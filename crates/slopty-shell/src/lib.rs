@@ -56,6 +56,7 @@ mod new_thread_background_image;
 mod new_thread_background_mask;
 mod notice;
 pub mod notify;
+pub mod invariants; // slopty: what the shell's state must hold, checked as it runs
 pub mod overscroll;
 pub mod page; // slopty: a page an agent shows inline, as its card
 pub mod pickers;
@@ -254,6 +255,7 @@ pub fn start(
         .detach();
         cx.set_global(state::EngineService(config.service.clone())); // slopty
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
+        invariants::watch(&state, cx); // slopty
 
         // Graceful teardown: an in-process engine drains live runs and flushes
         // doc snapshots before the process exits (remote engines outlive us).

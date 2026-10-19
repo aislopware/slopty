@@ -456,6 +456,9 @@ pub struct AppState {
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection, where optimistic echoes may already be visible.
     pub transcript_replayed: bool,
+    /// slopty: whether the shell's window is the active one, as the shell last drew it
+    /// (`invariants`: an open chat reads unread only while nobody looks).
+    pub window_active: bool,
     transcript_baselines: HashMap<String, Arc<slopty_view_doc::TranscriptBaseline>>,
     transcript_cache: std::collections::VecDeque<CachedTranscript>,
     pub(crate) prepared_transcripts: HashMap<String, Arc<crate::transcript::PreparedTranscript>>,
@@ -583,6 +586,7 @@ impl AppState {
             usage_limits: Vec::new(),
             limit_resets_at: None,
             transcript_replayed: false,
+            window_active: false,
             transcript_baselines: HashMap::new(),
             transcript_cache: Default::default(),
             prepared_transcripts: HashMap::new(),

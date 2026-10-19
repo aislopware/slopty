@@ -13401,3 +13401,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **A surface that opens for a moment takes no room.** The Background tray's list opens over
     the transcript from where the closed tray sits, so nothing above it moves. Proof:
     `composer::dock_tests::the_tray_opens_over_the_chat_without_moving_it`.
+- ✅ **What the person must see right is checked as the app runs (2026-10-19).** Tests written
+  after the code confirm what was built, and every fix since the zeron shell passed the gate. So
+  the shell's state is now checked against named breaches every 2 s (`slopty_shell::invariants`):
+  a transcript holding one id twice, a message's echo beside the message under another id, an
+  echo left once nothing works and nothing is on its way, a message both queued and sent, the
+  open chat unread in the active window. A breach that stands for 6 s is logged
+  (`slopty::invariant`, in `~/Library/Logs/Slopty/slopty-app.log`), so one met in daily use comes
+  with its facts, and under `SLOPTY_INVARIANTS=panic`, which every e2e app sets, the app stops on
+  it. Times from different clocks are never compared in a check. Proof:
+  `invariants::tests::an_echo_beside_its_message_is_a_breach`.

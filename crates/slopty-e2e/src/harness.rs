@@ -725,6 +725,9 @@ async fn spawn_app(
         // scan-out keeps its own times.
         .env("GPUI_PRESENTED_AT_CALLBACK", "1")
         .env(CHECK_RETAINED, "record")
+        // What the person would see wrong stops the app where it happened
+        // (`slopty_shell::invariants`).
+        .env(INVARIANTS, "panic")
         // A panic on the main thread aborts the app inside AppKit's callback, where nothing
         // unwinds: its backtrace in the test's log is all that says where.
         .env("RUST_BACKTRACE", "1")
@@ -827,6 +830,9 @@ async fn connect_with_retry(sock: &Path, child: &mut Child) -> Result<Driver> {
 /// leaves no trace: the app draws as it would unchecked, so the goldens hold.
 const CHECK_RETAINED: &str = "GPUI_CHECK_RETAINED";
 
+/// The shell's invariants' switch (`slopty_shell::invariants::ENV`).
+const INVARIANTS: &str = "SLOPTY_INVARIANTS";
+
 /// Launch the app in a booted simulator with its socket at `root/<name>.sock` and its data
 /// under `root/<name>` (the simulator shares this file system), and connect to it. Each
 /// variable of `env` is passed as `SIMCTL_CHILD_<name>`.
@@ -853,6 +859,7 @@ async fn spawn_simulator_app(
         // Glass only: the key bar stays in the frame whatever the simulator has attached.
         .env("SIMCTL_CHILD_SLOPTY_HARDWARE_KEYBOARD", "0")
         .env(format!("SIMCTL_CHILD_{CHECK_RETAINED}"), "record")
+        .env(format!("SIMCTL_CHILD_{INVARIANTS}"), "panic")
         .envs(env.iter().map(|(k, v)| (format!("SIMCTL_CHILD_{k}"), *v)))
         // A named pasteboard: the simulator's general one follows this Mac's clipboard.
         .env(format!("SIMCTL_CHILD_{PASTEBOARD_ENV}"), pasteboard_name(root, name))

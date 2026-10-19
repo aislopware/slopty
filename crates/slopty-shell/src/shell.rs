@@ -11644,6 +11644,10 @@ impl Render for Shell {
                 if window_active && !self.was_window_active {
                     self.state.update(cx, |s, cx| s.probe_sync(cx));
                 }
+                if window_active != self.was_window_active {
+                    // slopty: the invariants' watch reads whether anybody looks.
+                    self.state.update(cx, |s, _| s.window_active = window_active);
+                }
                 self.was_window_active = window_active;
                 // A run finishing while you're LOOKING at the session must not
                 // badge "completed" until you leave and return — mark it seen
