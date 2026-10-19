@@ -3999,3 +3999,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`custody::derive`), since a first cut changed only ptyd's and the new worker refused the new
   ptyd. Test: `slopty-ptyd` `custody::the_custody_is_the_goldens_and_the_scripts` ("a line of
   ptyd moves it", and the baked derivation is the one checked).
+
+- ✅ **A key types the text its event carries (2026-10-19).** Vietnamese typed through XKey
+  reached the shell as plain letters, "a" where "ê" was meant. XKey, like EVKey and OpenKey,
+  is not an input source. It taps the event stream, deletes what it typed with backspaces,
+  then posts key-downs on key code 0 (the A key) whose characters are the composed text.
+  GPUI's macOS keystroke spelled `key_char` from the key code through the layout and never
+  read the event's characters. The composer was not affected, because the text system
+  inserts the event's own characters, but the terminal sends `key_char`. The fix is in
+  gpui-fast (`fast/typed.rs`, aislopware/gpui-fast#56). When the event's characters are
+  printable and differ from the layout's spelling, `key_char` is those characters; otherwise
+  it is the layout's, as before. Caps Lock is affected the same way. The key itself is still
+  named by position, so bindings do not change. Tests: gpui-fast
+  `fast::typed::tests::a_key_types_the_text_its_event_carries`, and `slopty-engine`
+  `key_encoding_follows_terminal_modes`, where `ê` on the A key reaches the program as `ê`,
+  with and without the Kitty protocol's disambiguation.

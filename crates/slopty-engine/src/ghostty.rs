@@ -4092,6 +4092,16 @@ mod tests {
         out.clear();
         e.encode_key(&key(KeyCode::C, Some("c"), Mods::CTRL), &mut out).unwrap();
         assert_eq!(out, b"\x03");
+        // A Vietnamese input method (XKey) posts `ê` on the A key: the text is what is typed,
+        // with or without the Kitty keyboard protocol's disambiguation a TUI pushes.
+        let posted =
+            KeyEvent { unshifted: Some('a'), ..key(KeyCode::A, Some("ê"), Mods::empty()) };
+        for push in [&b""[..], b"\x1b[>1u"] {
+            e.write(push);
+            out.clear();
+            e.encode_key(&posted, &mut out).unwrap();
+            assert_eq!(String::from_utf8_lossy(&out), "ê");
+        }
     }
 
     /// A key's repeat and release reach a program only once it asks for event types (Kitty
