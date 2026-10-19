@@ -773,6 +773,17 @@ more full-window layer.
     incremental session after the link. A pass under cargo's locks, where nothing compiles,
     takes them all. Units still stay while a build holds the directory, since it may link any
     unit's rlib.
+  - A thin LTO link's modules are not an earlier compile's (2026-10-19). Twice in a row,
+    `xtask bundle --fast` failed at the app's link with "no such file" for 83 of its modules
+    while lanes ran checks. A third build, in a target directory outside `target/`, linked.
+    Thin LTO writes one module per dependency, named
+    `<binary>.<dependency>.<dependency>.<hash>-cgu.<n>.rcgu.o.rcgu.o`. The rule for earlier
+    compiles split names as `<stem>.<cgu>.<invocation>` and read the dependency as the
+    invocation. So every dependency's modules except the newest counted as superseded, and a
+    pass deleted them mid-link: that rule ran in a held directory with no guard. Now only exact
+    `<stem>.<cgu>.<invocation>.rcgu.o` names count, and in a held directory a superseded object
+    goes only once it has settled for the build's hour, like every other object. Test:
+    `prune::tests::a_thin_lto_links_modules_stay_while_it_runs`.
   - Measured: `target/debug/deps` went from 177 559 entries to 51 018 (43 275 objects, all named
     by a live executable's debug map), and 13 GB went. The stalled test now takes 2.8 s cold and
     0.7 s warm, run from `deps/` without the runner (it took 15.7 s).

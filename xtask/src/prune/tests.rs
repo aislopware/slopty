@@ -621,6 +621,34 @@ fn a_directory_a_build_holds_sheds_its_earlier_objects() {
     drop(held);
 }
 
+/// A thin LTO link in a directory a build holds writes one module per dependency, named
+/// `<binary>.<dependency>.<dependency>.<hash>-cgu.<n>.rcgu.o.rcgu.o`, minutes apart, and reads
+/// them all at its end: none is an earlier compile's, so all stay. Read as
+/// `<stem>.<cgu>.<invocation>`, every dependency's but the newest went mid-link, and the bundle's
+/// link failed with "no such file" (2026-10-19).
+#[test]
+fn a_thin_lto_links_modules_stay_while_it_runs() {
+    let fx = Fixture::new("busy-lto");
+    let fast = fx.profile("fast");
+    fx.old_unit(&fast, "app", A, HOUR, HOUR);
+    let deps = fast.join("deps");
+    let module = |dependency: &str, age: u64| {
+        let name = format!("app-{A}.{dependency}-{B}.{dependency}.1a2b-cgu.00.rcgu.o.rcgu.o");
+        write(&deps.join(&name), 64, fx.ago(age), fx.ago(age));
+        deps.join(name)
+    };
+    let modules = [module("gpui", 600), module("gpui_base", 300), module("serde", 1)];
+    let held = File::options().write(true).open(fast.join(".cargo-lock")).unwrap();
+    held.lock_shared().unwrap();
+
+    let report = fx.prune(Fixture::opts());
+
+    assert!(modules.iter().all(|p| p.exists()), "the link's modules stay");
+    let [busy] = report.busy.as_slice() else { panic!("{:?}", report.busy) };
+    assert_eq!(busy.swept.leftovers, 0);
+    drop(held);
+}
+
 /// A child process holding a session's lock as rustc 1.98 does on macOS: `fcntl(F_SETLK)`, a
 /// write lock. Another process, because a process drops its `fcntl` locks on a file when it
 /// closes any descriptor of it, which the pass does in this one. Released when dropped.

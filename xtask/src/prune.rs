@@ -1344,7 +1344,11 @@ fn unread_objects(objects: &[Utf8PathBuf], settled: SystemTime) -> Vec<Utf8PathB
     }
     let mut unread = Vec::new();
     for ((dir, stem), objects) in by_stem {
-        let superseded = superseded_objects(&objects);
+        // In a directory a build holds, a compile or a link may still be writing an object
+        // that looks superseded: only one written before the build's guard goes. By its write
+        // time, since an earlier compile's objects are what is asked about, not hard links.
+        let superseded: Vec<_> =
+            superseded_objects(&objects).into_iter().filter(|o| modified(o) <= settled).collect();
         let unlinked = unlinked_objects(dir, stem, &objects, settled).unwrap_or_default();
         unread.extend(unlinked.into_iter().filter(|o| !superseded.contains(o)));
         unread.extend(superseded);
@@ -1475,11 +1479,13 @@ fn superseded_objects(objects: &[Utf8PathBuf]) -> Vec<Utf8PathBuf> {
     let mut parsed = Vec::new();
     for path in objects {
         let Some(name) = path.file_name() else { continue };
-        let mut parts = name.split('.');
-        let (Some(stem), Some(_cgu), Some(invocation)) = (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
+        // Exactly `<stem>.<cgu>.<invocation>.rcgu.o`. A thin LTO link writes its modules as
+        // `<binary>.<dependency>.<dependency>.<hash>-cgu.<n>.rcgu.o.rcgu.o`, where the third part
+        // names a dependency, not an invocation: read as one, every dependency's modules but
+        // the newest were "superseded" and went while the link still needed them.
+        let parts: Vec<&str> = name.split('.').collect();
+        let [stem, _cgu, invocation, "rcgu", "o"] = parts.as_slice() else { continue };
+        let (stem, invocation) = (*stem, *invocation);
         let time = modified(path);
         let slot = newest.entry((stem, invocation)).or_insert(UNIX_EPOCH);
         *slot = (*slot).max(time);
