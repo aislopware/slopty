@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use slopty_proto::thread::detail::{Clipped, Patch};
 use slopty_proto::thread::{
     AskId, Compaction, ContentRef, Image, IntentId, ItemBody, Notice, Request, ThreadId,
-    ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, kind,
+    ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, kind,
 };
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
 use slopty_view_proto::{UserInputAnswer, UserInputQuestion};
@@ -299,7 +299,7 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
         match &item.body {
             ItemBody::User(message) => {
                 // The id the shell gave the message, where it sent it, so its echo gives way.
-                let shown = message.intent.and_then(&look.named).unwrap_or_else(|| id.clone());
+                let shown = shown_as(message, &id, &look.named);
                 // The person's own words where the shell sent them, its chips and pictures as
                 // the shell holds them; else what the agent was given, and its pictures.
                 let text = message.intent.and_then(&look.said).unwrap_or_else(|| {
@@ -839,6 +839,22 @@ fn plan_part(state: &ThreadState, written: bool, device: &str, out: &mut Vec<Ses
 
 /// A task's text by its id.
 type Named<'a> = HashMap<&'a str, &'a str>;
+
+/// The id the person's message `message`, the item `item`, goes by in the shell.
+///
+/// Its intent's, which is the id the shell gave it where the shell sent it, or the one `named`
+/// keeps for a message sent again under a new intent; its item's where no intent is known to
+/// have sent it.
+pub fn shown_as(
+    message: &UserMessage,
+    item: &str,
+    named: &dyn Fn(IntentId) -> Option<String>,
+) -> String {
+    message.intent.map_or_else(
+        || item.to_owned(),
+        |intent| named(intent).unwrap_or_else(|| intent.to_string()),
+    )
+}
 
 /// A task list's steps as the shell's checklist, a step of no text of its own named by its id
 /// (`named`).

@@ -13374,9 +13374,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     "Run again", drawn or not, so one update stacked a toast per session. The note now waits
     for the terminal's first frame. Proof:
     `view::tests::a_restored_session_off_screen_says_nothing`.
-- ✅ **An open chat is seen whatever the clocks say (2026-10-19).** A chat's last message carries
-  its worker's time and the seen mark this device's, so a worker a few seconds ahead left the
-  open chat "Done" in bold and asked to mark it seen on every frame. The seen mark is never
-  earlier than the message it saw (`AppState::mark_chat_seen`). Proof:
-  `state::tests::a_chat_from_a_clock_ahead_is_seen_once_looked_at`; e2e golden
-  `dock-shell-mode`.
+- ✅ **Small bugs are fixed at their cause: one identity, one clock, no layout room for a passing
+  surface (2026-10-19).** The person found the trickle of small bugs made Slopty unusable day to
+  day and put it down to the foundation. Read one by one, the fixes since the zeron shell landed
+  (89 of 178 commits) mostly come from three causes: a value measured while drawing reaches
+  layout a frame late; one fact kept twice, under different keys, between worker, view model and
+  shell; and an agent's state rebuilt from partial signals. The study and its plan are in
+  `.research/foundation-2026-10-19/report.md`. The rulings that follow are the first step.
+  - **A message is one id from the composer to the transcript.** The shell names each message
+    with a UUIDv7, and the view model sends it under that id as its intent
+    (`WorkspaceView::message_intent`), which Claude Code is given as the message's `uuid`. Its
+    entry in the transcript therefore goes by the shell's id however the thread is read again,
+    with no table to lose: the intent's id where the worker links one, else the item's
+    (`transcript::shown_as`). Before, the view model minted its own intent and mapped it back
+    in memory, so a thread read again from the session's file left the shell's echo below the
+    real message, greyed, for good. A new intent is minted only where the shell's id is no id or
+    was asked under already, since a worker acts on an intent once. A message sent again under
+    a new intent keeps its first id (`named`). Proof: `delivery_tests::
+    a_message_is_one_id_from_the_shell_to_the_transcript`.
+  - **Seen is a turn, on one clock.** The worker marks a thread seen through a turn
+    (`Intent::Seen`), and the chat's seen time is that turn's end, on the worker's clock, as is
+    its last message's. The shell's own mark, which shows before the worker says it back, is
+    the message it shows (`AppState::mark_chat_seen`). No time from this device is compared
+    with a message's. This replaces the clamp of earlier that day. Proof:
+    `state::tests::a_chat_from_a_clock_ahead_is_seen_once_looked_at`.
+  - **A surface that opens for a moment takes no room.** The Background tray's list opens over
+    the transcript from where the closed tray sits, so nothing above it moves. Proof:
+    `composer::dock_tests::the_tray_opens_over_the_chat_without_moving_it`.

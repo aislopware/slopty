@@ -66,13 +66,96 @@ fn intents(rx: &mut Receiver<ClientMsg>) -> Vec<(IntentId, Intent)> {
 
 /// A message to `chat`, as the shell sends one.
 fn run(chat: &str, prompt: &str) -> serde_json::Value {
+    run_as(chat, prompt, "m-1")
+}
+
+/// A message to `chat` the shell named `message_id`.
+fn run_as(chat: &str, prompt: &str, message_id: &str) -> serde_json::Value {
     let request: slopty_view_proto::RunRequest = serde_json::from_value(serde_json::json!({
         "prompt": prompt, "model": null, "reasoning": null, "cwd": "/w",
         "sandbox": "workspace-write", "resume": null,
     }))
     .expect("a run");
-    let command = SessionCommandPayload::Run { request, message_id: "m-1".to_owned() };
+    let command = SessionCommandPayload::Run { request, message_id: message_id.to_owned() };
     serde_json::json!({ "chatId": chat, "command": command })
+}
+
+/// A message is one id from the shell to the agent and back: it goes under the id the shell
+/// gave it, and its entry in the transcript goes by that id however the thread is read again
+/// (its link to the intent lost, as a worker reading the session's file again has it; this
+/// client's own keeping lost, as after a restart), so the shell's echo always gives way. An id
+/// already asked under goes as a new intent, since the worker acts on one once.
+#[gpui::test]
+fn a_message_is_one_id_from_the_shell_to_the_transcript(cx: &mut gpui::TestAppContext) {
+    use slopty_proto::thread::{Item, ItemBody, ItemId};
+    let state = fixtures::thread("tools");
+    let chat = state.meta.id.to_string();
+    let thread = state.meta.id;
+    let (workspace, cx, mut rx, _feed) = holding(&state, |_| {}, cx);
+    workspace.update(cx, |v, _| {
+        v.view_model.followed.insert(chat.clone(), (KEY, thread));
+    });
+    let message = IntentId::new();
+    let params = run_as(&chat, "hi", &message.to_string());
+    let _sent = workspace.update(cx, |v, cx| v.view_command(&params, cx)).expect("sent");
+    cx.run_until_parked();
+    let sent: Vec<IntentId> = intents(&mut rx)
+        .into_iter()
+        .filter(|(_, intent)| matches!(intent, Intent::Send { .. }))
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(sent, [message], "it goes under the shell's id");
+
+    // Claude Code's transcript holds it under the uuid it was given, which is that id, with
+    // nothing linking it to the intent once its file is read again; another agent's under an
+    // id of its own, linked to the intent. And then this client keeps nothing of it.
+    let prompt = state
+        .items
+        .iter()
+        .find(|item| matches!(item.body, ItemBody::User(_)))
+        .cloned()
+        .expect("a message of the person's");
+    let read = |id: String, intent: Option<IntentId>| {
+        let mut item = Item { id: ItemId(id), ..prompt.clone() };
+        if let ItemBody::User(user) = &mut item.body {
+            user.intent = intent;
+        }
+        item
+    };
+    let reads = [
+        (read(message.to_string(), Some(message)), true),
+        (read(message.to_string(), None), false),
+        (read("item-7".to_owned(), Some(message)), false),
+    ];
+    for (seq, (item, kept)) in reads.into_iter().enumerate() {
+        let mut read = state.clone();
+        read.items.retain(|i| !matches!(i.body, ItemBody::User(_)));
+        read.items.insert(0, item);
+        let shown = workspace.update(cx, |v, cx| {
+            if !kept {
+                v.view_model.named.clear();
+                v.view_model.said.clear();
+            }
+            let seq = 2_u64.saturating_add(u64::try_from(seq).expect("a few"));
+            let frame =
+                ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq }, state: Box::new(read) };
+            v.thread_frame(KEY, thread, frame, cx);
+            v.view_transcript(&chat, cx).expect("its transcript")
+        });
+        let ids: Vec<&str> = shown
+            .entries
+            .iter()
+            .filter(|e| e.role == slopty_view_doc::MessageRole::User)
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(ids, [message.to_string()], "read again ({seq}): under the shell's id");
+    }
+
+    let again = workspace.update(cx, |v, cx| v.view_command(&params, cx));
+    let _again = again.expect("sent again");
+    cx.run_until_parked();
+    let (id, _) = intents(&mut rx).pop().expect("the second");
+    assert_ne!(id, message, "an id asked under already goes as a new intent");
 }
 
 /// A chat whose worker drops says so, by the chat, and recovers once the link is back; with no

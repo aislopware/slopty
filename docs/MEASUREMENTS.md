@@ -17805,3 +17805,19 @@ every 15 s on `target/`'s volume (`cargo gate --lane tests --shard <s>`): **work
 9 GB, rest 8 GB** at their low point. The shards' floor is 15 GB (`ci.yml`'s matrix): above the
 largest with room for the logs and the caches restored before it, and under what the image has.
 The 50 GB default stays for a whole gate on one disk, which writes about 35 GB cold.
+
+## 2026-10-19 — where a local check's time goes
+
+A three-crate check (`cargo xtask remote -p slopty-client -p slopty-ui -p slopty-shell`) in a
+lane directory used for the first time took 8 min 36 s: lint 40 s, the spawned binaries 136 s,
+nextest 320 s, of which the tests ran 37 s. The rest compiled 729 units again; sccache keeps no
+proc-macro or binary (486 calls refused for their crate type, 729 non-cacheable in all). One test,
+`an_answer_and_a_review_cross_a_cut_link`, ran 36.98 s of the 37: its network stayed cut for
+30 s.
+
+A new lane's `target` and `e2e-target` are now APFS clones of the ones a lane used last
+(`xtask::local::seed`), so only the workspace's own crates build again. The cut is 12 s, past the
+worker's 10 s hello wait.
+
+The same lane warm, the next three-crate check (slopty-shell, slopty-client, xtask) took 1 min
+27 s: lint 19 s, the spawned binaries 11 s, nextest 43 s with the tests running 22.6 s.

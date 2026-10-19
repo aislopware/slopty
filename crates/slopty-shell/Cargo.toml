@@ -47,7 +47,7 @@ fontdb = "0.24"
 # slopty: the code a phone or iPad scans for the server (`settings::invite`): the matrix alone.
 qrcode = { version = "0.14.1", default-features = false }
 ttf-parser = "0.25.1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 tracing = "0.1"

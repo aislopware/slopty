@@ -1,6 +1,5 @@
 Window
 Button │ Hello there
-Status │ Done
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings

@@ -2606,10 +2606,10 @@ impl AppState {
         if !chat.unseen() {
             return;
         }
-        // slopty: never before the message it saw: the message's time is its worker's clock,
-        // and a worker a few seconds ahead of this device would leave an open chat unseen.
-        let now = crate::clock::utc(cx);
-        chat.last_seen_at = Some(chat.last_message_at.map_or(now, |message| now.max(message)));
+        // slopty: seen through the message it shows, on that message's own clock (its
+        // worker's), as the worker marks it by turn: never this device's time, which no
+        // message's time may be compared with.
+        chat.last_seen_at = chat.last_message_at;
         cx.notify();
         let Some(handle) = self.engine.clone() else {
             return;

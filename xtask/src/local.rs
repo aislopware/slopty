@@ -58,6 +58,7 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
     let sh = Shell::new()?;
     sh.change_dir(&tree);
     target_by_config(&dir)?;
+    seed(&dir, "target");
     // `.cargo/config.toml` names it relative to the tree: the checkout's is the one every build
     // shares.
     sh.set_var("LIBGHOSTTY_VT_SYS_PREBUILT_DIR", root.join("target").join(crate::prune::PREBUILT));
@@ -88,6 +89,53 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
     };
     let passed = failed.is_none() && tests.is_some();
     Ok(Outcome { passed, took: started.elapsed(), thermal, load, failed })
+}
+
+/// Give lane `dir` a warm `sub` target dir where it has none: a copy-on-write clone (APFS
+/// `clonefile`, near instant and no space until either side writes) of the one another lane
+/// used last. A new lane's cold dir rebuilt every dependency: sccache cannot keep a proc-macro
+/// or a binary, so 729 units compiled again and a three-crate check took 8.5 min, 37 s of it
+/// testing (2026-10-19). The dependencies' units are keyed by the registry's paths, the same in
+/// every lane, so cargo keeps them and rebuilds only the workspace's own crates. A failed clone
+/// leaves the lane cold, as before.
+pub fn seed(dir: &Utf8Path, sub: &str) {
+    let target = dir.join(sub);
+    if target.exists() {
+        return;
+    }
+    let Some(lanes) = dir.parent() else { return };
+    let Ok(entries) = std::fs::read_dir(lanes) else { return };
+    let warmest = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join(sub))
+        .filter(|path| path.join("debug").exists() || has_triple(path))
+        .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
+        .max_by_key(|(at, _)| *at);
+    let Some((_, from)) = warmest else { return };
+    let started = Instant::now();
+    let cloned = std::process::Command::new("/bin/cp")
+        .args(["-c", "-R"])
+        .arg(&from)
+        .arg(target.as_std_path())
+        .status();
+    match cloned {
+        Ok(status) if status.success() => println!(
+            "  {sub} seeded from {} by a clone ({:.1}s)",
+            from.display(),
+            started.elapsed().as_secs_f64()
+        ),
+        outcome => {
+            println!("  {sub} not seeded from {} ({outcome:?}): built cold", from.display());
+            let _gone = std::fs::remove_dir_all(target.as_std_path());
+        }
+    }
+}
+
+/// Whether `target` holds a build for a target triple (`<triple>/debug`).
+fn has_triple(target: &std::path::Path) -> bool {
+    std::fs::read_dir(target).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| entry.path().join("debug").exists())
+    })
 }
 
 /// Point cargo at `<dir>/target` through `<dir>/.cargo/config.toml`, which cargo finds above the

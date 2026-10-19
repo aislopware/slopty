@@ -177,8 +177,11 @@ pub(super) struct Bridge {
     /// The first message of a side chat, by the aside that starts it: sent to the aside once
     /// it has started, with the id the shell gave it.
     first_words: HashMap<IntentId, FirstWords>,
-    /// The id the shell gave each message it sent, by the intent that sent it: its entry in
-    /// the transcript goes by it, so the shell's own echo of the message gives way to it.
+    /// The id the shell gave each message it sent, by the intent carrying it. A message goes
+    /// under that id (`WorkspaceView::message_intent`), so its entry in the transcript goes by
+    /// it with no help from here, however its thread is read again; one sent again under a new
+    /// intent keeps its first id here, so the shell's own echo still gives way. One that has
+    /// not gone is the shell's echo, not a queue row.
     named: HashMap<IntentId, String>,
     /// The words of each message the shell sent, by its intent, as the person wrote them: the
     /// agent was given them in its own words, and the chat shows the person's.
@@ -1231,7 +1234,8 @@ impl WorkspaceView {
                 }
             });
         let intent = Intent::Send { text: text.clone(), delivery, attachments: held.attachments };
-        let id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
+        let id = self.message_intent(key, &held.name, cx);
+        hub.update(cx, |hub, cx| hub.intent_as(id, thread, intent, cx));
         self.keep_said(id, held.text, &text, Some((key, thread)), cx);
         let name = if held.name.is_empty() { id.to_string() } else { held.name };
         if held.queued {
@@ -1239,6 +1243,20 @@ impl WorkspaceView {
         }
         self.view_model.named.insert(id, name);
         id
+    }
+
+    /// The intent the message the shell named `name` goes to `key` under: that id, so the
+    /// message is one id from the composer through the worker to the agent (Claude Code's
+    /// `uuid`) and back in the transcript, however its thread is read again. A new one where
+    /// `name` is no id or was asked under already, since a worker acts on an intent once.
+    fn message_intent(&self, key: WorkerKey, name: &str, cx: &gpui::App) -> IntentId {
+        let Ok(id) = name.parse::<IntentId>() else { return IntentId::new() };
+        let bridge = &self.view_model;
+        let used = bridge.named.contains_key(&id)
+            || bridge.starts.contains_key(&id)
+            || bridge.unanswered.contains_key(&id)
+            || self.held_hub(key).is_some_and(|hub| hub.read(cx).asked(id));
+        if used { IntentId::new() } else { id }
     }
 
     /// Keep `words`, as the person wrote the message `id` the agent is given as `agent`, where
@@ -1296,9 +1314,9 @@ impl WorkspaceView {
                 return Ok(serde_json::json!({ "commandId": IntentId::new().to_string() }));
             }
             self.view_model.refused.remove(&chat);
-            let id = IntentId::new();
             // A side chat's first message asks its chat's thread aside, and goes to the aside.
             if let Some(parent) = minted.parent.as_deref() {
+                let id = IntentId::new();
                 let (key, thread) = self
                     .chat_thread(parent, cx)
                     .ok_or_else(|| RpcError::Failed("Its chat has not started yet".to_owned()))?;
@@ -1316,6 +1334,8 @@ impl WorkspaceView {
                 self.view_send_kept(key, id, msg);
                 return Ok(serde_json::json!({ "commandId": id.to_string() }));
             }
+            // The start carries the chat's first message: it goes under that message's id.
+            let id = self.message_intent(minted.worker, &message_id, cx);
             if request.worktree.is_some() {
                 self.project_setup_for(&chat, minted.worker, &minted.cwd);
             }
@@ -1398,7 +1418,8 @@ impl WorkspaceView {
                 if request.model.is_some() {
                     start.model.clone_from(&request.model);
                 }
-                let id = hub.update(cx, |hub, cx| hub.resume(thread, start, cx));
+                let id = self.message_intent(key, message_id, cx);
+                hub.update(cx, |hub, cx| hub.resume_as(id, thread, start, cx));
                 self.view_model.named.insert(id, message_id.clone());
                 self.keep_said(id, request.prompt.clone(), &agent, Some((key, thread)), cx);
                 return Ok(serde_json::json!({ "commandId": id.to_string() }));
@@ -1453,7 +1474,10 @@ impl WorkspaceView {
             Intent::Send { text, .. } => Some(text.clone()),
             _ => None,
         };
-        let id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
+        let id = message_id
+            .as_deref()
+            .map_or_else(IntentId::new, |message_id| self.message_intent(key, message_id, cx));
+        hub.update(cx, |hub, cx| hub.intent_as(id, thread, intent, cx));
         if let Some(message_id) = message_id {
             self.view_model.named.insert(id, message_id);
         }
@@ -1547,7 +1571,8 @@ impl WorkspaceView {
                     let (text, attachments) = (first.text, first.attachments);
                     let send =
                         Intent::Send { text: text.clone(), delivery: Delivery::Steer, attachments };
-                    let sent = hub.update(cx, |hub, cx| hub.intent(*thread, send, cx));
+                    let sent = self.message_intent(key, &first.name, cx);
+                    hub.update(cx, |hub, cx| hub.intent_as(sent, *thread, send, cx));
                     self.view_model.named.insert(sent, first.name);
                     self.keep_said(sent, first.said, &text, Some((key, *thread)), cx);
                 }

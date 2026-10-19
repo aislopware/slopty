@@ -62,11 +62,11 @@ const ROW_GAP: f32 = PANEL_PAD_X;
 const ROW_SLOT: f32 = ROW_HEIGHT + ROW_GAP;
 const ROW_PAD_X: f32 = 8.0;
 pub(crate) const PANEL_RADIUS: f32 = 16.0;
-const PANEL_BORDER: f32 = 1.0;
+pub(crate) const PANEL_BORDER: f32 = 1.0;
 /// One inset on every visible side of the rows: left, right, top, and above
 /// the composer that overlaps the tray's bottom.
 const PANEL_PAD_X: f32 = 4.0;
-const PANEL_PAD_TOP: f32 = 4.0;
+pub(crate) const PANEL_PAD_TOP: f32 = 4.0;
 /// Concentric with the tray: its radius less the border and the inset, so a
 /// row's hover and editing wash follow the tray's corner exactly.
 pub(crate) const ROW_RADIUS: f32 = PANEL_RADIUS - PANEL_BORDER - PANEL_PAD_X;

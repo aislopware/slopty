@@ -54,6 +54,16 @@ const DEPTH_STEP: f32 = 14.0;
 /// How long a row a reveal opened at stays marked.
 const MARK_SHOWN: Duration = Duration::from_millis(1600);
 
+/// slopty: the closed tray's height in the stack: its header in the panel's frame, the composer
+/// overlapping its foot (`queue::queue_panel_surface`).
+fn closed_height() -> f32 {
+    use crate::queue::{PANEL_BORDER, PANEL_PAD_TOP};
+    2.0 * PANEL_BORDER
+        + 2.0 * PANEL_PAD_TOP
+        + QUEUE_COMPOSER_OVERLAP
+        + crate::surface_chrome::touch_row_height(HEADER_HEIGHT)
+}
+
 /// Bind the tray's keys. Call once at boot, beside the composer's.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -493,23 +503,33 @@ impl Composer {
                     .children(rail),
             );
         }
+        let card = crate::frost::frosted(crate::queue::PANEL_RADIUS, crate::frost::MENU_BLUR, surface);
+        let tray = div()
+            .id("background-tray")
+            .role(gpui::Role::Group)
+            .aria_label("Background work")
+            .key_context(TRAY_CONTEXT)
+            .track_focus(&focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.on_tray_key(event, window, cx)
+            }))
+            .child(card);
+        // slopty: open, the list rises over the transcript from the closed tray's place, so
+        // nothing above it moves (the chat kept its place while the tray opened).
+        let tray = if open {
+            div()
+                .relative()
+                .h(px(closed_height()))
+                .child(div().absolute().left_0().right_0().bottom_0().child(tray))
+                .into_any_element()
+        } else {
+            tray.into_any_element()
+        };
         Some(
             div()
-                .id("background-tray")
-                .role(gpui::Role::Group)
-                .aria_label("Background work")
-                .key_context(TRAY_CONTEXT)
-                .track_focus(&focus)
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    this.on_tray_key(event, window, cx)
-                }))
                 .mx(px(inset))
                 .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
-                .child(crate::frost::frosted(
-                    crate::queue::PANEL_RADIUS,
-                    crate::frost::MENU_BLUR,
-                    surface,
-                ))
+                .child(tray)
                 .into_any_element(),
         )
     }

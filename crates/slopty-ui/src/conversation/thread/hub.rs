@@ -334,14 +334,26 @@ impl ThreadHub {
 
     /// Ask `thread` to do `intent`. It shows at once; it goes now, or once the link is back.
     pub fn intent(&mut self, thread: ThreadId, intent: Intent, cx: &mut Context<Self>) -> IntentId {
-        let (id, out) = self.threads.intent(thread, intent);
+        let id = IntentId::new();
+        self.intent_as(id, thread, intent, cx);
+        id
+    }
+
+    /// Ask `thread` to do `intent` under `id`, the one its origin gave it: as [`Self::intent`].
+    pub fn intent_as(
+        &mut self,
+        id: IntentId,
+        thread: ThreadId,
+        intent: Intent,
+        cx: &mut Context<Self>,
+    ) {
+        let out = self.threads.intent_as(id, thread, intent);
         self.keep_outbox(cx);
         cx.emit(HubEvent::Thread(thread));
         cx.notify();
         if let Some(msg) = out {
             cx.emit(HubEvent::Send(vec![msg]));
         }
-        id
     }
 
     /// What `thread` was turned down that it would not show, oldest first.
@@ -353,6 +365,19 @@ impl ThreadHub {
     /// as resuming at once, and goes now or once the link is back. A refusal is kept in words.
     pub fn resume(&mut self, thread: ThreadId, start: Start, cx: &mut Context<Self>) -> IntentId {
         let id = IntentId::new();
+        self.resume_as(id, thread, start, cx);
+        id
+    }
+
+    /// Take `thread`'s agent up again under `id`, the one its first message was given: as
+    /// [`Self::resume`].
+    pub fn resume_as(
+        &mut self,
+        id: IntentId,
+        thread: ThreadId,
+        start: Start,
+        cx: &mut Context<Self>,
+    ) {
         let msg = self.threads.linked().then(|| start_msg(id, &start));
         self.resuming.insert(id, (thread, start));
         cx.emit(HubEvent::Thread(thread));
@@ -360,7 +385,11 @@ impl ThreadHub {
         if let Some(msg) = msg {
             cx.emit(HubEvent::Send(vec![msg]));
         }
-        id
+    }
+
+    /// Whether anything was asked under `id` here: an intent, or a resume on its way.
+    pub fn asked(&self, id: IntentId) -> bool {
+        self.threads.asked(id) || self.resuming.contains_key(&id)
     }
 
     /// `thread` is known now: take it up again if it was asked to be.

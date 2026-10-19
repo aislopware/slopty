@@ -403,6 +403,47 @@ fn what_still_runs_is_said_once_and_the_cards_share_one_column(cx: &mut TestAppC
     assert!(find(&nodes, Role::Status, waiting).is_some(), "{:?}", labels(&nodes, Role::Status));
 }
 
+/// slopty: opening the tray moves nothing above it: its list rises over the transcript from the
+/// closed tray's place, so the stack the chat scrolls under keeps its height.
+#[gpui::test]
+fn the_tray_opens_over_the_chat_without_moving_it(cx: &mut TestAppContext) {
+    let dock = ChatDock {
+        notes: vec![NoteLine {
+            key: "n".into(),
+            text: "Indexing the repository".into(),
+            tone: NoteLine::INFO.into(),
+            priority: "low".into(),
+            at: chrono::Utc::now().timestamp_millis(),
+            until: None,
+        }],
+        can: can(),
+        ..ChatDock::default()
+    };
+    let tray = WorkTray {
+        main: MainRow::default(),
+        rows: vec![
+            work_row("task:a", WorkRow::COMMAND, true),
+            work_row("task:b", WorkRow::COMMAND, true),
+            work_row("task:c", WorkRow::MONITOR, true),
+        ],
+        counts: WorkCounts { commands: 2, monitors: 1, ..WorkCounts::default() },
+        summary: "2 commands · 1 monitor".into(),
+        can_stop_all: true,
+    };
+    let (_, _, cx) = open(cx, dock, Some(tray));
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Button, "Expand background work").is_some(), "closed until asked");
+    let lines = cx.debug_bounds("dock-lines").expect("the quiet lines' card");
+    let closed = cx.debug_bounds("background-tray").expect("the tray");
+    cx.update(|_, cx| crate::transcript::reveal_work("chat", "task:c", cx));
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Button, "Collapse background work").is_some());
+    let opened = cx.debug_bounds("background-tray").expect("the tray");
+    assert_eq!(cx.debug_bounds("dock-lines").expect("the lines").top(), lines.top(), "nothing above moved");
+    assert_eq!(opened.bottom(), closed.bottom(), "the tray keeps its foot on the composer");
+    assert!(opened.top() < closed.top() - px(40.0), "its list rose: {opened:?} from {closed:?}");
+}
+
 /// The footer says the mode and the goal (the tray above it counts the background work); a
 /// mode switch that cannot go goes back to the mode the agent is in.
 #[gpui::test]

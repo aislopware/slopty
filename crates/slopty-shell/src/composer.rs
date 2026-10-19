@@ -8673,7 +8673,9 @@ impl Composer {
         let text = expand_context_chips(&text);
         let text = crate::comments::with_comments(&text, &comments);
         self.preview = None;
-        let message_id = uuid::Uuid::new_v4().to_string();
+        // slopty: a time-ordered id, which the message keeps to the agent and back
+        // (`WorkspaceView::message_intent`), so its echo gives way however the chat is read.
+        let message_id = uuid::Uuid::now_v7().to_string();
         let created_at = crate::clock::utc(cx).timestamp_millis();
         // Existing busy chats always queue; compatibility was checked before
         // taking the draft, attachments, or review comments.

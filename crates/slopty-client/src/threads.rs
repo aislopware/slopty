@@ -280,12 +280,29 @@ impl Threads {
     /// Ask `thread` to do `intent`: its id, and what to send now (nothing while the link is
     /// down; it goes once the link is back).
     pub fn intent(&mut self, thread: ThreadId, intent: Intent) -> (IntentId, Option<ClientMsg>) {
-        let sent = Sent { id: IntentId::new(), thread, intent, outcome: None };
+        let id = IntentId::new();
+        (id, self.intent_as(id, thread, intent))
+    }
+
+    /// Ask `thread` to do `intent` under `id`, the one its origin gave it (a message's, as the
+    /// interface named it): what to send now, as [`Self::intent`].
+    pub fn intent_as(
+        &mut self,
+        id: IntentId,
+        thread: ThreadId,
+        intent: Intent,
+    ) -> Option<ClientMsg> {
+        let sent = Sent { id, thread, intent, outcome: None };
         let msg = self.linked.then(|| intent_msg(&sent));
-        let id = sent.id;
         self.outbox.push(sent);
         self.outbox_changed = true;
-        (id, msg)
+        msg
+    }
+
+    /// Whether this client already asked anything under `id`, which a thread acts on once.
+    #[must_use]
+    pub fn asked(&self, id: IntentId) -> bool {
+        self.outbox.all().iter().any(|sent| sent.id == id)
     }
 
     /// Let a failed intent go once the person has read why.

@@ -51,7 +51,7 @@ fn message_turn(
 ) -> Option<(TurnId, String)> {
     state.items.iter().find_map(|item| {
         let ItemBody::User(user) = &item.body else { return None };
-        let shown = user.intent.and_then(named).unwrap_or_else(|| item.id.0.clone());
+        let shown = transcript::shown_as(user, &item.id.0, named);
         (shown == message).then(|| {
             let words = user.intent.and_then(said).unwrap_or_else(|| user.text.text.clone());
             (item.turn, words)

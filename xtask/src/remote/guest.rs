@@ -605,6 +605,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     let dir = crate::local::dir(root, lane);
     let tree = crate::gate::snapshot_commit(root, &dir, sha)?;
     crate::local::target_by_config(&dir)?;
+    crate::local::seed(&dir, "e2e-target");
     let target = dir.join("e2e-target");
     let sh = Shell::new()?;
     sh.change_dir(&tree);

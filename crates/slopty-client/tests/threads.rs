@@ -417,12 +417,14 @@ mod threads {
     /// Six seconds without a pong, after which the app gives a worker's link up and dials
     /// again (`slopty_net::liveness::PONG_WITHIN`).
     const SILENCE_DROP: Duration = slopty_net::liveness::PONG_WITHIN;
-    /// How long the network is gone.
-    const AWAY: Duration = Duration::from_secs(30);
+    /// How long the network is gone: past the app's giving up and the worker's wait for a
+    /// half-open link's hello (`slopty_net::listen`, 10 s), so the outage is a long one on both
+    /// sides. It was 30 s, which made this test alone the length of the suite's run.
+    const AWAY: Duration = Duration::from_secs(12);
 
     /// The app's link to its worker cut while the person answers and reviews, as the app meets
     /// it: the link goes silent, the app gives it up after six seconds without a pong and dials
-    /// again until the network is back. Cut both ways for 30 s, an answer and a review asked into
+    /// again until the network is back. Cut both ways for 12 s, an answer and a review asked into
     /// the cut go again on the next link and arrive, the answer acted on once and the review
     /// without being asked again. Cut on the way back alone, an answer is acted on and its reply
     /// lost; on the next link it goes again under its id and is answered as it was, not refused

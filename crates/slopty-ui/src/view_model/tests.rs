@@ -47,7 +47,8 @@ fn a_message_the_shell_sent_goes_by_the_id_it_gave() {
     let entries = transcript::entries(&state, &transcript::Look::new("w").named(named));
     assert_eq!(entries.first().map(|e| e.id.as_str()), Some("m-1"));
     let unnamed = transcript::entries(&state, &transcript::Look::new("w"));
-    assert_ne!(unnamed.first().map(|e| e.id.as_str()), Some("m-1"), "not sent from here");
+    let own = sent.to_string();
+    assert_eq!(unnamed.first().map(|e| e.id.as_str()), Some(own.as_str()), "its intent's");
 }
 
 /// A recorded session's thread, as the shell's transcript, applied by the shell's own reducer.

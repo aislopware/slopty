@@ -14,7 +14,6 @@ MultilineTextInput │ Do anything…
 Button │ Send message
 Button │ Mode: Auto
 Button │ Context 1%
-Button │ Frames late
 Button │ Window controls
 Button │ Open in…
 Button │ Show chat details
