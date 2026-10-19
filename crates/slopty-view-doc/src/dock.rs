@@ -103,7 +103,8 @@ pub struct DockCan {
     pub shell: bool,
     /// Put the files back as they were before a message (`slopty.Rewind` with `code`).
     pub rewind: bool,
-    /// Branch the conversation at a message (`slopty.Rewind` with `conversation`).
+    /// Take the conversation back to before a message (`slopty.Rewind` with `conversation`):
+    /// in the chat itself where its agent can, else branched into a chat of its own.
     pub fork: bool,
     /// Read and change its permission rules (`slopty.WatchRules`, `slopty.ChangeRule`).
     pub rules: bool,

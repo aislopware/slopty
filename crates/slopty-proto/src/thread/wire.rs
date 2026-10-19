@@ -401,6 +401,15 @@ pub enum Intent {
         /// The turn whose start the files go back to.
         turn: TurnId,
     },
+    /// Take the conversation back to before turn `turn` in this thread, through the agent's own
+    /// door ([`Cap::REWIND_CONVERSATION`]): the agent forgets the turn and every one after, and
+    /// they go from the thread ([`Action::Truncated`]). The chat stays
+    /// one chat, as the TUI's `/rewind` keeps it; an agent without the door is branched by
+    /// [`Intent::Fork`] instead.
+    RewindConversation {
+        /// The first turn taken back.
+        turn: TurnId,
+    },
     /// Undo the last rewind: the thread's folder put back as it was just before it
     /// ([`ThreadState::rewound`](super::ThreadState::rewound)), named by what the worker kept
     /// then, so an undo of an older rewind is refused ([`Cap::REWIND`]).
@@ -506,6 +515,7 @@ impl Intent {
             Self::Background { .. } => Cap::BACKGROUND,
             Self::Shell { .. } => Cap::SHELL,
             Self::Rewind { .. } | Self::Unrewind { .. } => Cap::REWIND,
+            Self::RewindConversation { .. } => Cap::REWIND_CONVERSATION,
             Self::Rule(_) => Cap::RULES,
             Self::Surface { .. } => Cap::SURFACES,
             Self::Side { .. } => Cap::SIDE,

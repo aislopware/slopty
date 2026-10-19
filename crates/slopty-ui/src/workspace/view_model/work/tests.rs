@@ -247,6 +247,67 @@ fn a_subagents_request_is_asked_and_answered_in_its_parent(cx: &mut gpui::TestAp
     assert_eq!(answered, Some((child_id, "ask-c", "Yes")));
 }
 
+/// An agent that takes its conversation back in place keeps the chat one chat: the files go back
+/// first, then the conversation, in that order, nothing is branched, and the words come back
+/// for this chat's composer with the folder's undo.
+#[gpui::test]
+fn a_rewind_in_place_keeps_the_chat(cx: &mut gpui::TestAppContext) {
+    let mut state = fixtures::empty();
+    state.meta.caps =
+        vec![Cap::named(Cap::REWIND), Cap::named(Cap::REWIND_CONVERSATION), Cap::named(Cap::FORK)];
+    state.items = vec![Item {
+        id: ItemId("u2".into()),
+        turn: TurnId(2),
+        at_ms: WallMs::from_millis(1_800_000_000_000),
+        body: ItemBody::User(UserMessage {
+            text: slopty_proto::thread::detail::Clipped::whole("make it faster"),
+            images: Vec::new(),
+            command: None,
+            intent: None,
+        }),
+    }];
+    state.rewound = Some(slopty_proto::thread::Rewound {
+        turn: TurnId(2),
+        tree: TreeRef("before-rewind".into()),
+        at_ms: WallMs::from_millis(1_800_000_000_500),
+    });
+    let thread = state.meta.id;
+    let (workspace, cx, mut rx) = holding(&[state], cx);
+    let params = serde_json::json!({
+        "chatId": thread.to_string(), "messageId": "u2", "code": true, "conversation": true,
+    });
+    let answer = workspace
+        .update(cx, |v, cx| v.view_work_call(calls::REWIND, &params, cx))
+        .expect("a call of Slopty's");
+    cx.run_until_parked();
+    // The files first: the conversation is asked only once the worker has taken them.
+    let mut asked = Vec::new();
+    for _ in 0..2 {
+        let sent = intents(&mut rx);
+        workspace.update(cx, |v, cx| {
+            for (_, id, _) in &sent {
+                v.thread_done(KEY, &IntentDone { id: *id, outcome: Outcome::Done }, cx);
+            }
+        });
+        asked.push(sent.into_iter().map(|(_, _, i)| i).collect::<Vec<_>>());
+        cx.run_until_parked();
+    }
+    assert_eq!(
+        asked,
+        [
+            vec![Intent::Rewind { turn: TurnId(2) }],
+            vec![Intent::RewindConversation { turn: TurnId(2) }]
+        ],
+        "the files, then the conversation, and no fork"
+    );
+    let answer = value(answer.now_or_never());
+    assert_eq!(answer["prompt"], "make it faster");
+    assert!(answer.get("chatId").is_none(), "{answer}");
+    assert_eq!(answer["undo"]["chatId"], thread.to_string());
+    assert!(answer["undo"].get("branchChatId").is_none_or(serde_json::Value::is_null), "{answer}");
+    assert_eq!(answer["undo"]["tree"], "before-rewind");
+}
+
 /// Rewinding to a message puts the files back before its turn and branches the conversation
 /// before it, answering with its words and the branched chat.
 #[gpui::test]

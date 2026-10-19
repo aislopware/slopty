@@ -5562,6 +5562,10 @@ fn skill_display_name(name: &str) -> String {
         .join(" ")
 }
 
+// slopty: what `/context`, `/mcp` or `/usage` says before the chat's agent has told any of it.
+/// Why the footer's card did not open.
+const NO_CONTEXT_YET: &str = "The agent hasn't said its context or MCP servers yet; send a message first.";
+
 /// Commands implemented by Slopty, independently of the provider protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceCommand {
@@ -5574,6 +5578,11 @@ pub enum WorkspaceCommand {
     Terminal,
     Rename,
     Stop,
+    // slopty: the footer's cards, which the TUI's own `/context`, `/mcp` and `/usage` dialogs
+    // are in Slopty.
+    Context,
+    Mcp,
+    Usage,
 }
 
 impl WorkspaceCommand {
@@ -5603,7 +5612,28 @@ impl WorkspaceCommand {
                 true,
             ),
             (Self::Stop, "stop", "Slopty: stop the active run", true),
+            (Self::Context, "context", "Slopty: show the context in use", true),
+            (Self::Mcp, "mcp", "Slopty: show the agent's MCP servers", true),
+            (Self::Usage, "usage", "Slopty: show plan usage", true),
         ]
+    }
+
+    // slopty: an agent's command that only opens a dialog in its own terminal, sent bare, is
+    // Slopty's surface for it: a headless agent answers it with text that points at a terminal
+    // there is none of (`/mcp` says "Use /mcp in the terminal"). Given arguments it is the
+    // agent's (`/mcp reconnect github`, `/model sonnet`).
+    /// The command an agent's own command of `name`, typed with nothing after it, opens here.
+    fn shadowing(name: &str) -> Option<Self> {
+        match name {
+            // slopty: the TUI's `/effort` picker is the model picker's reasoning row, and its
+            // `/clear` a conversation of its own, as Slopty's new chat is.
+            "model" | "effort" => Some(Self::Model),
+            "clear" => Some(Self::New),
+            "context" => Some(Self::Context),
+            "mcp" => Some(Self::Mcp),
+            "usage" => Some(Self::Usage),
+            _ => None,
+        }
     }
 }
 
@@ -5612,8 +5642,16 @@ fn with_workspace_commands(
     in_chat: bool,
 ) -> Vec<InvocationCandidate> {
     rows.retain(|row| row.workspace_command.is_none());
+    for row in &mut rows {
+        row.bare_command = in_chat.then(|| WorkspaceCommand::shadowing(&row.name)).flatten();
+    }
     for &(command, name, description, needs_chat) in WorkspaceCommand::catalog() {
         if needs_chat && !in_chat {
+            continue;
+        }
+        // slopty: the agent's own row of the same name stands for it, as Slopty's surface when
+        // sent bare.
+        if rows.iter().any(|row| row.name == name && row.bare_command == Some(command)) {
             continue;
         }
         // Keep provider commands intact. Explicit Slopty names remain available
@@ -5628,6 +5666,7 @@ fn with_workspace_commands(
             description: description.into(),
             input_hint: None,
             workspace_command: Some(command),
+            bare_command: None,
         });
     }
     rows
@@ -5642,14 +5681,15 @@ fn workspace_command_for_text(
     if !text[..token.range.start].trim().is_empty() {
         return None;
     }
-    rows.iter()
-        .find(|row| row.name == token.query)?
-        .workspace_command
+    let row = rows.iter().find(|row| row.name == token.query)?;
+    row.workspace_command.or(row.bare_command)
 }
 
 #[derive(Debug, Clone)]
 struct InvocationCandidate {
     workspace_command: Option<WorkspaceCommand>,
+    // slopty: an agent's command that, sent bare, opens Slopty's surface for it.
+    bare_command: Option<WorkspaceCommand>,
     name: String,
     description: String,
     input_hint: Option<String>,
@@ -5775,6 +5815,7 @@ fn invocation_candidates(
         .into_iter()
         .map(|c| InvocationCandidate {
             workspace_command: None,
+            bare_command: None,
             input_hint: c.input_hint,
             name: c.name.clone(),
             description: c.description,
@@ -5786,6 +5827,7 @@ fn invocation_candidates(
                 .filter(|s| s.enabled)
                 .map(|s| InvocationCandidate {
                     workspace_command: None,
+                    bare_command: None,
                     input_hint: None,
                     name: s.name.clone(),
                     description: if slopty_view_proto::invocation::native_skill_identity(&s.path) {
@@ -8389,6 +8431,15 @@ impl Composer {
         self.reset_slash(None, cx);
         self.failure = None;
         self.failure_key = None;
+        // slopty: the footer's cards are the composer's own.
+        if let WorkspaceCommand::Context | WorkspaceCommand::Mcp | WorkspaceCommand::Usage = command {
+            let usage = command == WorkspaceCommand::Usage;
+            if !self.account_usage.update(cx, |cards, cx| cards.open_card(usage, cx)) {
+                self.failure = Some(NO_CONTEXT_YET.into());
+            }
+            cx.notify();
+            return;
+        }
         cx.emit(ComposerEvent::WorkspaceCommand(command));
         cx.notify();
     }
@@ -11948,20 +11999,51 @@ mod tests {
                     description: "Plugin command".into(),
                     input_hint: None,
                 },
+                SlashCommand {
+                    name: "diff".into(),
+                    description: "Native diff command".into(),
+                    input_hint: None,
+                },
+                SlashCommand {
+                    name: "mcp".into(),
+                    description: "Manage MCP servers".into(),
+                    input_hint: Some("[reconnect|enable|disable [<server>|all]]".into()),
+                },
+                SlashCommand {
+                    name: "clear".into(),
+                    description: "Clear the conversation".into(),
+                    input_hint: None,
+                },
+                SlashCommand {
+                    name: "effort".into(),
+                    description: "Set the effort level".into(),
+                    input_hint: Some("<low|medium|high|xhigh|max>".into()),
+                },
             ],
             vec![],
         );
         let rows = with_workspace_commands(native, true);
-        assert_eq!(rows.len(), 11);
+        // slopty: the agent's `model` and `mcp` stand for Slopty's own (no second row), and a
+        // bare `clear` and `effort` for its new chat and picker; its `diff` is its own, and
+        // Slopty's goes as `slopty:diff`.
+        assert_eq!(rows.len(), 16);
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
-        assert_eq!(workspace_command_for_text("/model", &rows), None);
+        assert_eq!(workspace_command_for_text("/model", &rows), Some(WorkspaceCommand::Model));
+        assert_eq!(workspace_command_for_text("/model sonnet", &rows), None);
+        assert_eq!(workspace_command_for_text("/mcp", &rows), Some(WorkspaceCommand::Mcp));
+        assert_eq!(workspace_command_for_text("/mcp reconnect github", &rows), None);
+        assert_eq!(workspace_command_for_text("/clear", &rows), Some(WorkspaceCommand::New));
+        assert_eq!(workspace_command_for_text("/effort", &rows), Some(WorkspaceCommand::Model));
+        assert_eq!(workspace_command_for_text("/effort max", &rows), None);
+        assert_eq!(workspace_command_for_text("/new", &rows), Some(WorkspaceCommand::New));
         assert_eq!(workspace_command_for_text("/slopty:model", &rows), None);
+        assert_eq!(workspace_command_for_text("/diff", &rows), None);
         assert_eq!(
-            workspace_command_for_text("/slopty:slopty:model", &rows),
-            Some(WorkspaceCommand::Model)
+            workspace_command_for_text("/slopty:diff", &rows),
+            Some(WorkspaceCommand::Diff)
         );
-        assert_eq!(with_workspace_commands(rows, true).len(), 11);
+        assert_eq!(with_workspace_commands(rows, true).len(), 16);
         let draft_rows = with_workspace_commands(vec![], false);
         assert_eq!(draft_rows.len(), 4);
         assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);
@@ -12081,6 +12163,7 @@ mod tests {
                             description: String::new(),
                             input_hint: None,
                             workspace_command: None,
+                            bare_command: None,
                             invocation: invocation.clone(),
                         }],
                     );

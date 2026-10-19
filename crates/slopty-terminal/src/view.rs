@@ -2569,7 +2569,6 @@ impl TerminalView {
                 }
             }
         }
-        self.tell_restored(cx);
         let progress = self.progress();
         if progress != self.progress_told {
             self.progress_told = progress;
@@ -2621,8 +2620,9 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// A session reopened after its shell was lost says so once, as a notice that waits on one
-    /// choice: the shell's toast, with "Run again" when it was opened to run something.
+    /// A session reopened after its shell was lost says so once it is first drawn, as a notice
+    /// that waits on one choice: the shell's toast, with "Run again" when it was opened to run
+    /// something.
     fn tell_restored(&mut self, cx: &mut Context<Self>) {
         if self.restored_seen || self.state.restored().is_none() {
             return;
@@ -4135,6 +4135,14 @@ impl Render for TerminalView {
         }
         self.watch_keyboard(window, cx);
         self.before_drawing(cx);
+        // Told only once the session is on screen: a tile of a project the person has not
+        // opened, restored along with it, says nothing until they look at it.
+        if !self.restored_seen && self.state.restored().is_some() {
+            let this = cx.entity().downgrade();
+            window.defer(cx, move |_, cx| {
+                let _gone = this.update(cx, Self::tell_restored);
+            });
+        }
         let focused = self.focus.is_focused(window);
         #[cfg(any(test, feature = "e2e"))]
         {
@@ -8471,6 +8479,21 @@ mod tests {
             );
         });
         cx.run_until_parked();
+    }
+
+    /// A restored session no window draws, a tile of a project not open, says nothing: the
+    /// toast waits until the person can see the session it is about.
+    #[gpui::test]
+    fn a_restored_session_off_screen_says_nothing(cx: &mut TestAppContext) {
+        let (_shown, _rx, cx) = terminal(cx);
+        let (tx, _hidden_rx) = mpsc::channel(64);
+        let hidden = cx.update(|_window, cx| {
+            let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+            cx.new(|cx| TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx))
+        });
+        restore(&hidden, cx, &["claude", "--resume"]);
+        let toasts = cx.update(|_window, cx| slopty_shell::toast::messages(cx));
+        assert!(toasts.is_empty(), "{toasts:?}");
     }
 
     /// A restored session says so once, in the shell's toast, and offers what it ran again:

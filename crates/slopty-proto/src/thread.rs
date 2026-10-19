@@ -261,6 +261,9 @@ impl Cap {
     pub const REVIEW: &'static str = "review";
     /// [`wire::Intent::Rewind`]: the files put back as they were before a turn.
     pub const REWIND: &'static str = "rewind";
+    /// [`wire::Intent::RewindConversation`]: the conversation taken back to before a turn in
+    /// the thread itself, not branched off it.
+    pub const REWIND_CONVERSATION: &'static str = "rewind-conversation";
     /// [`wire::Intent::Rule`]: the agent's permission rules changed in its own settings.
     pub const RULES: &'static str = "rules";
     /// [`wire::Intent::Send`] with a delivery the worker keeps ([`Delivery::is_kept`]): it holds

@@ -6,7 +6,7 @@ expression: "decode(\"permission\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1792208778529
+      at_ms: 1792374431846
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"permission\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1792208780334
+      at_ms: 1792374433340
       body:
         Tool:
           name: Bash
@@ -44,12 +44,12 @@ expression: "decode(\"permission\").snapshot()"
               lines: 1
               chars: 23
               full: ~
-            at_ms: 1792208780523
+            at_ms: 1792374433418
             images: []
             said: ~
           title: ~
     - id: toolu_02
-      at_ms: 1792208781622
+      at_ms: 1792374434543
       body:
         Tool:
           name: Bash
@@ -72,12 +72,12 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1792208781946
+            at_ms: 1792374434938
             images: []
             said: Done
           title: ~
     - id: toolu_03
-      at_ms: 1792208783172
+      at_ms: 1792374436031
       body:
         Tool:
           name: Bash
@@ -100,32 +100,32 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1792208783277
+            at_ms: 1792374436116
             images: []
             said: Done
           title: ~
-    - id: "00000000-0000-4000-8000-000000000035:0"
-      at_ms: 1792208785894
+    - id: "00000000-0000-4000-8000-000000000034:0"
+      at_ms: 1792374438004
       body:
         Text:
-          text: "done\n\n`touch refused.txt` was refused, so that file was not created. `allowed.txt` and `always.txt` were created."
+          text: "done\n\n`refused.txt` was refused by the fixture, so it was not created. `allowed.txt` and `always.txt` were created."
           lines: 3
-          chars: 113
+          chars: 115
           full: ~
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1792208778529
-      ended_ms: 1792208785922
+      started_ms: 1792374431846
+      ended_ms: 1792374438034
       models:
         - claude-haiku-5-5
       requests: 4
       usage:
         input: 8
-        cache_read: 67579
-        cache_write: 7849
-        output: 479
-        thinking: 193
-      context_tokens: 19080
+        cache_read: 67479
+        cache_write: 7799
+        output: 425
+        thinking: 138
+      context_tokens: 19030
       mode: default
       stop: end_turn

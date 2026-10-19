@@ -180,6 +180,22 @@ impl Driven {
             }
         }
         let Some(applied) = said.get("applied") else { return outs };
+        let model = str_at(applied, "model").filter(|m| !m.is_empty()).map(str::to_owned);
+        let effort = str_at(applied, "effort").map(str::to_owned);
+        let meters = self.history.meters_now();
+        if model.as_ref().is_some_and(|m| meters.model_id.as_ref() != Some(m))
+            || effort.as_ref().is_some_and(|e| meters.effort.as_ref() != Some(e))
+        {
+            outs.extend(self.meters(|m| {
+                if let Some(model) = model {
+                    m.model = Some(crate::claude::model_label(&model));
+                    m.model_id = Some(model);
+                }
+                if let Some(effort) = effort {
+                    m.effort = Some(effort);
+                }
+            }));
+        }
         // The advisor rides every request: the TUI says so once, as it costs tokens.
         if let Some(advisor) = str_at(applied, "advisor").filter(|a| !a.trim().is_empty())
             && self.said_once.0.insert(format!("advisor:{advisor}"))

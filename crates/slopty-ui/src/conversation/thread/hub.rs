@@ -584,6 +584,7 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Background { .. } => "Couldn't move it to the background".to_owned(),
         Intent::Shell { .. } => "The command didn't run".to_owned(),
         Intent::Rewind { .. } => "Couldn't put the files back".to_owned(),
+        Intent::RewindConversation { .. } => "Couldn't take the conversation back".to_owned(),
         Intent::Unrewind { .. } => "Couldn't undo the rewind".to_owned(),
         Intent::Rule(_) => "Couldn't change the rule".to_owned(),
         Intent::Surface { .. } => "The mod didn't take it".to_owned(),

@@ -50,6 +50,17 @@ const BAND: &str = "above-prompt";
 /// How long a toast shows when the mod says nothing.
 const TOAST_MS: u64 = 5_000;
 
+/// What a rewind to before a message says when neither it nor any later one has a checkpoint:
+/// Claude Code changed no file since.
+pub(super) const NOTHING_TO_PUT_BACK: &str =
+    "Nothing to put back: no file changed since that message";
+
+/// Whether Claude Code's `error` says a message has no checkpoint of the files (its words in
+/// 2.1.302: "No file checkpoint found for this message.").
+fn no_checkpoint(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("no file checkpoint")
+}
+
 /// What a `!` command did: what Claude Code is handed as the person's next message.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ran {
@@ -183,8 +194,8 @@ impl Driven {
                 self.app_answers.push((*app, AppAnswer::Refused(error.to_owned())));
                 Vec::new()
             }
-            Control::RewindPreview(preview) => {
-                self.rewind_previews.push((*preview, Err(error.to_owned())));
+            Control::RewindPreview(preview, rest) => {
+                self.preview_refused(*preview, rest.clone(), error);
                 Vec::new()
             }
             Control::Side(asked) => self.side_failed(asked.clone(), error),
@@ -520,29 +531,66 @@ impl Driven {
     }
 
     /// Put the files back as they were before turn `turn` began, through Claude Code's own
-    /// checkpoints; a turn whose message is not known says so at once.
+    /// checkpoints; a turn whose message is not known says so at once. A message with no
+    /// checkpoint of its own (a command Claude Code ran itself, such as `/mcp`, changes no file)
+    /// is asked by the next one's, as the files stood the same before both.
     pub fn rewind(&mut self, turn: TurnId, now: WallMs) -> Vec<Out> {
-        let Some(prompt) = self.history.prompt_of(turn) else {
+        let mut prompts = self.history.prompts_from(turn).into_iter();
+        let Some(prompt) = prompts.next() else {
             let text = "Couldn't put the files back: that turn's message is not known";
             return self.history.notice(Notice::INFO, text, now);
         };
-        let request = json!({ "subtype": "rewind_files", "user_message_id": prompt });
-        self.control(Control::Rewind(turn), &request);
+        self.rewind_files(turn, &prompt, prompts.collect());
         Vec::new()
+    }
+
+    fn rewind_files(&mut self, turn: TurnId, prompt: &str, rest: Vec<String>) {
+        let request = json!({ "subtype": "rewind_files", "user_message_id": prompt });
+        self.control(Control::Rewind(turn, rest), &request);
+    }
+
+    /// Claude Code would not put the files back to before turn `turn`, saying `error`: a message
+    /// with no checkpoint is asked again by the next of `rest`, and with none left nothing
+    /// changed since; any other reason is said.
+    pub(super) fn rewind_refused(
+        &mut self,
+        turn: TurnId,
+        rest: Vec<String>,
+        error: &str,
+        now: WallMs,
+    ) -> Vec<Out> {
+        let mut outs = if no_checkpoint(error) {
+            let mut rest = rest.into_iter();
+            if let Some(next) = rest.next() {
+                self.rewind_files(turn, &next, rest.collect());
+                return Vec::new();
+            }
+            self.history.notice(Notice::REWOUND, NOTHING_TO_PUT_BACK, now)
+        } else {
+            let text = format!("Claude Code refused to put the files back: {error}");
+            self.history.notice(Notice::INFO, &text, now)
+        };
+        outs.extend(self.release_held_rewind(now));
+        outs
     }
 
     /// What a rewind to before turn `turn` would put back, asked of Claude Code's checkpoints
     /// without putting anything back (`rewind_files` with `dry_run`), by the ask's number
     /// `preview`: answered later ([`Self::take_rewind_previews`]).
     pub fn preview_rewind(&mut self, preview: u64, turn: TurnId) {
-        let Some(prompt) = self.history.prompt_of(turn) else {
+        let mut prompts = self.history.prompts_from(turn).into_iter();
+        let Some(prompt) = prompts.next() else {
             let why = "that turn's message is not known".to_owned();
             self.rewind_previews.push((preview, Err(why)));
             return;
         };
+        self.preview_files(preview, &prompt, prompts.collect());
+    }
+
+    fn preview_files(&mut self, preview: u64, prompt: &str, rest: Vec<String>) {
         let request =
             json!({ "subtype": "rewind_files", "user_message_id": prompt, "dry_run": true });
-        self.control(Control::RewindPreview(preview), &request);
+        self.control(Control::RewindPreview(preview, rest), &request);
     }
 
     /// What rewinds would put back since last taken, by each ask's number.
@@ -550,9 +598,11 @@ impl Driven {
         std::mem::take(&mut self.rewind_previews)
     }
 
-    pub(super) fn rewind_previewed(&mut self, preview: u64, said: &Value) {
+    pub(super) fn rewind_previewed(&mut self, preview: u64, rest: Vec<String>, said: &Value) {
         let answer = if said.get("canRewind").and_then(Value::as_bool) == Some(false) {
-            Err(str_at(said, "error").unwrap_or("no checkpoint for that message").to_owned())
+            let why = str_at(said, "error").unwrap_or("no checkpoint for that message");
+            self.preview_refused(preview, rest, why);
+            return;
         } else {
             let files = said.get("filesChanged").and_then(Value::as_array);
             Ok(files.into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect())
@@ -560,21 +610,74 @@ impl Driven {
         self.rewind_previews.push((preview, answer));
     }
 
-    pub(super) fn rewound(&mut self, _turn: TurnId, said: &Value, now: WallMs) -> Vec<Out> {
-        if said.get("canRewind").and_then(Value::as_bool) == Some(false) {
-            let why = str_at(said, "error").unwrap_or("no checkpoint for that message");
-            return self.history.notice(
-                Notice::INFO,
-                &format!("Couldn't put the files back: {why}"),
-                now,
-            );
+    /// A preview Claude Code turned down for `why`: asked again by the next message of `rest`
+    /// when the message has no checkpoint, nothing to put back once none is left.
+    pub(super) fn preview_refused(&mut self, preview: u64, rest: Vec<String>, why: &str) {
+        if !no_checkpoint(why) {
+            self.rewind_previews.push((preview, Err(why.to_owned())));
+            return;
         }
-        let files = said.get("filesChanged").and_then(Value::as_array).map_or(0, Vec::len);
-        let added = u64_at(said, "insertions").unwrap_or_default();
-        let removed = u64_at(said, "deletions").unwrap_or_default();
-        let files = if files == 1 { "1 file".to_owned() } else { format!("{files} files") };
-        let text = format!("Put back {files} (+{added} −{removed})");
-        self.history.notice(Notice::REWOUND, &text, now)
+        let mut rest = rest.into_iter();
+        match rest.next() {
+            Some(next) => self.preview_files(preview, &next, rest.collect()),
+            None => self.rewind_previews.push((preview, Ok(Vec::new()))),
+        }
+    }
+
+    pub(super) fn rewound(&mut self, _turn: TurnId, said: &Value, now: WallMs) -> Vec<Out> {
+        let mut outs = if said.get("canRewind").and_then(Value::as_bool) == Some(false) {
+            let why = str_at(said, "error").unwrap_or("no checkpoint for that message");
+            self.history.notice(Notice::INFO, &format!("Couldn't put the files back: {why}"), now)
+        } else {
+            let files = said.get("filesChanged").and_then(Value::as_array).map_or(0, Vec::len);
+            let added = u64_at(said, "insertions").unwrap_or_default();
+            let removed = u64_at(said, "deletions").unwrap_or_default();
+            let files = if files == 1 { "1 file".to_owned() } else { format!("{files} files") };
+            let text = format!("Put back {files} (+{added} −{removed})");
+            self.history.notice(Notice::REWOUND, &text, now)
+        };
+        outs.extend(self.release_held_rewind(now));
+        outs
+    }
+
+    /// Take the conversation back to before turn `turn` in this session
+    /// (`rewind_conversation`), as the TUI's `/rewind` does: Claude Code forgets the turn and
+    /// every one after, and the thread drops them once it says so. While the files are still
+    /// going back it waits for them.
+    pub fn rewind_conversation(&mut self, turn: TurnId, now: WallMs) -> Vec<Out> {
+        if self.controls.values().any(|c| matches!(c, Control::Rewind(..))) {
+            self.held_rewind = Some(turn);
+            return Vec::new();
+        }
+        let Some(prompt) = self.history.prompt_of(turn) else {
+            let text = "Couldn't take the conversation back: that turn's message is not known";
+            return self.history.notice(Notice::INFO, text, now);
+        };
+        let request = json!({ "subtype": "rewind_conversation", "target_message_uuid": prompt });
+        self.control(Control::RewindConversation(turn), &request);
+        Vec::new()
+    }
+
+    /// The conversation rewind that waited on the files, sent now they are back.
+    fn release_held_rewind(&mut self, now: WallMs) -> Vec<Out> {
+        match self.held_rewind.take() {
+            Some(turn) => self.rewind_conversation(turn, now),
+            None => Vec::new(),
+        }
+    }
+
+    pub(super) fn conversation_rewound(
+        &mut self,
+        turn: TurnId,
+        said: &Value,
+        now: WallMs,
+    ) -> Vec<Out> {
+        if said.get("rewound").and_then(Value::as_bool) == Some(true) {
+            return self.history.rewound_to(turn);
+        }
+        let why = str_at(said, "error").unwrap_or("Claude Code would not say why");
+        let text = format!("Couldn't take the conversation back: {why}");
+        self.history.notice(Notice::INFO, &text, now)
     }
 
     /// Hand the `!` command `ran` to Claude Code as the person's message, intent `intent`: one
@@ -884,9 +987,10 @@ impl Driven {
         self.history.tell(Action::Side(SideExchange { failed, ..asked }))
     }
 
-    /// Claude Code is gone: what pages asked of it is refused, and a side question it was
-    /// answering gets no answer.
+    /// Claude Code is gone: what pages asked of it is refused, a side question it was
+    /// answering gets no answer, and a conversation rewind waiting on the files is let go.
     pub(super) fn doors_gone(&mut self, _now: WallMs) -> Vec<Out> {
+        self.held_rewind = None;
         let apps: Vec<u64> = self
             .controls
             .values()
@@ -899,9 +1003,9 @@ impl Driven {
         let previews: Vec<u64> = self
             .controls
             .values()
-            .filter_map(|c| if let Control::RewindPreview(n) = c { Some(*n) } else { None })
+            .filter_map(|c| if let Control::RewindPreview(n, _) = c { Some(*n) } else { None })
             .collect();
-        self.controls.retain(|_, c| !matches!(c, Control::RewindPreview(_)));
+        self.controls.retain(|_, c| !matches!(c, Control::RewindPreview(..)));
         for preview in previews {
             self.rewind_previews.push((preview, Err("Claude Code ended".to_owned())));
         }

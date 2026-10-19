@@ -4,7 +4,7 @@ Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Article │ You
-Paragraph │ Use the Read tool to read the file $SCRATCH/work/main.rs and count its lines. Reply with just the number of lines and nothing else.
+Paragraph │ Count the number of lines in the file $SCRATCH/work/main.rs. Use the Read tool on that file to do it. Do not modify any files. Reply with just the number and nothing else.
 Button │ Read 1 file
 Article │ Claude
 Paragraph │ 4

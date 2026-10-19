@@ -876,6 +876,29 @@ fn a_failed_mcp_server_offers_reconnect(cx: &mut TestAppContext) {
     assert!(!buttons.iter().any(|b| b.starts_with("Reconnect ") || b.starts_with("Disable ") || b.starts_with("Enable ")), "{buttons:?}");
 }
 
+/// `/mcp` typed bare opens the context card with the agent's MCP servers, as the TUI's opens its
+/// dialog, even before the context window is known; with nothing to show it says why.
+#[gpui::test]
+fn a_bare_mcp_opens_the_servers(cx: &mut TestAppContext) {
+    use slopty_view_doc::dock::McpServerRow;
+    let github = McpServerRow { name: "github".into(), status: "connected".into(), ..McpServerRow::default() };
+    let dock = ChatDock { servers: vec![github], can: DockCan { mcp_servers: true, ..can() }, ..ChatDock::default() };
+    let (composer, _, cx) = open(cx, dock, None);
+    draw(cx);
+    composer.update(cx, |composer, cx| composer.execute_workspace_command(WorkspaceCommand::Mcp, 0..0, cx));
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::ListItem, "github, Connected").is_some(), "the servers show");
+    assert_eq!(composer.read_with(cx, |composer, _| composer.failure().cloned()), None);
+
+    composer.update(cx, |composer, _| composer.dock.dock = Some(Arc::new(ChatDock { can: can(), ..ChatDock::default() })));
+    draw(cx);
+    let usage = composer.read_with(cx, |composer, _| composer.account_usage.clone());
+    usage.update(cx, |usage, cx| usage.set_servers(Vec::new(), false, cx));
+    composer.update(cx, |composer, cx| composer.execute_workspace_command(WorkspaceCommand::Context, 0..0, cx));
+    let failure = composer.read_with(cx, |composer, _| composer.failure().cloned());
+    assert_eq!(failure.as_deref(), Some(NO_CONTEXT_YET));
+}
+
 /// A dialog Slopty does not know shows its payload and takes OK or Dismiss, never words.
 #[gpui::test]
 fn an_unknown_dialog_shows_its_payload(cx: &mut TestAppContext) {

@@ -35,6 +35,10 @@ pub const EFFORT_FLAG: &str = "--effort";
 /// The flag the model is given with.
 pub const MODEL_FLAG: &str = "--model";
 
+/// What every Claude model's full id begins with (`claude-opus-5-5`); Claude Code takes a model
+/// by it as well as by the aliases its menu lists.
+pub const MODEL_ID_PREFIX: &str = "claude-";
+
 /// The flag that has a resume keep the conversation only up to a message, by its record's id.
 pub const RESUME_AT_FLAG: &str = "--resume-session-at";
 
@@ -181,7 +185,7 @@ pub fn is_session_id(id: &str) -> bool {
 /// "Opus 5.5").
 #[must_use]
 pub fn model_label(model: &str) -> String {
-    let named = model.strip_prefix("claude-").map(|rest| {
+    let named = model.strip_prefix(MODEL_ID_PREFIX).map(|rest| {
         let mut words = rest.split('-');
         let family = words.next().unwrap_or_default();
         let version: Vec<&str> =

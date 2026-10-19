@@ -468,6 +468,10 @@ impl Task {
                 let outs = self.driven.rewind(turn, now);
                 self.take(outs);
             }
+            ThreadAsk::RewindConversation { turn } => {
+                let outs = self.driven.rewind_conversation(turn, now);
+                self.take(outs);
+            }
             ThreadAsk::RewindPreview { turn, reply } => {
                 let preview = self.previews.1;
                 self.previews.1 = preview.wrapping_add(1);

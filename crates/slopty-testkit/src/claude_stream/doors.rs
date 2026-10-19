@@ -1,4 +1,4 @@
-//! The stand-in's doors beside messages, each as Claude Code 2.1.302 answers it.
+//! The stand-in's doors beside messages, each as Claude Code 2.1.303 answers it.
 //!
 //! The doors are its background work, its dialogs and forms, its file checkpoints, its MCP
 //! servers' apps, its permission rules, its mods' surfaces and its side questions.
@@ -16,8 +16,9 @@
 //!   withdraws the ask (`control_cancel_request`).
 //! - **Checkpoints.** `write <path> <words>` writes a file in the folder, kept against the turn's
 //!   message; `rewind_files` puts back every file written from that message on (with `dry_run`,
-//!   only names them), and refuses a message it holds no checkpoint for. `plan` asks `ExitPlanMode`
-//!   with a plan.
+//!   only names them), and refuses a message it holds no checkpoint for. `rewind_conversation`
+//!   forgets a message and every one after it, the files left as they are. `plan` asks
+//!   `ExitPlanMode` with a plan.
 //! - **MCP Apps.** `mcp_status` lists each `--mcp-config` server with its tools, asked as a host
 //!   with the UI extension; `mcp_read_resource` and `mcp_call` go to the server named, its error
 //!   refused.
@@ -117,6 +118,9 @@ impl Stub {
             "rewind_files" => {
                 let dry = request.get("dry_run").and_then(Value::as_bool).unwrap_or(false);
                 self.rewind(id, &field("user_message_id").unwrap_or_default(), dry);
+            }
+            "rewind_conversation" => {
+                self.rewind_conversation(id, &field("target_message_uuid").unwrap_or_default());
             }
             "list_permission_rules" => reply(id, Some(json!({ "state": self.rules() }))),
             "mcp_status" => {
@@ -464,6 +468,24 @@ impl Stub {
         let said = format!("Done: wrote {name}.");
         self.assistant(&json!({ "type": "text", "text": said }), None, None);
         Ok(said)
+    }
+
+    /// `rewind_conversation`: the conversation taken back to before message `message`, as
+    /// Claude Code 2.1.303 answers it (`rewound`, else `error` and `reason`); the files stay.
+    fn rewind_conversation(&mut self, id: &str, message: &str) {
+        let Some(at) = self.doors.prompts.iter().position(|p| p == message) else {
+            let refused = json!({
+                "rewound": false, "prefillText": null, "precedingAssistantUuid": null,
+                "error": "target not found", "reason": "target_not_found",
+            });
+            reply(id, Some(refused));
+            return;
+        };
+        self.doors.prompts.truncate(at);
+        reply(
+            id,
+            Some(json!({ "rewound": true, "targetMessageUuid": message, "prefillText": "" })),
+        );
     }
 
     /// `rewind_files`: every file written from message `message` on, as it was before; a

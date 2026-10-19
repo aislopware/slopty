@@ -628,7 +628,7 @@ pub fn dock(state: &ThreadState, counts: &WorkCounts, now_ms: i64) -> ChatDock {
             background: can(Cap::BACKGROUND),
             shell: can(Cap::SHELL),
             rewind: can(Cap::REWIND),
-            fork: can(Cap::FORK),
+            fork: can(Cap::FORK) || can(Cap::REWIND_CONVERSATION),
             rules: can(Cap::RULES),
             surfaces: can(Cap::SURFACES),
             set_mode: can(Cap::SET_MODE) && !state.meta.modes.is_empty(),

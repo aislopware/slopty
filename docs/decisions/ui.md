@@ -13352,3 +13352,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   element's own derivation, installed as `live::serve_fit`), and an open waits for that first
   draw; a panel not drawn within half a second opens at 80 × 24. Proof:
   `terminal::panel::progress_tests::a_session_opens_at_the_grid_its_body_draws`.
+- ✅ **A bare `/mcp`, `/context`, `/usage`, `/model`, `/effort` and `/clear` open Slopty's own surfaces; a toast
+  closes by its button; a restored terminal speaks only once drawn (2026-10-19).**
+  - **Commands.** zeron lets an agent's command win a name it shares with a workspace command,
+    so `/mcp`, which Claude Code lists, went to the agent as a message; in the TUI it opened a
+    dialog that `-p` has not. The bare command now opens Slopty's surface (the servers and
+    context card, the usage card, the model picker, whose reasoning row is `/effort`'s), and
+    with arguments it still goes to the agent (`/mcp reconnect github`, `/effort max`). A bare
+    `/clear` starts a new chat, as the TUI starts a new session and keeps the old one to resume. A card with nothing to show yet says the agent hasn't told
+    it. Proof: `composer::tests::workspace_commands_preserve_native_commands_and_avoid_collisions`,
+    `composer::dock_tests::a_bare_mcp_opens_the_servers`.
+  - **Toasts.** A stack of toasts had no way to close but waiting. Each expanded toast now has
+    zeron's round close button at its corner (`toast-close-<id>`). Proof:
+    `toast::tests::a_hovered_toast_closes_by_its_button`.
+  - **Restored terminals.** Every terminal that came back after an update said "Restored…" with
+    "Run again", drawn or not, so one update stacked a toast per session. The note now waits
+    for the terminal's first frame. Proof:
+    `view::tests::a_restored_session_off_screen_says_nothing`.

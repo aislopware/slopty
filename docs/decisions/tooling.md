@@ -2205,6 +2205,16 @@ more full-window layer.
     which noq's port lacks and the deque's defragment is written without.
   - Claude Code 2.1.302 is pinned and the fixtures are recorded on it. Its control and stream
     subtypes are the same 155 as 2.1.301's.
+- ✅ **Upstream sync of 2026-10-19 (second): gpui-fast `3276d4c7`, gpui-kit `90d1ffa6`.** The
+  gpui-fast fork takes #53: the retained check compares a sprite's transform on the 1/64 pixel
+  grid (rotation and scale to 1/4096). A rotated sprite's translation comes from where its
+  element landed, and a kept frame and one drawn again reach it through different sums: an iOS
+  spinner at a quarter turn read -591.0 in one and -590.99994 in the other, and the phone's
+  live-page e2e called the kept frame stale. gpui-kit is rebased onto `af456ddb` (three upstream
+  commits): #3586 keeps keyboard activation inside a popover's content, #3590 keeps a motion's
+  duration precise, and #3591 makes the WebView build on gpui-pre again, with gpui-fast
+  optional. The fork still leaves `gpui-webview` out of its workspace, so upstream's new
+  WebView lint and test jobs stay out of its CI; Slopty draws its pages with wry.
 - ✅ **Upstream sync of 2026-10-19: gpui-fast `eccf9139`, gpui-kit `bbe912be`, ghostty
   `44278514`.** The gpui-fast fork takes three of Slopty's own changes: #50 draws SVGs with
   resvg and usvg 0.48 and checks a font for a glyph through skrifa, as resvg now does, in place

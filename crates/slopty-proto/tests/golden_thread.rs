@@ -812,6 +812,7 @@ mod golden_thread {
         );
         snap("intent_shell", &send(Intent::Shell { command: "pwd".to_owned() }));
         snap("intent_rewind", &send(Intent::Rewind { turn: TurnId(2) }));
+        snap("intent_rewind_conversation", &send(Intent::RewindConversation { turn: TurnId(2) }));
         snap("intent_side", &send(Intent::Side { question: "Which test covers this?".to_owned() }));
         snap("intent_mcp_reconnect", &send(Intent::McpReconnect { server: "github".to_owned() }));
         snap(

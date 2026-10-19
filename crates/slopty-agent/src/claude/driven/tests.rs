@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use slopty_proto::thread::{
-    Action, ItemBody, Phase, RequestState, ThreadId, ThreadState, TurnState, Wait,
+    Action, ItemBody, Phase, RequestState, ThreadId, ThreadState, TurnId, TurnState, Wait,
 };
 
 use super::*;
@@ -724,10 +724,9 @@ fn recorded_doors_answer_as_claude_code_did() {
         said.iter().any(|(k, t)| k == Notice::REWOUND && t == "Put back 0 files (+0 −0)"),
         "{said:?}"
     );
-    assert!(
-        said.iter().any(|(k, t)| k == Notice::INFO && t.contains("No file checkpoint found")),
-        "{said:?}"
-    );
+    // The message Claude Code keeps no checkpoint for is put back by the next one's: no refusal
+    // is said.
+    assert!(!said.iter().any(|(_, t)| t.contains("No file checkpoint found")), "{said:?}");
     assert!(thread.turns.iter().all(|t| t.state != TurnState::Active), "{:#?}", thread.turns);
     assert_eq!(thread.status.phase, Phase::Done);
 }
@@ -1499,4 +1498,241 @@ fn a_session_read_again_takes_its_custom_title_over_its_ai_title() {
     named.after_initialize();
     let (_, request) = asked_for(&mut named, "rename_session").expect("sent at start");
     assert_eq!(request["title"], "Sales chart");
+}
+
+/// The recorded session of four turns ([`a_recorded_session_is_a_thread`]), its permission
+/// allowed, each line taken in.
+fn four_turns() -> (Driven, Host) {
+    let (mut driven, mut host) = driven();
+    let prompts =
+        ["scenario:think say hello", "scenario:touch make a file", "scenario:slow one", "/compact"];
+    let mut prompts = prompts.iter().zip((10_u64..).step_by(10));
+    for line in recorded("session") {
+        if line["type"] == "command_lifecycle" && line["state"] == "queued" {
+            let (text, when) = prompts.next().expect("a prompt for each send");
+            host.take(driven.send(text, &[], sent_as(&line), at(when)));
+            drop(driven.take_writes());
+        }
+        host.take(driven.incoming(&line, at(1_000)));
+        if line["type"] == "control_request" {
+            let id = host.main(&driven).requests.last().expect("a request").id.clone();
+            let by = Answerer { client: None, name: "test".to_owned() };
+            host.take(driven.answer(&id, "allow", None, by, at(1_100)).expect("taken").outs);
+            drop(driven.take_writes());
+        }
+    }
+    drop(driven.take_writes());
+    (driven, host)
+}
+
+/// Claude Code's answer to the codec's last control request: `response`, else refused with
+/// `error`.
+fn answer_last(driven: &mut Driven, response: Option<Value>, error: &str) -> (Value, Value) {
+    let asked = written(driven).pop().expect("a control request");
+    let id = asked["request_id"].clone();
+    let line = match response {
+        Some(response) => json!({ "type": "control_response",
+            "response": { "subtype": "success", "request_id": id, "response": response } }),
+        None => json!({ "type": "control_response",
+            "response": { "subtype": "error", "request_id": id, "error": error } }),
+    };
+    (asked, line)
+}
+
+/// A message with no checkpoint of its own (a command Claude Code ran itself) is put back by the
+/// next message's, as the files stood the same before both; with none left, nothing changed
+/// since, and the rewind says so rather than that it failed.
+#[test]
+fn a_message_without_a_checkpoint_is_put_back_by_the_next() {
+    let (mut driven, mut host) = four_turns();
+    let turns: Vec<TurnId> = host.main(&driven).turns.iter().map(|t| t.id).collect();
+    assert_eq!(turns.len(), 4);
+    host.take(driven.rewind(turns[2], at(2_000)));
+    let none = "No file checkpoint found for this message.";
+    let mut asked_by = Vec::new();
+    for _ in 0..2 {
+        let (asked, refusal) = answer_last(&mut driven, None, none);
+        assert_eq!(asked["request"]["subtype"], "rewind_files");
+        asked_by.push(asked["request"]["user_message_id"].as_str().unwrap_or_default().to_owned());
+        host.take(driven.incoming(&refusal, at(2_100)));
+    }
+    let third = driven.history.prompt_of(turns[2]).expect("the third turn's message");
+    let fourth = driven.history.prompt_of(turns[3]).expect("the fourth turn's message");
+    assert_eq!(asked_by, [third, fourth], "its own message, then the next one's");
+    assert!(written(&mut driven).is_empty(), "no message left to ask by");
+    let said = notices(host.main(&driven));
+    assert!(
+        said.contains(&(Notice::REWOUND.to_owned(), doors::NOTHING_TO_PUT_BACK.to_owned())),
+        "{said:?}"
+    );
+    assert!(!said.iter().any(|(_, t)| t.contains("refused")), "{said:?}");
+}
+
+/// The conversation goes back in the session itself (`rewind_conversation`), after the files
+/// when both go back: the turn and every one after leave the thread once Claude Code says it
+/// rewound, and a refusal is said with Claude Code's reason.
+#[test]
+fn the_conversation_goes_back_in_place_after_the_files() {
+    let (mut driven, mut host) = four_turns();
+    let turns: Vec<TurnId> = host.main(&driven).turns.iter().map(|t| t.id).collect();
+    host.take(driven.rewind(turns[1], at(2_000)));
+    host.take(driven.rewind_conversation(turns[1], at(2_000)));
+    let put_back =
+        json!({ "canRewind": true, "filesChanged": ["made.txt"], "insertions": 0, "deletions": 1 });
+    let (asked, answer) = answer_last(&mut driven, Some(put_back), "");
+    assert_eq!(asked["request"]["subtype"], "rewind_files", "the files first, alone");
+    host.take(driven.incoming(&answer, at(2_100)));
+    let rewound = json!({ "rewound": true, "prefillText": "scenario:touch make a file" });
+    let (asked, answer) = answer_last(&mut driven, Some(rewound), "");
+    assert_eq!(asked["request"]["subtype"], "rewind_conversation");
+    let prompt = driven.history.prompt_of(turns[1]).expect("the second turn's message");
+    assert_eq!(asked["request"]["target_message_uuid"], json!(prompt));
+    host.take(driven.incoming(&answer, at(2_200)));
+    let thread = host.main(&driven);
+    let left: Vec<TurnId> = thread.turns.iter().map(|t| t.id).collect();
+    assert_eq!(left, [turns[0]], "the turns from the second on are gone");
+    assert!(thread.items.iter().all(|i| i.turn <= turns[0]), "{:#?}", thread.items);
+
+    host.take(driven.rewind_conversation(turns[0], at(3_000)));
+    let refused = json!({ "rewound": false, "error": "turn running", "reason": "turn_running" });
+    let (_, answer) = answer_last(&mut driven, Some(refused), "");
+    host.take(driven.incoming(&answer, at(3_100)));
+    let said = notices(host.main(&driven));
+    assert!(
+        said.iter().any(|(_, t)| t == "Couldn't take the conversation back: turn running"),
+        "{said:?}"
+    );
+    assert_eq!(host.main(&driven).turns.len(), 1, "a refusal takes nothing");
+}
+
+/// A slash command Claude Code runs itself (`/mcp`) prints before its echo, as an assistant
+/// message of its own making (2.1.302): the words are the command's output, in the command's
+/// own turn, never the turn before's answer.
+#[test]
+fn a_commands_output_is_its_own_turns() {
+    let (mut driven, mut host) = driven();
+    let first = intent(1);
+    host.take(driven.send("hello", &[], first, at(10)));
+    let hello = message_id(first);
+    for line in [
+        json!({"type": "command_lifecycle", "command_uuid": hello, "state": "started"}),
+        json!({"type": "user", "uuid": hello, "session_id": SESSION, "parent_tool_use_id": null, "isReplay": true,
+            "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}}),
+        json!({"type": "assistant", "uuid": "a1", "session_id": SESSION, "parent_tool_use_id": null,
+            "message": {"id": "m1", "role": "assistant", "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "Hi there."}]}}),
+        json!({"type": "result", "subtype": "success", "session_id": SESSION, "result": "Hi there."}),
+    ] {
+        host.take(driven.incoming(&line, at(20)));
+    }
+    let second = intent(2);
+    host.take(driven.send("/mcp", &[], second, at(30)));
+    let mcp = message_id(second);
+    let printed = "6 MCP server(s): 6 connected, 0 not connected, 0 disabled.";
+    for line in [
+        json!({"type": "command_lifecycle", "command_uuid": mcp, "state": "started"}),
+        json!({"type": "assistant", "uuid": "a2", "session_id": SESSION, "parent_tool_use_id": null,
+            "message": {"id": "m2", "role": "assistant", "model": "<synthetic>",
+                "content": [{"type": "text", "text": printed}]},
+            "local_command_source": format!("<local-command-stdout>{printed}</local-command-stdout>"),
+            "local_command_run": {"command": "mcp", "args": ""}}),
+        json!({"type": "user", "uuid": mcp, "session_id": SESSION, "parent_tool_use_id": null, "isReplay": true,
+            "message": {"role": "user", "content":
+                "<command-name>/mcp</command-name>\n<command-message>mcp</command-message>\n<command-args></command-args>"}}),
+        json!({"type": "result", "subtype": "success", "session_id": SESSION, "result": printed, "local_command": "mcp"}),
+    ] {
+        host.take(driven.incoming(&line, at(40)));
+    }
+    let thread = host.main(&driven);
+    assert_eq!(thread.turns.len(), 2, "{:#?}", thread.turns);
+    let (one, two) = (thread.turns[0].id, thread.turns[1].id);
+    let words = |turn: TurnId| {
+        let items: Vec<_> = thread.items.iter().filter(|i| i.turn == turn).collect();
+        format!("{items:?}")
+    };
+    assert!(!words(one).contains("MCP server"), "not the first turn's: {}", words(one));
+    assert!(words(two).contains(printed), "the command's turn: {}", words(two));
+}
+
+/// `/clear` empties the thread, as the TUI's screen empties, and the conversation goes on in
+/// the session Claude Code begins for it: the one a resume and a read of its transcript find.
+#[test]
+fn a_cleared_conversation_goes_on_in_its_new_session() {
+    let (mut driven, mut host) = driven();
+    let first = intent(1);
+    host.take(driven.send("hello", &[], first, at(10)));
+    let hello = message_id(first);
+    for line in [
+        json!({"type": "command_lifecycle", "command_uuid": hello, "state": "started"}),
+        json!({"type": "user", "uuid": hello, "session_id": SESSION, "parent_tool_use_id": null, "isReplay": true,
+            "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}}),
+        json!({"type": "assistant", "uuid": "a1", "session_id": SESSION, "parent_tool_use_id": null,
+            "message": {"id": "m1", "role": "assistant", "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "Hi there."}]}}),
+        json!({"type": "result", "subtype": "success", "session_id": SESSION, "result": "Hi there."}),
+    ] {
+        host.take(driven.incoming(&line, at(20)));
+    }
+    let second = intent(2);
+    host.take(driven.send("/clear", &[], second, at(30)));
+    let clear = message_id(second);
+    let after = "21ab8b5c-dc8c-4872-8d97-4065ce274c8f";
+    // As Claude Code 2.1.303 tells it in `-p`.
+    for line in [
+        json!({"type": "command_lifecycle", "command_uuid": clear, "state": "started"}),
+        json!({"type": "conversation_reset", "new_conversation_id": "b09377e6", "trigger": "clear",
+            "user_message_uuid": clear, "session_id": SESSION}),
+        json!({"type": "system", "subtype": "hook_started", "hook_event": "SessionStart", "session_id": after}),
+        json!({"type": "result", "subtype": "success", "session_id": after, "result": "", "local_command": "clear"}),
+    ] {
+        host.take(driven.incoming(&line, at(40)));
+    }
+    let thread = host.main(&driven);
+    assert!(thread.turns.is_empty(), "{:#?}", thread.turns);
+    assert_eq!(thread.meta.native, after);
+    assert_ne!(thread.status.phase, Phase::Working, "{:?}", thread.status);
+    let third = intent(3);
+    host.take(driven.send("hello again", &[], third, at(50)));
+    let again = message_id(third);
+    for line in [
+        json!({"type": "command_lifecycle", "command_uuid": again, "state": "started"}),
+        json!({"type": "user", "uuid": again, "session_id": after, "parent_tool_use_id": null, "isReplay": true,
+            "message": {"role": "user", "content": [{"type": "text", "text": "hello again"}]}}),
+    ] {
+        host.take(driven.incoming(&line, at(60)));
+    }
+    let thread = host.main(&driven);
+    assert_eq!(
+        thread.turns.len(),
+        1,
+        "the next message is the thread's one turn: {:#?}",
+        thread.turns
+    );
+}
+
+/// A command that changes what the session runs with in Claude Code itself (`/effort max`) is
+/// followed by the meters: Claude Code is asked its settings, and what it applies is shown.
+#[test]
+fn a_typed_effort_reaches_the_meters() {
+    let (mut driven, mut host) = driven();
+    let first = intent(1);
+    host.take(driven.send("/effort max", &[], first, at(10)));
+    drop(driven.take_writes());
+    let line = json!({"type": "result", "subtype": "success", "session_id": SESSION,
+        "result": "Set effort level to max", "local_command": "effort"});
+    host.take(driven.incoming(&line, at(20)));
+    let applied = json!({ "applied": { "model": "claude-sonnet-5-5", "effort": "max" } });
+    let asked = written(&mut driven);
+    let settings = asked
+        .iter()
+        .find(|w| w["request"]["subtype"] == "get_settings")
+        .unwrap_or_else(|| panic!("Claude Code asked its settings: {asked:?}"));
+    let answer = json!({ "type": "control_response", "response": { "subtype": "success",
+        "request_id": settings["request_id"], "response": applied } });
+    host.take(driven.incoming(&answer, at(30)));
+    let meters = &host.main(&driven).meters;
+    assert_eq!(
+        (meters.model.as_deref(), meters.model_id.as_deref(), meters.effort.as_deref()),
+        (Some("Sonnet 5.5"), Some("claude-sonnet-5-5"), Some("max"))
+    );
 }

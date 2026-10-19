@@ -53,9 +53,9 @@
 //! the turn under way as Claude Code does), `set_model`, `set_permission_mode`,
 //! `apply_flag_settings` (`effortLevel`, `fastMode`, shown in the next `init`), `stop_task` (a
 //! subagent or a background command), `get_context_usage`, and the doors' (`background_tasks`,
-//! `rewind_files`, `list_permission_rules`, `mcp_status`, `mcp_reconnect`, `mcp_toggle`,
-//! `mcp_read_resource`, `mcp_call`, `side_question`, `ui_*`); any other subtype is answered with
-//! an error.
+//! `rewind_files`, `rewind_conversation`, `list_permission_rules`, `mcp_status`, `mcp_reconnect`,
+//! `mcp_toggle`, `mcp_read_resource`, `mcp_call`, `side_question`, `ui_*`); any other subtype is
+//! answered with an error.
 //!
 //! The conversation goes where Claude Code keeps it, `~/.claude/projects/<cwd with every
 //! character but letters and digits made '-'>/<session>.jsonl`, so `--resume <id>` (with
@@ -94,7 +94,7 @@ use serde_json::{Map, Value, json};
 mod doors;
 
 /// What it says its version is.
-pub const VERSION: &str = "2.1.302-stub";
+pub const VERSION: &str = "2.1.303-stub";
 
 /// The pause between two deltas of a `slow` turn.
 const SLOW_STEP: Duration = Duration::from_millis(200);

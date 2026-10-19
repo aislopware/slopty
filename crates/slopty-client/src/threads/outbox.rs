@@ -91,6 +91,7 @@ impl Sent {
             | Intent::Background { .. }
             | Intent::Shell { .. }
             | Intent::Rewind { .. }
+            | Intent::RewindConversation { .. }
             | Intent::Unrewind { .. }
             | Intent::Rule(_)
             | Intent::Surface { .. }

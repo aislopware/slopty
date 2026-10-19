@@ -160,6 +160,10 @@ enum ThreadAsk {
     Rewind {
         turn: TurnId,
     },
+    /// Take the conversation back to before turn `turn`.
+    RewindConversation {
+        turn: TurnId,
+    },
     /// Which files a rewind to before turn `turn` would put back, nothing put back yet.
     RewindPreview {
         turn: TurnId,
@@ -459,11 +463,15 @@ impl Claude {
                 }
                 ThreadAsk::Shell { command: command.clone(), intent: id }
             }
-            Intent::Rewind { turn } => {
+            Intent::Rewind { turn } | Intent::RewindConversation { turn } => {
                 if !state.turns.iter().any(|t| t.id == *turn && t.input.is_some()) {
                     return refused(&format!("There is no turn {} to go back to", turn.0));
                 }
-                ThreadAsk::Rewind { turn: *turn }
+                if matches!(ask, Intent::Rewind { .. }) {
+                    ThreadAsk::Rewind { turn: *turn }
+                } else {
+                    ThreadAsk::RewindConversation { turn: *turn }
+                }
             }
             Intent::Side { .. } if subagent => return refused("A subagent takes no side question"),
             Intent::Side { question } => {
@@ -534,7 +542,10 @@ impl Claude {
                 }
             }
             Intent::SetModel { model } => {
-                if !state.meta.models.iter().any(|m| m.id == *model) {
+                // Claude Code lists its menu by alias (`opus`) and takes a model by its full id
+                // too (`claude-opus-5-5`), as the picker names it; it judges that one itself.
+                let offered = state.meta.models.iter().any(|m| m.id == *model);
+                if !offered && !model.starts_with(agent::MODEL_ID_PREFIX) {
                     return refused(&format!("There is no model {model} here"));
                 }
                 ThreadAsk::SetModel { model: model.clone() }
@@ -589,6 +600,8 @@ impl Claude {
                 | ThreadAsk::SetModel { .. }
                 | ThreadAsk::SetMode { .. }
                 | ThreadAsk::SetEffort { .. }
+                | ThreadAsk::Rewind { .. }
+                | ThreadAsk::RewindConversation { .. }
         ) && goes_on;
         if !live && !held && !takes_up {
             return refused("Claude Code is not running");
@@ -646,7 +659,7 @@ pub fn spawn(
                         let _gone = reply.send(outcome);
                     }
                     Some(Ask::Fork { thread, id, after, reply }) => {
-                        let outcome = served.fork(thread, id, after).await;
+                        let outcome = Box::pin(served.fork(thread, id, after)).await;
                         let _gone = reply.send(outcome);
                     }
                     Some(Ask::Thread { thread, ask }) => served.route(thread, vec![ask]).await,
@@ -962,6 +975,23 @@ impl Served {
         };
         let thread = *thread;
         take(&self.host, outs);
+        let mut driven = driven;
+        if !fresh {
+            // What it shares is read from the session it branches off, through the record it
+            // resumes at: Claude Code tells a resumed session's past to nobody, and the copy it
+            // makes is written only with the fork's first message.
+            match self.records(&state.meta).await {
+                Ok(records) => {
+                    let shared = shared_through(records, at.as_deref());
+                    if let Some((forked, _)) = self.host.state(thread) {
+                        let (read, outs) = read_again(&forked, &shared, false);
+                        take(&self.host, outs);
+                        driven = read;
+                    }
+                }
+                Err(why) => say(&self.host, thread, "unread", &format!("{UNREAD}: {why}")),
+            }
+        }
         let session = if fresh {
             Session::New(native)
         } else {
@@ -999,7 +1029,14 @@ impl Served {
         let mut shown = None;
         for ask in left {
             match ask {
-                ThreadAsk::Send { .. } | ThreadAsk::Report { .. } | ThreadAsk::ShellDone { .. } => {
+                // A rewind takes the thread up again too: only its Claude Code holds the
+                // checkpoints and the conversation.
+                ThreadAsk::Send { .. }
+                | ThreadAsk::Report { .. }
+                | ThreadAsk::ShellDone { .. }
+                | ThreadAsk::Rewind { .. }
+                | ThreadAsk::RewindConversation { .. }
+                | ThreadAsk::RewindPreview { .. } => {
                     sends.push(ask);
                 }
                 ThreadAsk::App { reply, .. } => {
@@ -1279,6 +1316,26 @@ impl Served {
             let _gone = reply.send(body);
         }));
     }
+}
+
+/// The records a fork shares of its session's `records` (the main transcript's, then each
+/// subagent's): the main ones through record `at`, else all of them, and every subagent's.
+fn shared_through(records: Vec<serde_json::Value>, at: Option<&str>) -> Vec<serde_json::Value> {
+    let Some(at) = at else { return records };
+    let sidechain = |r: &serde_json::Value| {
+        r.get("isSidechain").and_then(serde_json::Value::as_bool) == Some(true)
+    };
+    let Some(last) = records.iter().position(|r| {
+        !sidechain(r) && r.get("uuid").and_then(serde_json::Value::as_str) == Some(at)
+    }) else {
+        return records;
+    };
+    records
+        .into_iter()
+        .enumerate()
+        .filter(|(n, r)| *n <= last || sidechain(r))
+        .map(|(_, r)| r)
+        .collect()
 }
 
 /// The last record of turn `after` of `state`, as `records` (its session's) hold it: the one the

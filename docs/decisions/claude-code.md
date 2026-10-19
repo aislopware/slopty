@@ -2471,3 +2471,48 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     then the person's `~/.claude/settings.json`, else auto (`offers::starting_mode_in`). A
     past session taken up again runs in it too, as shown, where it ran in Manual before. The
     recordings and the stand-in are 2.1.302's; its control and stream messages are 2.1.301's.
+- ✅ **A rewind stays in its chat, a command's words are its own turn, and a full model id
+  is taken (2026-10-19, Claude Code 2.1.302).** On the person's Mac, "Code and conversation"
+  refused with "No file checkpoint found for this message" and opened the branch as a second
+  chat, and that chat was empty; `/mcp`'s answer landed in the turn before it; and the picker's
+  `claude-opus-5-5` was refused as "no model here".
+  - **The conversation goes back in place.** Claude Code's `rewind_conversation` door
+    (`target_message_uuid`, answered `rewound` or refused with a reason) is offered as
+    `Cap::REWIND_CONVERSATION` and asked by `Intent::RewindConversation`: once it answers, the
+    driver cuts the thread before that turn's prompt (`History::rewound_to`), and the next message is
+    the thread's next turn. The files go first (`rewind_files`), while the message still has its
+    checkpoint: the chat asks for the conversation only once the worker has kept the folder
+    and asked for the files, and the driver holds that ask until Claude Code has answered
+    them. Sent together, the conversation went back during the worker's dry run, and the
+    files then had no message to go back to. A thread whose Claude Code has ended is
+    taken up again to hear it. An agent without the door is still branched by `Intent::Fork`.
+  - **A message with no checkpoint is put back by the next one.** A local command (`/mcp`,
+    `/context`) writes no file snapshot, and Claude Code refuses its message. Its files are
+    those before the next prompt, so the driver asks again with the prompts after it in turn,
+    and says "Nothing to put back" when none has a checkpoint. A dry run does the same.
+  - **A fork shows what it shares from its first frame.** Claude Code writes the fork's
+    transcript only with its first message, so the worker reads the source's records through
+    the one it resumes at, with every subagent's, into the new thread.
+  - **A local command's output is held for its echo.** In `-p` the command's words arrive as an
+    assistant message from `<synthetic>` carrying `local_command_source`, before the replay of
+    the person's `<command-name>` line. The driver treats it as that replay's record, so it waits
+    with the echo and lands in the command's own turn.
+  - **A `/clear` that reaches Claude Code is followed.** It answers `conversation_reset` and
+    goes on in a new session, whose id only the next messages carry. The thread empties, as
+    the TUI's screen does, and takes that id as its own, so a resume and a read of its
+    transcript find the conversation that goes on, not the cleared one. The person's `/clear`
+    starts a new chat in Slopty instead (`ui.md`); this is for a client or a model that sends
+    the words. Test: `a_cleared_conversation_goes_on_in_its_new_session`.
+  - **A model goes by its alias or its full id.** Claude Code's model list names aliases
+    (`opus`, `sonnet`); the catalog's picker names full ids. A set is refused only when it is
+    neither offered nor a `claude-` id. A `/model` or `/effort` typed with its words goes to
+    Claude Code, which changes the session itself; the driver then asks `get_settings`, and
+    the chips show the model and effort it applies. Test: `a_typed_effort_reaches_the_meters`.
+  - **Claude Code 2.1.303.** Its changelog lists only fixes; the recordings and the stand-in
+    are now its, and its control and stream messages are 2.1.302's.
+  - Tests: `slopty-agent` `driven::tests` `a_message_without_a_checkpoint_is_put_back_by_the_next`,
+    `the_conversation_goes_back_in_place_after_the_files`, `a_commands_output_is_its_own_turns`;
+    `slopty-worker` `claude.rs` `the_conversation_goes_back_in_the_thread_itself`,
+    `a_model_goes_by_its_full_id_or_its_alias`, and the fork's shared turn in
+    `files_go_back_before_a_turn_and_a_fork_shares_the_turns_before`; `slopty-ui`
+    `a_rewind_in_place_keeps_the_chat`.

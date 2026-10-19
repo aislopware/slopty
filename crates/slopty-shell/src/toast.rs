@@ -733,6 +733,7 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
             continue;
         }
         let kind = toast.kind;
+        let closing = toast.closing.is_some();
         let message = toast.message.clone();
         let progress = toast.progress;
         let copied = copied_ids.contains(&id);
@@ -884,7 +885,11 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
                 crate::popover::CARD_RADIUS,
                 crate::frost::MENU_BLUR,
                 card,
-            ));
+            ))
+            // slopty: a pointer closes a toast too, not only a swipe: sonner's close button at
+            // its top-left corner, shown while the stack is hovered (which holds every
+            // countdown, so a toast the person means to close never waits for its time).
+            .children((expanded && !closing && !hidden).then(|| close_button(id, &theme)));
         children.push(toast_el.into_any_element());
     }
 
@@ -922,6 +927,44 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
         .into_any_element(),
     )
 }
+
+// slopty: sonner's close button (20 round, at the corner, half over the edge), in the house's
+// icon control.
+/// The button that closes toast `id` at once.
+fn close_button(id: u64, theme: &Theme) -> gpui::AnyElement {
+    let fade = SharedString::from(format!("toast-close-hover-{id}"));
+    div()
+        .id(("toast-close", id as usize))
+        .debug_selector(move || format!("toast-close-{id}"))
+        .role(gpui::Role::Button)
+        .aria_label(SharedString::from(CLOSE_LABEL))
+        .absolute()
+        .top(px(-CLOSE_SIZE * 0.35))
+        .left(px(-CLOSE_SIZE * 0.35))
+        .size(px(CLOSE_SIZE))
+        .rounded_full()
+        .border_1()
+        .border_color(theme.border)
+        .bg(crate::motion::hover_blend(&fade, crate::popover::surface_bg(theme), theme.ink(0.08)))
+        .hover_fade(fade.clone())
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_color(theme.text_muted)
+        .child(crate::icons::icon(crate::icons::CLOSE).size(px(12.0)))
+        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            dismiss(id, cx);
+        })
+        .into_any_element()
+}
+
+/// The close button's side.
+const CLOSE_SIZE: f32 = 20.0;
+/// What the close button says to assistive tech.
+const CLOSE_LABEL: &str = "Close";
 
 /// The copy span's key for toast `id`.
 fn copy_key(id: u64) -> String {
@@ -1062,6 +1105,29 @@ mod tests {
         let id = cx.update(|_, cx| cx.global::<ToastStore>().toasts[1].id);
         cx.update(|_, cx| dismiss(id, cx));
         cx.update(|_, cx| assert_eq!(messages(cx), ["Couldn't save"]));
+    }
+
+    // slopty: a pointer closes a toast by its button, shown while the stack is hovered.
+    #[gpui::test]
+    fn a_hovered_toast_closes_by_its_button(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        cx.update(|_, cx| info(cx, "Restored"));
+        cx.run_until_parked();
+        let id = cx.update(|_, cx| cx.global::<ToastStore>().toasts[0].id);
+        let selector: &'static str = format!("toast-close-{id}").leak();
+        assert!(cx.debug_bounds(selector).is_none(), "no button until hovered");
+        cx.update(|window, cx| {
+            set_hovered(true, cx);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds(selector).expect("the close button");
+        cx.simulate_click(button.center(), gpui::Modifiers::none());
+        cx.update(|_, cx| assert!(messages(cx).is_empty(), "{:?}", messages(cx)));
     }
 
     // slopty: an error's raw reason is never shown, and Copy error copies it after the words.

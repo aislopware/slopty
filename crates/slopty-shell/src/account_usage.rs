@@ -221,6 +221,30 @@ impl AccountUsage {
         }
     }
 
+    // slopty: `/context`, `/mcp` and `/usage` typed bare open the footer's cards, as the TUI's
+    // own commands open its dialogs.
+    /// Open the card `/usage` (plan usage, else the context) or `/context` and `/mcp` (the
+    /// context with the agent's MCP servers) names; `false` when the chat has neither ring yet.
+    pub(crate) fn open_card(&mut self, usage: bool, cx: &mut Context<Self>) -> bool {
+        let has_usage = used_fraction(&self.state.read(cx).usage_limits).is_some();
+        let card = if usage && has_usage { FooterCard::Usage } else { FooterCard::Context };
+        if card == FooterCard::Context && !self.has_context(cx) {
+            return false;
+        }
+        if self.popup.as_open() != Some(&card) {
+            self.toggle(card, cx);
+        }
+        true
+    }
+
+    /// Whether the context ring shows: once the chat's window is known, or its agent has
+    /// named MCP servers.
+    fn has_context(&self, cx: &gpui::App) -> bool {
+        let known = self.breakdown.as_ref().is_some_and(|b| b.window > 0)
+            || crate::context_usage::has_window(self.state.read(cx).context_usage);
+        known || !self.servers.is_empty()
+    }
+
     // slopty: the composer hands the chat's servers over each render; cheap.
     /// The agent's MCP servers, and whether it takes the person's reconnect and enable.
     pub fn set_servers(
@@ -519,7 +543,7 @@ impl Render for AccountUsage {
                 cx,
             )
         });
-        let context = crate::context_usage::has_window(context).then(|| {
+        let context = self.has_context(cx).then(|| {
             let mut chip = crate::context_usage::chip(
                 context,
                 self.popup.get() == Some(&FooterCard::Context),

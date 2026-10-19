@@ -1303,7 +1303,8 @@ mod claude {
 
     /// Putting the files back to before a turn goes through Claude Code's checkpoints
     /// (`rewind_files`) and says what it put back; a fork through the first turn shares that
-    /// turn alone (`--resume-session-at`), and a turn that is not there is refused.
+    /// turn alone (`--resume-session-at`), shown in it from the start, and a turn that is not
+    /// there is refused.
     #[tokio::test]
     async fn files_go_back_before_a_turn_and_a_fork_shares_the_turns_before() {
         let rig = Rig::new(&[]).await;
@@ -1336,6 +1337,8 @@ mod claude {
             fork_state.meta.forked_from.as_ref().map(|f| (f.thread, f.turn)),
             Some((thread, Some(first)))
         );
+        let shared = fork_state.turns.iter().filter(|t| t.input.is_some()).count();
+        assert_eq!(shared, 1, "the fork shows the turn it shares: {:?}", fork_state.turns);
         let record = rig
             .record_once("the fork's Claude Code", |r| {
                 r["argv"].as_array().is_some_and(|a| a.iter().any(|w| w == "--resume-session-at"))
@@ -1351,6 +1354,29 @@ mod claude {
         );
         let kept = std::fs::read_to_string(&transcript).unwrap();
         assert!(kept.contains("write a.txt one") && !kept.contains("write a.txt two"), "{kept}");
+    }
+
+    /// The conversation goes back in the thread itself (`rewind_conversation`): the turn and
+    /// the ones after leave it, and the next message is the thread's next turn.
+    #[tokio::test]
+    async fn the_conversation_goes_back_in_the_thread_itself() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "Say hello.").await;
+        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        rig.send(&claude, thread, "Say goodbye.");
+        let state = rig.until(thread, "the second turn", turn_ended(2, TurnState::Complete)).await;
+        let second = state.turns[1].id;
+        let back = Intent::RewindConversation { turn: second };
+        assert_eq!(rig.intent(&claude, thread, &back), Outcome::Done);
+        rig.until(thread, "the second turn gone", |s| s.turns.len() == 1).await;
+        let record = rig.record();
+        let asked = heard(&record, "rewind_conversation");
+        let prompt = state.turns[1].input.as_ref().unwrap().0.clone();
+        assert_eq!(asked[0]["request"]["target_message_uuid"], prompt.as_str());
+        rig.send(&claude, thread, "Say hello again.");
+        let state = rig.until(thread, "the next turn", |s| s.turns.len() == 2).await;
+        assert!(state.turns[1].id > state.turns[0].id, "{:?}", state.turns);
     }
 
     /// A rewind of the whole conversation branches before the first turn: the client names it
@@ -1380,6 +1406,28 @@ mod claude {
         let argv: Vec<&str> =
             record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
         assert!(!argv.contains(&"--resume") && !argv.contains(&"--fork-session"), "{argv:?}");
+    }
+
+    /// The picker names a model by its full id while Claude Code lists its menu by alias: the
+    /// id goes to Claude Code as it is, and a name that is neither is refused.
+    #[tokio::test]
+    async fn a_model_goes_by_its_full_id_or_its_alias() {
+        let rig = Rig::new(&[]).await;
+        let (claude, _served) = rig.serve();
+        let thread = rig.started(&claude, "hello").await;
+        rig.until(thread, "the menu", |s| !s.meta.models.is_empty()).await;
+        for model in ["claude-sonnet-5-5", "opus"] {
+            let switch = Intent::SetModel { model: model.to_owned() };
+            assert_eq!(rig.intent(&claude, thread, &switch), Outcome::Done, "{model}");
+        }
+        let unknown = Intent::SetModel { model: "gpt-5".to_owned() };
+        assert!(refused(&rig.intent(&claude, thread, &unknown)));
+        let record = rig.record_once("both switches", |r| heard(r, "set_model").len() == 2).await;
+        let asked: Vec<&str> = heard(&record, "set_model")
+            .iter()
+            .filter_map(|r| r["request"]["model"].as_str())
+            .collect();
+        assert_eq!(asked, ["claude-sonnet-5-5", "opus"]);
     }
 
     /// The person's status line command runs on the thread as Claude Code's TUI runs it, its

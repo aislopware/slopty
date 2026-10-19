@@ -73,7 +73,7 @@ use model::{mode_words, switched_to};
 pub use work::{PROGRESS_EVERY, TAIL_EVERY};
 
 /// What a driven Claude Code can do through Slopty.
-pub const CAPS: [&str; 20] = [
+pub const CAPS: [&str; 21] = [
     Cap::APPROVALS,
     Cap::BACKGROUND,
     Cap::END,
@@ -82,6 +82,7 @@ pub const CAPS: [&str; 20] = [
     Cap::MCP_SERVERS,
     Cap::QUEUE,
     Cap::REWIND,
+    Cap::REWIND_CONVERSATION,
     Cap::RULES,
     Cap::SCHEDULE,
     Cap::SET_EFFORT,
@@ -189,10 +190,14 @@ enum Control {
     McpEnable(String, bool),
     /// A page's ask of its app, by its number.
     App(u64),
-    /// The files put back to before turn `turn`.
-    Rewind(slopty_proto::thread::TurnId),
-    /// The files a rewind would put back, asked without putting them back, by the ask's number.
-    RewindPreview(u64),
+    /// The files put back to before turn `turn`, with the later turns' messages to ask by
+    /// when this one has no checkpoint.
+    Rewind(slopty_proto::thread::TurnId, Vec<String>),
+    /// The files a rewind would put back, asked without putting them back, by the ask's number,
+    /// with the later messages to ask by as [`Control::Rewind`] has them.
+    RewindPreview(u64, Vec<String>),
+    /// The conversation taken back to before turn `turn` (`rewind_conversation`).
+    RewindConversation(slopty_proto::thread::TurnId),
     /// One of the asks a mod's surfaces make.
     Ui(doors::Ui),
     /// A side question, asked as it stands until answered.
@@ -289,6 +294,9 @@ pub struct Driven {
     /// The message Claude Code began and has not echoed yet, and what waits for its echo.
     awaiting_echo: Option<String>,
     held: Vec<Value>,
+    /// The conversation was cleared (`conversation_reset`): the session it goes on in is the
+    /// next one a message names.
+    clearing: bool,
     /// The last user message heard.
     last_echo: Option<String>,
     /// A compaction was said, and its summary is still to come.
@@ -308,6 +316,9 @@ pub struct Driven {
     app_answers: Vec<(u64, slopty_proto::visual::AppAnswer)>,
     /// What rewinds would put back, by each ask's number, not taken yet.
     rewind_previews: Vec<(u64, RewindPreview)>,
+    /// A rewind of the conversation that waits for the files to go back first: Claude Code
+    /// finds a message's checkpoint only while the message is in the conversation.
+    held_rewind: Option<slopty_proto::thread::TurnId>,
     /// The MCP servers' statuses as last seen, so a change asks for their tools again.
     servers: String,
     /// The surfaces the session's mods draw, and the elements in them.
@@ -407,6 +418,7 @@ impl Driven {
             begun,
             awaiting_echo: None,
             held: Vec::new(),
+            clearing: false,
             last_echo: None,
             compacted: false,
             calls: HashMap::new(),
@@ -417,6 +429,7 @@ impl Driven {
             tailed: None,
             app_answers: Vec::new(),
             rewind_previews: Vec::new(),
+            held_rewind: None,
             servers: String::new(),
             surfaces: doors::Surfaces::default(),
             quiet: HashSet::new(),
@@ -893,7 +906,19 @@ impl Driven {
             outs.extend(self.history.stalled(None));
         }
         let kind = str_at(message, "type").unwrap_or_default();
+        // A cleared conversation goes on in a session of its own, named by what comes next.
+        if self.clearing
+            && let Some(session) = str_at(message, "session_id")
+            && session != self.history.meta().native
+        {
+            self.clearing = false;
+            outs.extend(self.history.moved_to(session));
+        }
         outs.extend(match kind {
+            "conversation_reset" => {
+                self.clearing = true;
+                self.history.conversation_cleared()
+            }
             "tool_progress" => self.tool_progress(message, now),
             "prompt_suggestion" => self.suggested(message),
             "active_goal" => self.goal(message, now),
@@ -985,11 +1010,12 @@ impl Driven {
                 self.app_answered(app, &said);
                 Vec::new()
             }
-            Control::Rewind(turn) => self.rewound(turn, &said, now),
-            Control::RewindPreview(preview) => {
-                self.rewind_previewed(preview, &said);
+            Control::Rewind(turn, _) => self.rewound(turn, &said, now),
+            Control::RewindPreview(preview, rest) => {
+                self.rewind_previewed(preview, rest, &said);
                 Vec::new()
             }
+            Control::RewindConversation(turn) => self.conversation_rewound(turn, &said, now),
             Control::Ui(ui) => self.ui_answered(&ui, &said, now),
             Control::Side(asked) => self.side_answered(asked, &said),
             Control::Rename(title) => {
@@ -1001,6 +1027,9 @@ impl Driven {
 
     /// Claude Code refused `control`, saying `error`.
     fn refused(&mut self, control: &Control, error: &str, now: WallMs) -> Vec<Out> {
+        if let Control::Rewind(turn, rest) = control {
+            return self.rewind_refused(*turn, rest.clone(), error, now);
+        }
         if matches!(control, Control::McpReconnect(_) | Control::McpEnable(..)) {
             // Its row says why, as the servers stand after it.
             let _asked = self.servers_changed();
@@ -1038,12 +1067,13 @@ impl Driven {
             | Control::Thinking(_) => "the switch",
             Control::StopTask => "to stop the task",
             Control::Background(_) => "to move the call to the background",
-            Control::Rewind(_) => "to put the files back",
+            Control::Rewind(..) => "to put the files back",
+            Control::RewindConversation(_) => "to take the conversation back",
             Control::Rules => "to list its permission rules",
             Control::McpStatus => "to list its MCP servers",
             Control::McpReconnect(_) | Control::McpEnable(..) => return Vec::new(),
             Control::App(_)
-            | Control::RewindPreview(_)
+            | Control::RewindPreview(..)
             | Control::Ui(_)
             | Control::Side(_)
             | Control::Rename(_)
@@ -1419,7 +1449,12 @@ impl Driven {
     ///
     /// The stream tells a slash command's output before the echo of the command, which the
     /// transcript records first: what a command printed waits for the command it answers.
+    /// Claude Code 2.1.302 tells that output as an assistant message of its own making that
+    /// carries the command's words (`local_command_source`): it is read as those words, the
+    /// command's output, as the transcript records it.
     fn record(&mut self, message: &Value, now: WallMs) -> Vec<Out> {
+        let printed = local_command_output(message);
+        let message = printed.as_ref().unwrap_or(message);
         let uuid = str_at(message, "uuid");
         if let Some(awaited) = self.awaiting_echo.as_deref()
             && uuid != Some(awaited)
@@ -1430,7 +1465,7 @@ impl Driven {
             return Vec::new();
         }
         let echoed = uuid.is_some() && uuid == self.awaiting_echo.as_deref();
-        if str_at(message, "type") == Some("user") {
+        if printed.is_none() && str_at(message, "type") == Some("user") {
             self.last_echo = uuid.map(str::to_owned);
         }
         let mut outs = self.one_record(message, now);
@@ -1691,6 +1726,11 @@ impl Driven {
         };
         if was_running || str_at(message, "local_command").is_none() {
             outs.extend(self.history.ended(&end, now));
+        }
+        // A command typed with its words (`/model sonnet`, `/effort max`) changed what the
+        // session runs with in Claude Code itself: the meters ask what it now is.
+        if matches!(str_at(message, "local_command"), Some("model" | "effort" | "config")) {
+            self.ask_settings();
         }
         outs.extend(self.fast_said(message, now));
         // A hook held a call back: the turn stops at it until the person goes on.
@@ -2214,6 +2254,29 @@ fn u64_at(value: &Value, key: &str) -> Option<u64> {
 
 fn bool_at(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// A command's output Claude Code told as an assistant message of its own (`model`
+/// `<synthetic>`, its words in `local_command_source`), as the user record the transcript keeps
+/// it as: `<local-command-stdout>…</local-command-stdout>`. `None` for any other message.
+fn local_command_output(message: &Value) -> Option<Value> {
+    if str_at(message, "type") != Some("assistant")
+        || message.get("parent_tool_use_id").is_some_and(|p| !p.is_null())
+    {
+        return None;
+    }
+    let source = str_at(message, "local_command_source")?;
+    let mut record = serde_json::Map::new();
+    record.insert("type".to_owned(), "user".into());
+    record.insert("message".to_owned(), json!({ "role": "user", "content": source }));
+    record.insert("parent_tool_use_id".to_owned(), Value::Null);
+    record.insert("isReplay".to_owned(), true.into());
+    for key in ["uuid", "session_id", "timestamp"] {
+        if let Some(value) = message.get(key) {
+            record.insert(key.to_owned(), value.clone());
+        }
+    }
+    Some(Value::Object(record))
 }
 
 #[cfg(test)]

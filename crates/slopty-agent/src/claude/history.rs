@@ -890,6 +890,56 @@ impl History {
         Some(id.split_once(':').map_or(id.as_str(), |(record, _)| record).to_owned())
     }
 
+    /// The messages of turn `turn` and of every main turn after it, in order, by their records'
+    /// ids: where a checkpoint of the files as they were before `turn` may be found, when its
+    /// own message has none (a command Claude Code ran itself, such as `/mcp`).
+    #[must_use]
+    pub fn prompts_from(&self, turn: TurnId) -> Vec<String> {
+        let Some(mapped) = self.threads.get(&conv::ThreadId::Main) else { return Vec::new() };
+        let mut prompts: Vec<(TurnId, &str)> = mapped
+            .prompts
+            .iter()
+            .filter(|(_, t)| **t >= turn)
+            .map(|(id, t)| (*t, id.split_once(':').map_or(id.as_str(), |(record, _)| record)))
+            .collect();
+        prompts.sort_by_key(|(t, _)| *t);
+        prompts.into_iter().map(|(_, id)| id.to_owned()).collect()
+    }
+
+    /// The conversation was taken back to before turn `turn` (Claude Code's
+    /// `rewind_conversation`): the turn and every one after go, as a branch in its transcript
+    /// takes them.
+    pub fn rewound_to(&mut self, turn: TurnId) -> Vec<Out> {
+        let entry = self.threads.get(&conv::ThreadId::Main).and_then(|mapped| {
+            mapped.prompts.iter().find(|(_, t)| **t == turn).map(|(entry, _)| entry.clone())
+        });
+        if let Some(entry) = entry {
+            self.remove(&conv::ThreadId::Main, &entry);
+        }
+        self.drain()
+    }
+
+    /// Claude Code cleared the conversation (`/clear`): every turn goes, as its screen empties.
+    pub fn conversation_cleared(&mut self) -> Vec<Out> {
+        let first = self
+            .threads
+            .get(&conv::ThreadId::Main)
+            .and_then(|mapped| mapped.prompts.values().copied().min());
+        match first {
+            Some(first) => self.rewound_to(first),
+            None => self.drain(),
+        }
+    }
+
+    /// The conversation goes on as Claude Code session `native`, as a `/clear` begins one.
+    pub fn moved_to(&mut self, native: &str) -> Vec<Out> {
+        if self.meta.native != native {
+            native.clone_into(&mut self.meta.native);
+            self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
+        }
+        self.drain()
+    }
+
     /// `shown` with its paths made the worker's own: a relative path is under the session's
     /// folder.
     fn rooted(&self, shown: &detail::ToolDetail) -> detail::ToolDetail {

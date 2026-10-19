@@ -6,7 +6,7 @@ expression: "decode(\"interrupt\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1792208766690
+      at_ms: 1792374420044
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"interrupt\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1792208768572
+      at_ms: 1792374424570
       body:
         Tool:
           name: Bash
@@ -40,23 +40,23 @@ expression: "decode(\"interrupt\").snapshot()"
           result:
             status: Rejected
             text:
-              text: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
-              lines: 1
-              chars: 225
+              text: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.\n\nNote: The user's next message may contain a correction or preference. Pay close attention — if they explain what went wrong or how they'd prefer you to work, consider saving that to memory for future sessions."
+              lines: 3
+              chars: 436
               full: ~
-            at_ms: 1792208768609
+            at_ms: 1792374424619
             images: []
             said: ~
           title: ~
     - id: 00000000-0000-4000-8000-000000000019
-      at_ms: 1792208768612
+      at_ms: 1792374424622
       body:
         Interrupted:
           during_tool: true
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1792208766690
+      started_ms: 1792374420044
       ended_ms: ~
       models:
         - claude-haiku-5-5

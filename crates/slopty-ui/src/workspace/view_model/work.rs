@@ -13,7 +13,8 @@ use gpui::{Context, Task};
 use slopty_client::WorkerKey;
 use slopty_proto::thread::wire::{Intent, ThreadRow};
 use slopty_proto::thread::{
-    AskId, ItemBody, ItemId, Rule, RuleChange, SurfaceEvent, ThreadId, ThreadState, TreeRef, TurnId,
+    AskId, Cap, ItemBody, ItemId, Rule, RuleChange, SurfaceEvent, ThreadId, ThreadState, TreeRef,
+    TurnId,
 };
 use slopty_view_doc::{RewindUndo, calls};
 use slopty_view_proto::UserInputAnswer;
@@ -384,12 +385,49 @@ impl WorkspaceView {
                 message_turn(state, message, &|intent| named.get(&intent).cloned(), &|intent| {
                     said.get(&intent).or_else(|| state.said.get(&intent)).cloned()
                 })?;
-            Some((key, thread, turn))
+            Some((key, thread, turn, state.meta.can(Cap::REWIND_CONVERSATION)))
         });
         let from = chat.to_owned();
-        let Some((key, thread, (turn, prompt))) = found else {
+        let Some((key, thread, (turn, prompt), in_place)) = found else {
             return Task::ready(Err(RpcError::Failed("That message is not here".to_owned())));
         };
+        // slopty: an agent that takes its conversation back in place keeps the chat one chat,
+        // as the TUI's `/rewind` does; the words come back to its own composer. Its files go
+        // back first, while the message still has its checkpoint: the conversation is asked
+        // once the worker has kept the folder and asked for the files.
+        let hub = self.thread_hub(key, cx);
+        if conversation && in_place {
+            let rewound = code.then(|| {
+                let id = hub.update(cx, |hub, cx| hub.intent(thread, Intent::Rewind { turn }, cx));
+                self.view_await(id, cx)
+            });
+            return cx.spawn(async move |this, cx| {
+                let mut undo = RewindUndo { chat_id: from, ..RewindUndo::default() };
+                if let Some(rewound) = rewound {
+                    rewound.await?;
+                    undo.tree = rewound_tree(&this, &undo.chat_id, turn, cx).await;
+                }
+                let back = this
+                    .update(cx, |this, cx| {
+                        let hub = this.thread_hub(key, cx);
+                        let back = Intent::RewindConversation { turn };
+                        let back = hub.update(cx, |hub, cx| hub.intent(thread, back, cx));
+                        this.view_await(back, cx)
+                    })
+                    .map_err(|e| RpcError::Failed(format!("The window closed: {e}")))?;
+                back.await?;
+                let mut answer = serde_json::json!({ "prompt": prompt });
+                let fields =
+                    answer.as_object_mut().ok_or_else(|| RpcError::Failed(String::new()))?;
+                if code && undo.tree.is_none() {
+                    fields.insert("noUndo".to_owned(), NO_UNDO.into());
+                } else if undo.tree.is_some() {
+                    fields
+                        .insert("undo".to_owned(), serde_json::to_value(&undo).unwrap_or_default());
+                }
+                Ok(RpcReply::Value(answer))
+            });
+        }
         // slopty: the branch goes by the conversation's name, not "New chat".
         let title = self
             .held_hub(key)
@@ -397,7 +435,6 @@ impl WorkspaceView {
                 held.read(cx).threads().rows().rows.get(&thread).map(|row| row.title.clone())
             })
             .filter(|title| !title.trim().is_empty());
-        let hub = self.thread_hub(key, cx);
         let rewound = code.then(|| {
             let id = hub.update(cx, |hub, cx| hub.intent(thread, Intent::Rewind { turn }, cx));
             self.view_await(id, cx)
@@ -540,8 +577,7 @@ impl WorkspaceView {
         let hub = self.held_hub(key).ok_or_else(|| RpcError::Failed("Not linked".to_owned()))?;
         let rows = &hub.read(cx).threads().rows().rows;
         let cwd = param(params, "cwd").map(|cwd| cwd.trim_end_matches('/'));
-        let reads =
-            |row: &&ThreadRow| row.caps.iter().any(|c| c.0 == slopty_proto::thread::Cap::RULES);
+        let reads = |row: &&ThreadRow| row.caps.iter().any(|c| c.0 == Cap::RULES);
         let newest = |inside: bool| {
             rows.values()
                 .filter(reads)
