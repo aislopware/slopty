@@ -2606,7 +2606,10 @@ impl AppState {
         if !chat.unseen() {
             return;
         }
-        chat.last_seen_at = Some(crate::clock::utc(cx));
+        // slopty: never before the message it saw: the message's time is its worker's clock,
+        // and a worker a few seconds ahead of this device would leave an open chat unseen.
+        let now = crate::clock::utc(cx);
+        chat.last_seen_at = Some(chat.last_message_at.map_or(now, |message| now.max(message)));
         cx.notify();
         let Some(handle) = self.engine.clone() else {
             return;
@@ -3261,6 +3264,21 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         }
+    }
+
+    /// slopty: a chat whose worker's clock runs ahead of this device's is seen once looked at,
+    /// not left "Done" while it is open.
+    #[gpui::test]
+    fn a_chat_from_a_clock_ahead_is_seen_once_looked_at(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            let mut ahead = chat("ahead", 0, Some(0));
+            ahead.last_message_at = Some(crate::clock::utc(cx) + TimeDelta::minutes(5));
+            state.chats = vec![ahead];
+            assert!(state.chats[0].unseen());
+            state.mark_chat_seen("ahead", cx);
+            assert!(!state.chats[0].unseen(), "{:?}", state.chats[0].last_seen_at);
+        });
     }
 
     #[gpui::test]

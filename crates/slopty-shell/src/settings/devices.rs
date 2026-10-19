@@ -356,6 +356,7 @@ impl Render for DevicesPage {
             if !is_local {
                 meta.push(if online {
                     div()
+                        .text_color(theme.success_muted)
                         .child(SharedString::from("Online"))
                         .into_any_element()
                 } else {
@@ -478,6 +479,7 @@ impl Render for DevicesPage {
                     server.name.clone(),
                     if server.online {
                         div()
+                            .text_color(theme.success_muted)
                             .child(SharedString::from("Online"))
                             .into_any_element()
                     } else {

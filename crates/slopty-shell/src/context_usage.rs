@@ -374,16 +374,14 @@ fn compact_tokens(tokens: u64) -> String {
 }
 
 /// The colours the categories take in turn: the theme's own, never ad hoc.
-// slopty: the breakdown's categories are a neutral ramp, not status hues: none of them asks
-// for the person's attention.
 fn slice_palette(theme: &Theme) -> [gpui::Hsla; 6] {
     [
-        theme.text.opacity(0.85),
-        theme.text.opacity(0.6),
-        theme.text.opacity(0.4),
-        theme.text.opacity(0.25),
+        theme.accent,
+        theme.success,
+        theme.warning,
+        theme.text_muted,
+        theme.accent.opacity(0.55),
         theme.text_faint,
-        crate::theme::ink(0.12),
     ]
 }
 

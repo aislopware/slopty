@@ -594,10 +594,11 @@ impl Driven {
                     (Some("success") | None, Some(0) | None) if hook_allowed(message) => {
                         Some((Notice::ALLOWED, format!("Allowed by {event} hook")))
                     }
-                    // It said nothing past success: quiet, as the TUI keeps it.
-                    (Some("success") | None, Some(0) | None) => first("stdout")
-                        .filter(|_| text("outcome") == Some("success"))
-                        .map(|out| (Notice::HOOK, format!("{name} hook: {out}"))),
+                    // A success's stdout is for the model or the verbose view (a SessionStart
+                    // hook's `additionalContext`); the TUI shows only the JSON's own words to
+                    // the person: its `systemMessage`, or its `stopReason` when it stopped.
+                    (Some("success") | None, Some(0) | None) => hook_said(message)
+                        .map(|said| (Notice::HOOK, format!("{name} hook: {said}"))),
                     (Some("cancelled"), _) => Some((
                         Notice::HOOK,
                         format!("{name} hook timed out; its output was dropped"),
@@ -808,6 +809,23 @@ fn hook_allowed(message: &Value) -> bool {
             .and_then(|s| s.get("permissionDecision"))
             .or_else(|| specific.and_then(|s| s.get("decision")).and_then(|d| d.get("behavior")));
         decided.and_then(Value::as_str) == Some("allow")
+    })
+}
+
+/// What a successful hook's JSON answer says to the person: its `systemMessage`, or its
+/// `stopReason` when it set `continue` to false.
+fn hook_said(message: &Value) -> Option<String> {
+    ["stdout", "output"].iter().find_map(|key| {
+        let said = message.get(*key).and_then(Value::as_str)?;
+        let said = serde_json::from_str::<Value>(said.trim()).ok()?;
+        let stopped = said.get("continue").and_then(Value::as_bool) == Some(false);
+        let words = said
+            .get("systemMessage")
+            .or_else(|| said.get("stopReason").filter(|_| stopped))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|words| !words.is_empty())?;
+        Some(words.to_owned())
     })
 }
 

@@ -383,12 +383,12 @@ fn status_dot(color: gpui::Hsla) -> AnyElement {
     div().flex_none().size(px(5.0)).rounded_full().bg(color).into_any_element()
 }
 
-/// This Mac offline: the offline glyph, quiet (amber is for a send that is stuck).
+/// This Mac offline: the offline glyph in zeron's offline amber.
 fn offline_mark(theme: &Theme) -> AnyElement {
     crate::icons::icon(crate::icons::WIFI_OFF)
         .flex_none()
         .size(px(12.0))
-        .text_color(theme.text_muted)
+        .text_color(theme.warning.opacity(0.8))
         .into_any_element()
 }
 

@@ -526,8 +526,7 @@ impl Composer {
         let needs = tray.counts.needs_you > 0;
         let words = header_words(tray);
         let wakes = tray.rows.iter().any(|row| row.live && row.wakes);
-        // slopty: working is no news: a muted pulse; amber only for what needs the person.
-        let dot_color = if needs { theme.warning } else if wakes { theme.text_muted } else { theme.text_faint };
+        let dot_color = if needs { theme.warning } else if wakes { theme.accent } else { theme.text_faint };
         let toggle_hover: SharedString = "background-tray-toggle-hover".into();
         let label = if open { "Collapse background work" } else { "Expand background work" };
         let toggle_chat = chat.to_owned();
@@ -639,10 +638,9 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .text_size(crate::typography::ui_rems(TEXT_SIZE))
-            // slopty: the main agent at work: a muted pulse, not the accent.
             .child(div().w(px(GLYPH_SLOT)).flex_none().flex().justify_center().child(state_dot(
                 "background-tray-main-dot",
-                theme.text_muted,
+                theme.accent,
                 true,
             )))
             .child(div().flex_none().font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text).child("main"))
@@ -703,14 +701,12 @@ impl Composer {
         let glyph: AnyElement = if needs {
             state_dot(format!("background-row-dot-{id}"), theme.warning, false)
         } else if row.live {
-            // slopty: work under way is no news (a muted pulse); done a muted check; a stop or an
-            // expiry is faint; only a failure is loud.
-            state_dot(format!("background-row-dot-{id}"), theme.text_muted, row.wakes && row.state != "paused")
+            state_dot(format!("background-row-dot-{id}"), if row.wakes { theme.accent } else { theme.text_muted }, row.wakes && row.state != "paused")
         } else {
             match row.state.as_str() {
-                "completed" => icon(icons::CHECK).size(px(11.0)).text_color(theme.text_muted).into_any_element(),
+                "completed" => icon(icons::CHECK).size(px(11.0)).text_color(theme.success).into_any_element(),
                 "failed" => state_dot(format!("background-row-dot-{id}"), theme.danger, false),
-                _ => state_dot(format!("background-row-dot-{id}"), theme.text_faint, false),
+                _ => state_dot(format!("background-row-dot-{id}"), theme.warning, false),
             }
         };
         let state_color = if needs {

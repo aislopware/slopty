@@ -12928,19 +12928,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_files_toggles_tooltip_names_its_key_under_it` (goldens `tooltip-files-toggle`); gpui-fast
   `fast::tests::focus_tooltip::{an_anchored_hover_tooltip_sits_under_its_control,
   the_next_tooltip_shows_at_once_while_warm}`, `fast::tests::a11y::a_disabled_control_says_so`.
-- ✅ **A loud hue means notice this; the default is quiet (2026-10-17).** A status hue is spent
-  only where the person should look. Working is the neutral `busy` tone (no accent pulse);
-  online draws no mark; offline is `WIFI_OFF` in `text_muted`; queued is muted with the clock
-  glyph; a seen Done is a muted check. Amber stays for what needs the person, red for what
-  failed or may be lost ("Changes could not be saved" is `danger`). The Claude mark is muted at
-  rest. A disabled control is drawn at one opacity, `theme::DISABLED_OPACITY` (0.38), and keeps
-  its name and tooltip.
-  In the conversation: the footer's mode reads in the text colour, red with its lock only when
-  every ask is let through (bypass); Don't ask is quiet, as it refuses what was not allowed. A
-  finished background task is a muted check, a stopped one faint; a stall in the working line
-  turns amber, never red. The model picker's favourite star and Fast bolt are the text colour,
-  and a goal chip is plain text. A blocked Send dims and says why in its tooltip ("Write a
-  message to send"). Tests: `slopty-ui` `view_model::work::tests::dont_ask_is_not_loud`.
+- ❌ **A loud hue means notice this; the default is quiet** (2026-10-17; superseded 2026-10-19 by
+  "Zeron's colours stay"). It muted working, online, offline, queued, done, the Claude mark, the
+  favourite star, the Fast bolt, plan mode, the goal, the context breakdown and markdown's
+  accents. The person found the app grey where it used to have colour.
+- ✅ **Zeron's colours stay (2026-10-19).** Every hue zeron spends is spent here too: the Claude
+  mark in its clay (`icons::claude_brand`) wherever a harness mark shows (title bar, sidebar,
+  model chip, settings), working in the accent family (`Theme::busy`), done green, a stopped
+  or expired task amber, queued amber, offline as the amber Wi-Fi-off, online green, the
+  favourite star amber, the Fast bolt, plan mode and the goal in the accent, the context
+  breakdown in the theme's hues, markdown's quote rail, list markers and checked boxes in the
+  accent, and the notes over a file and a partial diff in zeron's amber strip. From the muted
+  round only what is not a hue question stays: a disabled control at one opacity
+  (`theme::DISABLED_OPACITY`, 0.38) with its name and tooltip; "Changes could not be saved" in
+  `danger`; the mode chip red with its lock only when every ask is let through, Don't ask quiet
+  as it refuses; a stalled working line amber, never red; a blocked Send that says why. A new
+  hue question follows zeron's code. Tests:
+  `theme::tests::slopty_accent_is_the_exact_upstream_default`, `account_usage::tests::the_ring_turns_at_the_context_ring_s_thresholds`, `slopty-ui`
+  `view_model::work::tests::dont_ask_is_not_loud`.
 - ✅ **Every choice marks its default and the recommended one (2026-10-17).** A menu row or
   select option says "Default", "Recommended" or "Default · Recommended" in the quiet key voice
   after its label (`settings::widgets::Standing`, `standing_note`, `SelectOption::standing`).
@@ -13369,3 +13374,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     "Run again", drawn or not, so one update stacked a toast per session. The note now waits
     for the terminal's first frame. Proof:
     `view::tests::a_restored_session_off_screen_says_nothing`.
+- ✅ **An open chat is seen whatever the clocks say (2026-10-19).** A chat's last message carries
+  its worker's time and the seen mark this device's, so a worker a few seconds ahead left the
+  open chat "Done" in bold and asked to mark it seen on every frame. The seen mark is never
+  earlier than the message it saw (`AppState::mark_chat_seen`). Proof:
+  `state::tests::a_chat_from_a_clock_ahead_is_seen_once_looked_at`; e2e golden
+  `dock-shell-mode`.

@@ -308,10 +308,9 @@ impl Pickers {
                         } else {
                             crate::icons::STAR
                         })
-                        .size(px(12.0))
-                        // slopty: a starred model is chosen, not news: the text colour.
+                        .size(px(13.0))
                         .text_color(if favorite {
-                            theme.text
+                            theme.accent
                         } else {
                             theme.text_muted
                         }),
@@ -1038,11 +1037,9 @@ impl Pickers {
                         this.pick_option(option.clone(), choice.clone(), default, cx);
                     }))
                     .child({
-                        // slopty: fast mode on is chosen, not news: the solid bolt in the text
-                        // colour, not the accent.
                         let color = motion::mix(
                             motion::mix(theme.text_muted, theme.text, fast_hover),
-                            theme.text,
+                            theme.accent,
                             fast_t,
                         );
                         // On fills the bolt: the solid twin fades in over the

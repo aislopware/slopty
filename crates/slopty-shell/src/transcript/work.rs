@@ -134,13 +134,13 @@ pub fn notice_words(note: &NoteRow, now: i64) -> String {
     }
 }
 
-/// The colour of a task's dot: a failure red; done muted, stopped or expired faint (slopty:
-/// routine ends wear no status hue); else by its tone.
+/// The colour of a task's dot: done green, failed red, stopped amber, else by its tone, as the
+/// TUI colours its `●`.
 fn task_tint(task: &TaskRow, theme: &Theme) -> gpui::Hsla {
     match task.status.as_str() {
-        "completed" => theme.text_muted,
+        "completed" => theme.success,
         "failed" => theme.danger,
-        "killed" | "expired" => theme.text_faint,
+        "killed" | "expired" => theme.warning,
         _ => tone_tint(&task.tone, theme),
     }
 }

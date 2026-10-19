@@ -125,6 +125,7 @@ impl AccentColor {
                 Appearance::Dark => 0.12,
                 Appearance::Light => 0.10,
             }),
+            activity: primary,
             glyph: GlyphPalette::for_accent(primary, strong, appearance),
         }
     }
@@ -204,7 +205,7 @@ struct AccentTokens {
     caret: Hsla,
     code_text: Hsla,
     code_wash: Hsla,
-    // slopty: no activity tone; working wears the muted ink (`Theme::busy`).
+    activity: Hsla,
     glyph: GlyphPalette,
 }
 
@@ -685,9 +686,7 @@ pub struct Theme {
     pub warning_muted: Hsla,
     /// Success / online — emerald.
     pub success: Hsla,
-    /// Working / streaming indicator. slopty: the muted ink, never the accent: the accent marks a
-    /// result not yet seen, and a loud hue means "notice this" (`docs/decisions/ui.md`, "A loud hue
-    /// means notice this; the default is quiet").
+    /// Working / streaming indicator in the selected accent family.
     pub busy: Hsla,
     /// Three-tone animated pixel glyph palette in the selected accent family.
     pub glyph: GlyphPalette,
@@ -1187,7 +1186,7 @@ impl Theme {
             warning: oklch(0.828, 0.189, 84.429),      // amber-400
             warning_muted: oklch(0.924, 0.12, 95.746), // amber-200
             success: oklch(0.765, 0.177, 163.223),     // emerald-400
-            busy: neutral(0.708), // slopty: text_muted
+            busy: accent.activity,
             glyph: accent.glyph,
             success_muted: oklch(0.845, 0.143, 164.978), // emerald-300
             surface_raised_hover: neutral(0.29),
@@ -1283,7 +1282,7 @@ impl Theme {
             warning: oklch(0.555, 0.163, 48.998),       // amber-700 — carries 12px text
             warning_muted: oklch(0.473, 0.137, 46.201), // amber-800
             success: oklch(0.596, 0.145, 163.225),      // emerald-600
-            busy: neutral(0.439), // slopty: text_muted
+            busy: accent.activity,
             glyph: accent.glyph,
             success_muted: oklch(0.508, 0.118, 165.612), // emerald-700
             // Opaque pills darken on hover here rather than brighten — same
@@ -1482,7 +1481,7 @@ impl Theme {
         theme.warning_muted = model_color(colors.warning_muted);
         theme.success = model_color(colors.success);
         theme.success_muted = model_color(colors.success_muted);
-        theme.busy = theme.text_muted; // slopty: working is quiet
+        theme.busy = model_color(accent.activity);
         theme.glyph = GlyphPalette {
             light: model_color(accent.glyph[0]),
             mid: model_color(accent.glyph[1]),
@@ -2146,13 +2145,13 @@ mod tests {
         assert_eq!(dark.accent, oklch(0.673, 0.182, 276.935));
         assert_eq!(dark.accent_strong, oklch(0.585, 0.233, 277.117));
         assert_eq!(dark.code_text, dark.accent);
-        assert_eq!(dark.busy, dark.text_muted);
+        assert_eq!(dark.busy, dark.accent);
         assert_eq!(dark.glyph.mid, dark.accent);
         assert_eq!(dark.caret, dark.accent);
         assert_eq!(light.accent, oklch(0.511, 0.262, 276.966));
         assert_eq!(light.accent_strong, oklch(0.511, 0.262, 276.966));
         assert_eq!(light.code_text, light.accent);
-        assert_eq!(light.busy, light.text_muted);
+        assert_eq!(light.busy, light.accent);
         assert_eq!(light.glyph.mid, light.accent);
         assert_eq!(light.caret, light.accent);
     }
@@ -2236,7 +2235,7 @@ mod tests {
         );
         let slopty = Theme::dark();
         assert_ne!(catppuccin.surface, slopty.surface);
-        assert_eq!(catppuccin.busy, catppuccin.text_muted);
+        assert_eq!(catppuccin.busy, catppuccin.accent);
         assert_eq!(catppuccin.glyph.mid, catppuccin.accent);
         assert_eq!(catppuccin.surface_treatment, SurfaceTreatment::Opaque);
         assert!(!catppuccin.is_glass());
@@ -2402,7 +2401,7 @@ mod tests {
                 assert!(contrast_ratio(theme.code_text, theme.bg) >= 4.5);
                 assert!(contrast_ratio(theme.busy, theme.bg) >= 3.0);
                 assert_eq!(theme.code_text, theme.accent);
-                assert_eq!(theme.busy, theme.text_muted);
+                assert_eq!(theme.busy, theme.accent);
                 // slopty: one selection colour, the terminal's included (M40).
                 assert_eq!(theme.terminal.selection, theme.selection);
                 assert_eq!(theme.glyph.mid, theme.accent);
@@ -2428,6 +2427,7 @@ mod tests {
                 assert_eq!(theme.diff_del, baseline.diff_del);
                 if accent != AccentColor::Slopty {
                     assert_ne!(theme.code_text, baseline.code_text);
+                    assert_ne!(theme.busy, baseline.busy);
                     assert_ne!(theme.selection, baseline.selection);
                 }
                 assert_eq!(theme.syntax.keyword, baseline.syntax.keyword);

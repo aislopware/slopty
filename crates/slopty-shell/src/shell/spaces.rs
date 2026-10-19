@@ -2684,8 +2684,7 @@ pub(crate) fn status_dot_color(status: ChatIndicator, theme: &Theme) -> gpui::Hs
         // Non-done statuses sit well below full
         // strength: at full alpha the colored words shouted across the
         // whole sidebar (user request) — only Done keeps its pop.
-        // slopty: working is the muted ink, the accent only a result nobody has seen.
-        ChatIndicator::Working => theme.busy,
+        ChatIndicator::Working => theme.busy.opacity(0.55),
         // slopty: Claude desktop's vocabulary: amber is "needs you", blue a result nobody has
         // seen, red a failure; working keeps zeron's busy glyph.
         ChatIndicator::AwaitingInput => theme.warning.opacity(0.9),
@@ -4494,7 +4493,7 @@ impl Shell {
                             icon(icons::WIFI_OFF)
                                 .size(px(12.0))
                                 .flex_none()
-                                .text_color(theme.text_muted), // slopty: offline is quiet
+                                .text_color(theme.warning.opacity(0.8)),
                         )
                     }),
             );
@@ -4757,7 +4756,7 @@ impl Shell {
                                     icon(icons::WIFI_OFF)
                                         .size(px(12.0))
                                         .flex_none()
-                                        .text_color(theme.text_muted), // slopty: offline is quiet
+                                        .text_color(theme.warning.opacity(0.8)),
                                 )
                             })
                             // No check glyph — the selected row's glass plate
@@ -7257,15 +7256,17 @@ impl Shell {
                         row(ix)
                             .child(glyph_el(device_glyph(&device.platform)))
                             .child(label_el(name))
-                            // slopty: online needs no mark; offline wears the muted Wi-Fi-off.
-                            .when(!online, |row| {
-                                row.child(
-                                    icon(icons::WIFI_OFF)
-                                        .size(px(11.0))
-                                        .flex_none()
-                                        .text_color(theme.text_muted),
-                                )
-                            })
+                            .child(
+                                div()
+                                    .size(px(5.0))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .bg(if online {
+                                        theme.success
+                                    } else {
+                                        theme.text_faint
+                                    }),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_space_pick_device(device.clone(), cx)
                             }))

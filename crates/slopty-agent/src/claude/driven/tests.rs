@@ -1222,20 +1222,29 @@ fn a_turn_that_cannot_go_on_says_why() {
     assert!(said.iter().any(|(k, t)| k == Notice::HOOK && t.starts_with("A hook deferred Bash")));
 }
 
-/// A hook that allowed a call says so; a hook that said nothing past success stays quiet; a
-/// message from another session held back says so.
+/// A hook that allowed a call says so; a successful hook's stdout (a `SessionStart` hook's
+/// context for the model, plain text or JSON) stays quiet, and only its `systemMessage` is said;
+/// a message from another session held back says so.
 #[test]
 fn a_hooks_allow_and_a_held_message_say_so() {
     let (mut driven, mut host) = driven();
-    let hook = |stdout: &str| {
+    let hook = |name: &str, stdout: &str| {
+        let event = name.split(':').next().unwrap_or(name);
         json!({ "type": "system", "subtype": "hook_response", "hook_id": "h", "session_id": SESSION,
-                "hook_name": "PreToolUse:Bash", "hook_event": "PreToolUse", "output": "",
+                "hook_name": name, "hook_event": event, "output": stdout,
                 "stdout": stdout, "stderr": "", "exit_code": 0, "outcome": "success" })
     };
     let allow = json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse",
                                                 "permissionDecision": "allow" } });
-    host.take(driven.incoming(&hook(&allow.to_string()), at(10)));
-    host.take(driven.incoming(&hook(""), at(20)));
+    let context = json!({ "hookSpecificOutput": { "hookEventName": "SessionStart",
+                                                  "additionalContext": "standing notes" } });
+    let shown = json!({ "systemMessage": "Lint is on", "hookSpecificOutput": {
+                        "hookEventName": "SessionStart", "additionalContext": "x" } });
+    host.take(driven.incoming(&hook("PreToolUse:Bash", &allow.to_string()), at(10)));
+    host.take(driven.incoming(&hook("PreToolUse:Bash", ""), at(20)));
+    host.take(driven.incoming(&hook("SessionStart:startup", &context.to_string()), at(21)));
+    host.take(driven.incoming(&hook("SessionStart:startup", "plain context\n"), at(22)));
+    host.take(driven.incoming(&hook("SessionStart:startup", &shown.to_string()), at(23)));
     host.take(driven.incoming(
         &json!({ "type": "system", "subtype": "peer_message_hold", "session_id": SESSION,
                  "from_name": "reviewer", "cause": "permission mode mismatch" }),
@@ -1243,8 +1252,9 @@ fn a_hooks_allow_and_a_held_message_say_so() {
     ));
     let said = notices(host.main(&driven));
     assert_eq!(said[0], (Notice::ALLOWED.to_owned(), "Allowed by PreToolUse hook".to_owned()));
-    assert_eq!(said.len(), 2, "{said:?}");
-    assert!(said[1].1.contains("reviewer"), "{said:?}");
+    assert_eq!(said[1], (Notice::HOOK.to_owned(), "SessionStart:startup hook: Lint is on".into()));
+    assert_eq!(said.len(), 3, "{said:?}");
+    assert!(said[2].1.contains("reviewer"), "{said:?}");
 }
 
 /// What `init` says went wrong (a plugin that did not load, a server config skipped) is said

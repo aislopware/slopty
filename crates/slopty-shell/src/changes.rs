@@ -4210,27 +4210,19 @@ impl Changes {
                         .child(SharedString::from(format!("−{}", parsed.deletions))),
                 )
                 .child(div().flex_1())
-                // slopty: a partial diff is information, not a warning (M34).
+                // slopty: its tooltip says what is left out.
                 .when(parsed.truncated, |el| {
                     el.child(
                         div()
                             .id("changes-partial")
                             .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
                             .text_size(px(10.0))
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(4.0))
-                            .bg(crate::theme::ink(0.03))
-                            .text_color(theme.text_muted)
+                            .bg(theme.warning.opacity(0.08))
+                            .text_color(theme.warning.opacity(0.75))
                             .hint("Too large to show whole: the diff shows its start")
-                            .child(
-                                crate::icons::icon(crate::icons::INFO_CIRCLE)
-                                    .size(px(11.0))
-                                    .text_color(theme.text_muted),
-                            )
                             .child(SharedString::from("Partial snapshot")),
                     )
                 })

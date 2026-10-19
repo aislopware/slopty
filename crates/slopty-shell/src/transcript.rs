@@ -7785,12 +7785,12 @@ impl Transcript {
                 .pt(px(Theme::SPACE_SM))
                 .h(px(ROW_LANE_HEIGHT))
                 .text_size(crate::typography::ui_rems(11.0))
-                // slopty: a queued send waits quietly, under the clock glyph (no amber).
+                // slopty: a queued send waits under the clock glyph, in zeron's queued amber.
                 .child(if queued {
                     crate::icons::icon(crate::icons::CLOCK_CIRCLE)
                         .flex_none()
                         .size(px(12.0))
-                        .text_color(theme.text_muted)
+                        .text_color(theme.warning)
                         .into_any_element()
                 } else {
                     crate::loaders::gradient_spinner(
@@ -7808,7 +7808,11 @@ impl Transcript {
                         .min_w_0()
                         .truncate()
                         .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
+                        .text_color(if queued {
+                            theme.warning
+                        } else {
+                            theme.text_muted
+                        })
                         .child(crate::roll_text::roll_text(
                             format!("working-word-{}-{turn}", cx.entity_id()),
                             SharedString::from(if queued {

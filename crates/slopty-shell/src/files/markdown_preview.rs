@@ -1140,7 +1140,7 @@ impl MarkdownPreview {
                             Some(Err(error)) => div()
                                 .p(px(12.0))
                                 .text_size(px(12.0))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.warning_muted)
                                 .child(format!("Couldn't draw this diagram · {error}"))
                                 .into_any_element(),
                             None => div()

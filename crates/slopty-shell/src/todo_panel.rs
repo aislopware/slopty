@@ -435,8 +435,11 @@ impl Composer {
                         icons::CHECKLIST
                     })
                     .size(px(14.0))
-                    // slopty: done is routine: muted, no green.
-                    .text_color(theme.text_muted),
+                    .text_color(if summary.finished() {
+                        theme.success
+                    } else {
+                        theme.text_muted
+                    }),
                 )
                 .child(
                     div()
@@ -651,11 +654,9 @@ fn status_glyph(
     cx: &mut gpui::App,
 ) -> AnyElement {
     match status {
-        // slopty: done is routine (a muted check); the item under way is the text's own
-        // colour, not the accent.
         TodoStatus::Completed => icon(icons::CHECK)
             .size(px(12.0))
-            .text_color(theme.text_muted)
+            .text_color(theme.success)
             .into_any_element(),
         TodoStatus::InProgress if live => crate::loaders::mini_glyph_spinner(
             format!("todo-active-{ix}"),
@@ -669,11 +670,11 @@ fn status_glyph(
             .size(px(10.0))
             .rounded_full()
             .border_1()
-            .border_color(theme.text)
+            .border_color(theme.accent)
             .flex()
             .items_center()
             .justify_center()
-            .child(div().size(px(4.0)).rounded_full().bg(theme.text))
+            .child(div().size(px(4.0)).rounded_full().bg(theme.accent))
             .into_any_element(),
         TodoStatus::Pending => div()
             .size(px(10.0))

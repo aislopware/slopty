@@ -3420,8 +3420,7 @@ fn outside_read_only_row(theme: &Theme) -> AnyElement {
     )
 }
 
-// slopty: information over a file is quiet: the info glyph in `text_muted` on a faint ink, never
-// amber, which stays for the prompts that ask for a decision (M34).
+// slopty: a note over a file (zeron's amber strip), with the info glyph.
 pub(super) fn info_row(theme: &Theme, text: impl Into<SharedString>) -> AnyElement {
     div()
         .h(px(28.0))
@@ -3430,16 +3429,16 @@ pub(super) fn info_row(theme: &Theme, text: impl Into<SharedString>) -> AnyEleme
         .gap(px(6.0))
         .border_b_1()
         .border_color(theme.border)
-        .bg(crate::theme::ink(0.03))
+        .bg(theme.warning.opacity(0.045))
         .flex()
         .items_center()
         .text_size(crate::typography::ui_rems(11.0))
-        .text_color(theme.text_muted)
+        .text_color(theme.warning_muted)
         .child(
             icon(icons::INFO_CIRCLE)
                 .size(px(12.0))
                 .flex_none()
-                .text_color(theme.text_muted),
+                .text_color(theme.warning_muted),
         )
         .child(div().min_w_0().truncate().child(text.into()))
         .into_any_element()

@@ -640,20 +640,19 @@ impl FilesSurface {
                         .h(px(27.0))
                         .flex_none()
                         .px(px(10.0))
-                        // slopty: a paused feed is information, not a warning (M34).
                         .border_b_1()
-                        .border_color(theme.border)
-                        .bg(crate::theme::ink(0.03))
+                        .border_color(theme.warning.opacity(0.22))
+                        .bg(theme.warning.opacity(0.045))
                         .flex()
                         .items_center()
                         .gap(px(6.0))
                         .text_size(px(10.0))
-                        .text_color(theme.text_muted)
+                        .text_color(theme.warning_muted)
                         .child(
                             crate::icons::icon(crate::icons::REFRESH)
                                 .size(px(10.5))
                                 .flex_none()
-                                .text_color(theme.text_muted),
+                                .text_color(theme.warning_muted),
                         )
                         .child(div().min_w_0().flex_1().truncate().child(error))
                         .child(

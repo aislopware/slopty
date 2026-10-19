@@ -636,10 +636,11 @@ pub fn render_block(
         ),
         Block::Math { tex } => render_math_block(tex, top_ix, ix, opts, theme, highlight),
         Block::BlockQuote { children } => div()
-            // slopty: a quote's rail is a neutral hairline with no wash: the accent means
-            // "notice this", and every answer is full of quotes.
+            // Accent-tinted quote: indigo rail + a whisper of the same hue
+            // behind it (the inline-code treatment, dialed down).
             .border_l_2()
-            .border_color(crate::theme::hairline(0.16))
+            .border_color(theme.accent.opacity(0.6))
+            .bg(theme.accent.opacity(0.05))
             .rounded_tr(px(6.0))
             .rounded_br(px(6.0))
             .pl(px(12.0))
@@ -669,8 +670,8 @@ pub fn render_block(
             .flex_col()
             .gap(px(4.0))
             .children(items.iter().enumerate().map(|(item_ix, item)| {
-                // Quiet markers (slopty: no accent): ordered numbers as faint
-                // text, unordered as a REAL 5px disc — the glyph "•" reads too
+                // Accent markers (the inline-code hue): ordered numbers as
+                // tinted text, unordered as a REAL 5px disc — the glyph "•" reads too
                 // small at 14px.
                 let task = item
                     .first()
@@ -711,14 +712,13 @@ pub fn render_block(
                             .size(px(16.0))
                             .border_1()
                             .rounded(px(3.0))
-                            // slopty: a checked box is muted, not the accent.
                             .border_color(if task.checked {
-                                theme.text_muted
+                                theme.accent
                             } else {
                                 theme.border
                             })
                             .bg(if task.checked {
-                                theme.text_muted
+                                theme.accent
                             } else {
                                 gpui::transparent_black()
                             })
@@ -747,8 +747,8 @@ pub fn render_block(
                             .min_w(px(18.0))
                             .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
                             .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT))
-                            // slopty: list markers are quiet (no accent), in figures that line up.
-                            .text_color(theme.text_faint)
+                            // slopty: figures that line up.
+                            .text_color(theme.accent)
                             .font_features(crate::typography::tabular())
                             .child(SharedString::from(format!("{}.", start + item_ix as u64)))
                             .into_any_element(),
@@ -765,7 +765,7 @@ pub fn render_block(
                                     .w(px(5.0))
                                     .h(px(5.0))
                                     .rounded_full()
-                                    .bg(theme.text_faint),
+                                    .bg(theme.accent),
                             )
                             .into_any_element(),
                     }
@@ -2549,11 +2549,10 @@ fn code_notice(id: SharedString, message: SharedString, theme: &Theme) -> AnyEle
         .justify_center()
         .tooltip(crate::settings::widgets::text_tooltip(message))
         .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-        // slopty: why a fence stays source is information, not a warning: no amber.
         .child(
-            crate::icons::icon(crate::icons::INFO_CIRCLE)
+            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
                 .size(px(CODE_ACTION_GLYPH))
-                .text_color(theme.text_muted),
+                .text_color(theme.warning_muted),
         )
         .into_any_element()
 }

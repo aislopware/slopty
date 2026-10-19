@@ -3494,9 +3494,13 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     the TUI writes it. It names the auto-mode classifier and its reason, the ask rule that
     overrides auto mode, the permission rule and the settings it came from, or the hook. The
     dock shows it above the choices.
-  - **Hooks stay quiet.** `hook_started`, `hook_progress` and a hook that succeeds silently
-    show nothing. A hook's output, timeout, blocking error or failure is one HOOK notice in
-    the TUI's words.
+  - **Hooks stay quiet.** `hook_started`, `hook_progress` and a hook that succeeds show
+    nothing: a success's stdout is context for the model (a SessionStart hook's
+    `additionalContext`) or for the TUI's verbose view, never raw JSON in the chat (2026-10-19,
+    the person saw a SessionStart hook's JSON as a notice). A success says only what its JSON
+    shows the person, its `systemMessage` or the `stopReason` of a hook that stopped; a
+    timeout, blocking error or failure is one HOOK notice in the TUI's words. Test:
+    `claude::driven::tests::a_hooks_allow_and_a_held_message_say_so`.
   - Tests: `slopty-workerd` `threads.rs` `a_rewind_of_the_files_is_undone`; `slopty-agent`
     `conversation::tests::the_files_a_command_changed_are_its_calls`,
     `claude::driven::tests::why_claude_code_asks_is_said_as_its_tui_says_it`; `slopty-worker`

@@ -311,7 +311,7 @@ impl Shell {
                 icon(icons::WIFI_OFF)
                     .size(px(12.0))
                     .flex_none()
-                    .text_color(theme.text_muted), // slopty: offline is quiet
+                    .text_color(theme.warning.opacity(0.8)),
             )
         });
         let project_row = match project {

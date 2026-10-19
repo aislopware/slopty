@@ -666,16 +666,14 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        // slopty: the agent's mark rests in the muted ink; its brand hue would
-                        // wear a constant state loud (Claude desktop keeps clay for working).
                         .when_some(
                             harness.map(crate::pickers::harness_brand_icon),
-                            |el, (path, _tint)| {
+                            |el, (path, tint)| {
                                 el.child(
                                     icon(path)
                                         .size(px(14.0))
                                         .flex_none()
-                                        .text_color(theme.text_muted),
+                                        .text_color(tint.unwrap_or(theme.text_muted)),
                                 )
                             },
                         )

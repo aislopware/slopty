@@ -485,8 +485,7 @@ impl Composer {
             .gap(px(5.0))
             .rounded(px(Theme::CONTROL_RADIUS))
             .text_size(crate::typography::ui_rems(11.0))
-            // slopty: a goal that is set is chosen, not news: the text colour, not the accent.
-            .text_color(theme.text)
+            .text_color(theme.accent)
             .cursor_pointer()
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -578,11 +577,11 @@ impl Composer {
             Some(choice) => format!("{}…", choice.label),
             None => mode_words(chip),
         };
-        // slopty: loud only when nothing is asked; plan mode is chosen, not news (the text colour,
-        // not the accent); the recommended default is quiet and wears no lock.
+        // slopty: loud only when nothing is asked; the recommended default is quiet and wears no
+        // lock.
         let (color, wash) = match chip.tone.as_str() {
             ModeChip::DANGER => (theme.warning, Some(theme.warning.opacity(0.12))),
-            ModeChip::PLAN => (theme.text, None),
+            ModeChip::PLAN => (theme.accent, None),
             ModeChip::ACCEPT => (theme.text_muted, None),
             _ => (theme.text_faint, None),
         };
@@ -730,11 +729,11 @@ fn goal_glyph(theme: &Theme) -> AnyElement {
         .size(px(10.0))
         .rounded_full()
         .border_1()
-        .border_color(theme.text)
+        .border_color(theme.accent)
         .flex()
         .items_center()
         .justify_center()
-        .child(div().size(px(4.0)).rounded_full().bg(theme.text))
+        .child(div().size(px(4.0)).rounded_full().bg(theme.accent))
         .into_any_element()
 }
 

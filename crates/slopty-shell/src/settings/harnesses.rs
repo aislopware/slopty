@@ -757,7 +757,7 @@ impl HarnessesPage {
                 // user doesn't want must not be stuck on because it isn't
                 // installed); turning ON still does.
                 let interactive = !last_enabled && (enabled || installed);
-                let (icon_path, _) = crate::pickers::harness_brand_icon(harness);
+                let (icon_path, tint) = crate::pickers::harness_brand_icon(harness);
                 // slopty: an agent on or off against its default (installed and not the mock)
                 // offers "Reset" (M10).
                 let default_on = installed && harness != HarnessId::MOCK;
@@ -833,8 +833,6 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
-                // slopty: the brand mark rests in `text_muted`: clay is for an agent at work, not a
-                // constant state (M15).
                 let tile = div()
                     .flex_none()
                     .size(px(36.0))
@@ -846,7 +844,7 @@ impl HarnessesPage {
                     .child(
                         crate::icons::icon(icon_path)
                             .size(px(16.0))
-                            .text_color(theme.text_muted),
+                            .text_color(tint.unwrap_or(theme.text_muted)),
                     );
                 let expanded = enabled && self.expanded_harness == Some(harness);
                 let header = widgets::card_row(&theme, ix == 0)

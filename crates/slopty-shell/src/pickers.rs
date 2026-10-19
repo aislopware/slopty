@@ -3021,8 +3021,7 @@ impl Pickers {
                                         crate::icons::icon(crate::icons::WIFI_OFF)
                                             .size(px(12.0))
                                             .flex_none()
-                                            // slopty: offline is quiet; amber is for a stuck send.
-                                            .text_color(theme.text_muted),
+                                            .text_color(theme.warning.opacity(0.8)),
                                     )
                                 })
                             },
@@ -3796,8 +3795,7 @@ impl Pickers {
                 &theme,
                 cx,
             )
-            // slopty: offline is quiet; amber is for a stuck send.
-            .when(offline, |el| el.text_color(theme.text_muted));
+            .when(offline, |el| el.text_color(theme.warning.opacity(0.8)));
         let project_chip = self.footer_chip(
             PickerKind::Space,
             "picker-project",
@@ -5073,9 +5071,8 @@ impl Pickers {
                         crate::icons::STAR
                     })
                     .size(px(13.0))
-                    // slopty: a starred model is chosen, not news: the text colour.
                     .text_color(if is_fav {
-                        theme.text
+                        theme.warning
                     } else {
                         theme.text_muted
                     }),
@@ -6167,10 +6164,9 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
 /// it wears the Claude mark).
 pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
     match harness {
-        // slopty: the Claude mark is quiet at rest like every other mark; the brand's clay is
-        // for a chat that works, if anywhere (`docs/decisions/ui.md`, "A loud hue means notice
-        // this").
-        HarnessId::CLAUDE_CODE | HarnessId::MOCK => (crate::icons::CLAUDE_MARK, None),
+        HarnessId::CLAUDE_CODE | HarnessId::MOCK => {
+            (crate::icons::CLAUDE_MARK, Some(crate::icons::claude_brand()))
+        }
         HarnessId::CODEX => (crate::icons::OPENAI_MARK, None),
         HarnessId::CURSOR => (crate::icons::CURSOR_MARK, None),
         // Cognition's mark (the Devin product icon), monochrome.
@@ -6510,7 +6506,7 @@ impl Render for Pickers {
             Some(harness) => harness_brand_icon(harness),
             None if self.title.is_some() => (crate::icons::CHAT_ROUND_LINE, Some(theme.text_muted)),
             None if no_agents => (crate::icons::TERMINAL, Some(theme.text_muted)),
-            None => (crate::icons::CLAUDE_MARK, Some(theme.text_muted)),
+            None => (crate::icons::CLAUDE_MARK, Some(crate::icons::claude_brand())),
         };
         // The chip names the model and its effort only; the other options
         // (context, fast mode, ...) live in the popover. The effort reads in the
@@ -6611,8 +6607,7 @@ impl Render for Pickers {
                     div().flex_none().child(
                         crate::icons::icon(crate::icons::FAST_TIER_BOLD)
                             .size(px(13.0))
-                            // slopty: fast mode is chosen, not news: the text colour.
-                            .text_color(theme.text),
+                            .text_color(theme.accent),
                     ),
                 ))
             })

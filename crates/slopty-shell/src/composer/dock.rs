@@ -529,10 +529,9 @@ impl Composer {
                     cx,
                 )
                 .into_any_element(),
-                // slopty: done is routine: a muted check, no green.
                 Some(Ok(())) => crate::icons::icon(crate::icons::CHECK)
                     .size(px(10.0))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.success)
                     .into_any_element(),
                 Some(Err(_)) => div().flex_none().size(px(5.0)).rounded_full().bg(theme.danger).into_any_element(),
             })

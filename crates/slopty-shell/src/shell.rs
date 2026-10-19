@@ -6990,11 +6990,10 @@ impl Shell {
                 state.send_undelivered(&id, now),
             )
         };
-        // slopty: a queued send is routine, so it is muted and wears the clock; amber is "needs you".
         let status_color = if undelivered {
             theme.danger
         } else if queued {
-            theme.text_muted
+            theme.warning
         } else {
             spaces::status_dot_color(status, theme)
         };
@@ -7969,13 +7968,12 @@ impl Shell {
                     ).into_any_element(),
                 )
             }
-            // slopty: offline is no alarm while sends are saved: the muted Wi-Fi-off mark.
             S::Offline => (
                 "Offline — sends are saved".into(),
-                icon(icons::WIFI_OFF)
-                    .size(px(11.0))
-                    .flex_none()
-                    .text_color(theme.text_muted)
+                div()
+                    .size(px(5.0))
+                    .rounded_full()
+                    .bg(theme.warning)
                     .into_any_element(),
             ),
             S::Reconnecting => (
@@ -8647,10 +8645,9 @@ impl Shell {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.bg)
                     .child(div().w_full().text_center().child(initial))
-                    // slopty: the server's link: no mark while it is up (zeron draws none), a
-                    // muted one while it is down.
+                    // slopty: the server's link: green while it is up, muted while it is down.
                     .relative()
-                    .children(online.filter(|online| !online).map(|_| {
+                    .children(online.map(|online| {
                         div()
                             .absolute()
                             .right(px(-2.0))
@@ -8659,7 +8656,7 @@ impl Shell {
                             .rounded_full()
                             .border_1()
                             .border_color(theme.bg)
-                            .bg(theme.text_muted)
+                            .bg(if online { theme.success } else { theme.text_muted })
                     })),
             )
             .child(sidebar_faded_label(
