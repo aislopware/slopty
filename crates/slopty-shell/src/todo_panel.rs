@@ -25,7 +25,7 @@ use slopty_view_proto::{TodoItem, TodoStatus, ToolCall};
 
 use crate::composer::{Composer, QUEUE_COMPOSER_OVERLAP};
 use crate::icons::{self, icon};
-use crate::motion::{self, AnimationExt as _};
+use crate::motion;
 use crate::theme::Theme;
 use crate::motion::HoverFade as _;
 
@@ -188,8 +188,6 @@ pub(crate) struct TodoPanelState {
     dismissed: Option<u64>,
     /// Whether the previous frame was settled, to detect the transition.
     was_settled: bool,
-    /// Bumped on every toggle so the list's fade-in replays.
-    epoch: u32,
 }
 
 impl TodoPanelState {
@@ -211,7 +209,6 @@ impl TodoPanelState {
 
     pub fn toggle(&mut self, finished: bool) {
         self.expanded = Some(!self.is_expanded(finished));
-        self.epoch = self.epoch.wrapping_add(1);
     }
 
     pub fn toggle_fold(&mut self, side: FoldSide) {
@@ -303,7 +300,7 @@ impl Composer {
             return None;
         }
         let expanded = panel.is_expanded(summary.finished());
-        let (show_earlier, show_later, epoch) = (panel.show_earlier, panel.show_later, panel.epoch);
+        let (show_earlier, show_later) = (panel.show_earlier, panel.show_later);
 
         let theme = Theme::of(cx).clone();
         let view = cx.entity_id();
@@ -312,7 +309,8 @@ impl Composer {
 
         let surface =
             crate::queue::queue_panel_surface(&theme, cx.has_active_drag()).child(header);
-        let surface = if expanded {
+        // slopty: the list slides open and shut (`motion::reveal_height`), kept while it closes.
+        let surface = {
             let list = div().flex().flex_col().children(
                 rows(&items, show_earlier, show_later)
                     .into_iter()
@@ -338,21 +336,16 @@ impl Composer {
             )
             // The ramp ends at the clip edge; glyphs fade per pixel.
             .fade_overflow_y(&self.todo_scroll);
-            surface.child(
+            surface.child(motion::reveal_height(
+                SharedString::from(format!("todo-rows-{chat_id}")),
+                expanded,
                 div()
                     .mt(px(2.0))
                     // The tray's lowest strip hides behind the composer; keep
                     // the last row clear of that edge.
                     .pb(px(6.0))
-                    .child(rows)
-                    .with_animation(
-                        SharedString::from(format!("todo-rows-{epoch}")),
-                        motion::FADE_QUICK.animation(),
-                        |el, t| el.opacity(t),
-                    ),
-            )
-        } else {
-            surface
+                    .child(rows),
+            ))
         };
 
         let inset = SIDE_INSET * (1 + trays_below) as f32;
@@ -415,7 +408,8 @@ impl Composer {
                 .items_center()
                 .gap(px(8.0))
                 .cursor_pointer()
-                .bg(motion::hover_blend("todo-panel-toggle-hover", gpui::transparent_black(), crate::theme::ink(0.05)))
+                // slopty: a header, not a button in the card: its chevron brightens under the
+                // pointer, and turns as the list slides.
                 .hover_fade("todo-panel-toggle-hover")
                 .tab_index(0)
                 .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -475,13 +469,18 @@ impl Composer {
                 })
                 .when(expanded, |el| el.child(div().flex_1()))
                 .child(
-                    icon(if expanded {
-                        icons::ALT_ARROW_DOWN
-                    } else {
-                        icons::ALT_ARROW_UP
-                    })
-                    .size(px(12.0))
-                    .text_color(theme.text_muted.opacity(0.7)),
+                    icon(icons::ALT_ARROW_UP)
+                        .size(px(12.0))
+                        .with_transformation(gpui::Transformation::rotate(gpui::radians(if expanded {
+                            std::f32::consts::PI
+                        } else {
+                            0.0
+                        })))
+                        .text_color(motion::hover_blend(
+                            "todo-panel-toggle-hover",
+                            theme.text_muted.opacity(0.7),
+                            theme.text,
+                        )),
                 );
 
         let dismiss_chat = chat_id.to_owned();
@@ -566,8 +565,7 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .bg(motion::hover_blend(&fold_hover, gpui::transparent_black(), crate::theme::ink(0.05)))
-            .hover_fade(fold_hover.clone())
+            .hover_fade(fold_hover.clone()) // slopty: its words brighten, no tile.
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -583,12 +581,16 @@ impl Composer {
                     .flex_none()
                     .flex()
                     .justify_center()
-                    .child(icon(glyph).size(px(12.0)).text_color(theme.text_faint)),
+                    .child(icon(glyph).size(px(12.0)).text_color(motion::hover_blend(
+                        &fold_hover,
+                        theme.text_faint,
+                        theme.text_muted,
+                    ))),
             )
             .child(
                 div()
                     .text_size(crate::typography::ui_rems(11.5))
-                    .text_color(theme.text_faint)
+                    .text_color(motion::hover_blend(&fold_hover, theme.text_faint, theme.text_muted))
                     .child(text),
             )
             .into_any_element()
@@ -919,11 +921,8 @@ mod tests {
     }
 
     #[test]
-    fn toggle_replays_the_fade_and_folds_toggle_independently() {
+    fn folds_toggle_independently() {
         let mut state = TodoPanelState::default();
-        let before = state.epoch;
-        state.toggle(false);
-        assert_ne!(state.epoch, before);
         state.toggle_fold(FoldSide::Later);
         assert!(state.show_later && !state.show_earlier);
         state.toggle_fold(FoldSide::Later);

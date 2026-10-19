@@ -214,17 +214,24 @@ pub(crate) fn row_figures(row: &WorkRow, now: i64) -> String {
 /// What the row says under its title: what it asks of the person, else its step, else how it
 /// ended, else the last line it printed.
 pub(crate) fn row_subline(row: &WorkRow) -> Option<(String, bool)> {
-    if let Some(ask) = row.needs_you.as_ref().filter(|ask| !ask.trim().is_empty()) {
-        return Some((ask.clone(), false));
+    if let Some(ask) = row.needs_you.as_deref().and_then(plain_line) {
+        return Some((ask, false));
     }
-    if let Some(step) = row.step.as_ref().filter(|s| !s.trim().is_empty()) {
-        return Some((step.clone(), false));
+    if let Some(step) = row.step.as_deref().and_then(plain_line) {
+        return Some((step, false));
     }
-    if !row.live && let Some(outcome) = row.outcome.as_ref().filter(|o| !o.trim().is_empty()) {
-        return Some((outcome.clone(), false));
+    if !row.live && let Some(outcome) = row.outcome.as_deref().and_then(plain_line) {
+        return Some((outcome, false));
     }
     let tail = row.output.as_deref()?.lines().rev().find(|line| !line.trim().is_empty())?;
     Some((tail.trim_end().to_owned(), true))
+}
+
+/// The first line of an agent's words with something in it, as plain words: a line break written
+/// as markup (`<br>`) breaks the line, as it would drawn.
+fn plain_line(text: &str) -> Option<String> {
+    let text = ["<br>", "<br/>", "<br />"].iter().fold(text.to_owned(), |text, tag| text.replace(tag, "\n"));
+    text.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_owned)
 }
 
 /// The header's words: what needs the person, else the counts.
@@ -445,10 +452,11 @@ impl Composer {
         let focused = focus.contains_focused(window, cx);
 
         let header = self.tray_header(&chat, &tray, open, &theme, cx);
-        let mut surface = crate::queue::queue_panel_surface(&theme, cx.has_active_drag())
+        let surface = crate::queue::queue_panel_surface(&theme, cx.has_active_drag())
             .debug_selector(|| "background-tray".into())
             .child(header);
-        if open {
+        // Its list slides open over the transcript and shut again, kept while it closes.
+        let list = {
             let mut list = div().flex().flex_col();
             if tray.main.working {
                 list = list.child(self.tray_main_row(&tray, now, &theme));
@@ -467,11 +475,15 @@ impl Composer {
             }
             if !ended.is_empty() {
                 list = list.child(self.tray_finished_fold(ended.len(), &theme, cx));
-                if self.tray.finished_open {
-                    for row in &ended {
-                        list = list.child(self.tray_row(row, now, focused, &theme, cx));
-                    }
+                let mut finished = div().flex().flex_col();
+                for row in &ended {
+                    finished = finished.child(self.tray_row(row, now, focused, &theme, cx));
                 }
+                list = list.child(motion::reveal_height(
+                    SharedString::from(format!("background-tray-finished-{chat}")),
+                    self.tray.finished_open,
+                    finished,
+                ));
             }
             let rows = crate::edge_fade::edge_faded(
                 Theme::TRANSCRIPT_FADE_BAND,
@@ -492,17 +504,20 @@ impl Composer {
                 .is_none()
                 .then(|| crate::popover::rail(self, "background-tray-scrollbar", &theme, cx))
                 .flatten();
-            surface = surface.child(
-                div()
-                    .id("background-tray-list")
-                    .relative()
-                    .mt(px(2.0))
-                    .pb(px(6.0))
-                    .on_hover(cx.listener(Self::on_popup_list_hover))
-                    .child(rows)
-                    .children(rail),
-            );
-        }
+            div()
+                .id("background-tray-list")
+                .relative()
+                .mt(px(2.0))
+                .pb(px(6.0))
+                .on_hover(cx.listener(Self::on_popup_list_hover))
+                .child(rows)
+                .children(rail)
+        };
+        let surface = surface.child(motion::reveal_height(
+            SharedString::from(format!("background-tray-reveal-{chat}")),
+            open,
+            list,
+        ));
         let card = crate::frost::frosted(crate::queue::PANEL_RADIUS, crate::frost::MENU_BLUR, surface);
         let tray = div()
             .id("background-tray")
@@ -514,17 +529,12 @@ impl Composer {
                 this.on_tray_key(event, window, cx)
             }))
             .child(card);
-        // slopty: open, the list rises over the transcript from the closed tray's place, so
-        // nothing above it moves (the chat kept its place while the tray opened).
-        let tray = if open {
-            div()
-                .relative()
-                .h(px(closed_height()))
-                .child(div().absolute().left_0().right_0().bottom_0().child(tray))
-                .into_any_element()
-        } else {
-            tray.into_any_element()
-        };
+        // slopty: the list rises over the transcript from the closed tray's place, so nothing
+        // above it moves (the chat kept its place while the tray opened).
+        let tray = div()
+            .relative()
+            .h(px(closed_height()))
+            .child(div().absolute().left_0().right_0().bottom_0().child(tray));
         Some(
             div()
                 .mx(px(inset))
@@ -566,8 +576,8 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .bg(motion::hover_blend(&toggle_hover, gpui::transparent_black(), crate::theme::ink(0.05)))
-            .hover_fade(toggle_hover)
+            // A header, not a button in the card: what it says brightens under the pointer.
+            .hover_fade(toggle_hover.clone())
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_tray(toggle_chat.clone(), open, cx)))
@@ -593,13 +603,22 @@ impl Composer {
                     .min_w_0()
                     .truncate()
                     .text_size(crate::typography::ui_rems(TEXT_SIZE))
-                    .text_color(if needs { theme.warning } else { theme.text_faint })
+                    .text_color(if needs {
+                        theme.warning
+                    } else {
+                        motion::hover_blend(&toggle_hover, theme.text_faint, theme.text_muted)
+                    })
                     .child(SharedString::from(words)),
             )
             .child(
-                icon(if open { icons::ALT_ARROW_DOWN } else { icons::ALT_ARROW_UP })
+                icon(icons::ALT_ARROW_UP)
                     .size(px(12.0))
-                    .text_color(theme.text_muted.opacity(0.7)),
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(if open {
+                        std::f32::consts::PI
+                    } else {
+                        0.0
+                    })))
+                    .text_color(motion::hover_blend(&toggle_hover, theme.text_muted.opacity(0.7), theme.text)),
             );
         let stop_all = (open && tray.can_stop_all).then(|| {
             let stopping = self.tray.stopping_all;
@@ -718,16 +737,20 @@ impl Composer {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ");
-        let glyph: AnyElement = if needs {
-            state_dot(format!("background-row-dot-{id}"), theme.warning, false)
+        // One glyph: the row's kind, in its state's colour; a finished one's check.
+        let glyph_color = if needs {
+            theme.warning
         } else if row.live {
-            state_dot(format!("background-row-dot-{id}"), if row.wakes { theme.accent } else { theme.text_muted }, row.wakes && row.state != "paused")
+            if row.wakes { theme.accent } else { theme.text_muted }
+        } else if row.state == "failed" {
+            theme.danger
         } else {
-            match row.state.as_str() {
-                "completed" => icon(icons::CHECK).size(px(11.0)).text_color(theme.success).into_any_element(),
-                "failed" => state_dot(format!("background-row-dot-{id}"), theme.danger, false),
-                _ => state_dot(format!("background-row-dot-{id}"), theme.warning, false),
-            }
+            theme.text_faint
+        };
+        let glyph: AnyElement = if !row.live && !needs && row.state == "completed" {
+            icon(icons::CHECK).size(px(12.0)).text_color(theme.success).into_any_element()
+        } else {
+            icon(kind_icon(&row.kind)).size(px(12.0)).text_color(glyph_color).into_any_element()
         };
         let state_color = if needs {
             theme.warning
@@ -771,7 +794,11 @@ impl Composer {
         };
         // Its details, open under it, and the button that opens them.
         let detail_open = self.tray.detail.as_deref() == Some(row.id.as_str());
-        let detail = detail_open.then(|| row_detail(row, now, theme));
+        let detail = motion::reveal_height(
+            SharedString::from(format!("background-row-detail-reveal-{id}")),
+            detail_open,
+            row_detail(row, now, theme),
+        );
         let detail_id = row.id.clone();
         let details_key: SharedString = format!("background-row-details-hover-{id}").into();
         let details = div()
@@ -840,7 +867,6 @@ impl Composer {
                             .items_center()
                             .gap(px(6.0))
                             .text_size(crate::typography::ui_rems(TEXT_SIZE))
-                            .child(icon(kind_icon(&row.kind)).size(px(12.0)).flex_none().text_color(theme.text_faint))
                             .when_some(lead, |el, lead| {
                                 el.child(
                                     div()
@@ -895,10 +921,7 @@ impl Composer {
             .child(details)
             .children(stop)
             .into_any_element();
-        match detail {
-            Some(detail) => div().flex().flex_col().child(line).child(detail).into_any_element(),
-            None => line,
-        }
+        div().flex().flex_col().child(line).child(detail).into_any_element()
     }
 
     /// "Finished · N": the rows that ended, folded.
@@ -917,8 +940,7 @@ impl Composer {
             .items_center()
             .gap(px(8.0))
             .cursor_pointer()
-            .bg(motion::hover_blend(&hover, gpui::transparent_black(), crate::theme::ink(0.05)))
-            .hover_fade(hover)
+            .hover_fade(hover.clone())
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -931,12 +953,21 @@ impl Composer {
                     .flex_none()
                     .flex()
                     .justify_center()
-                    .child(icon(if open { icons::ALT_ARROW_DOWN } else { icons::ALT_ARROW_RIGHT }).size(px(12.0)).text_color(theme.text_faint)),
+                    .child(
+                        icon(icons::ALT_ARROW_RIGHT)
+                            .size(px(12.0))
+                            .with_transformation(gpui::Transformation::rotate(gpui::radians(if open {
+                                std::f32::consts::FRAC_PI_2
+                            } else {
+                                0.0
+                            })))
+                            .text_color(motion::hover_blend(&hover, theme.text_faint, theme.text_muted)),
+                    ),
             )
             .child(
                 div()
                     .text_size(crate::typography::ui_rems(SUB_SIZE))
-                    .text_color(theme.text_faint)
+                    .text_color(motion::hover_blend(&hover, theme.text_faint, theme.text_muted))
                     .child(SharedString::from(format!("Finished · {count}"))),
             )
             .into_any_element()

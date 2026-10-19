@@ -123,10 +123,20 @@ pub fn tray(
         let agent_type = agent_type?;
         state.agents.iter().find(|kind| kind.name == agent_type).and_then(|kind| kind.model.clone())
     };
+    // A task's chat: the one it names, else the one its call started (a subagent taken up again
+    // names none).
+    let child_of = |task: &BackgroundTask| {
+        children.iter().find(|c| {
+            task.child == Some(c.row.id)
+                || task.item.as_ref().is_some_and(|item| {
+                    c.row.parent.as_ref().is_some_and(|link| link.item == *item)
+                })
+        })
+    };
     let mut rows: Vec<WorkRow> = Vec::new();
     for task in &state.tasks {
         let (kind, noun) = kind_of(&task.kind);
-        let child = task.child.and_then(|id| children.iter().find(|c| c.row.id == id));
+        let child = child_of(task);
         let needs_you = child.and_then(|c| child_asks(c.row));
         let usage = task.usage;
         let live = task.is_live();
@@ -156,7 +166,7 @@ pub fn tray(
             timeout_ms: task.timeout_ms,
             persistent: task.persistent,
             call_part_id: task.item.as_ref().map(|item| item.0.clone()),
-            chat_id: task.child.map(chat_of),
+            chat_id: child.map(|c| chat_of(c.row.id)),
             parent: task.parent.as_deref().map(task_row),
             depth: 0,
             can_stop: live && can_stop_task,
@@ -164,7 +174,7 @@ pub fn tray(
     }
     // The chats it started that no task stands for.
     for child in children {
-        if state.tasks.iter().any(|task| task.child == Some(child.row.id)) {
+        if state.tasks.iter().any(|task| child_of(task).is_some_and(|c| c.row.id == child.row.id)) {
             continue;
         }
         let row = child.row;

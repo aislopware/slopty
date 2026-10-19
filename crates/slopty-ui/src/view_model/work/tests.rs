@@ -159,6 +159,21 @@ fn a_child_that_needs_you_sits_first() {
     assert_eq!(tasked_task.chat_id, Some(tasked.meta.id.to_string()));
 }
 
+/// A subagent's task that names no chat (one taken up again) is its chat's row still, found by
+/// the call that started both: the tray lists it once.
+#[test]
+fn a_task_is_its_calls_chat() {
+    let mut state = thread_with(&[Cap::STOP_TASK]);
+    let child = child_of(&state, "call-3", Phase::Working);
+    let child_row = child.row(ms(9));
+    let mut agent = task("a3", BackgroundTask::AGENT, 2);
+    agent.item = Some(ItemId("call-3".to_owned()));
+    state.tasks = vec![agent];
+    let tray = tray(&state, &[Child { row: &child_row }], &chat_of);
+    assert_eq!(tray.rows.len(), 1, "{:?}", tray.rows.iter().map(|row| &row.id).collect::<Vec<_>>());
+    assert_eq!(tray.rows[0].chat_id, Some(child.meta.id.to_string()));
+}
+
 /// Work a subagent started follows it, one deeper; ended rows are kept to a few.
 #[test]
 fn a_tasks_own_work_follows_it() {

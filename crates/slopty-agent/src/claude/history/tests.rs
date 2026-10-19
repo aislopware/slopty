@@ -983,3 +983,73 @@ fn a_session_at_rest_runs_nothing_it_started() {
     let ended: Vec<Option<WallMs>> = tasks.iter().map(|t| t.ended_ms).collect();
     assert!(ended.iter().all(|at| *at == Some(last)), "as of its last entry: {ended:?}");
 }
+
+/// Claude Code taken up again says in one notice which of its subagents the session before it
+/// left unfinished: each of them stops, though the notice names no call, and so does whatever
+/// else that session left running, named or not.
+#[test]
+fn one_notice_stops_every_subagent_it_names() {
+    use serde_json::json;
+    let (mut history, mut host, mut decoder) =
+        (observed(), Host::default(), Conversation::default());
+    host.take(history.drain());
+    let agent = json!({ "description": "Lane", "prompt": "go", "run_in_background": true });
+    let launched = |id: &str| json!({ "isAsync": true, "status": "async_launched", "agentId": id });
+    let command =
+        json!({ "command": "sleep 600", "description": "Fuzz", "run_in_background": true });
+    let content = "<task-notification>\n<task-id>a1</task-id>\n<task-id>a2</task-id>\n\
+                   <status>stopped</status>\n<summary>2 background agents didn't finish before the \
+                   previous session ended</summary>\n</task-notification>";
+    feed(
+        &mut history,
+        &mut host,
+        &mut decoder,
+        &[
+            records::prompt("p1", 0, None),
+            records::call("c1", 1, None, "toolu_a", "Agent", &agent),
+            records::result("r1", 2, None, "toolu_a", &launched("a1")),
+            records::call("c2", 3, None, "toolu_b", "Agent", &agent),
+            records::result("r2", 4, None, "toolu_b", &launched("a2")),
+            records::prompt("s1", 5, Some("a1")),
+            records::prompt("s2", 5, Some("a2")),
+            records::call("c3", 6, None, "toolu_c", "Bash", &command),
+            records::result("r3", 7, None, "toolu_c", &json!({ "backgroundTaskId": "b1" })),
+            json!({ "type": "queue-operation", "operation": "enqueue", "timestamp": records::at(9), "content": content }),
+        ],
+    );
+    for agent in ["a1", "a2"] {
+        let sub = host.thread(history.main().subagent(agent));
+        assert_eq!(sub.status.phase, Phase::Stopped, "{agent}");
+    }
+    let live: Vec<_> =
+        host.thread(history.main()).tasks.iter().filter(|t| t.is_live()).map(|t| &t.id).collect();
+    assert!(live.is_empty(), "nothing the session before ran runs on: {live:?}");
+}
+
+/// A command stopped by the model's `TaskStop` ends by its result: Claude Code writes no notice
+/// for it.
+#[test]
+fn a_task_stopped_by_a_call_ends() {
+    use serde_json::json;
+    let (mut history, mut host, mut decoder) =
+        (observed(), Host::default(), Conversation::default());
+    host.take(history.drain());
+    let command =
+        json!({ "command": "sleep 600", "description": "Fuzz", "run_in_background": true });
+    let stop = json!({ "task_id": "b1" });
+    let stopped = json!({ "message": "Successfully stopped task: b1", "task_id": "b1", "task_type": "local_bash" });
+    feed(
+        &mut history,
+        &mut host,
+        &mut decoder,
+        &[
+            records::prompt("p1", 0, None),
+            records::call("c1", 1, None, "toolu_a", "Bash", &command),
+            records::result("r1", 2, None, "toolu_a", &json!({ "backgroundTaskId": "b1" })),
+            records::call("c2", 3, None, "toolu_b", "TaskStop", &stop),
+            records::result("r2", 4, None, "toolu_b", &stopped),
+        ],
+    );
+    let tasks = &host.thread(history.main()).tasks;
+    assert!(tasks.iter().all(|t| !t.is_live()), "{tasks:?}");
+}

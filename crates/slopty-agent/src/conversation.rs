@@ -190,6 +190,9 @@ struct Notice {
     event: Option<String>,
     /// When the record carrying it was written.
     at_ms: WallMs,
+    /// The tasks it names past the first: one notice ends several when the session that ran
+    /// them ended ("4 background agents didn't finish before the previous session ended").
+    more_tasks: Vec<String>,
 }
 
 /// The words a subagent's notice says when it stopped with background work of its own still
@@ -1033,6 +1036,13 @@ impl Conversation {
         let text = text.filter(|t| !t.text.is_empty() || images.is_empty());
         call.result = Some(ToolResult { status, text, at_ms: ctx.at_ms, images, said: said.line });
         let changed_tasks = task_change(&call.detail, call.result.as_ref());
+        // A task stopped by a call (`TaskStop`) says so in no notice: the call's result is its end.
+        let stopped = (status == ResultStatus::Ok
+            && matches!(call.name.as_str(), "TaskStop" | "KillShell" | "KillBash"))
+        .then(|| {
+            structured.and_then(|r| string_at(r, "task_id").or_else(|| string_at(r, "shell_id")))
+        })
+        .flatten();
         let task = match &call.detail {
             ToolDetail::Agent(agent) => agent.agent_id.clone(),
             ToolDetail::Bash(bash) => bash.task_id.clone(),
@@ -1053,6 +1063,15 @@ impl Conversation {
             change.apply(&mut t.tasks);
             batch.tasks(&thread, t.tasks.clone());
         }
+        if let Some(task) = stopped {
+            let notice = Notice {
+                task_id: Some(task),
+                status: Some("stopped".to_owned()),
+                at_ms: ctx.at_ms,
+                ..Notice::default()
+            };
+            self.notice(notice, batch);
+        }
     }
 
     /// Whether call `id` is one that starts background work: a command or a subagent.
@@ -1064,7 +1083,57 @@ impl Conversation {
         })
     }
 
-    fn notice(&mut self, notice: Notice, batch: &mut Batch) {
+    /// The calls started before `at` that still run: a command or a subagent, in the background
+    /// or not.
+    fn running_before(&self, at: WallMs) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .calls
+            .iter()
+            .filter_map(|(id, thread)| {
+                let entry = self.threads.get(thread)?.get(id)?;
+                let Body::Tool(call) = &entry.body else { return None };
+                let running = match &call.detail {
+                    ToolDetail::Bash(bash) => bash.status == ShellStatus::Running,
+                    ToolDetail::Agent(agent) => {
+                        matches!(agent.status, AgentRun::Running | AgentRun::Waiting)
+                    }
+                    _ => false,
+                };
+                (running && entry.at_ms < at).then(|| id.clone())
+            })
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn notice(&mut self, mut notice: Notice, batch: &mut Batch) {
+        let more_tasks = std::mem::take(&mut notice.more_tasks);
+        // Claude Code taken up again says which of its tasks the session before it left
+        // unfinished, though not all of them: whatever that session started and left running
+        // ended with it.
+        if notice.summary.as_deref().is_some_and(|said| said.contains(PREVIOUS_SESSION_ENDED))
+            && !notice.at_ms.is_zero()
+        {
+            for id in self.running_before(notice.at_ms) {
+                let ended = Notice {
+                    task_id: None,
+                    tool_use_id: Some(id),
+                    status: Some("stopped".to_owned()),
+                    summary: None,
+                    result: None,
+                    usage: (None, None, None),
+                    ..notice.clone()
+                };
+                self.notice(ended, batch);
+            }
+        }
+        // Each other task it names ends by it too, found by its task: it names no call for them.
+        for task in more_tasks {
+            self.notice(
+                Notice { task_id: Some(task), tool_use_id: None, summary: None, ..notice.clone() },
+                batch,
+            );
+        }
         // The call that started the task: the one the notice names, unless that is another
         // (the `SendMessage` that took a subagent up again), else the one its task names.
         let by_task = notice.task_id.as_ref().and_then(|task| self.task_calls.get(task)).cloned();
@@ -1906,6 +1975,10 @@ fn task_change(detail: &ToolDetail, result: Option<&ToolResult>) -> Option<TaskC
     }
 }
 
+/// What Claude Code's notice says of tasks a session left unfinished when it ended, read by
+/// the session that took it up again.
+const PREVIOUS_SESSION_ENDED: &str = "before the previous session ended";
+
 /// A `<task-notification>` in a queued command or a user record.
 fn parse_notice(text: &str) -> Option<Notice> {
     let body = tag(text, "task-notification")?;
@@ -1920,6 +1993,12 @@ fn parse_notice(text: &str) -> Option<Notice> {
         usage: usage_in(body),
         event: tag(body, "event").map(|v| v.trim().to_owned()),
         at_ms: WallMs::ZERO,
+        more_tasks: body
+            .split("<task-id>")
+            .skip(2)
+            .filter_map(|rest| Some(rest.split_once("</task-id>")?.0.trim().to_owned()))
+            .filter(|task| !task.is_empty())
+            .collect(),
     })
 }
 

@@ -12561,7 +12561,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     scrolls the transcript to the call that started it and opens a subagent's card
     (`background_tray::CallReveal`). A transcript row's link opens the tray at its row
     (`WorkReveal`). The tray opens by itself while something needs the person, until the person
-    folds it.
+    folds it. Since 2026-10-19 its list, its Finished fold and a row's details slide open and
+    shut (`motion::reveal_height`) and the header is a header, not a button in the card: no tile
+    under the pointer, its words and chevron brighten, the chevron turns. A row has one glyph,
+    its kind in its state's colour (a check once done), and its line under the title is plain
+    words (a `<br>` an agent wrote breaks it). The checklist tray took the same slide and header,
+    in place of zeron's fade.
   - **The footer.** It always sits under the composer, right-aligned.
     - The agent's status line, its ANSI and hex colours kept.
     - Mods' status segments.

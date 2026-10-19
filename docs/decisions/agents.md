@@ -3952,3 +3952,13 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   background tasks, and the session's, ended with it. A subagent's own tasks also end when the
   subagent does (`a_subagent_taken_up_again_ends_by_its_tasks_notice`,
   `a_session_at_rest_runs_nothing_it_started`).
+  The same day a live session still listed five subagents from a day before. Claude Code
+  restarted writes one notice naming every task the session before it left unfinished ("4
+  background agents didn't finish before the previous session ended"), and the decoder read only
+  its first task; it now ends each one. That notice also leaves some out (a subagent waiting on
+  its own work, commands it never listed), so it stands for the restart itself: every command or
+  subagent started before it and still running stops then. A task the model stopped with
+  `TaskStop` ends by that call's result, since no notice follows it
+  (`one_notice_stops_every_subagent_it_names`, `a_task_stopped_by_a_call_ends`). The tray matches
+  a subagent's task to its chat by the call that started both, so one taken up again is one row,
+  not two (`a_task_is_its_calls_chat`).
