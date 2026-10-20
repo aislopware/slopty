@@ -95,14 +95,27 @@ impl WorkspaceView {
     /// Answer what waited on the workspace and is there now.
     fn live_settle(&mut self, cx: &mut Context<Self>) {
         self.live_settle_again(cx);
+        self.live_settle_opens(cx);
         self.live_settle_terminals(cx);
         self.live_publish_previews(cx);
     }
 
-    /// The machine and folder a chat of the interface stands in: its thread's, one made in the
-    /// interface and not started, or a project's new-session canvas (`space-canvas:{space}`).
-    /// `params.targetDeviceId`, when given, names the machine.
+    /// The machine and folder a chat of the interface stands in ([`Self::live_chat_place`]),
+    /// else the machine in context.
     fn live_place(
+        &self,
+        params: &serde_json::Value,
+        cx: &Context<Self>,
+    ) -> Option<(WorkerKey, Option<String>)> {
+        self.live_chat_place(params, cx)
+            .or_else(|| self.context_worker().map(|worker| (worker, None)))
+    }
+
+    /// The machine and folder the chat `params.chatId` itself names: its thread's, one made in
+    /// the interface and not started, or a project's new-session canvas (`space-canvas:{space}`).
+    /// `params.targetDeviceId`, when given, names the machine. `None` while the workspace knows
+    /// no such chat or machine (yet).
+    fn live_chat_place(
         &self,
         params: &serde_json::Value,
         cx: &Context<Self>,
@@ -121,7 +134,7 @@ impl WorkspaceView {
             let cwd = self.thread_place(thread).and_then(|place| place.cwd.clone());
             return Some((target.unwrap_or(worker), cwd));
         }
-        target.or_else(|| self.context_worker()).map(|worker| (worker, None))
+        target.map(|worker| (worker, None))
     }
 
     /// The terminal `id`, in the frame the shell's `look` says; `None` until it is attached.

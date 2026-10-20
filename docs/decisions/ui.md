@@ -14363,3 +14363,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   "Last seen" moving on by the minute, the hour or the day it says
   (`a_silent_machine_goes_offline_by_the_page_s_own_clock`,
   `presence_changes_when_its_words_do`).
+- ✅ **A shell asked for ahead of its machine waits for the machine (2026-10-20).** A dock left
+  open, or an agent's call, asks for a chat's shell at launch, before the app's link to the
+  machine is up and before its items arrive. The workspace refused such an open at once, and
+  the dock's panel kept trying again; an open that landed between the link and the items found
+  no shell kept for the chat and opened a second one, the first running unseen. The workspace
+  now holds the open until the chat's machine is linked and its items are here, so it finds
+  the kept shell first. A chat naming no machine yet waits until every machine is linked and
+  synced, then opens on the one in context. The open is refused, in the same words, only after
+  `AGAIN_GRACE` (20 s, the wait for a terminal asked for again by its id), and the panel's own
+  retry is gone, so every caller gets the wait
+  (`live::terminals::tests::a_shell_asked_for_ahead_of_its_machine_is_the_one_kept_for_its_chat`,
+  `a_shell_whose_machine_never_links_is_refused_after_the_grace`).

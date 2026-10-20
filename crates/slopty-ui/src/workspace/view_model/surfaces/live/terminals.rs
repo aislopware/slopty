@@ -6,6 +6,12 @@
 //! shell. A tab the app showed when it last ran asks for its terminal again by
 //! its id (`terminalId`): shown once its machine says it still runs, refused once it ended or
 //! [`AGAIN_GRACE`] passed with its machine silent of it.
+//!
+//! The app's links to its machines, and their items, come after the app does, and a tab opened
+//! at launch asks ahead of them. A shell is opened only once the chat's machine is linked and
+//! its items are here, so the one kept for the chat is found rather than a second one opened
+//! beside it; until then the open waits, and it is refused as out of reach (or as having no
+//! machine) only once [`AGAIN_GRACE`] passed.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -22,7 +28,7 @@ use slopty_view_proto::TerminalSession;
 use slopty_view_rpc::{RpcError, RpcReply};
 use tokio::sync::oneshot;
 
-use super::{Live, LiveLook, LiveView, later, now, param};
+use super::{Live, LiveLook, LiveView, later, param};
 use crate::workspace::WorkspaceView;
 
 /// The fact a shell opened for the interface carries: the chat it was opened for.
@@ -31,8 +37,9 @@ const CHAT: &str = crate::workspace::CHAT_FACT;
 /// Where an open's answer goes.
 type Reply = oneshot::Sender<Result<RpcReply, RpcError>>;
 
-/// How long a terminal asked for again by its id is waited for: the app's links to its machines,
-/// and their sessions, come back after the app does.
+/// How long a terminal asked for again by its id, or a shell asked for ahead of its machine's
+/// link and items, is waited for: the app's links to its machines, and their sessions and
+/// items, come back after the app does.
 pub(super) const AGAIN_GRACE: Duration = Duration::from_secs(20);
 
 /// The terminals asked for, coming and shown.
@@ -47,6 +54,9 @@ pub(super) struct Terminals {
     /// Terminals asked for again by their id, by session: the chat, the answer, and until when
     /// its machine is waited for.
     again: HashMap<SessionId, (String, Reply, Instant)>,
+    /// Shells asked for before the chat's machine was linked and its items here, in the order
+    /// asked: the call, the answer, and until when its machine is waited for.
+    early: Vec<(serde_json::Value, Reply, Instant)>,
 }
 
 /// The program a session runs, as a tab names it: the command's last path part.
@@ -70,34 +80,101 @@ impl WorkspaceView {
     }
 
     /// A terminal for `params.chatId` as [`Self::live_open_terminal`] opens one, running `script`
-    /// on `key` where one is named, in a fresh terminal of its own.
+    /// on `key` where one is named, in a fresh terminal of its own. A shell for the chat waits
+    /// for its machine's link and items ([`Self::live_settle_opens`]); a script runs at once.
     pub(in crate::workspace) fn live_open_session(
         &mut self,
         params: &serde_json::Value,
         script: Option<(WorkerKey, RunScript)>,
         cx: &mut Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
+        let (reply, answer) = oneshot::channel();
+        if script.is_some() {
+            self.live_open_now(params, script, reply, cx);
+            return later(answer, cx);
+        }
+        let now = cx.background_executor().now();
+        let until = now.checked_add(AGAIN_GRACE).unwrap_or(now);
+        cx.default_global::<Live>().terminals.early.push((params.clone(), reply, until));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(AGAIN_GRACE).await;
+            let _gone = this.update(cx, Self::live_settle_opens);
+        })
+        .detach();
+        self.live_settle_opens(cx);
+        later(answer, cx)
+    }
+
+    /// Open each shell asked for ahead of its machine whose machine is linked and whose items
+    /// are here now, or whose wait is over: the open then finds the shell kept for its chat, or
+    /// opens one, or says why it can't.
+    pub(in crate::workspace) fn live_settle_opens(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = cx.try_global::<Live>() else { return };
+        if live.terminals.early.is_empty() {
+            return;
+        }
+        let early = std::mem::take(&mut cx.global_mut::<Live>().terminals.early);
+        let now = cx.background_executor().now();
+        let mut waiting = Vec::new();
+        for (params, reply, until) in early {
+            if reply.is_closed() {
+                continue;
+            }
+            if now < until && !self.live_open_ready(&params, cx) {
+                waiting.push((params, reply, until));
+                continue;
+            }
+            self.live_open_now(&params, None, reply, cx);
+        }
+        let terminals = &mut cx.global_mut::<Live>().terminals;
+        waiting.append(&mut terminals.early);
+        terminals.early = waiting;
+    }
+
+    /// Whether the shell `params` asks for can be opened now: the chat's machine is linked and
+    /// its items are here. A chat that names no machine the workspace knows yet opens on the
+    /// machine in context once every machine is.
+    fn live_open_ready(&self, params: &serde_json::Value, cx: &Context<Self>) -> bool {
+        let ready = |key: &WorkerKey| {
+            self.workers.get(key).is_some_and(|w| w.is_linked() && !w.awaiting_snapshot)
+        };
+        match self.live_chat_place(params, cx) {
+            Some((key, _)) => ready(&key),
+            None => !self.workers.is_empty() && self.workers.keys().all(ready),
+        }
+    }
+
+    /// [`Self::live_open_session`] now, its answer to `reply`.
+    fn live_open_now(
+        &mut self,
+        params: &serde_json::Value,
+        script: Option<(WorkerKey, RunScript)>,
+        reply: Reply,
+        cx: &mut Context<Self>,
+    ) {
         let chat = param(params, "chatId").unwrap_or_default().to_owned();
         let place = match &script {
             Some((key, script)) => Some((*key, Some(script.cwd.clone()))),
             None => self.live_place(params, cx),
         };
         let Some((key, cwd)) = place else {
-            return now(Err(RpcError::Failed("no machine to open a terminal on".to_owned())));
+            let why = "no machine to open a terminal on".to_owned();
+            let _gone = reply.send(Err(RpcError::Failed(why)));
+            return;
         };
         let cwd = param(params, "cwd").filter(|_| script.is_none()).map(str::to_owned).or(cwd);
-        let (reply, answer) = oneshot::channel();
         if script.is_none()
             && let Some(session) = self.live_kept_shell(key, &chat, cx)
         {
             self.live_hold(session, &chat, cx);
-            cx.global_mut::<Live>().terminals.coming.insert(session, (chat, reply));
+            cx.default_global::<Live>().terminals.coming.insert(session, (chat, reply));
             self.live_settle_terminals(cx);
-            return later(answer, cx);
+            return;
         }
         if !self.reachable_for(key, "the terminal", cx) {
             let name = self.workers.get(&key).map(|w| w.name.clone()).unwrap_or_default();
-            return now(Err(RpcError::Failed(format!("{name} is out of reach"))));
+            let _gone = reply.send(Err(RpcError::Failed(format!("{name} is out of reach"))));
+            return;
         }
         let size = |key: &str, default: u16| {
             params
@@ -120,10 +197,9 @@ impl WorkspaceView {
         };
         let request = self.next_open.get();
         self.next_open.set(request.wrapping_add(1));
-        cx.global_mut::<Live>().terminals.asked.insert((key, request), (chat, reply));
+        cx.default_global::<Live>().terminals.asked.insert((key, request), (chat, reply));
         tracing::debug!(%key, request, cwd = ?spec.cwd, "a terminal for the interface");
         self.send(key, ClientMsg::OpenSession { request, spec });
-        later(answer, cx)
     }
 
     /// Terminal `session` for `chat` again, which a tab showed when the app last ran: answered
@@ -135,7 +211,8 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Task<Result<RpcReply, RpcError>> {
         let (reply, answer) = oneshot::channel();
-        let until = Instant::now().checked_add(AGAIN_GRACE).unwrap_or_else(Instant::now);
+        let now = cx.background_executor().now();
+        let until = now.checked_add(AGAIN_GRACE).unwrap_or(now);
         let terminals = &mut cx.global_mut::<Live>().terminals;
         if let Some((_, earlier, _)) = terminals.again.insert(session, (chat, reply, until)) {
             let _gone = earlier.send(Err(RpcError::Failed("Asked again".to_owned())));
@@ -158,7 +235,7 @@ impl WorkspaceView {
         }
         let again = std::mem::take(&mut cx.global_mut::<Live>().terminals.again);
         let mut waiting = HashMap::new();
-        let now = Instant::now();
+        let now = cx.background_executor().now();
         for (session, (chat, reply, until)) in again {
             if reply.is_closed() {
                 continue;
@@ -353,10 +430,15 @@ impl WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext};
-    use slopty_core::SessionId;
-    use slopty_proto::items::{ItemKind, ItemSync};
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+    use slopty_core::{ItemId, SessionId};
+    use slopty_proto::ClientMsg;
+    use slopty_proto::items::{Item, ItemKind, ItemSync};
     use slopty_theme::Theme;
+    use slopty_view_rpc::methods;
 
     use crate::workspace::WorkspaceView;
     use crate::workspace::rig::{KEY, link, mac, shell};
@@ -425,5 +507,82 @@ mod tests {
         assert_eq!(again, [unknown], "only the one its machine never spoke of waits");
         assert_eq!(coming, [runs], "the one that runs is shown again");
         assert_eq!(held, [ItemKind::Terminal { session: runs }]);
+    }
+
+    /// The shells waiting for their machine, and those come or shown, as `workspace` has them.
+    fn opens(
+        workspace: &gpui::Entity<WorkspaceView>,
+        cx: &VisualTestContext,
+    ) -> (usize, Vec<SessionId>) {
+        workspace.read_with(cx, |_, cx| {
+            let terminals = &cx.global::<super::Live>().terminals;
+            let come = terminals.coming.keys().chain(&terminals.shown).copied().collect();
+            (terminals.early.len(), come)
+        })
+    }
+
+    /// A tab opened at launch asks for its chat's shell before the app's link to the machine is
+    /// up and before the machine's items are here. It waits for both, then gets the shell kept
+    /// for its chat, never a second one opened beside it.
+    #[gpui::test]
+    fn a_shell_asked_for_ahead_of_its_machine_is_the_one_kept_for_its_chat(
+        cx: &mut TestAppContext,
+    ) {
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        let kept = SessionId::new();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let ask = serde_json::json!({ "chatId": "chat-1", "cols": 80, "rows": 24 });
+        let _answer =
+            workspace.update(cx, |v, cx| v.live_surface_call(methods::OPEN_TERMINAL, &ask, cx));
+        cx.run_until_parked();
+        assert_eq!(opens(&workspace, cx), (1, Vec::new()), "waits for the link");
+
+        let mut rx = link(&workspace, cx, mac(|_| {}), vec![shell(kept)]);
+        assert_eq!(opens(&workspace, cx), (1, Vec::new()), "and for the machine's items");
+
+        let facts = BTreeMap::from([(super::CHAT.to_owned(), "chat-1".to_owned())]);
+        let item = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Terminal { session: kept },
+            name: None,
+            facts,
+        };
+        workspace.update(cx, |v, cx| {
+            v.apply_sync(KEY, ItemSync::Snapshot { version: 1, items: vec![item] }, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(opens(&workspace, cx), (0, vec![kept]), "the shell kept for the chat");
+        let opened = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|msg| matches!(msg, ClientMsg::OpenSession { .. }))
+            .count();
+        assert_eq!(opened, 0, "no second shell");
+    }
+
+    /// A shell asked for on a machine whose link never comes up waits out [`super::AGAIN_GRACE`]
+    /// and is then refused, saying why.
+    #[gpui::test]
+    fn a_shell_whose_machine_never_links_is_refused_after_the_grace(cx: &mut TestAppContext) {
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let ask = serde_json::json!({ "chatId": "chat-1" });
+        let answer =
+            workspace.update(cx, |v, cx| v.live_surface_call(methods::OPEN_TERMINAL, &ask, cx));
+        let mut answer = answer.expect("a live surface's call");
+        cx.executor().advance_clock(super::AGAIN_GRACE.saturating_sub(Duration::from_secs(1)));
+        cx.run_until_parked();
+        assert!(futures::FutureExt::now_or_never(&mut answer).is_none(), "still waits");
+        assert_eq!(opens(&workspace, cx), (1, Vec::new()));
+
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let refused =
+            futures::FutureExt::now_or_never(answer).expect("answered once the wait is over");
+        let Err(slopty_view_rpc::RpcError::Failed(why)) = refused else {
+            panic!("refused, not opened");
+        };
+        assert_eq!(why, "studio is out of reach");
+        assert_eq!(opens(&workspace, cx), (0, Vec::new()), "and waits no more");
     }
 }
