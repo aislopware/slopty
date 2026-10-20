@@ -17821,3 +17821,46 @@ worker's 10 s hello wait.
 
 The same lane warm, the next three-crate check (slopty-shell, slopty-client, xtask) took 1 min
 27 s: lint 19 s, the spawned binaries 11 s, nextest 43 s with the tests running 22.6 s.
+
+## 2026-10-20 — the new-thread glyph field's frame
+
+mac-studio, release. The wind is lit on the CPU for a 1060 × 880 pane at 2× (the e2e window):
+11 152 cells, one sample per two columns, 600 frames after 60 of warm-up, the clock stepping at
+25 frames a second. The figures come from a scratch harness that compiles
+`new_thread_background_field.rs` alone (its `light` is pure); a release build of the whole shell
+ran past an hour at that day's load, and the test below runs the same loop in the crate. Per
+frame, the uncontended figure (each run's minimum and p50 agree when the Mac is idle; under a
+load average of 200 the p50 is the machine's, not the field's):
+
+| scenario | lit cells | before | after |
+| --- | --- | --- | --- |
+| calm | 4 283 | 6.09 ms | 0.86 ms |
+| three taps rippling | 7 158 | 7.3 ms (one tap) | 1.01 ms |
+
+What took it there, each kept only when the frames matched the one before it pixel for pixel
+(within float rounding):
+
+1. The noise's per-frame terms (each z plane's hashes and fades) once a frame, the sway (turn
+   and eddy) on a grid of every second sample read bilinearly, the leading edge read from the
+   still field 56 pt ahead rather than lit again, and the calm split into its two axes:
+   6.09 → 3.15 ms.
+2. Each row's gust octaves batched eight samples at a time in plain arrays, which the compiler
+   vectorises, and a polynomial cosine: 3.15 → 1.12 ms, a mean over the run. The table's
+   0.86 ms is the per-frame minimum of a later run, which a loaded Mac does not skew.
+3. A tap's age terms (its radius, width, decays) once a frame rather than at every sample, and
+   a sample ahead of a front by more than its leading edge (a heart's at its farthest, 1.5 of a
+   circle's) skipped whole: three taps 2.66 → 1.01 ms.
+
+At 25 frames a second the calm field is 0.86 ms in 40, about 2 % of one core. Drawing the lit
+cells is GPUI's `paint_glyph` per cell, the path the terminal takes, where 12 000 glyphs cost
+about 0.5 ms a frame (2026-09-26 above), so the field's 4 000 to 7 000 add 0.2 to 0.3 ms; the
+backdrop beneath is one textured quad from an image made once a theme. After its 180 s budget
+the field rests on a still frame and asks for none; in a hidden or background window, and under
+reduced motion, it asks for none from the first (`next_frame` is `None`; the tests
+`a_window_in_the_background_asks_the_field_for_no_frames`,
+`the_field_rests_after_its_budget_and_a_stir_wakes_it` and
+`reduced_motion_holds_the_field_still`).
+
+```sh
+cargo test -p slopty-shell --release --lib wind_frame_cost -- --ignored --nocapture
+```

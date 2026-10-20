@@ -1,18 +1,22 @@
 Window
+Button │ Filter projects: All projects
+Button │ Working, 1
 Button │ background sleep 600
 Status │ Background work
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
+Paragraph │ Done: it runs in the background.
 Button │ Copy message
 Article │ You
 Paragraph │ monitor
 Button │ Copy message
 Button │ Rewind…
 Article │ Claude Code
-Button │ Monitor "Watch the build log" stream ended · 0s · Watch the build log │ completed
+Button │ Monitor "Watch the build log" stream ended · <1s │ completed
 Paragraph │ Done: the build log ended.
-Button │ Copy message
 Group │ Background work
 Button │ Collapse background work │ 1 command
 Button │ Stop all
@@ -22,7 +26,6 @@ MultilineTextInput │ Do anything…
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel
@@ -31,4 +34,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

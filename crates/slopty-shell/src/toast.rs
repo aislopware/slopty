@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Global, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, App, Global, InteractiveElement as _, IntoElement, ParentElement as _, prelude::FluentBuilder as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Task, Window, div, point, px,
 };
 
@@ -41,6 +41,12 @@ const SWIPE_THRESHOLD: f32 = 45.0;
 // slopty: a toast's button, and at most the line of words it sits on, which it overhangs.
 const ACTION_HEIGHT: f32 = 24.0;
 const LINE_HEIGHT: f32 = 16.0;
+// slopty: the content's side padding, its lead's width, and the gap after the lead.
+const PAD_X: f32 = 14.0;
+const LEAD: f32 = 16.0;
+const LEAD_GAP: f32 = 10.0;
+/// A button's side padding.
+const ACTION_PAD: f32 = 8.0;
 /// Sonner's `cubic-bezier(.215, .61, .355, 1)`.
 const EASE: CubicBezier = CubicBezier::new(0.215, 0.61, 0.355, 1.0);
 
@@ -119,6 +125,9 @@ struct Toast {
     closing: Option<Instant>,
     /// Natural height, measured each paint.
     height: f32,
+    // slopty: words too long for one line beside the button put it on a row of its own.
+    /// Its button stands under its words, which take more than a line beside it.
+    action_below: bool,
     bottom: Option<Glide>,
     clip: Option<Glide>,
     swipe: f32,
@@ -220,6 +229,7 @@ fn push_for(
             clip: None,
             swipe: 0.0,
             swipe_from: None,
+            action_below: false,
         });
     }
     let id = store.next_id;
@@ -754,6 +764,7 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
         let message = toast.message.clone();
         let progress = toast.progress;
         let copied = copied_ids.contains(&id);
+        let below = toast.action_below;
         // slopty: its button, after the words: sonner's small action (24 tall, 12 px, a quiet
         // fill), its overhang taken back so the toast keeps the height of its line.
         let action = toast.action.clone().map(|action| {
@@ -771,7 +782,8 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
             .flex_none()
             .min_h(px(ACTION_HEIGHT))
             .h(px(ACTION_HEIGHT))
-            .my(px(-(ACTION_HEIGHT - LINE_HEIGHT) / 2.0))
+            // slopty: beside the words it overhangs their first line; under them it stands whole.
+            .when(!below, |action| action.my(px(-(ACTION_HEIGHT - LINE_HEIGHT) / 2.0)))
             .px(px(8.0))
             .py(px(0.0))
             .rounded(px(6.0))
@@ -781,32 +793,78 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
                 dismiss(id, cx);
             })
         });
+        // slopty: everything sits on the words' first line (opencode's toast): the lead in a cell
+        // of that line's height, the buttons overhanging it, and a button whose words would
+        // wrap beside it on its own row under them, from where the words start.
+        let has_action = action.is_some();
+        let has_copy = kind == ToastKind::Error;
+        let measured = message.clone();
         let content = div()
             .id(("toast-content", id as usize))
             .w_full()
             .flex()
             .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .px(px(14.0))
+            .flex_wrap()
+            .items_start()
+            .gap_x(px(LEAD_GAP))
+            .px(px(PAD_X))
             .py(px(13.0))
             .text_size(crate::typography::ui_rems(13.0))
+            .line_height(px(LINE_HEIGHT))
             .text_color(theme.text)
-            .child(lead(kind, progress, id, &theme))
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(LINE_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .child(lead(kind, progress, id, &theme)),
+            )
             // slopty: an error clamps at four lines and shows whole while the stack is hovered.
             .child({
                 // slopty: a hyphenated name ("e2e-worker") never breaks across two lines.
                 let words = div().flex_1().min_w_0().child(SharedString::from(names_kept_whole(&message)));
                 if kind == ToastKind::Error && !expanded { words.line_clamp(4) } else { words }
             })
-            .children((kind == ToastKind::Error).then(|| {
-                error_copy_button(id, copied, &theme).into_any_element()
+            .children(has_copy.then(|| {
+                div()
+                    .flex_none()
+                    .my(px(-(ACTION_HEIGHT - LINE_HEIGHT) / 2.0))
+                    .child(error_copy_button(id, copied, &theme))
+                    .into_any_element()
             }))
-            .children(action)
+            .children(action.map(|action| {
+                if below {
+                    div()
+                        .w_full()
+                        .flex()
+                        .pt(px(10.0))
+                        .pl(px(LEAD + LEAD_GAP))
+                        .child(action)
+                        .into_any_element()
+                } else {
+                    action.into_any_element()
+                }
+            }))
             .child(
                 // Measure the natural height for the stack's layout.
                 gpui::canvas(
                     move |bounds, window, cx| {
+                        let wants_below = has_action
+                            && action_label_width(id, window, cx).is_some_and(|button| {
+                                let words = line_width(&measured, crate::typography::ui_rems(13.0), window);
+                                action_goes_below(words, f32::from(bounds.size.width), button, has_copy)
+                            });
+                        if wants_below != below
+                            && let Some(toast) = cx
+                                .global_mut::<ToastStore>()
+                                .toasts
+                                .iter_mut()
+                                .find(|toast| toast.id == id)
+                        {
+                            toast.action_below = wants_below;
+                            window.on_next_frame(|window, _| window.refresh());
+                        }
                         let height = f32::from(bounds.size.height);
                         if let Some(store) = cx.try_global::<ToastStore>()
                             && store
@@ -837,13 +895,14 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
         let card = div()
             .size_full()
             .rounded(px(crate::popover::CARD_RADIUS))
-            .border_1()
-            .border_color(theme.border)
+            // slopty: Amp's floating elevation, as every float's (`Theme::elevation`).
+            .shadow(theme.elevation(crate::theme::Elevation::Floating))
             .bg(crate::popover::surface_bg(&theme))
             .overflow_hidden()
             .child(content);
         let toast_el = div()
             .id(("toast", id as usize))
+            .debug_selector(move || format!("toast-{id}")) // slopty: for the tests
             .role(match kind {
                 ToastKind::Error => gpui::Role::Alert,
                 _ => gpui::Role::Status,
@@ -990,12 +1049,35 @@ fn copy_key(id: u64) -> String {
 }
 
 // slopty: an error's words are one click from the clipboard (zeron's icon control, 24/6/14).
+/// slopty: how wide `text` lies on one line at `size` in the window's current face.
+fn line_width(text: &str, size: gpui::Rems, window: &Window) -> f32 {
+    let style = window.text_style();
+    let line = window.text_system().shape_line(
+        SharedString::from(text.to_owned()),
+        size.to_pixels(window.rem_size()),
+        &[style.to_run(text.len())],
+        None,
+    );
+    f32::from(line.width())
+}
+
+/// slopty: how wide toast `id`'s button is, its words and its padding.
+fn action_label_width(id: u64, window: &Window, cx: &App) -> Option<f32> {
+    let store = cx.try_global::<ToastStore>()?;
+    let action = store.toasts.iter().find(|toast| toast.id == id)?.action.as_ref()?;
+    Some(line_width(&action.label, crate::typography::ui_rems(12.0), window) + ACTION_PAD * 2.0)
+}
+
+/// slopty: whether a toast `content` wide puts its button (`button` wide) under words `words`
+/// wide: when beside it, with the lead and a copy button, they would not fit on one line.
+fn action_goes_below(words: f32, content: f32, button: f32, copy: bool) -> bool {
+    let copy = if copy { 24.0 + LEAD_GAP } else { 0.0 };
+    let room = content - PAD_X * 2.0 - LEAD - LEAD_GAP - copy - LEAD_GAP - button;
+    words > room
+}
+
 fn error_copy_button(id: u64, copied: bool, theme: &Theme) -> impl IntoElement {
-    let (glyph, label) = if copied {
-        (crate::icons::CHECK, "Copied")
-    } else {
-        (crate::icons::COPY, "Copy error")
-    };
+    let label = if copied { "Copied" } else { "Copy error" };
     let rest = theme.ink(0.0);
     let hover = theme.ink(0.05);
     let fade = SharedString::from(format!("toast-copy-hover-{id}"));
@@ -1014,7 +1096,8 @@ fn error_copy_button(id: u64, copied: bool, theme: &Theme) -> impl IntoElement {
         .hover_fade(fade.clone())
         .cursor_pointer()
         .text_color(theme.text_muted)
-        .child(crate::icons::icon(glyph).size(px(14.0)))
+        // slopty: a copy answers with its check drawn in, never swapped (`CopyGlyph`).
+        .child(crate::loaders::copy_glyph::CopyGlyph::new(copy_key(id), 12.0, theme.text_muted))
         .tooltip(crate::settings::widgets::text_tooltip(label))
         .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1077,6 +1160,7 @@ mod tests {
             clip: None,
             swipe: 0.0,
             swipe_from: None,
+            action_below: false,
         });
     }
 
@@ -1307,6 +1391,56 @@ mod tests {
         assert!((heights[0] - heights[1]).abs() < 0.5, "same height with a button: {heights:?}");
         let button = cx.debug_bounds("toast-action-Stop").expect("its button");
         assert!((f32::from(button.size.height) - ACTION_HEIGHT).abs() < 0.5, "{button:?}");
+    }
+
+    /// slopty: a toast lines up on its words' first line: a short offer keeps its button on
+    /// that line, and words that would wrap beside the button put it on a row under them,
+    /// starting where the words start.
+    #[gpui::test]
+    fn a_wrapping_offer_puts_its_button_under_its_words(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            cx.set_reduce_motion(true);
+        });
+        let (_, cx) = cx.add_window_view(|_, _| Host);
+        cx.update(|window, _| window.activate_window());
+        let lasts = Duration::from_secs(20);
+        let short = cx.update(|_, cx| offer(cx, "Sent", "Open", lasts, |_| {}).expect("shown"));
+        cx.run_until_parked();
+        cx.run_until_parked();
+        let toast = cx.debug_bounds(Box::leak(format!("toast-{short}").into_boxed_str())).expect("the toast");
+        let button = cx.debug_bounds("toast-action-Open").expect("its button");
+        // Its words start 13 under its top.
+        let line_middle = f32::from(toast.top()) + 13.0 + LINE_HEIGHT / 2.0;
+        assert!((f32::from(button.center().y) - line_middle).abs() < 1.0, "on the first line: {button:?} in {toast:?}");
+        cx.update(|_, cx| withdraw(cx, short));
+
+        let words = "studio wants to open a page on this Mac that it found in the notes of the run it just finished";
+        let long = cx.update(|_, cx| offer(cx, words, "Open", lasts, |_| {}).expect("shown"));
+        cx.run_until_parked();
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let toast = cx.global::<ToastStore>().toasts.iter().find(|t| t.id == long).expect("up");
+            assert!(toast.action_below, "the words wrap beside the button");
+        });
+        // The button's move under the words is measured on one frame and laid out on the next;
+        // the stack takes the new height on the one after.
+        for _ in 0..3 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        }
+        let toast = cx.debug_bounds(Box::leak(format!("toast-{long}").into_boxed_str())).expect("the toast");
+        let button = cx.debug_bounds("toast-action-Open").expect("its button");
+        assert!(
+            f32::from(button.top()) > f32::from(toast.top()) + 13.0 + LINE_HEIGHT * 2.0,
+            "under the words: {button:?} in {toast:?}"
+        );
+        let words_start = f32::from(toast.left()) + PAD_X + LEAD + LEAD_GAP;
+        assert!((f32::from(button.left()) - words_start).abs() < 1.0, "from where the words start: {button:?}");
+        assert!((f32::from(button.size.height) - ACTION_HEIGHT).abs() < 0.5, "whole: {button:?}");
     }
 
     /// What the window last painted, sorted, against the same state drawn from scratch at its

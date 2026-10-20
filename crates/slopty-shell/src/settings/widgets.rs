@@ -254,10 +254,11 @@ pub fn rail<V: 'static>(
     reach: impl Fn(&mut V) -> &mut PageScroll + Copy + 'static,
 ) -> Option<AnyElement> {
     let metrics = scroll.metrics()?;
-    popover::schedule_scrollbar_hide(&mut scroll.bar, cx);
+    popover::schedule_scrollbar_hide(&mut scroll.bar, move |view: &mut V| &mut reach(view).bar, cx); // slopty
     let (now, reduced) = (cx.frame_time(), cx.reduce_motion()); // slopty: the frame's moment
     let strip = scroll.bar.render_rail(theme, metrics, now, reduced)?;
-    Some(
+    // slopty: its fade is the shell rail's, a GPUI animation from the linger's wake.
+    Some(popover::fading_rail(
         strip
             .id(id)
             .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
@@ -298,9 +299,10 @@ pub fn rail<V: 'static>(
                     reach(view).end_press();
                     cx.notify();
                 }),
-            )
-            .into_any_element(),
-    )
+            ),
+        &scroll.bar,
+        id,
+    ))
 }
 
 /// Shared typography for a settings component's title and description. The
@@ -308,6 +310,8 @@ pub fn rail<V: 'static>(
 /// it instead of drifting by page.
 pub const ROW_TITLE_SIZE: f32 = 13.0;
 pub const ROW_DESCRIPTION_SIZE: f32 = 12.0;
+/// The air between a row title and its description.
+pub const ROW_DESCRIPTION_GAP: f32 = 4.0;
 
 /// The page column's outer max width and side padding: a centered ~680px
 /// content measure with generous air on either side.
@@ -367,6 +371,47 @@ pub fn page_subtitle(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div 
         .text_color(theme.text_muted)
         .child(copy.into())
 }
+
+// slopty: every page opens one way (T3's settings header): the title on a 32-tall row with the
+// page's one action centred on it at the right edge, and under it a line saying what the page
+// is for. Pages put the action on three heights and explained themselves on four of nine.
+/// A settings page's head: [`page_header`] on a 32 row with `action` right on it, and
+/// [`page_subtitle`] under it.
+pub fn page_head(
+    theme: &Theme,
+    title: &str,
+    count: Option<usize>,
+    subtitle: impl Into<SharedString>,
+    action: Option<AnyElement>,
+) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .debug_selector(|| "page-head-row".to_owned())
+                .min_h(px(PAGE_HEAD_ROW))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(16.0))
+                .child(page_header(theme, title, count).flex_1().min_w_0())
+                .children(action.map(|action| {
+                    div()
+                        .debug_selector(|| "page-head-action".to_owned())
+                        .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(action)
+                })),
+        )
+        .child(page_subtitle(theme, subtitle).debug_selector(|| "page-head-subtitle".to_owned()))
+}
+
+/// The height of a settings page's title row (`page_head`).
+pub const PAGE_HEAD_ROW: f32 = 32.0;
 
 /// Small label above a group of controls (`text-[13px] font-medium`) — the
 /// "Theme" caption over a picker, not a page headline.
@@ -578,7 +623,9 @@ pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
 /// text-muted-foreground/65` fragments joined by dots.
 pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
     let mut line = div()
-        .mt(px(Theme::TEXT_STACK_GAP))
+        // slopty: 4 under the title, opencode's settings leading, where 1 pressed the two lines
+        // into one block.
+        .mt(px(ROW_DESCRIPTION_GAP))
         .min_w_0()
         .max_w_full()
         .flex()
@@ -1134,6 +1181,40 @@ pub(crate) fn select_fill(theme: &Theme, lifted: bool) -> gpui::Hsla {
     theme.wash(if lifted { 0.10 } else { 0.06 })
 }
 
+thread_local! {
+    /// slopty: the select trigger the pointer is over, by its own enter and leave.
+    static SELECT_POINTER: std::cell::RefCell<Option<SharedString>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// slopty: a trigger's hover listener, which also remembers the pointer over it. A settings page
+/// the window draws from its last frame reads none of its fades, so the fades let go of the
+/// trigger's; the trigger still under the pointer is lifted again when the page is next built,
+/// as the frame it left drew it (the sidebar's rows do the same, `spaces::sidebar_hover`).
+fn select_hover(key: SharedString) -> impl Fn(&bool, &mut Window, &mut gpui::App) + 'static {
+    let fade = crate::motion::hover_listener(key.clone());
+    move |hovered, window, cx| {
+        SELECT_POINTER.with(|pointer| {
+            let mut pointer = pointer.borrow_mut();
+            if *hovered {
+                *pointer = Some(key.clone());
+            } else if pointer.as_ref() == Some(&key) {
+                *pointer = None;
+            }
+        });
+        fade(hovered, window, cx);
+    }
+}
+
+/// [`crate::motion::hover_blend`] of a trigger's fade `key`, set by [`select_hover`].
+fn select_hover_blend(key: &str, rest: gpui::Hsla, hover: gpui::Hsla) -> gpui::Hsla {
+    let over = SELECT_POINTER.with(|pointer| pointer.borrow().as_deref() == Some(key));
+    if over && !crate::motion::hover_known(key) {
+        crate::motion::set_hover(key, true, true);
+    }
+    crate::motion::hover_blend(key, rest, hover)
+}
+
 /// The trigger of every settings dropdown: a borderless filled pill. The
 /// caller adds the value ([`select_value`], after any leading glyph), then
 /// [`select_chevron`], plus its own listeners. Its focus ring is paint only,
@@ -1158,9 +1239,10 @@ pub fn select_trigger(
         .bg(if open {
             lifted
         } else {
-            crate::motion::hover_blend(&hover_key, select_fill(theme, false), lifted)
+            select_hover_blend(&hover_key, select_fill(theme, false), lifted)
         })
-        .hover_fade(hover_key)
+        .on_hover(select_hover(hover_key.clone()))
+        .child(crate::motion::fade_driver(hover_key))
         .flex()
         .flex_row()
         .items_center()
@@ -1564,6 +1646,8 @@ impl<V: 'static> Select<V> {
 #[derive(Clone, Copy)]
 pub enum ActionTone {
     Quiet,
+    // slopty: a page's destructive action, its words in the danger tone, no fill.
+    QuietDanger,
     Outlined,
     Filled,
     Solid,
@@ -1609,6 +1693,10 @@ pub fn action_button_when(theme: &Theme, tone: ActionTone, enabled: bool) -> gpu
             lift(button.text_color(theme.text_muted), enabled, move |s| {
                 s.bg(wash).text_color(text)
             })
+        }
+        ActionTone::QuietDanger => {
+            let wash = theme.glass_hover();
+            lift(button.text_color(theme.danger_muted), enabled, move |s| s.bg(wash))
         }
         ActionTone::Outlined => {
             let (wash, edge) = (theme.glass_hover(), theme.border_strong);
@@ -1933,7 +2021,7 @@ pub fn tooltip_card_detail(
             )
             .child(
                 div()
-                    .text_size(crate::typography::ui_rems(10.5))
+                    .text_size(crate::typography::ui_rems(11.0)) // slopty: the tooltip's detail at 11
                     .text_color(theme.text_faint)
                     .child(detail.into()),
             ),
@@ -2199,6 +2287,32 @@ pub fn middle_truncate(
 mod hint_tests {
     use super::*;
 
+    /// A select trigger under the pointer stays lifted through frames the window draws its page
+    /// from the last one, which read no fade and let the fades drop its key, so a page built
+    /// afresh draws it as the frame it left did; once the pointer leaves, it rests.
+    #[gpui::test]
+    fn a_trigger_under_the_pointer_keeps_its_lift_over_frames_drawn_from_the_last(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let cx = cx.add_empty_window();
+        let key = SharedString::from("light-theme-hover-test");
+        let (rest, lifted) = (gpui::black(), gpui::white());
+        let listener = select_hover(key.clone());
+        cx.update(|window, cx| listener(&true, window, cx));
+        for _ in 0..3 {
+            crate::motion::hover_fades_active(std::time::Instant::now());
+        }
+        assert!(!crate::motion::hover_known(&key), "the fades dropped it");
+        assert_eq!(select_hover_blend(&key, rest, lifted), lifted, "still under the pointer");
+        cx.update(|window, cx| listener(&false, window, cx));
+        for _ in 0..3 {
+            crate::motion::hover_fades_active(
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            );
+        }
+        assert_eq!(select_hover_blend(&key, rest, lifted), rest, "the pointer left");
+    }
+
     #[test]
     fn standing_reads_in_plain_words() {
         assert_eq!(Standing::of(false, false), None);
@@ -2261,5 +2375,77 @@ mod hint_tests {
             assert_eq!(keys.text(window, cx), None);
             assert_eq!(Keys::Fixed("shift-tab").text(window, cx), Some(crate::keys::combo_text("shift-tab")));
         });
+    }
+}
+
+#[cfg(test)]
+mod page_head_tests {
+    use super::*;
+
+    struct Page;
+
+    impl Render for Page {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx);
+            div().w(px(600.0)).child(page_head(
+                &theme,
+                "Notifications",
+                None,
+                "What Slopty tells you, and how.",
+                Some(text_action(&theme, ActionTone::Quiet, "Restore defaults").into_any_element()),
+            ))
+        }
+    }
+
+    // slopty: every page opens one way: its action centred on the title's 32 row at its right,
+    // the line saying what the page is for under it.
+    #[gpui::test]
+    fn a_page_head_centres_its_action_on_the_title_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (_page, cx) = cx.add_window_view(|_, _| Page);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let row = cx.debug_bounds("page-head-row").expect("the title row");
+        let action = cx.debug_bounds("page-head-action").expect("the action");
+        let subtitle = cx.debug_bounds("page-head-subtitle").expect("the subtitle");
+        assert!(f32::from(row.size.height) >= PAGE_HEAD_ROW - 0.5, "{row:?}");
+        assert!((f32::from(row.center().y - action.center().y)).abs() < 0.5, "centred: {row:?} {action:?}");
+        assert!((f32::from(row.right() - action.right())).abs() < 0.5, "at the right edge: {row:?} {action:?}");
+        assert!(subtitle.top() >= row.bottom(), "the line under it: {row:?} {subtitle:?}");
+    }
+
+    struct Row;
+
+    impl Render for Row {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let theme = Theme::of(cx);
+            div()
+                .w(px(600.0))
+                .flex()
+                .flex_col()
+                .child(row_title(&theme, "Theme").debug_selector(|| "row-title".to_owned()))
+                .child(
+                    meta_line(&theme, vec!["Follows the system".into_any_element()])
+                        .debug_selector(|| "row-description".to_owned()),
+                )
+        }
+    }
+
+    // slopty: a row's description stands 4 under its title on every page (opencode's settings
+    // leading), not pressed against it.
+    #[gpui::test]
+    fn a_rows_description_stands_clear_of_its_title(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (_row, cx) = cx.add_window_view(|_, _| Row);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let title = cx.debug_bounds("row-title").expect("the title");
+        let description = cx.debug_bounds("row-description").expect("the description");
+        let gap = f32::from(description.top() - title.bottom());
+        assert!((gap - ROW_DESCRIPTION_GAP).abs() < 0.5, "{title:?} {description:?}");
     }
 }

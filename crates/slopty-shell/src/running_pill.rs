@@ -291,7 +291,7 @@ impl RenderOnce for CountBadge {
             window,
             self.count,
             &self.family,
-            gpui::FontWeight::SEMIBOLD,
+            gpui::FontWeight::MEDIUM, // slopty: the chrome's two weights (opencode; item 23).
             gpui::white(),
             font_size,
         );

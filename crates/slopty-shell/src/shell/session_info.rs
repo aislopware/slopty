@@ -158,7 +158,7 @@ impl Shell {
             - self.right_visible_width(cx)
             - self.files_visible_width(cx))
         .max(0.0);
-        session_card_reserve(main, crate::settings::transcript_width(cx))
+        session_card_reserve(main, crate::settings::transcript_width(self.viewport_width, cx))
     }
 
     /// Whether the card fits beside the transcript without narrowing it.
@@ -321,7 +321,9 @@ impl Shell {
                 name,
             )
             .id("session-info-project")
+            // slopty: the shell's tooltip delay, as every other hint (item 20).
             .tooltip(crate::settings::widgets::text_tooltip(path))
+            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
             .into_any_element(),
             None => info_row(&theme, row_glyph(icons::HOME, &theme), "No project".into())
                 .into_any_element(),
@@ -355,14 +357,22 @@ impl Shell {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
-                    .px(px(5.0))
-                    .mr(px(-5.0))
-                    .py(px(2.0))
-                    .rounded(px(5.0))
+                    .gap(px(Theme::SPACE_SNUG))
+                    .px(px(Theme::SPACE_SNUG))
+                    .mr(px(-Theme::SPACE_SNUG))
+                    .py(px(Theme::SPACE_2XS))
+                    // slopty: a control on the ladder, its hover faded in (items 17, 19, 20).
+                    .rounded(px(Theme::CONTROL_RADIUS))
                     .cursor_pointer()
-                    .hover(|style| style.bg(crate::theme::ink(0.08)))
-                    .tooltip(crate::settings::widgets::text_tooltip("Uncommitted changes"))
+                    .role(gpui::Role::Button)
+                    .bg(crate::motion::hover_blend(
+                        "session-info-diff-fade",
+                        crate::theme::wash(0.0),
+                        crate::theme::control_hover(),
+                    ))
+                    .hover_fade("session-info-diff-fade")
+                    .active(|style| style.bg(crate::theme::pressed_wash()))
+                    .hint("Uncommitted changes")
                     .on_click(cx.listener(|this, _, window, cx| {
                         cx.stop_propagation();
                         this.close_session_info_overlay(cx);
@@ -489,7 +499,7 @@ impl Shell {
                         .id("session-info-actions-retry")
                         .on_click(cx.listener(|this, _, _, cx| this.retry_project_actions(cx)))
                         .child(popover::picker_icon_slot(row_glyph(icons::REFRESH, theme)))
-                        .child("Retry")
+                        .child("Try again") // slopty: the house's words for a retry
                         .into_any_element(),
                 );
             }
@@ -533,7 +543,7 @@ impl Shell {
                             .group(SharedString::from(format!("session-info-edit-target-{}", edit.id)))
                             .invisible()
                             .group_hover(group, |style| style.visible())
-                            .tooltip(crate::settings::widgets::text_tooltip("Edit action"))
+                            .hint("Edit action")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.close_session_info_overlay(cx);
@@ -545,13 +555,13 @@ impl Shell {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .rounded(px(5.0))
+                                    .rounded(px(Theme::CONTROL_RADIUS))
                                     .group_hover(
                                         SharedString::from(format!(
                                             "session-info-edit-target-{}",
                                             edit_target
                                         )),
-                                        |style| style.bg(crate::theme::ink(0.08)),
+                                        |style| style.bg(crate::theme::control_hover()),
                                     )
                                     .child(
                                         icon(icons::SETTINGS_MINIMALISTIC)

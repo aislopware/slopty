@@ -222,31 +222,28 @@ pub(super) fn child_chat_title(chat: &Chat) -> String {
         .unwrap_or_else(|| "New side chat".into())
 }
 
-/// A status mark in a row's icon slot: Working spins, Completed wears the
-/// check, the rest a dot in the status color.
-fn status_mark(
-    key: String,
-    status: ChatIndicator,
-    view: gpui::EntityId,
-    theme: &Theme,
-    cx: &mut App,
-) -> AnyElement {
-    let color = spaces::status_dot_color(status, theme);
-    match status {
-        ChatIndicator::Completed => icon(icons::CHECK)
-            .size(px(12.0))
-            .text_color(color)
-            .into_any_element(),
-        ChatIndicator::Working => {
-            loaders::mini_glyph_spinner(format!("{key}-working"), 2.0, theme.glyph, view, cx)
-                .into_any_element()
+/// A status mark in a row's icon slot.
+// slopty: one mark that morphs between working, waiting, done and failed
+// (`loaders::status_mark`), where a spinner, a check and a dot cut; an idle row keeps its dot.
+fn status_mark(key: String, status: ChatIndicator, theme: &Theme) -> AnyElement {
+    use crate::loaders::status_mark::{MARK_SMALL, MarkState, StatusMark};
+    let state = match status {
+        ChatIndicator::Working => MarkState::Working,
+        ChatIndicator::AwaitingInput => MarkState::Waiting,
+        ChatIndicator::Errored => MarkState::Failed,
+        ChatIndicator::Completed => MarkState::Done,
+        ChatIndicator::Idle => {
+            return div()
+                .size(px(6.0))
+                .rounded_full()
+                .bg(spaces::status_dot_color(status, theme))
+                .into_any_element();
         }
-        _ => div()
-            .size(px(6.0))
-            .rounded_full()
-            .bg(color)
-            .into_any_element(),
-    }
+    };
+    StatusMark::new(SharedString::from(format!("{key}-mark")), state)
+        .size(MARK_SMALL)
+        .ground(popover::surface_bg(theme))
+        .into_any_element()
 }
 
 fn glyph(path: &'static str, theme: &Theme) -> AnyElement {
@@ -359,7 +356,6 @@ impl Shell {
                 SubagentLane::new(subagent_rows(state, &chat.id)),
             )
         };
-        let view = cx.entity_id();
         // Subagents run on the session's own harness.
         let harness = chat.config.as_ref().map(|config| config.harness);
         // ── The two ways to start a side chat: rows while the lane is empty,
@@ -434,7 +430,7 @@ impl Shell {
         let hidden = side_chats.len().saturating_sub(shown);
         for row in side_chats.into_iter().take(shown) {
             rows.push(
-                self.render_side_chat_row(row, view, theme, cx)
+                self.render_side_chat_row(row, theme, cx)
                     .into_any_element(),
             );
         }
@@ -469,7 +465,7 @@ impl Shell {
             };
             for row in active {
                 rows.push(
-                    self.render_subagent_row(row, harness, view, theme, cx)
+                    self.render_subagent_row(row, harness, theme, cx)
                         .into_any_element(),
                 );
             }
@@ -481,7 +477,7 @@ impl Shell {
             }
             for row in finished {
                 rows.push(
-                    self.render_subagent_row(row, harness, view, theme, cx)
+                    self.render_subagent_row(row, harness, theme, cx)
                         .into_any_element(),
                 );
             }
@@ -549,12 +545,11 @@ impl Shell {
     fn render_side_chat_row(
         &mut self,
         row: ChildChatRow,
-        view: gpui::EntityId,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let key = format!("session-lanes-chat-{}", row.chat_id);
-        let mark = status_mark(key.clone(), row.status, view, theme, cx);
+        let mark = status_mark(key.clone(), row.status, theme);
         let rename_input = self.rename_input_for(&row.chat_id, ChatRenameSurface::SessionCard);
         let revealing = rename_input.is_some() && self.chat_rename_revealing();
         let title = match rename_input {
@@ -623,12 +618,11 @@ impl Shell {
         &mut self,
         row: SubagentRow,
         harness: Option<slopty_view_proto::HarnessId>,
-        view: gpui::EntityId,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let key = format!("session-lanes-subagent-{}", row.doc_id);
-        let mark = status_mark(key.clone(), row.indicator(), view, theme, cx);
+        let mark = status_mark(key.clone(), row.indicator(), theme);
         let time = slopty_view_proto::view::format_time_ago(row.spawned_at, crate::clock::utc(cx));
         let title = row_title(format!("{key}-title"), row.title.clone());
         popover::picker_row(theme, false, false, key.clone())

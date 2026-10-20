@@ -146,6 +146,41 @@ fn open(
     (transcript, cx)
 }
 
+/// [`open`], with the settled turn's divider opened, so its work's rows draw: a settled turn
+/// folds them all behind it (Amp's settled turn).
+fn open_turn(
+    cx: &mut gpui::TestAppContext,
+    reply: SessionMessageEntry,
+) -> (Entity<Transcript>, &mut VisualTestContext) {
+    let (transcript, cx) = open(cx, reply);
+    unfold(&transcript, cx);
+    (transcript, cx)
+}
+
+/// Opens every turn's divider that is shut.
+fn unfold(transcript: &Entity<Transcript>, cx: &mut VisualTestContext) {
+    transcript.update(cx, |this, cx| {
+        let shut: Vec<gpui::SharedString> = this
+            .rows
+            .iter()
+            .filter(|row| {
+                matches!(row.kind, super::RowKind::ToolGroup { compact_shell: true, .. })
+                    && this.folds.get(&row.id).and_then(|fold| fold.open) != Some(true)
+            })
+            .map(|row| row.id.clone())
+            .collect();
+        for id in shut {
+            this.toggle_fold(id.clone(), 0.0, false, cx);
+            // Open already, not opening, whatever motion the test turns on next.
+            if let Some(fold) = this.folds.get_mut(&id) {
+                fold.toggled_at = None;
+                fold.disclosure_at = None;
+            }
+        }
+        cx.notify();
+    });
+}
+
 fn spawn(progress: SubagentProgress) -> MessagePart {
     MessagePart::Tool {
         id: "spawn".into(),
@@ -186,7 +221,7 @@ fn a_subagent_card_opens_in_place_and_drills_in(cx: &mut gpui::TestAppContext) {
         row: Some("task:a1".into()),
         ..SubagentProgress::default()
     };
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
     let opened = Rc::new(RefCell::new(Vec::new()));
     let _events = cx.update(|_, cx| {
         let opened = opened.clone();
@@ -218,6 +253,33 @@ fn a_subagent_card_opens_in_place_and_drills_in(cx: &mut gpui::TestAppContext) {
     assert_eq!(*opened.borrow(), ["child-chat"]);
 }
 
+/// slopty: a subagent card's chevron takes no room at rest and arrives with the pointer, as
+/// opencode's card action does; an open run keeps it after the pointer leaves.
+#[gpui::test]
+fn a_subagent_cards_chevron_arrives_with_the_pointer(cx: &mut gpui::TestAppContext) {
+    let progress = SubagentProgress {
+        running: true,
+        state: SubagentProgress::RUNNING.into(),
+        step: Some("Reading parser.rs".into()),
+        chat_id: Some("child-chat".into()),
+        row: Some("task:a1".into()),
+        ..SubagentProgress::default()
+    };
+    let (_transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let nodes = draw(cx);
+    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
+    let width = |cx: &mut VisualTestContext| cx.debug_bounds("subagent-chevron").map_or(0.0, |b| f32::from(b.size.width));
+    assert!(width(cx) < 0.5, "no room at rest");
+    cx.simulate_mouse_move(card.center, None, gpui::Modifiers::default());
+    draw(cx);
+    assert!((width(cx) - 18.0).abs() < 0.5, "arrived under the pointer: {}", width(cx));
+    cx.simulate_click(card.center, gpui::Modifiers::default());
+    draw(cx);
+    cx.simulate_mouse_move(gpui::point(px(2.0), px(2.0)), None, gpui::Modifiers::default());
+    draw(cx);
+    assert!((width(cx) - 18.0).abs() < 0.5, "kept while the run is open: {}", width(cx));
+}
+
 /// slopty: on a phone a tap on a subagent's card drills into its run: no room to open it in
 /// place, so it says no open state and asks the shell for the run's chat.
 #[gpui::test]
@@ -230,7 +292,7 @@ fn a_phones_tap_on_a_subagents_card_drills_in(cx: &mut gpui::TestAppContext) {
         row: Some("task:a1".into()),
         ..SubagentProgress::default()
     };
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
     cx.simulate_resize(gpui::size(px(390.0), px(800.0)));
     let opened = Rc::new(RefCell::new(Vec::new()));
     let _events = cx.update(|_, cx| {
@@ -249,7 +311,8 @@ fn a_phones_tap_on_a_subagents_card_drills_in(cx: &mut gpui::TestAppContext) {
     assert_eq!(*opened.borrow(), ["child-chat"], "the tap drills in");
 }
 
-/// A background task's row opens the tray at its row; a retry says what is tried again.
+/// A background task's row opens the tray at its row, and names its task on the right unless
+/// its words already do; a retry says what is tried again.
 #[gpui::test]
 fn work_rows_link_to_the_tray(cx: &mut gpui::TestAppContext) {
     let task = TaskRow {
@@ -260,6 +323,13 @@ fn work_rows_link_to_the_tray(cx: &mut gpui::TestAppContext) {
         text: "Background command finished".into(),
         title: "cargo test".into(),
         ..TaskRow::default()
+    };
+    let named = TaskRow {
+        task: "t2".into(),
+        row: "task:t2".into(),
+        text: "Background command \"Build\" completed (exit code 0)".into(),
+        title: "Build".into(),
+        ..task.clone()
     };
     let note = NoteRow {
         kind: "hook".into(),
@@ -273,6 +343,7 @@ fn work_rows_link_to_the_tray(cx: &mut gpui::TestAppContext) {
             vec![
                 text("Started the tests."),
                 MessagePart::Task { id: "task".into(), task: Box::new(task) },
+                MessagePart::Task { id: "named".into(), task: Box::new(named) },
                 MessagePart::Note { id: "note".into(), note: Box::new(note) },
             ],
         ),
@@ -281,6 +352,10 @@ fn work_rows_link_to_the_tray(cx: &mut gpui::TestAppContext) {
     let row = find(&nodes, Role::Button, "Background command finished · cargo test")
         .expect("the task's row")
         .clone();
+    assert!(
+        find(&nodes, Role::Button, "Background command \"Build\" completed (exit code 0)").is_some(),
+        "words that name the task say it once"
+    );
     assert_eq!(row.value, "completed");
     let notice = nodes
         .values()
@@ -389,7 +464,7 @@ fn a_subagent_run_open_in_its_card_is_as_tall_as_its_rows(cx: &mut gpui::TestApp
         chat_id: Some("child-chat".into()),
         ..SubagentProgress::default()
     };
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
     let said = |n: usize| SessionMessageEntry {
         id: format!("child:{n}"),
         parts: vec![MessagePart::Text { id: format!("child:{n}:t"), text: format!("Line {n} of the run.") }],
@@ -429,7 +504,7 @@ fn a_subagents_run_holds_no_prompt_of_its_own(cx: &mut gpui::TestAppContext) {
     let parts = std::iter::once(spawn(progress))
         .chain((0..40).map(|n| text(&format!("Paragraph {n} after the run."))))
         .collect();
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, parts));
+    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, parts));
     let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
     let prompt = SessionMessageEntry {
         id: "prompt".into(),
@@ -482,7 +557,7 @@ fn a_subagents_run_holds_no_prompt_of_its_own(cx: &mut gpui::TestAppContext) {
     });
     let nodes = (0..4).map(|_| draw(cx)).last().unwrap_or_default();
     assert_eq!(child.read_with(cx, |this, _| this.sticky_prompt()), Some(0), "its task would hold");
-    assert_eq!(child.read_with(cx, |this, cx| this.held_prompt(cx)), None, "but its run holds none");
+    assert_eq!(child.read_with(cx, |this, _| this.held_prompt()), None, "but its run holds none");
     let held: Vec<&str> = nodes
         .values()
         .filter(|node| node.label.starts_with("Back to your prompt"))
@@ -522,6 +597,79 @@ fn a_held_prompt_spans_the_top_as_part_of_the_page(cx: &mut gpui::TestAppContext
     let top = f32::from(band.center.y) - band.height / 2.0;
     assert!((top - Theme::TITLEBAR_HEIGHT).abs() <= 0.5, "flush under the titlebar: {band:?}");
     assert!(band.height <= Transcript::sticky_height() + 0.5, "one line: {band:?}");
+}
+
+/// #11: on a phone the band stands under the navigation bar, whose title and subtitle reach
+/// lower than a Mac's titlebar, never over them.
+#[gpui::test]
+fn a_phones_held_prompt_stands_under_its_navigation_bar(cx: &mut gpui::TestAppContext) {
+    let said = |n: usize| text(&format!("Paragraph {n} of the long answer."));
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, (0..80).map(said).collect()));
+    crate::shell::force_touch(true);
+    cx.simulate_resize(gpui::size(px(402.0), px(874.0)));
+    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
+    let prompt = SessionMessageEntry {
+        id: "prompt".into(),
+        role: MessageRole::User,
+        parts: vec![text("Explain the upload path")],
+        ..entry(MessageStatus::Complete, Vec::new())
+    };
+    state.update(cx, |state, cx| {
+        state.transcript.insert(0, prompt);
+        state.transcript_revision += 1;
+        cx.notify();
+    });
+    transcript.update(cx, |this, cx| this.sync(cx));
+    draw(cx);
+    transcript.update(cx, |this, cx| {
+        this.list.scroll_to(gpui::ListOffset { item_ix: 1, offset_in_item: px(300.0) });
+        cx.notify();
+    });
+    let nodes = (0..3).map(|_| draw(cx)).last().unwrap_or_default();
+    crate::shell::force_touch(false);
+    let band = find(&nodes, Role::Button, "Back to your prompt: Explain the upload path")
+        .expect("the prompt held");
+    let top = f32::from(band.center.y) - band.height / 2.0;
+    let bar = Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD;
+    assert!((top - bar).abs() <= 0.5, "under the phone's bar ({bar}): {band:?}");
+}
+
+/// slopty: a list held at its end, as a finished turn rests, holds its prompt once the prompt
+/// is above the band: the list keeps no top row there, and the band reads where its rows stand
+/// all the same (#18). Short enough to fit, it holds none.
+#[gpui::test]
+fn a_list_held_at_its_end_holds_the_prompt_it_scrolled_past(cx: &mut gpui::TestAppContext) {
+    let said = |n: usize| text(&format!("Paragraph {n} of the long answer."));
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, (0..80).map(said).collect()));
+    cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
+    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
+    let prompt = SessionMessageEntry {
+        id: "prompt".into(),
+        role: MessageRole::User,
+        parts: vec![text("Survey the files")],
+        ..entry(MessageStatus::Complete, Vec::new())
+    };
+    state.update(cx, |state, cx| {
+        state.transcript.insert(0, prompt.clone());
+        state.transcript_revision += 1;
+        cx.notify();
+    });
+    transcript.update(cx, |this, cx| this.sync(cx));
+    let nodes = (0..3).map(|_| draw(cx)).last().unwrap_or_default();
+    assert!(
+        transcript.read_with(cx, |this, _| this.is_glued()),
+        "the list rests at its end, with no top row"
+    );
+    assert!(find(&nodes, Role::Button, "Back to your prompt: Survey the files").is_some(), "the prompt held");
+    // One short answer under it fits, and nothing is held.
+    state.update(cx, |state, cx| {
+        state.transcript = vec![prompt, entry(MessageStatus::Complete, vec![text("Done.")])];
+        state.transcript_revision += 1;
+        cx.notify();
+    });
+    transcript.update(cx, |this, cx| this.sync(cx));
+    let nodes = (0..3).map(|_| draw(cx)).last().unwrap_or_default();
+    assert!(!nodes.values().any(|node| node.label.starts_with("Back to your prompt")), "all of it fits");
 }
 
 /// The rewind menu hangs from the person's bubble's left edge, under it, not from wherever the
@@ -592,7 +740,7 @@ fn a_subagent_card_slides_its_run_open_and_shut(cx: &mut gpui::TestAppContext) {
         chat_id: Some("child-chat".into()),
         ..SubagentProgress::default()
     };
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
     cx.update(|_, cx| cx.set_reduce_motion(false));
     let task = SessionMessageEntry {
         id: "child:task".into(),
@@ -648,7 +796,7 @@ fn opened_before_its_run(cx: &mut gpui::TestAppContext, running: bool) {
         row: running.then(|| "task:a1".into()),
         ..SubagentProgress::default()
     };
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
     let nodes = draw(cx);
     let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
     cx.simulate_click(card.center, gpui::Modifiers::default());
@@ -702,9 +850,17 @@ fn a_chats_words_are_articles_and_paragraphs(cx: &mut gpui::TestAppContext) {
         status: None,
         ..reply.clone()
     };
+    // slopty: a fork's seam is the app's, not a message the agent said (#8).
+    let seam = SessionMessageEntry {
+        id: "seam".into(),
+        role: MessageRole::System,
+        parts: vec![MessagePart::Marker { id: "seam:m".into(), text: "Forked from Survey".into() }],
+        status: None,
+        ..reply.clone()
+    };
     transcript.update(cx, |this, cx| {
         this.state.update(cx, |state, _| {
-            state.transcript = vec![asked, reply];
+            state.transcript = vec![seam, asked, reply];
             state.transcript_revision += 1;
         });
         this.sync(cx);
@@ -718,7 +874,7 @@ fn a_chats_words_are_articles_and_paragraphs(cx: &mut gpui::TestAppContext) {
     assert!(first.iter().any(|p| p.label == "The ls failed."), "plain text: {first:?}");
     assert!(find(&nodes, Role::Paragraph, "Then it was done.").is_some(), "the second block");
     let articles = nodes.values().filter(|n| n.role == Role::Article).count();
-    assert_eq!(articles, 2, "one article a message");
+    assert_eq!(articles, 2, "one article a message, none for the seam");
 }
 
 /// slopty: a link to a chat in a reply is a live chip: it says the chat's title and how it
@@ -770,7 +926,7 @@ fn a_cards_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppCon
         chat_id: Some("child-chat".into()),
         ..SubagentProgress::default()
     };
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
     let opened = Rc::new(RefCell::new(Vec::new()));
     let _events = cx.update(|_, cx| {
         let opened = opened.clone();
@@ -803,7 +959,7 @@ fn a_card_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppCon
         ..SubagentProgress::default()
     };
     let words = (0..40).map(|n| format!("Paragraph {n} of the survey.\n\n")).collect::<String>();
-    let (transcript, cx) = open(
+    let (transcript, cx) = open_turn(
         cx,
         entry(MessageStatus::Complete, vec![text(&words), spawn(progress), text("Counted.")]),
     );
@@ -886,7 +1042,7 @@ fn a_running_card_says_the_clocks_time_in_every_frame(cx: &mut gpui::TestAppCont
         started_at: Some(started),
         ..SubagentProgress::default()
     };
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
     transcript.update(cx, |this, cx| {
         this.clock = chrono::DateTime::from_timestamp_millis(started + 42_000).unwrap_or_default();
         cx.notify();
@@ -919,7 +1075,7 @@ fn the_controls_of_a_reply_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
         subagent_tail: None,
         facts: None,
     };
-    // slopty: two calls, so the group draws its summary row (one call is its own row, #2).
+    // slopty: two calls before a reply, so the settled turn draws its divider, the summary.
     let again = exec("run2", "cargo build", true, false);
     crate::shell::force_touch(true);
     let (transcript, cx) =
@@ -938,12 +1094,12 @@ fn the_controls_of_a_reply_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
         (group.height, copy.height, copy.width)
     };
     let (group, copy, copy_width) = ours(&transcript, cx);
-    assert!(group >= 43.9, "the summary row under a finger's 44 pt: {group}");
+    assert!(group >= 43.9, "the divider under a finger's 44 pt: {group}");
     assert!(copy.min(copy_width) >= 43.9, "Copy under a finger's 44 pt: {copy_width}x{copy}");
 
     crate::shell::force_touch(false);
     let (group, copy, copy_width) = ours(&transcript, cx);
-    assert_eq!(group.round(), 26.0, "as drawn on a Mac");
+    assert_eq!(group.round(), 22.0, "the divider's button as drawn on a Mac");
     assert_eq!((copy_width.round(), copy.round()), (24.0, 24.0), "as drawn on a Mac");
 }
 
@@ -1084,7 +1240,7 @@ fn a_prompt_heads_its_turn(cx: &mut gpui::TestAppContext) {
 /// #2: a group of one call shows the call itself; two calls keep their summary.
 #[gpui::test]
 fn a_lone_call_shows_itself(cx: &mut gpui::TestAppContext) {
-    let (transcript, cx) = open(
+    let (transcript, cx) = open_turn(
         cx,
         entry(MessageStatus::Complete, vec![exec("one", "ls missing-file", true, false), text("Then:")]),
     );
@@ -1108,6 +1264,26 @@ fn a_lone_call_shows_itself(cx: &mut gpui::TestAppContext) {
     assert!(find(&nodes, Role::Button, "Ran 2 commands").is_some(), "two calls fold");
 }
 
+/// #12: a turn that ended on a call that never settled says it stopped, never that it runs.
+#[test]
+fn a_finished_turns_summary_never_says_running() {
+    let reply = entry(
+        MessageStatus::Complete,
+        vec![exec("one", "cargo fmt", true, false), exec("two", "cargo test", false, false)],
+    );
+    let rows = super::work_rows(&reply, false, &mut |_, text| {
+        Arc::new(crate::markdown::parse_full(text))
+    });
+    let summaries: Vec<String> = rows
+        .iter()
+        .filter_map(|row| match &row.kind {
+            super::RowKind::ToolGroup { summary, .. } => Some(summary.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(summaries, ["Ran 1 command and 1 command stopped"]);
+}
+
 /// #3: a summary says what settled in the past, what runs now in its live verb, and the call a
 /// request holds up as waiting.
 #[gpui::test]
@@ -1121,7 +1297,7 @@ fn a_summary_says_what_runs_now(cx: &mut gpui::TestAppContext) {
     );
     let nodes = draw(cx);
     assert!(
-        find(&nodes, Role::Button, "Ran 1 command · running 1 command").is_some(),
+        find(&nodes, Role::Button, "Ran 1 command and running 1 command").is_some(),
         "{:?}",
         nodes.values().map(|n| n.label.clone()).collect::<Vec<_>>()
     );
@@ -1146,7 +1322,7 @@ fn a_summary_says_what_runs_now(cx: &mut gpui::TestAppContext) {
     );
     let labels: Vec<String> = nodes.values().map(|n| n.label.clone()).collect();
     assert!(
-        find(&nodes, Role::Button, "Ran 1 command · waiting for approval · run touch refused.txt")
+        find(&nodes, Role::Button, "Ran 1 command and waiting for approval (run touch refused.txt)")
             .is_some(),
         "{labels:?}"
     );
@@ -1194,7 +1370,7 @@ fn a_turn_ends_on_its_done_line() {
         created_at: 1_760_000_000_000,
         ..entry(MessageStatus::Complete, vec![edit, text("done"), done])
     };
-    let rows = super::rows_for_entry(&reply, false, false, &mut |_, text| {
+    let rows = super::work_rows(&reply, false, &mut |_, text| {
         Arc::new(crate::markdown::parse_full(text))
     });
     let kinds: Vec<&str> = rows
@@ -1208,6 +1384,40 @@ fn a_turn_ends_on_its_done_line() {
     assert_eq!(kinds.last(), Some(&"done"), "the done line last: {kinds:?}");
     assert_eq!(kinds.iter().rev().nth(1), Some(&"changes"), "the files above it: {kinds:?}");
     assert_eq!(rows.last().and_then(|row| row.timestamp), Some(0), "the time said once");
+}
+
+/// #7: a turn that ends on its done line has its Copy at the end of the line's words, on the
+/// line, not alone in a lane under it.
+#[gpui::test]
+fn a_done_lines_copy_rides_on_its_line(cx: &mut gpui::TestAppContext) {
+    let done = MessagePart::Note {
+        id: "reply:done".into(),
+        note: Box::new(NoteRow {
+            kind: "done".into(),
+            text: "Worked for 4s · done 9:00 AM".into(),
+            tone: "info".into(),
+            ..NoteRow::default()
+        }),
+    };
+    let reply = SessionMessageEntry {
+        created_at: 1_760_000_000_000,
+        ..entry(MessageStatus::Complete, vec![text("All done."), done])
+    };
+    let (_, cx) = open(cx, reply);
+    let nodes = draw(cx);
+    let line = find(&nodes, Role::Status, "Worked for 4s · done 9:00 AM").expect("the done line");
+    let copy = find(&nodes, Role::Button, "Copy message").expect("its Copy");
+    assert!(
+        (copy.center.y - line.center.y).abs() < px(2.0),
+        "on the line: {:?} vs {:?}",
+        copy.center,
+        line.center
+    );
+    assert!(copy.center.x > line.center.x - px(line.width / 2.0), "after its words");
+    assert!(
+        descendants(&nodes, line, Role::Button).iter().any(|b| b.label == "Copy message"),
+        "the line's own control"
+    );
 }
 
 /// #5: a subagent's run drilled into as a chat reads from the top, not risen from the bottom,
@@ -1239,6 +1449,42 @@ fn a_drilled_run_reads_from_the_top(cx: &mut gpui::TestAppContext) {
     let top = f32::from(task.center.y) - task.height / 2.0;
     let crumb = Theme::TITLEBAR_HEIGHT + super::DRILL_CRUMB_HEIGHT;
     assert!(top >= crumb + Theme::SPACE_SM, "under the breadcrumb's {crumb}: {task:?}");
+}
+
+/// #17: a subagent's run drilled into before the chat list lists it (a note tapped at launch)
+/// holds no prompt while it is unknown, and reads from the top once it is listed.
+#[gpui::test]
+fn a_run_listed_after_it_opened_reads_as_one(cx: &mut gpui::TestAppContext) {
+    let (transcript, cx) = open(cx, answer("a1", "Main answer."));
+    transcript.update(cx, |this, cx| {
+        this.state.update(cx, |state, _| {
+            state.selected_chat = Some("child".into());
+            state.transcript = vec![prompt("task", "Count the lines"), answer("a2", "It has 4.")];
+            state.transcript_revision += 1;
+        });
+        this.sync(cx);
+    });
+    draw(cx);
+    let (top, holds) = transcript.read_with(cx, |this, _| (this.list_top, this.holds_prompts));
+    assert!(!top && !holds, "unknown: no band from its task, laid as a chat");
+    transcript.update(cx, |this, cx| {
+        this.state.update(cx, |state, cx| {
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "child", "title": "Count lines", "deviceId": "dev", "archived": false,
+                    "createdAt": chrono::Utc::now(), "cwd": "/work/app", "subagent": true,
+                    "parentChatId": "chat",
+                }))
+                .unwrap(),
+            );
+            cx.notify();
+        });
+    });
+    let nodes = draw(cx);
+    let (top, holds) = transcript.read_with(cx, |this, _| (this.list_top, this.holds_prompts));
+    assert!(top && !holds, "listed as a run: from the top, holding none");
+    let said = find(&nodes, Role::Paragraph, "It has 4.").expect("the run's answer").clone();
+    assert!(f32::from(said.center.y) < 300.0, "near the top: {said:?}");
 }
 
 /// #6: a long prompt clips to five lines that fade out, with a quiet 12 pt "Show more" under
@@ -1341,12 +1587,29 @@ fn the_keyboard_reaches_the_controls_of_a_reply(cx: &mut gpui::TestAppContext) {
             ],
         ),
     );
-    let mut reached = Vec::new();
-    for _ in 0..24 {
-        tab(cx);
-        reached.push(focused(cx));
+    let reach = |cx: &mut VisualTestContext| {
+        let mut reached = Vec::new();
+        for _ in 0..24 {
+            tab(cx);
+            reached.push(focused(cx));
+        }
+        reached
+    };
+    // The settled turn's divider stands for its work, then what it changed and its strip.
+    let reached = reach(cx);
+    for want in ["Wrote 2 notes, ran 2 commands", "2 files changed", "Open diff", "Copy message"] {
+        assert!(reached.iter().any(|label| label.starts_with(want)), "{want}: {reached:?}");
     }
-    for want in ["Ran 2 commands", "Subagent Count lines", "2 files changed", "Open diff", "Copy message"] {
+    // Enter opens the divider, as a click does, and its work's controls join the order.
+    while !focused(cx).starts_with("Wrote 2 notes") {
+        tab(cx);
+    }
+    press_enter(cx);
+    let nodes = draw(cx);
+    let divider = nodes.values().find(|n| n.label.starts_with("Wrote 2 notes")).expect("the divider");
+    assert_eq!(divider.expanded, Some(true));
+    let reached = reach(cx);
+    for want in ["Ran 2 commands", "Subagent Count lines"] {
         assert!(reached.iter().any(|label| label.starts_with(want)), "{want}: {reached:?}");
     }
     // Enter opens the focused summary, as a click does.
@@ -1491,7 +1754,7 @@ fn a_run_in_its_card_reads_compact(cx: &mut gpui::TestAppContext) {
         ..SubagentProgress::default()
     };
     let (transcript, cx) =
-        open(cx, entry(MessageStatus::Complete, vec![text("Counting."), spawn(progress)]));
+        open_turn(cx, entry(MessageStatus::Complete, vec![text("Counting."), spawn(progress)]));
     let said = SessionMessageEntry {
         id: "child:0".into(),
         parts: vec![MessagePart::Text { id: "child:0:t".into(), text: "Four.".into() }],
@@ -1522,7 +1785,7 @@ fn a_running_call_sweeps_its_words() {
             spawn(SubagentProgress::default()),
         ],
     );
-    let rows = super::rows_for_entry(&entry, false, false, &mut |_, text| {
+    let rows = super::work_rows(&entry, false, &mut |_, text| {
         Arc::new(crate::markdown::parse_full(text))
     });
     let tools: Vec<_> = rows
@@ -1547,7 +1810,7 @@ fn a_failed_fetch_says_so_and_offers_retry(cx: &mut gpui::TestAppContext) {
         *output_ref = Some("blob-1".into());
         *output_bytes = Some(12_000);
     }
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![call, text("Done.")]));
+    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![call, text("Done.")]));
     transcript.update(cx, |this, cx| {
         this.blob_details.insert("blob-1".into(), super::BlobFetch::Failed);
         cx.notify();

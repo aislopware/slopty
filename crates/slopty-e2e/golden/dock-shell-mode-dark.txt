@@ -1,14 +1,16 @@
 Window
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Hello there
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
 Article │ You
 Paragraph │ Hello there
 Button │ Copy message
 Button │ Rewind…
-Article │ Claude Code
-Button │ Thought process
 Paragraph │ Done: Hello there
 Button │ Copy message
 Button │ Attach images
@@ -17,7 +19,6 @@ MultilineTextInput │ Shell command │ !echo bang-$((6*7)) (focused)
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel
@@ -26,4 +27,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

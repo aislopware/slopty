@@ -397,23 +397,26 @@ impl Render for NotificationsPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                .child(
-                                    widgets::page_header(&theme, "Notifications", None)
-                                        .items_center()
-                                        .child(div().flex_1())
-                                        .child(
-                                            widgets::restore_defaults(
-                                                &theme,
-                                                "notifications-restore-defaults",
-                                                any_changed,
-                                            )
-                                            .when(any_changed, |button| {
-                                                button.on_click(cx.listener(|this, _, _, cx| {
-                                                    this.restore_defaults(cx)
-                                                }))
-                                            }),
-                                        ),
-                                )
+                                // slopty: one page head (`widgets::page_head`).
+                                .child(widgets::page_head(
+                                    &theme,
+                                    "Notifications",
+                                    None,
+                                    "What Slopty tells you, and how.",
+                                    Some(
+                                        widgets::restore_defaults(
+                                            &theme,
+                                            "notifications-restore-defaults",
+                                            any_changed,
+                                        )
+                                        .when(any_changed, |button| {
+                                            button.on_click(cx.listener(|this, _, _, cx| {
+                                                this.restore_defaults(cx)
+                                            }))
+                                        })
+                                        .into_any_element(),
+                                    ),
+                                ))
                                 .child(
                                     widgets::section(&theme, "Desktop", desktop_card).mt(px(24.0)),
                                 )

@@ -39,8 +39,9 @@
 //!   (`tools`, `permission`, …) or folder, played for any prompt, or an object naming one for each
 //!   prompt (`{"<prompt>": "<fixture>"}`). The recording's messages stream as Claude Code streams
 //!   them, a subagent's under the `Agent` call that started it, each recorded permission request is
-//!   a `can_use_tool` the turn waits on, and every record goes to the conversation's file (a
-//!   subagent's to its own beside it). `STUB_REPLAY_GAP_MS` (20 by default) paces its steps.
+//!   a `can_use_tool` the turn waits on, a background task's recorded end is its
+//!   `task_notification`, and every record goes to the conversation's file (a subagent's to its own
+//!   beside it). `STUB_REPLAY_GAP_MS` (20 by default) paces its steps.
 //! - `background <cmd>`, `wait <secs>`, `monitor`, `signals`, `dialog <kind>`, `elicit`, `write
 //!   <path> <words>` and `plan`: the doors beside messages (`doors`).
 //! - anything else: a thinking block, then `Done: <prompt>`; for a batch of Slopty's reports
@@ -996,6 +997,9 @@ impl Stub {
                         {
                             say(&streamed);
                         }
+                        if main && let Some(ended) = task_ended(&record) {
+                            self.system("task_notification", &ended);
+                        }
                     }
                 }
                 crate::replay::Step::Hook { payload, waits: true } => {
@@ -1335,6 +1339,26 @@ fn text_of(record: &Value) -> Option<String> {
         .filter_map(|p| p.get("text")?.as_str())
         .collect();
     (!words.is_empty()).then(|| words.join("\n"))
+}
+
+/// The `task_notification` Claude Code streams as a background task ends, for the queued
+/// `<task-notification>` its transcript keeps of it: the task, its call, its output, how it ended
+/// and what it says.
+fn task_ended(record: &Value) -> Option<Value> {
+    let attachment = record.get("attachment")?;
+    if attachment.get("commandMode").and_then(Value::as_str) != Some("task-notification") {
+        return None;
+    }
+    let body = attachment.get("prompt")?.as_str()?;
+    let field = |name: &str| {
+        let (_, rest) = body.split_once(&format!("<{name}>"))?;
+        let (value, _) = rest.split_once(&format!("</{name}>"))?;
+        Some(value.trim().to_owned())
+    };
+    Some(json!({
+        "task_id": field("task-id")?, "tool_use_id": field("tool-use-id"),
+        "output_file": field("output-file"), "status": field("status"), "summary": field("summary"),
+    }))
 }
 
 /// A recorded message as Claude Code streams it, under `parent` for a subagent's; `None` for a

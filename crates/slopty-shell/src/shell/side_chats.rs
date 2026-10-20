@@ -332,7 +332,7 @@ impl Shell {
         // close animates.
         let width = composer_target_width(
             self.right_content_width(self.right_target(cx)),
-            settings::transcript_width(cx),
+            settings::transcript_width(self.viewport_width, cx),
             true,
         );
         composer.update(cx, |composer, cx| {
@@ -351,6 +351,7 @@ impl Shell {
                     "side-chat-jump",
                     "side-chat-jump-pill",
                     transcript.clone(),
+                    None,
                     cx,
                 ))
         });
@@ -375,8 +376,9 @@ impl Shell {
                     .children(pill),
             )
             .child(div().flex_none().child(composer))
-            .children(Self::attachment_drop_overlay(Theme::of(cx), cx))
-            .children(Self::mention_drop_overlay(Theme::of(cx), cx))
+            // slopty: keyed apart from the main chat's, so each target arrives on its own clock.
+            .children(Self::attachment_drop_overlay("side-chat", Theme::of(cx), cx))
+            .children(Self::mention_drop_overlay("side-chat", Theme::of(cx), cx))
             .into_any_element()
     }
 }

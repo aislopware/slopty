@@ -383,7 +383,7 @@ impl Composer {
         {
             self.footer.pending_mode = None;
         }
-        let now = crate::clock::utc(cx).timestamp_millis();
+        let now = self.dock.now_ms(cx); // slopty: the dock's moment: a goal's age turns with its tick
         let mut segments: Vec<AnyElement> = Vec::new();
         // slopty: where ↑ has walked to among the chat's prompts.
         if self.extras.history.is_some() {

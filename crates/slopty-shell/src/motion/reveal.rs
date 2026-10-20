@@ -12,10 +12,10 @@ use gpui::{
     Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 
-use super::{COLLAPSE, lerp, reduced_motion, speed_scale};
+use super::{COLLAPSE, FoldFrame, fold_frame, lerp, reduced_motion, speed_scale};
 
 /// How long a copy control shows its check (and its tooltip "Copied") after a copy.
-pub const COPIED_FOR: Duration = Duration::from_millis(1200);
+pub const COPIED_FOR: Duration = Duration::from_millis(1500);
 
 /// The copy controls in their "Copied" span, each with the copy that started it (a second copy
 /// restarts the span, and the first one's timer then leaves it be).
@@ -72,6 +72,7 @@ pub fn reveal_height(
     RevealHeight {
         key: key.into(),
         open,
+        fold: false,
         child: child.into_any_element(),
     }
 }
@@ -80,7 +81,19 @@ pub fn reveal_height(
 pub struct RevealHeight {
     key: ElementId,
     open: bool,
+    /// Moves as the one fold ([`fold_frame`]) instead of [`COLLAPSE`].
+    fold: bool,
     child: AnyElement,
+}
+
+impl RevealHeight {
+    /// slopty: moves as the one fold groups, cards and trays share ([`fold_frame`];
+    /// design-inspiration item 7): the height opens first and the contents fade in and rise
+    /// after it; closing, the contents are gone before the height lands.
+    pub fn fold(mut self) -> Self {
+        self.fold = true;
+        self
+    }
 }
 
 struct RevealState {
@@ -91,6 +104,25 @@ struct RevealState {
 }
 
 impl RevealState {
+    /// The height drawn now, the contents' opacity and rise, and whether a tween is still
+    /// running.
+    fn fold(&mut self, now: Instant, reduced: bool) -> (Option<f32>, FoldFrame, bool) {
+        let settled = FoldFrame { height: 1.0, opacity: 1.0, rise: 0.0 };
+        let target = if self.open { self.natural.get() } else { 0.0 };
+        if let Some((from, started)) = self.tween
+            && !reduced
+        {
+            let frame = fold_frame(self.open, now.saturating_duration_since(started), false);
+            let share = if self.open { frame.height } else { 1.0 - frame.height };
+            let landed = share >= 1.0 && (if self.open { frame.opacity >= 1.0 } else { frame.opacity <= 0.0 });
+            if !landed {
+                return (Some(lerp(from, target, share)), frame, true);
+            }
+        }
+        self.tween = None;
+        (if self.open { None } else { Some(0.0) }, settled, false)
+    }
+
     /// The height drawn now, and whether a tween is still running.
     fn height(&mut self, now: Instant, reduced: bool) -> (Option<f32>, bool) {
         let target = if self.open { self.natural.get() } else { 0.0 };
@@ -121,15 +153,24 @@ impl RenderOnce for RevealHeight {
         // moment (the retained check, the self-test's dump) stands the section where it stood,
         // and a tween's last frame short of its end is drawn where it was.
         let now = window.frame_time();
-        let (height, running, natural) = state.update(cx, |state, _| {
+        let fold = self.fold;
+        let (height, frame, running, natural) = state.update(cx, |state, _| {
+            let at = |state: &mut RevealState| {
+                if fold {
+                    state.fold(now, reduced)
+                } else {
+                    let (height, running) = state.height(now, reduced);
+                    (height, FoldFrame { height: 1.0, opacity: 1.0, rise: 0.0 }, running)
+                }
+            };
             if state.open != open {
-                let (drawn, _) = state.height(now, reduced);
+                let (drawn, _, _) = at(state);
                 let drawn = drawn.unwrap_or_else(|| state.natural.get());
                 state.tween = Some((drawn, now));
                 state.open = open;
             }
-            let (height, running) = state.height(now, reduced);
-            (height, running, state.natural.clone())
+            let (height, frame, running) = at(state);
+            (height, frame, running, state.natural.clone())
         });
         if running {
             window.request_animation_frame();
@@ -143,7 +184,16 @@ impl RenderOnce for RevealHeight {
                 }
             })
             .when_some(height, |el, height| el.h(px(height)).overflow_hidden())
-            .when(shown, |el| el.child(div().flex_none().w_full().child(child)))
+            .when(shown, |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .w_full()
+                        .when(frame.opacity < 1.0, |el| el.opacity(frame.opacity))
+                        .when(frame.rise > 0.0, |el| el.mt(px(frame.rise)))
+                        .child(child),
+                )
+            })
     }
 }
 
@@ -213,5 +263,29 @@ mod tests {
             cx.notify();
         });
         assert_eq!(height(cx), 0.0);
+    }
+
+    /// slopty: a fold opens its height first and fades its contents in after, risen; closing,
+    /// the contents are gone before the height lands.
+    #[test]
+    fn a_fold_opens_its_height_before_its_contents() {
+        let start = Instant::now();
+        let mut state = RevealState { open: true, natural: Rc::new(Cell::new(40.0)), tween: Some((0.0, start)) };
+        let (height, frame, running) = state.fold(start + Duration::from_millis(60), false);
+        assert!(running);
+        assert!(height.is_some_and(|h| h > 10.0 && h < 40.0), "the height is on its way: {height:?}");
+        assert!(frame.opacity == 0.0 && frame.rise > 0.0, "the contents wait, below their place");
+        let (_, frame, _) = state.fold(start + Duration::from_millis(200), false);
+        assert!(frame.opacity > 0.0 && frame.opacity < 1.0, "then fade in");
+        let (height, frame, running) = state.fold(start + Duration::from_millis(400), false);
+        assert!(!running && height.is_none() && frame.opacity == 1.0 && frame.rise == 0.0);
+
+        state.open = false;
+        state.tween = Some((40.0, start));
+        let (height, frame, _) = state.fold(start + Duration::from_millis(150), false);
+        assert!(frame.opacity <= 0.0, "the contents are gone");
+        assert!(height.is_some_and(|h| h > 0.0), "before the height lands");
+        let (height, _, running) = state.fold(start + Duration::from_millis(300), false);
+        assert!(!running && height == Some(0.0));
     }
 }

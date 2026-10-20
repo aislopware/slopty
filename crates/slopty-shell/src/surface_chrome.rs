@@ -8,9 +8,9 @@ use crate::motion::HoverFade as _;
 
 pub(crate) const HEADER_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT;
 pub(crate) const CONTROL_SIZE: f32 = 24.0;
-pub(crate) const CONTROL_RADIUS: f32 = 6.0;
+pub(crate) const CONTROL_RADIUS: f32 = Theme::CONTROL_RADIUS;
 pub(crate) const ICON_SIZE: f32 = 14.0;
-pub(crate) const CONTROL_GAP: f32 = 4.0;
+pub(crate) const CONTROL_GAP: f32 = Theme::SPACE_XS;
 pub(crate) const EDGE_INSET: f32 = 8.0;
 
 /// Shared field treatment for the file search and browser address controls.
@@ -24,8 +24,88 @@ pub(crate) fn input() -> Div {
         .bg(crate::theme::ink(0.035))
         .flex()
         .items_center()
-        .gap(px(6.0))
-        .text_size(px(11.5))
+        .gap(px(Theme::SPACE_SNUG))
+        // slopty: on the type ladder, and with the font-size setting (M28).
+        .text_size(crate::typography::ui_rems(12.0))
+}
+
+// slopty: one icon button for every pane toolbar and strip (Claude desktop's ghost button, T3's
+// `variant="ghost"`): five recipes had drawn the same 24 px control side by side.
+/// The pane's icon button: 24 square, r 6, a 14 glyph in `text_muted`, its hover wash faded in
+/// and its press a step deeper; Tab reaches it and the ring shows it. The caller names it
+/// (`hint`/`action_hint`) and gives it a click.
+pub(crate) fn icon_button(
+    id: impl Into<gpui::SharedString>,
+    glyph: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    icon_button_frame(id, false, theme)
+        .child(crate::icons::icon(glyph).size(px(ICON_SIZE)).text_color(theme.text_muted))
+}
+
+/// [`icon_button`] for a toggle: while `on` it rests on the selected wash with its glyph in
+/// `theme.text`, hover still answering a step deeper, and a screen reader hears its state.
+pub(crate) fn icon_toggle(
+    id: impl Into<gpui::SharedString>,
+    glyph: &'static str,
+    on: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    icon_button_frame(id, on, theme)
+        .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
+        .child(
+            crate::icons::icon(glyph)
+                .size(px(ICON_SIZE))
+                .text_color(if on { theme.text } else { theme.text_muted }),
+        )
+}
+
+/// [`icon_button`] for a menu's trigger: while its menu is `open` it holds the selected wash with
+/// its glyph in full ink and takes no hover over it (opencode's `[data-expanded]`), so the
+/// trigger reads as the menu's own. The caller sets `aria_expanded`.
+pub(crate) fn icon_menu_button(
+    id: impl Into<gpui::SharedString>,
+    glyph: &'static str,
+    open: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    icon_button_frame(id, open, theme)
+        .when(open, |el| el.bg(crate::theme::selected_wash()))
+        .child(
+            crate::icons::icon(glyph)
+                .size(px(ICON_SIZE))
+                .text_color(if open { theme.text } else { theme.text_muted }),
+        )
+}
+
+/// The frame [`icon_button`] and [`icon_toggle`] share, for a caller-drawn glyph: a keyboard
+/// stop ([`key_stop`]), so a press leaves the keyboard where it was.
+pub(crate) fn icon_button_frame(
+    id: impl Into<gpui::SharedString>,
+    on: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    let id: gpui::SharedString = id.into();
+    let fade = format!("{id}-fade");
+    let (rest, hover) = if on {
+        (crate::theme::selected_wash(), crate::theme::selected_hover_wash())
+    } else {
+        (crate::theme::wash(0.0), crate::theme::control_hover())
+    };
+    div()
+        .id(gpui::ElementId::Name(id))
+        .size(px(CONTROL_SIZE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(CONTROL_RADIUS))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .bg(crate::motion::hover_blend(&fade, rest, hover))
+        .hover_fade(fade)
+        .active(|style| style.bg(crate::theme::pressed_wash()))
+        .map(|el| key_stop(el, theme))
 }
 
 pub(crate) fn toolbar(theme: &Theme) -> Div {
@@ -129,7 +209,7 @@ pub(crate) fn tab_frame(
         .role(gpui::Role::Button)
         .aria_selected(selected)
         .tab_index(0)
-        .text_size(px(12.0))
+        .text_size(crate::typography::ui_rems(12.0))
         .text_color(if selected {
             theme.text
         } else {
@@ -137,7 +217,7 @@ pub(crate) fn tab_frame(
         })
         // slopty: a ring that never widens the chip (`focus_ring`).
         .map(|el| focus_ring(el, theme))
-        .when(selected, |el| el.bg(crate::theme::wash(0.10)))
+        .when(selected, |el| el.bg(crate::theme::selected_wash()))
 }
 
 pub(crate) fn tab(
@@ -146,21 +226,125 @@ pub(crate) fn tab(
     theme: &Theme,
 ) -> gpui::Stateful<Div> {
     tab_frame(id, selected, theme)
-        .when(!selected, |el| {
-            el.hover(|style| style.bg(crate::theme::wash(0.06)))
-        })
+        .when(!selected, |el| el.hover(|style| style.bg(crate::theme::hover_wash())))
         // slopty: pressed reads a step deeper (M22).
-        .active(|style| style.bg(crate::theme::wash(0.14)))
+        .active(|style| style.bg(crate::theme::pressed_wash()))
 }
 
-/// Fixed pane tab width. Drag reordering (drop-index quantisation and slide
-/// offsets) assumes uniform chips.
-pub(crate) const TAB_CHIP_WIDTH: f32 = 112.0;
+// slopty: a pane's tabs fit their titles (T3's content-sized chips), so "Working tree" reads
+// whole beside an empty strip. One width per strip, the widest title's, keeps the drag maths
+// (drop-index quantisation, slide offsets) uniform.
+/// The narrowest a pane tab draws.
+pub(crate) const TAB_CHIP_MIN_WIDTH: f32 = 96.0;
+/// The widest a pane tab draws; a longer title is cut and shown whole in its tooltip.
+pub(crate) const TAB_CHIP_MAX_WIDTH: f32 = 168.0;
 pub(crate) const TAB_CHIP_HEIGHT: f32 = 24.0;
-/// A chip plus the strip's own gap.
-pub(crate) const TAB_CHIP_SLOT: f32 = TAB_CHIP_WIDTH + CONTROL_GAP;
+/// A tab title's size, at the 16 px baseline.
+pub(crate) const TAB_TITLE_SIZE: f32 = crate::typography::ladder::LABEL;
+/// What a chip spends besides its title: its two 4 px pads, the 18 px glyph and close slots,
+/// the two gaps between them, and 4 px so a measured title never meets its fade.
+const TAB_CHIP_FRAME: f32 = 2.0 * 4.0 + 2.0 * 18.0 + 2.0 * CONTROL_GAP + 4.0;
 /// Width of the fade over tabs scrolled out of a strip.
 pub(crate) const TAB_STRIP_FADE: f32 = 36.0;
+
+/// One strip's tab width, and for each title whether that width cuts it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TabWidths {
+    /// Every chip's width in the strip.
+    pub chip: f32,
+    /// Per title, in order: whether the chip cuts it.
+    pub cut: Vec<bool>,
+}
+
+impl TabWidths {
+    /// A chip plus the strip's own gap: one drag slot.
+    pub(crate) fn slot(&self) -> f32 {
+        self.chip + CONTROL_GAP
+    }
+}
+
+/// Fits a strip's chips to its widest title (in `cx`'s interface face and size), between
+/// [`TAB_CHIP_MIN_WIDTH`] and [`TAB_CHIP_MAX_WIDTH`].
+pub(crate) fn tab_widths<'a>(
+    titles: impl IntoIterator<Item = &'a str>,
+    cx: &gpui::App,
+) -> TabWidths {
+    let size = px(crate::typography::font_size(cx).pixels() * TAB_TITLE_SIZE / 16.0);
+    let text = cx.text_system();
+    let font = text.resolve_font(&gpui::font(crate::typography::effective_family_name(cx)));
+    let widths: Vec<f32> = titles
+        .into_iter()
+        .map(|title| {
+            title
+                .chars()
+                .map(|ch| {
+                    text.advance(font, size, ch)
+                        .map_or(f32::from(size) * 0.6, |advance| f32::from(advance.width))
+                })
+                .sum()
+        })
+        .collect();
+    let widest = widths.iter().copied().fold(0.0_f32, f32::max);
+    let chip = (widest + TAB_CHIP_FRAME).clamp(TAB_CHIP_MIN_WIDTH, TAB_CHIP_MAX_WIDTH).ceil();
+    let room = chip - TAB_CHIP_FRAME;
+    TabWidths { chip, cut: widths.into_iter().map(|width| width > room).collect() }
+}
+
+// slopty: a strip keeps its chips' width after a close by pointer, so the next ✕ stays under the
+// pointer (opencode's TUI and every browser): until the pointer leaves the strip or five seconds
+// pass, then the chips ease to their new width over `TAB_SLIDE`.
+/// How long a strip holds its width after a close with the pointer still over it.
+pub(crate) const TAB_HOLD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The chip width a strip holds after a close by pointer, and its ease back once let go.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct HeldTabWidth(Option<Hold>);
+
+#[derive(Debug, Clone, Copy)]
+enum Hold {
+    Holding { width: f32, at: std::time::Instant },
+    Easing { from: f32, at: std::time::Instant },
+}
+
+impl HeldTabWidth {
+    /// A tab was closed by pointer while the chips stood `width` wide.
+    pub(crate) fn hold(&mut self, width: f32, now: std::time::Instant) {
+        self.0 = Some(Hold::Holding { width, at: now });
+    }
+
+    /// The pointer left the strip: the held width eases to the natural one. Whether it held.
+    pub(crate) fn release(&mut self, now: std::time::Instant) -> bool {
+        match self.0 {
+            Some(Hold::Holding { width, .. }) => {
+                self.0 = Some(Hold::Easing { from: width, at: now });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The width to draw the chips at instead of `natural`, and whether it is still moving (the
+    /// caller asks for frames while it is). Reduced motion lands at once.
+    pub(crate) fn width(&mut self, natural: f32, now: std::time::Instant, reduced: bool) -> (f32, bool) {
+        if let Some(Hold::Holding { width, at }) = self.0 {
+            if now.saturating_duration_since(at) < TAB_HOLD {
+                return (width, false);
+            }
+            self.0 = Some(Hold::Easing { from: width, at: at + TAB_HOLD });
+        }
+        let Some(Hold::Easing { from, at }) = self.0 else {
+            return (natural, false);
+        };
+        let total = crate::motion::TAB_SLIDE.total().as_secs_f32();
+        let raw = now.saturating_duration_since(at).as_secs_f32() / total;
+        if reduced || raw >= 1.0 {
+            self.0 = None;
+            return (natural, false);
+        }
+        let eased = crate::motion::TAB_SLIDE.progress(raw);
+        (crate::motion::lerp(from, natural, eased), true)
+    }
+}
 
 /// One pane tab chip, as drawn in the titlebar band above a side pane.
 pub(crate) struct TabChip {
@@ -175,6 +359,10 @@ pub(crate) struct TabChip {
     pub dirty: bool,
     /// The leading 18px slot's content, usually [`tab_chip_icon`].
     pub leading: gpui::AnyElement,
+    /// The strip's chip width ([`tab_widths`]).
+    pub width: f32,
+    /// The close button's tooltip ("Close tab", with ⌘W on the tab in front).
+    pub close_hint: &'static str,
 }
 
 /// A pane tab: the leading icon, the truncated title, and a trailing slot
@@ -193,17 +381,30 @@ pub(crate) fn tab_chip(
         title,
         dirty,
         leading,
+        width,
+        close_hint,
     } = chip;
+    // slopty: each ✕ is named for its tab, so a screen reader tells them apart (T3's
+    // `Close ${title}`); its tooltip keeps the action's words and key.
+    let close_name: gpui::SharedString = format!("Close {title}").into();
     let selector: gpui::SharedString = format!("{id}-{ix}").into();
     let close_fade = format!("{close_id}-{ix}-fade");
     // slopty: the ✕ fades in with the tab's hover, the unsaved dot out (M23).
     let tab_fade = format!("{id}-{ix}-reveal");
     let shown = crate::motion::hover_t(&tab_fade);
-    tab((id, ix), active, theme)
+    // slopty: on a touch screen the ✕ is there at rest (opencode's `(hover: hover)` gate); an
+    // inactive tab with unsaved edits keeps its dot there instead.
+    let revealed = if dirty && !active { shown } else { crate::motion::revealed_by_hover(&tab_fade) };
+    // slopty: the hover wash fades with the same hover as the ✕ (M23 remainder).
+    let rest = if active { crate::theme::selected_wash() } else { crate::theme::wash(0.0) };
+    let hover = if active { rest } else { crate::theme::hover_wash() };
+    tab_frame((id, ix), active, theme)
+        .bg(crate::motion::mix(rest, hover, shown))
+        .active(|style| style.bg(crate::theme::pressed_wash()))
         .debug_selector(move || selector.to_string())
         .hover_fade(tab_fade)
         .h(px(TAB_CHIP_HEIGHT))
-        .w(px(TAB_CHIP_WIDTH))
+        .w(px(width))
         .flex_none()
         // slopty: 4 from the edge; the ring is drawn inside it, as the strip clips.
         .px(px(4.0))
@@ -212,7 +413,7 @@ pub(crate) fn tab_chip(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(3.0))
+        .gap(px(CONTROL_GAP))
         .cursor_pointer()
         .role(gpui::Role::Button)
         // The old session-tab strip's solved carve-out: NOT `.occlude()` — a
@@ -238,7 +439,7 @@ pub(crate) fn tab_chip(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(crate::typography::ui_rems(11.5))
+                .text_size(crate::typography::ui_rems(TAB_TITLE_SIZE))
                 .text_color(if active { theme.text } else { theme.text_muted })
                 .child(title),
         )
@@ -260,14 +461,14 @@ pub(crate) fn tab_chip(
                 .items_center()
                 .justify_center()
                 .role(gpui::Role::Button)
-                .aria_label("Close tab")
+                .aria_label(close_name)
                 .tooltip(if active {
                     Box::new(crate::settings::widgets::action_tooltip(
-                        "Close tab",
+                        close_hint,
                         crate::settings::widgets::Keys::Action(Box::new(crate::app_menus::CloseTab)),
                     )) as Box<dyn Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView>
                 } else {
-                    Box::new(crate::settings::widgets::text_tooltip("Close tab"))
+                    Box::new(crate::settings::widgets::text_tooltip(close_hint))
                 })
                 .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                 .hover_fade(close_fade.clone())
@@ -296,7 +497,7 @@ pub(crate) fn tab_chip(
                         .bg(crate::motion::hover_blend(
                             &close_fade,
                             crate::theme::wash(0.0),
-                            crate::theme::wash(0.11),
+                            crate::theme::control_hover(),
                         ))
                         .when(dirty, |slot| {
                             slot.child(
@@ -306,7 +507,7 @@ pub(crate) fn tab_chip(
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .opacity(1.0 - shown)
+                                    .opacity(1.0 - revealed)
                                     .child(div().size(px(6.0)).rounded_full().bg(theme.text_muted)),
                             )
                         })
@@ -317,7 +518,7 @@ pub(crate) fn tab_chip(
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .opacity(shown)
+                                .opacity(revealed)
                                 .child(
                                     crate::icons::icon(crate::icons::CLOSE)
                                         .size(px(12.0))
@@ -443,10 +644,29 @@ const fn close_hit_size(touch: bool) -> (f32, f32) {
     if touch { (30.0, 44.0) } else { (24.0, 24.0) }
 }
 
+/// A dragged tab at the pointer: the strip's chip width, its title on the raised surface.
+pub(crate) fn tab_ghost(title: gpui::SharedString, width: f32, theme: &Theme) -> Div {
+    div()
+        .h(px(TAB_CHIP_HEIGHT))
+        .w(px(width))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .rounded(px(CONTROL_RADIUS))
+        .bg(theme.surface_raised)
+        .border_1()
+        .border_color(theme.border_strong)
+        .text_size(crate::typography::ui_rems(TAB_TITLE_SIZE))
+        .text_color(theme.text)
+        .opacity(0.85)
+        .child(div().truncate().child(title))
+}
+
 /// A chip's leading glyph, quieter on inactive tabs.
 pub(crate) fn tab_chip_icon(path: &'static str, active: bool, theme: &Theme) -> gpui::AnyElement {
+    // slopty: a tab's leading glyph is 14, as the file icons beside it (M48, item 21).
     crate::icons::icon(path)
-        .size(px(12.0))
+        .size(px(ICON_SIZE))
         .text_color(if active {
             theme.text_muted
         } else {
@@ -727,6 +947,8 @@ mod tests {
                     title: "notes.md".into(),
                     dirty: self.dirty,
                     leading: div().into_any_element(),
+                    width: TAB_CHIP_MIN_WIDTH,
+                    close_hint: "Close tab",
                 },
                 &theme,
                 {
@@ -739,6 +961,30 @@ mod tests {
 
     /// A tab's ✕ fades in with its hover (M23): the unsaved dot it stands over fades out with
     /// the same hover, so with motion reduced the dot is gone once the pointer is over the tab.
+    /// After a close by pointer the strip holds its width while the pointer stays, eases to the
+    /// new width once it leaves, and lets go by itself after five seconds.
+    #[test]
+    fn a_strip_holds_its_width_after_a_close_until_the_pointer_leaves() {
+        let t0 = std::time::Instant::now();
+        let ms = |m: u64| t0 + std::time::Duration::from_millis(m);
+        let mut hold = HeldTabWidth::default();
+        assert_eq!(hold.width(120.0, t0, false), (120.0, false), "nothing held");
+        hold.hold(150.0, t0);
+        assert_eq!(hold.width(120.0, ms(1000), false), (150.0, false), "held under the pointer");
+        assert!(hold.release(ms(1000)));
+        let (mid, moving) = hold.width(120.0, ms(1075), false);
+        assert!(moving && mid < 150.0 && mid > 120.0, "easing: {mid}");
+        assert_eq!(hold.width(120.0, ms(1200), false), (120.0, false), "settled");
+        assert!(!hold.release(ms(1300)), "nothing left to let go");
+
+        hold.hold(150.0, t0);
+        assert_eq!(hold.width(120.0, ms(4999), false).0, 150.0);
+        assert!(hold.width(120.0, ms(5050), false).1, "five seconds on, it eases by itself");
+        hold.hold(150.0, t0);
+        hold.release(ms(10));
+        assert_eq!(hold.width(120.0, ms(11), true), (120.0, false), "reduced motion lands at once");
+    }
+
     #[gpui::test]
     fn a_tabs_close_fades_with_its_hover(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {

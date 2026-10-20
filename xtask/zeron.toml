@@ -235,6 +235,14 @@ paths = [
     "crates/ui/build.rs",
     # zatex's benchmark and font-sheet examples (its numbers: docs/MEASUREMENTS.md).
     "crates/zatex/examples/",
+    # Pruned from Appearance and the agents' settings (docs/decisions/ui.md, "The sidebar, settings
+    # and themes take Amp's details and prunes"): theme import with its library, the per-agent
+    # completion preferences, and the wallpaper folder with its shuffle.
+    "crates/theme/src/library.rs",
+    "crates/theme/src/vscode.rs",
+    "crates/ui/src/theme_library.rs",
+    "crates/ui/src/settings/completion.rs",
+    "crates/ui/src/settings/wallpaper.rs",
     # zeron's mark: the shell draws Slopty's (`crates/slopty-shell/assets/icons/slopty-logo.svg`).
     "crates/ui/assets/icons/zeron-logo.svg",
     # The repository's own files: Slopty has its own.

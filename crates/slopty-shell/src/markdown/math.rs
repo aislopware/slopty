@@ -59,39 +59,18 @@ const NBSP: char = '\u{00A0}';
 /// grows the formula, not the gap around it.
 const DISPLAY_PAD_Y: f32 = 6.0;
 
-/// How a surface sets math: the "Render math", "Math font" and "Math size"
-/// settings ([`crate::settings::math_style`]). Disabled, inline math shows
-/// its `$tex$` source as inline code and display math as a `math` code block
-/// — the same fallbacks as source slopty_math can't render.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MathStyle {
-    pub enabled: bool,
-    pub face: Face,
-    /// Percent of the surrounding text size.
-    pub size: u16,
-}
-
-impl MathStyle {
-    /// Formula size per unit of text size.
-    pub fn scale(self) -> f32 {
-        f32::from(self.size) / 100.0
-    }
-}
-
-impl Default for MathStyle {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            face: Face::Fira,
-            size: crate::settings::MATH_SIZE_DEFAULT,
-        }
-    }
-}
+// slopty: formulas set in one look, the prose's (the Amp study's P8): always typeset, in Fira
+// Math beside the sans body, at the size of the text around them. Source slopty_math can't
+// render shows as code: inline code for `$tex$`, a `math` code block for display math.
+/// The face every formula is set in.
+pub const MATH_FACE: Face = Face::Fira;
+/// A formula's size per unit of the text around it.
+pub const MATH_SCALE: f32 = 1.0;
 
 /// A formula painted over a reserved run of NBSPs. `range` is in displayed
 /// text coordinates; `display` centers the formula in its line box instead
 /// of setting it on the text baseline. `scale` is the formula's size per
-/// unit of the element's font size ([`MathStyle::scale`]).
+/// unit of the element's font size ([`MATH_SCALE`]).
 #[derive(Clone)]
 pub struct MathSlot {
     pub range: Range<usize>,
@@ -1200,15 +1179,6 @@ mod tests {
             assert!(scaled * nbsp_em() >= scale * (span.end - span.start));
             assert!((scaled - normal * scale).abs() <= 1.0, "{scale}: {scaled}");
         }
-        assert_eq!(MathStyle::default().scale(), 1.0);
-        assert_eq!(
-            MathStyle {
-                size: 135,
-                ..Default::default()
-            }
-            .scale(),
-            1.35
-        );
     }
 
     #[test]

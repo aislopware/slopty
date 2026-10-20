@@ -175,6 +175,84 @@ fn signature(items: &[TodoItem]) -> u64 {
     hasher.finish()
 }
 
+// slopty: a 2 px rule under the header fills as steps finish (Clanker's plan rule, HextaUI's
+// questionnaire fill; design-inspiration item 3): grown from the left over [`RULE_FILL`] as a step
+// is done, snapped when the agent writes a different list, and, full, green for [`RULE_HOLD`]
+// before it goes quiet into the track over [`RULE_QUIET`].
+/// A step finishing: the fill grows over 500 ms on the quint ease-out.
+const RULE_FILL: motion::MotionSpec = motion::MotionSpec::new(500, motion::EASE_OUT_QUINT);
+/// How long a full rule stays green once its fill lands.
+const RULE_HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+/// A full rule fading into the track.
+const RULE_QUIET: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE);
+/// The rule's thickness, and its track's ink.
+const RULE_HEIGHT: f32 = 2.0;
+const RULE_TRACK: f32 = 0.08;
+
+/// Where the header's rule stands: the share it fills, from where it grows and since when.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TodoRule {
+    /// The list the rule measures, by its steps' texts: another list snaps.
+    list: u64,
+    from: f32,
+    to: f32,
+    /// When the fill last moved; `None` drawn where it is.
+    at: Option<std::time::Instant>,
+}
+
+/// One frame of the rule: how much it fills, how green it is (1 success, 0 the track), and
+/// whether it still moves.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RuleFrame {
+    pub fill: f32,
+    pub green: f32,
+    pub moving: bool,
+}
+
+impl TodoRule {
+    /// The list `items` is, done to the share it is at `now`: a change of share grows from
+    /// wherever the fill stands; another list snaps, quiet if it is already full.
+    fn observe(rule: Option<Self>, items: &[TodoItem], now: std::time::Instant) -> Self {
+        let summary = TodoSummary::of(items);
+        let share = if summary.total == 0 { 0.0 } else { summary.done as f32 / summary.total as f32 };
+        let list = {
+            let mut hasher = DefaultHasher::new();
+            for item in items {
+                item.text.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        match rule {
+            Some(rule) if rule.list == list && (rule.to - share).abs() < f32::EPSILON => rule,
+            Some(rule) if rule.list == list => {
+                Self { list, from: rule.frame(now, false).fill, to: share, at: Some(now) }
+            }
+            _ => Self { list, from: share, to: share, at: None },
+        }
+    }
+
+    /// The rule at `now`; settled at once under reduced motion (`still`).
+    pub(crate) fn frame(&self, now: std::time::Instant, still: bool) -> RuleFrame {
+        let full = self.to >= 1.0;
+        let Some(at) = self.at.filter(|_| !still) else {
+            // Snapped, or still: a full list is already quiet.
+            return RuleFrame { fill: self.to, green: if full { 0.0 } else { 1.0 }, moving: false };
+        };
+        let elapsed = now.saturating_duration_since(at);
+        let scale = motion::speed_scale();
+        let fill_total = RULE_FILL.total().mul_f32(scale);
+        let grown = RULE_FILL.progress(elapsed.as_secs_f32() / fill_total.as_secs_f32().max(f32::EPSILON));
+        let fill = motion::lerp(self.from, self.to, grown);
+        if !full {
+            return RuleFrame { fill, green: 1.0, moving: grown < 1.0 };
+        }
+        let quiet_at = fill_total + RULE_HOLD.mul_f32(scale);
+        let quiet_total = RULE_QUIET.total().mul_f32(scale).as_secs_f32().max(f32::EPSILON);
+        let quiet = RULE_QUIET.progress(elapsed.saturating_sub(quiet_at).as_secs_f32() / quiet_total);
+        RuleFrame { fill, green: 1.0 - quiet, moving: quiet < 1.0 }
+    }
+}
+
 /// Per-chat presentation state. In memory only — like the right-pane flags in
 /// `shell::SessionPanels` it lasts for the app run, not across restarts.
 #[derive(Debug, Default, Clone)]
@@ -188,6 +266,10 @@ pub(crate) struct TodoPanelState {
     dismissed: Option<u64>,
     /// Whether the previous frame was settled, to detect the transition.
     was_settled: bool,
+    /// The header's progress rule.
+    rule: Option<TodoRule>,
+    /// When a settled tray began to leave.
+    leaving: Option<std::time::Instant>,
 }
 
 impl TodoPanelState {
@@ -299,13 +381,45 @@ impl Composer {
         if panel.is_dismissed(&items) {
             return None;
         }
+        let now = window.frame_time();
+        let still = motion::reduced_motion(cx);
+        let rule = TodoRule::observe(panel.rule, &items, now);
+        let fresh = panel.rule.map(|rule| rule.list) != Some(rule.list);
+        panel.rule = Some(rule);
+        // slopty: a finished list leaves once the turn has ended (the Amp study's P13): the
+        // transcript's Todo row keeps the record. It goes once its rule has gone quiet, fading
+        // over `FOLD_HIDE`; one already settled when first seen never shows. It stays gone until
+        // the agent writes a different list.
+        let rule_frame = rule.frame(now, still);
+        let leaving = if !settled {
+            panel.leaving = None;
+            None
+        } else if fresh || still {
+            Some(1.0)
+        } else if rule_frame.moving {
+            None
+        } else {
+            let since = *panel.leaving.get_or_insert(now);
+            let total = motion::FOLD_HIDE.total().mul_f32(motion::speed_scale()).as_secs_f32();
+            Some(motion::FOLD_HIDE.progress(now.saturating_duration_since(since).as_secs_f32() / total.max(f32::EPSILON)))
+        };
+        if leaving.is_some_and(|gone| gone >= 1.0) {
+            panel.leaving = None;
+            panel.dismiss(&items);
+            return None;
+        }
         let expanded = panel.is_expanded(summary.finished());
         let (show_earlier, show_later) = (panel.show_earlier, panel.show_later);
 
         let theme = Theme::of(cx).clone();
-        let view = cx.entity_id();
         // Dismissable whenever the turn is idle, finished or not.
         let header = self.todo_header(&chat_id, &items, summary, expanded, !live, &theme, cx);
+        if rule_frame.moving || leaving.is_some() {
+            // The next frame draws the composer again, wherever this is asked from.
+            let view = cx.entity_id();
+            window.on_next_frame(move |_, cx| cx.notify(view));
+        }
+        let header = div().relative().child(header).child(progress_rule(rule_frame, &theme));
 
         let surface =
             crate::queue::queue_panel_surface(&theme, cx.has_active_drag()).child(header);
@@ -322,7 +436,7 @@ impl Composer {
                 rows(&items, show_earlier, show_later)
                     .into_iter()
                     .map(|row| match row {
-                        TodoRow::Item(ix) => todo_item_row(ix, &items[ix], live, &theme, view, cx),
+                        TodoRow::Item(ix) => todo_item_row(ix, &items[ix], live, &theme),
                         TodoRow::Fold { side, count, open } => {
                             self.todo_fold_row(&chat_id, side, count, open, &theme, cx)
                         }
@@ -342,17 +456,21 @@ impl Composer {
                     .child(list),
             )
             // The ramp ends at the clip edge; glyphs fade per pixel.
-            .fade_overflow_y(&self.todo_scroll);
-            surface.child(motion::reveal_height(
-                SharedString::from(format!("todo-rows-{chat_id}")),
-                expanded,
-                div()
-                    .mt(px(2.0))
-                    // The tray's lowest strip hides behind the composer; keep
-                    // the last row clear of that edge.
-                    .pb(px(6.0))
-                    .child(rows),
-            ))
+            // slopty: each ramp as tall as what lies past it (design-inspiration item 4).
+            .fade_scroll_y(&self.todo_scroll);
+            surface.child(
+                motion::reveal_height(
+                    SharedString::from(format!("todo-rows-{chat_id}")),
+                    expanded,
+                    div()
+                        .mt(px(2.0))
+                        // The tray's lowest strip hides behind the composer; keep
+                        // the last row clear of that edge.
+                        .pb(px(6.0))
+                        .child(rows),
+                )
+                .fold(),
+            )
         };
 
         let inset = SIDE_INSET * (1 + trays_below) as f32;
@@ -362,6 +480,7 @@ impl Composer {
                 // Cancel the column gap and tuck the tray behind what follows
                 // (the queue tray, or the composer itself).
                 .mb(px(-(Theme::SPACE_SM + QUEUE_COMPOSER_OVERLAP)))
+                .when_some(leaving, |el, gone| el.opacity(1.0 - gone))
                 .child(crate::frost::frosted(
                     crate::queue::PANEL_RADIUS,
                     crate::frost::MENU_BLUR,
@@ -606,13 +725,32 @@ impl Composer {
 
 /// One checklist row: status glyph + text. Completed work recedes, the
 /// in-progress item is the brightest thing in the list.
+/// slopty: the header's progress rule, laid along its foot inset to its text: the track in
+/// faint ink, the fill in success green, going quiet into the track once full.
+fn progress_rule(rule: RuleFrame, theme: &Theme) -> impl IntoElement {
+    let track = theme.ink(RULE_TRACK);
+    div()
+        .absolute()
+        .left(px(ROW_PAD_X))
+        .right(px(ROW_PAD_X))
+        .bottom_0()
+        .h(px(RULE_HEIGHT))
+        .rounded_full()
+        .bg(track)
+        .child(
+            div()
+                .h_full()
+                .w(gpui::relative(rule.fill.clamp(0.0, 1.0)))
+                .rounded_full()
+                .bg(motion::mix(track, theme.success, rule.green)),
+        )
+}
+
 fn todo_item_row(
     ix: usize,
     item: &TodoItem,
     live: bool,
     theme: &Theme,
-    view: gpui::EntityId,
-    cx: &mut gpui::App,
 ) -> AnyElement {
     let status = item.status();
     let (color, weight) = match status {
@@ -644,7 +782,7 @@ fn todo_item_row(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(status_glyph(ix, status, live, theme, view, cx)),
+                .child(status_glyph(ix, status, live, theme)),
         )
         .child(
             div()
@@ -659,30 +797,24 @@ fn todo_item_row(
         .into_any_element()
 }
 
-/// check / active / pending. An in-progress item only animates while the turn
-/// is live; on an idle chat it is a still ring (the agent is not working on
-/// it), so a stopped run does not look busy forever.
-fn status_glyph(
-    ix: usize,
-    status: TodoStatus,
-    live: bool,
-    theme: &Theme,
-    view: gpui::EntityId,
-    cx: &mut gpui::App,
-) -> AnyElement {
+/// slopty: done / working / stopped / pending. A step's mark morphs as it moves on (the one
+/// status mark, design-inspiration item 1): the working ring closes and its disc and tick draw in
+/// as the step is done, never a spinner swapped for a check. An in-progress step only turns while
+/// the turn is live; on an idle chat it is a still ring (the agent is not working on it), so a
+/// stopped run does not look busy forever.
+fn status_glyph(ix: usize, status: TodoStatus, live: bool, theme: &Theme) -> AnyElement {
+    use crate::loaders::status_mark::{MARK_LARGE, MarkState, StatusMark};
+    let mark = |state| {
+        StatusMark::new(SharedString::from(format!("todo-mark-{ix}")), state)
+            // A tray row's size; its drawn ring and disc sit inside the 14 px slot.
+            .size(MARK_LARGE)
+            // The tick is cut through the disc in the tray's own ground.
+            .ground(crate::theme::flatten(theme.input_glass_bg(), theme.bg))
+            .into_any_element()
+    };
     match status {
-        TodoStatus::Completed => icon(icons::CHECK)
-            .size(px(12.0))
-            .text_color(theme.success)
-            .into_any_element(),
-        TodoStatus::InProgress if live => crate::loaders::mini_glyph_spinner(
-            format!("todo-active-{ix}"),
-            2.5,
-            theme.glyph,
-            view,
-            cx,
-        )
-        .into_any_element(),
+        TodoStatus::Completed => mark(MarkState::Done),
+        TodoStatus::InProgress if live => mark(MarkState::Working),
         TodoStatus::InProgress => div()
             .size(px(10.0))
             .rounded_full()
@@ -721,6 +853,34 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// slopty: the header's rule grows over 500 ms as a step is done, snaps for another list,
+    /// and, full, holds green for 1.2 s before it goes quiet into the track.
+    #[test]
+    fn the_todo_rule_fills_as_steps_finish() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let rule = TodoRule::observe(None, &items("x.."), start);
+        assert_eq!(rule.frame(start, false), RuleFrame { fill: 1.0 / 3.0, green: 1.0, moving: false }, "a new list snaps");
+
+        let rule = TodoRule::observe(Some(rule), &items("xx."), start);
+        let early = rule.frame(at(100), false);
+        assert!(early.moving && early.fill > 1.0 / 3.0 && early.fill < 2.0 / 3.0, "grows: {early:?}");
+        let landed = rule.frame(at(500), false);
+        assert!((landed.fill - 2.0 / 3.0).abs() < 1e-4 && !landed.moving);
+
+        let rule = TodoRule::observe(Some(rule), &items("xxx"), at(1000));
+        let full = rule.frame(at(1000 + 500 + 1100), false);
+        assert!((full.fill - 1.0).abs() < 1e-4 && full.green == 1.0 && full.moving, "held green");
+        let quiet = rule.frame(at(1000 + 500 + 1200 + 300), false);
+        assert!(quiet.green == 0.0 && !quiet.moving, "then quiet: {quiet:?}");
+        assert_eq!(rule.frame(at(1000), true).green, 0.0, "reduced motion lands at once");
+
+        let other = TodoRule::observe(Some(rule), &items("x."), at(5000));
+        assert_eq!(other.frame(at(5000), false).fill, 0.5, "another list snaps");
+        let full_fresh = TodoRule::observe(None, &items("xx"), start);
+        assert_eq!(full_fresh.frame(start, false).green, 0.0, "a list shown full is already quiet");
     }
 
     fn entry(role: MessageRole, parts: Vec<MessagePart>) -> SessionMessageEntry {
@@ -1127,30 +1287,24 @@ mod composer_tests {
             .unwrap();
     }
 
+    /// slopty: a finished list on an ended turn has no tray (the Amp study's P13); the
+    /// transcript's row keeps the record. A dismissed list stays gone until the list changes.
     #[gpui::test]
-    fn a_dismissed_finished_list_stays_gone_until_the_list_changes(cx: &mut gpui::TestAppContext) {
+    fn a_finished_or_dismissed_list_stays_gone_until_the_list_changes(cx: &mut gpui::TestAppContext) {
         let (_dir, state, handle) = window(cx);
-        let finished = || vec![assistant_with_todo(items(3, 3))];
-        show_todo(&state, &handle, "a", finished(), cx);
+        show_todo(&state, &handle, "a", vec![assistant_with_todo(items(3, 3))], cx);
+        assert!(!rendered(&handle, cx), "a finished list on an ended turn leaves");
+        assert!(!rendered(&handle, cx), "and stays gone");
+        // A new list (more work) is shown again.
+        show_todo(&state, &handle, "a", vec![assistant_with_todo(items(3, 5))], cx);
         assert!(rendered(&handle, cx));
         handle
             .update(cx, |composer, _, _| {
-                composer
-                    .todo_panels
-                    .get_mut("a")
-                    .unwrap()
-                    .dismiss(&items(3, 3));
+                composer.todo_panels.get_mut("a").unwrap().dismiss(&items(3, 5));
             })
             .unwrap();
         assert!(!rendered(&handle, cx));
-        // A new list (more work) is shown again.
-        show_todo(
-            &state,
-            &handle,
-            "a",
-            vec![assistant_with_todo(items(3, 5))],
-            cx,
-        );
+        show_todo(&state, &handle, "a", vec![assistant_with_todo(items(4, 5))], cx);
         assert!(rendered(&handle, cx));
     }
 }

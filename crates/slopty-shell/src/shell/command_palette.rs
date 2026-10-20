@@ -356,15 +356,16 @@ enum Section {
 impl Section {
     fn title(self) -> &'static str {
         match self {
-            Self::RecentFiles => "Recent Files",
-            Self::QuickActions => "Quick Actions",
+            // slopty: sentence case, as every label in the app.
+            Self::RecentFiles => "Recent files",
+            Self::QuickActions => "Quick actions",
             // slopty: one name for a conversation, "chat" (M17).
-            Self::RecentThreads => "Recent Chats",
+            Self::RecentThreads => "Recent chats",
             Self::Threads => "Chats",
             Self::Commands => "Commands",
             Self::Files => "Files",
-            Self::InFiles => "In Files",
-            Self::InThreads => "In Chats",
+            Self::InFiles => "In files",
+            Self::InThreads => "In chats",
         }
     }
 }
@@ -386,7 +387,7 @@ impl Command {
     fn label(&self) -> &'static str {
         match self {
             Self::NewChat => "New chat",
-            Self::NewProject => "New project",
+            Self::NewProject => "New project\u{2026}", // slopty: it opens a picker
             Self::ResumeSession => super::past_sessions::RESUME, // slopty
             Self::Settings => "Settings", // slopty: the name its menu and button use
             Self::Theme(AppearanceMode::System) => "Switch to system theme",
@@ -399,7 +400,7 @@ impl Command {
 
     fn icon(&self) -> &'static str {
         match self {
-            Self::NewChat => icons::PEN_NEW_SQUARE,
+            Self::NewChat => icons::PLUS, // slopty: the titlebar's glyph for it
             Self::NewProject => icons::FOLDER,
             Self::ResumeSession => icons::CLOCK_CIRCLE, // slopty
             Self::Settings => icons::SETTINGS,
@@ -594,6 +595,7 @@ impl Shell {
             return;
         }
         self.close_add_space(cx);
+        crate::live::chrome::release_held_keys(cx);
         let search = cx.new(|cx| {
             ComposerInput::with_context("Search chats, commands and files…", "PaletteSearch", cx)
         });
@@ -1181,7 +1183,7 @@ impl Shell {
                     .rounded(px(popover::PALETTE_ITEM_RADIUS))
                     .role(gpui::Role::Button)
                     .aria_label(label)
-                    .min_h(px(30.0))
+                    .min_h(px(PALETTE_ROW_HEIGHT)) // slopty: a list row's 32
                     .py(px(4.0))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
@@ -1215,7 +1217,7 @@ impl Shell {
                     .rounded(px(popover::PALETTE_ITEM_RADIUS))
                     .role(gpui::Role::Button)
                     .aria_label(SharedString::from(path.clone()))
-                    .min_h(px(30.0))
+                    .min_h(px(PALETTE_ROW_HEIGHT)) // slopty: a list row's 32
                     .py(px(4.0))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
@@ -1261,7 +1263,7 @@ impl Shell {
                         "{}:{} {}",
                         found.path, found.line, found.preview
                     )))
-                    .min_h(px(30.0))
+                    .min_h(px(PALETTE_ROW_HEIGHT)) // slopty: a list row's 32
                     .py(px(4.0))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
@@ -1351,24 +1353,12 @@ impl Shell {
                     (Some(project), None) => project.to_string(),
                     (None, device) => device.unwrap_or_default().to_string(),
                 };
-                let branch = self
-                    .settings
-                    .sidebar_show_branch
-                    .then(|| crate::change_requests::conversation_branch(chat, &state.spaces))
-                    .flatten()
+                let branch = crate::change_requests::conversation_branch(chat, &state.spaces)
                     .map(str::trim)
                     .filter(|branch| !branch.is_empty())
                     .map(SharedString::from);
-                let pr = self
-                    .settings
-                    .sidebar_show_pull_request
-                    .then(|| state.change_request_for_chat(chat).cloned())
-                    .flatten();
-                let harness = self
-                    .settings
-                    .sidebar_show_harness
-                    .then(|| chat.config.as_ref().map(|c| c.harness))
-                    .flatten();
+                let pr = state.change_request_for_chat(chat).cloned();
+                let harness = chat.config.as_ref().map(|c| c.harness);
                 self.render_chat_row(
                     id.clone(),
                     transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).into(),
@@ -1384,7 +1374,6 @@ impl Shell {
                     false,
                     None,
                     None,
-                    false,
                     Some(query),
                     theme,
                     cx,
@@ -1423,8 +1412,10 @@ impl Shell {
             let mut header = div()
                 .flex_none()
                 .when(section_ix == 0, |header| header.pt(px(8.0)));
+            // slopty: groups stand 16 apart with no rule between them (opencode's command
+            // dialog), the space alone parting them.
             if section_ix > 0 {
-                header = header.child(spaces::sidebar_separator(&theme).w_full().my(px(8.0)));
+                header = header.pt(px(14.0));
             }
             children.push(
                 header
@@ -1556,11 +1547,11 @@ impl Shell {
             .child(body)
             .child(
                 palette_footer()
-                    .child(command_key_hint(&theme, "↑ ↓", "Navigate"))
-                    .child(command_key_hint(&theme, "⏎", "Open"))
-                    .child(command_key_hint(&theme, "Esc", "Close")),
+                    .child(command_key_hint(&theme, "↑ ↓", "Navigate", window, cx))
+                    .child(command_key_hint(&theme, "⏎", "Open", window, cx))
+                    .child(command_key_hint(&theme, "Esc", "Close", window, cx)),
             );
-        Some(palette_overlay(viewport, card))
+        Some(palette_overlay("command-palette", viewport, card))
     }
 }
 
@@ -1606,7 +1597,8 @@ fn palette_section_header(
         .flex()
         .items_center()
         .gap(px(8.0))
-        .text_size(crate::typography::ui_rems(11.0))
+        // slopty: opencode's group title, 13 at the body's weight in the muted ink.
+        .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text_muted)
         .child(title)
         .when_some(status, |header, status| {
@@ -1652,16 +1644,22 @@ pub(super) fn palette_card(
     viewport: gpui::Size<Pixels>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
+    // slopty: its footer's caps sink while their keys are held.
+    crate::live::chrome::track_held_keys(div().id(id))
+        .debug_selector(move || id.to_owned()) // slopty: for the tests
         .track_focus(focus)
         .w(px(560.0_f32.min(f32::from(viewport.width) - 32.0)))
+        // slopty: between 280 and 480 tall (`PALETTE_MIN_HEIGHT`), within the window under its
+        // top, its footer at its foot.
+        .min_h(px(PALETTE_MIN_HEIGHT.min(
+            f32::from(viewport.height - palette_top(viewport.height)) - 16.0,
+        )))
+        .max_h(px(PALETTE_MAX_HEIGHT))
         .flex()
         .flex_col()
         .rounded(px(16.0))
-        .border_1()
-        .border_color(theme.border)
-        .when(!theme.is_frost(), |el| el.shadow_lg())
+        // slopty: Amp's floating elevation, a ring inside the edge and the long soft shadows.
+        .shadow(theme.elevation(crate::theme::Elevation::Floating))
         .bg(popover::surface_bg(theme))
         .text_color(theme.text)
 }
@@ -1691,6 +1689,7 @@ pub(super) fn palette_header(theme: &Theme, search: AnyElement, hint: gpui::Div)
 pub(super) fn palette_footer() -> gpui::Div {
     div()
         .flex_none()
+        .mt_auto() // slopty: at the card's foot, however few rows answer
         .px(px(16.0))
         .py(px(7.0))
         .border_t_1()
@@ -1701,13 +1700,45 @@ pub(super) fn palette_footer() -> gpui::Div {
         .gap(px(12.0))
 }
 
+// slopty: Claude desktop's overlay entrance (`dur-snap` 120 ms on `cubic(0.32,0.72,0,1)`), its
+// card's .98 scale approximated by a 4 px settle as `motion::menu_in` approximates its own.
+const OVERLAY_EASE: crate::motion::CubicBezier = crate::motion::CubicBezier::new(0.32, 0.72, 0.0, 1.0);
+/// The scrim's fade in under a palette.
+const SCRIM_IN: crate::motion::MotionSpec = crate::motion::MotionSpec::new(120, OVERLAY_EASE);
+/// The palette card's fade and settle in.
+const CARD_IN: crate::motion::MotionSpec = crate::motion::MotionSpec::new(150, OVERLAY_EASE);
+
+/// slopty: a palette row's height, a list row's as Claude desktop draws them, and as the pickers'
+/// rows stand (`popover::PICKER_ROW_HEIGHT`).
+const PALETTE_ROW_HEIGHT: f32 = popover::PICKER_ROW_HEIGHT;
+
+/// The tallest a palette stands, and the least: opencode's command dialog's 480 and 280, so its
+/// results grow down inside a card whose foot moves little.
+pub(super) const PALETTE_MAX_HEIGHT: f32 = popover::MODAL_MAX_HEIGHT;
+pub(super) const PALETTE_MIN_HEIGHT: f32 = 280.0;
+
+/// Where a palette's top edge stands in a window `height` tall: where a centred palette at its
+/// tallest would start, 48 at the least (opencode's `max(48px, (100vh − 480px) / 2)`), so its
+/// search field stays put however many rows answer.
+pub(super) fn palette_top(height: Pixels) -> Pixels {
+    popover::modal_top_edge(height)
+}
+
 /// Mount a palette card over the scrimmed window, frosted like the composer.
+// slopty: pinned from the top (`palette_top`), not centred, so the field does not move as the
+// results change, and it comes in over Claude desktop's overlay entrance; `id` keys it.
 pub(super) fn palette_overlay(
+    id: &'static str,
     viewport: gpui::Size<Pixels>,
     card: gpui::Stateful<gpui::Div>,
 ) -> AnyElement {
     // Match the composer's 16px backdrop blur, including its opaque fallback.
     let card = crate::frost::frosted(16.0, crate::frost::MENU_BLUR, card);
+    let card = div().relative().child(card).with_animation(
+        SharedString::from(format!("{id}-in")),
+        CARD_IN.animation(),
+        |el, t| el.opacity(t).top(px(-4.0 * (1.0 - t))),
+    );
     gpui::deferred(
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))
@@ -1716,13 +1747,18 @@ pub(super) fn palette_overlay(
                     .occlude()
                     .w(viewport.width)
                     .h(viewport.height)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .pt(palette_top(viewport.height))
+                    .child(card)
                     // Match glass modals: quiet the background while
                     // preserving its color through the frosted palette.
-                    .bg(popover::scrim_alpha(0.35))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(card),
+                    .with_animation(
+                        SharedString::from(format!("{id}-scrim")),
+                        SCRIM_IN.animation(),
+                        |el, t| el.bg(popover::scrim_alpha(0.35 * t)),
+                    ),
             ),
     )
     .priority(2)
@@ -1733,7 +1769,14 @@ pub(super) fn palette_overlay(
 /// the plain inline legends) and the verb after it. Arrow and return keys
 /// are icons, which sit optically centered on the cap where font glyphs
 /// don't; other keys ("Esc") are text.
-pub(super) fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -> gpui::Div {
+// slopty: the cap sinks while its key is held (`live::chrome::pressable_cap`).
+pub(super) fn command_key_hint(
+    theme: &Theme,
+    keys: &str,
+    label: &'static str,
+    window: &mut Window,
+    cx: &gpui::App,
+) -> gpui::Div {
     let glyph = |path: &'static str| {
         crate::icons::icon(path)
             .size(px(12.5))
@@ -1741,7 +1784,7 @@ pub(super) fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -
     };
     let cap = popover::key_cap(theme);
     let cap = match keys {
-        "⏎" => cap.child(glyph(crate::icons::RETURN)),
+        "⏎" | "↵" => cap.child(glyph(crate::icons::RETURN)),
         "←" => cap.child(glyph(crate::icons::ARROW_LEFT)),
         "↑ ↓" => cap
             .child(glyph(crate::icons::ARROW_UP))
@@ -1752,6 +1795,9 @@ pub(super) fn command_key_hint(theme: &Theme, keys: &str, label: &'static str) -
             .text_color(theme.text_muted)
             .child(SharedString::from(keys.to_string())),
     };
+    let selector = format!("key-cap-{keys}");
+    let cap = crate::live::chrome::pressable_cap(cap, keys, 0.05, window, cx)
+        .debug_selector(move || selector); // slopty: for the tests
     div()
         .flex()
         .items_center()
@@ -1797,8 +1843,8 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "id": id, "title": id, "deviceId": "local", "archived": archived,
             "parentChatId": parent,
-            "createdAt": "2026-09-20T00:00:00Z".parse::<chrono::DateTime<Utc>>().unwrap()
-                - chrono::Duration::minutes(age),
+            // slopty: recent, so a chat stays out of the sidebar's shut Inactive group.
+            "createdAt": Utc::now() - chrono::Duration::minutes(age),
         }))
         .unwrap()
     }
@@ -1821,6 +1867,68 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// slopty: a footer cap sinks while its key is held and rises as it comes up; a key that
+    /// closed the palette, coming up where nothing listened, leaves no cap sunk next time.
+    #[gpui::test]
+    fn a_footer_cap_sinks_while_its_key_is_held(cx: &mut TestAppContext) {
+        let (window, _dir) = keyed_palette_window(cx);
+        cx.update(|cx| crate::motion::set_reduced_motion(cx, true));
+        let open = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |shell, window, cx| shell.toggle_command_palette(window, cx))
+                .unwrap();
+        };
+        open(cx);
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        };
+        let key = |down: bool, key: &str, cx: &mut gpui::VisualTestContext| {
+            let keystroke = gpui::Keystroke::parse(key).unwrap();
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    if down {
+                        gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                            keystroke,
+                            is_held: false,
+                            prefer_character_input: false,
+                        })
+                    } else {
+                        gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke })
+                    },
+                    cx,
+                );
+            });
+            draw(cx);
+        };
+        draw(cx);
+        draw(cx);
+        let rest = cx.debug_bounds("key-cap-↑ ↓").expect("the Navigate cap");
+        let esc = cx.debug_bounds("key-cap-Esc").expect("the Close cap");
+        key(true, "down", cx);
+        let held = cx.debug_bounds("key-cap-↑ ↓").unwrap();
+        assert_eq!(held.origin.y, rest.origin.y + px(1.0), "sunk while ↓ is held");
+        assert_eq!(cx.debug_bounds("key-cap-Esc").unwrap(), esc, "the others stay up");
+        key(false, "down", cx);
+        assert_eq!(cx.debug_bounds("key-cap-↑ ↓").unwrap(), rest, "up again");
+        key(true, "escape", cx);
+        assert!(cx.debug_bounds("key-cap-Esc").is_none(), "Escape closed the palette");
+        cx.update(|window, cx| {
+            window
+                .root::<Shell>()
+                .flatten()
+                .unwrap()
+                .update(cx, |shell, cx| shell.toggle_command_palette(window, cx));
+        });
+        draw(cx);
+        draw(cx);
+        assert_eq!(cx.debug_bounds("key-cap-Esc").unwrap(), esc, "no cap left sunk");
     }
 
     #[gpui::test]
@@ -2035,6 +2143,28 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    // slopty: the palette's headings are in sentence case, as every label in the app; New chat
+    // wears the titlebar's glyph for it, and New project, which opens a picker, says so.
+    #[test]
+    fn the_palette_speaks_as_the_app_does() {
+        for section in [
+            Section::RecentFiles,
+            Section::QuickActions,
+            Section::RecentThreads,
+            Section::Threads,
+            Section::Commands,
+            Section::Files,
+            Section::InFiles,
+            Section::InThreads,
+        ] {
+            let title = section.title();
+            let rest = title.split_whitespace().skip(1);
+            assert!(rest.clone().all(|word| word.chars().all(char::is_lowercase)), "{title}");
+        }
+        assert_eq!(Command::NewChat.icon(), icons::PLUS);
+        assert!(Command::NewProject.label().ends_with('\u{2026}'));
     }
 
     #[test]

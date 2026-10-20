@@ -136,9 +136,46 @@ fn a_calls_result_reads_as_the_tuis() {
     );
     let asking = ToolState::Pending { ask: slopty_proto::thread::AskId("1".to_owned()) };
     assert_eq!(
-        result_of(&call("Bash", "exec", None, asking)).as_deref(),
+        result_of(&call("Bash", "exec", None, asking.clone())).as_deref(),
         Some("Waiting for permission…")
     );
+    // slopty: held on a request it knows, it says what the request waits for, in the words of
+    // the request's chip (#9).
+    let held = |kind: &str| {
+        let mut state = fixtures::empty();
+        state.requests = vec![slopty_proto::thread::Request {
+            id: slopty_proto::thread::AskId("1".to_owned()),
+            item: Some(ItemId("t1".to_owned())),
+            kind: kind.to_owned(),
+            title: String::new(),
+            text: None,
+            options: Vec::new(),
+            questions: Vec::new(),
+            proposed: None,
+            schema_json: None,
+            url: None,
+            reason: None,
+            state: slopty_proto::thread::RequestState::Open,
+            opened_ms: WallMs::from_millis(1),
+            until_ms: None,
+            needs_presence: false,
+        }];
+        tool_facts("t1", &call("Bash", "exec", None, asking.clone()), &state, None)
+            .and_then(|facts| facts.result)
+    };
+    assert_eq!(
+        held(slopty_proto::thread::Request::QUESTION).as_deref(),
+        Some("Waiting for your answer")
+    );
+    assert_eq!(
+        held(slopty_proto::thread::Request::APPROVAL).as_deref(),
+        Some("Waiting for approval")
+    );
+    assert_eq!(held(slopty_proto::thread::Request::PLAN).as_deref(), Some("Plan ready for review"));
+    let mut ask = call("AskUserQuestion", "other", None, ToolState::Completed);
+    ask.input = Clipped::whole(r#"{"questions":[{"header":"Color","question":"Which color?"}]}"#);
+    let title = tool_facts("t1", &ask, &fixtures::empty(), None).and_then(|facts| facts.title);
+    assert_eq!(title.as_deref(), Some("Asked about Color"), "a human name");
     let mut grep = exec(Some(0), ExecStatus::Done, false);
     grep.interpretation = Some("No matches found".to_owned());
     let facts = tool_facts(
@@ -263,13 +300,20 @@ fn a_subagent_card_follows_its_run() {
         duration_ms: Some(125_000),
         ..agent
     };
-    let done = call("Agent", "agent", Some(ToolDetail::Agent(ended)), ToolState::Completed);
+    let done = call("Agent", "agent", Some(ToolDetail::Agent(ended.clone())), ToolState::Completed);
     let settled = progress(&state, None, &done);
     assert_eq!(settled.state, SubagentProgress::DONE);
     assert_eq!(settled.outcome.as_deref(), Some("Done"), "the time is the figures' to say");
     assert_eq!(settled.duration_ms, Some(125_000));
     assert_eq!(settled.figures, "3 tools · 9k tokens");
     assert!(!settled.running && settled.step.is_none());
+    // What it answered is its outcome: the report's first line, as Claude Code records it.
+    let answered = AgentDetail {
+        report: Some(Clipped::whole("\n## **4** lines\n\nmain.rs has four.")),
+        ..ended
+    };
+    let answered = call("Agent", "agent", Some(ToolDetail::Agent(answered)), ToolState::Completed);
+    assert_eq!(progress(&state, None, &answered).outcome.as_deref(), Some("4 lines"));
 }
 
 /// A task's notice is a row linked to its tray row, with its duration and tone.
@@ -295,6 +339,14 @@ fn a_task_notification_is_a_row_linking_its_call() {
     assert_eq!(row.call_part_id.as_deref(), Some("t1"));
     assert_eq!(row.figures, "4 tool uses");
     assert_eq!(row.kind, "subagent");
+    // slopty: a run under a second says so as its tray row does, never "0s" (#16).
+    let quick = TaskNote {
+        summary: "Monitor \"Watch the build log\" stream ended".into(),
+        usage: Some(TaskUsage { tokens: 0, tool_uses: 0, duration_ms: 300 }),
+        ..note
+    };
+    let row = task_part(&quick, &fixtures::empty(), &words, &|t| t.to_string());
+    assert_eq!(row.text, "Monitor \"Watch the build log\" stream ended · <1s");
 }
 
 /// A request tried again counts down while it is the turn's last word, reads as recovered once

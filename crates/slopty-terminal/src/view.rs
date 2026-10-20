@@ -398,9 +398,10 @@ pub enum TerminalViewEvent {
         elapsed: Duration,
     },
     /// Context for an agent's message, Markdown, for the workspace to put in the draft of the
-    /// agent it picks: a block from "Attach to agent" on its menu or the palette's "Attach block
-    /// to agent" (`block_context`), or the selection from "Attach selection to agent"
-    /// (`selection_context`). Offered only while the attach probe finds an agent.
+    /// agent it picks: a block from "Add to chat" on its menu or the palette's "Attach block
+    /// to agent" (`block_context`), or the selection from "Add selection to chat" or the
+    /// palette's "Attach selection to agent" (`selection_context`). Offered only while the
+    /// attach probe finds an agent.
     Attach(String),
     /// "View" on a tool call that named a file, or ⌘-click on a path while a command runs:
     /// the workspace opens (or reveals) a file tile for it, a relative path made absolute
@@ -1751,10 +1752,10 @@ impl TerminalView {
         }
     }
 
-    /// The palette's "Attach selection to agent", and the menu's: the selected text goes to an
-    /// agent's draft as context ([`TerminalViewEvent::Attach`]), fenced and named after the
-    /// command whose block the selection starts in. With no agent to take it, or nothing
-    /// selected, it says so.
+    /// The palette's "Attach selection to agent", and the menu's "Add selection to chat": the
+    /// selected text goes to an agent's draft as context ([`TerminalViewEvent::Attach`]), fenced
+    /// and named after the command whose block the selection starts in. With no agent to take it,
+    /// or nothing selected, it says so.
     pub fn attach_selection(
         &mut self,
         _: &AttachSelection,
@@ -1979,7 +1980,7 @@ impl TerminalView {
     }
 
     /// Where the view asks whether an agent would take a block as context: only then does the
-    /// block menu offer "Attach to agent" (the palette asks the workspace itself).
+    /// block menu offer "Add to chat" (the palette asks the workspace itself).
     pub fn set_attach_probe(&mut self, probe: AttachProbe) {
         self.attach_probe = Some(probe);
     }
@@ -4617,8 +4618,9 @@ impl BlockMenuItem {
             Self::CopyCommand => "Copy command",
             Self::CopyOutput => "Copy output",
             Self::Rerun => "Rerun",
-            Self::Attach => "Attach to agent",
-            Self::AttachSelection => "Attach selection to agent",
+            // slopty: the pane speaks of the chat, not the agent (T3's "Add to chat").
+            Self::Attach => "Add to chat",
+            Self::AttachSelection => "Add selection to chat",
             Self::SelectBlock => "Select block",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
@@ -6971,6 +6973,139 @@ mod tests {
         cx.simulate_mouse_up(below, MouseButton::Left, mods);
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the rail does not select");
+    }
+
+    /// slopty: the dispatcher's clock moved on by `by` with nothing run that came due by then,
+    /// as a frame the display asks for can begin before the timers due by its moment run.
+    fn clock_ahead(cx: &VisualTestContext, by: Duration) {
+        cx.executor()
+            .dispatcher()
+            .as_test()
+            .expect("a test dispatcher")
+            .scheduler()
+            .clock()
+            .advance(by);
+    }
+
+    /// slopty: a window whose root holds the terminal, as the shell's does: the root told to
+    /// draw again draws the terminal again from the last frame.
+    struct Hosting(Entity<TerminalView>);
+
+    impl Render for Hosting {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.0.clone())
+        }
+    }
+
+    /// slopty: [`terminal`] under a [`Hosting`] root.
+    fn hosted_terminal(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Hosting>, Entity<TerminalView>, &mut VisualTestContext) {
+        let (tx, _rx) = mpsc::channel(64);
+        cx.update(|cx| cx.set_global(slopty_shell::theme::Theme::default()));
+        let (host, cx) = cx.add_window_view(|window, cx| {
+            let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+            let view =
+                cx.new(|cx| TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx));
+            let focus = view.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            Hosting(view)
+        });
+        cx.simulate_resize(size(px(400.0), px(300.0)));
+        let view = host.read_with(cx, |host, _| host.0.clone());
+        view.update(cx, |view, cx| view.apply(TermEvent::Driver { you: true }, cx));
+        slopty_shell::clock::run_on(cx.executor());
+        cx.run_until_parked();
+        (host, view, cx)
+    }
+
+    /// slopty: the thumbs down the terminal's right edge in a frame the root alone is told to
+    /// draw (the terminal drawn again from the last frame), and in one drawn from scratch at
+    /// its moment.
+    fn thumbs_drawn_and_from_scratch(
+        host: &Entity<Hosting>,
+        cx: &mut VisualTestContext,
+    ) -> (usize, usize) {
+        let terminal = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        host.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| {
+            let right = f32::from(terminal.right()) * window.scale_factor();
+            let thumbs = |window: &Window| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|q| {
+                        (q.bounds.origin.x.0 + q.bounds.size.width.0 - right).abs() < 12.0
+                            && q.bounds.size.width.0 < 12.0
+                    })
+                    .count()
+            };
+            window.draw(cx).clear(cx);
+            let drawn = thumbs(window);
+            window.repeat_frame_time();
+            window.refresh();
+            window.draw(cx).clear(cx);
+            (drawn, thumbs(window))
+        })
+    }
+
+    /// slopty: after a scroll, the rail lingers, then fades from when its wake runs: a frame that
+    /// begins past the linger and the fade before that wake has run (the e2e's jump pill, then
+    /// ⌘F) draws the thumb a frame from scratch draws too, and once the wake runs the thumb
+    /// fades out over frames the view draws, then is gone from both.
+    #[gpui::test]
+    fn a_frame_before_the_rails_wake_draws_the_thumb_as_one_from_scratch(cx: &mut TestAppContext) {
+        let (host, view, cx) = hosted_terminal(cx);
+        let rows = ["hello wor", "second", "third row"];
+        view.update(cx, |view, cx| view.apply(history_frame(30, &rows), cx));
+        cx.run_until_parked();
+        cx.simulate_event(ScrollWheelEvent {
+            position: cell_center(&view, cx, 1.0, 1.0),
+            delta: ScrollDelta::Lines(point(0.0, 1.0)),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: TouchPhase::Started,
+            momentum_phase: None,
+        });
+        cx.run_until_parked();
+        // The scroll's own frames (the jump pill comes in), well inside the linger.
+        let settled = (0..40).any(|_| {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            let asked = cx.update(Window::simulate_next_frame);
+            cx.run_until_parked();
+            asked == 0
+        });
+        assert!(settled, "the scroll's frames end");
+        assert_eq!(thumbs_drawn_and_from_scratch(&host, cx), (1, 1), "scrolled: the thumb up");
+
+        let gone = Duration::from_millis(
+            popover::MENU_SCROLLBAR_LINGER_MS + popover::MENU_SCROLLBAR_FADE_MS,
+        );
+        let built = view.read_with(cx, |view, _| view.renders);
+        clock_ahead(cx, gone.saturating_mul(2));
+        let before = thumbs_drawn_and_from_scratch(&host, cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.renders),
+            built.saturating_add(1),
+            "drawn again only from scratch"
+        );
+        assert_eq!(
+            before,
+            (1, 1),
+            "a frame past the linger and the fade, before the wake ran: still up in both"
+        );
+
+        // The wake runs, and the fade goes on frame by frame, each drawn as from scratch.
+        cx.run_until_parked();
+        for _ in 0..40 {
+            let (drawn, scratch) = thumbs_drawn_and_from_scratch(&host, cx);
+            assert_eq!(drawn, scratch, "fading");
+            cx.executor().advance_clock(Duration::from_millis(16));
+            if cx.update(Window::simulate_next_frame) == 0 {
+                break;
+            }
+            cx.run_until_parked();
+        }
+        assert_eq!(thumbs_drawn_and_from_scratch(&host, cx), (0, 0), "faded: gone from both");
     }
 
     /// Every key the terminal received, oldest first, with the paste texts in between.

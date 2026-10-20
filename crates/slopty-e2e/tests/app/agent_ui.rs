@@ -163,8 +163,10 @@ async fn an_agents_tools_lay_out_the_window() {
     })
     .await;
     assert!(
-        laid.a11y.iter().any(|n| n.role == "Tab")
-            && node(&laid, "Button", "Close terminal").is_some(),
+        laid.a11y.iter().filter(|n| n.role == "Tab").any(|tab| {
+            let close = format!("Close {}", tab.label.as_deref().unwrap_or_default());
+            node(&laid, "Button", &close).is_some()
+        }),
         "a terminal tab in the drawer:\n{}",
         slopty_e2e::frame_text(&laid.a11y)
     );

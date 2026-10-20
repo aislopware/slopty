@@ -1,25 +1,27 @@
 Window
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Say hello
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
 Article │ You
 Paragraph │ Say hello
-Article │ Claude Code
-Button │ Thought process
 Paragraph │ Done: Say hello
 Button │ Attach images
 MultilineTextInput │ Do anything…
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Group │ Workspace files
 SearchInput │ Search files
 Button │ Show hidden files
 Tree │ Workspace file tree (focused)
 TreeItem │ src
 TreeItem │ README.md
+Splitter │ Resize files panel
 Button │ Show chat details
 Button │ Hide files panel
 Button │ Show side pane
@@ -27,4 +29,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

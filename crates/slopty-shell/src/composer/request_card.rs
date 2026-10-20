@@ -37,10 +37,10 @@ pub(crate) const QUESTION: &str = "question";
 const NOTES: &str = "notes:";
 /// The most of a dialog's payload the card lists.
 const MAX_FACTS: usize = 8;
-/// What a card only the person at it answers says (`slopty_proto::thread::Request::NEEDS_PRESENCE`).
-pub(crate) const NEEDS_PRESENCE: &str = "Answer in Slopty";
-/// Why, in its tooltip and for a screen reader (`Request::NEEDS_PRESENCE_REFUSED`'s words).
-pub(crate) const NEEDS_PRESENCE_WHY: &str = "The agent takes this answer only from its card";
+/// What a card only the person at it answers says.
+pub(crate) const NEEDS_PRESENCE: &str = UserInputQuestion::NEEDS_PRESENCE;
+/// Why, in its tooltip and for a screen reader.
+pub(crate) const NEEDS_PRESENCE_WHY: &str = UserInputQuestion::NEEDS_PRESENCE_WHY;
 /// Under this long left, the countdown turns amber.
 const COUNTDOWN_URGENT_MS: i64 = 30_000;
 
@@ -451,7 +451,7 @@ pub(crate) struct CardState {
     /// The scopes the agent says a rule can go to (`slopty.WatchRules`), once said.
     scopes: Vec<RuleScope>,
     scopes_watch: Option<Task<()>>,
-    inputs: HashMap<String, Entity<ComposerInput>>,
+    pub(super) inputs: HashMap<String, Entity<ComposerInput>>,
     picks: HashMap<String, Vec<String>>,
     error: Option<String>,
     /// The option the pointer is over, whose preview the pane shows.
@@ -1221,9 +1221,12 @@ impl Composer {
                         .entry(field.name.clone())
                         .or_insert_with(|| {
                             let default = field.default.clone().unwrap_or_default();
-                            // The field is named by its title, which shows faint while empty.
+                            // slopty: named by its title, which its label above already shows,
+                            // as its description under it: nothing faint says either again (#19).
                             cx.new(|cx| {
-                                let mut input = ComposerInput::new(field.title.clone(), cx).with_single_line();
+                                let mut input = ComposerInput::new("", cx)
+                                    .with_single_line()
+                                    .with_name(field.title.clone());
                                 input.set_text(default, cx);
                                 input
                             })

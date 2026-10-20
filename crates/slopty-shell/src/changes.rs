@@ -9,10 +9,10 @@
 //! - states: *preparing* (no diff yet), *clean* (empty patch), *list*; a watch
 //!   error shows a banner while the last content stays;
 //! - virtualized with gpui `list()` at LINE granularity — every file header,
-//!   hunk header, and diff line is its own row (the flat model Zed's editor
+//!   unchanged-lines row, and diff line is its own row (the flat model Zed's editor
 //!   uses for its project diff: only the visible slice materializes, and a
 //!   collapsed file's body rows are removed from the list outright, not
-//!   hidden); nowrap sections collapse with a 180 ms height tween on a
+//!   hidden); nowrap sections fold (`motion::fold_frame`) on a
 //!   clipped stand-in row (analytic heights, capped to what the clip can
 //!   reveal), while variable-height wrapped sections settle immediately;
 //! - syntax highlight reuses the markdown tokenizer per diff line, computed
@@ -51,7 +51,7 @@ use crate::comments::{self, CommentSide, ReviewComment};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 
 use crate::markdown::render;
-use crate::motion::{self, AnimationExt as _, CHEVRON, COLLAPSE};
+use crate::motion::{self, AnimationExt as _, CHEVRON};
 use crate::popover::{self, Popup};
 use crate::settings::widgets::ActionHint as _;
 use crate::state::{AppState, EngineHandle};
@@ -62,6 +62,7 @@ use crate::motion::HoverFade as _;
 // slopty: find in the diff, the whitespace filter, the changed files' tree and any turn's diff.
 mod aids;
 mod review;
+mod words;
 pub use review::{DiffMatch, TreeRow, TurnChoice, diff_tree, find_matches, turn_choices};
 use review::scoped_params;
 
@@ -106,33 +107,40 @@ const STICKY_FILE_HEADER_BLUR: f32 = 16.0;
 /// to rows ghosting through the blur than light text is on a dark tint.
 const STICKY_FILE_HEADER_TINT_ALPHA_DARK: f32 = 0.40;
 const STICKY_FILE_HEADER_TINT_ALPHA_LIGHT: f32 = 0.85;
-pub const HUNK_HEADER_HEIGHT: f32 = 28.0;
-pub const DIFF_LINE_HEIGHT: f32 = 21.0;
+/// slopty: the "N unchanged lines" row between hunks, a line's height plus air (opencode's
+/// separator is one 24 px line; item 11).
+pub const UNCHANGED_HEIGHT: f32 = 24.0;
+/// slopty: how many unchanged lines one click on their row shows, nearest the change below
+/// (opencode's `expansionLineCount`); ⌥ shows them all.
+const UNCHANGED_STEP: u32 = 20;
+// slopty: the pane's one code line (`files::preview`'s), 20 px at the default code size.
+pub const DIFF_LINE_HEIGHT: f32 = 20.0;
 pub const NOTICE_HEIGHT: f32 = 24.0;
 pub const BODY_BOTTOM_PAD: f32 = 8.0;
-/// Gutter width per line-number column.
-pub const GUTTER_WIDTH: f32 = 36.0;
-/// The +/−/· marker column between the gutters and the code.
-pub const MARKER_WIDTH: f32 = 28.0;
-/// Width of the coloured accent bar on the left edge of +/− rows.
-pub const ACCENT_BAR_WIDTH: f32 = 3.0;
-/// The marker column in split mode: each half pays for its own, so it is
-/// narrower than [`MARKER_WIDTH`] to leave the code the room.
-pub const SPLIT_MARKER_WIDTH: f32 = 18.0;
+/// One line-number digit at the gutter's 11 px mono.
+const GUTTER_DIGIT: f32 = 6.6;
+/// A gutter's 8 px right pad and the 6 px gap that keeps its number off the bar.
+const GUTTER_PAD: f32 = 14.0;
+/// The digits every gutter has room for. slopty: three, so a file under a thousand lines never
+/// widens it (opencode's 3 ch number column; item 11).
+const GUTTER_MIN_DIGITS: u32 = 3;
+/// Gutter width per line-number column at its floor; wider numbers widen it by [`gutter_width`].
+pub const GUTTER_WIDTH: f32 = GUTTER_MIN_DIGITS as f32 * GUTTER_DIGIT + GUTTER_PAD;
+/// Width of the bar on the left edge of +/− rows. slopty: the bar alone marks an added or
+/// deleted line, 2 px in its full hue, with no +/− column (opencode's `diffIndicators: "bars"`;
+/// item 11).
+pub const ACCENT_BAR_WIDTH: f32 = 2.0;
 /// Hairline between the two split columns.
 pub const SPLIT_DIVIDER_WIDTH: f32 = 1.0;
-const DIFF_TEXT_SIZE: f32 = 12.0;
+const DIFF_TEXT_SIZE: f32 = crate::typography::CODE_FONT_SIZE_DEFAULT; // slopty: one code size
 const DIFF_TAB_SIZE: usize = 4;
-/// One shared `code_font_size` setting drives several surfaces that never
-/// agreed on a size historically. Each scales off its own baseline so the
-/// default setting reproduces the size that surface always had, and a
-/// user-chosen size moves them all while keeping those proportions.
-const DIFF_TEXT_SIZE_RATIO: f32 = DIFF_TEXT_SIZE / crate::typography::CODE_FONT_SIZE_DEFAULT;
-
+/// slopty: the band a diff line fades over where the pane cuts it.
+const DIFF_EDGE_FADE: f32 = 16.0;
 /// Size of the painted diff body text, and the size the column measurement in
-/// [`DiffHorizontalGeometry::resolve`] must use: they desync otherwise.
+/// [`DiffHorizontalGeometry::resolve`] must use: they desync otherwise. It is the
+/// `code_font_size` setting itself, as the editor's and a read-only file's.
 pub(crate) fn diff_text_size(theme: &Theme) -> f32 {
-    crate::typography::clamp_font_size(theme.code_font_size * DIFF_TEXT_SIZE_RATIO)
+    crate::typography::clamp_font_size(theme.code_font_size)
 }
 
 /// The row box and the painted line box must agree, or code clips once the
@@ -308,10 +316,10 @@ impl FileDiff {
 /// line number: 11px mono ≈ 6.6px per digit, the 8px right pad, and a 6px
 /// left gap so the number never abuts the accent bar (at 4 digits the old
 /// formula left 1.6px — visually touching; user report). Never narrower
-/// than the classic 36px column.
+/// than the [`GUTTER_WIDTH`] floor.
 pub fn gutter_width(file: &FileDiff) -> f32 {
-    let digits = file.max_line.max(1).ilog10() + 1;
-    (digits as f32 * 6.6 + 8.0 + 6.0).max(GUTTER_WIDTH)
+    let digits = (file.max_line.max(1).ilog10() + 1).max(GUTTER_MIN_DIGITS);
+    digits as f32 * GUTTER_DIGIT + GUTTER_PAD
 }
 
 /// Width inputs that are independent of the active window's font metrics.
@@ -493,6 +501,83 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
         .parse()
         .ok()?;
     Some((old, new))
+}
+
+/// slopty: a hunk's first line and its line count on the old and the new side, from its
+/// `@@ -a[,b] +c[,d] @@` header. A side with no lines names the line before the hunk, so its
+/// first line is the one after that.
+fn hunk_span(header: &str) -> Option<[(u32, u32); 2]> {
+    let mut sides = header.strip_prefix("@@")?.split_whitespace();
+    let mut side = |sign: char| -> Option<(u32, u32)> {
+        let range = sides.next()?.strip_prefix(sign)?;
+        let (start, count) = match range.split_once(',') {
+            Some((start, count)) => (start.parse().ok()?, count.parse().ok()?),
+            None => (range.parse().ok()?, 1),
+        };
+        Some((if count == 0 { start + 1 } else { start }, count))
+    };
+    Some([side('-')?, side('+')?])
+}
+
+/// slopty: how many unchanged lines sit between hunk `ix` and the one before it, or the top of
+/// the file for the first: what its "N unchanged lines" row counts (item 11). Read on the new
+/// side, so lines that differ only in whitespace count when whitespace is ignored.
+pub(crate) fn unchanged_before(file: &FileDiff, ix: usize) -> u32 {
+    let span = |ix: usize| file.hunks.get(ix).and_then(|hunk| hunk_span(&hunk.header));
+    let Some([_, (first, _)]) = span(ix) else {
+        return 0;
+    };
+    let after = match ix.checked_sub(1) {
+        None => 1,
+        Some(before) => match span(before) {
+            Some([_, (start, count)]) => start + count,
+            None => return 0,
+        },
+    };
+    first.saturating_sub(after)
+}
+
+/// slopty: show up to `most` of the unchanged lines above hunk `ix`, the nearest first, taking
+/// their text from `source`, the new side's lines whole: they join the hunk as context and its
+/// header widens to match. False when there is nothing to show or `source` lacks a line.
+pub(crate) fn reveal_unchanged(
+    file: &mut FileDiff,
+    ix: usize,
+    most: u32,
+    source: &[String],
+) -> bool {
+    let hidden = unchanged_before(file, ix);
+    let Some(hunk) = file.hunks.get_mut(ix) else {
+        return false;
+    };
+    let Some([(old_first, old_count), (new_first, new_count)]) = hunk_span(&hunk.header) else {
+        return false;
+    };
+    let shown = hidden.min(most);
+    if shown == 0 {
+        return false;
+    }
+    let from = new_first - shown;
+    let Some(texts) = source.get(from as usize - 1..new_first as usize - 1) else {
+        return false;
+    };
+    let revealed = texts.iter().zip(from..).map(|(text, new_no)| DiffLine {
+        kind: LineKind::Context,
+        old_no: (new_no + old_first).checked_sub(new_first).filter(|no| *no > 0),
+        new_no: Some(new_no),
+        text: text.clone(),
+    });
+    hunk.lines.splice(0..0, revealed);
+    let (_, context) = split_hunk_header(&hunk.header);
+    hunk.header = format!(
+        "@@ -{},{} +{},{} @@{}{context}",
+        old_first.saturating_sub(shown).max(1),
+        old_count + shown,
+        from,
+        new_count + shown,
+        if context.is_empty() { "" } else { " " },
+    );
+    true
 }
 
 /// Parse a unified git patch into file sections. Tolerant: unknown header
@@ -924,13 +1009,74 @@ pub fn diff_phase(resolved: Option<&CheckoutDiff>) -> DiffPhase {
     }
 }
 
-/// Header label: "N Uncommitted change(s)".
+// slopty: sentence case, as every label in the pane.
+/// Header label: "N uncommitted change(s)".
 pub fn uncommitted_label(count: usize) -> String {
     if count == 1 {
-        "1 Uncommitted change".to_string()
+        "1 uncommitted change".to_string()
     } else {
-        format!("{count} Uncommitted changes")
+        format!("{count} uncommitted changes")
     }
+}
+
+/// Which git colour a file header's count wears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CountKind {
+    Added,
+    Deleted,
+    None,
+}
+
+// slopty: "+1 −0" read like raw data, the zero in red.
+/// A file header's counts: `+N` when lines were added, `−N` when lines were removed, and a
+/// single quiet "0" for a text file that changed neither (a mode change); none for a binary.
+fn file_counts(adds: u32, dels: u32, binary: bool) -> Vec<(String, CountKind)> {
+    let mut counts = Vec::new();
+    if adds > 0 {
+        counts.push((format!("+{adds}"), CountKind::Added));
+    }
+    if dels > 0 {
+        counts.push((format!("−{dels}"), CountKind::Deleted));
+    }
+    if counts.is_empty() && !binary {
+        counts.push(("0".to_owned(), CountKind::None));
+    }
+    counts
+}
+
+// slopty: a file's size of change at a glance, five squares after its counts (AgentCraft's
+// `+19 −4 ■■■■■`; design-inspiration item 5), in the add and delete hues, never a grey bar.
+/// How many squares of the five a change fills, and with what: as many as lines changed, up to
+/// five, shared between added and removed in proportion, each side that changed holding one at
+/// least; the rest stay empty.
+fn diffstat_squares(adds: u32, dels: u32) -> [CountKind; 5] {
+    let total = u64::from(adds) + u64::from(dels);
+    let filled = total.min(5);
+    let mut added = (filled * u64::from(adds) + total / 2).checked_div(total).unwrap_or(0);
+    if adds > 0 {
+        added = added.max(1);
+    }
+    if dels > 0 {
+        added = added.min(filled - 1);
+    }
+    let mut squares = [CountKind::None; 5];
+    for (ix, square) in squares.iter_mut().enumerate().take(filled as usize) {
+        *square = if (ix as u64) < added { CountKind::Added } else { CountKind::Deleted };
+    }
+    squares
+}
+
+/// The five squares of [`diffstat_squares`], 7 pt with corners of 1.5, 2 apart.
+pub(crate) fn diffstat_blocks(adds: u32, dels: u32, theme: &Theme) -> gpui::Div {
+    div().flex_none().flex().flex_row().items_center().gap(px(2.0)).children(
+        diffstat_squares(adds, dels).map(|kind| {
+            div().size(px(7.0)).rounded(px(1.5)).bg(match kind {
+                CountKind::Added => add_color(theme),
+                CountKind::Deleted => del_color(theme),
+                CountKind::None => theme.ink(0.12),
+            })
+        }),
+    )
 }
 
 /// What the pane diffs against (t3code's scope dropdown).
@@ -980,11 +1126,11 @@ pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String
     match scope {
         DiffScope::WorkingTree => uncommitted_label(count),
         DiffScope::Branch => match base {
-            Some(base) => format!("{count} Changed {files} vs {base}"),
-            None => format!("{count} Changed {files}"),
+            Some(base) => format!("{count} changed {files} vs {base}"),
+            None => format!("{count} changed {files}"),
         },
-        DiffScope::LatestTurn => format!("{count} Changed {files} this turn"),
-        DiffScope::Turn => format!("{count} Changed {files} in this turn"), // slopty: any turn's.
+        DiffScope::LatestTurn => format!("{count} changed {files} this turn"),
+        DiffScope::Turn => format!("{count} changed {files} in this turn"), // slopty: any turn's.
     }
 }
 
@@ -1007,6 +1153,33 @@ pub fn default_base_ref(branches: &[String], current: Option<&str>) -> Option<St
         .find(|b| current != Some(b.as_str()))
         .or(Some(first))
         .cloned()
+}
+
+// slopty: a clean diff says what fills it, as Claude desktop's empty panes do.
+/// The line under [`clean_message`]: what would show here.
+pub fn clean_line(scope: DiffScope) -> &'static str {
+    match scope {
+        DiffScope::WorkingTree => "Edits in this folder show here.",
+        DiffScope::Branch => "Commits on this branch show here.",
+        DiffScope::LatestTurn | DiffScope::Turn => "This turn didn't change any files.",
+    }
+}
+
+// slopty: one empty-state voice in the pane (`live::chrome::empty_state`, zeron's anatomy).
+/// A diff with nothing to show, centred in the pane: its headline and the line under it.
+fn pane_note(
+    id: &'static str,
+    headline: SharedString,
+    line: Option<SharedString>,
+    theme: &Theme,
+) -> AnyElement {
+    div()
+        .flex_1()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(crate::live::chrome::empty_state(id, None, headline, line, None, theme))
+        .into_any_element()
 }
 
 /// Empty-state copy per scope.
@@ -1186,6 +1359,22 @@ fn sources_match_patch(file: &FileDiff, response: &slopty_view_proto::CheckoutFi
     })
 }
 
+/// slopty: the new side of `file` line by line, when `response` is whole and still the patch's.
+fn new_side_lines(
+    file: &FileDiff,
+    response: &slopty_view_proto::CheckoutFileDiffText,
+) -> Option<Arc<Vec<String>>> {
+    if response.stale
+        || response.binary
+        || response.truncated
+        || !sources_match_patch(file, response)
+    {
+        return None;
+    }
+    let new = response.new_text.as_deref()?;
+    Some(Arc::new(new.lines().map(str::to_owned).collect()))
+}
+
 fn full_highlights(
     file: &FileDiff,
     language: Lang,
@@ -1326,7 +1515,8 @@ pub enum DiffRow {
         file: u32,
         notice: u32,
     },
-    HunkHeader {
+    /// slopty: the unchanged lines above hunk `hunk`, as a count (item 11).
+    Unchanged {
         file: u32,
         hunk: u32,
     },
@@ -1371,7 +1561,7 @@ impl DiffRow {
         match self {
             Self::FileHeader { file }
             | Self::Notice { file, .. }
-            | Self::HunkHeader { file, .. }
+            | Self::Unchanged { file, .. }
             | Self::Line { file, .. }
             | Self::SplitLine { file, .. }
             | Self::CommentCard { file, .. }
@@ -1387,7 +1577,7 @@ impl DiffRow {
         match self {
             DiffRow::FileHeader { .. } => FILE_HEADER_HEIGHT,
             DiffRow::Notice { .. } => NOTICE_HEIGHT,
-            DiffRow::HunkHeader { .. } => HUNK_HEADER_HEIGHT,
+            DiffRow::Unchanged { .. } => UNCHANGED_HEIGHT,
             DiffRow::Line { .. } | DiffRow::SplitLine { .. } => line_h,
             DiffRow::CommentCard { card, .. } => comments
                 .get(card as usize)
@@ -1404,7 +1594,9 @@ impl DiffRow {
 /// shrink the line count, so the unified count is a safe hint for both.
 pub fn body_row_count(file: &FileDiff) -> usize {
     let lines: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
-    file_notices(file).len() + file.hunks.len() + lines + 1
+    // slopty: only a hunk with unchanged lines above it gets their row (`body_rows`).
+    let gaps = (0..file.hunks.len()).filter(|ix| unchanged_before(file, *ix) > 0).count();
+    file_notices(file).len() + gaps + lines + 1
 }
 
 pub fn body_rows(
@@ -1445,10 +1637,12 @@ pub fn body_rows(
     }
     let mut hunk_flat = 0u32;
     for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
-        rows.push(DiffRow::HunkHeader {
-            file: file_ix,
-            hunk: hunk_ix as u32,
-        });
+        if unchanged_before(file, hunk_ix) > 0 {
+            rows.push(DiffRow::Unchanged {
+                file: file_ix,
+                hunk: hunk_ix as u32,
+            });
+        }
         match mode {
             DiffMode::Unified => {
                 for (line_ix, line) in hunk.lines.iter().enumerate() {
@@ -1622,7 +1816,7 @@ struct FileFold {
     toggled_at: Option<std::time::Instant>,
 }
 
-/// Tween arming window after a fold toggle (COLLAPSE's 180ms plus margin).
+/// Tween arming window after a fold toggle (the fold's 300 ms plus margin).
 const FOLD_TWEEN_WINDOW: Duration = Duration::from_millis(400);
 
 /// Ceiling on how much body a fold tween's stand-in row materializes. A
@@ -1719,6 +1913,13 @@ pub struct Changes {
     parse_task: Option<Task<()>>,
     folds: HashMap<String, FileFold>,
     highlights: HashMap<String, HighlightSlot>,
+    /// slopty: each file's new side, line by line, once a click on an unchanged-lines row
+    /// fetched it, and the fetch in flight (item 11).
+    sources: HashMap<String, Arc<Vec<String>>>,
+    source_task: Option<Task<()>>,
+    /// slopty: each hunk's changed words, by file and hunk, worked out as its lines first draw
+    /// (`words::hunk_words`; design-inspiration item 14).
+    words: HashMap<(u32, u32), Arc<Vec<Vec<std::ops::Range<usize>>>>>,
     /// The flattened row model the list virtualizes over (line granularity;
     /// collapsed bodies excluded) + each file's row span within it.
     rows: Vec<DiffRow>,
@@ -1817,6 +2018,9 @@ impl Changes {
             parse_task: None,
             folds: HashMap::new(),
             highlights: HashMap::new(),
+            words: HashMap::new(),
+            sources: HashMap::new(),
+            source_task: None,
             rows: Vec::new(),
             row_ranges: Vec::new(),
             fold_settle: None,
@@ -2233,6 +2437,8 @@ impl Changes {
                 self.list.reset(0);
                 self.folds.clear();
                 self.highlights.clear();
+                self.sources.clear();
+                self.words.clear();
                 cx.notify();
             }
             return;
@@ -2284,6 +2490,8 @@ impl Changes {
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
                 changes.folds.clear();
                 changes.highlights.clear();
+                changes.sources.clear();
+                changes.words.clear();
                 // slopty: a large diff opens with files past the budget collapsed.
                 let held = held_back(&files);
                 for (file, _) in files.iter().zip(&held).filter(|(_, held)| **held) {
@@ -3034,6 +3242,178 @@ impl Changes {
         }
     }
 
+    /// Both sides of `path` whole, as the shown diff named them (`GET_CHECKOUT_FILE_DIFF_TEXT`);
+    /// `None` with no diff or no engine.
+    fn file_texts(
+        &self,
+        path: String,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Option<slopty_view_proto::CheckoutFileDiffText>>> {
+        let diff = self.active_diff(cx)?;
+        let engine = self.state.read(cx).engine().cloned()?;
+        let target = self.desired_target(cx);
+        let chat_id = self
+            .state
+            .read(cx)
+            .selected_chat_row()
+            .map(|chat| chat.id.clone());
+        let request = slopty_view_proto::GetCheckoutFileDiffTextRequest {
+            checkout_id: diff.checkout_id,
+            cwd: diff.cwd,
+            path,
+            mode: self.scope.mode().to_string(),
+            base_ref: self.base_ref.clone(),
+            chat_id,
+            commit_sha: None, // slopty: no History surface (ruled out)
+            diff_checksum: diff.checksum,
+        };
+        let mut params = serde_json::to_value(request)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        if let Some(target) = target {
+            params.insert("targetDeviceId".into(), serde_json::Value::String(target));
+        }
+        Some(cx.spawn(async move |_, _| {
+            engine
+                .client()
+                .call(methods::GET_CHECKOUT_FILE_DIFF_TEXT, serde_json::Value::Object(params))
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value(value).ok())
+        }))
+    }
+
+    /// slopty: show the unchanged lines above hunk `hunk_ix` of file `file_ix`: the next
+    /// [`UNCHANGED_STEP`] up, or all of them, fetching the file's new side once (item 11).
+    fn show_unchanged(
+        &mut self,
+        file_ix: usize,
+        hunk_ix: usize,
+        all: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(parsed) = &self.parsed else {
+            return;
+        };
+        let Some(path) = parsed.files.get(file_ix).map(|file| file.path.clone()) else {
+            return;
+        };
+        if let Some(source) = self.sources.get(&path).cloned() {
+            self.reveal(file_ix, hunk_ix, all, &source, cx);
+            return;
+        }
+        let key = parsed.key.clone();
+        let Some(texts) = self.file_texts(path.clone(), cx) else {
+            return;
+        };
+        self.source_task = Some(cx.spawn(async move |this, cx| {
+            let Some(response) = texts.await else {
+                return;
+            };
+            this.update(cx, |changes, cx| {
+                let Some(parsed) = changes.parsed.as_ref().filter(|parsed| parsed.key == key) else {
+                    return;
+                };
+                let Some(file) = parsed.files.get(file_ix).filter(|file| file.path == path) else {
+                    return;
+                };
+                let Some(source) = new_side_lines(file, &response) else {
+                    return;
+                };
+                changes.sources.insert(path, source.clone());
+                changes.reveal(file_ix, hunk_ix, all, &source, cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Reveal the lines in the parsed file and rebuild what hangs off them: the file's width,
+    /// its rows (unless folded) and the find.
+    fn reveal(
+        &mut self,
+        file_ix: usize,
+        hunk_ix: usize,
+        all: bool,
+        source: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let most = if all { u32::MAX } else { UNCHANGED_STEP };
+        let Some(parsed) = self.parsed.as_mut() else {
+            return;
+        };
+        let Some(file) = Arc::make_mut(&mut parsed.files).get_mut(file_ix) else {
+            return;
+        };
+        if !reveal_unchanged(file, hunk_ix, most, source) {
+            return;
+        }
+        self.words.remove(&(file_ix as u32, hunk_ix as u32));
+        let file = file.clone();
+        if let Some(horizontal) = parsed.horizontal.get_mut(file_ix) {
+            horizontal.geometry = DiffHorizontalGeometry::from_file(&file);
+            horizontal.measured.replace(None);
+        }
+        let folded = self.folds.get(&file.path).is_some_and(|fold| fold.collapsed);
+        let tweening = self.row_ranges.get(file_ix).and_then(|range| self.rows.get(range.start + 1))
+            == Some(&DiffRow::FoldingBody { file: file_ix as u32 });
+        if !folded && !tweening {
+            let body = body_rows(
+                file_ix as u32,
+                &file,
+                &self.comments_for(&file.path, cx),
+                self.draft_anchor_in(&file.path),
+                self.mode,
+            );
+            self.replace_file_body(file_ix, body);
+        }
+        self.refresh_find(cx);
+        cx.notify();
+    }
+
+    /// slopty: the find's marks on line `line` of hunk `hunk` of file `file`, then the words it
+    /// changed, lit in its own hue (22 % on dark, 16 % on light; design-inspiration item 14),
+    /// worked out once per hunk.
+    fn line_marks(
+        &mut self,
+        file: u32,
+        hunk: u32,
+        line: u32,
+        theme: &Theme,
+    ) -> Vec<(std::ops::Range<usize>, gpui::Hsla)> {
+        let mut marks = self.find_marks(file, hunk, line, theme);
+        let words = match self.words.get(&(file, hunk)) {
+            Some(words) => words.clone(),
+            None => {
+                let Some(found) = self.parsed.as_ref().and_then(|parsed| {
+                    parsed.files.get(file as usize)?.hunks.get(hunk as usize)
+                }) else {
+                    return marks;
+                };
+                let words = Arc::new(words::hunk_words(found));
+                self.words.insert((file, hunk), words.clone());
+                words
+            }
+        };
+        let Some(spans) = words.get(line as usize).filter(|spans| !spans.is_empty()) else {
+            return marks;
+        };
+        let kind = self
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.files.get(file as usize)?.hunks.get(hunk as usize)?.lines.get(line as usize))
+            .map(|line| line.kind);
+        let hue = match kind {
+            Some(LineKind::Add) => add_color(theme),
+            Some(LineKind::Del) => del_color(theme),
+            _ => return marks,
+        };
+        let lit = hue.opacity(if theme.appearance.is_dark() { 0.22 } else { 0.16 });
+        // The find's marks come first, so a match inside a changed word shows as a match.
+        marks.extend(spans.iter().map(|span| (span.clone(), lit)));
+        marks
+    }
+
     /// Start excerpt parsing and a lazy full-source fetch for an expanded file.
     fn request_highlight(
         &mut self,
@@ -3088,59 +3468,32 @@ impl Changes {
             .ok();
         });
 
-        let active = self.active_diff(cx);
-        let engine = self.state.read(cx).engine().cloned();
-        let target = self.desired_target(cx);
-        let chat_id = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone());
-        let mode = self.scope.mode().to_string();
-        let base_ref = self.base_ref.clone();
         let fetch_file = file.clone();
         let fetch_path = path.clone();
-        let fetch_task = match (active, engine) {
-            (Some(diff), Some(engine)) => Some(cx.spawn(async move |this, cx| {
-                let request = slopty_view_proto::GetCheckoutFileDiffTextRequest {
-                    checkout_id: diff.checkout_id,
-                    cwd: diff.cwd,
-                    path: fetch_path.clone(),
-                    mode,
-                    base_ref,
-                    chat_id,
-                    commit_sha: None, // slopty: no History surface (ruled out)
-                    diff_checksum: diff.checksum,
-                };
-                let mut params = serde_json::to_value(request)
-                    .ok()
-                    .and_then(|value| value.as_object().cloned())
-                    .unwrap_or_default();
-                if let Some(target) = target {
-                    params.insert("targetDeviceId".into(), serde_json::Value::String(target));
-                }
-                let response = engine
-                    .client()
-                    .call(
-                        methods::GET_CHECKOUT_FILE_DIFF_TEXT,
-                        serde_json::Value::Object(params),
-                    )
-                    .await
-                    .ok()
-                    .and_then(|value| {
-                        serde_json::from_value::<slopty_view_proto::CheckoutFileDiffText>(value).ok()
-                    });
-                let highlights = match response {
+        let fetch_task = self.file_texts(path.clone(), cx).map(|texts| {
+            cx.spawn(async move |this, cx| {
+                let response = texts.await;
+                let (highlights, source) = match response {
                     Some(response) => {
                         cx.background_executor()
                             .spawn(async move {
-                                full_highlights(&fetch_file, lang, &response).map(Arc::new)
+                                // slopty: the new side, kept for the unchanged-lines rows.
+                                let source = new_side_lines(&fetch_file, &response);
+                                let highlights =
+                                    full_highlights(&fetch_file, lang, &response).map(Arc::new);
+                                (highlights, source)
                             })
                             .await
                     }
-                    None => None,
+                    None => (None, None),
                 };
                 this.update(cx, |changes, cx| {
+                    let current = changes.highlights.get(&fetch_path);
+                    if let Some(source) = source
+                        && current.is_some_and(|slot| slot.fingerprint == fingerprint)
+                    {
+                        changes.sources.insert(fetch_path.clone(), source);
+                    }
                     if let Some(slot) = changes.highlights.get_mut(&fetch_path)
                         && slot.fingerprint == fingerprint
                         && let Some(highlights) = highlights
@@ -3150,9 +3503,8 @@ impl Changes {
                     }
                 })
                 .ok();
-            })),
-            _ => None,
-        };
+            })
+        });
         self.highlights.insert(
             file.path.clone(),
             HighlightSlot {
@@ -3219,11 +3571,40 @@ impl Changes {
                 .and_then(|f| file_notices(f).into_iter().nth(notice as usize))
                 .map(|text| notice_row(text, &theme))
                 .unwrap_or_else(|| gpui::Empty.into_any_element()),
-            DiffRow::HunkHeader { file, hunk } => files
-                .get(file as usize)
-                .and_then(|f| f.hunks.get(hunk as usize))
-                .map(|h| hunk_header_row(&h.header, &theme))
-                .unwrap_or_else(|| gpui::Empty.into_any_element()),
+            DiffRow::Unchanged { file, hunk } => {
+                let Some(file_diff) = files.get(file as usize) else {
+                    return gpui::Empty.into_any_element();
+                };
+                let Some(header) = file_diff.hunks.get(hunk as usize).map(|h| h.header.as_str())
+                else {
+                    return gpui::Empty.into_any_element();
+                };
+                let count = unchanged_before(file_diff, hunk as usize);
+                let gutter_px = gutter_width(file_diff);
+                let (lead, pad) = match self.mode {
+                    DiffMode::Unified => {
+                        (ACCENT_BAR_WIDTH + 2.0 * gutter_px, UNIFIED_CODE_PADDING_LEFT)
+                    }
+                    DiffMode::Split => (ACCENT_BAR_WIDTH + gutter_px, SPLIT_CODE_PADDING_LEFT),
+                };
+                // slopty: a click shows the next lines up, ⌥-click all of them (item 11).
+                let hint = if count <= UNCHANGED_STEP {
+                    "Show these lines".to_owned()
+                } else {
+                    format!("Show {UNCHANGED_STEP} more lines, ⌥-click for all {count}")
+                };
+                let (file_ix, hunk_ix) = (file as usize, hunk as usize);
+                unchanged_row(count, header, lead, pad, true, &theme)
+                    .id(("diff-unchanged", ix))
+                    .group(UNCHANGED_GROUP)
+                    .cursor_pointer()
+                    .role(gpui::Role::Button)
+                    .hint(hint)
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                        this.show_unchanged(file_ix, hunk_ix, event.modifiers().alt, cx);
+                    }))
+                    .into_any_element()
+            }
             DiffRow::Line {
                 file,
                 hunk,
@@ -3246,7 +3627,7 @@ impl Changes {
                     .map(|highlights| highlights.spans(line))
                     .unwrap_or(&[]);
                 let gutter_px = gutter_width(file_diff);
-                let marks = self.find_marks(file, hunk, line_ix, &theme); // slopty: find.
+                let marks = self.line_marks(file, hunk, line_ix, &theme); // slopty: find, words.
                 let row = diff_line_row(
                     line,
                     spans,
@@ -3302,10 +3683,10 @@ impl Changes {
                 let mirrored = left.is_some() && left == right;
                 // slopty: the find's marks on each column's line.
                 let left_marks = left
-                    .map(|slot| self.find_marks(file, hunk, slot, &theme))
+                    .map(|slot| self.line_marks(file, hunk, slot, &theme))
                     .unwrap_or_default();
                 let right_marks = right
-                    .map(|slot| self.find_marks(file, hunk, slot, &theme))
+                    .map(|slot| self.line_marks(file, hunk, slot, &theme))
                     .unwrap_or_default();
                 let left = left.and_then(|slot| lines.get(slot as usize));
                 let right = right.and_then(|slot| lines.get(slot as usize));
@@ -3455,11 +3836,28 @@ impl Changes {
                 );
                 let clipped = div().w_full().overflow_hidden().child(body);
                 if fold.animating(crate::clock::now(cx)) {
+                    // slopty: the one fold (`motion::fold_frame`): the height opens on the quint
+                    // while the lines wait 80 ms and fade in rising 3 px; closing, they fade
+                    // before the height lands.
+                    let opening = to > from;
+                    let span = if opening {
+                        motion::FOLD_OPEN.total().max(motion::FOLD_REVEAL.total())
+                    } else {
+                        motion::FOLD_CLOSE.total().max(motion::FOLD_HIDE.total())
+                    }
+                    .mul_f32(motion::speed_scale());
+                    let still = motion::reduced_motion(cx);
+                    let full = from.max(to);
                     clipped
                         .with_animation(
                             SharedString::from(format!("fold-{}-{}", file_diff.path, fold.epoch)),
-                            COLLAPSE.animation(),
-                            move |el, t| el.h(px(motion::lerp(from, to, t))),
+                            gpui::Animation::new(span),
+                            move |el, t| {
+                                let frame = motion::fold_frame(opening, span.mul_f32(t), still);
+                                el.h(px(full * frame.height))
+                                    .pt(px(frame.rise))
+                                    .opacity(frame.opacity)
+                            },
                         )
                         .into_any_element()
                 } else {
@@ -3507,9 +3905,10 @@ impl Changes {
         } else {
             crate::icons::ALT_ARROW_DOWN
         };
-        let chevron = div().flex_none().size(px(14.0)).child(
+        // slopty: 12, as the scope trigger's chevron.
+        let chevron = div().flex_none().size(px(14.0)).flex().items_center().justify_center().child(
             crate::icons::icon(chevron_icon)
-                .size(px(13.0))
+                .size(px(12.0))
                 .text_color(theme.text_muted.opacity(0.7)),
         );
         let chevron: AnyElement = if fold.animating(crate::clock::now(cx)) {
@@ -3535,6 +3934,7 @@ impl Changes {
         // slopty: a header names its file and whether it is open; a file a large diff held back
         // says how many lines a click loads.
         let held_lines = (fold.held && collapsed).then(|| diff_lines(file));
+        let header_fade = format!("{}-{ix}-hover", presentation.key_prefix());
         let header_label = match held_lines {
             Some(lines) => format!("{path}, {lines} lines not loaded. Load"),
             None if collapsed => format!("{path}, collapsed"),
@@ -3563,9 +3963,10 @@ impl Changes {
             .items_center()
             .gap(px(8.0))
             .px(px(Theme::SPACE_MD))
-            .bg(rest_bg)
+            // slopty: the hover wash fades in, as every row's (M23).
+            .bg(motion::hover_blend(&header_fade, rest_bg, hover_bg))
+            .hover_fade(header_fade.clone())
             .cursor_pointer()
-            .hover(move |s| s.bg(hover_bg))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_fold(ix, cx);
                 cx.notify();
@@ -3593,7 +3994,7 @@ impl Changes {
                 el.child(
                     div()
                         .flex_none()
-                        .text_size(px(10.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
                         .child(SharedString::from("BIN")),
                 )
@@ -3603,57 +4004,41 @@ impl Changes {
                 el.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
                         .child(SharedString::from(format!("Large diff · {lines} lines · Load"))),
                 )
             })
-            .when(adds > 0 || !file.binary, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .font_family(theme.font_mono.clone())
-                        .text_size(px(11.0))
-                        .text_color(add_color(theme))
-                        .child(SharedString::from(format!("+{adds}"))),
-                )
-            })
-            .when(dels > 0 || !file.binary, |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .font_family(theme.font_mono.clone())
-                        .text_size(px(11.0))
-                        .text_color(del_color(theme))
-                        .child(SharedString::from(format!("−{dels}"))),
-                )
-            })
-            .child(
+            // slopty: a count shows only when it is not zero (T3), in tabular figures; a
+            // mode-only change keeps one quiet "0".
+            .children(file_counts(adds, dels, file.binary).into_iter().map(|(text, kind)| {
                 div()
-                    .id(("diff-open-file", ix))
-                    // slopty: a keyboard stop with the shell's ring (M8).
-                    .map(|el| crate::surface_chrome::key_stop(el, theme))
                     .flex_none()
-                    .size(px(crate::surface_chrome::CONTROL_SIZE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
-                    .hover(|s| s.bg(theme.ink(0.08)))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
+                    .font_family(theme.font_mono.clone())
+                    .font_features(crate::typography::tabular())
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(match kind {
+                        CountKind::Added => add_color(theme),
+                        CountKind::Deleted => del_color(theme),
+                        CountKind::None => theme.text_faint,
                     })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.emit(ChangesEvent::OpenFile(path.clone()));
-                    }))
-                    .hint("Open in file browser")
-                    .child(
-                        crate::icons::icon(crate::icons::DOCUMENT)
-                            .size(px(crate::surface_chrome::ICON_SIZE))
-                            .text_color(theme.text_muted),
-                    ),
+                    .child(SharedString::from(text))
+            }))
+            .when(adds + dels > 0, |el| el.child(diffstat_blocks(adds, dels, theme)))
+            .child(
+                // slopty: the pane's icon button, its "opens elsewhere" glyph, a Button for a
+                // screen reader.
+                crate::surface_chrome::icon_button(
+                    format!("diff-open-file-{}-{ix}", presentation.key_prefix()),
+                    crate::icons::ARROW_UP_RIGHT,
+                    theme,
+                )
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(ChangesEvent::OpenFile(path.clone()));
+                }))
+                .hint("Open file"),
             )
             .into_any_element()
     }
@@ -3718,62 +4103,28 @@ impl Changes {
     /// A small hover-washed icon button for the pane header. The header lives
     /// inside the titlebar drag strip, so the button occludes and swallows the
     /// mouse-down (same discipline as the shell's `header_icon_button`).
+    // slopty: the pane's one icon button (`surface_chrome::icon_button`).
     fn header_button(
         id: &'static str,
         icon_path: &'static str,
         label: &'static str,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        Self::header_toggle(id, icon_path, label, false, theme).hint(label)
+        crate::surface_chrome::icon_button(id, icon_path, theme).occlude().hint(label)
     }
 
-    /// [`Self::header_button`] with a latched look: an `active` toggle holds
-    /// the hover wash and the full text tone, so the pane says which layout
-    /// it is in without a label. The caller names it
+    /// [`Self::header_button`] for a toggle: latched while `active`, so the pane says which
+    /// layout it is in without a label, and a screen reader hears it. The caller names it
     /// ([`crate::settings::widgets::ActionHint`]): its words, and its key when it has one.
+    // slopty: the pane's one toggle (`surface_chrome::icon_toggle`): hover still answers a
+    // latched one.
     fn header_toggle(
         id: &'static str,
         icon_path: &'static str,
-        _label: &'static str,
         active: bool,
         theme: &Theme,
     ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .role(gpui::Role::Button) // slopty: read aloud and found by name.
-            .size(px(crate::surface_chrome::CONTROL_SIZE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
-            .cursor_pointer()
-            // Latched: the blend is neither read nor driven, and its listener
-            // would dirty the whole window on every enter/leave for nothing.
-            .map(|el| {
-                if active {
-                    el.bg(crate::theme::wash(0.14))
-                } else {
-                    el.bg(motion::hover_blend(
-                        id,
-                        crate::theme::wash(0.0),
-                        crate::theme::wash(0.14),
-                    ))
-                    .hover_fade(id)
-                }
-            })
-            .occlude()
-            // slopty: a keyboard stop with the shell's ring (M8).
-            .map(|el| crate::surface_chrome::key_stop(el, theme))
-            .child(
-                crate::icons::icon(icon_path)
-                    .size(px(crate::surface_chrome::ICON_SIZE))
-                    .text_color(if active {
-                        theme.text
-                    } else {
-                        theme.text_muted.opacity(0.7)
-                    }),
-            )
+        crate::surface_chrome::icon_toggle(id, icon_path, active, theme).occlude()
     }
 
     /// The unified ⇄ split layout toggle (both the scoped and the
@@ -3782,7 +4133,6 @@ impl Changes {
         Self::header_toggle(
             "changes-split",
             crate::icons::SPLIT_COLUMNS,
-            "Split view",
             self.mode.is_split(),
             theme,
         )
@@ -3798,7 +4148,6 @@ impl Changes {
         Self::header_toggle(
             "changes-wrap",
             crate::icons::WRAP_TEXT,
-            "Wrap long lines",
             self.wrap_lines,
             theme,
         )
@@ -3820,8 +4169,14 @@ impl Changes {
         let theme = Theme::of(cx).clone();
         // slopty: no History surface (ruled out)
         let scope = self.scope;
+        let scope_open = self.scope_menu.get().is_some();
         let scope_trigger = div()
             .id("changes-scope-trigger")
+            // slopty: a screen reader hears what it picks and whether its menu is open (T3's
+            // `Diff scope: …`).
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("Diff scope: {}", scope.label())))
+            .aria_expanded(scope_open)
             .h(px(crate::surface_chrome::CONTROL_SIZE))
             .px(px(8.0))
             .flex_none()
@@ -3833,10 +4188,13 @@ impl Changes {
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-scope-trigger",
-                crate::theme::wash(0.05),
-                crate::theme::wash(0.14),
+                crate::theme::hover_wash(),
+                crate::theme::control_hover(),
             ))
             .hover_fade("changes-scope-trigger")
+            // slopty: held selected while its menu is open (opencode's `[data-expanded]`).
+            .when(scope_open, |el| el.bg(crate::theme::selected_wash()))
+            .active(|style| style.bg(crate::theme::pressed_wash()))
             // slopty: a keyboard stop with the shell's ring (M8).
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, &theme))
@@ -3859,8 +4217,7 @@ impl Changes {
             }))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .line_height(px(14.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text)
                     .child(SharedString::from(scope.label())),
             )
@@ -3870,7 +4227,7 @@ impl Changes {
                     .text_color(theme.text_muted.opacity(0.7)),
             );
         // slopty: no History surface (ruled out)
-        let trigger = if self.scope_menu.get().is_some() {
+        let trigger = if scope_open {
             let closing = self.scope_menu.closing_at(crate::clock::now(cx));
             let menu = self.render_scope_menu(&theme, cx);
             scope_trigger
@@ -3993,14 +4350,19 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .rounded(px(6.0))
+            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-ref-trigger",
                 crate::theme::wash(0.0),
-                crate::theme::wash(0.12),
+                crate::theme::control_hover(),
             ))
             .hover_fade("changes-ref-trigger")
+            // slopty: held selected while its menu is open, and named as the menu it opens.
+            .when(self.ref_menu.get().is_some(), |el| el.bg(crate::theme::selected_wash()))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("Compare with {base}")))
+            .aria_expanded(self.ref_menu.get().is_some())
             // slopty: a keyboard stop with the shell's ring (M8).
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -4096,7 +4458,7 @@ impl Changes {
             div()
                 .px(px(8.0))
                 .py(px(6.0))
-                .text_size(px(12.0))
+                .text_size(crate::typography::ui_rems(12.0))
                 .text_color(theme.text_faint)
                 .child(SharedString::from(if branches.is_empty() {
                     "No branches"
@@ -4187,7 +4549,7 @@ impl Changes {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .child(SharedString::from(scope_label(
                             self.scope,
@@ -4195,19 +4557,22 @@ impl Changes {
                             self.base_ref.as_deref(),
                         ))),
                 )
-                .child(
-                    div()
-                        .font_family(theme.font_mono.clone())
-                        .text_size(px(11.0))
-                        .text_color(add_color(theme))
-                        .child(SharedString::from(format!("+{}", parsed.additions))),
-                )
-                .child(
-                    div()
-                        .font_family(theme.font_mono.clone())
-                        .text_size(px(11.0))
-                        .text_color(del_color(theme))
-                        .child(SharedString::from(format!("−{}", parsed.deletions))),
+                // slopty: the totals in tabular figures, a zero total left out, as each file's.
+                .children(
+                    file_counts(parsed.additions, parsed.deletions, true).into_iter().map(
+                        |(text, kind)| {
+                            div()
+                                .font_family(theme.font_mono.clone())
+                                .font_features(crate::typography::tabular())
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(if kind == CountKind::Added {
+                                    add_color(theme)
+                                } else {
+                                    del_color(theme)
+                                })
+                                .child(SharedString::from(text))
+                        },
+                    ),
                 )
                 .child(div().flex_1())
                 // slopty: its tooltip says what is left out.
@@ -4216,7 +4581,7 @@ impl Changes {
                         div()
                             .id("changes-partial")
                             .flex_none()
-                            .text_size(px(10.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(4.0))
@@ -4250,27 +4615,106 @@ pub(crate) fn notice_row(notice: String, theme: &Theme) -> AnyElement {
         .flex()
         .items_center()
         .px(px(Theme::SPACE_LG))
-        .text_size(px(11.0))
+        .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_faint)
         .child(SharedString::from(notice))
         .into_any_element()
 }
 
-/// One `@@ … @@` hunk-header row on the bluish-grey wash.
-pub(crate) fn hunk_header_row(header: &str, theme: &Theme) -> AnyElement {
+// slopty: what a diff leaves out between hunks reads as a count, "N unchanged lines", not the
+// `@@` range (opencode's `line-info-basic` separator; opencode item 11), in muted italic, with the
+// unfold mark and the function git names in the warning hue at 70 %, Amp's amber diff meta (Amp
+// item 14): the colour sits in the ink on a neutral wash, as both draw it, not in a tinted band.
+// The number columns take a stronger step of the wash.
+/// The row standing for `count` unchanged lines above the hunk `header` opens. `lead` is the
+/// width of the bar and number columns, `pad` the code's own left pad after them.
+pub(crate) fn unchanged_row(
+    count: u32,
+    header: &str,
+    lead: f32,
+    pad: f32,
+    expandable: bool,
+    theme: &Theme,
+) -> gpui::Div {
+    let (_, context) = split_hunk_header(header);
+    let meta = diff_meta_ink(theme);
+    let label = if count == 1 {
+        "1 unchanged line".to_owned()
+    } else {
+        format!("{count} unchanged lines")
+    };
     div()
-        .h(px(HUNK_HEADER_HEIGHT))
+        .h(px(UNCHANGED_HEIGHT))
         .w_full()
         .flex_none()
         .flex()
         .items_center()
-        .px(px(Theme::SPACE_LG))
-        .bg(theme.diff_hunk_bg)
-        .font_family(theme.font_mono.clone())
-        .text_size(px(11.0))
-        .text_color(theme.text_faint)
-        .child(SharedString::from(header.to_string()))
-        .into_any_element()
+        .bg(theme.ink(0.04))
+        .text_size(crate::typography::ui_rems(crate::typography::ladder::LABEL))
+        .text_color(theme.text_muted)
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .child(
+            div()
+                .w(px(lead))
+                .h_full()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.ink(0.04))
+                .when(expandable, |el| {
+                    el.child(
+                        crate::icons::icon(crate::icons::UNFOLD_VERTICAL)
+                            .size(px(crate::surface_chrome::ICON_SIZE))
+                            .text_color(meta)
+                            .group_hover(UNCHANGED_GROUP, |s| s.text_color(theme.warning)),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex_none()
+                .pl(px(pad))
+                .italic()
+                .font_features(crate::typography::tabular())
+                .when(expandable, |el| {
+                    el.group_hover(UNCHANGED_GROUP, |s| s.text_color(theme.text))
+                })
+                .child(SharedString::from(label)),
+        )
+        .when(!context.is_empty(), |row| {
+            row.child(
+                div()
+                    .min_w_0()
+                    .pl(px(Theme::SPACE_SM))
+                    .truncate()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(px(11.0))
+                    .text_color(meta)
+                    .child(SharedString::from(context.to_owned())),
+            )
+        })
+}
+
+/// slopty: a diff's meta, its hunk's function and the unfold mark, in the warning hue at 70 %
+/// (Amp's `#a07013` / `#d6a038`; Amp item 14): colour, not grey.
+pub(crate) fn diff_meta_ink(theme: &Theme) -> gpui::Hsla {
+    theme.warning.opacity(0.7)
+}
+
+/// The hover group of an unchanged-lines row the pane can open.
+const UNCHANGED_GROUP: &str = "diff-unchanged";
+
+/// A hunk header's range (`@@ -1,4 +1,5 @@`) and the function context git writes after it.
+fn split_hunk_header(header: &str) -> (&str, &str) {
+    header
+        .strip_prefix("@@")
+        .and_then(|rest| rest.find("@@"))
+        .map_or((header.trim(), ""), |end| {
+            let (range, context) = header.split_at(end + 4);
+            (range.trim(), context.trim())
+        })
 }
 
 /// The only part of a diff row allowed to exceed its viewport. The outer
@@ -4323,7 +4767,14 @@ fn code_text_viewport(
             // Without this GPUI maps a vertical-only wheel delta onto x for
             // an x-only scroller, starving the virtualized list underneath.
             viewport.style().restrict_scroll_to_axis = Some(true);
-            viewport.into_any_element()
+            // slopty: a line running past the pane fades out at the edge, and back in on the
+            // left once scrolled, so the cut reads as "more" (T3's diff does; item 23). Each
+            // ramp grows with what is hidden past it, so a line that fits never dims.
+            crate::edge_fade::edge_faded(DIFF_EDGE_FADE, false, false, viewport)
+                .fade_left(true)
+                .fade_right(true)
+                .fade_scroll_x(&scroll.handle)
+                .into_any_element()
         }
         None => viewport.into_any_element(),
     }
@@ -4331,8 +4782,8 @@ fn code_text_viewport(
 
 // slopty: no pull-request pages.
 /// One +/−/context/meta diff line: coloured accent bar, dual line-number
-/// gutters (`gutter_px` wide — see [`gutter_width`]), marker column, and
-/// paint-only syntax runs.
+/// gutters (`gutter_px` wide — see [`gutter_width`]) and paint-only syntax
+/// runs.
 fn diff_line_row(
     line: &DiffLine,
     spans: &[slopty_syntax::HighlightSpan],
@@ -4346,7 +4797,7 @@ fn diff_line_row(
         return meta_line_row(
             &line.text,
             theme,
-            ACCENT_BAR_WIDTH + 2.0 * gutter_px + MARKER_WIDTH + 12.0,
+            ACCENT_BAR_WIDTH + 2.0 * gutter_px + UNIFIED_CODE_PADDING_LEFT,
         );
     }
 
@@ -4356,44 +4807,8 @@ fn diff_line_row(
     let mut del_bg = del_color(theme);
     del_bg.a = 0.055;
 
-    let (marker, marker_color, row_bg, accent, number_color) = match line.kind {
-        LineKind::Add => (
-            "+",
-            add_color(theme),
-            Some(add_bg),
-            Some(add_color(theme).opacity(0.55)),
-            add_color(theme).opacity(0.9),
-        ),
-        LineKind::Del => (
-            "−",
-            del_color(theme),
-            Some(del_bg),
-            Some(del_color(theme).opacity(0.55)),
-            del_color(theme).opacity(0.9),
-        ),
-        _ => (
-            "·",
-            theme.text_faint.opacity(0.5),
-            None,
-            None,
-            theme.text_faint.opacity(0.8),
-        ),
-    };
-    let gutter = |no: Option<u32>, color: gpui::Hsla| {
-        div()
-            .w(px(gutter_px))
-            .flex_none()
-            .font_family(theme.font_mono.clone())
-            .text_size(px(11.0))
-            .line_height(px(diff_line_height(theme)))
-            .text_color(color)
-            .flex()
-            .justify_end()
-            .pr(px(8.0))
-            .child(SharedString::from(
-                no.map(|n| n.to_string()).unwrap_or_default(),
-            ))
-    };
+    let (row_bg, accent, number_color) = line_tones(line.kind, add_bg, del_bg, theme);
+    let wrapped = matches!(code_width, DiffCodeWidth::Wrapped);
     let mono = font(theme.font_mono.clone());
     let runs = render::runs_for_syntax_line_with_plain(
         &line.text,
@@ -4408,7 +4823,6 @@ fn diff_line_row(
         DiffCodeWidth::Scrollable(metrics) => Some(metrics.unified_content_width(gutter_px)),
         DiffCodeWidth::Wrapped => None,
     };
-    let wrapped = matches!(code_width, DiffCodeWidth::Wrapped);
     div()
         .map(|el| {
             if wrapped {
@@ -4432,34 +4846,28 @@ fn diff_line_row(
                 .flex_none()
                 .when_some(accent, |el, color| el.bg(color)),
         )
-        .child(gutter(
+        .child(gutter_cell(
             line.old_no,
             if line.kind == LineKind::Del {
                 number_color
             } else {
                 theme.text_faint.opacity(0.8)
             },
+            None,
+            gutter_px,
+            theme,
         ))
-        .child(gutter(
+        .child(gutter_cell(
             line.new_no,
             if line.kind == LineKind::Add {
                 number_color
             } else {
                 theme.text_faint.opacity(0.8)
             },
+            wrapped.then_some(line.text.as_str()),
+            gutter_px,
+            theme,
         ))
-        .child(
-            div()
-                .w(px(MARKER_WIDTH))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .text_size(px(diff_text_size(theme)))
-                .line_height(px(diff_line_height(theme)))
-                .text_color(marker_color)
-                .font_family(theme.font_mono.clone())
-                .child(SharedString::from(marker)),
-        )
         .child(code_text_viewport(
             line.text.clone(),
             runs,
@@ -4470,6 +4878,75 @@ fn diff_line_row(
             scroll,
         ))
         .into_any_element()
+}
+
+/// A line's number in its gutter. slopty: with wrap on, `wraps` is the line's text and each row
+/// it wraps onto shows `»` under the number (AgentCraft's continuation mark; design-inspiration
+/// item 13), so a wrapped line never reads as two.
+fn gutter_cell(
+    number: Option<u32>,
+    color: gpui::Hsla,
+    wraps: Option<&str>,
+    gutter_px: f32,
+    theme: &Theme,
+) -> gpui::Div {
+    let cell = div()
+        .w(px(gutter_px))
+        .flex_none()
+        .font_family(theme.font_mono.clone())
+        .text_size(px(11.0))
+        .line_height(px(diff_line_height(theme)))
+        .text_color(color)
+        .flex()
+        .justify_end()
+        .pr(px(8.0));
+    let number = SharedString::from(number.map(|n| n.to_string()).unwrap_or_default());
+    match wraps.and_then(continuation_marks) {
+        // The marks stand out of the layout, so the row stays as tall as its code, which clips
+        // the ones it does not wrap onto.
+        Some(marks) => cell.self_stretch().relative().overflow_hidden().child(
+            div()
+                .absolute()
+                .top_0()
+                .right(px(8.0))
+                .flex()
+                .flex_col()
+                .items_end()
+                .child(number)
+                .child(div().text_color(theme.text_faint).child(marks)),
+        ),
+        None => cell.child(number),
+    }
+}
+
+/// `»` for every row a line could wrap onto, one per line: at most one per 24 columns of the
+/// line (no diff pane is narrower), so the row's own height clips the rest.
+fn continuation_marks(text: &str) -> Option<SharedString> {
+    let columns: usize = text
+        .chars()
+        .map(|ch| match ch {
+            '\t' => 4,
+            ch if ch.is_ascii() => 1,
+            _ => 2,
+        })
+        .sum();
+    let rows = (columns / 24).min(200);
+    (rows > 0).then(|| vec!["»"; rows].join("\n").into())
+}
+
+/// A line's wash, its bar and its numbers' colour by kind. slopty: the bar takes the full hue, as
+/// the only mark of an added or deleted line now the +/− column is gone (item 11).
+fn line_tones(
+    kind: LineKind,
+    add_bg: gpui::Hsla,
+    del_bg: gpui::Hsla,
+    theme: &Theme,
+) -> (Option<gpui::Hsla>, Option<gpui::Hsla>, gpui::Hsla) {
+    match kind {
+        LineKind::Add => (Some(add_bg), Some(add_color(theme)), add_color(theme).opacity(0.9)),
+        LineKind::Del => (Some(del_bg), Some(del_color(theme)), del_color(theme).opacity(0.9)),
+        _ => (None, None, theme.text_faint.opacity(0.8)),
+    }
 }
 
 /// `\ No newline at end of file` and friends: a note about the row rather
@@ -4483,7 +4960,7 @@ fn meta_line_row(text: &str, theme: &Theme, pad_left: f32) -> AnyElement {
         .flex()
         .items_center()
         .pl(px(pad_left))
-        .text_size(px(10.5))
+        .text_size(px(11.0))
         .text_color(theme.text_faint)
         .italic()
         .child(SharedString::from(text.to_string()))
@@ -4510,7 +4987,7 @@ fn line_runs(
     )
 }
 
-/// One half of a split row: the same accent bar / gutter / marker / code
+/// One half of a split row: the same accent bar / gutter / code
 /// columns a unified row uses, minus the second gutter — each half numbers
 /// only its own side. Takes prebuilt `runs` so a mirrored row can share one
 /// set across both columns.
@@ -4527,29 +5004,7 @@ fn split_line_cell(
     add_bg.a = 0.055;
     let mut del_bg = del_color(theme);
     del_bg.a = 0.055;
-    let (marker, marker_color, row_bg, accent, number_color) = match line.kind {
-        LineKind::Add => (
-            "+",
-            add_color(theme),
-            Some(add_bg),
-            Some(add_color(theme).opacity(0.55)),
-            add_color(theme).opacity(0.9),
-        ),
-        LineKind::Del => (
-            "−",
-            del_color(theme),
-            Some(del_bg),
-            Some(del_color(theme).opacity(0.55)),
-            del_color(theme).opacity(0.9),
-        ),
-        _ => (
-            "·",
-            theme.text_faint.opacity(0.5),
-            None,
-            None,
-            theme.text_faint.opacity(0.8),
-        ),
-    };
+    let (row_bg, accent, number_color) = line_tones(line.kind, add_bg, del_bg, theme);
     let content_width = match code_width {
         DiffCodeWidth::Clipped => None,
         DiffCodeWidth::Scrollable(metrics) => Some(metrics.split_content_width(gutter_px)),
@@ -4572,33 +5027,13 @@ fn split_line_cell(
                 .flex_none()
                 .when_some(accent, |el, color| el.bg(color)),
         )
-        .child(
-            div()
-                .w(px(gutter_px))
-                .flex_none()
-                .font_family(theme.font_mono.clone())
-                .text_size(px(11.0))
-                .line_height(px(diff_line_height(theme)))
-                .text_color(number_color)
-                .flex()
-                .justify_end()
-                .pr(px(8.0))
-                .child(SharedString::from(
-                    number.map(|n| n.to_string()).unwrap_or_default(),
-                )),
-        )
-        .child(
-            div()
-                .w(px(SPLIT_MARKER_WIDTH))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .text_size(px(diff_text_size(theme)))
-                .line_height(px(diff_line_height(theme)))
-                .text_color(marker_color)
-                .font_family(theme.font_mono.clone())
-                .child(SharedString::from(marker)),
-        )
+        .child(gutter_cell(
+            number,
+            number_color,
+            wrapped.then_some(line.text.as_str()),
+            gutter_px,
+            theme,
+        ))
         .child(code_text_viewport(
             line.text.clone(),
             runs,
@@ -4702,9 +5137,9 @@ fn draft_cite_path(draft: &CommentDraft) -> &str {
     }
 }
 
-/// The expanded body of one file section: notices, hunk headers, +/-/context
-/// lines with a coloured accent bar, dual line-number gutters, a marker
-/// column, and paint-only syntax runs (slopty checkout-diff-sidebar).
+/// The expanded body of one file section: notices, unchanged-lines rows, +/-/context
+/// lines with a coloured accent bar, dual line-number gutters and
+/// paint-only syntax runs (slopty checkout-diff-sidebar).
 /// Shared with the transcript's tool-diff detail blocks — the same component
 /// renders a checkout diff section and an inline ACP tool diff. (The changes
 /// pane itself virtualizes these rows individually; this stacked form serves
@@ -4720,8 +5155,15 @@ pub(crate) fn render_file_body_with_syntax(
     for notice in file_notices(file) {
         children.push(notice_row(notice, theme));
     }
-    for hunk in &file.hunks {
-        children.push(hunk_header_row(&hunk.header, theme));
+    let lead = ACCENT_BAR_WIDTH + 2.0 * gutter_px;
+    for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
+        let count = unchanged_before(file, hunk_ix);
+        if count > 0 {
+            children.push(
+                unchanged_row(count, &hunk.header, lead, UNIFIED_CODE_PADDING_LEFT, false, theme)
+                    .into_any_element(),
+            );
+        }
         for line in &hunk.lines {
             let spans = highlights
                 .as_deref()
@@ -4776,12 +5218,21 @@ fn render_file_body_upto(
             children.push(notice_row(notice, theme));
             y += NOTICE_HEIGHT;
         }
+        let (lead, pad) = match mode {
+            DiffMode::Unified => (ACCENT_BAR_WIDTH + 2.0 * gutter_px, UNIFIED_CODE_PADDING_LEFT),
+            DiffMode::Split => (ACCENT_BAR_WIDTH + gutter_px, SPLIT_CODE_PADDING_LEFT),
+        };
         for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
             if y >= max_px {
                 break 'build;
             }
-            children.push(hunk_header_row(&hunk.header, theme));
-            y += HUNK_HEADER_HEIGHT;
+            let count = unchanged_before(file, hunk_ix);
+            if count > 0 {
+                children.push(
+                    unchanged_row(count, &hunk.header, lead, pad, true, theme).into_any_element(),
+                );
+                y += UNCHANGED_HEIGHT;
+            }
             match mode {
                 DiffMode::Unified => {
                     for (line_ix, line) in hunk.lines.iter().enumerate() {
@@ -4889,30 +5340,47 @@ impl Render for Changes {
         // GetCheckoutDiff (a still-running daemon after an app update, or a
         // remote device behind on releases) — say that instead of leaking
         // the raw RPC error (user report).
-        let scoped_notice: Option<(SharedString, bool)> = (!no_chat
+        // slopty: a notice is a headline and its way on, in the empty-state voice, naming the
+        // machine.
+        let host = {
+            let state = self.state.read(cx);
+            state.selected_chat_row().map(|chat| {
+                state.device_name(&chat.device_id).unwrap_or(&chat.device_id).to_owned()
+            })
+        }
+        .unwrap_or_else(|| "This chat's machine".to_owned());
+        let scoped_notice: Option<(SharedString, Option<SharedString>, bool)> = (!no_chat
             && scope != DiffScope::WorkingTree)
             .then(|| self.scoped_error.clone())
             .flatten()
             .map(|message| {
                 if message.contains("no turn recorded") {
                     (
-                        SharedString::from("No turns yet: send a message first"),
+                        "No turns yet".into(),
+                        Some("Send a message to see what it changes.".into()),
                         false,
                     )
                 } else if message.contains("unknown method") {
                     (
-                        SharedString::from(
-                            "This chat's device is running an older Slopty — update it to view branch and turn diffs",
-                        ),
+                        format!("{host} runs an older Slopty").into(),
+                        Some("Update it to see branch and turn changes.".into()),
                         false,
                     )
                 } else {
-                    (message, true)
+                    (message, None, true)
                 }
             });
 
+        // slopty: the preparing loader waits 150 ms and, once shown, stays 400 ms
+        // (`loaders::delayed`), asked on every draw so it knows when the diff lands.
+        let preparing = crate::loaders::delayed(
+            "changes-preparing",
+            scoped_notice.is_none() && phase == DiffPhase::Preparing,
+            window,
+            cx,
+        );
         // slopty: a failed read names what failed and offers the way on (M31).
-        let content: AnyElement = if let Some((message, true)) = scoped_notice.clone() {
+        let content: AnyElement = if let Some((message, _, true)) = scoped_notice.clone() {
             crate::files::failure_state(
                 "changes-scoped-error",
                 "Couldn't load this diff",
@@ -4926,64 +5394,39 @@ impl Render for Changes {
                 }),
                 cx,
             )
-        } else if let Some((message, _)) = scoped_notice {
+        } else if let Some((headline, line, _)) = scoped_notice {
+            pane_note("changes-notice", headline, line, &theme)
+        } else if preparing != crate::loaders::Delayed::Done || phase == DiffPhase::Preparing {
             div()
                 .flex_1()
                 .flex()
                 .items_center()
                 .justify_center()
-                .px(px(Theme::SPACE_LG))
-                .text_size(px(12.0))
-                .text_color(theme.text_faint)
-                .child(message)
+                .when(preparing == crate::loaders::Delayed::Shown, |el| {
+                    el.child(crate::loaders::pending("changes-preparing", "Preparing diff…").at_once())
+                })
                 .into_any_element()
         } else {
             match phase {
-                DiffPhase::Preparing => div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(Theme::SPACE_SM))
-                    .child(crate::loaders::gradient_spinner(
-                        "changes-preparing",
-                        &theme,
-                        3.0,
-                        cx.entity_id(),
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from("Preparing diff…")),
-                    )
-                    .into_any_element(),
-                DiffPhase::Clean => div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(12.0))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(clean_message(scope, base.as_deref())))
-                    .into_any_element(),
+                DiffPhase::Preparing => gpui::Empty.into_any_element(),
+                DiffPhase::Clean => pane_note(
+                    "changes-clean",
+                    clean_message(scope, base.as_deref()).into(),
+                    Some(clean_line(scope).into()),
+                    &theme,
+                ),
                 DiffPhase::List => {
                     // slopty: a diff whose every change was whitespace, read with whitespace
                     // ignored, says so.
                     let only_space = self.ignore_whitespace
                         && self.parsed.as_ref().is_some_and(|parsed| parsed.files.is_empty());
                     if only_space {
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(12.0))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from("Only whitespace changed"))
-                            .into_any_element()
+                        pane_note(
+                            "changes-only-space",
+                            "Only whitespace changed".into(),
+                            Some("Turn off Ignore whitespace to see it.".into()),
+                            &theme,
+                        )
                     } else if self.parsed.is_some() {
                         let sticky_header = self.render_sticky_file_header(&theme, cx);
                         // slopty: the changed files' tree beside the diff, and the find over it.
@@ -5071,7 +5514,7 @@ impl Render for Changes {
                         .py(px(4.0))
                         .border_b_1()
                         .border_color(theme.border)
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.warning)
                         .child(message),
                 )
@@ -5356,10 +5799,11 @@ rename to new_name.rs
         // Spans tile the whole row vec.
         assert_eq!(ranges.last().unwrap().end, rows.len());
 
-        // src/main.rs: header, 2 hunk headers, 8 lines, pad.
+        // src/main.rs: header, 8 lines, the 5 unchanged lines between its hunks as one row
+        // (none above the first, which opens at line 1), pad.
         let main_rows = &rows[ranges[0].clone()];
-        assert_eq!(main_rows.len(), 1 + 2 + 8 + 1);
-        assert_eq!(main_rows[1], DiffRow::HunkHeader { file: 0, hunk: 0 });
+        assert_eq!(main_rows.len(), 1 + 1 + 8 + 1);
+        assert_eq!(main_rows[6], DiffRow::Unchanged { file: 0, hunk: 1 });
         // Flat line indices run across hunks (they key the highlight slot).
         let flats: Vec<u32> = main_rows
             .iter()
@@ -5444,8 +5888,8 @@ rename to new_name.rs
         use slopty_shell_theme::{AccentSelection, SurfacePreference};
 
         for (appearance, variant_id) in [
-            (crate::theme::Appearance::Dark, "gruvbox-dark"),
-            (crate::theme::Appearance::Light, "gruvbox-light"),
+            (crate::theme::Appearance::Dark, "tokyo-night"),
+            (crate::theme::Appearance::Light, "rose-pine-dawn"),
         ] {
             let opaque = Theme::for_selection(
                 appearance,
@@ -5603,12 +6047,12 @@ rename to new_name.rs
         assert_eq!(ranges.len(), files.len());
         assert_eq!(ranges.last().unwrap().end, rows.len());
 
-        // src/main.rs: header, 2 hunk headers, 4 + 2 paired rows, pad — the
-        // same 8 lines, two columns.
+        // src/main.rs: header, the unchanged lines between its hunks (none before the first),
+        // 4 + 2 paired rows, pad — the same 8 lines, two columns.
         let main_rows = &rows[ranges[0].clone()];
-        assert_eq!(main_rows.len(), 1 + 2 + (4 + 2) + 1);
+        assert_eq!(main_rows.len(), 1 + 1 + (4 + 2) + 1);
         assert_eq!(
-            main_rows[2],
+            main_rows[1],
             DiffRow::SplitLine {
                 file: 0,
                 hunk: 0,
@@ -5617,7 +6061,7 @@ rename to new_name.rs
             }
         );
         assert_eq!(
-            main_rows[4],
+            main_rows[3],
             DiffRow::SplitLine {
                 file: 0,
                 hunk: 0,
@@ -5625,6 +6069,7 @@ rename to new_name.rs
                 right: Some(3),
             }
         );
+        assert_eq!(main_rows[5], DiffRow::Unchanged { file: 0, hunk: 1 });
         assert_eq!(*main_rows.last().unwrap(), DiffRow::BodyPad { file: 0 });
         // Pairing only ever merges rows, so split is never the taller layout.
         assert!(main_rows.len() < 1 + body_row_count(&files[0]));
@@ -5632,7 +6077,7 @@ rename to new_name.rs
         // Heights stay analytic — the fold tween needs no measurement.
         assert_eq!(
             body_height_with(&files[0], &[], None, DiffMode::Split, DIFF_LINE_HEIGHT),
-            2.0 * HUNK_HEADER_HEIGHT + 6.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
+            UNCHANGED_HEIGHT + 6.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
         );
     }
 
@@ -5787,7 +6232,7 @@ rename to new_name.rs
         // body_height stays consistent with what actually renders.
         assert_eq!(
             body_height(&file),
-            NOTICE_HEIGHT + 2.0 * HUNK_HEADER_HEIGHT + 6.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
+            NOTICE_HEIGHT + UNCHANGED_HEIGHT + 6.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
         );
 
         // A cap below the first hunk's length drops later hunks entirely.
@@ -5806,7 +6251,7 @@ rename to new_name.rs
 
         // Every digit count keeps ≥6px clear of the accent bar on the left
         // of the number (digits×6.6 + 8px right pad + 6px gap), and the
-        // column never shrinks below the classic 36px.
+        // column never shrinks below its floor.
         let mut file = files[0].clone();
         for digits in 1..=7u32 {
             file.max_line = 10u32.pow(digits) - 1;
@@ -5818,8 +6263,13 @@ rename to new_name.rs
                 "{digits} digits: left gap {left_gap} < 6px"
             );
         }
-        // 4 digits outgrow the classic column now (the old formula left
-        // them 1.6px off the bar — visually touching).
+        // slopty: the floor holds three digits, so a file under a thousand lines keeps one
+        // width as it grows, and the fourth digit is the first to widen it (item 11).
+        file.max_line = 9;
+        assert_eq!(gutter_width(&file), GUTTER_WIDTH);
+        file.max_line = 999;
+        assert_eq!(gutter_width(&file), GUTTER_WIDTH);
+        assert!(gutter_width(&file) < 36.0, "the old 36 px column at three digits");
         file.max_line = 9999;
         assert!(gutter_width(&file) > GUTTER_WIDTH);
         file.max_line = 27404;
@@ -5861,12 +6311,12 @@ rename to new_name.rs
         let wide = 52.0;
 
         let unified_total = |gutter| {
-            ACCENT_BAR_WIDTH + 2.0 * gutter + MARKER_WIDTH + metrics.unified_content_width(gutter)
+            ACCENT_BAR_WIDTH + 2.0 * gutter + metrics.unified_content_width(gutter)
         };
         assert_eq!(unified_total(narrow), unified_total(wide));
 
         let split_total = |gutter| {
-            ACCENT_BAR_WIDTH + gutter + SPLIT_MARKER_WIDTH + metrics.split_content_width(gutter)
+            ACCENT_BAR_WIDTH + gutter + metrics.split_content_width(gutter)
         };
         assert_eq!(split_total(narrow), split_total(wide));
     }
@@ -6036,14 +6486,83 @@ rename to new_name.rs
         let lines: usize = main.hunks.iter().map(|h| h.lines.len()).sum();
         assert_eq!(
             body_height(main),
-            2.0 * HUNK_HEADER_HEIGHT + lines as f32 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
+            UNCHANGED_HEIGHT + lines as f32 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
         );
-        // Notices add height (added file: 1 notice + meta line inside hunk).
+        // Notices add height (added file: 1 notice + meta line inside hunk); its one hunk
+        // has no `@@` row, the notice saying it.
         let added = &files[1];
         assert_eq!(
             body_height(added),
-            NOTICE_HEIGHT + HUNK_HEADER_HEIGHT + 3.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
+            NOTICE_HEIGHT + 3.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
         );
+    }
+
+    // slopty: a wrapped line marks each row it wraps onto with `»` under its number, as many as
+    // the narrowest pane could wrap it onto; a short line has none.
+    #[test]
+    fn a_wrapped_line_marks_its_continuation_rows() {
+        assert_eq!(continuation_marks("short"), None);
+        assert_eq!(continuation_marks(&"x".repeat(50)).as_deref(), Some("»\n»"));
+        assert_eq!(continuation_marks(&"\t".repeat(6)).as_deref(), Some("»"), "a tab is four columns");
+        assert_eq!(continuation_marks(&"字".repeat(12)).as_deref(), Some("»"), "a wide glyph is two");
+        let marks = continuation_marks(&"y".repeat(100_000)).unwrap();
+        assert_eq!(marks.matches('»').count(), 200, "bounded");
+    }
+
+    // slopty: five squares say how much a file changed, in each side's share.
+    #[test]
+    fn the_diffstat_fills_a_square_per_line_up_to_five_by_share() {
+        use CountKind::{Added as A, Deleted as D, None as N};
+        assert_eq!(diffstat_squares(0, 0), [N; 5]);
+        assert_eq!(diffstat_squares(2, 0), [A, A, N, N, N], "a two-line change fills two");
+        assert_eq!(diffstat_squares(19, 4), [A, A, A, A, D]);
+        assert_eq!(diffstat_squares(400, 1), [A, A, A, A, D], "a side that changed keeps one");
+        assert_eq!(diffstat_squares(1, 400), [A, D, D, D, D]);
+        assert_eq!(diffstat_squares(0, 9), [D; 5]);
+    }
+
+    // slopty: between hunks the diff counts what it left out, and a click shows those lines from
+    // the file's new side, the nearest first, until none are left (item 11).
+    #[test]
+    fn unchanged_lines_count_between_hunks_and_open_from_the_new_side() {
+        assert_eq!(hunk_span("@@ -3,6 +3,7 @@ fn main() {"), Some([(3, 6), (3, 7)]));
+        assert_eq!(hunk_span("@@ -0,0 +1 @@"), Some([(1, 0), (1, 1)]));
+        assert_eq!(hunk_span("@@ -5,2 +4,0 @@"), Some([(5, 2), (5, 0)]));
+        assert_eq!(hunk_span("garbage"), None);
+        assert_eq!(split_hunk_header("@@ -3,6 +3,7 @@ fn main() {").1, "fn main() {");
+
+        let files = parse_patch(PATCH);
+        assert_eq!(unchanged_before(&files[0], 0), 0, "the first hunk opens at line 1");
+        assert_eq!(unchanged_before(&files[0], 1), 5, "lines 6 to 10 sit between the hunks");
+        assert_eq!(unchanged_before(&files[1], 0), 0, "a new file is all change");
+        assert_eq!(unchanged_before(&files[2], 0), 0, "and so is a deleted one");
+
+        // The new side, line for line: the first hunk's four lines, line 5 (the patch's header
+        // counts five), the five left out, then the second hunk's.
+        let mut source: Vec<String> =
+            ["fn main() {", "    println!(\"new\");", "    let x = 1;", "}"].map(String::from).into();
+        source.extend((5..=10).map(|n| format!("line {n}")));
+        source.extend(["// tail", "new_line"].map(String::from));
+
+        let mut file = files[0].clone();
+        assert!(reveal_unchanged(&mut file, 1, 2, &source));
+        assert_eq!(unchanged_before(&file, 1), 3, "two of five shown");
+        let shown = &file.hunks[1].lines[..2];
+        assert!(shown.iter().all(|line| line.kind == LineKind::Context));
+        assert_eq!(shown[0].text, "line 9");
+        assert_eq!((shown[0].old_no, shown[0].new_no), (Some(8), Some(9)));
+        assert_eq!(file.hunks[1].header, "@@ -8,4 +9,4 @@");
+
+        assert!(reveal_unchanged(&mut file, 1, u32::MAX, &source));
+        assert_eq!(unchanged_before(&file, 1), 0);
+        assert!(!reveal_unchanged(&mut file, 1, u32::MAX, &source), "nothing left to show");
+        assert!(
+            !body_rows(0, &file, &[], None, DiffMode::Unified)
+                .iter()
+                .any(|row| matches!(row, DiffRow::Unchanged { .. })),
+            "a gap shown whole leaves no row"
+        );
+        assert!(!reveal_unchanged(&mut files[0].clone(), 1, 5, &source[..8]), "a short source shows nothing");
     }
 
     fn diff(checkout: &str, device: &str, cwd: &str, patch: &str) -> CheckoutDiff {
@@ -6129,27 +6648,39 @@ rename to new_name.rs
         assert_eq!(diff_phase(Some(&summarized)), DiffPhase::List);
     }
 
+    // slopty: a header shows only the counts that say something.
+    #[test]
+    fn a_file_header_counts_only_what_changed() {
+        use CountKind::{Added, Deleted, None};
+        let counts = |adds, dels, binary| file_counts(adds, dels, binary);
+        assert_eq!(counts(1, 0, false), [("+1".to_owned(), Added)], "no red −0");
+        assert_eq!(counts(0, 3, false), [("−3".to_owned(), Deleted)]);
+        assert_eq!(counts(2, 3, false), [("+2".to_owned(), Added), ("−3".to_owned(), Deleted)]);
+        assert_eq!(counts(0, 0, false), [("0".to_owned(), None)], "a mode-only change");
+        assert!(counts(0, 0, true).is_empty(), "a binary says BIN instead");
+    }
+
     #[test]
     fn header_label_pluralizes() {
-        assert_eq!(uncommitted_label(0), "0 Uncommitted changes");
-        assert_eq!(uncommitted_label(1), "1 Uncommitted change");
-        assert_eq!(uncommitted_label(4), "4 Uncommitted changes");
+        assert_eq!(uncommitted_label(0), "0 uncommitted changes");
+        assert_eq!(uncommitted_label(1), "1 uncommitted change");
+        assert_eq!(uncommitted_label(4), "4 uncommitted changes");
     }
 
     #[test]
     fn scope_labels_and_clean_messages() {
         assert_eq!(
             scope_label(DiffScope::WorkingTree, 2, None),
-            "2 Uncommitted changes"
+            "2 uncommitted changes"
         );
         assert_eq!(
             scope_label(DiffScope::Branch, 1, Some("main")),
-            "1 Changed file vs main"
+            "1 changed file vs main"
         );
-        assert_eq!(scope_label(DiffScope::Branch, 3, None), "3 Changed files");
+        assert_eq!(scope_label(DiffScope::Branch, 3, None), "3 changed files");
         assert_eq!(
             scope_label(DiffScope::LatestTurn, 2, None),
-            "2 Changed files this turn"
+            "2 changed files this turn"
         );
         assert_eq!(
             clean_message(DiffScope::WorkingTree, None),
@@ -6218,7 +6749,7 @@ rename to new_name.rs
     #[test]
     fn an_earlier_turn_has_its_own_words() {
         assert_eq!(DiffScope::Turn.label(), "Turn");
-        assert_eq!(scope_label(DiffScope::Turn, 1, None), "1 Changed file in this turn");
+        assert_eq!(scope_label(DiffScope::Turn, 1, None), "1 changed file in this turn");
         assert_eq!(clean_message(DiffScope::Turn, None), "No changes in this turn");
     }
 

@@ -102,11 +102,12 @@ impl SessionHoverCard {
 }
 
 /// "21h ago" for the card's footer line ("now" stays as it is).
-fn time_label(time_ago: &str) -> String {
+// slopty: then the time in full, which the row's "21h" leaves out: "21h ago · Oct 18, 09:12".
+fn time_label(time_ago: &str, at: &str) -> String {
     if time_ago == "now" {
-        "just now".to_owned()
+        format!("just now \u{b7} {at}")
     } else {
-        format!("{time_ago} ago")
+        format!("{time_ago} ago \u{b7} {at}")
     }
 }
 
@@ -190,9 +191,14 @@ impl Shell {
         let now = crate::clock::utc(cx);
         // slopty: Slopty's facts of the row (`sidebar_status::chat_card`).
         let facts = super::sidebar_status::chat_card(self.state.read(cx), chat_id, now)?;
-        let (title, project, local, online, branch, change_request) = {
+        let (title, project, local, online, branch, change_request, at) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
+            // slopty: when the row's time was, in full (the row says only "21h").
+            let at = crate::settings::archived::absolute_time(
+                chat.last_message_at.unwrap_or(chat.created_at),
+                now,
+            );
             let space = state.space_for_chat(chat);
             let project = space.map(|space| SharedString::from(space.display_name().to_owned()));
             let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
@@ -218,6 +224,7 @@ impl Shell {
                 online,
                 branch,
                 change_request,
+                at,
             )
         };
 
@@ -293,7 +300,7 @@ impl Shell {
                                 facts
                                     .status
                                     .clone()
-                                    .unwrap_or_else(|| time_label(&time_ago).into()),
+                                    .unwrap_or_else(|| time_label(&time_ago, &at).into()),
                             ),
                     ),
             )
@@ -459,14 +466,12 @@ mod tests {
         shell
     }
 
-    fn init_test(cx: &mut TestAppContext, dir: &std::path::Path, compact: bool) {
+    fn init_test(cx: &mut TestAppContext, dir: &std::path::Path) {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx); // slopty: no History surface
-            let mut ui_settings = settings::UiSettings::default();
-            ui_settings.sidebar_compact = compact;
-            settings::init(ui_settings, dir, cx);
+            settings::init(settings::UiSettings::default(), dir, cx);
             motion::set_reduced_motion(cx, true);
         });
     }
@@ -504,7 +509,6 @@ mod tests {
                     false,
                     None,
                     None,
-                    false,
                     palette.then_some(""),
                     &Theme::default(),
                     cx,
@@ -515,11 +519,10 @@ mod tests {
 
     fn row_setup(
         cx: &mut TestAppContext,
-        compact: bool,
         palette: bool,
     ) -> (Entity<Shell>, &mut VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
-        init_test(cx, dir.path(), compact);
+        init_test(cx, dir.path());
         let (host, cx) = cx.add_window_view(|_, cx| {
             let shell = cx.new(|cx| test_shell(dir.path(), cx));
             let observation = cx.observe(&shell, |_, _, cx| cx.notify());
@@ -551,39 +554,32 @@ mod tests {
     }
 
     #[gpui::test]
-    fn archive_press_cancels_pending_and_shown_cards_in_both_layouts(cx: &mut TestAppContext) {
-        for compact in [false, true] {
-            for shown in [false, true] {
-                let (shell, cx) = row_setup(cx, compact, false);
-                let row = cx.debug_bounds("chat-hover-test").unwrap().center();
-                cx.simulate_mouse_move(row, None, gpui::Modifiers::default());
-                redraw(cx);
-                if shown {
-                    wait_for_card(cx);
-                }
-                shell.read_with(cx, |shell, _| {
-                    assert_eq!(shell.session_hover_card.target(), Some("hover-test"));
-                    assert_eq!(shell.session_hover_card.shown().is_some(), shown);
-                });
-                let corner = if compact {
-                    "chat-time-hover-test"
-                } else {
-                    "chat-hover-test-corner"
-                };
-                let position = cx.debug_bounds(corner).unwrap().center();
-                cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::default());
-                shell.read_with(cx, |shell, _| {
-                    assert_eq!(shell.session_hover_card.target(), None)
-                });
+    fn archive_press_cancels_pending_and_shown_cards(cx: &mut TestAppContext) {
+        for shown in [false, true] {
+            let (shell, cx) = row_setup(cx, false);
+            let row = cx.debug_bounds("chat-hover-test").unwrap().center();
+            cx.simulate_mouse_move(row, None, gpui::Modifiers::default());
+            redraw(cx);
+            if shown {
                 wait_for_card(cx);
-                assert!(cx.debug_bounds("session-hover-card-hover-test").is_none());
             }
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.session_hover_card.target(), Some("hover-test"));
+                assert_eq!(shell.session_hover_card.shown().is_some(), shown);
+            });
+            let position = cx.debug_bounds("chat-time-hover-test").unwrap().center();
+            cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::default());
+            shell.read_with(cx, |shell, _| {
+                assert_eq!(shell.session_hover_card.target(), None)
+            });
+            wait_for_card(cx);
+            assert!(cx.debug_bounds("session-hover-card-hover-test").is_none());
         }
     }
 
     #[gpui::test]
     fn palette_pr_badge_keeps_its_tooltip_without_a_session_card(cx: &mut TestAppContext) {
-        let (shell, cx) = row_setup(cx, false, true);
+        let (shell, cx) = row_setup(cx, true);
         let badge = cx
             .debug_bounds("pull-request-badge-palette-chat-hover-test-pr")
             .unwrap()
@@ -597,25 +593,11 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn sidebar_pr_badge_uses_the_session_card_instead_of_a_second_tooltip(cx: &mut TestAppContext) {
-        let (_, cx) = row_setup(cx, false, false);
-        let badge = cx
-            .debug_bounds("pull-request-badge-chat-hover-test-pr")
-            .unwrap()
-            .center();
-        cx.simulate_mouse_move(badge, None, gpui::Modifiers::default());
-        redraw(cx);
-        wait_for_card(cx);
-        assert!(cx.debug_bounds("session-hover-card-hover-test").is_some());
-        assert!(cx.debug_bounds("change-request-tooltip").is_none());
-    }
-
     fn shell_setup(
         cx: &mut TestAppContext,
     ) -> (Entity<Shell>, &mut VisualTestContext, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        init_test(cx, dir.path(), false);
+        init_test(cx, dir.path());
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
         cx.simulate_resize(gpui::size(px(1400.0), px(800.0)));
         redraw(cx);
@@ -750,7 +732,7 @@ mod tests {
 
     #[test]
     fn the_age_reads_as_a_sentence() {
-        assert_eq!(time_label("21h"), "21h ago");
-        assert_eq!(time_label("now"), "just now");
+        assert_eq!(time_label("21h", "Oct 18, 09:12"), "21h ago \u{b7} Oct 18, 09:12");
+        assert_eq!(time_label("now", "Oct 19, 06:04"), "just now \u{b7} Oct 19, 06:04");
     }
 }

@@ -76,7 +76,7 @@ impl StackDir {
             let lock_path = parent.join(format!("{name}.lock"));
             let lock = std::fs::File::create(&lock_path)?;
             if lock.try_lock().is_ok() {
-                match std::fs::remove_dir_all(parent.join(&name)) {
+                match remove_root(&parent.join(&name)) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => return Err(e).context("clear the last run's root"),
@@ -139,7 +139,7 @@ fn drop_oldest_kept(parent: &Path) {
         .collect();
     kept.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     for (_, old) in kept.into_iter().skip(FAILED_KEPT) {
-        let _gone = std::fs::remove_dir_all(old);
+        let _gone = remove_root(&old);
     }
 }
 
@@ -163,13 +163,36 @@ fn sweep(parent: &Path) {
         let path = entry.path();
         if path.is_dir() {
             if !path.join(KEPT_MARK).exists() {
-                let _gone = std::fs::remove_dir_all(&path);
+                let _gone = remove_root(&path);
             }
         } else if path.extension().is_some_and(|ext| ext == "lock")
             && std::fs::File::open(&path).is_ok_and(|lock| lock.try_lock().is_ok())
         {
             let _gone = std::fs::remove_file(&path);
         }
+    }
+}
+
+/// Remove the root at `path`, whatever a test left locked in it: a test that takes a folder's
+/// permissions away (History's unreadable store) and fails before it gives them back leaves a
+/// root `remove_dir_all` cannot clear, so its folders get their owner's rights back first.
+fn remove_root(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            fn reopen(dir: &Path) {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _reopened: std::io::Result<()> =
+                    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+                for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        reopen(&entry.path());
+                    }
+                }
+            }
+            reopen(path);
+            std::fs::remove_dir_all(path)
+        }
+        done => done,
     }
 }
 
@@ -1568,6 +1591,19 @@ mod tests {
         let next = pinned(&cache, &runs, "run-2").unwrap();
         assert_eq!(std::fs::read_to_string(next.join("slopty-app")).unwrap(), "plain");
         assert_eq!(std::fs::read_dir(&runs).unwrap().count(), 2, "no half-made pin is left");
+    }
+
+    /// A root a failed run left with a folder locked (no rights at all) is still cleared.
+    #[test]
+    fn a_root_left_with_a_locked_folder_is_cleared() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap().keep();
+        let store = root.join("home").join("store");
+        std::fs::create_dir_all(store.join("inner")).unwrap();
+        std::fs::write(store.join("inner").join("a.jsonl"), "{}").unwrap();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o000)).unwrap();
+        super::remove_root(&root).unwrap();
+        assert!(!root.exists());
     }
 
     /// A passing test's root and lock go with it; a failing one's root stays, marked, as does

@@ -166,7 +166,7 @@ async fn add_device_says_what_the_tailnet_holds_and_why_a_run_failed() {
 
     drv.keys("cmd-,").await.unwrap();
     click(drv, "Tab", "Devices").await;
-    click(drv, "Button", "Add device").await;
+    click(drv, "Button", "Add a device").await;
     drv.wait_for("the dialog", STEP, |d| node(d, "Dialog", "Add device").is_some()).await.unwrap();
 
     // A server: the look on the stand-in tailnet finds none, and says so.

@@ -14,7 +14,6 @@ Tab │ Archived chats
 Button │ Server: e2e-server, Connected
 Button │ Close settings
 Button │ Device: This device
-Button │ Claude Code preferences
 Button │ Install Codex
 Button │ Install pi
 Button │ Autonomy: Auto

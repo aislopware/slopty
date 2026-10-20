@@ -1,21 +1,22 @@
 Window
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Say hello
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
 Article │ You
 Paragraph │ Say hello
-Article │ Claude Code
-Button │ Thought process
 Paragraph │ Done: Say hello
 Button │ Attach images
 MultilineTextInput │ Do anything…
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Tab │ Terminal 1
-Button │ Close terminal
+Button │ Close Terminal 1
 Button │ New terminal
 Button │ Hide terminal
 Group (focused)
@@ -27,4 +28,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

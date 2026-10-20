@@ -34,9 +34,9 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment, ListOffset,
+    AnyElement, Bounds, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
     ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
-    Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task, TextAlign,
+    Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task,
     TextRun, Window, canvas, div, img, list, point, prelude::*, px, size,
 };
 
@@ -50,7 +50,6 @@ use crate::markdown::parser::{
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _};
-use crate::notice::{NoticeChipIcon::Tile, notice_chip};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::settings::widgets::ActionHint as _; // slopty: tooltips name their key.
@@ -156,20 +155,23 @@ fn tool_group_header_height() -> f32 {
 
 /// Compact rows retain the analytic heights used by row and group folds.
 const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
-const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_OUT);
 /// slopty: a jump's landing flash fading out (Claude's `code-reply-flash`, 1.2 s ease-out, #13).
 const LANDING_FLASH: motion::MotionSpec = motion::MotionSpec::new(1_200, motion::EASE_OUT);
 /// slopty: the person's own send coming in: faded up and risen from [`SEND_RISE`] below (#15).
 const SEND_ENTRANCE: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_OUT_QUINT);
 const SEND_RISE: f32 = 6.0;
-/// slopty: a bubble not yet sent.
-const PENDING_OPACITY: f32 = 0.65;
-/// BoardUI task-list cadence: a slow light sweep keeps the active summary
-/// legible, while each newly appended row reveals quickly enough to read as a
-/// continuous log rather than a stack of discrete pop-ins.
-const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(3_400);
-const TOOL_GROUP_SHIMMER_HALF_WIDTH: f32 = 0.36;
-const TOOL_GROUP_SHIMMER_STRIP_WIDTH: f32 = 2.0;
+/// slopty: a bubble not yet taken by the agent is tinted, not faded (Amp): 14 % of the accent
+/// mixed into its fill, as a queued row's; it settles over 200 ms once taken.
+pub(crate) const QUEUED_TINT: f32 = 0.14;
+const QUEUED_SETTLE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
+
+/// slopty: `fill` with `tint` of the accent mixed in, for what waits to be sent.
+pub(crate) fn queued_fill(fill: gpui::Hsla, accent: gpui::Hsla, tint: f32) -> gpui::Hsla {
+    motion::mix(fill, accent, tint)
+}
+
+/// Each newly appended row reveals quickly enough to read as a continuous log
+/// rather than a stack of discrete pop-ins.
 const TOOL_ROW_REVEAL: motion::MotionSpec = motion::MotionSpec::new(360, motion::EASE_OUT_EXPO);
 /// The connector draws briskly, then eases into the branch tip so its arrival
 /// remains visible without feeling mechanically linear.
@@ -289,6 +291,14 @@ fn agent_name(harness: Option<slopty_view_proto::HarnessId>) -> SharedString {
         .iter()
         .find(|(id, _)| *id == harness)
         .map_or_else(|| harness.as_str().into(), |(_, name)| (*name).into())
+}
+
+/// slopty: the focus of a strip's controls, and what redraws the strip as either gains or
+/// loses it.
+struct StripFocus {
+    copy: gpui::FocusHandle,
+    rewind: gpui::FocusHandle,
+    _redraw: [gpui::Subscription; 4],
 }
 
 /// slopty: `inner` as the start of a message `who` said, to the accessibility tree.
@@ -560,6 +570,16 @@ fn tool_group_collapses(tools: &[ToolItem]) -> bool {
     tools.iter().any(|t| !is_agent_tool(t))
 }
 
+/// slopty: whether a group folds behind its header, and whether it is one call shown as itself.
+/// Agent/spawn chips never fold (a running subagent stays visible), except under a turn's
+/// divider, which holds everything. A group of one call (or one thought) shows the call itself
+/// ("Read main.rs"), not a summary to open to learn it ("Read 1 file ›") (#2).
+fn group_shape(tools: &[ToolItem], divider: bool) -> (bool, bool) {
+    let collapses = divider || tool_group_collapses(tools);
+    let solo = !divider && collapses && tools.len() == 1 && !is_spawn_link(&tools[0]);
+    (collapses, solo)
+}
+
 /// Column budget for soft-wrapping thought text into detail lines. The
 /// detail body is preformatted (no element wrapping), so the wrap happens
 /// here — conservative enough to fit the card at typical transcript widths.
@@ -567,7 +587,7 @@ const THOUGHT_WRAP_COLS: usize = 96;
 
 /// Flatten a thought's parsed markdown into wrapped, STYLED detail lines —
 /// inline markers render as real styling (bold/italic/code/links) instead of
-/// literal `**` glyphs; blocks flatten structurally (headings bold, list
+/// literal `**` glyphs; blocks flatten structurally (headings as prose, list
 /// bullets, quote bars, verbatim code lines). Every line is one fixed-height
 /// row, so the detail height stays analytic (lines × [`OUTPUT_LINE_HEIGHT`])
 /// and the group's fold tween keeps working without measurement.
@@ -737,20 +757,9 @@ fn wrap_styled_runs(runs: &[InlineRun], indent: usize, out: &mut Vec<Vec<InlineR
 /// One markdown block into thought detail lines, `indent` spaces deep.
 fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun>>) {
     match block {
-        Block::Paragraph { runs } => wrap_styled_runs(runs, indent, out),
-        Block::Heading { runs, .. } => {
-            // Headings keep the detail's single type size — bold is the cue
-            // (an 18px line box can't host display sizes).
-            let bold: Vec<InlineRun> = runs
-                .iter()
-                .map(|r| {
-                    let mut r = r.clone();
-                    r.style.bold = true;
-                    r
-                })
-                .collect();
-            wrap_styled_runs(&bold, indent, out);
-        }
+        // slopty: a heading in a thought reads as its prose does, at the body's size and weight
+        // (opencode's reasoning): a thought never outranks the answer.
+        Block::Paragraph { runs } | Block::Heading { runs, .. } => wrap_styled_runs(runs, indent, out),
         // Interim: display math shows its TeX source like a code block.
         Block::CodeBlock { code, .. } | Block::Math { tex: code } => {
             let style = InlineStyle {
@@ -1303,14 +1312,17 @@ pub enum RowKind {
         block_ix: usize,
     },
     ToolGroup {
-        summary: SharedString,
+        summary: Sentence,
         tools: Arc<Vec<ToolItem>>,
         auto_open: bool,
-        /// Compact-mode settled duration for this turn, in seconds.
+        /// The turn divider's settled duration for this turn, in seconds.
         worked_secs: Option<i64>,
-        /// Compact-mode work header. Expanded content is sibling rows tagged
+        /// The turn's divider (Amp's settled turn). Expanded content is sibling rows tagged
         /// [`Row::compact_fold`], not chips.
         compact_shell: bool,
+        /// slopty: when the divider's turn ended ("Done 3:42 PM"), its tooltip: the turn's done
+        /// line, folded into it.
+        done: Option<SharedString>,
     },
     InputChip {
         /// slopty: what kind of ask it was: "Question", "Approval", "Confirm", "Form", "Plan".
@@ -1643,11 +1655,31 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
 /// incremental parsers for live parts and a cache for complete ones; tests pass
 /// a plain `parse_full`.
-/// `compact` is the transcript's compact mode: every working step of the
-/// turn — tool calls, thoughts, and the narration text between them — folds
-/// into ONE collapsed [`RowKind::ToolGroup`], so only the reply text (the
-/// trailing run of text parts) stays a visible row.
+/// slopty: a turn reads as its prompt, one divider and its reply (Amp's settled turn): every
+/// working step — tool calls, thoughts, and the narration text between them — folds into ONE
+/// [`RowKind::ToolGroup`] drawn as the divider, so only the reply text (the trailing run of text
+/// parts) stays a visible row. The rows it opens to are [`work_rows`].
 pub fn rows_for_entry(
+    entry: &SessionMessageEntry,
+    pending: bool,
+    parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
+) -> Vec<Row> {
+    entry_rows(entry, pending, true, parse)
+}
+
+/// slopty: the rows a turn's work opens to under its divider: each call, thought and narration
+/// in its own groups and rows, as they ran.
+pub(crate) fn work_rows(
+    entry: &SessionMessageEntry,
+    pending: bool,
+    parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
+) -> Vec<Row> {
+    entry_rows(entry, pending, false, parse)
+}
+
+/// `compact` folds the turn's work behind its divider ([`rows_for_entry`]), or not
+/// ([`work_rows`]).
+fn entry_rows(
     entry: &SessionMessageEntry,
     pending: bool,
     compact: bool,
@@ -1770,27 +1802,20 @@ pub fn rows_for_entry(
             }
             let tools = std::mem::take(group);
             let auto_open = streaming && last_ix == last_part_ix;
-            // slopty: a request right after the group holds up its open call (#3).
-            let waiting = match entry.parts.get(last_ix + 1) {
-                Some(MessagePart::Input { resolved: false, questions, .. }) => {
-                    Some(match questions.first().map(|q| q.kind.as_str()) {
-                        Some("approval" | "retry") => "approval",
-                        Some("plan") => "your review",
-                        _ => "your answer",
-                    })
-                }
-                _ => None,
-            };
+            let waiting = waiting_on(entry.parts.get(last_ix + 1));
             rows.push(Row {
                 id: format!("{}#g{}", entry.id, group_ix).into(),
-                version: tool_fingerprint(&tools, auto_open) ^ (u64::from(waiting.is_some()) << 63),
+                version: tool_fingerprint(&tools, auto_open)
+                    ^ (u64::from(waiting.is_some()) << 63)
+                    ^ (u64::from(streaming) << 61),
                 turn_start: false,
                 kind: RowKind::ToolGroup {
-                    summary: tool_group_summary_waiting(&tools, waiting).into(),
+                    summary: tool_group_summary_waiting(&tools, waiting, !streaming),
                     tools: Arc::new(tools),
                     auto_open,
                     worked_secs: None,
                     compact_shell: false,
+                    done: None,
                 },
                 entry_id: entry.id.clone().into(),
                 timestamp: None,
@@ -2142,7 +2167,11 @@ pub fn rows_for_entry(
                     continuation_of: None,
                     ..entry.clone()
                 };
-                rows_for_entry(&work_entry, pending, false, parse)
+                let mut inner = work_rows(&work_entry, pending, parse);
+                // slopty: what the turn changed is said once, under the divider, never again
+                // inside it (its row id would be drawn twice).
+                inner.retain(|row| !matches!(row.kind, RowKind::TurnChanges { .. }));
+                inner
             };
             for row in &mut inner {
                 row.turn_start = false;
@@ -2150,12 +2179,22 @@ pub fn rows_for_entry(
                 row.copy_text = None;
                 row.compact_fold = Some(work_id.clone());
             }
+            // slopty: the turn's done line folds into its divider, which says how long it worked;
+            // when it ended is the divider's tooltip, so the time shows once (TX4).
+            let done = rows.iter().rposition(is_done_line).map(|ix| rows.remove(ix)).and_then(|row| {
+                let RowKind::Notice { note } = row.kind else { return None };
+                done_clock(&note.text)
+            });
+            // slopty: a request right after the work holds its divider up, as it does a group (#3).
+            let waiting = waiting_on(entry.parts.get(group_last_part_ix + 1));
             let header = Row {
                 id: work_id,
-                version: tool_fingerprint(&tools, false),
+                version: tool_fingerprint(&tools, false)
+                    ^ done.as_ref().map_or(0, |done| fnv1a(done.as_bytes()).rotate_left(7))
+                    ^ (u64::from(waiting.is_some()) << 63),
                 turn_start: false,
                 kind: RowKind::ToolGroup {
-                    summary: tool_group_summary(&tools).into(),
+                    summary: tool_group_summary_waiting(&tools, waiting, !streaming),
                     tools: Arc::new(tools),
                     auto_open: false,
                     worked_secs: (!streaming)
@@ -2167,6 +2206,7 @@ pub fn rows_for_entry(
                         })
                         .flatten(),
                     compact_shell: true,
+                    done,
                 },
                 entry_id: entry.id.clone().into(),
                 timestamp: None,
@@ -2221,6 +2261,38 @@ fn is_done_line(row: &Row) -> bool {
 
 /// slopty: the kind of a turn's done line (`slopty_ui::view_model::folds::DONE`).
 const DONE_NOTE: &str = "done";
+
+/// slopty: a divider says how long its turn worked, once known (`secs`).
+fn settle_worked(row: &mut Row, secs: Option<i64>) {
+    if let (Some(secs), RowKind::ToolGroup { worked_secs, compact_shell: true, .. }) =
+        (secs, &mut row.kind)
+    {
+        *worked_secs = Some(secs);
+    }
+}
+
+/// slopty: when a done line says its turn ended, as its own sentence: "Worked for 1m 5s · done
+/// 3:42 PM" (`slopty_ui::view_model::folds::done_words`) ends "Done 3:42 PM".
+fn done_clock(line: &str) -> Option<SharedString> {
+    let (_, clock) = line.rsplit_once(" · ")?;
+    let mut chars = clock.chars();
+    let first = chars.next()?;
+    Some(format!("{}{}", first.to_uppercase(), chars.as_str()).into())
+}
+
+/// slopty: what a request right after a group holds its open call up for (#3).
+fn waiting_on(next: Option<&MessagePart>) -> Option<&'static str> {
+    match next {
+        Some(MessagePart::Input { resolved: false, questions, .. }) => {
+            Some(match questions.first().map(|q| q.kind.as_str()) {
+                Some("approval" | "retry") => "approval",
+                Some("plan") => "your review",
+                _ => "your answer",
+            })
+        }
+        _ => None,
+    }
+}
 
 fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize>) -> bool {
     match part {
@@ -2427,19 +2499,125 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 // Tool summaries / chips (pure)
 // ---------------------------------------------------------------------------
 
-/// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
-///
-/// The rule lives in `slopty_view_proto::view` so the terminal viewport reports the
-/// same summary; this only adapts the row model's [`ToolItem`] to it.
+/// slopty: a work group's summary as one sentence (Amp, `.research/amp-study-2026-10-19.md`
+/// item 2): its clauses joined by ", ", or " and " between two, each followed by what it adds in
+/// parentheses: "Ran 3 commands (1 failed), edited 2 files (+40 −12)". `marks` say which spans
+/// are drawn apart: the joins and parentheses faint, an edit's counts as a diff's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sentence {
+    pub text: SharedString,
+    pub marks: Arc<[(Range<usize>, Mark)]>,
+}
+
+/// slopty: how a span of a [`Sentence`] is drawn apart from its words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// A join or a parenthesis, in faint ink.
+    Join,
+    /// Lines an edit added, in the diff's ink.
+    Added,
+    /// Lines an edit removed, in the diff's ink.
+    Removed,
+}
+
+impl std::ops::Deref for Sentence {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl From<&str> for Sentence {
+    fn from(text: &str) -> Self {
+        Self { text: SharedString::from(text.to_owned()), marks: Arc::from([]) }
+    }
+}
+
+impl std::fmt::Display for Sentence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+/// slopty: one clause of a [`Sentence`]: its words, then what it adds.
+struct Clause {
+    words: String,
+    adds: Vec<Adds>,
+}
+
+/// slopty: what a clause adds in its parentheses.
+enum Adds {
+    Words(String),
+    /// Lines added and removed.
+    Lines(u64, u64),
+}
+
+impl Clause {
+    fn new(words: impl Into<String>) -> Self {
+        Self { words: words.into(), adds: Vec::new() }
+    }
+
+    fn failed(mut self, failed: usize) -> Self {
+        if failed > 0 {
+            self.adds.push(Adds::Words(format!("{failed} failed")));
+        }
+        self
+    }
+}
+
+/// slopty: `clauses` as one sentence, its first letter lifted.
+fn sentence(clauses: Vec<Clause>) -> Sentence {
+    let mut text = String::new();
+    let mut marks: Vec<(Range<usize>, Mark)> = Vec::new();
+    let mut push = |text: &mut String, words: &str, mark: Option<Mark>| {
+        let start = text.len();
+        text.push_str(words);
+        if let Some(mark) = mark {
+            marks.push((start..text.len(), mark));
+        }
+    };
+    let count = clauses.len();
+    for (ix, clause) in clauses.into_iter().enumerate() {
+        if ix > 0 {
+            push(&mut text, if count == 2 { " and " } else { ", " }, Some(Mark::Join));
+        }
+        push(&mut text, &clause.words, None);
+        if clause.adds.is_empty() {
+            continue;
+        }
+        push(&mut text, " (", Some(Mark::Join));
+        for (ax, adds) in clause.adds.iter().enumerate() {
+            if ax > 0 {
+                push(&mut text, ", ", Some(Mark::Join));
+            }
+            match adds {
+                Adds::Words(words) => push(&mut text, words, None),
+                Adds::Lines(added, removed) => {
+                    push(&mut text, &format!("+{added}"), Some(Mark::Added));
+                    push(&mut text, " ", None);
+                    push(&mut text, &format!("−{removed}"), Some(Mark::Removed));
+                }
+            }
+        }
+        push(&mut text, ")", Some(Mark::Join));
+    }
+    if let Some(first) = text.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    Sentence { text: text.into(), marks: marks.into() }
+}
+
+/// The ToolGroup summary line — "Ran 3 commands, edited 2 files".
 pub fn tool_group_summary(tools: &[ToolItem]) -> String {
-    tool_group_summary_waiting(tools, None)
+    tool_group_summary_waiting(tools, None, false).text.to_string()
 }
 
 /// slopty: [`tool_group_summary`] in the tense of each call (#3): what settled is said in the
 /// past ("Read 3 files"), what is under way in its participle ("running 1 command"), and the
 /// call a request holds up says what it waits for (`waiting`, "approval") and what it is
-/// ("waiting for approval · run touch refused.txt").
-pub fn tool_group_summary_waiting(tools: &[ToolItem], waiting: Option<&str>) -> String {
+/// ("waiting for approval (run touch refused.txt)"). Once its turn is over (`turn_over`), a call
+/// that never settled is no longer under way: it says it stopped ("1 command stopped").
+pub fn tool_group_summary_waiting(tools: &[ToolItem], waiting: Option<&str>, turn_over: bool) -> Sentence {
     #[cfg(test)]
     FORBID_ROW_PREPARATION
         .with(|forbidden| assert!(!forbidden.get(), "tool summary formatting ran on UI thread"));
@@ -2454,148 +2632,150 @@ pub fn tool_group_summary_waiting(tools: &[ToolItem], waiting: Option<&str>) -> 
     };
     let under_way: Vec<&ToolItem> =
         tools.iter().enumerate().filter(|(ix, t)| live(*ix, t)).map(|(_, t)| t).collect();
-    let settled: Vec<ToolItem> = tools
+    let settled: Vec<&ToolItem> = tools
         .iter()
         .enumerate()
         .filter(|(ix, t)| !live(*ix, t) && Some(*ix) != held)
-        .map(|(_, t)| t.clone())
+        .map(|(_, t)| t)
         .collect();
-    let mut segments: Vec<String> = Vec::new();
-    let past = past_summary(&settled);
-    if !past.is_empty() {
-        segments.push(past);
+    let mut clauses = past_clauses(&settled);
+    if turn_over {
+        clauses.extend(stopped_clauses(&under_way));
+    } else {
+        clauses.extend(live_clauses(&under_way));
     }
-    segments.extend(live_segments(&under_way));
     if let (Some(what), Some(ix)) = (waiting, held) {
         let mut name = chip_name(&tools[ix]).to_string();
         if let Some(first) = name.get_mut(..1) {
             first.make_ascii_lowercase();
         }
-        segments.push(format!("waiting for {what} · {name}"));
+        let mut clause = Clause::new(format!("waiting for {what}"));
+        clause.adds.push(Adds::Words(name));
+        clauses.push(clause);
     }
-    let mut summary = segments.join(" · ");
-    if let Some(first) = summary.get_mut(..1) {
-        first.make_ascii_uppercase();
+    sentence(clauses)
+}
+
+/// slopty: the calls a turn ended on before they settled (an interrupted run, a record without
+/// its results), said as stopped, never as still running (#12).
+fn stopped_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
+    let commands = tools.iter().filter(|t| matches!(t.call, ToolCall::Exec { .. })).count();
+    let other = tools.len() - commands;
+    let mut clauses = Vec::new();
+    match commands {
+        0 => {}
+        1 => clauses.push(Clause::new("1 command stopped")),
+        n => clauses.push(Clause::new(format!("{n} commands stopped"))),
     }
-    summary
+    match other {
+        0 => {}
+        1 => clauses.push(Clause::new("1 call stopped")),
+        n => clauses.push(Clause::new(format!("{n} calls stopped"))),
+    }
+    clauses
+}
+
+/// slopty: `n` of a noun, one or many.
+fn counted(n: usize, one: &str, many: &str) -> String {
+    if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
+}
+
+/// slopty: what a call is, for the clause that counts it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallKind {
+    Command,
+    Listing,
+    Edit,
+    Read,
+    Search,
+    Fetch,
+    Todo,
+    /// slopty: a subagent's run, said as the work it hands off, not as a tool called.
+    Subagent,
+    Other,
+}
+
+fn call_kind(call: &ToolCall) -> CallKind {
+    match call {
+        call if lists_directory(call) => CallKind::Listing,
+        call if is_agent_call(call) => CallKind::Subagent,
+        ToolCall::Exec { .. } => CallKind::Command,
+        ToolCall::WriteFile { .. } | ToolCall::EditFile { .. } | ToolCall::ApplyPatch { .. } => CallKind::Edit,
+        ToolCall::ReadFile { .. } => CallKind::Read,
+        ToolCall::Search { .. } | ToolCall::Glob { .. } | ToolCall::WebSearch { .. } => CallKind::Search,
+        ToolCall::WebFetch { .. } => CallKind::Fetch,
+        ToolCall::Todo { .. } => CallKind::Todo,
+        ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => CallKind::Other,
+    }
+}
+
+/// slopty: the files `tools` edited, each once, in order.
+fn edited_paths<'a>(tools: &[&'a ToolItem]) -> Vec<&'a str> {
+    let mut edited: Vec<&str> = Vec::new();
+    for t in tools {
+        let path = match &t.call {
+            ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => path.as_str(),
+            ToolCall::ApplyPatch { path } => path.as_deref().unwrap_or("patch"),
+            _ => continue,
+        };
+        if !edited.contains(&path) {
+            edited.push(path);
+        }
+    }
+    edited
 }
 
 /// slopty: what the calls under way are doing, in the TUI's live verbs (#3).
-fn live_segments(tools: &[&ToolItem]) -> Vec<String> {
-    let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
-    let mut commands = 0;
-    let mut listings = 0;
-    let mut edited: Vec<&str> = Vec::new();
-    let mut reads = 0;
-    let mut searches = 0;
-    let mut fetches = 0;
-    let mut todos = 0;
-    let mut other = 0;
-    for t in tools {
-        match &t.call {
-            call if lists_directory(call) => listings += 1,
-            ToolCall::Exec { .. } => commands += 1,
-            ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => {
-                if !edited.contains(&path.as_str()) {
-                    edited.push(path);
-                }
-            }
-            ToolCall::ApplyPatch { path } => {
-                let path = path.as_deref().unwrap_or("patch");
-                if !edited.contains(&path) {
-                    edited.push(path);
-                }
-            }
-            ToolCall::ReadFile { .. } => reads += 1,
-            ToolCall::Search { .. } | ToolCall::Glob { .. } | ToolCall::WebSearch { .. } => searches += 1,
-            ToolCall::WebFetch { .. } => fetches += 1,
-            ToolCall::Todo { .. } => todos += 1,
-            ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
-        }
-    }
-    let mut segments = Vec::new();
-    if commands > 0 {
-        segments.push(format!("running {}", count(commands, "command", "commands")));
-    }
-    if listings > 0 {
-        segments.push(format!("listing {}", count(listings, "directory", "directories")));
-    }
-    match edited.as_slice() {
-        [] => {}
-        [path] => segments.push(format!("editing {}", file_badge_name(path))),
-        many => segments.push(format!("editing {} files", many.len())),
-    }
-    if reads > 0 {
-        segments.push(format!("reading {}", count(reads, "file", "files")));
-    }
-    if searches > 0 {
-        segments.push("searching".to_owned());
-    }
-    if fetches > 0 {
-        segments.push(format!("fetching {}", count(fetches, "page", "pages")));
-    }
-    if todos > 0 {
-        segments.push("updating todos".to_owned());
-    }
-    if other > 0 {
-        segments.push(format!("calling {}", count(other, "tool", "tools")));
-    }
-    segments
+fn live_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
+    let of = |kind: CallKind| tools.iter().filter(|t| call_kind(&t.call) == kind).count();
+    let edits: Vec<&ToolItem> = tools.iter().copied().filter(|t| call_kind(&t.call) == CallKind::Edit).collect();
+    let editing = match edited_paths(&edits).as_slice() {
+        [] => None,
+        [path] => Some(format!("editing {}", file_badge_name(path))),
+        many => Some(format!("editing {} files", many.len())),
+    };
+    let (commands, listings, reads, fetches, other) = (
+        of(CallKind::Command),
+        of(CallKind::Listing),
+        of(CallKind::Read),
+        of(CallKind::Fetch),
+        of(CallKind::Other),
+    );
+    [
+        (commands > 0).then(|| format!("running {}", counted(commands, "command", "commands"))),
+        (listings > 0).then(|| format!("listing {}", counted(listings, "directory", "directories"))),
+        editing,
+        (reads > 0).then(|| format!("reading {}", counted(reads, "file", "files"))),
+        (of(CallKind::Search) > 0).then(|| "searching".to_owned()),
+        (fetches > 0).then(|| format!("fetching {}", counted(fetches, "page", "pages"))),
+        (of(CallKind::Todo) > 0).then(|| "updating todos".to_owned()),
+        (of(CallKind::Subagent) > 0)
+            .then(|| format!("running {}", counted(of(CallKind::Subagent), "subagent", "subagents"))),
+        (other > 0).then(|| format!("calling {}", counted(other, "tool", "tools"))),
+    ]
+    .into_iter()
+    .flatten()
+    .map(Clause::new)
+    .collect()
 }
 
-/// The summary of calls that settled, and thoughts and notes: the shared rule's past verbs.
-fn past_summary(tools: &[ToolItem]) -> String {
+/// The summary of calls that settled, and thoughts and notes, in past verbs. A failure is said
+/// in the parentheses of the clause whose call it was ("ran 3 commands (1 failed)"), never loose
+/// at the end.
+fn past_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
+    let calls: Vec<&ToolItem> = tools.iter().copied().filter(|t| t.kind == ToolItemKind::Call).collect();
     // slopty: directory listings are counted apart from commands, as the TUI's group line
-    // counts them ("listed 2 directories").
-    // A listing that failed listed nothing: it counts as the failed command it was.
-    let listing = |t: &ToolItem| lists_directory(&t.call) && !t.is_error;
-    let listed = tools
-        .iter()
-        .filter(|t| t.kind == ToolItemKind::Call && listing(t))
-        .count();
-    // slopty: what failed counts every call, a listing too, and is said last ("· 1 failed").
-    let failed = tools
-        .iter()
-        .filter(|t| t.kind == ToolItemKind::Call && t.is_error && !denied(t))
-        .count();
-    let pairs: Vec<(ToolCall, bool)> = tools
-        .iter()
-        .filter(|t| t.kind == ToolItemKind::Call && !listing(t))
-        .map(|t| (t.call.clone(), false))
-        .collect();
-    let thoughts = tools
-        .iter()
-        .filter(|t| t.kind == ToolItemKind::Thought)
-        .count();
-    let notes = tools
-        .iter()
-        .filter(|t| t.kind == ToolItemKind::Note)
-        .count();
-    // The shared summary answers "used 0 tools" for an empty set — a
-    // thought-only group must not inherit that.
-    let base = if pairs.is_empty() {
-        String::new()
-    } else {
-        slopty_view_proto::view::tool_group_summary(&pairs)
+    // counts them ("listed 2 directories"). A listing that failed listed nothing: it counts as
+    // the failed command it was.
+    let kind = |t: &ToolItem| match call_kind(&t.call) {
+        CallKind::Listing if t.is_error => CallKind::Command,
+        kind => kind,
     };
-    // slopty: the TUI's group parts past the shared summary: an edit's line totals ("edited 2
-    // files +12 −3"), directories listed, and what commands landed ("committed 1a2b3c4 ·
-    // pushed to main").
-    let base = with_line_totals(base, tools);
-    let base = [base]
-        .into_iter()
-        .chain((listed > 0).then(|| {
-            format!("listed {listed} {}", if listed == 1 { "directory" } else { "directories" })
-        }))
-        .chain(landed_words(tools))
-        .chain((failed > 0).then(|| format!("{failed} failed")))
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>()
-        .join(" · ");
-    // Thought and note chips ride the group (they are UI-synthesized, so the
-    // shared view summary never sees them): name them on the collapsed line.
-    let mut segments: Vec<String> = Vec::new();
+    let of = |want: CallKind| calls.iter().copied().filter(|t| kind(t) == want).collect::<Vec<_>>();
+    let failed = |of: &[&ToolItem]| of.iter().filter(|t| t.is_error && !denied(t)).count();
+    let mut clauses: Vec<Clause> = Vec::new();
     // slopty: how long it thought, where each thought says, as the TUI's "Thought for 12s".
+    let thoughts = tools.iter().filter(|t| t.kind == ToolItemKind::Thought).count();
     let thought_ms: Option<u64> = tools
         .iter()
         .filter(|t| t.kind == ToolItemKind::Thought)
@@ -2603,29 +2783,66 @@ fn past_summary(tools: &[ToolItem]) -> String {
         .sum();
     match (thoughts, thought_ms) {
         (0, _) => {}
-        (_, Some(ms)) if ms >= 1_000 => {
-            segments.push(format!("thought for {}", slopty_view_doc::work::duration_words(ms)));
-        }
-        (1, _) => segments.push("thought process".into()),
-        (n, _) => segments.push(format!("thought {n} times")),
+        (_, Some(ms)) if ms >= 1_000 => clauses.push(Clause::new(format!(
+            "thought for {}",
+            slopty_view_doc::work::duration_words(ms)
+        ))),
+        // slopty: a clause says what was done, as its siblings do ("Thought once and ran 1
+        // command"); "Thought process" is a thought's own row, never a clause of a sentence.
+        (_, Some(_)) => clauses.push(Clause::new("thought briefly")),
+        (1, None) => clauses.push(Clause::new("thought once")),
+        (n, None) => clauses.push(Clause::new(format!("thought {n} times"))),
     }
-    match notes {
+    match tools.iter().filter(|t| t.kind == ToolItemKind::Note).count() {
         0 => {}
-        1 => segments.push("wrote a note".into()),
-        n => segments.push(format!("wrote {n} notes")),
+        1 => clauses.push(Clause::new("wrote a note")),
+        n => clauses.push(Clause::new(format!("wrote {n} notes"))),
     }
-    if !base.is_empty() {
-        segments.push(base);
+    let commands = of(CallKind::Command);
+    if !commands.is_empty() {
+        clauses.push(
+            Clause::new(format!("ran {}", counted(commands.len(), "command", "commands")))
+                .failed(failed(&commands)),
+        );
     }
-    let mut summary = segments.join(" · ");
-    // Same capitalization rule as the shared summary — only the leading
-    // letter lifts.
-    if let Some(first) = summary.get_mut(..1) {
-        first.make_ascii_uppercase();
+    let edits = of(CallKind::Edit);
+    let edited = edited_paths(&edits);
+    if !edited.is_empty() {
+        // slopty: the lines its edits added and removed, the number a reviewer wants first.
+        let (added, removed) = edits
+            .iter()
+            .filter_map(|t| t.facts.as_ref().and_then(|facts| facts.changed))
+            .fold((0_u64, 0_u64), |(a, r), [add, rem]| (a.saturating_add(add), r.saturating_add(rem)));
+        let mut clause = Clause::new(format!("edited {}", counted(edited.len(), "file", "files")));
+        if added > 0 || removed > 0 {
+            clause.adds.push(Adds::Lines(added, removed));
+        }
+        clauses.push(clause.failed(failed(&edits)));
     }
-    summary
+    for (want, verb, one, many) in [
+        (CallKind::Read, "read", "file", "files"),
+        (CallKind::Search, "searched", "time", "times"),
+        (CallKind::Fetch, "fetched", "page", "pages"),
+        (CallKind::Subagent, "delegated to", "subagent", "subagents"),
+        (CallKind::Other, "called", "tool", "tools"),
+        (CallKind::Listing, "listed", "directory", "directories"),
+    ] {
+        let these = of(want);
+        if !these.is_empty() {
+            clauses.push(
+                Clause::new(format!("{verb} {}", counted(these.len(), one, many))).failed(failed(&these)),
+            );
+        }
+    }
+    let todos = of(CallKind::Todo);
+    if !todos.is_empty() {
+        clauses.push(Clause::new("updated todos").failed(failed(&todos)));
+    }
+    // slopty: what the commands landed ("committed 1a2b3c4", "pushed to main").
+    let settled: Vec<ToolItem> = tools.iter().map(|t| (*t).clone()).collect();
+    clauses.extend(landed_words(&settled).into_iter().map(Clause::new));
+    clauses
 }
-
 // slopty: a call that only lists a directory, as the TUI's group line counts it.
 fn lists_directory(call: &ToolCall) -> bool {
     match call {
@@ -2637,27 +2854,6 @@ fn lists_directory(call: &ToolCall) -> bool {
         ToolCall::Unknown { name, .. } => name == "LS",
         _ => false,
     }
-}
-
-// slopty: the shared summary's "edited N files" with the lines its edits added and removed.
-fn with_line_totals(base: String, tools: &[ToolItem]) -> String {
-    let (added, removed) = tools
-        .iter()
-        .filter_map(|t| t.facts.as_ref().and_then(|facts| facts.changed))
-        .fold((0_u64, 0_u64), |(a, r), [add, rem]| (a.saturating_add(add), r.saturating_add(rem)));
-    if added == 0 && removed == 0 {
-        return base;
-    }
-    base.split(" · ")
-        .map(|segment| {
-            if segment.to_ascii_lowercase().starts_with("edited ") {
-                format!("{segment} +{added} −{removed}")
-            } else {
-                segment.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
 }
 
 // slopty: what the group's commands landed, each once, in order.
@@ -2673,97 +2869,52 @@ fn landed_words(tools: &[ToolItem]) -> Vec<String> {
     said
 }
 
-fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Theme) -> AnyElement {
-    let Some(shimmer_phase) = shimmer_phase else {
-        // Keep the ordinary inherited hover color when the group is settled
-        // (and when reduced motion turns the active shimmer off).
+// slopty: a title under way shimmers as every live line in the app does (opencode's
+// `text-shimmer`, `.research/opencode-study-2026-10-19.md` item 1): `motion::shimmer_ink` inks each
+// glyph from faint to full as the band crosses it, on the process's one clock, so the group's
+// summary and its running row move in step with the working line. Settled, the title is plain
+// and takes its row's ink.
+/// `text`, shimmering at `shimmer_ms` into the shimmer's cycle, or plain without one, its
+/// `marks` drawn apart (`Sentence`).
+fn tool_group_title(
+    text: SharedString,
+    marks: &[(Range<usize>, Mark)],
+    shimmer_ms: Option<f32>,
+    theme: &Theme,
+) -> AnyElement {
+    if let Some(phase) = shimmer_ms {
+        let runs = title_shimmer_runs(&text, phase, theme);
+        return StyledText::new(text).with_highlights(runs).into_any_element();
+    }
+    if marks.is_empty() {
         return text.into_any_element();
-    };
-    // Keep the title as ONE normal text run. Splitting it per character copies
-    // the gradient stops, but also splits shaping/kerning and makes the sweep
-    // visibly hop one glyph at a time. The overlay repaints the intact shaped
-    // line through narrow moving clips, which is the native equivalent of
-    // CSS `background-clip: text` without duplicating accessible text.
-    let overlay_text = text.clone();
-    let overlay_font = gpui::font(theme.font_sans_fixed.clone());
-    let base = theme.text_muted;
-    let peak = theme.text;
-    let overlay = canvas(
-        move |bounds, window, _| {
-            let probe = window.text_system().shape_line(
-                overlay_text.clone(),
-                px(TOOL_LABEL_SIZE),
-                &[TextRun {
-                    len: overlay_text.len(),
-                    font: overlay_font.clone(),
-                    color: peak,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            );
-            let text_width = f32::from(probe.width()).min(f32::from(bounds.size.width));
-            let strip_count = (text_width / TOOL_GROUP_SHIMMER_STRIP_WIDTH).ceil() as usize;
-            let mut strips = Vec::with_capacity(strip_count);
-            for ix in 0..strip_count {
-                let left = ix as f32 * TOOL_GROUP_SHIMMER_STRIP_WIDTH;
-                let right = ((ix + 1) as f32 * TOOL_GROUP_SHIMMER_STRIP_WIDTH).min(text_width);
-                let x = (left + right) * 0.5 / text_width.max(1.0);
-                let amount = tool_title_shimmer_amount(x, shimmer_phase);
-                if amount <= 0.001 {
-                    continue;
-                }
-                let line = window.text_system().shape_line(
-                    overlay_text.clone(),
-                    px(TOOL_LABEL_SIZE),
-                    &[TextRun {
-                        len: overlay_text.len(),
-                        font: overlay_font.clone(),
-                        color: motion::mix(base, peak, amount),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                );
-                strips.push((left, right, line));
-            }
-            strips
-        },
-        move |bounds, strips, window, cx| {
-            for (left, right, line) in strips {
-                let mask = ContentMask {
-                    bounds: Bounds {
-                        origin: point(bounds.origin.x + px(left), bounds.origin.y),
-                        size: size(px(right - left), bounds.size.height),
-                    },
-                };
-                window.with_content_mask(Some(mask), |window| {
-                    let line_height = px(TOOL_LABEL_LINE_HEIGHT);
-                    let _ = line.paint(
-                        bounds.origin,
-                        line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
-                });
-            }
-        },
-    )
-    .absolute()
-    .inset_0();
-    div()
-        .relative()
-        .h_full()
-        .min_w_0()
-        .flex_1()
-        .overflow_hidden()
-        .child(text)
-        .child(overlay)
-        .into_any_element()
+    }
+    let runs = marks.iter().map(|(range, mark)| {
+        let ink = match mark {
+            Mark::Join => theme.text_faint,
+            Mark::Added => theme.diff_add,
+            Mark::Removed => theme.diff_del,
+        };
+        (range.clone(), gpui::HighlightStyle { color: Some(ink), ..Default::default() })
+    });
+    StyledText::new(text).with_highlights(runs.collect::<Vec<_>>()).into_any_element()
+}
+
+/// slopty: the ink of each glyph of `text` at `phase` ms into the shimmer's cycle.
+fn title_shimmer_runs(text: &str, phase: f32, theme: &Theme) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
+    text.char_indices()
+        .enumerate()
+        .map(|(index, (start, ch))| {
+            let ink = motion::shimmer_color(motion::shimmer_ink(index, phase), theme);
+            (start..start + ch.len_utf8(), gpui::HighlightStyle { color: Some(ink), ..Default::default() })
+        })
+        .collect()
+}
+
+/// slopty: where the shimmer stands at `moment`, in milliseconds into its cycle.
+fn shimmer_ms(moment: Instant) -> f32 {
+    let cycle = Duration::from_secs_f32(motion::SHIMMER_PERIOD_MS / 1000.0);
+    motion::locked_phase(cycle, moment) * motion::SHIMMER_PERIOD_MS
 }
 
 // `single_line` and the per-kind chip label/detail are shared with the terminal
@@ -2826,6 +2977,12 @@ struct ImageMenu {
 /// Spawn chips never expand, so they never preview images either.
 fn chip_has_images(tool: &ToolItem) -> bool {
     !tool.images.is_empty() && !is_spawn_link(tool)
+}
+
+/// slopty: a read that went through shows its path and nothing more (Amp): what it read is the
+/// file, which its path opens; only a failed read, or one that read an image, opens in place.
+fn quiet_read(tool: &ToolItem) -> bool {
+    matches!(tool.call, ToolCall::ReadFile { .. }) && !tool.is_error && !chip_has_images(tool)
 }
 
 /// Height of the "Show full output/diff" affordance row appended below an
@@ -2902,6 +3059,16 @@ pub const FLAVOUR_WORDS: [&str; 21] = [
 ];
 pub const FLAVOUR_ROTATE_SECS: i64 = 7;
 
+/// slopty: what a send held back waits for: this device's own network when it is offline,
+/// else the chat's machine `host` (#11, #18).
+fn queued_words(this_device_offline: bool, host: Option<&str>) -> String {
+    match host {
+        _ if this_device_offline => "Queued \u{b7} sends when you're back online".to_owned(),
+        Some(host) => format!("Queued \u{b7} sends when {host} is back"),
+        None => "Queued \u{b7} sends when its machine is back".to_owned(),
+    }
+}
+
 /// The flavour word for a seed at an elapsed time.
 pub fn flavour_word(seed: u64, elapsed_secs: i64) -> &'static str {
     let step = (elapsed_secs.max(0) / FLAVOUR_ROTATE_SECS) as u64;
@@ -2955,25 +3122,49 @@ fn worked_for_label(secs: i64) -> String {
     format!("Worked for {}", format_elapsed(secs))
 }
 
-/// Compact-mode header: the live tool summary crossfades into "Worked for".
-/// `t` is 0 = summary, 1 = duration.
-fn compact_work_title(
-    summary: SharedString,
+/// slopty: a settled divider as a screen reader says it: how long the turn worked, then its
+/// work's sentence from a small letter ("Worked for 6s, ran 2 commands").
+fn spoken_divider(worked: &str, summary: &str) -> String {
+    let mut letters = summary.chars();
+    match letters.next() {
+        Some(first) => format!("{worked}, {}{}", first.to_lowercase(), letters.as_str()),
+        None => worked.to_owned(),
+    }
+}
+
+/// slopty: a phase label's swap (Clanker's `SWAP`): the outgoing words fade over 120 ms, the
+/// incoming ones fade in over 200 ms and rise 3 px (`.research/design-inspiration-2026-10-19.md`
+/// item 8).
+const PHASE_OUT: motion::MotionSpec =
+    motion::MotionSpec::new(120, motion::CubicBezier::new(0.4, 0.0, 0.6, 1.0));
+const PHASE_IN: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT_QUINT);
+const PHASE_RISE: f32 = 3.0;
+
+/// slopty: how far a phase swap `ms` in has gone: the outgoing words' opacity, then the
+/// incoming words' opacity and how far they still sit below their line.
+fn phase_swap(ms: f32) -> (f32, f32, f32) {
+    let out = 1.0 - PHASE_OUT.progress(ms / PHASE_OUT.duration_ms as f32);
+    let arrived = PHASE_IN.progress(ms / PHASE_IN.duration_ms as f32);
+    (out, arrived, PHASE_RISE * (1.0 - arrived))
+}
+
+/// The turn divider's words: the live tool summary swaps into "Worked for" ([`phase_swap`]),
+/// `ms` into the swap.
+fn divider_title(
+    summary: &Sentence,
     worked: SharedString,
-    t: f32,
+    ms: f32,
     shimmer_phase: Option<f32>,
     theme: &Theme,
 ) -> AnyElement {
-    if t >= 1.0 {
-        return tool_group_title(worked, None, theme);
+    let (out, arrived, below) = phase_swap(ms);
+    if arrived >= 1.0 {
+        return tool_group_title(worked, &[], None, theme);
     }
-    if t <= 0.0 {
-        return tool_group_title(summary, shimmer_phase, theme);
-    }
+    // The new words hold the room; the old ones fade over them.
     div()
         .relative()
         .min_w_0()
-        .w_full()
         .h(px(TOOL_LABEL_LINE_HEIGHT))
         .child(
             div()
@@ -2985,21 +3176,96 @@ fn compact_work_title(
                 .flex()
                 .items_center()
                 .overflow_hidden()
-                .opacity(1.0 - t)
-                .child(tool_group_title(summary, None, theme)),
+                .opacity(out)
+                .child(tool_group_title(summary.text.clone(), &summary.marks, shimmer_phase.filter(|_| out > 0.0), theme)),
         )
         .child(
             div()
                 .relative()
-                .top(px(4.0 * (1.0 - t)))
+                .top(px(below))
                 .h(px(TOOL_LABEL_LINE_HEIGHT))
                 .flex()
                 .items_center()
                 .overflow_hidden()
-                .opacity(t)
-                .child(tool_group_title(worked, None, theme)),
+                .opacity(arrived)
+                .child(tool_group_title(worked, &[], None, theme)),
         )
         .into_any_element()
+}
+
+/// The turn divider's rules and button (Amp `AJ/af7bde63.js:25-38`): a 1 px hairline each side,
+/// 12 px from the label, which is a 6 × 2 button with a 7 % wash under the pointer and a 12 px
+/// chevron that turns as the work opens.
+const DIVIDER_GAP: f32 = 12.0;
+const DIVIDER_CHEVRON: f32 = 12.0;
+
+/// slopty: a turn's divider: `title` (named `label`) between two hairlines, opening the work
+/// behind it; `done` says when the turn ended, in its tooltip.
+fn turn_divider(
+    row_id: &SharedString,
+    label: SharedString,
+    title: AnyElement,
+    open: bool,
+    disclosure: f32,
+    done: Option<SharedString>,
+    theme: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<gpui::Div> {
+    let hover = format!("{row_id}-divider");
+    let rule = || div().flex_1().min_w(px(DIVIDER_GAP)).h(px(1.0)).bg(theme.border);
+    let button = crate::surface_chrome::key_stop(
+        div().id(SharedString::from(format!("{row_id}-hdr"))),
+        theme,
+    )
+    .role(gpui::Role::Button)
+    .aria_label(label)
+    .aria_expanded(open)
+    .flex_shrink(1.0)
+    .min_w_0()
+    .flex()
+    .flex_row()
+    .items_center()
+    .gap(px(4.0))
+    .px(px(6.0))
+    .py(px(2.0))
+    // slopty: a finger's whole row, 44 pt, on a touch screen.
+    .when(crate::shell::touch_screen(), |button| button.h_full())
+    .rounded(px(6.0))
+    .bg(motion::hover_blend(&hover, gpui::transparent_black(), crate::theme::ink(0.07)))
+    .hover_fade(hover)
+    .cursor_pointer()
+    // slopty: on the button, so Enter or Space on it opens the work as a click does.
+    .on_click(on_click)
+    .text_size(px(TOOL_LABEL_SIZE))
+    .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+    .text_color(theme.text_muted.opacity(0.7))
+    .whitespace_nowrap()
+    .child(div().min_w_0().overflow_hidden().child(title))
+    .child(
+        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+            .flex_none()
+            .size(px(DIVIDER_CHEVRON))
+            .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                -std::f32::consts::FRAC_PI_2 * (1.0 - disclosure),
+            )))
+            .text_color(theme.text_muted.opacity(0.7)),
+    )
+    .when_some(done, |button, done| {
+        button
+            .tooltip(crate::settings::widgets::text_tooltip(done))
+            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+    });
+    div()
+        .id(SharedString::from(format!("{row_id}-divider-row")))
+        .h(px(tool_group_header_height()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(DIVIDER_GAP))
+        .debug_selector(|| "turn-divider".into())
+        .child(rule())
+        .child(button)
+        .child(rule())
 }
 
 // ---------------------------------------------------------------------------
@@ -3198,7 +3464,7 @@ impl TranscriptPreparation {
                 rows.clone()
             } else {
                 let streaming = entry.status == Some(MessageStatus::Streaming);
-                let built = Arc::new(rows_for_entry(entry, false, false, &mut |key, text| {
+                let built = Arc::new(rows_for_entry(entry, false, &mut |key, text| {
                     parse_for_row(
                         streaming,
                         key,
@@ -3221,7 +3487,7 @@ impl TranscriptPreparation {
             {
                 historical.insert(
                     entry.id.clone(),
-                    rows_for_entry(&prefix, false, false, &mut |_, text| {
+                    rows_for_entry(&prefix, false, &mut |_, text| {
                         Arc::new(parse_full(text))
                     }),
                 );
@@ -3285,9 +3551,6 @@ struct ToolGroupReveal {
     /// reveal as its steps. Replayed headers leave this unset.
     header_started_at: Option<Instant>,
     starts: Vec<Option<Instant>>,
-    /// A title sweep begins with this group instead of inheriting the shared
-    /// loader clock at an arbitrary point midway across the label.
-    shimmer_started_at: Option<Instant>,
     rendered_open: Option<bool>,
     rendered_height: f32,
 }
@@ -3377,22 +3640,39 @@ fn activity_branch_points(progress: f32) -> Vec<Point<f32>> {
     visible
 }
 
-fn tool_disclosure_progress(open: bool, fold: FoldState, now: Instant) -> f32 {
-    let Some(start) = fold.disclosure_at else {
-        return if open { 1.0 } else { 0.0 };
+/// slopty: where a tool fold toggled toward `open` at `at` stands at `now`, as the one fold
+/// moves (`motion::fold_frame`; design-inspiration item 7): the height opens on `FOLD_OPEN` and
+/// the contents fade in and rise after it; closing, they are gone before it lands on
+/// `FOLD_CLOSE`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ToolFold {
+    /// The height's share of the way from where it stood to where it goes, 0 to 1.
+    share: f32,
+    /// The contents' opacity, and how far below their place they stand.
+    opacity: f32,
+    rise: f32,
+    /// Whether any of it still moves.
+    moving: bool,
+}
+
+fn tool_fold(open: bool, at: Option<Instant>, now: Instant, still: bool) -> ToolFold {
+    let Some(at) = at.filter(|_| !still) else {
+        return ToolFold { share: 1.0, opacity: if open { 1.0 } else { 0.0 }, rise: 0.0, moving: false };
     };
-    let raw = now
-        .checked_duration_since(start)
-        .unwrap_or_default()
-        .as_secs_f32()
-        / TOOL_FOLD.total().as_secs_f32();
-    let progress = TOOL_FOLD.curve.eval(raw);
-    if open { progress } else { 1.0 - progress }
+    let frame = motion::fold_frame(open, now.saturating_duration_since(at), false);
+    let share = if open { frame.height } else { 1.0 - frame.height };
+    let moving = share < 1.0 || (open && frame.opacity < 1.0);
+    ToolFold { share, opacity: frame.opacity, rise: frame.rise, moving }
+}
+
+fn tool_disclosure_progress(open: bool, fold: FoldState, now: Instant) -> f32 {
+    let share = tool_fold(open, fold.disclosure_at, now, false).share;
+    if open { share } else { 1.0 - share }
 }
 
 /// The compact work fold's animated body budget: `fold.from` lerps toward
-/// the rows' measured total while open (zero when closed) under the shared
-/// [`TOOL_FOLD`] spec. Each sibling body row clips to `budget - prefix`, so
+/// the rows' measured total while open (zero when closed) as the one fold
+/// moves ([`tool_fold`]). Each sibling body row clips to `budget - prefix`, so
 /// the group opens/closes exactly like an ordinary tool fold's single
 /// overflow-hidden container — including reversals, which seed `from` with
 /// the budget in flight.
@@ -3405,10 +3685,8 @@ fn compact_body_height(fold: FoldState, total: f32, reduce_motion: bool, now: In
     let Some(at) = fold.toggled_at.filter(|_| !reduce_motion) else {
         return target;
     };
-    let t = TOOL_FOLD
-        .curve
-        .eval(now.saturating_duration_since(at).as_secs_f32() / TOOL_FOLD.total().as_secs_f32());
-    motion::lerp(fold.from, target, t)
+    let share = tool_fold(fold.open.unwrap_or(false), Some(at), now, false).share;
+    motion::lerp(fold.from, target, share)
 }
 
 /// Clip geometry for one compact-fold body row: `(prefix, own, total)`
@@ -3441,23 +3719,6 @@ fn compact_fold_geometry(
         total += height;
     }
     (prefix, own, total)
-}
-
-/// BoardUI's measured recipe: a 300%-wide repeating gradient moves from 200%
-/// to -100%. Its 38→50→62% highlight maps to a 36%-of-title shoulder around
-/// each peak; adjacent copies sit three title-widths apart. Sampling this by
-/// x-coordinate lets the paint clips reproduce the continuous pattern.
-fn tool_title_shimmer_amount(x: f32, phase: f32) -> f32 {
-    let primary_center = -2.5 + phase.clamp(0.0, 1.0) * 6.0;
-    (-2..=2)
-        .map(|copy| primary_center + copy as f32 * 3.0)
-        .map(|center| (1.0 - (x - center).abs() / TOOL_GROUP_SHIMMER_HALF_WIDTH).clamp(0.0, 1.0))
-        .fold(0.0, f32::max)
-}
-
-fn tool_title_shimmer_phase(start: Instant, now: Instant) -> f32 {
-    let elapsed = now.checked_duration_since(start).unwrap_or_default();
-    (elapsed.as_secs_f32() / TOOL_GROUP_SHIMMER_DURATION.as_secs_f32()).fract()
 }
 
 /// Viewport compensation paired with a long user-message collapse. While the
@@ -3760,6 +4021,9 @@ pub struct Transcript {
     /// slopty: whether `list` aligns its rows to its top: a subagent's run, in a doc of its own
     /// or drilled into as a chat, reads like a fresh notes page (#5).
     list_top: bool,
+    /// slopty: whether this transcript holds the person's prompts at its top (`sticky.rs`):
+    /// its chat is listed and is no subagent's run; read once a sync, never a frame (#13, #17).
+    holds_prompts: bool,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
     chat_id: Option<String>,
@@ -3780,6 +4044,10 @@ pub struct Transcript {
     /// A transcript instance is shared across tabs, so the active ListState is
     /// reset on every attach and cannot retain these positions by itself.
     saved_viewports: SavedViewportCache,
+    /// slopty: the work groups the person opened or shut in each chat visited, so a chat left
+    /// and come back to (a subagent drilled into, then Escape) reads as they left it, and its
+    /// saved viewport lands on rows that are still drawn. Kept for the chats whose viewport is.
+    saved_folds: HashMap<String, HashMap<SharedString, bool>>,
     /// An anchored viewport waiting for the selected chat's async replay.
     pending_viewport: Option<SavedViewport>,
     /// Generation of the selected chat, guarding post-layout restoration
@@ -3869,6 +4137,9 @@ pub struct Transcript {
     /// link-roots revision that resets `file_link_roots`.
     inline_code_links: crate::markdown::inline_code_links::InlineCodeLinkCache,
     rendered_rows: HashSet<SharedString>,
+    /// slopty: the entries of the shown transcript the agent did not say (the person's, a
+    /// compaction note, a fork's seam): none opens a message in the agent's name (#8).
+    unsaid_entries: HashSet<SharedString>,
     /// Last UI typography generation reflected in `list` item measurements.
     /// Family and size changes can alter prose wrapping without changing row
     /// identity, so the virtual list must explicitly discard cached heights.
@@ -3877,17 +4148,6 @@ pub struct Transcript {
     /// Width held free at the column's right for a docked side card; the
     /// reading column centers in what remains.
     right_reserve: f32,
-    /// Last global code-fence layout generation applied to this transcript.
-    /// Each instance owns separate scroll handles and list measurements, so
-    /// every one must reset itself after a global Fit-mode transition.
-    code_fences_generation: u64,
-    /// Last math-style generation applied (see
-    /// [`crate::settings::math_generation`]); like the code-fence one, each
-    /// instance remeasures its own rows.
-    math_generation: u64,
-    /// Compact mode as last applied to this instance's row split. Render
-    /// polls the setting each frame; a flip rebuilds every row.
-    compact_mode: bool,
     /// Compact work-group entry ids that were live this session — the
     /// "Worked for" subtitle fades in only for those, not historical rows.
     compact_live_entries: HashSet<SharedString>,
@@ -3898,7 +4158,7 @@ pub struct Transcript {
     /// can fade in without replaying on later paints.
     compact_worked_fade_at: HashMap<SharedString, Instant>,
     /// Natural heights of compact-fold body rows, written by each row's
-    /// prepaint probe without notifying. The work fold's TOOL_FOLD tween
+    /// prepaint probe without notifying. The work fold's tween
     /// clips the sibling rows against one shared budget without knowing
     /// their layout up front.
     compact_fold_heights: HashMap<SharedString, Rc<Cell<f32>>>,
@@ -3906,6 +4166,12 @@ pub struct Transcript {
     compact_fold_settle: Option<Task<()>>,
     highlights: HighlightStore,
     show_jump_button: bool,
+    /// slopty: the last row there was when the person left the end; the jump pill counts the
+    /// rows after it as new (design-inspiration item 11).
+    jump_mark: Option<SharedString>,
+    /// slopty: each message strip fading in or out: whether it shows, where its fade started
+    /// and when ([`Transcript::strip_fade`]).
+    strip_fades: HashMap<SharedString, (bool, f32, Instant)>,
     /// Distance from the bottom at the last observation (wheel event or spring
     /// tick) — restick and escape are direction-aware
     /// (see [`Transcript::should_restick`]).
@@ -3977,11 +4243,12 @@ pub struct Transcript {
     /// clear the reveal when the old row's leave event arrives after the new
     /// row's enter (enter/leave order across rows is not guaranteed).
     hovered_entry: Option<(SharedString, SharedString)>,
-    // slopty: on touch, the entry a long press showed the strip of (no hover there).
-    pressed_entry: Option<SharedString>,
-    /// slopty: each hover strip control's focus, by its key, and what redraws the strip as it
-    /// gains or loses it: a focused control shows its strip as a hover does (#9).
-    strip_focus: HashMap<SharedString, (gpui::FocusHandle, [gpui::Subscription; 2])>,
+    /// slopty: each drawn strip's controls' focus (Copy, Rewind), by its entry, and what redraws
+    /// the strip as one gains or loses it: a focused control shows its strip as a hover does
+    /// (#9). Only strips drawn in the last frame, or holding focus, keep theirs (#13).
+    strip_focus: HashMap<SharedString, StripFocus>,
+    /// slopty: the entries whose strip this frame drew, for pruning [`Self::strip_focus`].
+    strip_drawn: HashSet<SharedString>,
     /// slopty: the person's send under way (its message id) and when its bubble first drew:
     /// it fades and rises in, as the person's own words arriving (#15).
     send_entrance: Option<(SharedString, Option<Instant>)>,
@@ -4295,6 +4562,7 @@ impl Transcript {
             state,
             list,
             list_top,
+            holds_prompts: false,
             rows: Vec::new(),
             last_source: None,
             // Pre-set so `sync` never sees an attach edge — an override
@@ -4305,6 +4573,7 @@ impl Transcript {
             doc_live: doc_override.is_some() && follow,
             doc_override,
             saved_viewports: SavedViewportCache::default(),
+            saved_folds: HashMap::new(),
             pending_viewport: None,
             viewport_generation: 0,
             viewport_finalize_pending: false,
@@ -4333,12 +4602,11 @@ impl Transcript {
             file_link_roots: Default::default(),
             inline_code_links: Default::default(),
             rendered_rows: HashSet::new(),
+            unsaid_entries: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
-            content_width: crate::settings::transcript_width(cx),
+            // slopty: the window's width arrives with the first render.
+            content_width: crate::settings::transcript_width(0.0, cx),
             right_reserve: 0.0,
-            code_fences_generation: crate::settings::code_fences_generation(cx),
-            math_generation: crate::settings::math_generation(cx),
-            compact_mode: crate::settings::transcript_compact_mode(cx),
             compact_live_entries: HashSet::new(),
             compact_last_elapsed: HashMap::new(),
             compact_worked_fade_at: HashMap::new(),
@@ -4346,6 +4614,8 @@ impl Transcript {
             compact_fold_settle: None,
             highlights: HighlightStore::default(),
             show_jump_button: false,
+            jump_mark: None,
+            strip_fades: HashMap::new(),
             last_scroll_distance: 0.0,
             wheel_travel: 0.0,
             pinned,
@@ -4372,8 +4642,8 @@ impl Transcript {
             page_viewport: gpui::Bounds::default(),
             rail_hover: None,
             hovered_entry: None,
-            pressed_entry: None,
             strip_focus: HashMap::new(),
+            strip_drawn: HashSet::new(),
             send_entrance: None,
             pending_bubbles: HashSet::new(),
             sent_bubbles: HashMap::new(),
@@ -4532,6 +4802,28 @@ impl Transcript {
             return;
         };
         self.saved_viewports.insert(chat_id, viewport);
+    }
+
+    /// slopty: keep the outgoing chat's opened and shut work groups for its return, and drop
+    /// those of chats whose viewport is no longer kept, `incoming` aside.
+    fn remember_folds(&mut self, incoming: Option<&str>) {
+        if let Some(chat_id) = self.chat_id.clone() {
+            let pins: HashMap<SharedString, bool> = self
+                .folds
+                .iter()
+                .filter_map(|(id, fold)| fold.open.map(|open| (id.clone(), open)))
+                .collect();
+            if pins.is_empty() {
+                self.saved_folds.remove(&chat_id);
+            } else {
+                self.saved_folds.insert(chat_id, pins);
+            }
+        }
+        let kept = &self.saved_viewports;
+        let outgoing = self.chat_id.as_deref();
+        self.saved_folds.retain(|chat, _| {
+            kept.by_chat.contains_key(chat) || Some(chat.as_str()) == incoming || Some(chat.as_str()) == outgoing
+        });
     }
 
     /// Restore an exact optimistic row while replay is pending, enable stable
@@ -5368,6 +5660,28 @@ impl Transcript {
         self.show_jump_button
     }
 
+    fn strip_fade(&mut self, key: &SharedString, shown: bool, now: Instant, still: bool) -> (f32, bool) {
+        strip_fade(&mut self.strip_fades, key, shown, now, still || TOUCH)
+    }
+
+    /// slopty: how many rows arrived since the person left the end, for the jump pill to say.
+    pub fn jump_unseen(&self) -> usize {
+        let Some(mark) = self.jump_mark.as_ref().filter(|_| self.show_jump_button) else {
+            return 0;
+        };
+        self.rows.iter().rposition(|row| &row.id == mark).map_or(0, |ix| self.rows.len() - ix - 1)
+    }
+
+    /// slopty: marks the last row there is as the person leaves the end, and forgets it as
+    /// they come back.
+    fn mark_jump(&mut self) {
+        if !self.show_jump_button {
+            self.jump_mark = None;
+        } else if self.jump_mark.is_none() {
+            self.jump_mark = self.rows.last().map(|row| row.id.clone());
+        }
+    }
+
     /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
         self.user_collapse_scroll = None;
@@ -5561,6 +5875,27 @@ impl Transcript {
             }
         };
 
+        // slopty: what the selected chat is, read each time the state moves: a chat drilled
+        // into before the list lists it (a note tapped at launch) takes a subagent run's
+        // alignment and band rule once it is listed, not only as it opens (#17).
+        let (listed, run) = {
+            let state = self.state.read(cx);
+            selected
+                .as_deref()
+                .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+                .map_or((false, false), |chat| (true, chat.subagent))
+        };
+        self.holds_prompts = listed && !run;
+        let top = self.doc_override.is_some() || run;
+        if top != self.list_top {
+            // slopty: a drilled subagent's run reads from the top, as one in its own doc does;
+            // the list takes the alignment its chat reads in, its rows laid in again (#5).
+            self.list = Self::new_list(top, cx);
+            self.list_top = top;
+            self.rows.clear();
+            self.last_source = None;
+        }
+
         let source = (
             selected.clone(),
             replay,
@@ -5592,6 +5927,7 @@ impl Transcript {
                 .as_ref()
                 .and_then(|chat_id| self.saved_viewports.get_cloned_and_touch(chat_id));
             self.remember_current_viewport();
+            self.remember_folds(selected.as_deref());
             let keep_own_turn = self
                 .own_turn
                 .as_ref()
@@ -5602,19 +5938,6 @@ impl Transcript {
                 self.own_turn_last_tick = None;
             }
             self.chat_id = selected;
-            // slopty: a drilled subagent's run reads from the top, as one in its own doc does;
-            // the list takes the alignment its chat reads in (#5).
-            let top = self.doc_override.is_some() || {
-                let state = self.state.read(cx);
-                self.chat_id
-                    .as_deref()
-                    .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
-                    .is_some_and(|chat| chat.subagent)
-            };
-            if top != self.list_top {
-                self.list = Self::new_list(top, cx);
-                self.list_top = top;
-            }
             self.rows.clear();
             self.tool_images.clear(cx);
             self.md_images.borrow_mut().clear(); // slopty
@@ -5622,12 +5945,22 @@ impl Transcript {
             self.live_parsers.clear();
             self.tree_cache.clear();
             self.folds.clear();
+            // slopty: the incoming chat's work opens as the person left it, before its rows are
+            // built, so its saved viewport resolves against them.
+            let pins = self.chat_id.as_ref().and_then(|chat| self.saved_folds.get(chat));
+            for (id, open) in pins.into_iter().flatten() {
+                self.folds.insert(id.clone(), FoldState { open: Some(*open), ..FoldState::default() });
+            }
             self.tool_group_reveals.clear();
             self.last_replay_baseline = None;
             self.historical_markdown.clear();
             self.user_folds.clear();
             self.user_heights.clear();
             self.strip_focus.clear(); // slopty
+            // slopty: the row the pointer was on left with its chat, unmounted with no leave, so
+            // its strip must not come back lit on the return.
+            self.hovered_entry = None;
+            self.rewind.feet.borrow_mut().clear(); // slopty: the feet of the last chat's bubbles
             self.pending_bubbles.clear(); // slopty
             self.sent_bubbles.clear(); // slopty
             self.compact_fold_heights.clear();
@@ -5695,12 +6028,24 @@ impl Transcript {
                 .chat_id
                 .as_ref()
                 .and_then(|id| state.prepared_transcripts.get(id));
+            // slopty: the entries the agent did not say (the person's, a compaction, a fork's
+            // seam, a relayed marker).
+            self.unsaid_entries = entries
+                .iter()
+                .filter(|entry| entry.role != MessageRole::Assistant)
+                .map(|entry| SharedString::from(entry.id.clone()))
+                .collect();
             for entry in entries {
-                if !self.compact_mode
-                    && let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id))
-                {
-                    // slopty: a plan's fold hides its rows here too.
-                    new_rows.extend(rows.iter().filter(|row| self.fold_shows(row, now)).cloned());
+                if let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id)) {
+                    // slopty: a plan's fold hides its rows here too; a divider says how long its
+                    // turn worked, as a row built here would.
+                    let secs = self.compact_worked_secs_for(entry);
+                    new_rows.extend(rows.iter().filter(|row| self.fold_shows(row, now)).cloned().map(
+                        |mut row| {
+                            settle_worked(&mut row, secs);
+                            row
+                        },
+                    ));
                 } else {
                     new_rows.extend(self.rows_for(entry, false, now));
                 }
@@ -5755,8 +6100,7 @@ impl Transcript {
                     fully_historical.insert(entry.id.clone().into());
                     continue;
                 }
-                if !self.compact_mode
-                    && let Some(rows) = self
+                if let Some(rows) = self
                         .chat_id
                         .as_ref()
                         .and_then(|id| state.prepared_transcripts.get(id))
@@ -5771,7 +6115,6 @@ impl Transcript {
                 historical_rows.extend(rows_for_entry(
                     &historical,
                     false,
-                    self.compact_mode,
                     &mut |_, text| Arc::new(parse_full(text)),
                 ));
             }
@@ -5853,12 +6196,12 @@ impl Transcript {
         let now = crate::clock::now(cx);
         let mut live_tool_groups = HashSet::new();
         for row in &new_rows {
-            let RowKind::ToolGroup { tools, .. } = &row.kind else {
+            let RowKind::ToolGroup { tools, compact_shell, .. } = &row.kind else {
                 continue;
             };
-            // Agent/spawn groups are standalone cards, not task trees —
-            // except under compact mode, where they collapse like the rest.
-            if !self.compact_mode && !tool_group_collapses(tools) {
+            // Agent/spawn groups are standalone cards, not task trees; a turn's divider folds
+            // them with the rest.
+            if !compact_shell && !tool_group_collapses(tools) {
                 continue;
             }
             live_tool_groups.insert(row.id.clone());
@@ -5883,7 +6226,6 @@ impl Transcript {
                     fold.disclosure_at = None;
                 }
             }
-            reveal.shimmer_started_at.get_or_insert(now);
             if is_new_group {
                 reveal.header_started_at.get_or_insert(now);
             }
@@ -6085,7 +6427,7 @@ impl Transcript {
     }
 
     fn compact_worked_secs_for(&self, entry: &SessionMessageEntry) -> Option<i64> {
-        if !self.compact_mode || entry.role != MessageRole::Assistant {
+        if entry.role != MessageRole::Assistant {
             return None;
         }
         if entry.status == Some(MessageStatus::Streaming) {
@@ -6105,13 +6447,10 @@ impl Transcript {
         let streaming = entry.status == Some(MessageStatus::Streaming);
         // Live entries always rebuild; don't allocate a fingerprint that the
         // streaming path cannot use.
-        // The mode is part of the row split, so it keys the cache alongside
-        // the entry's own content (the high bit — `entry_fingerprint` never
-        // sets it: its accumulator is small relative to 2^63).
         let fingerprint = if streaming {
             0
         } else {
-            entry_fingerprint(entry, pending) ^ ((self.compact_mode as u64) << 63)
+            entry_fingerprint(entry, pending)
         };
         let mut rows = if !streaming
             && let Some(cached) = self.row_cache.get(&entry.id)
@@ -6126,19 +6465,11 @@ impl Transcript {
                 // rows whose content hash changed are spliced — the reparsed tail).
                 parse_for_row(streaming, key, text, live_parsers, tree_cache).0
             };
-            rows_for_entry(entry, pending, self.compact_mode, &mut parse)
+            rows_for_entry(entry, pending, &mut parse)
         };
-        if let Some(secs) = self.compact_worked_secs_for(entry) {
-            for row in &mut rows {
-                if let RowKind::ToolGroup {
-                    worked_secs,
-                    compact_shell: true,
-                    ..
-                } = &mut row.kind
-                {
-                    *worked_secs = Some(secs);
-                }
-            }
+        let secs = self.compact_worked_secs_for(entry);
+        for row in &mut rows {
+            settle_worked(row, secs);
         }
 
         if !streaming {
@@ -6155,7 +6486,7 @@ impl Transcript {
     }
 
     /// A row shows unless its fold is closed. A closing fold keeps its body mounted through
-    /// the TOOL_FOLD tween; the shell's settle sweep drops the rows afterwards.
+    /// the fold's tween; the shell's settle sweep drops the rows afterwards.
     fn fold_shows(&self, row: &Row, now: Instant) -> bool {
         match &row.compact_fold {
             None => true,
@@ -8035,7 +8366,7 @@ impl Transcript {
         // slopty: the clock moves on at the timer's next whole second (a second on while it
         // sends), so the second a frame says is the one every frame built after it says.
         self.tick_clock(if sending || queued { None } else { Some(turn) }, cx);
-        if self.compact_mode && !sending && !queued && elapsed_secs > 0 {
+        if !sending && !queued && elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
                     .read(cx)
@@ -8069,15 +8400,13 @@ impl Transcript {
         // slopty: what waits, and what it waits for (#11, #18).
         let queued_words = queued.then(|| {
             let state = self.state.read(cx);
+            let offline = state.connectivity.state == slopty_view_proto::ConnectivityState::Offline;
             let host = self
                 .chat_id
                 .as_deref()
                 .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
                 .and_then(|chat| state.device_name(&chat.device_id));
-            match host {
-                Some(host) => format!("Queued \u{b7} sends when {host} is back"),
-                None => "Queued \u{b7} sends when its machine is back".to_owned(),
-            }
+            queued_words(offline, host)
         });
         let word = if let Some(words) = queued_words.as_deref() {
             words
@@ -8107,12 +8436,23 @@ impl Transcript {
             return Some(line);
         }
         let theme = Theme::of(cx).clone();
+        // slopty: a first Escape armed the stop: the line ends by saying a second one stops it.
+        let armed = match self.chat_id.clone() {
+            Some(chat) if !sending && !queued && self.doc_override.is_none() => {
+                crate::composer::armed_hint(&chat, cx.entity_id(), cx)
+            }
+            _ => None,
+        };
+        let spoken = match &armed {
+            Some(_) => format!("{word} · {}", crate::composer::ARMED_SPOKEN),
+            None => word.to_owned(),
+        };
         Some(
             div()
                 // slopty: the working line says what it shows: the step, or the word.
                 .id("working-line")
                 .role(gpui::Role::Status)
-                .aria_label(SharedString::from(word.to_owned()))
+                .aria_label(SharedString::from(spoken))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -8178,6 +8518,7 @@ impl Transcript {
                             )),
                     )
                 })
+                .children(armed.map(|(hint, shown)| crate::composer::armed_element(hint, shown, &theme)))
                 .into_any_element(),
         )
     }
@@ -8251,16 +8592,28 @@ impl Transcript {
             .hovered_entry
             .as_ref()
             .is_some_and(|(_, entry)| entry == &row.entry_id)
-            // slopty: touch has no hover: the last row's strip shows, and a long press shows
-            // any entry's.
-            || (TOUCH && (is_last || self.pressed_entry.as_ref() == Some(&row.entry_id)));
+            // slopty: touch has no hover, so every strip is there at rest, as opencode gates each
+            // reveal on a hover the screen has (`.research/opencode-study-2026-10-19.md` item 4).
+            || TOUCH;
         // slopty: the keyboard reaches the strip too: its controls stay mounted, unseen, and one
-        // holding focus shows the strip as a hover does (#9).
-        let (copy_focus, rewind_focus) = (
-            self.strip_focus(format!("copy-message-{}", row.entry_id), window, cx),
-            self.strip_focus(format!("rewind-message-{}", row.entry_id), window, cx),
-        );
-        let shown = hovered || copy_focus.is_focused(window) || rewind_focus.is_focused(window);
+        // holding focus shows the strip as a hover does (#9); only a row with a strip has them.
+        let (copy_focus, rewind_focus) = row
+            .timestamp
+            .map(|_| self.strip_focus(&row.entry_id, window, cx))
+            .unzip();
+        let shown = hovered
+            || copy_focus.as_ref().is_some_and(|f| f.is_focused(window))
+            || rewind_focus.as_ref().is_some_and(|f| f.is_focused(window));
+        // slopty: the strip fades in and out over 200 ms as the pointer comes and goes (Amp's
+        // message actions; the Amp study's item 9).
+        let (strip_t, strip_moving) = if row.timestamp.is_some() {
+            self.strip_fade(&row.id, shown, window.frame_time(), motion::reduced_motion(cx))
+        } else {
+            (0.0, false)
+        };
+        if strip_moving {
+            window.request_animation_frame();
+        }
         // slopty: the house's copy span (`motion::copy_feedback`).
         let copied_message =
             motion::copied(&copy_message_key(&row.entry_id), cx);
@@ -8274,30 +8627,44 @@ impl Transcript {
         let beside_bubble = !TOUCH
             && !task
             && matches!(&row.kind, RowKind::User { text, .. } if !text.is_empty());
+        // slopty: a turn's done line says when it ended, so its Copy rides at the end of its
+        // words, not alone in a lane under them (#7).
+        let on_done_line = is_done_line(&row);
         // slopty: a run in its card shows its work, not its messages' times and actions; a run's
         // task, which the person never sent, has none either.
         let strip = row
             .timestamp
             .filter(|_| self.fit.is_none() && !(is_user_row && task))
             .map(|ms| {
-            // slopty: the day only when it is not today, the full moment on hover (#17).
-            let timestamp = div()
-                .id(SharedString::from(format!("{}-time", row.id)))
-                .flex_none()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_faint)
-                // A tooltip, not a name: the strip's words for assistive tech are its controls'.
-                .tooltip(crate::settings::widgets::text_tooltip(SharedString::from(
-                    format_full_timestamp(ms, &chrono::Local),
-                )))
-                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-                .child(SharedString::from(format_timestamp_near(ms, now_ms, &chrono::Local)));
+            // slopty: the day only when it is not today, the full moment on hover (#17); worded
+            // only while the strip shows, and the full moment only once its tooltip opens (#13).
+            let timestamp = (ms > 0 && strip_t > 0.0).then(|| {
+                div()
+                    .id(SharedString::from(format!("{}-time", row.id)))
+                    .flex_none()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_faint)
+                    // A tooltip, not a name: the strip's words for assistive tech are its
+                    // controls'.
+                    .tooltip(move |window, cx| {
+                        crate::settings::widgets::text_tooltip(format_full_timestamp(ms, &chrono::Local))(
+                            window, cx,
+                        )
+                    })
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                    .child(SharedString::from(format_timestamp_near(ms, now_ms, &chrono::Local)))
+            });
             let copy = copy_text.map(|text| {
                 let entry_id = copy_entry_id.clone();
+                let glyph_key = copy_message_key(&entry_id);
                 let fade_key = format!("copy-message-hover-{entry_id}");
                 // slopty: a finger's press on a touch screen, the wash drawn on the 24 (#23).
                 let (press, reach) = strip_press(format!("copy-message-{entry_id}"));
-                strip_control(press.track_focus(&copy_focus), &theme, reach) // slopty: a tab stop.
+                let press = match &copy_focus {
+                    Some(focus) => press.track_focus(focus), // slopty: a tab stop.
+                    None => press,
+                };
+                strip_control(press, &theme, reach)
                     .cursor_pointer()
                     .hover_fade(fade_key.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -8315,15 +8682,12 @@ impl Transcript {
                                 gpui::transparent_black(),
                                 crate::theme::ink(0.08),
                             ))
-                            .child(
-                                crate::icons::icon(if copied_message {
-                                    crate::icons::CHECK
-                                } else {
-                                    crate::icons::COPY
-                                })
-                                .size(px(14.0))
-                                .text_color(theme.text_muted),
-                            ),
+                            // slopty: its check drawn in as the copy lands (`CopyGlyph`).
+                            .child(crate::loaders::copy_glyph::CopyGlyph::new(
+                                glyph_key,
+                                14.0,
+                                theme.text_muted,
+                            )),
                     )
             });
             let metadata = div()
@@ -8332,21 +8696,20 @@ impl Transcript {
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
             // slopty: a time the agent never said (0) shows none; the copy action stays.
-            let metadata = metadata.when(ms > 0, |el| el.child(timestamp)).children(copy);
+            let metadata = metadata.children(timestamp).children(copy);
             // slopty: a person's message can be gone back to (`transcript/rewind.rs`).
             // slopty: not a run's task, which the person never sent.
             let metadata = metadata.children(
-                (is_user_row && !task)
-                    .then(|| self.rewind_action(&rewind_message, &rewind_focus, &theme, cx))
-                    .flatten(),
+                rewind_focus
+                    .as_ref()
+                    .filter(|_| is_user_row && !task)
+                    .and_then(|focus| self.rewind_action(&rewind_message, focus, &theme, cx)),
             );
             // slopty: unseen until hovered or focused, but there for the keyboard (#9).
-            let metadata = if shown {
-                motion::fade_quick(SharedString::from(format!("meta-{}", row.id)), metadata)
-                    .into_any_element()
-            } else {
-                metadata.opacity(0.0).into_any_element()
-            };
+            let metadata = metadata.opacity(strip_t).into_any_element();
+            if on_done_line {
+                return div().flex_none().child(metadata).into_any_element();
+            }
             if beside_bubble {
                 // slopty: at the bubble's foot, to its left, drawn over the gutter (#1).
                 return div()
@@ -8378,6 +8741,7 @@ impl Transcript {
                 .into_any_element()
         });
         let (mut beside, strip) = if beside_bubble { (strip, None) } else { (None, strip) };
+        let (mut done_trailing, strip) = if on_done_line { (strip, None) } else { (None, strip) };
 
         let inner: AnyElement = match &row.kind {
             RowKind::User {
@@ -8445,24 +8809,39 @@ impl Transcript {
                                 .aria_label(spoken)
                                 .min_w_0()
                                 .max_w(px(self.content_width * 0.8))
-                                .bg(crate::theme::user_bubble_bg())
+                                .bg(queued_fill(
+                                    crate::theme::user_bubble_bg(),
+                                    theme.accent,
+                                    if pending { QUEUED_TINT } else { 0.0 },
+                                ))
                                 .rounded(px(Theme::BUBBLE_RADIUS))
                                 .px(px(16.0))
                                 .py(px(10.0))
                                 .text_size(crate::typography::ui_rems(14.0))
                                 .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
                                 .text_color(theme.text)
-                                .when(pending, |el| el.opacity(PENDING_OPACITY))
+                                // slopty: lit faintly in the theme's hues, under the words (Amp).
+                                .relative()
+                                .children(crate::lit::light_over(px(Theme::BUBBLE_RADIUS), &theme))
                                 .child(self.render_user_body(
                                     &row.id, ix, text, mentions, &theme, window, cx,
                                 ));
-                    // slopty: a send that went through fades up to full, not in one frame (#15).
+                    // slopty: a send the agent took loses its tint, not in one frame (#15).
                     let bubble = if self.bubble_sent(&row.id, pending, cx) {
                         bubble
                             .with_animation(
                                 SharedString::from(format!("sent-{}", row.id)),
-                                motion::FADE_QUICK.animation(),
-                                |bubble, t| bubble.opacity(motion::lerp(PENDING_OPACITY, 1.0, t)),
+                                QUEUED_SETTLE.animation(),
+                                {
+                                    let accent = theme.accent;
+                                    move |bubble, t| {
+                                        bubble.bg(queued_fill(
+                                            crate::theme::user_bubble_bg(),
+                                            accent,
+                                            QUEUED_TINT * (1.0 - t),
+                                        ))
+                                    }
+                                },
                             )
                             .into_any_element()
                     } else {
@@ -8513,7 +8892,6 @@ impl Transcript {
                     code,
                     run: self.run_ui(cx), // slopty: Run in terminal.
                     code_menu: Some(self.code_menu_ui(cx)),
-                    math: crate::settings::math_style(cx),
                     body: self.markdown_body(), // slopty: a card's run reads compact (#24).
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
@@ -8588,7 +8966,6 @@ impl Transcript {
                     code,
                     run: self.run_ui(cx), // slopty: Run in terminal.
                     code_menu: Some(self.code_menu_ui(cx)),
-                    math: crate::settings::math_style(cx),
                     body: self.markdown_body(), // slopty: a card's run reads compact (#24).
                 };
                 if seed_history && let Some(veil) = &veil {
@@ -8648,6 +9025,7 @@ impl Transcript {
                 summary,
                 worked_secs,
                 compact_shell,
+                done,
             } => self.render_tool_group(
                 &row.id,
                 tools,
@@ -8655,6 +9033,7 @@ impl Transcript {
                 *auto_open,
                 *worked_secs,
                 *compact_shell,
+                done.clone(),
                 &theme,
                 cx,
             ),
@@ -8670,7 +9049,8 @@ impl Transcript {
             RowKind::Visual { owner, path, title } => {
                 self.render_visual(&row.id, owner, path, title, cx)
             }
-            RowKind::ErrorChip { message } => error_chip(message.clone(), &theme),
+            // slopty: a title, one sentence, and its one way on (`extras::render_error_card`).
+            RowKind::ErrorChip { message } => self.render_error_card(&row, message, None, false, &theme, cx),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
             // slopty: Slopty's own rows.
             RowKind::ErrorCard { .. }
@@ -8680,7 +9060,9 @@ impl Transcript {
             | RowKind::PlanFold { .. }
             | RowKind::TurnChanges { .. } => self.render_extra_row(&row, &theme, cx),
             RowKind::TaskNote { task } => self.render_task_note(&row, task, &theme, cx),
-            RowKind::Notice { note } => self.render_notice(&row, note, &theme, cx),
+            RowKind::Notice { note } => {
+                self.render_notice(&row, note, done_trailing.take(), &theme, cx)
+            }
             RowKind::Page { owner, card } => self.render_page(&row, owner, card, window, cx),
         };
         // slopty: a plan's rows draw as one card.
@@ -8708,9 +9090,12 @@ impl Transcript {
             _ => inner,
         };
         // slopty: a reply opens at its first row, whatever it is, so its first calls are heard
-        // as its own (#10).
+        // as its own (#10); what no one said is no one's message (#8).
         let opens_entry = ix == 0 || self.rows[ix - 1].entry_id != row.entry_id;
-        let inner = if opens_entry && !matches!(row.kind, RowKind::User { .. }) {
+        let inner = if opens_entry
+            && !matches!(row.kind, RowKind::User { .. })
+            && !self.unsaid_entries.contains(&row.entry_id)
+        {
             message_article(&row.id, agent, inner)
         } else {
             inner
@@ -8755,10 +9140,8 @@ impl Transcript {
         };
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
-        let pressed = TOUCH.then(|| long_press_shows(row.entry_id.clone(), cx.weak_entity()));
         let outer = div()
             .id(row.id.clone())
-            .children(pressed)
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     let next = Some((row_id.clone(), entry_id.clone()));
@@ -8834,10 +9217,8 @@ impl Transcript {
         let open = fold.open.unwrap_or(false);
         let reduce_motion = motion::reduced_motion(cx);
         let now = cx.frame_time(); // slopty: the frame's moment
-        let animating = !reduce_motion
-            && fold
-                .toggled_at
-                .is_some_and(|at| now.saturating_duration_since(at) < TOOL_FOLD.total());
+        let contents = tool_fold(open, fold.toggled_at, now, reduce_motion);
+        let animating = contents.moving;
         if !animating {
             // Settled states render plain — open rows untouched, closed rows
             // empty until the settle sweep drops them from the row list.
@@ -8862,7 +9243,8 @@ impl Transcript {
             .w_full()
             .overflow_hidden()
             .h(px(clip))
-            .child(body)
+            // slopty: the rows fade in after the height opens, and out before it lands.
+            .child(div().w_full().opacity(contents.opacity).mt(px(contents.rise)).child(body))
             .child(
                 canvas(
                     |_, _, _| (),
@@ -8920,24 +9302,30 @@ impl Transcript {
         )
     }
 
-    /// slopty: the focus of the hover strip's control `key`, made on first use: the keyboard
-    /// reaches the control, and its focus coming or going draws the strip again (#9).
+    /// slopty: the focus of `entry`'s strip controls (Copy, Rewind), made on first use and kept
+    /// while its strip is drawn: the keyboard reaches them, and their focus coming or going
+    /// draws the strip again (#9).
     fn strip_focus(
         &mut self,
-        key: String,
+        entry: &SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::FocusHandle {
-        if let Some((handle, _)) = self.strip_focus.get(key.as_str()) {
-            return handle.clone();
+    ) -> (gpui::FocusHandle, gpui::FocusHandle) {
+        self.strip_drawn.insert(entry.clone());
+        if let Some(focus) = self.strip_focus.get(entry) {
+            return (focus.copy.clone(), focus.rewind.clone());
         }
-        let handle = cx.focus_handle().tab_stop(true);
+        let copy = cx.focus_handle().tab_stop(true);
+        let rewind = cx.focus_handle().tab_stop(true);
         let redraw = [
-            cx.on_focus(&handle, window, |_, _, cx| cx.notify()),
-            cx.on_blur(&handle, window, |_, _, cx| cx.notify()),
+            cx.on_focus(&copy, window, |_, _, cx| cx.notify()),
+            cx.on_blur(&copy, window, |_, _, cx| cx.notify()),
+            cx.on_focus(&rewind, window, |_, _, cx| cx.notify()),
+            cx.on_blur(&rewind, window, |_, _, cx| cx.notify()),
         ];
-        self.strip_focus.insert(key.into(), (handle.clone(), redraw));
-        handle
+        let handles = (copy.clone(), rewind.clone());
+        self.strip_focus.insert(entry.clone(), StripFocus { copy, rewind, _redraw: redraw });
+        handles
     }
 
     fn copy_message(&mut self, entry_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
@@ -8996,7 +9384,6 @@ impl Transcript {
         let runtime = self.code_fences.entry(key.clone()).or_default();
         render::code_ui_for(
             key,
-            crate::settings::current(cx).code_fences_fit_content,
             runtime,
             cx.weak_entity(),
             |transcript| &mut transcript.code_fences,
@@ -9087,10 +9474,11 @@ impl Transcript {
         &mut self,
         row_id: &SharedString,
         tools: &Arc<Vec<ToolItem>>,
-        summary: &SharedString,
+        summary: &Sentence,
         auto_open: bool,
         worked_secs: Option<i64>,
         compact_shell: bool,
+        done: Option<SharedString>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -9104,19 +9492,7 @@ impl Transcript {
         }) {
             self.tick_soon(cx);
         }
-        // Agent/spawn chips never fold: they are their own row, always open,
-        // no "Called N tools" header — a running subagent stays visible.
-        // Compact mode is the exception: EVERYTHING sits under the one work
-        // accordion, spawn chips included.
-        let collapses = self.compact_mode || tool_group_collapses(tools);
-        // slopty: a group of one call (or one thought) shows the call itself ("Read main.rs"),
-        // not a summary to open to learn it ("Read 1 file ›"); compact mode keeps its one fold
-        // (#2).
-        let solo = !self.compact_mode
-            && !compact_shell
-            && collapses
-            && tools.len() == 1
-            && !is_spawn_link(&tools[0]);
+        let (collapses, solo) = group_shape(tools, compact_shell);
         let arrival_pending = !cx.reduce_motion()
             && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
                 reveal.starts.iter().flatten().any(|start| {
@@ -9128,7 +9504,7 @@ impl Transcript {
             });
         // Compact mode never auto-opens — not for the streaming tail, and not
         // to show chips arriving mid-reveal. Collapsed-by-default is the mode.
-        let effective_auto_open = auto_open || (arrival_pending && !self.compact_mode);
+        let effective_auto_open = auto_open || (arrival_pending && !compact_shell);
         let open = solo || !collapses || fold.open.unwrap_or(effective_auto_open);
         // Compact shells only change `open` through `toggle_fold`, which
         // already seeds `from` with the body's measured height — the
@@ -9152,11 +9528,11 @@ impl Transcript {
         // pulsing until the turn's work settles. Compute this before the
         // collapsed-body skip, which may empty `tools`.
         let active =
-            collapses && (auto_open || (self.compact_mode && tools.iter().any(|t| !t.resolved)));
-        if self.compact_mode && active {
+            collapses && (auto_open || (compact_shell && tools.iter().any(|t| !t.resolved)));
+        if compact_shell && active {
             self.compact_live_entries.insert(row_id.clone());
         }
-        let worked_secs = worked_secs.filter(|_| self.compact_mode);
+        let worked_secs = worked_secs.filter(|_| compact_shell);
         if worked_secs.is_some() && self.compact_live_entries.remove(row_id) {
             self.compact_worked_fade_at
                 .insert(row_id.clone(), crate::clock::now(cx));
@@ -9164,29 +9540,20 @@ impl Transcript {
         let animate_worked = self
             .compact_worked_fade_at
             .get(row_id)
-            .is_some_and(|at| frame_now.saturating_duration_since(*at) < motion::FADE_IN.total());
-        let worked_fade_t = match worked_secs {
-            Some(_) if animate_worked && !cx.reduce_motion() => self
-                .compact_worked_fade_at
-                .get(row_id)
-                .map(|at| {
-                    motion::FADE_IN.progress(
-                        frame_now.saturating_duration_since(*at).as_secs_f32() / motion::FADE_IN.total().as_secs_f32(),
-                    )
-                })
-                .unwrap_or(1.0),
-            Some(_) => 1.0,
-            None => 0.0,
+            .is_some_and(|at| frame_now.saturating_duration_since(*at) < PHASE_IN.total());
+        // slopty: how far into the swap from the live summary to "Worked for", in ms; a settled
+        // turn seen later is past it.
+        let worked_fade_ms = match self.compact_worked_fade_at.get(row_id) {
+            Some(at) if animate_worked && !cx.reduce_motion() => {
+                frame_now.saturating_duration_since(*at).as_secs_f32() * 1_000.0
+            }
+            _ => f32::INFINITY,
         };
 
         // A settled collapsed group has no visible body. Do not construct or
         // format thousands of hidden chips merely to clip them to zero height.
         // Keep the body during closing so the existing fold animation survives.
-        let body_visible = open
-            || (!cx.reduce_motion()
-                && fold
-                    .toggled_at
-                    .is_some_and(|at| frame_now.saturating_duration_since(at) < TOOL_FOLD.total()));
+        let body_visible = open || tool_fold(open, fold.toggled_at, frame_now, cx.reduce_motion()).moving;
         let tools = if body_visible {
             tools.as_slice()
         } else {
@@ -9204,7 +9571,7 @@ impl Transcript {
                 // Spawn chips never expand — the subagent doc is the record
                 // of what the tool did, and an inline body would only repeat
                 // it. The whole chip is the "open that doc" click instead.
-                if is_spawn_link(tool) {
+                if is_spawn_link(tool) || quiet_read(tool) {
                     return None;
                 }
                 // Among fetched blobs, the most recently REQUESTED one wins —
@@ -9226,7 +9593,7 @@ impl Transcript {
         // always answers "what exactly was this call?", output or not.
         let invocations: Vec<Option<Arc<ToolDetail>>> = tools
             .iter()
-            .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool)))
+            .map(|tool| tool.invocation.clone().filter(|_| !is_spawn_link(tool) && !quiet_read(tool)))
             .collect();
         // Fetch affordance under each open detail whose full payload is still
         // sidecar-only: `(ref, label)`. Diff offered first (the richer
@@ -9307,10 +9674,10 @@ impl Transcript {
             .map(|(((detail, invocation), fold), tool)| {
                 // A STREAMING thought chip defaults open (the live thinking
                 // is the point); settled chips default closed. A user toggle
-                // overrides either way — and compact mode overrides all of
-                // it: nothing inside the fold opens itself.
+                // overrides either way; a turn's divider opens only to
+                // the person.
                 let default_open =
-                    tool.kind == ToolItemKind::Thought && !tool.resolved && !self.compact_mode;
+                    tool.kind == ToolItemKind::Thought && !tool.resolved && !compact_shell;
                 (detail.is_some() || invocation.is_some() || chip_has_images(tool))
                     && fold.open.unwrap_or(default_open)
             })
@@ -9362,16 +9729,14 @@ impl Transcript {
                     };
                     if !cx.reduce_motion() {
                         if let Some(at) = fold.toggled_at {
-                            let t = TOOL_FOLD
-                                .curve
-                                .eval(frame_now.saturating_duration_since(at).as_secs_f32() / TOOL_FOLD.total().as_secs_f32());
-                            if t < 1.0 {
+                            let fold_now = tool_fold(*open, Some(at), frame_now, false);
+                            if fold_now.moving {
                                 motion_active = true;
                             }
                             return motion::lerp(
                                 fold.from + base_row_height - CHIP_CARD_HEIGHT,
                                 target,
-                                t,
+                                fold_now.share,
                             );
                         }
                     }
@@ -9428,11 +9793,8 @@ impl Transcript {
         let running_call = auto_open && tools.iter().any(sweeps);
         let shimmer_phase = if (active || running_call) && !reduce_motion {
             motion::pulse_lease(cx.entity_id(), cx);
-            let ticked = motion::pulse_moment(cx.entity_id(), cx); // slopty: the pulse's tick, which drew it
-            self.tool_group_reveals
-                .get(row_id)
-                .and_then(|reveal| reveal.shimmer_started_at)
-                .map(|start| tool_title_shimmer_phase(start, ticked))
+            // slopty: the pulse's tick, which drew it, on the shimmer's one clock.
+            Some(shimmer_ms(motion::pulse_moment(cx.entity_id(), cx)))
         } else {
             None
         };
@@ -9448,19 +9810,84 @@ impl Transcript {
         // 3 times · Ran 1 command"), like the working indicator's word.
         let rolled_summary = crate::roll_text::rolling(
             format!("tool-group-title-{row_id}"),
-            summary.clone(),
+            summary.text.clone(),
             reduce_motion,
             crate::clock::now(cx),
         );
         let toggle_id = row_id.clone();
+        // slopty: a turn's work folds behind one centred divider (Amp's settled turn): "Worked for
+        // 1m 12s ›" between two hairlines, when it ended in its tooltip.
+        if compact_shell {
+            let view = cx.entity_id();
+            // The sibling body rows fold as one ([`tool_fold`]) — keep frames (and
+            // the chevron's disclosure rotation) pumping until it lands.
+            if tool_fold(open, fold.toggled_at, frame_now, reduce_motion).moving {
+                motion_active = true;
+            }
+            // slopty: a screen reader hears what the work was as well as how long it took,
+            // which the eye finds by opening it: "Worked for 6s, ran 2 commands".
+            let label = match worked_secs {
+                Some(secs) => SharedString::from(spoken_divider(&worked_for_label(secs), &summary.text)),
+                None => summary.text.clone(),
+            };
+            let title = match worked_secs {
+                Some(secs) => divider_title(
+                    summary,
+                    SharedString::from(worked_for_label(secs)),
+                    worked_fade_ms,
+                    shimmer_phase,
+                    theme,
+                ),
+                None => rolled_summary
+                    .unwrap_or_else(|| tool_group_title(summary.text.clone(), &summary.marks, shimmer_phase, theme)),
+            };
+            let divider = turn_divider(
+                row_id,
+                label,
+                title,
+                open,
+                disclosure_progress,
+                done,
+                theme,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open, cx);
+                    cx.notify();
+                }),
+            );
+            return div()
+                .relative()
+                .flex()
+                .flex_col()
+                .font_family(theme.font_sans_fixed.clone())
+                .child(divider)
+                .when(motion_active || animate_worked, |group| {
+                    group.child(
+                        canvas(
+                            |_, _, _| (),
+                            move |_, _, window, _| {
+                                window.on_next_frame(move |_, cx| cx.notify(view));
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                })
+                .into_any_element();
+        }
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
         // slopty: a button the keyboard reaches, Enter or Space opening it (#9).
+        // slopty: its chevron arrives under the pointer and stays while the group is open (Amp);
+        // on a touch screen it is there at rest.
+        let header_hover = format!("{row_id}-hdr-hover");
+        let chevron_shown = motion::revealed_by_hover(&header_hover).max(disclosure_progress);
         let header = crate::surface_chrome::key_stop(div().id(SharedString::from(format!("{row_id}-hdr"))), theme)
+            .hover_fade(header_hover)
             .rounded(px(4.0))
             // slopty: the group reads as a button named by its summary, open or not.
             .role(gpui::Role::Button)
-            .aria_label(summary.clone())
+            .aria_label(summary.text.clone())
             .aria_expanded(open)
             .relative()
             .flex()
@@ -9477,7 +9904,7 @@ impl Transcript {
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
             // chips (destructive tint, slopty tool-chip.tsx) and in the
-            // summary's "· N failed" count.
+            // clause's "(N failed)".
             .text_color(theme.text_muted)
             .hover(|s| s.text_color(theme.text))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -9501,7 +9928,8 @@ impl Transcript {
                             .with_transformation(gpui::Transformation::rotate(gpui::radians(
                                 -std::f32::consts::FRAC_PI_2 * (1.0 - disclosure_progress),
                             )))
-                            .text_color(theme.text_muted),
+                            .text_color(theme.text_muted)
+                            .opacity(chevron_shown),
                     ),
             )
             .child(
@@ -9511,51 +9939,10 @@ impl Transcript {
                     .flex()
                     .items_center()
                     .overflow_hidden()
-                    .child(match worked_secs {
-                        Some(secs) => compact_work_title(
-                            summary.clone(),
-                            SharedString::from(worked_for_label(secs)),
-                            worked_fade_t,
-                            shimmer_phase,
-                            theme,
-                        ),
-                        None => rolled_summary.unwrap_or_else(|| {
-                            tool_group_title(summary.clone(), shimmer_phase, theme)
-                        }),
-                    }),
+                    .child(rolled_summary.unwrap_or_else(|| {
+                        tool_group_title(summary.text.clone(), &summary.marks, shimmer_phase, theme)
+                    })),
             );
-
-        if compact_shell {
-            let view = cx.entity_id();
-            // The sibling body rows tween under TOOL_FOLD — keep frames (and
-            // the chevron's disclosure rotation) pumping until it lands.
-            if !reduce_motion
-                && fold
-                    .toggled_at
-                    .is_some_and(|at| frame_now.saturating_duration_since(at) < TOOL_FOLD.total())
-            {
-                motion_active = true;
-            }
-            return div()
-                .relative()
-                .flex()
-                .flex_col()
-                .font_family(theme.font_sans_fixed.clone())
-                .child(header)
-                .when(motion_active || animate_worked, |group| {
-                    group.child(
-                        canvas(
-                            |_, _, _| (),
-                            move |_, _, window, _| {
-                                window.on_next_frame(move |_, cx| cx.notify(view));
-                            },
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                })
-                .into_any_element();
-        }
 
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
@@ -9640,6 +10027,7 @@ impl Transcript {
                             tool,
                             Some(open),
                         )
+                            .hover_fade(format!("{key}-hover"))
                             .rounded(px(4.0))
                             .h(px(if collapses {
                                 CHIP_CARD_HEIGHT
@@ -9664,6 +10052,7 @@ impl Transcript {
                             .child(chip_header(
                                 tool,
                                 open,
+                                motion::revealed_by_hover(&format!("{key}-hover")),
                                 file_opener.as_ref(),
                                 Some(&chip_facts),
                                 row_shimmer,
@@ -9676,12 +10065,16 @@ impl Transcript {
                 // Invocation first (what was asked), then output/diff (what
                 // came back), separated by a small gap.
                 if open || animating {
+                    // slopty: the details fade in after the row opens, and out before it shuts.
+                    let contents = tool_fold(open, dfold.toggled_at.filter(|_| dfold.epoch > 0), frame_now, cx.reduce_motion());
                     let mut panel = div()
                         .flex_none()
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .overflow_hidden();
+                        .overflow_hidden()
+                        .when(contents.opacity < 1.0, |panel| panel.opacity(contents.opacity))
+                        .when(contents.rise > 0.0, |panel| panel.mt(px(contents.rise)));
                     if let Some(invocation) = invocation.as_deref() {
                         panel = panel
                             .child(
@@ -9799,19 +10192,12 @@ impl Transcript {
         // Evaluate the group on the same clock as its disclosure. This also
         // gives completion a gentle close after the last arrival finishes,
         // without restarting an element animation when the list remounts it.
-        let body_height = if !reduce_motion {
-            fold.toggled_at
-                .map(|at| {
-                    let t = TOOL_FOLD.curve.eval(
-                        now.saturating_duration_since(at).as_secs_f32()
-                            / TOOL_FOLD.total().as_secs_f32(),
-                    );
-                    if t < 1.0 {
-                        motion_active = true;
-                    }
-                    motion::lerp(fold.from, target, t)
-                })
-                .unwrap_or(target)
+        let group_fold = tool_fold(open, fold.toggled_at, now, reduce_motion);
+        if group_fold.moving {
+            motion_active = true;
+        }
+        let body_height = if fold.toggled_at.is_some() && !reduce_motion {
+            motion::lerp(fold.from, target, group_fold.share)
         } else {
             target
         };
@@ -9824,7 +10210,13 @@ impl Transcript {
             div()
                 .overflow_hidden()
                 .h(px(body_height))
-                .child(chips)
+                // slopty: the calls fade in after the height opens, and out before it lands.
+                .child(
+                    div()
+                        .when(group_fold.opacity < 1.0, |chips| chips.opacity(group_fold.opacity))
+                        .when(group_fold.rise > 0.0, |chips| chips.mt(px(group_fold.rise)))
+                        .child(chips),
+                )
                 .into_any_element()
         };
 
@@ -10296,25 +10688,6 @@ fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// The transcript ErrorChip — the shared [`notice_chip`] in its tile
-/// treatment (a port of slopty chat-view.tsx `ErrorChip`, restacked for long
-/// payloads: header row with the red-washed tile and the medium "Error"
-/// label, then the human message below). Unlike the web port, the message
-/// WRAPS instead of truncating: startup-crash errors carry the agent's exit
-/// status and stderr, and a one-line ellipsis was exactly what made
-/// aislopware/slopty#95 undiagnosable from the screenshot.
-fn error_chip(message: SharedString, theme: &Theme) -> AnyElement {
-    div()
-        .py(px(4.0))
-        .w_full()
-        .child(
-            notice_chip(theme, false, "Error", message, Tile)
-                .overflow_hidden()
-                .w_full(),
-        )
-        .into_any_element()
-}
-
 /// A quiet fork seam. The source gets its own constrained line so long
 /// titles cannot widen a narrow side-chat pane. No message metadata lane.
 fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
@@ -10374,8 +10747,10 @@ fn input_chip(
     resolved: bool,
     theme: &Theme,
 ) -> AnyElement {
+    // slopty: one rule with the card's own marks: nothing an ask shows is locked; an approval
+    // asks for the person's leave (a key), a confirmation informs (#19).
     let icon = match label.as_ref() {
-        "Approval" => crate::icons::LOCK,
+        "Approval" => crate::icons::KEY_MINIMALISTIC,
         "Plan" => crate::icons::CHECKLIST,
         "Form" => crate::icons::PEN,
         "Confirm" => crate::icons::INFO_CIRCLE,
@@ -10464,8 +10839,15 @@ fn input_chip_words(questions: &[slopty_view_proto::UserInputQuestion]) -> (Shar
     let header = first.header.trim();
     let asked = first.question.lines().map(str::trim).find(|line| !line.is_empty());
     // slopty: an approval shows what it would run or change ("touch refused.txt"), not its
-    // generic header ("Bash command"), which says only the tool (#8).
+    // generic header ("Bash command"), which says only the tool (#8): its command where it
+    // runs one, which its words then only describe.
     let approval = label == "Approval";
+    let asked = first
+        .command
+        .as_deref()
+        .and_then(|command| command.lines().map(str::trim).find(|line| !line.is_empty()))
+        .filter(|_| approval)
+        .or(asked);
     let value = if label == QUESTION_CHIP {
         if header.is_empty() { QUESTION_CHIP } else { header }
     } else if approval && let Some(asked) = asked {
@@ -10767,8 +11149,9 @@ fn note_chip_detail(tool: &ToolItem) -> String {
 
 /// The trailing tile on a chip header, when it has one.
 enum ChipTrail {
-    /// Expand/collapse chevron — flipped while the detail body is open.
-    Chevron { open: bool },
+    /// Expand/collapse chevron — flipped while the detail body is open. slopty: on an activity
+    /// row it shows as much as `shown`, its row's hover (Amp).
+    Chevron { open: bool, shown: f32 },
     // slopty: no open-arrow; a subagent's card has its own (`transcript/subagents.rs`).
 }
 
@@ -10952,7 +11335,7 @@ fn chip_header_row(
                     label.font_weight(gpui::FontWeight::MEDIUM)
                 })
                 .text_color(tint)
-                .child(tool_group_title(SharedString::from(label), shimmer, theme))
+                .child(tool_group_title(SharedString::from(label), &[], shimmer, theme))
                 .map(|label| {
                     if hover_text {
                         label
@@ -11107,15 +11490,13 @@ fn chip_header_row(
             )))
         })
         .when_some(trail, |row, trail| {
+            let ChipTrail::Chevron { shown, .. } = trail;
             // Trailing tile matching the group header's: a chevron for the
             // output/diff accordion, or the open-arrow for spawn chips.
             let tile = div()
                 .size(px(18.0))
                 .flex_none()
-                .when(activity, |tile| {
-                    tile.opacity(0.0)
-                        .group_hover("tool-header", |style| style.opacity(1.0))
-                })
+                .when(activity, |tile| tile.opacity(shown))
                 .when(!activity, |tile| {
                     tile.rounded(px(5.0)).bg(crate::theme::ink(0.06))
                 })
@@ -11124,7 +11505,7 @@ fn chip_header_row(
                 .justify_center()
                 .text_color(theme.text_muted.opacity(0.8));
             row.child(match trail {
-                ChipTrail::Chevron { open } => tile.child(
+                ChipTrail::Chevron { open, .. } => tile.child(
                     crate::icons::icon(if open {
                         crate::icons::ALT_ARROW_DOWN
                     } else {
@@ -11144,6 +11525,7 @@ fn chip_header_row(
 fn chip_header(
     tool: &ToolItem,
     open: bool,
+    shown: f32,
     file_opener: Option<&ToolFileOpener>,
     facts: Option<&work::ChipFacts>,
     shimmer: Option<f32>,
@@ -11153,7 +11535,7 @@ fn chip_header(
 ) -> gpui::Div {
     chip_header_row(
         tool,
-        Some(ChipTrail::Chevron { open }),
+        Some(ChipTrail::Chevron { open, shown }),
         file_opener,
         facts,
         shimmer,
@@ -11241,33 +11623,45 @@ fn reveal_tool_row(row: AnyElement, height: f32, progress: f32) -> AnyElement {
 }
 
 /// slopty: a touch screen, where nothing hovers.
-const TOUCH: bool = cfg!(target_os = "ios");
-
-/// slopty: on touch, a long press on a row shows its entry's strip (its time, Copy, Rewind),
-/// which a pointer's hover shows elsewhere.
-fn long_press_shows(entry: SharedString, view: gpui::WeakEntity<Transcript>) -> AnyElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let (entry, view) = (entry.clone(), view.clone());
-            window.on_mouse_event(move |event: &gpui::LongPressEvent, phase, _, cx| {
-                if phase.bubble()
-                    && event.phase == gpui::TouchPhase::Started
-                    && bounds.contains(&event.start_position)
-                {
-                    view.update(cx, |this, cx| {
-                        this.pressed_entry = Some(entry.clone());
-                        cx.notify();
-                    })
-                    .ok();
-                }
-            });
-        },
-    )
-    .absolute()
-    .inset_0()
-    .into_any_element()
+/// slopty: how far row `key`'s message strip has faded toward `shown` at `now`, and whether it
+/// still moves, remembered in `fades`. `still` (reduced motion, or a touch screen, which shows it
+/// at rest) snaps it.
+fn strip_fade(
+    fades: &mut HashMap<SharedString, (bool, f32, Instant)>,
+    key: &SharedString,
+    shown: bool,
+    now: Instant,
+    still: bool,
+) -> (f32, bool) {
+    let target = |on: bool| if on { 1.0 } else { 0.0 };
+    if still {
+        fades.remove(key);
+        return (target(shown), false);
+    }
+    let at = |(on, from, since): (bool, f32, Instant)| {
+        let total = STRIP_FADE.total().mul_f32(motion::speed_scale()).as_secs_f32();
+        let progress = STRIP_FADE.progress(now.saturating_duration_since(since).as_secs_f32() / total.max(f32::EPSILON));
+        (motion::lerp(from, target(on), progress), progress < 1.0)
+    };
+    let fade = match fades.get(key).copied() {
+        None if !shown => return (0.0, false),
+        None => (true, 0.0, now),
+        Some(fade) if fade.0 != shown => (shown, at(fade).0, now),
+        Some(fade) => fade,
+    };
+    let (t, moving) = at(fade);
+    if !shown && !moving {
+        fades.remove(key);
+    } else {
+        fades.insert(key.clone(), fade);
+    }
+    (t, moving)
 }
+
+const TOUCH: bool = cfg!(target_os = "ios");
+/// slopty: a message strip's fade as the pointer comes and goes (Amp's 200 ms, on the
+/// Tailwind ease the hover washes ride).
+const STRIP_FADE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_TAILWIND);
 
 /// slopty: whether the person turned the call down (their own Deny): an end, not a failure.
 fn denied(tool: &ToolItem) -> bool {
@@ -11573,6 +11967,7 @@ impl Render for Transcript {
         self.page_viewport = self.list.viewport_bounds();
         // slopty: a subagent's card sizes its child by the window, and drills in on a phone's.
         self.subagents.window = window.viewport_size();
+        self.mark_jump();
         self.watch_rewind(cx);
         self.md_images.borrow_mut().folder = self.image_host(cx).1;
         if record_view_frame("transcript") {
@@ -11590,48 +11985,13 @@ impl Render for Transcript {
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
-        let compact_mode = crate::settings::transcript_compact_mode(cx);
-        if self.compact_mode != compact_mode {
-            self.compact_mode = compact_mode;
-            // The row SPLIT differs by mode (one work fold vs per-segment
-            // groups + narration rows) — the fingerprint above already keys
-            // on it, so a fresh sync rebuilds everything.
-            self.last_source = None;
-            self.sync(cx);
-        }
-        let code_fences_generation = crate::settings::code_fences_generation(cx);
-        if self.code_fences_generation != code_fences_generation {
-            self.code_fences_generation = code_fences_generation;
-            // Horizontal positions are ephemeral. Reset every block owned by
-            // this Transcript even when the toggle originated in another one.
-            for runtime in self.code_fences.values() {
-                runtime.scroll.set_offset(Point::default());
-            }
-            // Fit changes every code row from analytic to measured height (or
-            // back), including virtual rows outside the current viewport.
-            self.list.remeasure();
-            if self.pinned {
-                self.wake_spring(crate::clock::now(cx));
-            }
-            if self.own_turn.is_some() {
-                self.own_turn_kick = true;
-            }
-        }
-        let math_generation = crate::settings::math_generation(cx);
-        if self.math_generation != math_generation {
-            self.math_generation = math_generation;
-            // Formulas change size with their face, and display math becomes
-            // a code block (or back), so every row with math changes height.
-            // The render cache drops its laid-out text on its own.
-            self.list.remeasure();
-            if self.pinned {
-                self.wake_spring(crate::clock::now(cx));
-            }
-            if self.own_turn.is_some() {
-                self.own_turn_kick = true;
-            }
-        }
-        let content_width = crate::settings::transcript_width(cx);
+        // slopty: a strip no longer drawn lets its focus go, unless it holds the keyboard (#13).
+        let drawn = std::mem::take(&mut self.strip_drawn);
+        self.strip_focus.retain(|entry, focus| {
+            drawn.contains(entry) || focus.copy.is_focused(window) || focus.rewind.is_focused(window)
+        });
+        let content_width =
+            crate::settings::transcript_width(f32::from(window.viewport_size().width), cx);
         if self.content_width != content_width {
             self.content_width = content_width;
             // The outer list viewport may not resize when only max-width
@@ -11799,21 +12159,17 @@ impl Render for Transcript {
             // The primary transcript's fade lives on the SHELL's outlet
             // wrapper (it spans the titlebar/composer chrome); an override
             // instance owns its own — top edge only (nothing overlays the
-            // pane's bottom), gated on real overflow so a short top-anchored
-            // transcript shows no fade. Gated here rather than at paint via
-            // a ScrollHandle (the list isn't one); scrolls re-render this
-            // entity, so the flag can't go stale.
-            let scrolled_under_top = {
-                let max = f32::from(self.list.max_offset_for_scrollbar().y);
-                max - self.distance_from_bottom() > 1.0
-            };
-            crate::edge_fade::edge_faded(
-                Theme::TRANSCRIPT_FADE_BAND,
-                scrolled_under_top,
-                false,
-                list_el,
-            )
-            .into_any_element()
+            // pane's bottom). slopty: its ramp is as tall as what lies above, read at paint
+            // (HextaUI's scroll area; design-inspiration item 4), so a short top-anchored
+            // transcript shows none and a scroll of 4 px dims 4 px, never a whole band at once.
+            let scroll = self.list.clone();
+            crate::edge_fade::edge_faded(Theme::TRANSCRIPT_FADE_BAND, true, false, list_el)
+                .fade_scroll_y_with(move |_| {
+                    let max = f32::from(scroll.max_offset_for_scrollbar().y);
+                    let above = (-f32::from(scroll.scroll_px_offset_for_scrollbar().y)).clamp(0.0, max.max(0.0));
+                    (above, (max - above).max(0.0))
+                })
+                .into_any_element()
         } else {
             list_el.into_any_element()
         };
@@ -11993,6 +12349,7 @@ mod tests {
                 *auto_open,
                 None,
                 false,
+                None,
                 &Theme::dark(),
                 cx,
             );
@@ -12029,7 +12386,7 @@ mod tests {
                 transcript.update(cx, |this, _| {
                     // Navigate away during the previous close animation.
                     this.folds.insert(
-                        "tools#g0".into(),
+                        "tools#work".into(),
                         FoldState {
                             open: Some(false),
                             from: 120.0,
@@ -12050,6 +12407,45 @@ mod tests {
                 transcript.update(cx, |this, cx| this.sync(cx));
                 replay_tool_group(&state, &transcript, "chat-a", cx);
                 assert_replayed_group_is_closed(&transcript, cx);
+            }
+        });
+    }
+
+    /// slopty: a turn's work the person opened is open again when they come back to its chat,
+    /// a subagent drilled into and left, so the saved viewport lands on rows still drawn; one they
+    /// never touched comes back shut, and no strip comes back lit by the pointer that left.
+    #[gpui::test]
+    fn a_chat_come_back_to_keeps_the_work_its_person_opened(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            let work: SharedString = "tools#work".into();
+            let folded_rows =
+                |transcript: &Entity<Transcript>, cx: &mut gpui::App| {
+                    transcript.read(cx).rows.iter().filter(|row| row.compact_fold.is_some()).count()
+                };
+            assert_eq!(folded_rows(&transcript, cx), 0, "the work starts shut");
+            transcript.update(cx, |this, cx| this.toggle_fold(work.clone(), 0.0, false, cx));
+            assert!(folded_rows(&transcript, cx) > 0, "a click opens the work");
+
+            for away in ["chat-b", "chat-c"] {
+                // The pointer on the reply as it leaves: the row unmounts with no leave.
+                transcript.update(cx, |this, _| {
+                    this.hovered_entry = Some((work.clone(), "tools".into()));
+                });
+                state.update(cx, |state, cx| state.select_chat(Some(away.into()), cx));
+                transcript.update(cx, |this, cx| this.sync(cx));
+                replay_tool_group(&state, &transcript, away, cx);
+                assert_eq!(folded_rows(&transcript, cx), 0, "{away}'s own work stays shut");
+                replay_tool_group(&state, &transcript, "chat-a", cx);
+                assert_eq!(
+                    transcript.read(cx).folds.get(&work).and_then(|fold| fold.open),
+                    Some(true),
+                    "back from {away}, the work is open as it was left",
+                );
+                assert!(folded_rows(&transcript, cx) > 0, "back from {away}, its rows are drawn");
+                assert!(
+                    transcript.read(cx).hovered_entry.is_none(),
+                    "back from {away}, no strip is lit by a pointer that left with the chat",
+                );
             }
         });
     }
@@ -12117,7 +12513,7 @@ mod tests {
                 Some(slopty_view_doc::TranscriptBaseline::capture(&cached)),
                 cx,
             );
-            let row_id: SharedString = "tools#g0".into();
+            let row_id: SharedString = "tools#work".into();
             {
                 let reveal = &transcript.read(cx).tool_group_reveals[&row_id];
                 assert_eq!(reveal.starts.len(), 1);
@@ -12340,20 +12736,21 @@ mod tests {
             };
             apply(&preview, true, cx);
             assert_settled(1, cx);
-            // Prepending history moves the tail tool from group 0 to group 1.
-            // Its new row identity must not turn it into a live entrance.
+            // Prepending history puts the older call and the narration after it ahead of the
+            // tail tool in the turn's one group: three items. Its new place must not turn it
+            // into a live entrance.
             apply(&full, false, cx);
-            assert_settled(2, cx);
+            assert_settled(3, cx);
             for _ in 0..3 {
                 state.update(cx, |state, cx| state.select_chat(Some("away".into()), cx));
                 transcript.update(cx, |this, cx| this.sync(cx));
                 state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
                 transcript.update(cx, |this, cx| this.sync(cx));
-                assert_settled(2, cx);
+                assert_settled(3, cx);
                 apply(&preview, true, cx); // ignored because the cache is complete
-                assert_settled(2, cx);
+                assert_settled(3, cx);
                 apply(&full, false, cx);
-                assert_settled(2, cx);
+                assert_settled(3, cx);
             }
             let mut live = full.clone();
             live[0].parts.push(tool_part("new-live-tool", "git status"));
@@ -12373,13 +12770,13 @@ mod tests {
             });
             transcript.update(cx, |this, cx| this.sync(cx));
             let this = transcript.read(cx);
-            let tail = &this.tool_group_reveals[&SharedString::from("turn#g1")];
-            assert!(tail.header_started_at.is_none());
+            let work = &this.tool_group_reveals[&SharedString::from("turn#work")];
+            assert!(work.header_started_at.is_none());
             assert!(
-                tail.starts[0].is_none(),
-                "existing tool must remain settled"
+                work.starts[..3].iter().all(Option::is_none),
+                "existing work must remain settled"
             );
-            assert!(tail.starts[1].is_some(), "new live tool must still animate");
+            assert!(work.starts[3].is_some(), "new live tool must still animate");
         });
     }
 
@@ -12428,14 +12825,14 @@ mod tests {
             });
             transcript.update(cx, |this, cx| {
                 this.sync(cx);
-                let reveal = &this.tool_group_reveals[&SharedString::from("tools#g0")];
+                let reveal = &this.tool_group_reveals[&SharedString::from("tools#work")];
                 assert!(reveal.header_started_at.is_none());
                 assert!(reveal.starts[..2].iter().all(Option::is_none));
                 assert!(
                     reveal.starts[2].is_some(),
                     "live tail was swallowed by the replay"
                 );
-                let new_group = &this.tool_group_reveals[&SharedString::from("new-live-group#g0")];
+                let new_group = &this.tool_group_reveals[&SharedString::from("new-live-group#work")];
                 assert!(new_group.header_started_at.is_some());
                 assert!(new_group.starts[0].is_some());
             });
@@ -12473,7 +12870,7 @@ mod tests {
                 vec![tool_part("live-a", "pwd"), tool_part("live-b", "pwd")],
             )];
             apply(&entries, None, cx);
-            let row: SharedString = "mixed#g0".into();
+            let row: SharedString = "mixed#work".into();
             let starts = transcript.read(cx).tool_group_reveals[&row].starts.clone();
             assert!(starts.iter().all(Option::is_some));
             let header = transcript.read(cx).tool_group_reveals[&row].header_started_at;
@@ -12544,7 +12941,7 @@ mod tests {
             });
             transcript.update(cx, |this, cx| {
                 this.sync(cx);
-                let reveal = &this.tool_group_reveals[&SharedString::from("first#g0")];
+                let reveal = &this.tool_group_reveals[&SharedString::from("first#work")];
                 assert!(reveal.header_started_at.is_some());
                 assert!(reveal.starts[0].is_some());
             });
@@ -12582,7 +12979,7 @@ mod tests {
                 this.sync(cx);
                 for ix in 0..5 {
                     let reveal =
-                        &this.tool_group_reveals[&SharedString::from(format!("live-{ix}#g0"))];
+                        &this.tool_group_reveals[&SharedString::from(format!("live-{ix}#work"))];
                     assert!(reveal.header_started_at.is_some());
                     assert!(reveal.starts[0].is_some());
                 }
@@ -12595,7 +12992,7 @@ mod tests {
         with_tool_group_navigation(cx, |state, transcript, cx| {
             transcript.update(cx, |this, _| {
                 this.folds.insert(
-                    "tools#g0".into(),
+                    "tools#work".into(),
                     FoldState {
                         open: Some(true),
                         ..Default::default()
@@ -12624,6 +13021,7 @@ mod tests {
                     *auto_open,
                     None,
                     false,
+                    None,
                     &Theme::dark(),
                     cx,
                 );
@@ -12656,7 +13054,7 @@ mod tests {
                 else {
                     panic!("expected tools")
                 };
-                assert!(*auto_open);
+                assert!(!*auto_open, "a turn's work never opens itself, live or settled");
                 let _ = this.render_tool_group(
                     &row.id,
                     tools,
@@ -12664,6 +13062,7 @@ mod tests {
                     *auto_open,
                     None,
                     false,
+                    None,
                     &Theme::dark(),
                     cx,
                 );
@@ -13368,7 +13767,7 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/generated-images.json")).unwrap();
         let entry = &entries[0];
         let original = entry_fingerprint(entry, false);
-        let row_version = rows_for_entry(entry, false, false, &mut parse)[0].version;
+        let row_version = work_rows(entry, false, &mut parse)[0].version;
         for field in 0..4 {
             let mut changed = entry.clone();
             if field == 0 {
@@ -13388,12 +13787,12 @@ mod tests {
             }
             assert_ne!(entry_fingerprint(&changed, false), original);
             assert_ne!(
-                rows_for_entry(&changed, false, false, &mut parse)[0].version,
+                work_rows(&changed, false, &mut parse)[0].version,
                 row_version
             );
         }
         for entry in entries {
-            let rows = rows_for_entry(&entry, false, false, &mut parse);
+            let rows = work_rows(&entry, false, &mut parse);
             assert_eq!(rows.len(), 1);
             assert!(rows[0].turn_start);
             assert_eq!(
@@ -13629,18 +14028,39 @@ mod tests {
         cx.run_until_parked();
         transcript.update(cx, |this, cx| this.scroll_to_row(30, cx));
         assert!(transcript.read_with(cx, |this, _| this.glide.is_some()), "a glide, not a jump");
-        // Each frame steps it, until it lands (a frame's clock that stands still lands it at
-        // its frames' bound).
-        for _ in 0..400 {
-            if transcript.read_with(cx, |this, _| this.glide.is_none()) {
-                break;
-            }
-            cx.update(|window, cx| {
-                window.refresh();
-                let _ = window.draw(cx);
-            });
-            transcript.update(cx, |this, cx| this.step_glide(cx));
+        // Frames 8 ms apart, as at 120 Hz: the frame that render asks for steps the glide, and
+        // nothing else does. It moves on most frames, never back, and lands on its clock, well
+        // inside its frames' bound.
+        cx.run_until_parked();
+        // The row at the viewport's top and how far into it: a landing above its row (a
+        // negative offset) is read as the row before's, which the last frames measured.
+        let at = |cx: &mut gpui::VisualTestContext| {
+            transcript.read_with(cx, |this, _| {
+                let top = this.list.logical_scroll_top();
+                let into = f32::from(top.offset_in_item);
+                if into < 0.0 && top.item_ix > 0 {
+                    let before = this.list.offset_for_item(top.item_ix) - this.list.offset_for_item(top.item_ix - 1);
+                    (top.item_ix - 1, f32::from(before) + into)
+                } else {
+                    (top.item_ix, into)
+                }
+            })
+        };
+        let mut seen = vec![at(cx)];
+        let mut frames = 0;
+        while transcript.read_with(cx, |this, _| this.glide.is_some()) {
+            assert!(frames < 120, "a 500 ms glide lands on its clock, not at its frames' bound");
+            cx.executor().advance_clock(std::time::Duration::from_millis(8));
+            assert!(cx.update(|window, cx| window.simulate_next_frame(cx)) > 0, "a frame asked for");
+            cx.run_until_parked();
+            seen.push(at(cx));
+            frames += 1;
         }
+        assert!(frames >= 40, "it took {frames} frames: a glide, not a jump");
+        // From the list's end up to row 30: every frame's step is up, or none.
+        assert!(seen.windows(2).all(|pair| pair[1] <= pair[0]), "it never moves back: {seen:?}");
+        let moved = seen.windows(2).filter(|pair| pair[1] != pair[0]).count();
+        assert!(moved * 2 > frames, "it moved on most frames, {moved} of {frames}");
         cx.run_until_parked();
         transcript.read_with(cx, |this, _| {
             assert!(this.glide.is_none(), "the glide landed");
@@ -13763,7 +14183,7 @@ mod tests {
             transcript.update(cx, |this, cx| {
                 this.rows = entries
                     .iter()
-                    .flat_map(|entry| rows_for_entry(entry, false, false, &mut parse))
+                    .flat_map(|entry| work_rows(entry, false, &mut parse))
                     .collect();
                 for (ix, expected) in ["loaded", "loading", "error"].into_iter().enumerate() {
                     let RowKind::GeneratedImage {
@@ -13813,7 +14233,7 @@ mod tests {
             mime_type: "image/png".into(),
         };
         let entry = assistant("a", MessageStatus::Complete, vec![image.clone()]);
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].turn_start);
         assert!(rows[0].copy_text.is_none());
@@ -13828,7 +14248,7 @@ mod tests {
                 text_part("t2", "after"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[1].kind, RowKind::ToolGroup { .. }));
         assert!(matches!(rows[2].kind, RowKind::GeneratedImage { .. }));
@@ -13850,7 +14270,7 @@ mod tests {
                 tool_part("t3", "pwd"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1, "one combined accordion row");
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
@@ -13882,11 +14302,25 @@ mod tests {
                 tool_part("t", "cargo test"),
             ],
         );
-        let rows = rows_for_entry(&timed, false, false, &mut parse);
+        let rows = work_rows(&timed, false, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
-        assert_eq!(tool_group_summary(tools), "Thought for 12s · Ran 1 command");
+        assert_eq!(tool_group_summary(tools), "Thought for 12s and ran 1 command");
+        // slopty: under a second, it thought briefly.
+        let brief = assistant(
+            "a2",
+            MessageStatus::Complete,
+            vec![
+                MessagePart::Reasoning { id: "r".into(), text: "planning".into(), thought_ms: Some(400) },
+                tool_part("t", "cargo test"),
+            ],
+        );
+        let rows = work_rows(&brief, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("expected a tool group");
+        };
+        assert_eq!(tool_group_summary(tools), "Thought briefly and ran 1 command");
 
         // A lone thought is still an accordion (with the group tween), named
         // plainly.
@@ -13895,12 +14329,12 @@ mod tests {
             MessageStatus::Complete,
             vec![reasoning_part("r0", "just thinking")],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
-        assert_eq!(tool_group_summary(&tools), "Thought process");
+        assert_eq!(tool_group_summary(&tools), "Thought once");
 
         // Empty reasoning renders nothing.
         let entry = assistant(
@@ -13908,7 +14342,7 @@ mod tests {
             MessageStatus::Complete,
             vec![reasoning_part("r0", "   ")],
         );
-        assert!(rows_for_entry(&entry, false, false, &mut parse).is_empty());
+        assert!(work_rows(&entry, false, &mut parse).is_empty());
     }
 
     #[test]
@@ -13918,7 +14352,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![reasoning_part("r0", "thinking hard")],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         let RowKind::ToolGroup {
             tools, auto_open, ..
         } = &rows[0].kind
@@ -13938,7 +14372,7 @@ mod tests {
                 text_part("t1", "answer"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -13952,7 +14386,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_mode_folds_the_whole_turn_into_one_collapsed_group() {
+    fn a_turns_work_folds_behind_one_divider() {
         // Collapsed: work header + reply. Expanded: header + the compact-off
         // layout for work parts (thoughts/tools as groups, narration as
         // markdown) + reply.
@@ -13968,7 +14402,7 @@ mod tests {
                 text_part("r1", "All done — here is the answer."),
             ],
         );
-        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let visible = compact_visible(&rows);
         assert_eq!(visible.len(), 2, "collapsed: work header + the reply");
         let RowKind::ToolGroup {
@@ -13990,8 +14424,8 @@ mod tests {
         assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
         let summary = tool_group_summary(tools);
         assert!(summary.contains("wrote a note"), "{summary}");
-        assert!(summary.contains("Ran 2 commands"), "{summary}");
-        assert!(summary.contains("Thought process"), "{summary}");
+        assert!(summary.contains("ran 2 commands"), "{summary}");
+        assert!(summary.contains("Thought once"), "{summary}");
 
         assert!(rows.iter().any(|row| {
             row.compact_fold.is_some() && matches!(row.kind, RowKind::Markdown { .. })
@@ -14013,25 +14447,30 @@ mod tests {
     }
 
     #[test]
-    fn compact_mode_carries_worked_for_duration_on_the_work_group() {
+    fn the_divider_carries_how_long_the_turn_worked() {
         let mut entry = assistant(
             "a1",
             MessageStatus::Complete,
             vec![tool_part("t0", "ls"), text_part("r0", "done")],
         );
         entry.duration_ms = Some(310_000);
-        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
         assert_eq!(*worked_secs, Some(310));
         assert_eq!(worked_for_label(310), "Worked for 5m 10s");
         assert_eq!(worked_for_label(95), "Worked for 1m 35s");
+        assert_eq!(
+            spoken_divider("Worked for 6s", "Ran 2 commands and edited 1 file"),
+            "Worked for 6s, ran 2 commands and edited 1 file"
+        );
+        assert_eq!(spoken_divider("Worked for 6s", ""), "Worked for 6s");
 
         let streaming = assistant("a1", MessageStatus::Streaming, vec![tool_part("t0", "ls")]);
         let mut streaming = streaming;
         streaming.duration_ms = Some(310_000);
-        let rows = rows_for_entry(&streaming, false, true, &mut parse);
+        let rows = rows_for_entry(&streaming, false, &mut parse);
         let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -14046,7 +14485,7 @@ mod tests {
             vec![tool_part("t0", "ls"), text_part("r0", "done")],
         );
         zero.duration_ms = Some(0);
-        let rows = rows_for_entry(&zero, false, true, &mut parse);
+        let rows = rows_for_entry(&zero, false, &mut parse);
         let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -14060,7 +14499,7 @@ mod tests {
             MessageStatus::Complete,
             vec![tool_part("t0", "ls"), text_part("r0", "done")],
         );
-        let rows = rows_for_entry(&missing, false, true, &mut parse);
+        let rows = rows_for_entry(&missing, false, &mut parse);
         let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -14071,7 +14510,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_mode_keeps_reply_rows_and_skips_empty_groups() {
+    fn the_reply_stays_and_a_turn_without_work_has_no_divider() {
         // A reply-only turn renders exactly like the ordinary split — no
         // empty accordion.
         let entry = assistant(
@@ -14079,7 +14518,7 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("t0", "just an answer")],
         );
-        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
         assert!(matches!(rows[0].kind, RowKind::Markdown { .. }));
 
@@ -14094,7 +14533,7 @@ mod tests {
                 text_part("r1", "second half"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let visible = compact_visible(&rows);
         assert_eq!(visible.len(), 3, "work header + two reply parts");
         assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
@@ -14116,7 +14555,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_mode_stays_collapsed_while_streaming() {
+    fn the_divider_stays_shut_while_the_turn_runs() {
         // Streaming surfaces nothing under compact mode — in-progress text is
         // narration until the turn settles, so it folds with the rest and the
         // whole turn is one closed accordion.
@@ -14129,7 +14568,7 @@ mod tests {
                 text_part("r1", "streaming the answer"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let visible = compact_visible(&rows);
         assert_eq!(visible.len(), 1, "the streaming text tail folds too");
         let RowKind::ToolGroup {
@@ -14151,7 +14590,7 @@ mod tests {
 
         // On settle the same parts surface the reply as its own row.
         let done = assistant("a1", MessageStatus::Complete, entry.parts.clone());
-        let rows = rows_for_entry(&done, false, true, &mut parse);
+        let rows = rows_for_entry(&done, false, &mut parse);
         let visible = compact_visible(&rows);
         assert_eq!(visible.len(), 2);
         assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
@@ -14159,7 +14598,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_mode_keeps_input_and_error_chips_visible() {
+    fn requests_and_errors_stay_outside_the_divider() {
         // Interactive/error rows are not work steps — they stay outside the
         // fold so a blocking question or a failure still surfaces.
         let entry = assistant(
@@ -14177,7 +14616,7 @@ mod tests {
                 text_part("r0", "the answer"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let visible = compact_visible(&rows);
         assert_eq!(visible.len(), 3);
         assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
@@ -14204,7 +14643,7 @@ mod tests {
                 text_part("r0", "the answer"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, true, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let work_id: SharedString = "a1#work".into();
         let folded_ixs: Vec<usize> = rows
             .iter()
@@ -14234,6 +14673,23 @@ mod tests {
         assert_eq!(total, 600.0);
     }
 
+    /// slopty: a tool fold opens its height first and its calls fade in after it (the one fold,
+    /// design-inspiration item 7): 60 ms in, the height is well on its way and the contents
+    /// still under 0.2; closing, the contents are gone before the height lands.
+    #[test]
+    fn a_tool_fold_shows_its_contents_after_its_height() {
+        let at = Instant::now();
+        let early = tool_fold(true, Some(at), at + Duration::from_millis(60), false);
+        assert!(early.share > 0.4 && early.opacity < 0.2 && early.rise > 0.0, "{early:?}");
+        assert!(early.moving);
+        let open = tool_fold(true, Some(at), at + Duration::from_millis(301), false);
+        assert_eq!((open.share, open.opacity, open.rise, open.moving), (1.0, 1.0, 0.0, false));
+        let closing = tool_fold(false, Some(at), at + Duration::from_millis(150), false);
+        assert!(closing.opacity <= 0.0 && closing.share < 1.0 && closing.moving, "{closing:?}");
+        let still = tool_fold(true, Some(at), at, true);
+        assert_eq!((still.share, still.opacity, still.moving), (1.0, 1.0, false), "reduced motion lands");
+    }
+
     #[test]
     fn compact_body_height_tweens_from_seeded_height_to_target() {
         let now = Instant::now();
@@ -14244,10 +14700,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(compact_body_height(opening, 300.0, false, now), 0.0);
-        let mid = compact_body_height(opening, 300.0, false, now + TOOL_FOLD.total() / 2);
+        let mid = compact_body_height(opening, 300.0, false, now + motion::FOLD_OPEN.total() / 2);
         assert!(mid > 150.0, "ease-out runs ahead of linear: {mid}");
         assert!(mid < 300.0);
-        let landed = now + TOOL_FOLD.total() + Duration::from_millis(1);
+        let landed = now + motion::FOLD_OPEN.total() + Duration::from_millis(1);
         assert_eq!(compact_body_height(opening, 300.0, false, landed), 300.0);
         assert_eq!(
             compact_body_height(opening, 300.0, true, now),
@@ -14262,7 +14718,7 @@ mod tests {
             toggled_at: Some(now),
             ..Default::default()
         };
-        let mid = compact_body_height(closing, 300.0, false, now + TOOL_FOLD.total() / 2);
+        let mid = compact_body_height(closing, 300.0, false, now + motion::FOLD_CLOSE.total() / 2);
         assert!(mid > 0.0 && mid < 120.0, "mid-close: {mid}");
         assert_eq!(compact_body_height(closing, 300.0, false, landed), 0.0);
     }
@@ -14284,7 +14740,6 @@ mod tests {
                 state.transcript_revision += 1;
             });
             transcript.update(cx, |this, cx| {
-                this.compact_mode = true;
                 this.last_source = None;
                 this.sync(cx);
             });
@@ -14325,10 +14780,10 @@ mod tests {
                 assert!(this.compact_fold_settle.is_some());
                 // Reopening mid-tween continues from the budget in flight.
                 this.folds.get_mut(&work_id).unwrap().toggled_at =
-                    Some(crate::clock::now(cx) - TOOL_FOLD.total() / 2);
+                    Some(crate::clock::now(cx) - motion::FOLD_CLOSE.total() / 2);
                 this.toggle_fold(work_id.clone(), 0.0, false, cx);
                 let from = this.folds[&work_id].from;
-                let expected = motion::lerp(total, 0.0, TOOL_FOLD.curve.eval(0.5));
+                let expected = motion::lerp(total, 0.0, motion::FOLD_CLOSE.progress(0.5));
                 assert!(
                     (from - expected).abs() < 1.0,
                     "reversal resumes from the in-flight budget: {from} ≈ {expected}"
@@ -14463,12 +14918,9 @@ mod tests {
     fn thought_blocks_flatten_structurally() {
         let lines = thought_of("# Head\n\npara\n\n- one\n- two\n\n```rust\nlet x = 1;\n```");
         let flat: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
-        // Heading renders bold, same size (one 18px row).
-        assert!(
-            lines[0]
-                .iter()
-                .any(|r| r.style.bold && r.text.contains("Head"))
-        );
+        // slopty: a heading reads as its prose: same size, not bold.
+        assert!(lines[0].iter().any(|r| r.text.contains("Head")));
+        assert!(lines[0].iter().all(|r| !r.style.bold), "{:?}", lines[0]);
         // Blank separator rows between top-level blocks; tight list inside.
         assert_eq!(flat[1], "");
         assert_eq!(flat[2], "para");
@@ -14513,7 +14965,7 @@ mod tests {
         // Live rows split per block exactly like completed ones (the list
         // virtualizes them — the fading tail is the only per-frame work).
         let live = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", MD)]);
-        let live_rows = rows_for_entry(&live, false, false, &mut parse);
+        let live_rows = work_rows(&live, false, &mut parse);
         assert_eq!(live_rows.len(), 3, "one live row per top-level block");
         assert!(
             live_rows
@@ -14524,7 +14976,7 @@ mod tests {
         assert_eq!(live_rows[2].id.as_ref(), "m1#t0.2");
 
         let done = assistant("m1", MessageStatus::Complete, vec![text_part("t0", MD)]);
-        let done_rows = rows_for_entry(&done, false, false, &mut parse);
+        let done_rows = work_rows(&done, false, &mut parse);
         assert_eq!(done_rows.len(), 3, "three top-level blocks");
         // Every block row keeps its id across the flip — no flicker on handoff.
         for (live, done) in live_rows.iter().zip(&done_rows) {
@@ -14547,8 +14999,8 @@ mod tests {
         let t2 = "para one\n\npara two\n\npara three grows here";
         let live1 = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", t1)]);
         let live2 = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", t2)]);
-        let r1 = rows_for_entry(&live1, false, false, &mut parse);
-        let r2 = rows_for_entry(&live2, false, false, &mut parse);
+        let r1 = work_rows(&live1, false, &mut parse);
+        let r2 = work_rows(&live2, false, &mut parse);
         assert_eq!(r1.len(), 3);
         assert_eq!(r2.len(), 3);
         assert_eq!(r1[0].version, r2[0].version, "settled block untouched");
@@ -14571,7 +15023,7 @@ mod tests {
                 text_part("t1", "tail para"),
             ],
         );
-        let rows = rows_for_entry(&done, false, false, &mut parse);
+        let rows = work_rows(&done, false, &mut parse);
         // Rows: t0.0, t0.1, t0.2 (three MD blocks), g0, t1.0.
         assert_eq!(rows.len(), 5);
         // Sibling markdown blocks from the same part: md block gap.
@@ -14597,7 +15049,7 @@ mod tests {
                 tool_part("c", "make"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
         assert_eq!(ids, ["m2#t0.0", "m2#g0", "m2#t1.0", "m2#g1"]);
         let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
@@ -14648,7 +15100,7 @@ mod tests {
                 text_part("t1", "after"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
         assert_eq!(
             ids,
@@ -14715,7 +15167,7 @@ mod tests {
             MessageStatus::Complete,
             vec![tool_part("a", "ls"), stray, tool_part("c", "make")],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1, "one folded group, no agent split");
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("tool group expected")
@@ -14733,7 +15185,7 @@ mod tests {
             MessageStatus::Complete,
             vec![agent_part("s1", "scan repo")],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::ToolGroup {
             tools, auto_open, ..
@@ -14769,7 +15221,7 @@ mod tests {
             MessageStatus::Complete,
             vec![tool_part("a", "ls"), part],
         );
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         assert_eq!(rows.len(), 2);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!()
@@ -14786,14 +15238,14 @@ mod tests {
     fn trailing_group_auto_opens_only_while_streaming() {
         let parts = vec![text_part("t0", "hi"), tool_part("a", "ls")];
         let streaming = assistant("m3", MessageStatus::Streaming, parts.clone());
-        let rows = rows_for_entry(&streaming, false, false, &mut parse);
+        let rows = work_rows(&streaming, false, &mut parse);
         let RowKind::ToolGroup { auto_open, .. } = rows[1].kind else {
             panic!()
         };
         assert!(auto_open, "trailing group opens while streaming");
 
         let complete = assistant("m3", MessageStatus::Complete, parts);
-        let rows = rows_for_entry(&complete, false, false, &mut parse);
+        let rows = work_rows(&complete, false, &mut parse);
         let RowKind::ToolGroup { auto_open, .. } = rows[1].kind else {
             panic!()
         };
@@ -14805,7 +15257,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![tool_part("a", "ls"), text_part("t0", "hi")],
         );
-        let rows = rows_for_entry(&mid, false, false, &mut parse);
+        let rows = work_rows(&mid, false, &mut parse);
         let RowKind::ToolGroup { auto_open, .. } = rows[0].kind else {
             panic!()
         };
@@ -14818,8 +15270,8 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", "hello")];
-        let confirmed = rows_for_entry(&entry, false, false, &mut parse);
-        let echoed = rows_for_entry(&entry, true, false, &mut parse);
+        let confirmed = work_rows(&entry, false, &mut parse);
+        let echoed = work_rows(&entry, true, &mut parse);
         assert_eq!(confirmed.len(), 1);
         assert_eq!(confirmed[0].id, echoed[0].id);
         // Pending → confirmed changes the version so the row re-renders.
@@ -14923,7 +15375,10 @@ mod tests {
                 draw(window, cx);
                 let original_veil =
                     transcript.read(cx).veils[&SharedString::from("reply#body.0")].clone();
-                crate::settings::set_transcript_width(560.0, cx);
+                crate::settings::set_conversation_width(
+                    crate::settings::ConversationWidth::Default,
+                    cx,
+                );
                 draw(window, cx);
                 let narrow = transcript
                     .read(cx)
@@ -14932,7 +15387,10 @@ mod tests {
                     .unwrap()
                     .size
                     .height;
-                crate::settings::set_transcript_width(1200.0, cx);
+                crate::settings::set_conversation_width(
+                    crate::settings::ConversationWidth::Full,
+                    cx,
+                );
                 draw(window, cx);
                 let this = transcript.read(cx);
                 let wide = this.list.bounds_for_item(0).unwrap().size.height;
@@ -14965,7 +15423,10 @@ mod tests {
                         offset_in_item: px(0.0),
                     });
                 });
-                crate::settings::set_transcript_width(560.0, cx);
+                crate::settings::set_conversation_width(
+                    crate::settings::ConversationWidth::Default,
+                    cx,
+                );
                 for _ in 0..80 {
                     tick(&transcript, window, cx);
                 }
@@ -16909,8 +17370,8 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &"a line\n".repeat(40))];
-        let before = rows_for_entry(&entry, false, false, &mut parse);
-        let after = rows_for_entry(&entry, false, false, &mut parse);
+        let before = work_rows(&entry, false, &mut parse);
+        let after = work_rows(&entry, false, &mut parse);
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].id, after[0].id);
         assert_eq!(before[0].version, after[0].version);
@@ -16926,7 +17387,7 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &content)];
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::User {
             text, attachments, ..
@@ -16943,7 +17404,7 @@ mod tests {
         // Image-only send: no bubble text, refs parsed.
         let only = crate::attachments::with_attachments("", &["/a/p.png".to_string()]);
         entry.parts = vec![text_part("t0", &only)];
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         let RowKind::User {
             text, attachments, ..
         } = &rows[0].kind
@@ -17031,7 +17492,7 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &raw)];
-        let rows = rows_for_entry(&entry, true, false, &mut parse);
+        let rows = work_rows(&entry, true, &mut parse);
         let RowKind::User {
             mentions,
             attachments,
@@ -17106,7 +17567,7 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &raw)];
-        let rows = rows_for_entry(&entry, true, false, &mut parse);
+        let rows = work_rows(&entry, true, &mut parse);
         let RowKind::User { mentions, .. } = &rows[0].kind else {
             panic!("expected a user row");
         };
@@ -17168,7 +17629,7 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &raw)];
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         let RowKind::User {
             text,
             mentions,
@@ -17216,7 +17677,7 @@ mod tests {
         // A files-only send hides the placeholder body.
         let raw = crate::attachments::with_attachments("", &["/uploads/ef56ab78-notes.md".into()]);
         entry.parts = vec![text_part("t0", &raw)];
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         let RowKind::User {
             text, attachments, ..
         } = &rows[0].kind
@@ -17234,7 +17695,7 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", raw)];
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         let RowKind::User { text, mentions, .. } = &rows[0].kind else {
             panic!("expected a user row");
         };
@@ -17251,7 +17712,7 @@ mod tests {
         assert_eq!(rows[0].version, (raw.len() as u64) << 1);
 
         entry.parts = vec![text_part("t0", "no mentions here")];
-        let rows = rows_for_entry(&entry, false, false, &mut parse);
+        let rows = work_rows(&entry, false, &mut parse);
         let RowKind::User { text, mentions, .. } = &rows[0].kind else {
             panic!("expected a user row");
         };
@@ -17263,9 +17724,9 @@ mod tests {
     fn diff_rows_appends_and_middle_edits() {
         let entry1 = assistant("m1", MessageStatus::Complete, vec![text_part("t0", "one")]);
         let entry2 = assistant("m2", MessageStatus::Complete, vec![text_part("t0", "two")]);
-        let r1 = rows_for_entry(&entry1, false, false, &mut parse);
+        let r1 = work_rows(&entry1, false, &mut parse);
         let mut both = r1.clone();
-        both.extend(rows_for_entry(&entry2, false, false, &mut parse));
+        both.extend(work_rows(&entry2, false, &mut parse));
 
         // Identical → None.
         assert!(diff_rows(&r1, &r1.clone()).is_none());
@@ -17280,12 +17741,12 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("t0", "one more")],
         );
-        let mut both_b = rows_for_entry(&entry1b, false, false, &mut parse);
-        both_b.extend(rows_for_entry(&entry2, false, false, &mut parse));
+        let mut both_b = work_rows(&entry1b, false, &mut parse);
+        both_b.extend(work_rows(&entry2, false, &mut parse));
         assert_eq!(diff_rows(&both, &both_b), Some((0..1, 1)));
 
         // Full reset when everything shifts.
-        let r2 = rows_for_entry(&entry2, false, false, &mut parse);
+        let r2 = work_rows(&entry2, false, &mut parse);
         assert_eq!(diff_rows(&r1, &r2), Some((0..1, 1)));
     }
 
@@ -17293,8 +17754,8 @@ mod tests {
     fn diff_handles_live_to_split_growth() {
         let live = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", MD)]);
         let done = assistant("m1", MessageStatus::Complete, vec![text_part("t0", MD)]);
-        let live_rows = rows_for_entry(&live, false, false, &mut parse);
-        let done_rows = rows_for_entry(&done, false, false, &mut parse);
+        let live_rows = work_rows(&live, false, &mut parse);
+        let done_rows = work_rows(&done, false, &mut parse);
         // Same ids; every version flips its streaming bit → one 3-row splice.
         assert_eq!(diff_rows(&live_rows, &done_rows), Some((0..3, 3)));
     }
@@ -17446,7 +17907,7 @@ mod tests {
         ];
         assert_eq!(
             tool_group_summary(&tools),
-            "Ran 3 commands · edited 2 files"
+            "Ran 3 commands and edited 2 files"
         );
         // slopty: the TUI's parts past the shared summary: an edit's line totals, directories
         // listed, and what commands landed, each once.
@@ -17471,20 +17932,20 @@ mod tests {
         ];
         assert_eq!(
             tool_group_summary(&tools),
-            "Ran 2 commands · edited 2 files +12 −3 · listed 1 directory · committed 1a2b3c4 · \
+            "Ran 2 commands, edited 2 files (+12 −3), listed 1 directory, committed 1a2b3c4, \
              pushed to main"
         );
         // Distinct-path dedupe: editing one file twice counts once.
         let tools = vec![edit("a.rs"), edit("a.rs")];
         assert_eq!(tool_group_summary(&tools), "Edited 1 file");
-        // Failures append.
+        // A failure is said in its own clause's parentheses.
         let mut failing = exec("boom");
         failing.is_error = true;
-        assert_eq!(tool_group_summary(&[failing]), "Ran 1 command · 1 failed");
-        // slopty: a failed listing listed nothing: a failed command, the failure said last.
+        assert_eq!(tool_group_summary(&[failing]), "Ran 1 command (1 failed)");
+        // slopty: a failed listing listed nothing: a failed command, said with the commands.
         let mut gone = exec("ls missing");
         gone.is_error = true;
-        assert_eq!(tool_group_summary(&[exec("ls src"), exec("make"), gone]), "Ran 2 commands · listed 1 directory · 1 failed");
+        assert_eq!(tool_group_summary(&[exec("ls src"), exec("make"), gone]), "Ran 2 commands (1 failed) and listed 1 directory");
         // slopty: the person's own Deny is no failure.
         let mut denied = exec("rm -rf build");
         denied.is_error = true;
@@ -17549,7 +18010,24 @@ mod tests {
                 facts: None,
             },
         ];
-        assert_eq!(tool_group_summary(&tools), "Read 1 file · searched 2 times");
+        assert_eq!(tool_group_summary(&tools), "Read 1 file and searched 2 times");
+        // slopty: a subagent's run is said as the work handed off, not as a tool called.
+        let spawn = ToolItem {
+            call: ToolCall::Unknown {
+                name: "Agent".into(),
+                input: Some(serde_json::json!({ "description": "Look" })),
+            },
+            ..exec("unused")
+        };
+        assert_eq!(
+            tool_group_summary(&[exec("make"), spawn.clone()]),
+            "Ran 1 command and delegated to 1 subagent"
+        );
+        let running = ToolItem { resolved: false, ..spawn };
+        assert_eq!(
+            tool_group_summary_waiting(&[running], None, false).text.as_ref(),
+            "Running 1 subagent"
+        );
     }
 
     #[test]
@@ -17723,6 +18201,7 @@ mod tests {
                         .child(chip_header(
                             &self.tool,
                             false,
+                            1.0,
                             Some(&self.opener),
                             None,
                             None,
@@ -17895,7 +18374,7 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         };
-        let rows = rows_for_entry(&user, true, false, &mut parse);
+        let rows = work_rows(&user, true, &mut parse);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].timestamp, Some(ms));
 
@@ -17905,7 +18384,7 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("p1", "one\n\ntwo")],
         );
-        let rows = rows_for_entry(&done, false, false, &mut parse);
+        let rows = work_rows(&done, false, &mut parse);
         assert!(rows.len() >= 2);
         assert_eq!(rows.last().unwrap().timestamp, Some(done.created_at));
         assert_eq!(
@@ -17921,7 +18400,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![text_part("p1", "streaming…")],
         );
-        let rows = rows_for_entry(&live, false, false, &mut parse);
+        let rows = work_rows(&live, false, &mut parse);
         assert!(rows.iter().all(|r| r.timestamp.is_none()));
         assert!(rows.iter().all(|r| r.copy_text.is_none()));
         // Every row knows its entry (the hover group).
@@ -17980,13 +18459,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(input_chip_words(&[approval]).1.as_ref(), "Run cargo test?");
+        // The view model carries the command apart; the words only describe it.
         let bash = slopty_view_proto::UserInputQuestion {
             kind: "approval".into(),
             header: "Bash command".into(),
-            question: "touch refused.txt\nCreate refused.txt file".into(),
+            question: "Create refused.txt file".into(),
+            command: Some("touch refused.txt".into()),
             ..Default::default()
         };
         assert_eq!(input_chip_words(&[bash]), ("Approval".into(), "touch refused.txt".into()));
+        let bare = slopty_view_proto::UserInputQuestion {
+            kind: "approval".into(),
+            header: "Bash command".into(),
+            command: Some("rm -rf build".into()),
+            ..Default::default()
+        };
+        assert_eq!(input_chip_words(&[bare]).1.as_ref(), "rm -rf build", "never \"Run a command\"");
     }
 
     #[test]
@@ -18075,29 +18563,43 @@ mod tests {
         }
     }
 
+    /// slopty: a title under way shimmers on the one clock every shimmer runs on: glyph by glyph
+    /// from faint through the accent to its crest as the band crosses it (opencode's
+    /// `text-shimmer`, HextaUI's accent crest).
     #[test]
-    fn tool_title_shimmer_crosses_the_title_without_a_loop_seam() {
-        assert_eq!(tool_title_shimmer_amount(0.5, 0.5), 1.0);
-        assert_eq!(tool_title_shimmer_amount(0.0, 0.5), 0.0);
-        assert_eq!(tool_title_shimmer_amount(1.0, 0.5), 0.0);
-        assert!(tool_title_shimmer_amount(0.3, 0.5) > 0.4);
-        assert!(tool_title_shimmer_amount(0.7, 0.5) > 0.4);
-        for x in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            assert_eq!(
-                tool_title_shimmer_amount(x, 0.0),
-                tool_title_shimmer_amount(x, 1.0),
-                "the repeating background must meet itself at x={x}"
-            );
-        }
+    fn a_title_under_way_shimmers_glyph_by_glyph_on_the_shared_clock() {
+        let theme = Theme::dark();
+        let moment = Instant::now();
+        let cycle = Duration::from_secs_f32(motion::SHIMMER_PERIOD_MS / 1000.0);
+        assert_eq!(shimmer_ms(moment), motion::locked_phase(cycle, moment) * motion::SHIMMER_PERIOD_MS);
+        // Half the band's pass past glyph 0: glyph 0 at full ink, glyphs far behind still faint.
+        let crest = motion::SHIMMER_BAND * motion::SHIMMER_STEP_MS / 2.0;
+        let runs = title_shimmer_runs("Running 2 commands", crest, &theme);
+        assert_eq!(runs.len(), "Running 2 commands".len(), "one run a glyph");
+        assert_eq!(runs[0].1.color, Some(motion::shimmer_color(1.0, &theme)), "glyph 0 is at the crest");
+        assert_eq!(runs[12].1.color, Some(theme.text_faint), "ahead of the band, faint");
+        let between = runs[2].1.color.expect("inked");
+        assert!(between != runs[0].1.color.expect("inked") && between != theme.text_faint, "the band's shoulder is between");
+    }
 
+    /// slopty: a message's time and actions fade in over 200 ms as the pointer arrives, and out
+    /// as it leaves, from wherever they stood (the Amp study's item 9); still, they snap.
+    #[test]
+    fn a_message_strip_fades_in_and_out() {
+        let mut fades = HashMap::new();
+        let key: SharedString = "row".into();
         let start = Instant::now();
-        assert_eq!(tool_title_shimmer_phase(start, start), 0.0);
-        let halfway = start + TOOL_GROUP_SHIMMER_DURATION / 2;
-        assert!((tool_title_shimmer_phase(start, halfway) - 0.5).abs() < f32::EPSILON);
-        assert_eq!(
-            tool_title_shimmer_phase(start, start + TOOL_GROUP_SHIMMER_DURATION),
-            0.0
-        );
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        assert_eq!(strip_fade(&mut fades, &key, false, start, false), (0.0, false), "unseen at rest");
+        assert_eq!(strip_fade(&mut fades, &key, true, start, false), (0.0, true), "arriving");
+        let (half, moving) = strip_fade(&mut fades, &key, true, at(100), false);
+        assert!(moving && half > 0.3 && half < 1.0, "{half}");
+        assert_eq!(strip_fade(&mut fades, &key, true, at(200), false), (1.0, false));
+        let (leaving, _) = strip_fade(&mut fades, &key, false, at(300), false);
+        assert_eq!(leaving, 1.0, "leaves from where it stood");
+        assert_eq!(strip_fade(&mut fades, &key, false, at(500), false), (0.0, false));
+        assert!(fades.is_empty(), "a gone strip is forgotten");
+        assert_eq!(strip_fade(&mut fades, &key, true, at(600), true), (1.0, false), "still, it snaps");
     }
 
     #[test]
@@ -18107,6 +18609,15 @@ mod tests {
         assert_ne!(flavour_word(seed, 0), flavour_word(seed, 7));
         // Deterministic per chat; different chats usually differ in phase.
         assert_eq!(flavour_word(seed, 3), flavour_word(seed, 3));
+    }
+
+    /// slopty: a held send names who is away: this device when it is the one offline, never
+    /// the machine that is fine (#10).
+    #[test]
+    fn a_queued_send_says_who_it_waits_for() {
+        assert_eq!(queued_words(true, Some("studio")), "Queued \u{b7} sends when you're back online");
+        assert_eq!(queued_words(false, Some("studio")), "Queued \u{b7} sends when studio is back");
+        assert_eq!(queued_words(false, None), "Queued \u{b7} sends when its machine is back");
     }
 
     #[test]
@@ -18163,7 +18674,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![text_part("t0", ""), text_part("t1", "   ")],
         );
-        assert!(rows_for_entry(&entry, false, false, &mut parse).is_empty());
+        assert!(work_rows(&entry, false, &mut parse).is_empty());
     }
 
 }

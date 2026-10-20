@@ -30,7 +30,6 @@ use slopty_view_proto::HarnessId;
 
 use slopty_view_rpc::methods;
 
-use crate::motion;
 use crate::pickers::visible_harnesses;
 use crate::popover::{self, Loadable};
 // slopty: no agent accounts: Slopty never touches a credential.
@@ -38,11 +37,8 @@ use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-#[path = "completion.rs"]
-mod completion;
-
-/// Left inset of an expanded provider's details: the header trigger's
-/// padding, brand tile and gap, so the details start on the title's edge.
+/// Left inset of what opens under a provider (its installer): the row's padding, brand tile and
+/// gap, so it starts on the title's edge.
 const DETAILS_INSET: f32 = 4.0 + 36.0 + 12.0;
 
 // slopty: how freely agents act (`[agents] autonomy`): the value, its label, and the note under
@@ -58,6 +54,9 @@ const AUTONOMY: [(&str, &str, &str); 3] = [
 const AUTONOMY_DEFAULT: usize = 0;
 /// Where `full` sits: the one that asks nothing, so its note is a warning.
 const AUTONOMY_FULL: usize = 1;
+
+// slopty: what an installed agent's row says where nothing else does.
+const INSTALLED: &str = "Installed";
 
 fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> bool {
     harness != HarnessId::MOCK && !installed && can_install
@@ -158,7 +157,6 @@ pub struct HarnessesPage {
     // slopty: the installer's terminal on the target machine, while the page shows it.
     install_run: Option<InstallRun>,
 
-    expanded_harness: Option<HarnessId>,
     // slopty: no agent accounts, and no update island: agents update themselves.
     // slopty: the person's one autonomy setting (`[agents] autonomy`), its index in AUTONOMY.
     autonomy: Option<usize>,
@@ -181,8 +179,6 @@ impl HarnessesPage {
             installing: None,
             install_task: None,
             install_run: None, // slopty
-
-            expanded_harness: None,
             // slopty: no agent accounts, and no update island: agents update themselves.
             autonomy: None, // slopty
             autonomy_select: widgets::SelectState::default(), // slopty
@@ -190,48 +186,6 @@ impl HarnessesPage {
         };
         page.load(cx);
         page
-    }
-
-    fn toggle_agent_details(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        if !self.harnesses.ready().is_some_and(|items| {
-            items
-                .iter()
-                .any(|item| item.id == harness && descriptor_enabled(item))
-        }) {
-            return;
-        }
-        if self.expanded_harness == Some(harness) {
-            self.expanded_harness = None;
-        } else {
-            self.expanded_harness = Some(harness);
-            // slopty: no agent accounts: Slopty never touches a credential.
-        }
-        cx.notify();
-    }
-
-    fn render_agent_details(
-        &self,
-        harness: HarnessId,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // slopty: no agent accounts: Slopty never touches a credential.
-        // No box of its own: the details continue the provider row on the
-        // block's fill, indented to the row's title so they read as its
-        // children, with switches and actions on the row's control edge.
-        let content = div()
-            .mx(px(16.0))
-            .pl(px(DETAILS_INSET))
-            .pb(px(16.0))
-            .flex()
-            .flex_col()
-            .gap(px(20.0))
-            .child(self.render_completion_for(harness, theme, cx)); // slopty: no accounts or updates.
-        if motion::reduced_motion(cx) {
-            content.into_any_element()
-        } else {
-            motion::menu_in(format!("agent-details-{harness:?}"), content).into_any_element()
-        }
     }
 
     // slopty: read `[agents] autonomy`, after writing `set` (an index in AUTONOMY) when given.
@@ -636,9 +590,6 @@ impl HarnessesPage {
                         if let Ok(list) = serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
                             page.harnesses = Loadable::Ready(list);
                         }
-                        if !enabled && page.expanded_harness == Some(harness) {
-                            page.expanded_harness = None;
-                        }
                         // The composer caches its catalog per space — poke
                         // every Pickers to re-fetch, or the rail keeps the
                         // old set until restart.
@@ -833,6 +784,15 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
+                // slopty: an installed agent says so, where nothing else speaks for it.
+                if meta.is_empty() && installed {
+                    meta.push(
+                        div()
+                            .debug_selector(move || format!("harness-installed-{ix}"))
+                            .child(INSTALLED)
+                            .into_any_element(),
+                    );
+                }
                 let tile = div()
                     .flex_none()
                     .size(px(36.0))
@@ -846,7 +806,6 @@ impl HarnessesPage {
                             .size(px(16.0))
                             .text_color(tint.unwrap_or(theme.text_muted)),
                     );
-                let expanded = enabled && self.expanded_harness == Some(harness);
                 let header = widgets::card_row(&theme, ix == 0)
                     .id(("harness-row", ix))
                     .when(!installed && self.installing != Some(harness), |el| {
@@ -854,8 +813,6 @@ impl HarnessesPage {
                     })
                     .child(
                         div()
-                            .id(("harness-details-trigger", ix))
-                            .group(format!("harness-details-{ix}"))
                             .flex_1()
                             .min_w(px(180.0))
                             .min_h(px(44.0))
@@ -865,33 +822,6 @@ impl HarnessesPage {
                             .flex_row()
                             .items_center()
                             .gap(px(12.0))
-                            .when(enabled, |el| {
-                                el.role(gpui::Role::Button)
-                                    .aria_label(format!("{} preferences", descriptor.name))
-                                    .aria_expanded(expanded)
-                                    .tab_index(0)
-                                    .cursor_pointer()
-                                    // No hover slab (it stopped short of the
-                                    // toggle and boxed the row); the chevron
-                                    // lifts instead, like a list disclosure.
-                                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
-                                    .on_click(cx.listener(move |page, _, _, cx| {
-                                        page.toggle_agent_details(harness, cx)
-                                    }))
-                                    .on_key_down(cx.listener(
-                                        move |page, event: &gpui::KeyDownEvent, _, cx| {
-                                            if !event.is_held
-                                                && matches!(
-                                                    event.keystroke.key.as_str(),
-                                                    "enter" | "space"
-                                                )
-                                            {
-                                                page.toggle_agent_details(harness, cx);
-                                                cx.stop_propagation();
-                                            }
-                                        },
-                                    ))
-                            })
                             .child(tile)
                             .child(
                                 div()
@@ -904,8 +834,7 @@ impl HarnessesPage {
                                         label.child(widgets::meta_line(&theme, meta))
                                     }),
                             )
-                            // Install / Cancel sit with the row's other
-                            // action, before the caret, so carets line up.
+                            // Install / Cancel sit with the row's other action.
                             .when(
                                 offers_install(harness, installed, descriptor.can_install)
                                     && self.installing != Some(harness),
@@ -940,27 +869,6 @@ impl HarnessesPage {
                                         .child("Cancel"),
                                 )
                             })
-                            // Always present so every row's controls hold
-                            // their place; inert while the provider is off.
-                            .child(
-                                crate::icons::icon(if expanded {
-                                    crate::icons::ALT_ARROW_DOWN
-                                } else {
-                                    crate::icons::ALT_ARROW_RIGHT
-                                })
-                                .size(px(14.0))
-                                .flex_none()
-                                .when(enabled, |caret| {
-                                    caret
-                                        .text_color(theme.text_muted)
-                                        .group_hover(format!("harness-details-{ix}"), |s| {
-                                            s.text_color(theme.text)
-                                        })
-                                })
-                                .when(!enabled, |caret| {
-                                    caret.text_color(theme.text_muted.opacity(0.35))
-                                }),
-                            ),
                     )
                     .children(reset)
                     .child(
@@ -1006,9 +914,6 @@ impl HarnessesPage {
                     .flex()
                     .flex_col()
                     .child(header)
-                    .when(expanded, |row| {
-                        row.child(self.render_agent_details(harness, &theme, cx))
-                    })
                     // slopty: the installer's terminal, under the agent it installs.
                     .when(self.install_run.as_ref().is_some_and(|run| run.harness == harness), |row| {
                         row.children(self.render_install(&theme, cx))
@@ -1098,21 +1003,14 @@ impl Render for HarnessesPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(widgets::page_header(&theme, "Providers", None))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(6.0))
-                                                .child(switcher),
-                                        ),
-                                )
+                                // slopty: one page head (`widgets::page_head`).
+                                .child(widgets::page_head(
+                                    &theme,
+                                    "Providers",
+                                    None,
+                                    "The coding agents each device can run.",
+                                    Some(switcher.into_any_element()),
+                                ))
                                 .child(body)
                                 .child(autonomy), // slopty
                         ),
@@ -1140,57 +1038,46 @@ mod tests {
             Some("Default · Recommended")
         );
     }
+}
+
+// slopty: an installed agent's row says so; no row opens, there being nothing under it.
+#[cfg(test)]
+mod row_tests {
+    use gpui::AppContext as _;
 
     #[gpui::test]
-    fn expanded_agent_preferences_render_inside_the_agent_row(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
+    fn an_installed_agent_says_so_and_no_row_opens(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             crate::settings::init(Default::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::default());
         });
-        let window = cx.add_window(|_, cx| {
+        let (page, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
             super::HarnessesPage::new(state, cx)
         });
-        let descriptor = |id, name: &str| crate::catalog::registry::HarnessDescriptor {
+        let descriptor = |id, name: &str, installed: bool| crate::catalog::registry::HarnessDescriptor {
             id,
             name: name.into(),
             supports_steering: false,
             steering_mode: slopty_view_proto::SteeringMode::TurnBoundary,
             reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            usage: None, // slopty
-            enabled: Some(true),
+            installed,
+            can_install: true,
+            usage: None,
+            enabled: Some(installed),
         };
-        window
-            .update(cx, |page, _, cx| {
-                page.harnesses = super::Loadable::Ready(vec![
-                    descriptor(slopty_view_proto::HarnessId::CLAUDE_CODE, "Claude Code"),
-                    descriptor(slopty_view_proto::HarnessId::CODEX, "Codex"),
-                ]);
-                page.toggle_agent_details(slopty_view_proto::HarnessId::CLAUDE_CODE, cx);
-                assert_eq!(
-                    page.expanded_harness,
-                    Some(slopty_view_proto::HarnessId::CLAUDE_CODE)
-                );
-                // slopty: no agent accounts: Slopty never touches a credential.
-            })
-            .unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-        window
-            .update(cx, |page, _, cx| {
-                page.toggle_agent_details(slopty_view_proto::HarnessId::CODEX, cx);
-                assert_eq!(page.expanded_harness, Some(slopty_view_proto::HarnessId::CODEX));
-                // slopty: no agent accounts: Slopty never touches a credential.
-            })
-            .unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-        // slopty: no agent accounts: Slopty never touches a credential.
+        page.update(cx, |page, _| {
+            page.harnesses = super::Loadable::Ready(vec![
+                descriptor(slopty_view_proto::HarnessId::CLAUDE_CODE, "Claude Code", true),
+                descriptor(slopty_view_proto::HarnessId::CODEX, "Codex", false),
+            ]);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("harness-installed-0").is_some(), "Claude Code says it is installed");
+        assert!(cx.debug_bounds("harness-installed-1").is_none(), "Codex says how to install instead");
+        assert!(cx.debug_bounds("harness-caret-0").is_none(), "no preferences to open");
     }
 }
 

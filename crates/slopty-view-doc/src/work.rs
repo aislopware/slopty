@@ -285,9 +285,24 @@ pub fn duration_words(ms: u64) -> String {
     if small == 0 { format!("{big}{unit}") } else { format!("{big}{unit} {small}{small_unit}") }
 }
 
+/// How long a finished run ran, as the tray and its notice both say it: [`duration_words`],
+/// and "<1s" for a run shorter than a second, never "0s".
+#[must_use]
+pub fn ran_for_words(ms: u64) -> String {
+    if ms < 1_000 { "<1s".to_owned() } else { duration_words(ms) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run under a second ran for less than one, wherever it is said.
+    #[test]
+    fn a_short_run_reads_under_a_second() {
+        assert_eq!(ran_for_words(300), "<1s");
+        assert_eq!(ran_for_words(1_000), "1s");
+        assert_eq!(ran_for_words(125_000), "2m 5s");
+    }
 
     /// The header's words count by kind in a fixed order, singular and plural.
     #[test]

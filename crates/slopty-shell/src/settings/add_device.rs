@@ -638,24 +638,24 @@ impl AddDeviceDialog {
     }
 
     fn render_steps(&self, theme: &Theme, progress: &Progress, cx: &mut Context<Self>) -> AnyElement {
-        let view = cx.entity_id();
         let waits = self.open;
         let mut list = div().mt(px(16.0)).flex().flex_col().gap(px(2.0));
         for (ix, step) in progress.steps.iter().enumerate() {
+            // slopty: one mark morphs from working to done, failed or waiting on the person
+            // (`loaders::status_mark`), where a spinner, a check and a cross cut.
+            let status_mark = |state| {
+                crate::loaders::status_mark::StatusMark::new(
+                    SharedString::from(format!("add-device-step-{ix}")),
+                    state,
+                )
+                .size(14.0)
+                .ground(popover::surface_bg(theme))
+                .into_any_element()
+            };
             let mark = match step.mark {
-                Mark::Done => crate::icons::icon(crate::icons::CHECK)
-                    .size(px(14.0))
-                    .text_color(theme.success_muted)
-                    .into_any_element(),
-                Mark::Failed => crate::icons::icon(crate::icons::CLOSE)
-                    .size(px(14.0))
-                    .text_color(theme.danger_muted)
-                    .into_any_element(),
-                Mark::NeedsYou => div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
+                Mark::Done => status_mark(crate::loaders::status_mark::MarkState::Done),
+                Mark::Failed => status_mark(crate::loaders::status_mark::MarkState::Failed),
+                Mark::NeedsYou => status_mark(crate::loaders::status_mark::MarkState::Waiting),
                 // The run's share, on the step under way.
                 Mark::Running if share_on(&progress.steps, progress.share) == Some(ix) => {
                     let percent = progress.share.map_or(0, |share| share_percent(share));
@@ -666,14 +666,7 @@ impl AddDeviceDialog {
                         theme.text,
                     )
                 }
-                Mark::Running => crate::loaders::mini_mono_spinner(
-                    SharedString::from(format!("add-device-step-{ix}")),
-                    2.0,
-                    theme.text_muted,
-                    view,
-                    cx,
-                )
-                .into_any_element(),
+                Mark::Running => status_mark(crate::loaders::status_mark::MarkState::Working),
                 Mark::Waiting => div()
                     .size(px(4.0))
                     .rounded_full()
@@ -862,19 +855,26 @@ impl Render for AddDeviceDialog {
             let serve = self.serve;
             let label =
                 if serve { "Install a machine there instead" } else { "Set up the server there instead" };
-            // A quiet action, its words on the body's edge.
-            div().mt(px(8.0)).ml(px(-10.0)).flex().child(
-                widgets::text_action(&theme, widgets::ActionTone::Quiet, label)
+            // slopty: a link in the accent, underlined under the pointer, its words on the
+            // body's edge: muted words alone did not read as something to press.
+            div().mt(px(8.0)).flex().child(
+                div()
                     .id("add-device-serve")
                     .tab_index(0)
-                    .role(gpui::Role::Button)
+                    .role(gpui::Role::Link)
                     .aria_label(label)
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .text_size(crate::typography::ui_rems(12.5))
+                    .text_color(theme.accent)
+                    .hover(|s| s.underline())
                     .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.serve = !serve;
                         this.progress = None;
                         cx.notify();
-                    })),
+                    }))
+                    .child(label),
             )
         });
         let found = progress.is_none().then(|| self.render_found(&theme, cx)).flatten();

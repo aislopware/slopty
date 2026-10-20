@@ -1,7 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 use super::{BrowserEvent, BrowserSurface};
 use crate::settings::widgets::ActionHint as _;
-use crate::{icons, surface_chrome, theme::Theme};
+use crate::{icons, motion::HoverFade as _, surface_chrome, theme::Theme};
 use gpui::{
     AnyElement, Context, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div,
     prelude::*, px,
@@ -160,17 +160,22 @@ impl BrowserSurface {
                     .rounded(px(10.0))
                     .border_1()
                     .border_color(theme.border)
-                    .bg(crate::theme::ink(0.02))
                     .flex()
                     .items_center()
                     .gap(px(10.0))
+                    // slopty: the row's wash fades in with the pointer, as the pane's rows do
+                    // (M23); its border still steps at once.
+                    .when(!available, |el| el.bg(crate::theme::ink(0.02)))
                     .when(available, |el| {
+                        let fade = format!("preview-row-{}-fade", service.id);
                         el.cursor_pointer()
-                            .hover(move |style| {
-                                style
-                                    .bg(crate::theme::ink(0.05))
-                                    .border_color(border_strong)
-                            })
+                            .bg(crate::motion::hover_blend(
+                                &fade,
+                                crate::theme::ink(0.02),
+                                crate::theme::ink(0.05),
+                            ))
+                            .hover_fade(fade)
+                            .hover(move |style| style.border_color(border_strong))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.navigate(&row_url, window, cx)
                             }))
@@ -232,9 +237,16 @@ impl BrowserSurface {
                             .when(available, |el| {
                                 // slopty: the row's keyboard stop; the row itself is the
                                 // pointer's larger target for the same press (M8).
+                                let fade = format!("open-preview-{}-fade", service.id);
                                 el.cursor_pointer()
                                     .map(|el| surface_chrome::key_stop(el, theme))
-                                    .hover(|style| style.bg(crate::theme::ink(0.05)))
+                                    .bg(crate::motion::hover_blend(
+                                        &fade,
+                                        crate::theme::wash(0.0),
+                                        crate::theme::control_hover(),
+                                    ))
+                                    .hover_fade(fade)
+                                    .active(|style| style.bg(crate::theme::pressed_wash()))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         this.navigate(&url, window, cx)
@@ -394,7 +406,17 @@ impl BrowserSurface {
                             } else {
                                 "Enter an address"
                             })
-                            .hover(|style| style.bg(crate::theme::wash(0.10)))
+                            // slopty: the hover fades a control step over the raised fill (M23).
+                            .bg(crate::motion::hover_blend(
+                                "browser-empty-action-fade",
+                                theme.surface_raised,
+                                theme.surface_raised.blend(crate::theme::control_hover()),
+                            ))
+                            .hover_fade("browser-empty-action-fade")
+                            .active({
+                                let pressed = theme.surface_raised.blend(crate::theme::pressed_wash());
+                                move |style| style.bg(pressed)
+                            })
                             // slopty: a keyboard stop with the shell's ring (M8).
                             .map(|el| surface_chrome::key_stop(el, theme))
                             .flex()
@@ -417,7 +439,7 @@ impl BrowserSurface {
                             .when(!has_error, |el| {
                                 el.child(
                                     div()
-                                        .text_size(crate::typography::ui_rems(10.0))
+                                        .text_size(crate::typography::ui_rems(11.0))
                                         .text_color(theme.text_faint)
                                         .child(if cfg!(target_os = "macos") {
                                             "⌘L"
@@ -654,7 +676,7 @@ impl Render for BrowserSurface {
                         .justify_center()
                         .cursor_pointer()
                         .role(gpui::Role::Button)
-                        .group("browser-go")
+                        .hover_fade("browser-go-fade")
                         // slopty: a keyboard stop with the shell's ring (M8).
                         .map(|el| surface_chrome::key_stop(el, &theme))
                         .on_click(cx.listener(|this, _, w, cx| this.submit(w, cx)))
@@ -666,11 +688,17 @@ impl Render for BrowserSurface {
                         .child(
                             div()
                                 .size(px(18.0))
-                                .rounded(px(4.0))
+                                .rounded(px(Theme::RADIUS_SM))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .group_hover("browser-go", |s| s.bg(crate::theme::wash(0.10)))
+                                // slopty: the mark's wash fades in with the pointer over the
+                                // whole button (M23).
+                                .bg(crate::motion::hover_blend(
+                                    "browser-go-fade",
+                                    crate::theme::wash(0.0),
+                                    crate::theme::control_hover(),
+                                ))
                                 .child(
                                     icons::icon(icons::RETURN)
                                         .size(px(12.0))
@@ -838,8 +866,8 @@ impl Render for BrowserSurface {
                 .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted)
                 .child("Localhost opens on this device. Open a detected preview from a new tab to reach your other device.")))
             .child(body)
-            .when(external, |el| el.child(div().h(px(26.0)).px(px(10.0)).flex().items_center().gap(px(5.0)).border_t_1().border_color(theme.border)
-                .text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_faint)
-                .child(icons::icon(icons::ARROW_UP_RIGHT).size(px(11.0))).child("Opens in your default browser")))
+            .when(external, |el| el.child(div().h(px(26.0)).px(px(10.0)).flex().items_center().gap(px(Theme::SPACE_SNUG)).border_t_1().border_color(theme.border)
+                .text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_faint)
+                .child(icons::icon(icons::ARROW_UP_RIGHT).size(px(12.0))).child("Opens in your default browser")))
     }
 }

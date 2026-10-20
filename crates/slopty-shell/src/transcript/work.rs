@@ -433,10 +433,12 @@ impl Transcript {
         let open = self.work.open.contains(&row.id);
         let chat = self.work_chat();
         let tray_row = task.row.clone();
-        let label = if task.title.is_empty() {
-            task.text.clone()
-        } else {
-            format!("{} · {}", task.text, task.title)
+        // slopty: the description on the right only where the words do not already say it
+        // (`Background command "Build" completed` names its task).
+        let title = Some(task.title.as_str()).filter(|t| !t.is_empty() && !task.text.contains(*t));
+        let label = match title {
+            Some(title) => format!("{} · {title}", task.text),
+            None => task.text.clone(),
         };
         let line = div()
             .id(SharedString::from(format!("{}-task", row.id)))
@@ -482,14 +484,14 @@ impl Transcript {
                 )
             })
             .child(div().flex_1())
-            .when(!task.title.is_empty(), |line| {
+            .when_some(title, |line, title| {
                 line.child(
                     div()
                         .flex_none()
                         .max_w(px(240.0))
                         .truncate()
                         .text_color(theme.text_faint)
-                        .child(SharedString::from(task.title.clone())),
+                        .child(SharedString::from(title.to_owned())),
                 )
             });
         let body = task.body.as_ref().filter(|body| !body.trim().is_empty());
@@ -518,11 +520,12 @@ impl Transcript {
 
     /// A quiet notice of the agent's: a dot in its tone, its words; a request tried again
     /// counts down to its next attempt with the working spinner, and reads recovered once it
-    /// went through.
+    /// went through. `trailing` (a done line's Copy) follows its words.
     pub(super) fn render_notice(
         &mut self,
         row: &Row,
         note: &NoteRow,
+        trailing: Option<AnyElement>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -580,7 +583,14 @@ impl Transcript {
                 theme.text_muted
             })
             .child(lead_slot(lead))
-            .child(div().min_w_0().flex_1().truncate().child(SharedString::from(words)))
+            .child(
+                div()
+                    .min_w_0()
+                    .when(trailing.is_none(), |words| words.flex_1())
+                    .truncate()
+                    .child(SharedString::from(words)),
+            )
+            .children(trailing)
             .children(toggle);
         div()
             .w_full()

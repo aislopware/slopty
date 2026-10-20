@@ -5,8 +5,8 @@
 //! parent's chat"): this card, the Background tray above the composer, and the drill-in. The
 //! card is zeron's chip anatomy: an icon tile, the task as its label, its kind and model faint
 //! on the right; under it the subagent's step and figures, live while it runs and settled to
-//! its outcome after (slopty: a run that went well says what it answered, not "Done", which its
-//! spinner gone already says). A click (or ↵) opens the child's transcript in place, capped in height
+//! its outcome after (slopty: a run that went well says what it answered, and "Done" only when
+//! it answered nothing). A click (or ↵) opens the child's transcript in place, capped in height
 //! and scrolling on its own, following its end while it runs; the newest running child of the
 //! turn under way opens itself while it is what the parent waits on, and closes once the turn
 //! moves on, unless the person opened or closed it. Open (⌘↵) drills into the child as the
@@ -48,6 +48,86 @@ const CHILD_MAX_HEIGHT: f32 = 480.0;
 const CHILD_VIEWPORT_SHARE: f32 = 0.4;
 /// A window narrower than this is a phone's (`shell/compact.rs`): a card there drills in.
 const PHONE_BELOW: f32 = 700.0;
+
+/// slopty: a card's status word swaps as Amp's does (`AJ/46b413b6.js:10505-10535`): the new word
+/// enters from 4 pt below over 350 ms as the old one leaves 4 pt up over 150 ms.
+const STATUS_IN: crate::motion::MotionSpec =
+    crate::motion::MotionSpec::new(350, crate::motion::EASE_OUT_QUINT);
+const STATUS_OUT: crate::motion::MotionSpec =
+    crate::motion::MotionSpec::new(150, crate::motion::EASE_OUT);
+const STATUS_TRAVEL: f32 = 4.0;
+/// Bound on remembered status words, as `roll_text`'s.
+const STATUS_KEYS: usize = 256;
+
+thread_local! {
+    /// Each card's last status word, and the word it swaps from and since when, while it does.
+    static STATUS: std::cell::RefCell<HashMap<SharedString, (SharedString, Option<(SharedString, std::time::Instant)>)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// slopty: where `key`'s status swap stands at `now`, `text` its word: the word it leaves and how
+/// far it has gone, `None` at rest. The first sight of a key never swaps; reduced motion never
+/// does.
+fn status_swap(
+    key: &SharedString,
+    text: &SharedString,
+    reduced: bool,
+    now: std::time::Instant,
+) -> Option<(SharedString, f32)> {
+    STATUS.with_borrow_mut(|words| {
+        if words.len() >= STATUS_KEYS && !words.contains_key(key) {
+            words.retain(|_, (_, swap)| swap.is_some());
+        }
+        let entry = words.entry(key.clone()).or_insert_with(|| (text.clone(), None));
+        if entry.0 != *text {
+            let from = std::mem::replace(&mut entry.0, text.clone());
+            entry.1 = (!reduced).then_some((from, now));
+        }
+        let ms = entry.1.as_ref().map(|(_, at)| now.saturating_duration_since(*at).as_secs_f32() * 1_000.0);
+        match ms {
+            Some(ms) if !reduced && ms < STATUS_IN.duration_ms as f32 => {
+                entry.1.as_ref().map(|(from, _)| (from.clone(), ms))
+            }
+            _ => {
+                entry.1 = None;
+                None
+            }
+        }
+    })
+}
+
+/// slopty: `text` as the card's status word, swapping in from the one it last said.
+fn status_word(key: SharedString, text: SharedString, view: gpui::EntityId, cx: &mut gpui::App) -> gpui::Div {
+    let (reduced, now) = (cx.reduce_motion(), crate::clock::now(cx));
+    let Some((from, ms)) = status_swap(&key, &text, reduced, now) else {
+        return div().min_w_0().truncate().child(text);
+    };
+    crate::motion::pulse_lease(view, cx);
+    let arrived = STATUS_IN.progress(ms / STATUS_IN.duration_ms as f32);
+    let left = STATUS_OUT.progress(ms / STATUS_OUT.duration_ms as f32);
+    div()
+        .relative()
+        .min_w_0()
+        .overflow_hidden()
+        .child(
+            div()
+                .relative()
+                .top(px(STATUS_TRAVEL * (1.0 - arrived)))
+                .opacity(arrived)
+                .truncate()
+                .child(text),
+        )
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(-STATUS_TRAVEL * left))
+                .opacity(1.0 - left)
+                .truncate()
+                .child(from),
+        )
+}
 /// Where a card's lines start: past its icon tile, under its title. Its child's rows start there
 /// too.
 pub(super) const CHILD_INSET: f32 = Theme::SPACE_SM + 18.0 + Theme::SPACE_SM;
@@ -150,8 +230,9 @@ impl Card {
         let step = if progress.running {
             progress.step.clone()
         } else if progress.state == SubagentProgress::DONE && !tool.is_error {
-            // slopty: a run that went well says the first line of what it answered (#23).
-            reply_line(tool)
+            // slopty: a run that went well says the first line of what it answered (#23): its
+            // call's result, else its report as the view model words it, never a blank line.
+            reply_line(tool).or_else(|| progress.outcome.clone())
         } else {
             progress.outcome.clone().or_else(|| progress.step.clone())
         };
@@ -251,6 +332,15 @@ pub(super) fn task_words(row: &SharedString, text: &SharedString, lines: Option<
     }
     .child(text.clone())
     .into_any_element()
+}
+
+impl Transcript {
+    /// slopty: the window, as last drawn, is a phone's: a touch screen narrower than
+    /// [`PHONE_BELOW`], where the shell puts its navigation bar for the titlebar.
+    pub(super) fn on_phone(&self) -> bool {
+        let width = f32::from(self.subagents.window.width);
+        crate::shell::touch_screen() && width > 0.0 && width < PHONE_BELOW
+    }
 }
 
 impl Transcript {
@@ -403,36 +493,38 @@ impl Transcript {
 
         // The trailing glyph: the working spinner, the calm clock of one waiting on its own work,
         // the amber dot of one waiting on the person.
+        // slopty: the one status mark (design-inspiration item 1): its ring turns while the run
+        // works, closes amber when it needs the person, and draws its tick as it finishes, a red
+        // `!` if it failed; a run stopped leaves no mark.
+        use crate::loaders::status_mark::{MARK_SMALL, MarkState, StatusMark};
+        let mark = |state| {
+            StatusMark::new(SharedString::from(format!("subagent-mark-{key}")), state)
+                .size(MARK_SMALL)
+                // The tick is cut through the disc in the card's own ground.
+                .ground(crate::theme::flatten(crate::theme::ink(0.03), theme.bg))
+                .into_any_element()
+        };
         let glyph: Option<AnyElement> = match card.state.as_str() {
-            _ if card.needs_you.is_some() || card.state == SubagentProgress::NEEDS_YOU => Some(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
-            ),
+            _ if card.needs_you.is_some() || card.state == SubagentProgress::NEEDS_YOU => {
+                Some(mark(MarkState::Waiting))
+            }
             SubagentProgress::WAITING => Some(
                 crate::icons::icon(crate::icons::CLOCK_CIRCLE)
                     .size(px(12.0))
                     .text_color(theme.text_muted)
                     .into_any_element(),
             ),
-            _ if card.running => Some(
-                crate::loaders::mini_glyph_spinner(
-                    format!("subagent-card-{key}"),
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
-            ),
+            _ if card.running => Some(mark(MarkState::Working)),
+            SubagentProgress::DONE => Some(mark(MarkState::Done)),
+            SubagentProgress::FAILED => Some(mark(MarkState::Failed)),
             _ => None,
         };
         // slopty: the card's hover, faded; its quiet controls fade in with it, each laid out in
         // an 18 pt footprint and pressed over 24 (44 on a touch screen: `press_target`, M25).
         let card_fade = format!("{key}-card-hover");
-        let shown = crate::motion::hover_t(&card_fade);
+        // slopty: on a touch screen, which has no hover, they stand at rest
+        // (`.research/opencode-study-2026-10-19.md` item 4).
+        let shown = crate::motion::revealed_by_hover(&card_fade);
         let quiet = |id: String, label: &'static str, glyph: &'static str| {
             let fade = format!("{id}-hover");
             crate::surface_chrome::press_target(SharedString::from(id), QUIET_FOOTPRINT)
@@ -490,22 +582,33 @@ impl Transcript {
             .and_then(|chat| self.subagents.open.get(chat))
             .and_then(|child| child.rows.get());
         let target = if open { full(target_rows) } else { 0.0 };
-        let spec = super::user_resize_spec((target - from).abs());
-        let t = moving.map_or(1.0, |_| {
-            let raw = moment.saturating_duration_since(since).as_secs_f32() / spec.total().as_secs_f32();
-            spec.curve.eval(raw.min(1.0))
-        });
+        // slopty: as the one fold moves (`motion::fold_frame`; design-inspiration item 7): the
+        // height first, the run fading in and rising after it; closing, gone before it lands.
+        let fold = crate::motion::fold_frame(open, moment.saturating_duration_since(since), false);
+        let t = moving.map_or(1.0, |_| if open { fold.height } else { 1.0 - fold.height });
+        let (contents, rise) = if moving.is_some() { (fold.opacity, fold.rise) } else { (1.0, 0.0) };
         let height = crate::motion::lerp(from, target, t);
         let openness = if full(target_rows) > 0.0 { (height / full(target_rows)).clamp(0.0, 1.0) } else { 0.0 };
+        // slopty: the chevron arrives with the card's hover, as opencode's card action does: from
+        // no width, sliding in from 4 pt back and fading up; an open run keeps it, to close by,
+        // and a touch screen shows it at rest (item 26).
+        let arrived = shown.max(openness);
         let chevron = can_open_in_place.then(|| {
             div()
-                .size(px(18.0))
+                .debug_selector(|| "subagent-chevron".into()) // slopty: for the tests
+                .w(px(18.0 * arrived))
+                .h(px(18.0))
+                .ml(px(-Theme::SPACE_SM * (1.0 - arrived)))
+                .overflow_hidden()
                 .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
+                .opacity(arrived)
                 .child(
                     crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                        .relative()
+                        .left(px(-4.0 * (1.0 - arrived)))
                         .size(px(12.0))
                         .with_transformation(gpui::Transformation::rotate(gpui::radians(
                             -std::f32::consts::FRAC_PI_2 * (1.0 - openness),
@@ -562,6 +665,7 @@ impl Transcript {
             .children(drill)
             .children(glyph.map(|glyph| div().flex_none().child(glyph)))
             .children(chevron);
+        let view = cx.entity_id();
         let step_line = (card.step.is_some() || !figures.is_empty()).then(|| {
             div()
                 .h(px(STEP_LINE_HEIGHT))
@@ -585,11 +689,17 @@ impl Transcript {
                         } else {
                             theme.text_muted
                         })
-                        .child(SharedString::from(if stopping {
-                            "Stopping…".to_owned()
-                        } else {
-                            card.step.clone().unwrap_or_default()
-                        })),
+                        // slopty: the word swaps as it changes (Amp).
+                        .child(status_word(
+                            SharedString::from(format!("{key}-status")),
+                            SharedString::from(if stopping {
+                                "Stopping…".to_owned()
+                            } else {
+                                card.step.clone().unwrap_or_default()
+                            }),
+                            view,
+                            cx,
+                        )),
                 )
                 .when(!figures.is_empty(), |line| {
                     line.child(
@@ -612,7 +722,7 @@ impl Transcript {
                 .text_color(theme.warning)
                 .child(SharedString::from(format!("Needs you · {ask}")))
         });
-        let sliding = moving.is_some() && t < 1.0;
+        let sliding = moving.is_some() && (t < 1.0 || (open && contents < 1.0));
         let child = card.chat.clone().filter(|_| open || sliding).map(|chat| {
             let (transcript, rows) = self.inline_child(row_id, &chat, card.running, cx);
             // As tall as its rows, up to its room: a short run leaves no room under its last
@@ -627,10 +737,11 @@ impl Transcript {
                 .flex_none()
                 .overflow_hidden()
                 .h(px(height))
-                .opacity(openness)
+                .opacity(contents)
                 .child(
                     div()
                         .w_full()
+                        .mt(px(rise))
                         .h(px(whole))
                         .border_t_1()
                         .border_color(crate::theme::hairline(0.06))
@@ -811,11 +922,12 @@ mod tests {
         assert_eq!(card.figures_at(124_000), "12 tools · 41k tokens · 2m 3s");
         progress.running = false;
         progress.state = SubagentProgress::DONE.into();
-        progress.outcome = Some("Done".into());
         progress.duration_ms = Some(65_000);
+        progress.outcome = Some("4".into());
         let settled = Card::of(&spawn(Some(progress.clone())));
-        // slopty: done, it says what it answered, else nothing; not "Done" (#23).
-        assert_eq!(settled.step, None);
+        // slopty: done, it says what it answered (#23): the view model's outcome is the report's
+        // first line where the call carries no result, as Claude Code's spawn calls do.
+        assert_eq!(settled.step.as_deref(), Some("4"));
         assert_eq!(settled.figures_at(999_999), "12 tools · 41k tokens · 1m 5s");
         let mut answered = spawn(Some(progress.clone()));
         answered.detail = super::super::tool_detail(Some("\n## **4** lines\n\nagentId: a1\n"), None, None)
@@ -840,5 +952,21 @@ mod tests {
         assert_eq!(card.chat.as_deref(), Some("child"));
         assert_eq!(card.row.as_deref(), Some("chat:child"));
         assert_eq!(card.figures_at(5), "");
+    }
+
+    /// slopty: a card's status word swaps as Amp's does: the first sight stands still, a new word
+    /// swaps in from the last for 350 ms, and reduced motion swaps at once.
+    #[test]
+    fn a_status_word_swaps_from_the_last() {
+        let key = SharedString::from("card-status");
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        assert_eq!(status_swap(&key, &"Thinking".into(), false, start), None, "first sight");
+        let swap = status_swap(&key, &"Running tools".into(), false, at(10));
+        assert_eq!(swap, Some(("Thinking".into(), 0.0)), "it swaps from the last word");
+        let mid = status_swap(&key, &"Running tools".into(), false, at(110)).expect("still swapping");
+        assert!((mid.1 - 100.0).abs() < 0.5, "{mid:?}");
+        assert_eq!(status_swap(&key, &"Running tools".into(), false, at(10 + 350)), None, "landed");
+        assert_eq!(status_swap(&key, &"Thinking".into(), true, at(400)), None, "reduced: at once");
     }
 }

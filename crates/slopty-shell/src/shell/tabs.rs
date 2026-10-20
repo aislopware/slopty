@@ -422,6 +422,18 @@ impl Shell {
                 None => (SharedString::from(""), None, true),
             }
         };
+        // slopty: the title's right-click opens the chat's menu, as its sidebar row's does,
+        // under the bar so the title stays in sight.
+        let menu_chat = self.state.read(cx).selected_chat.clone().filter(|_| !on_canvas);
+        // slopty: a title the agent gives rises in over the old (Amp's), on the house's roll.
+        let rolling_title = menu_chat.as_ref().and_then(|chat| {
+            crate::roll_text::rolling(
+                format!("titlebar-title-{chat}"),
+                title.clone(),
+                crate::motion::reduced_motion(cx),
+                crate::clock::now(cx),
+            )
+        });
 
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
@@ -676,6 +688,24 @@ impl Shell {
                                 )
                             },
                         )
+                        .when_some(menu_chat, |el, chat_id| {
+                            el.on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                    this.chat_menu.open(super::ChatMenuState {
+                                        tab: None,
+                                        chat_id: chat_id.clone(),
+                                        position: gpui::point(
+                                            event.position.x,
+                                            px(Theme::TITLEBAR_HEIGHT),
+                                        ),
+                                        page: super::ChatMenuPage::Root,
+                                    });
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            )
+                        })
                         // slopty: a cut title shows whole in a tooltip.
                         .child(
                             div()
@@ -688,10 +718,19 @@ impl Shell {
                                 } else {
                                     theme.text.opacity(0.85)
                                 })
-                                .child(crate::settings::widgets::truncate_with_tip(
-                                    "chat-titlebar-title",
-                                    title,
-                                )),
+                                .child(match rolling_title {
+                                    Some(rolling) => div()
+                                        .debug_selector(|| "chat-titlebar-title".into())
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(rolling)
+                                        .into_any_element(),
+                                    None => crate::settings::widgets::truncate_with_tip(
+                                        "chat-titlebar-title",
+                                        title,
+                                    )
+                                    .into_any_element(),
+                                }),
                         ),
                 )
             })

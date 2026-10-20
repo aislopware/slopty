@@ -47,13 +47,18 @@ pub mod keys; // slopty: how a key reads in tooltips, menus, the palette and the
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
 pub mod links;
+mod lit; // slopty: the person's message as a faintly lit surface
 pub mod live; // slopty: Slopty's terminals and remote screens in the shell's chrome
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
+mod new_thread_background_backdrop; // slopty: the warm and cool light beneath the glyph field
 mod new_thread_background_effects;
+mod new_thread_background_field; // slopty: the hero's glyph field, its wind
+mod new_thread_background_glyphs; // slopty: the hero's glyph field, drawn
 mod new_thread_background_image;
 mod new_thread_background_mask;
+mod new_thread_background_schedule; // slopty: when the hero's glyph field shows and rests
 mod notice;
 pub mod notify;
 pub mod invariants; // slopty: what the shell's state must hold, checked as it runs
@@ -76,7 +81,6 @@ pub mod terminal;
 mod todo_panel;
 pub(crate) mod tool_images;
 pub mod theme;
-pub mod theme_library;
 pub mod toast;
 pub mod transcript;
 pub mod typography;
@@ -127,6 +131,17 @@ struct ReopenState {
 }
 
 impl gpui::Global for ReopenState {}
+
+// slopty: one name for the device the app runs on, wherever the app speaks of it.
+/// This device, as the app's words name it: "this Mac", "this device" on an iPhone or iPad,
+/// "this computer" elsewhere.
+pub const THIS_DEVICE: &str = if cfg!(target_os = "macos") {
+    "this Mac"
+} else if cfg!(target_os = "ios") {
+    "this device"
+} else {
+    "this computer"
+};
 
 /// Run the headed app: tokio bridge up, engine bootstrap kicked off (probe →
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
@@ -208,7 +223,6 @@ pub fn start(
             font_availability,
             cx,
         );
-        theme_library::init(data_dir.clone(), cx);
         appearance::init(
             ui_settings.appearance,
             ui_settings.theme_selection,
@@ -218,7 +232,8 @@ pub fn start(
         );
         // slopty: no History surface (ruled out).
         motion::init(
-            ui_settings.reduce_motion,
+            // slopty: the OS's reduced motion alone; the override setting is gone (P12).
+            motion::ReduceMotion::System,
             ui_settings.pause_animations_in_background,
             cx,
         );

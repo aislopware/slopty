@@ -134,6 +134,9 @@ pub(crate) fn editor_style(theme: &Theme) -> InputEditorStyle {
             palette: theme.syntax.clone(),
         }),
         editor_active_line: Some(crate::theme::wash(0.025)),
+        // slopty: the caret's line number reads a step brighter than the rest, as in Claude
+        // desktop's and T3 Code's editors.
+        editor_active_line_number: Some(theme.text_muted),
         editor_gutter_background: Some(gpui::transparent_black()),
         ..Default::default()
     }
@@ -353,6 +356,17 @@ mod tests {
     fn editor_caret_uses_the_same_theme_token_as_other_inputs() {
         for theme in [Theme::dark(), Theme::light()] {
             assert_eq!(editor_style(&theme).caret, theme.caret);
+        }
+    }
+
+    /// The caret's line number stands out from the gutter in both appearances.
+    #[test]
+    fn the_current_line_number_reads_brighter_than_the_gutter() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let style = editor_style(&theme);
+            assert_eq!(style.line_number_color(false), theme.text_faint);
+            assert_eq!(style.line_number_color(true), theme.text_muted);
+            assert_ne!(theme.text_muted, theme.text_faint);
         }
     }
 }

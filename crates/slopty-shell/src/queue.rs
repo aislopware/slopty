@@ -705,11 +705,19 @@ impl Composer {
             }))
             .rounded(px(ROW_RADIUS))
             .when(being_edited, |el| el.bg(crate::theme::ink(0.06)))
-            // slopty: the row hover fades in, at the house's row strength.
+            // slopty: a queued row wears the queued bubble's tint (Amp), so the two read as one
+            // thing; the row hover deepens it at the house's row strength.
             .when(!being_edited && !being_removed, |el| {
                 let fade = SharedString::from(format!("{key}-row-hover"));
-                el.bg(motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.05)))
-                    .hover_fade(fade)
+                let tint = |fill| {
+                    crate::transcript::queued_fill(fill, theme.accent, crate::transcript::QUEUED_TINT)
+                };
+                el.bg(motion::hover_blend(
+                    &fade,
+                    tint(gpui::transparent_black()),
+                    tint(crate::theme::ink(0.05)),
+                ))
+                .hover_fade(fade)
             })
             .when(being_removed, |el| el.opacity(0.55))
             .cursor(gpui::CursorStyle::Arrow)

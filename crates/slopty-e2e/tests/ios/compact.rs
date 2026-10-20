@@ -1,9 +1,10 @@
 //! The phone's anatomy on the simulator (`cargo xtask e2e ios --sim iphone|ipad`): a phone
-//! opens on its Chats page (the large title, the chat list, the "New chat" capsule and
-//! the tab bar, with no sidebar foot), "New chat" takes the whole screen for the new chat under
-//! a navigation bar (its title and a close button, none of the desktop's sidebar and history
-//! cluster), and its close goes back. An iPad keeps the shell's columns, the sidebar beside the
-//! chat. Each state is a golden in light and in dark, `ios-<device>-compact-*`.
+//! opens on its Chats page (the large title, the chat list, the capsule and the tab bar, with no
+//! sidebar foot). Before any project the capsule adds one; after it, "New chat" takes the whole
+//! screen for the new chat under a navigation bar (its title and a close button, none of the
+//! desktop's sidebar and history cluster), and its close goes back. An iPad keeps the shell's
+//! columns, the sidebar beside the chat. Each state is a golden in light and in dark,
+//! `ios-<device>-compact-*`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -133,7 +134,32 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
     }
     // Settings is a tab, so the desktop's sidebar foot (the server pill, the gear) is gone.
     assert!(dump.a11y_node("Button", Some("Settings")).is_none(), "{:#?}", dump.a11y);
+    // Before any project the capsule offers the desktop canvas's step, never a new chat that
+    // has nowhere to go.
+    assert!(dump.a11y_node("Button", Some("New chat")).is_none(), "{:#?}", dump.a11y);
     goldens(drv, &dir, device, "chats").await;
+
+    // It opens the project picker: the worker, its Home, and ⌘⏎ adds the folder open there.
+    // The phone lands on the project's new chat, as the Mac does.
+    tap(drv, "Button", "Add a project").await;
+    drv.wait_for("the device step", STEP, |d| saying(d, "e2e-ios-worker").is_some()).await.unwrap();
+    drv.type_text("e2e-ios-worker").await.unwrap();
+    drv.keys("enter").await.unwrap();
+    drv.wait_for("the locations", STEP, |d| d.a11y_node("Button", Some("Home")).is_some())
+        .await
+        .unwrap();
+    drv.keys("enter").await.unwrap();
+    drv.wait_for("Home's folders", STEP, |d| saying(d, "Clone repository").is_some())
+        .await
+        .unwrap();
+    drv.keys("cmd-enter").await.unwrap();
+    let landed = drv.wait_for("the project's new chat", STEP, |d| !chats_page(d)).await;
+    if let Err(e) = landed {
+        let shown = drv.dump().await.unwrap();
+        panic!("{e:#}\nthe phone said:\n{}", slopty_e2e::frame_text(&shown.a11y));
+    }
+    tap(drv, "Button", "Close").await;
+    drv.wait_for("Chats with its project", STEP, chats_page).await.unwrap();
 
     // "New chat" takes the screen for the new chat, its composer ready, under the phone's
     // navigation bar: its title and a close, none of the desktop's sidebar and history cluster.
@@ -264,6 +290,25 @@ async fn a_phones_chat_holds_the_dock_and_a_subagents_card() {
         typed.a11y_node("Button", Some("Send message")).unwrap().bounds;
     drv.ui_tap(width.mul_add(0.5, left), height.mul_add(0.5, top)).await.unwrap();
     read("Done: the agent is back.").await;
+    // The settled turn folds its work behind its divider; a tap opens it, the card inside.
+    let settled = drv
+        .wait_for("the turn's divider", STEP, |d| {
+            d.a11y.iter().any(|n| {
+                n.role == "Button"
+                    && n.label.as_deref().is_some_and(|l| l.starts_with("Worked for "))
+            })
+        })
+        .await
+        .unwrap();
+    let [left, top, width, height] = settled
+        .a11y
+        .iter()
+        .find(|n| {
+            n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Worked for "))
+        })
+        .map(|n| n.bounds)
+        .unwrap();
+    drv.ui_tap(width.mul_add(0.5, left), height.mul_add(0.5, top)).await.unwrap();
     let chat = drv
         .wait_for("the chat with its card and its footer", STEP, |d| {
             d.a11y_node("Button", Some("Subagent Look")).is_some()

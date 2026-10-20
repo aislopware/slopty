@@ -17,8 +17,9 @@ use std::collections::HashMap;
 
 use slopty_proto::thread::detail::{Clipped, Patch};
 use slopty_proto::thread::{
-    AskId, Compaction, ContentRef, Image, IntentId, ItemBody, Notice, Request, ThreadId,
-    ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, kind,
+    AskId, BackgroundTask, Compaction, ContentRef, Image, IntentId, Item, ItemBody, Notice,
+    Request, TaskNote, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId,
+    TurnState, UserMessage, kind,
 };
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
 use slopty_view_proto::{UserInputAnswer, UserInputQuestion};
@@ -422,7 +423,9 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                     if let Some(card) = page_card(thread, &id, call, &state.meta.cwd) {
                         parts.push(MessagePart::Page { id: card.id.clone(), card: Box::new(card) });
                     }
-                } else if let ItemBody::Task(note) = body {
+                } else if let ItemBody::Task(note) = body
+                    && !said_by_its_card(note, item, state)
+                {
                     let words = |text: &Clipped| look.words(text);
                     let task = task_part(note, state, &words, &look.chat_of);
                     parts.push(MessagePart::Task { id: id.clone(), task: Box::new(task) });
@@ -1188,6 +1191,8 @@ struct Gate {
     deny_first: bool,
     click_only: bool,
     long: bool,
+    /// Destructive, by its command alone ([`destructive`]): the card's warning.
+    risky: bool,
 }
 
 /// The commands that only read, which a key may allow when nothing else rides with them.
@@ -1280,7 +1285,7 @@ fn gate(request: &Request, call: Option<&ToolCall>, mode: Option<&str>) -> Gate 
     let said_no =
         request.options.first().is_some_and(|c| c.effect == slopty_proto::thread::Effect::Deny);
     let deny_first = long || unknown || risky || said_no;
-    Gate { deny_first, click_only: deny_first || !safe || planning, long }
+    Gate { deny_first, click_only: deny_first || !safe || planning, long, risky }
 }
 
 /// The change an approval of `call` would make, for its card: an edit's or a write's diff.
@@ -1316,6 +1321,20 @@ fn proposed(request: &Request, call: Option<&ToolCall>) -> Option<slopty_view_pr
     })
 }
 
+/// What an approval's `text` says about `command` once the command itself is drawn apart: the
+/// words after it when the text leads with it whole (Claude Code's "command, blank line,
+/// description"), else the text as it is (Codex's reason).
+fn about_command(text: &str, command: &str) -> String {
+    let text = text.trim();
+    let command = command.trim();
+    match text.strip_prefix(command) {
+        Some(rest) if !command.is_empty() && (rest.is_empty() || rest.starts_with('\n')) => {
+            rest.trim().to_owned()
+        }
+        _ => text.to_owned(),
+    }
+}
+
 /// An open request of `state`'s as the shell's input part.
 ///
 /// A request that offers choices and asks no questions (an approval, a plan, Claude Code's trust
@@ -1348,6 +1367,15 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
             (if title.is_empty() { header(request) } else { title.to_owned() }, text.to_owned())
         };
         let gate = gate(request, call, state.meters.mode.as_deref());
+        // slopty: a shell command's approval carries its command whole, apart from its words.
+        let command = matches!(request.kind.as_str(), Request::APPROVAL | Request::RETRY)
+            .then(|| call.and_then(command))
+            .flatten()
+            .filter(|command| !command.trim().is_empty());
+        let question = match command {
+            Some(command) => about_command(&question, command),
+            None => question,
+        };
         // slopty: a Claude Code plan shown whole may be approved as the person edits it.
         let edit_from = (request.kind == Request::PLAN
             && state.meta.agent.is(slopty_proto::thread::AgentId::CLAUDE_CODE))
@@ -1384,8 +1412,21 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
             edit_from,
             proposed: proposed(request, call),
             // slopty: a shell command's approval sets its command as code.
-            code: matches!(request.kind.as_str(), Request::APPROVAL | Request::RETRY)
-                && call.and_then(command).is_some(),
+            command: command.map(|command| escaped(command.trim())),
+            risky: gate.risky,
+            // slopty: the once-allow leads, unless the card starts on its deny; a choice that
+            // stops the turn reads as the danger it is.
+            primary_option: (!gate.deny_first)
+                .then(|| slopty_proto::thread::once(&request.options, true))
+                .flatten()
+                .and_then(|allow| request.options.iter().position(|c| c.id == allow.id)),
+            stop_options: request
+                .options
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.stops)
+                .map(|(ix, _)| ix)
+                .collect(),
             ..UserInputQuestion::default()
         }]
     } else if request.questions.is_empty() {
@@ -1603,6 +1644,16 @@ fn assistant(
 /// the TUI's "Thought for 12s": from the item before it in its turn (or the turn's start) to
 /// it, once something follows it or its turn ended; `None` while it may still go on, or where
 /// a time is unknown.
+/// Whether `note` is a subagent's end that its own card already says: one that lands in the turn
+/// of the call that started it, whose card shows its answer and how it ended. A subagent left
+/// running that ends in a later turn keeps its notice, which says when it came back.
+fn said_by_its_card(note: &TaskNote, item: &Item, state: &ThreadState) -> bool {
+    note.kind == BackgroundTask::AGENT
+        && note.call.as_ref().is_some_and(|call| {
+            state.items.iter().any(|started| &started.id == call && started.turn == item.turn)
+        })
+}
+
 fn thought_for(state: &ThreadState, ix: usize) -> Option<u64> {
     let item = state.items.get(ix)?;
     let turn = state.turns.iter().find(|turn| turn.id == item.turn)?;

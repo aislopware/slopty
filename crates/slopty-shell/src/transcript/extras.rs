@@ -180,6 +180,29 @@ pub fn error_card_row(
     }
 }
 
+/// slopty: the longest first sentence an error card takes for its title.
+const TITLE_MOST: usize = 90;
+
+/// slopty: an error's words as a card says them (Amp): its first sentence, what happened, is
+/// the title; the next, what to do, is the one sentence under it, left out where it only says
+/// "Try again." over a card whose action does. Words that do not split read under a calm
+/// "Something went wrong".
+pub(super) fn error_title(message: &str, retry: bool) -> (SharedString, Option<SharedString>) {
+    let message = message.trim();
+    let split = message
+        .split_once(". ")
+        .filter(|(head, rest)| head.chars().count() <= TITLE_MOST && !rest.trim().is_empty());
+    let (title, rest) = match split {
+        Some((head, rest)) => (head.to_owned(), Some(rest.trim().to_owned())),
+        None if message.chars().count() <= TITLE_MOST && !message.contains('\n') => {
+            (message.trim_end_matches('.').to_owned(), None)
+        }
+        None => ("Something went wrong".to_owned(), Some(message.to_owned())),
+    };
+    let rest = rest.filter(|rest| !(retry && rest.trim_end_matches('.') == "Try again"));
+    (title.into(), rest.map(SharedString::from))
+}
+
 /// How the worker words a Claude Code too old to drive, after any words of what it refused.
 const TOO_OLD: &str = "Update Claude Code on this machine to ";
 
@@ -620,7 +643,12 @@ impl Transcript {
         }
     }
 
-    fn render_error_card(
+    /// slopty: an error as Amp says one (`.research/amp-study-2026-10-19.md` item 8): a title,
+    /// one calm sentence, and one action that carries the work on (Try again, where the turn
+    /// can be); the agent's own words open under Details, and the whole error copies. A request
+    /// tried again counts down in its own row (`RetryLine`), a usage limit in the composer's
+    /// limit notice.
+    pub(super) fn render_error_card(
         &mut self,
         row: &Row,
         message: &SharedString,
@@ -631,6 +659,8 @@ impl Transcript {
     ) -> AnyElement {
         let open = self.extras.details_open.contains(&row.id);
         let retried = self.extras.retried.contains(&row.id);
+        let (title, sentence) = error_title(message, retry);
+        let (accent, muted) = (theme.danger, theme.danger_muted);
         let quiet = |id: String, label: &'static str| {
             let fade = format!("{id}-hover");
             div()
@@ -653,7 +683,7 @@ impl Transcript {
                 .hover_fade(fade)
                 .child(SharedString::from(label))
         };
-        let mut actions = div().flex().flex_row().items_center().gap(px(2.0)).ml(px(-8.0));
+        let mut actions = div().flex().flex_row().items_center().gap(px(2.0));
         if retry {
             let id = row.id.clone();
             actions = actions.child(if retried {
@@ -667,24 +697,45 @@ impl Transcript {
                     .child(SharedString::from("Trying again…"))
                     .into_any_element()
             } else {
-                quiet(format!("{}-retry", row.id), "Try again")
+                // The one way on, drawn as the card's lead action in its own hue.
+                let fade = format!("{}-retry-hover", row.id);
+                div()
+                    .id(SharedString::from(format!("{}-retry", row.id)))
+                    .debug_selector(|| "error-retry".into()) // slopty: for the tests
+                    .role(gpui::Role::Button)
+                    .aria_label("Try again")
+                    .h(px(24.0))
+                    .px(px(10.0))
+                    .mr(px(4.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .tab_index(0)
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(muted)
+                    .bg(crate::motion::hover_blend(&fade, accent.opacity(0.12), accent.opacity(0.2)))
+                    .active(|s| s.opacity(0.8))
+                    .hover_fade(fade)
                     .on_click(cx.listener(move |this, _, _, cx| this.retry_turn(id.clone(), cx)))
+                    .child(SharedString::from("Try again"))
                     .into_any_element()
             });
         }
         if detail.is_some() {
             let id = row.id.clone();
             actions = actions.child(
-                quiet(
-                    format!("{}-details", row.id),
-                    if open { "Hide details" } else { "Show details" },
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.extras.details_open.remove(&id) {
-                        this.extras.details_open.insert(id.clone());
-                    }
-                    cx.notify();
-                })),
+                quiet(format!("{}-details", row.id), if open { "Hide details" } else { "Details" })
+                    // slopty: said whole to the screen reader, as its action.
+                    .aria_label(if open { "Hide details" } else { "Show details" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.extras.details_open.remove(&id) {
+                            this.extras.details_open.insert(id.clone());
+                        }
+                        cx.notify();
+                    })),
             );
         }
         // slopty: the error's words and its detail, to paste where help is asked (T51).
@@ -695,7 +746,10 @@ impl Transcript {
             None => message.to_string(),
         };
         actions = actions.child(
-            quiet(copy_key.clone(), if copied { "Copied" } else { "Copy error" }).on_click(move |_, _, cx| {
+            quiet(copy_key.clone(), if copied { "Copied" } else { "Copy" })
+                // slopty: what it copies, for the screen reader.
+                .aria_label(if copied { "Copied" } else { "Copy error" })
+                .on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
                 crate::motion::copy_feedback(copy_key.clone(), cx);
             }),
@@ -720,6 +774,28 @@ impl Transcript {
                 .text_color(theme.text_muted)
                 .child(detail.clone())
         });
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(20.0))
+                    .rounded(px(6.0))
+                    .bg(accent.opacity(0.12))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(crate::icons::icon(crate::icons::DANGER_TRIANGLE).size(px(12.0)).text_color(muted.opacity(0.8))),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(muted.opacity(0.9))
+                    .child(title),
+            );
         div()
             .id(SharedString::from(format!("{}-error", row.id)))
             .role(gpui::Role::Alert)
@@ -727,11 +803,25 @@ impl Transcript {
             .py(px(4.0))
             .w_full()
             .child(
-                notice_chip(theme, false, "Error", message.clone(), Tile)
-                    .overflow_hidden()
+                div()
                     .w_full()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .rounded(px(10.0))
+                    .border_1()
+                    .border_color(accent.opacity(0.16))
+                    .bg(accent.opacity(0.05))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .child(head)
+                    .children(sentence.map(|sentence| {
+                        div().min_w_0().w_full().pl(px(28.0)).text_color(theme.text.opacity(0.8)).child(sentence)
+                    }))
                     .children(detail_block)
-                    .child(actions),
+                    .child(actions.pl(px(28.0))),
             )
             .into_any_element()
     }
@@ -959,45 +1049,54 @@ impl Transcript {
         // slopty: one file is named in the card itself, with nothing to open (#12).
         let single = files.len() == 1;
         let open = !single && self.extras.changes_open.contains(&row.id);
-        // slopty: the list opens and closes over the tool folds' tween, its chevron turning with
-        // it (#12).
+        // slopty: the list opens and closes as the one fold does (`motion::fold_frame`;
+        // design-inspiration item 7), the height first and the files fading in after it, its
+        // chevron turning with the height (#12).
         let reduce_motion = crate::motion::reduced_motion(cx);
         let now = cx.frame_time();
-        let t = self
-            .extras
-            .changes_toggled
-            .get(&row.id)
-            .filter(|_| !reduce_motion)
-            .map_or(1.0, |at| {
-                super::TOOL_FOLD.curve.eval(
-                    now.saturating_duration_since(*at).as_secs_f32() / super::TOOL_FOLD.total().as_secs_f32(),
-                )
-            })
-            .clamp(0.0, 1.0);
-        let animating = t < 1.0;
-        let openness = if open { t } else { 1.0 - t };
+        let fold = crate::motion::fold_frame(
+            open,
+            self.extras
+                .changes_toggled
+                .get(&row.id)
+                .map_or(std::time::Duration::MAX, |at| now.saturating_duration_since(*at)),
+            reduce_motion,
+        );
+        let animating = if open { fold.height < 1.0 || fold.opacity < 1.0 } else { fold.height > 0.0 };
+        let openness = fold.height.clamp(0.0, 1.0);
         let list_height = files.len() as f32 * TURN_FILE_ROW_HEIGHT + 2.0 * TURN_FILES_PAD_Y + 1.0;
         let (additions, deletions) = files
             .iter()
             .fold((0, 0), |(a, d), file| (a + file.additions, d + file.deletions));
-        // slopty: a file whose lines were never counted says nothing, not "+0 −0".
+        // slopty: a file whose lines were never counted says nothing, not "+0 −0". After the
+        // counts, 4 px on, five squares say their share in hue (AgentCraft's merge review;
+        // design-inspiration item 5).
         let counts = |additions: u64, deletions: u64| {
+            let square = |count: u64| u32::try_from(count).unwrap_or(u32::MAX);
             (additions + deletions > 0).then(|| div()
                 .flex()
                 .flex_row()
-                .gap(px(6.0))
-                .font_family(theme.font_mono.clone())
-                .text_size(px(11.5))
+                .items_center()
+                .gap(px(4.0))
                 .child(
                     div()
-                        .text_color(theme.diff_add)
-                        .child(SharedString::from(format!("+{additions}"))),
+                        .flex()
+                        .flex_row()
+                        .gap(px(6.0))
+                        .font_family(theme.font_mono.clone())
+                        .text_size(px(11.5))
+                        .child(
+                            div()
+                                .text_color(theme.diff_add)
+                                .child(SharedString::from(format!("+{additions}"))),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.diff_del)
+                                .child(SharedString::from(format!("−{deletions}"))),
+                        ),
                 )
-                .child(
-                    div()
-                        .text_color(theme.diff_del)
-                        .child(SharedString::from(format!("−{deletions}"))),
-                ))
+                .child(crate::changes::diffstat_blocks(square(additions), square(deletions), theme)))
         };
         let label = match files.first().filter(|_| single) {
             Some(file) => shown_path(&file.path, root.as_deref()),
@@ -1111,6 +1210,8 @@ impl Transcript {
                 .child(
                     div()
                         .w_full()
+                        .when(fold.opacity < 1.0, |list| list.opacity(fold.opacity))
+                        .when(fold.rise > 0.0, |list| list.mt(px(fold.rise)))
                         .border_t_1()
                         .border_color(theme.border)
                         .py(px(TURN_FILES_PAD_Y))
@@ -1398,7 +1499,7 @@ mod tests {
             vec![MessagePart::Error { id: "refused:1".into(), message: start, detail: None, retry: false }],
             MessageStatus::Complete,
         );
-        let rows = super::super::rows_for_entry(&turn, false, false, &mut |_, text| {
+        let rows = super::super::work_rows(&turn, false, &mut |_, text| {
             Arc::new(crate::markdown::parser::parse_full(text))
         });
         assert!(
@@ -1517,5 +1618,30 @@ mod tests {
         let mut rows = Vec::new();
         plan_rows(&mut rows, &plan, "plan-card:t#plan:t", short, &tree, false);
         assert_eq!(rows.len(), 2, "a short plan has no fold");
+    }
+
+    /// slopty: an error card says its first sentence as its title and the next as its one
+    /// sentence; "Try again." over a card that can try again is its button, not words; words
+    /// that do not split read under a calm title.
+    #[test]
+    fn an_error_says_a_title_and_one_sentence() {
+        let words = |message: &str, retry: bool| {
+            let (title, sentence) = super::error_title(message, retry);
+            (title.to_string(), sentence.map(|s| s.to_string()))
+        };
+        assert_eq!(
+            words("The model's service returned an error on studio. Try again.", true),
+            ("The model's service returned an error on studio".to_owned(), None)
+        );
+        assert_eq!(
+            words("A hook stopped this step on studio. Fix the hook, then try again.", false),
+            (
+                "A hook stopped this step on studio".to_owned(),
+                Some("Fix the hook, then try again.".to_owned())
+            )
+        );
+        assert_eq!(words("Couldn't start the agent", false), ("Couldn't start the agent".to_owned(), None));
+        let long = "exit status 101\nthread 'main' panicked at src/main.rs:3:5";
+        assert_eq!(words(long, false), ("Something went wrong".to_owned(), Some(long.to_owned())));
     }
 }

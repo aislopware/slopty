@@ -114,9 +114,9 @@ pub(crate) struct TrayState {
     active: Option<String>,
     pub(crate) focus: Option<FocusHandle>,
     pub(crate) scroll: gpui::ScrollHandle, // slopty: the composer's rail follows it.
-    /// How far the open tray's card rises above its closed place, as last laid out: the stack
-    /// above it rides up by as much, so the tray never covers it ([`Composer::tray_lift`]).
-    lift: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The open tray's card as this frame lays it out ([`TrayCard`]), which the stack above it
+    /// rides up by ([`Composer::ride_over_tray`]).
+    card: CardSlot,
     /// The last reveal taken.
     seen: u64,
     mark_task: Option<gpui::Task<()>>,
@@ -135,7 +135,7 @@ impl Default for TrayState {
             active: None,
             focus: None,
             scroll: gpui::ScrollHandle::new(),
-            lift: std::rc::Rc::default(),
+            card: CardSlot::default(),
             seen: 0,
             mark_task: None,
         }
@@ -201,11 +201,9 @@ pub(crate) fn row_elapsed(row: &WorkRow, now: i64) -> Option<String> {
     // slopty: a live row's timer pads its seconds, so it holds its width as it counts.
     Some(if row.live {
         crate::transcript::ticking_elapsed(i64::try_from(ms / 1_000).unwrap_or(i64::MAX))
-    } else if ms < 1_000 {
-        // A run shorter than a second ran for less than one, never "0s".
-        "<1s".to_owned()
     } else {
-        duration_words(ms)
+        // A run shorter than a second ran for less than one, never "0s".
+        slopty_view_doc::work::ran_for_words(ms)
     })
 }
 
@@ -323,10 +321,10 @@ impl Composer {
         }
     }
 
-    /// How far the stack above the tray rides up so the open tray's card covers none of it (the
-    /// folded question's strip, a note, the Todo tray); 0 while no tray shows.
-    pub(crate) fn tray_lift(&self) -> f32 {
-        self.tray.lift.get()
+    /// `stack` (the folded question's strip, a note, the Todo tray), riding up over the tray by
+    /// as far as the open card rose, so the card covers none of it.
+    pub(crate) fn ride_over_tray(&self, stack: AnyElement) -> RidesOverTray {
+        RidesOverTray { card: self.tray.card.clone(), child: stack }
     }
 
     /// Whether the selected chat's tray is open.
@@ -455,8 +453,6 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        // No tray, nothing lifted; a tray keeps the rise it was last laid out at.
-        let rose = self.tray.lift.replace(0.0);
         let chat = self.state.read(cx).selected_chat.clone()?;
         let tray = self.dock.tray.clone()?;
         if self.dock.chat.as_deref() != Some(chat.as_str()) {
@@ -472,7 +468,10 @@ impl Composer {
         }
         let theme = Theme::of(cx).clone();
         let open = self.tray_open(&chat, &tray);
-        let now = crate::clock::utc(cx).timestamp_millis();
+        // slopty: the dock's moment, which its tick turns, not the frame's: the composer is drawn
+        // again from its last frame between ticks, and a time read at the frame's moment said
+        // "12s" afresh where the frame shown said "11s".
+        let now = self.dock.now_ms(cx);
         let focus = self.tray.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         let focused = focus.contains_focused(window, cx);
 
@@ -504,11 +503,14 @@ impl Composer {
                 for row in &ended {
                     finished = finished.child(self.tray_row(row, now, focused, &theme, cx));
                 }
-                list = list.child(motion::reveal_height(
-                    SharedString::from(format!("background-tray-finished-{chat}")),
-                    self.tray.finished_open,
-                    finished,
-                ));
+                list = list.child(
+                    motion::reveal_height(
+                        SharedString::from(format!("background-tray-finished-{chat}")),
+                        self.tray.finished_open,
+                        finished,
+                    )
+                    .fold(),
+                );
             }
             let rows = crate::edge_fade::edge_faded(
                 Theme::TRANSCRIPT_FADE_BAND,
@@ -521,7 +523,8 @@ impl Composer {
                     .track_scroll(&self.tray.scroll)
                     .child(list),
             )
-            .fade_overflow_y(&self.tray.scroll);
+            // slopty: each ramp as tall as what lies past it (design-inspiration item 4).
+            .fade_scroll_y(&self.tray.scroll);
             // slopty: the house's floating rail over a long list (the composer's one rail serves
             // the tray while no `/` or `@` list is open).
             let rail = self
@@ -538,11 +541,9 @@ impl Composer {
                 .child(rows)
                 .children(rail)
         };
-        let surface = surface.child(motion::reveal_height(
-            SharedString::from(format!("background-tray-reveal-{chat}")),
-            open,
-            list,
-        ));
+        let surface = surface.child(
+            motion::reveal_height(SharedString::from(format!("background-tray-reveal-{chat}")), open, list).fold(),
+        );
         let card = crate::frost::frosted(crate::queue::PANEL_RADIUS, crate::frost::MENU_BLUR, surface);
         let tray = div()
             .id("background-tray")
@@ -556,20 +557,12 @@ impl Composer {
             .child(card);
         // slopty: the list rises over the transcript from the closed tray's place, so the chat
         // keeps its place while the tray opens; what is stacked above it rides up on top of the
-        // card by how far it rose (`tray_lift`), measured as it lays out. A change asks the
-        // window for the frame that places the stack.
-        let lift = self.tray.lift.clone();
-        lift.set(rose);
-        let tray = div()
-            .relative()
-            .h(px(closed_height()))
-            .on_children_prepainted(move |bounds, window, _| {
-                let rose = bounds.first().map_or(0.0, |card| (f32::from(card.size.height) - closed_height()).max(0.0));
-                if (lift.replace(rose) - rose).abs() > 0.25 {
-                    window.refresh();
-                }
-            })
-            .child(div().absolute().left_0().right_0().bottom_0().child(tray));
+        // card by how far it rose (`ride_over_tray`), read from the card's layout in the same
+        // frame.
+        let tray = div().relative().h(px(closed_height())).child(TrayCard {
+            card: self.tray.card.clone(),
+            child: div().absolute().left_0().right_0().bottom_0().child(tray).into_any_element(),
+        });
         Some(
             div()
                 .mx(px(inset))
@@ -590,11 +583,13 @@ impl Composer {
     ) -> AnyElement {
         let needs = tray.counts.needs_you > 0;
         let words = header_words(tray);
-        let wakes = tray.rows.iter().any(|row| row.live && row.wakes);
-        // slopty: the header's dot breathes while anything runs, on the house's one pulse clock,
-        // so a live tray never reads as a finished one; its colour still says what kind.
-        let running = tray.main.working || tray.rows.iter().any(|row| row.live && !row.ambient);
-        let dot_color = if needs { theme.warning } else if wakes { theme.accent } else { theme.text_faint };
+        let (dot, breathes) = header_dot(tray);
+        let dot_color = match dot {
+            HeaderDot::NeedsYou => theme.warning,
+            HeaderDot::Wakes => theme.accent,
+            HeaderDot::Runs => theme.success,
+            HeaderDot::Rests => theme.text_faint,
+        };
         let toggle_hover: SharedString = "background-tray-toggle-hover".into();
         let chevron_hover: SharedString = "background-tray-chevron-hover".into();
         let label = if open { "Collapse background work" } else { "Expand background work" };
@@ -626,7 +621,7 @@ impl Composer {
                     .flex_none()
                     .flex()
                     .justify_center()
-                    .child(state_dot("background-tray-dot", dot_color, running && !needs)),
+                    .child(state_dot("background-tray-dot", dot_color, breathes)),
             )
             .child(
                 div()
@@ -835,7 +830,8 @@ impl Composer {
                 .items_center()
                 .justify_center()
                 .rounded(px(6.0))
-                .opacity(if active || stopping { 1.0 } else { motion::hover_t(&key) })
+                // slopty: a touch screen, which has no hover, shows it at rest (`revealed_by_hover`).
+                .opacity(if active || stopping { 1.0 } else { motion::revealed_by_hover(&key) })
                 .when(!stopping, |el| {
                     el.cursor_pointer()
                         .bg(motion::hover_blend(&stop_key, gpui::transparent_black(), crate::theme::wash(0.11)))
@@ -860,7 +856,8 @@ impl Composer {
             SharedString::from(format!("background-row-detail-reveal-{id}")),
             detail_open,
             row_detail(row, now, theme),
-        );
+        )
+        .fold();
         let detail_id = row.id.clone();
         let details_key: SharedString = format!("background-row-details-hover-{id}").into();
         let details = div()
@@ -873,7 +870,7 @@ impl Composer {
             .items_center()
             .justify_center()
             .rounded(px(6.0))
-            .opacity(if active || detail_open { 1.0 } else { motion::hover_t(&key) })
+            .opacity(if active || detail_open { 1.0 } else { motion::revealed_by_hover(&key) })
             .cursor_pointer()
             .bg(motion::hover_blend(&details_key, gpui::transparent_black(), crate::theme::wash(0.11)))
             .hover_fade(details_key.clone())
@@ -1152,6 +1149,38 @@ fn tray_section(name: &str, count: usize, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// What the tray header's dot says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderDot {
+    /// Something needs the person (amber).
+    NeedsYou,
+    /// A row that wakes the agent when it ends runs (the accent).
+    Wakes,
+    /// Something runs that wakes no one, a dev server left on (zeron's green, steady).
+    Runs,
+    /// Nothing runs (faint).
+    Rests,
+}
+
+/// slopty: the tray header's dot and whether it breathes: it breathes only while the turn works
+/// or a row that wakes the agent runs; a long-lived row that wakes no one (`bun dev` for hours)
+/// holds a steady green, so the window is not redrawn at the pulse's clock all that time (#14).
+fn header_dot(tray: &WorkTray) -> (HeaderDot, bool) {
+    let wakes = tray.rows.iter().any(|row| row.live && row.wakes);
+    let runs = tray.rows.iter().any(|row| row.live && !row.ambient);
+    if tray.counts.needs_you > 0 {
+        return (HeaderDot::NeedsYou, false);
+    }
+    let dot = if wakes {
+        HeaderDot::Wakes
+    } else if runs {
+        HeaderDot::Runs
+    } else {
+        HeaderDot::Rests
+    };
+    (dot, tray.main.working || wakes)
+}
+
 /// A 6 px state dot; `pulse`: it breathes, for work that will wake the agent.
 fn state_dot(key: impl Into<SharedString>, color: gpui::Hsla, pulse: bool) -> AnyElement {
     let dot = div().size(px(6.0)).rounded_full().bg(color);
@@ -1163,6 +1192,146 @@ fn state_dot(key: impl Into<SharedString>, color: gpui::Hsla, pulse: bool) -> An
         .size(px(6.0))
         .child(div().absolute().inset_0().child(crate::loaders::pulse_glow(key, 3.0, color, 0.35, 1.0)))
         .into_any_element()
+}
+
+/// The open tray's card as the frame in progress laid it out: [`RidesOverTray`] clears it as it
+/// lays out, [`TrayCard`] (laid out after it) records itself, and the stack's prepaint reads it.
+type CardSlot = std::rc::Rc<std::cell::Cell<Option<gpui::LayoutId>>>;
+
+// slopty: the stack over the Background tray is placed in the frame that opens the card. Every
+// element is laid out before any is prepainted, so the stack's prepaint reads the card's height
+// from this frame's layout; no frame after is asked for.
+/// The tray's card, recording its layout as it lays out.
+pub(crate) struct TrayCard {
+    card: CardSlot,
+    child: AnyElement,
+}
+
+/// The stack above the tray, riding up by as far as the open card rose above its closed place.
+pub(crate) struct RidesOverTray {
+    card: CardSlot,
+    child: AnyElement,
+}
+
+impl gpui::Element for TrayCard {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        let layout = self.child.request_layout(window, cx);
+        self.card.set(Some(layout));
+        (layout, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut (),
+        _prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for TrayCard {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for RidesOverTray {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        // Laid out before the tray: a card of an earlier frame is never read.
+        self.card.set(None);
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let rose = self.card.get().map_or(0.0, |card| {
+            (f32::from(window.layout_bounds(card).size.height) - closed_height()).max(0.0)
+        });
+        window.with_element_offset(gpui::point(px(0.0), px(-rose)), |window| {
+            self.child.prepaint(window, cx);
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut (),
+        _prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+impl IntoElement for RidesOverTray {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -1202,6 +1371,28 @@ mod tests {
             depth: 0,
             can_stop: live,
         }
+    }
+
+    /// slopty: the header's dot breathes only while the turn works or a row that wakes the agent
+    /// runs; a dev server left on holds a steady green, and what needs the person is amber (#14).
+    #[test]
+    fn the_header_dot_breathes_only_for_what_wakes_the_agent() {
+        let tray = |rows: Vec<WorkRow>, working: bool, needs_you: u32| WorkTray {
+            main: MainRow { working, ..MainRow::default() },
+            rows,
+            counts: WorkCounts { needs_you, ..WorkCounts::default() },
+            summary: String::new(),
+            can_stop_all: false,
+        };
+        let mut server = row("task:dev", WorkRow::COMMAND, true);
+        server.wakes = false;
+        assert_eq!(header_dot(&tray(vec![server.clone()], false, 0)), (HeaderDot::Runs, false), "steady");
+        assert_eq!(header_dot(&tray(vec![server.clone()], true, 0)), (HeaderDot::Runs, true), "the turn works");
+        let build = row("task:b", WorkRow::COMMAND, true);
+        assert_eq!(header_dot(&tray(vec![server, build], false, 0)), (HeaderDot::Wakes, true));
+        let done = row("task:d", WorkRow::COMMAND, false);
+        assert_eq!(header_dot(&tray(vec![done.clone()], false, 0)), (HeaderDot::Rests, false));
+        assert_eq!(header_dot(&tray(vec![done], false, 1)), (HeaderDot::NeedsYou, false));
     }
 
     /// Live rows and what needs the person come before what ended; housekeeping is left out.

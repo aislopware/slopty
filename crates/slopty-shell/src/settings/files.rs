@@ -289,7 +289,14 @@ impl Render for FilesSettingsPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                .child(widgets::page_header(&theme, "Files", None))
+                                // slopty: one page head (`widgets::page_head`).
+                                .child(widgets::page_head(
+                                    &theme,
+                                    "Files",
+                                    None,
+                                    "How the file editor saves and shows files.",
+                                    None,
+                                ))
                                 .child(card),
                         ),
                 )

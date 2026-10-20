@@ -6,11 +6,16 @@
 // (`add_device`): this Mac, a machine over ssh, or the server. The page shows the server this
 // app follows, with a way to change it.
 
+use crate::motion::HoverFade as _;
 use chrono::{DateTime, Utc};
 use gpui::{
     AnyElement, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div,
     prelude::*, px,
 };
+
+// slopty: one name for what the server menu, this page and the dialog offer.
+/// What a phone or an iPad joining the server is called, wherever it is offered.
+pub(crate) const INVITE: &str = "Connect a phone or iPad";
 
 use slopty_view_proto::WorkspaceScope;
 
@@ -265,7 +270,7 @@ impl Render for DevicesPage {
         let dialog = self
             .add
             .as_ref()
-            .map(|(dialog, _)| popover::modal("add-device-dialog", viewport, dialog.clone().into_any_element()));
+            .map(|(dialog, _)| popover::modal_top("add-device-dialog", viewport, dialog.clone().into_any_element()));
         let server = self.state.read(cx).connectivity.server.clone();
         // slopty: the server's code, while it is up and the app still offers one.
         let invite = server.as_ref().and_then(|server| server.invite.clone());
@@ -278,7 +283,7 @@ impl Render for DevicesPage {
                 .id("invite-card")
                 .track_focus(&invite_focus)
                 .role(gpui::Role::Dialog)
-                .aria_label("Connect a phone or iPad")
+                .aria_label(INVITE)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                     if event.keystroke.key == "escape" {
                         this.inviting = false;
@@ -286,7 +291,7 @@ impl Render for DevicesPage {
                         cx.stop_propagation();
                     }
                 }))
-                .child(popover::dialog_title(&theme, "Connect a phone or iPad"))
+                .child(popover::dialog_title(&theme, INVITE))
                 .child(crate::settings::invite::body(&theme, invite))
                 .child(
                     div()
@@ -399,19 +404,9 @@ impl Render for DevicesPage {
                         .gap(px(4.0))
                         .children(actions)
                         .child(
+                            // slopty: a row's action is its words alone, as its neighbours'.
                             widgets::action_button(&theme, widgets::ActionTone::Quiet)
-                                .gap(px(4.0))
-                                .child(
-                                    crate::icons::icon(if id_copied {
-                                        crate::icons::CHECK
-                                    } else {
-                                        crate::icons::COPY
-                                    })
-                                    .size(px(12.0))
-                                    .flex_none()
-                                    .text_color(if id_copied { theme.text } else { theme.text_muted }),
-                                )
-                                .child(SharedString::from("Copy ID"))
+                                .child(SharedString::from(if id_copied { "Copied" } else { "Copy ID" }))
                             .id(("device-id", ix))
                             .tab_index(0)
                             .role(gpui::Role::Button)
@@ -441,34 +436,38 @@ impl Render for DevicesPage {
         for (n, (ix, device)) in others.into_iter().enumerate() {
             others_block = others_block.child(device_row(ix, device, n == 0));
         }
+        // slopty: the row is the button, its words saying what it adds; a second "Add device"
+        // beside them said it twice.
         let others_block = others_block.child(
-            widgets::card_row(&theme, first_add)
-                .child(widgets::row_tile(&theme, crate::icons::PLUS))
+            div()
+                .id("device-add")
+                .cursor_pointer()
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .aria_label("Add a device")
+                .bg(crate::motion::hover_blend("device-add", crate::theme::wash(0.0), theme.glass_hover()))
+                .hover_fade("device-add")
+                .map(|el| crate::surface_chrome::focus_ring_inset(el, &theme))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.show_add_device(Choice::ThisMac, window, cx);
+                }))
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(160.0))
-                        .child(widgets::row_title(&theme, "Add a device"))
-                        .child(widgets::meta_line(
-                            &theme,
-                            vec![div()
-                                .child(SharedString::from(
-                                    "This Mac, or a Mac or Linux machine you reach with ssh",
-                                ))
-                                .into_any_element()],
-                        )),
-                )
-                .child(
-                    widgets::text_action(&theme, widgets::ActionTone::Filled, "Add device")
-                        .id("device-add")
-                        .flex_none()
-                        .tab_index(0)
-                        .role(gpui::Role::Button)
-                        .aria_label("Add device")
-                        .map(|el| crate::surface_chrome::focus_ring(el, &theme))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.show_add_device(Choice::ThisMac, window, cx);
-                        })),
+                    widgets::card_row(&theme, first_add)
+                        .child(widgets::row_tile(&theme, crate::icons::PLUS))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(160.0))
+                                .child(widgets::row_title(&theme, "Add a device"))
+                                .child(widgets::meta_line(
+                                    &theme,
+                                    vec![div()
+                                        .child(SharedString::from(
+                                            "This Mac, or a Mac or Linux machine you reach with ssh",
+                                        ))
+                                        .into_any_element()],
+                                )),
+                        ),
                 ),
         );
         // slopty: the server this app follows, and a way to change it.
@@ -521,12 +520,12 @@ impl Render for DevicesPage {
                     // slopty: the code a phone or iPad scans, where this device shows one.
                     .when(invite.is_some(), |row| {
                         row.child(
-                            widgets::text_action(&theme, widgets::ActionTone::Quiet, "Connect a phone")
+                            widgets::text_action(&theme, widgets::ActionTone::Quiet, INVITE)
                                 .id("device-server-invite")
                                 .flex_none()
                                 .tab_index(0)
                                 .role(gpui::Role::Button)
-                                .aria_label("Connect a phone or iPad")
+                                .aria_label(INVITE)
                                 .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.inviting = true;
@@ -579,9 +578,8 @@ impl Render for DevicesPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                .child(widgets::page_header(&theme, "Devices", None))
-                                // slopty: Slopty's machines, not a synced registry.
-                                .child(widgets::page_subtitle(&theme, DEVICES_SUBTITLE))
+                                // slopty: Slopty's machines, not a synced registry; one page head.
+                                .child(widgets::page_head(&theme, "Devices", None, DEVICES_SUBTITLE, None))
                                 .child(card),
                         ),
                 )
@@ -673,6 +671,47 @@ mod tests {
         cx.run_until_parked();
         assert!(!page.read_with(cx, |page, _| page.inviting), "Escape closes it");
         cx.update(|window, _| assert!(before.is_focused(window), "the keyboard back where it was"));
+    }
+
+    /// The Add device dialog keeps its top edge as its tabs change what it holds: only its foot
+    /// moves.
+    #[gpui::test]
+    fn the_add_device_dialog_keeps_its_top_across_tabs(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+            cx.set_reduce_motion(true);
+        });
+        let (page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            DevicesPage::new(state, cx)
+        });
+        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
+        page.update(cx, |page, cx| page.open_add_device_on(Choice::ThisMac, cx));
+        let dialog = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.set_a11y_active(true);
+                window.refresh();
+                window.draw(cx).clear(cx);
+                let update = window.a11y_tree().expect("a tree");
+                let scale = f64::from(window.scale_factor());
+                let at = |label: &str, role: gpui::Role| {
+                    update.nodes.iter().find(|(_, n)| n.role() == role && n.label() == Some(label)).map(|(_, n)| {
+                        let r = n.bounds().unwrap_or_default();
+                        (r.y0 / scale, r.y1 / scale, (r.x0 + r.x1) / 2.0 / scale, (r.y0 + r.y1) / 2.0 / scale)
+                    })
+                };
+                (at("Add device", gpui::Role::Dialog).expect("the dialog"), at("A server", gpui::Role::Tab))
+            })
+        };
+        let (mac, server_tab) = dialog(cx);
+        let (_, _, x, y) = server_tab.expect("the server's tab");
+        cx.simulate_click(gpui::point(px(x as f32), px(y as f32)), gpui::Modifiers::default());
+        let (server, _) = dialog(cx);
+        assert!((mac.0 - server.0).abs() < 0.5, "the top stays: {mac:?} {server:?}");
+        assert!((mac.0 - (880.0 - 480.0) / 2.0).abs() < 1.0, "where the palettes stand: {mac:?}");
     }
 
     #[test]

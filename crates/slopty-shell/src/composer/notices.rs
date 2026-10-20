@@ -66,9 +66,14 @@ pub(super) fn last_heard(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-/// What the composer says while this Mac itself is offline, in the grammar of its sibling
-/// notices ("studio is out of reach · last heard 2 min ago").
-const THIS_MAC_OFFLINE: &str = "This Mac is offline · messages send when it reconnects";
+/// What the composer says while this device itself is offline, in the grammar of its sibling
+/// notices ("studio is out of reach · last heard 2 min ago"): "This Mac is offline · messages
+/// send when it reconnects", "This device …" on an iPhone or iPad.
+fn this_device_offline() -> String {
+    let mut device = crate::THIS_DEVICE.chars();
+    let device: String = device.next().map(|first| first.to_uppercase().chain(device).collect()).unwrap_or_default();
+    format!("{device} is offline · messages send when it reconnects")
+}
 
 /// The words of a chat's offline notice: this Mac offline, or the chat's machine `name` out of
 /// reach since `last_seen`.
@@ -79,7 +84,7 @@ pub(super) fn road_words(
     now: DateTime<Utc>,
 ) -> String {
     if this_mac_offline {
-        return THIS_MAC_OFFLINE.to_owned();
+        return this_device_offline();
     }
     match last_seen {
         Some(at) => format!("{name} is out of reach · last heard {}", last_heard(at, now)),
@@ -238,7 +243,7 @@ impl Composer {
         let (chat, said, host) = {
             let state = self.state.read(cx);
             let chat = state.selected_chat.clone()?;
-            let now = crate::clock::utc(cx);
+            let now = state.announced(crate::clock::utc(cx)); // slopty: as the state says it
             let wait = state
                 .session_for(&chat)
                 .filter(|s| {
@@ -369,7 +374,7 @@ impl Composer {
         let offline = state.connectivity.state == S::Offline;
         degraded.then(|| {
             let text: SharedString = if offline {
-                THIS_MAC_OFFLINE.into()
+                this_device_offline().into()
             } else {
                 "Messages send once the connection is back".into()
             };
@@ -527,8 +532,10 @@ mod tests {
         assert_eq!(road_words(false, "studio", ago(5), now), "studio is out of reach · last heard just now");
         assert_eq!(road_words(false, "vm", ago(7300), now), "vm is out of reach · last heard 2 h ago");
         assert!(road_words(false, "vm", None, now).starts_with("vm is out of reach"));
-        // slopty: this Mac offline reads as its siblings do: what happened · what follows.
-        assert_eq!(road_words(true, "vm", ago(5), now), "This Mac is offline · messages send when it reconnects");
+        // slopty: this device offline reads as its siblings do: what happened · what follows,
+        // named as the device it is (an iPhone or iPad is no Mac).
+        let device = if cfg!(target_os = "ios") { "This device" } else if cfg!(target_os = "macos") { "This Mac" } else { "This computer" };
+        assert_eq!(road_words(true, "vm", ago(5), now), format!("{device} is offline · messages send when it reconnects"));
     }
 
     #[test]

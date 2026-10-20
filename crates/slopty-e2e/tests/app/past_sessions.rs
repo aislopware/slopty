@@ -139,20 +139,15 @@ fn mark_running(home: &Path, folder: &Path, id: &str, pid: u32) {
     std::fs::write(sessions.join(format!("{pid}.json")), record.to_string()).unwrap();
 }
 
-/// A stack whose worker's Claude Code store holds the TUI's sessions of `root/repo`, its sidebar
-/// organised by project, and whose stand-in writes what it heard to `root/heard-<session>.json`.
+/// A stack whose worker's Claude Code store holds the TUI's sessions of `root/repo`, and whose
+/// stand-in writes what it heard to `root/heard-<session>.json`.
 /// The project's folder, by its real path, and the worker's home.
 async fn stack() -> (ServedApp, PathBuf, PathBuf) {
     let stack = ServedApp::launch_rooted(MACHINE, &[], |root| {
-        // The pinned look (opaque, in the harness's appearance) plus the project sidebar: a
-        // settings file of its own replaces the harness's pin, whose frost would draw the machine.
-        let app = root.join("app");
-        slopty_e2e::harness::pin_interface(&app, slopty_e2e::harness::APPEARANCE).unwrap();
-        let settings = app.join("interface").join("ui-settings.json");
-        let mut pinned: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-        pinned.as_object_mut().unwrap().insert("sidebarOrganization".into(), "byProject".into());
-        std::fs::write(&settings, pinned.to_string()).unwrap();
+        // The pinned look (opaque, in the harness's appearance): a settings file of its own
+        // replaces the harness's pin, whose frost would draw the machine.
+        slopty_e2e::harness::pin_interface(&root.join("app"), slopty_e2e::harness::APPEARANCE)
+            .unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
         std::fs::create_dir_all(root.join("repo")).unwrap();
         let home = std::fs::canonicalize(root.join("home")).unwrap();
@@ -324,15 +319,20 @@ async fn a_tui_session_is_listed_opened_and_continued() {
     // where its last turn leaves it.
     let drv = &mut stack.driver;
     seen(drv, "the answer in the chat, its turn ended", STEP, |d| {
-        d.a11y
+        // The last reply: a settled turn that worked reads as its divider ("Worked for 1s"),
+        // then its answer; one that only answered ends on its done line.
+        let last = d
+            .a11y
             .iter()
-            .skip_while(|n| {
-                n.role != "Paragraph"
-                    || !n.label.as_deref().is_some_and(|l| l.contains("Done: Keep going"))
-            })
-            .any(|n| {
-                n.role == "Status" && n.label.as_deref().is_some_and(|l| l.contains("Worked for"))
-            })
+            .rposition(|n| n.role == "Article" && n.label.as_deref() == Some("Claude Code"));
+        let reply = last.map_or(&[][..], |at| &d.a11y[at..]);
+        let said = |role: &str, words: &str| {
+            reply
+                .iter()
+                .any(|n| n.role == role && n.label.as_deref().is_some_and(|l| l.contains(words)))
+        };
+        said("Paragraph", "Done: Keep going")
+            && (said("Button", "Worked for") || said("Status", "Worked for"))
     })
     .await;
 
@@ -361,9 +361,9 @@ async fn a_tui_session_is_listed_opened_and_continued() {
     stack.shutdown().await;
 }
 
-/// History says why it has nothing: a project whose folder Claude Code never ran in has no past
-/// sessions, and a store Claude Code's sessions cannot be read from says so in the machine's
-/// words, with Try again, which lists them once they can be read.
+/// History says why it has nothing: with only a project whose folder Claude Code never ran in,
+/// there are no past sessions, and a store Claude Code's sessions cannot be read from says so in
+/// the machine's words, with Try again, which lists them once they can be read.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn history_says_why_it_has_nothing() {
@@ -371,10 +371,23 @@ async fn history_says_why_it_has_nothing() {
     let empty = stack.path("empty");
     std::fs::create_dir_all(&empty).unwrap();
     let empty = std::fs::canonicalize(&empty).unwrap();
-    live_chat(&stack, &repo, LIVE).await;
     live_chat(&stack, &empty, LIVE).await;
+    stack.driver.ok(&slopty_e2e::Command::Resize { width: 1320.0, height: 880.0 }).await.unwrap();
+    open_history(&mut stack.driver).await;
+    seen(&mut stack.driver, "History with nothing", STEP, |d| {
+        holding(d, "Status", "No past Claude Code sessions here").is_some()
+    })
+    .await;
+    // Shut, so opened again it asks again.
+    let dump = seen(&mut stack.driver, "History open", STEP, |d| {
+        holding(d, "Button", "History, open").is_some()
+    })
+    .await;
+    let (x, y) = middle(holding(&dump, "Button", "History, open").unwrap());
+    stack.driver.click(x, y).await.unwrap();
 
-    // The store of `repo` cannot be read.
+    // The project whose store cannot be read.
+    live_chat(&stack, &repo, LIVE).await;
     let store = home.join(".claude").join("projects").join(escaped(&repo));
     let locked = |mode: u32| {
         use std::os::unix::fs::PermissionsExt as _;
@@ -383,13 +396,9 @@ async fn history_says_why_it_has_nothing() {
     locked(0o000);
 
     let drv = &mut stack.driver;
-    drv.ok(&slopty_e2e::Command::Resize { width: 1320.0, height: 880.0 }).await.unwrap();
-    for _ in 0..2 {
-        open_history(drv).await;
-    }
-    let said = seen(drv, "why each History has nothing", STEP, |d| {
-        holding(d, "Status", "No past Claude Code sessions here").is_some()
-            && holding(d, "Status", "Claude Code's sessions: Permission denied").is_some()
+    open_history(drv).await;
+    let said = seen(drv, "why History has nothing", STEP, |d| {
+        holding(d, "Status", "Claude Code's sessions: Permission denied").is_some()
     })
     .await;
     assert!(past(&said, PARSER_ASKED[0]).is_none(), "{}", words(&said));

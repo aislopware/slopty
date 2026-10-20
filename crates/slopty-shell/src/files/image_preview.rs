@@ -214,7 +214,7 @@ impl Render for ImagePreview {
             root = root.child(
                 div()
                     .px(px(16.0))
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(format!("Couldn't show this image · {error}")),
             );

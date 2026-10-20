@@ -108,10 +108,12 @@ impl FilesSurface {
     pub(super) fn render_tree_root_target(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = crate::theme::Theme::of(cx);
         let active = self.tree_drag.destination.as_deref() == Some("");
-        let label = if self.tree_drag.payload.is_some() {
-            "Move to workspace root"
+        // slopty: the root row names the folder itself ("slopty"), as a Finder sidebar does.
+        let folder = self.folder_name();
+        let label: gpui::SharedString = if self.tree_drag.payload.is_some() {
+            format!("Move to {folder}").into()
         } else {
-            "Workspace root"
+            folder.into()
         };
         self.track_tree_drop_row(
             "".into(),
@@ -125,10 +127,10 @@ impl FilesSurface {
                 .px(px(8.))
                 .flex()
                 .items_center()
-                .text_size(px(10.5))
+                .text_size(crate::typography::ui_rems(11.0))
                 .text_color(theme.text_muted)
-                .when(active, |el| el.bg(crate::theme::wash(0.16)))
-                .aria_label(label)
+                .when(active, |el| el.bg(crate::theme::selected_wash()))
+                .aria_label(label.clone())
                 .child(label)
                 .into_any_element(),
         )

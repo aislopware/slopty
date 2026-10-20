@@ -1,9 +1,13 @@
 Window
-Label │ No chats yet
+Label │ No projects yet
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
+Heading │ Add a project to get started
+Label │ A project is a folder on one of your devices.
+Button │ Add a project
 Tab │ Terminal 1
-Button │ Close terminal
+Button │ Close Terminal 1
 Button │ New terminal
 Button │ Hide terminal
 Group
@@ -11,12 +15,11 @@ Terminal │ shell │ ~ %
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ Sidebar view options
 Menu │ Command block (focused)
 MenuItem │ Copy command
 MenuItem │ Copy output
 MenuItem │ Rerun
-MenuItem │ Attach to agent
+MenuItem │ Add to chat
 MenuItem │ Select block
 MenuItem │ Paste
 MenuItem │ Find…

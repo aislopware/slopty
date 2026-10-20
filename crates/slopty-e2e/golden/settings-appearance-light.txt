@@ -16,7 +16,9 @@ Button │ Close settings
 Button │ System
 Button │ Light
 Button │ Dark
+Label │ Paper white under the same violet.
 Button │ Light theme: Slopty Light
+Label │ Soft greys under a violet accent.
 Button │ Dark theme: Slopty Dark
 Button │ Theme default · Default
 Button │ Slopty
@@ -29,17 +31,15 @@ Button │ Pink
 Switch │ Match wallpaper colors
 Button │ Reset Glass to default
 Button │ Glass: Opaque
-Button
-Button
-Button │ Reduce motion: System
+Button │ Choose image
 Switch │ Pause animations in background
-Button
 Button │ Interface font: Geist
 Button │ Interface font size: 16 px
 Button │ Terminal font: Geist Mono
 Button │ Terminal font size: 13 px
 Button │ Code & diff font: Geist Mono
 Button │ Code & diff font size: 12.5 px
+Button │ Conversation width: Default
 Switch │ Render math
 Button │ Math font: Fira Math
 Button │ Math size: 100%

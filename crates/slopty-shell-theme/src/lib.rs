@@ -1,41 +1,19 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Slopty's source-neutral theme domain model.
 //!
-//! Runtime code consumes complete [`ThemeVariant`] values. Import formats such
-//! as VS Code are deliberately isolated in [`vscode`], so a component never
-//! needs to understand a workbench color id or TextMate scope.
+//! Runtime code consumes complete [`ThemeVariant`] values.
+// slopty: the built-in themes are the whole set; theme import and the theme library are gone
+// (`docs/decisions/ui.md`, "A curated few themes").
 
 mod builtins;
-mod library;
-pub mod vscode;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 pub use builtins::builtin_registry;
-pub use library::{
-    CustomThemeEntry, CustomThemeLibrary, CustomThemeSource, CustomThemeStatus, InstallMode,
-};
-
-fn custom_families() -> &'static RwLock<Vec<ThemeFamily>> {
-    static CUSTOM: OnceLock<RwLock<Vec<ThemeFamily>>> = OnceLock::new();
-    CUSTOM.get_or_init(|| RwLock::new(Vec::new()))
-}
-
-/// Replace the process-wide custom portion of the runtime registry.
-///
-/// The UI calls this after loading or mutating the durable theme library. The
-/// returned registry remains source-neutral: renderers still see only resolved
-/// families and variants.
-pub fn replace_custom_families(families: Vec<ThemeFamily>) {
-    *custom_families()
-        .write()
-        .expect("custom theme registry lock was poisoned") = families;
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -463,7 +441,6 @@ pub struct ThemeColors {
     pub cursor: Color,
     pub diff_add: Color,
     pub diff_delete: Color,
-    pub diff_hunk: Color,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +458,9 @@ pub struct ThemeVariant {
     pub id: String,
     pub family_id: String,
     pub name: String,
+    /// slopty: one short line of the theme's voice, under its name in Appearance (Amp's).
+    #[serde(default)]
+    pub description: String,
     pub appearance: Appearance,
     /// The author's recommended treatment. Runtime applies the user's
     /// [`SurfacePreference`] before components consume the variant.
@@ -522,19 +502,6 @@ pub struct ThemeRegistry {
 impl ThemeRegistry {
     pub fn builtin() -> &'static Self {
         builtin_registry()
-    }
-
-    /// Built-ins plus the currently installed custom families.
-    pub fn active() -> Self {
-        let mut families = Self::builtin().families.clone();
-        families.extend(
-            custom_families()
-                .read()
-                .expect("custom theme registry lock was poisoned")
-                .iter()
-                .cloned(),
-        );
-        Self { families }
     }
 
     pub fn variant(&self, id: &str) -> Option<&ThemeVariant> {
@@ -812,7 +779,7 @@ mod tests {
     #[test]
     fn builtins_have_complete_provenance_and_no_validation_errors() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(registry.families.len(), 19);
+        assert_eq!(registry.families.len(), 6);
         assert!(registry.variant("slopty-light").is_some());
         assert!(registry.variant("slopty-dark").is_some());
         let errors: Vec<_> = registry
@@ -831,7 +798,37 @@ mod tests {
             .iter()
             .map(|family| family.variants.len())
             .sum::<usize>();
-        assert_eq!(variants, 30);
-        assert_eq!(variants * VisualFixture::ALL.len(), 300);
+        assert_eq!(variants, 9);
+        assert_eq!(variants * VisualFixture::ALL.len(), 90);
+    }
+
+    // slopty: each curated theme carries one short line in sentence case, and both appearances
+    // keep a high-contrast choice and a choice past the house pair.
+    #[test]
+    fn every_builtin_says_one_short_line() {
+        let registry = ThemeRegistry::builtin();
+        for variant in registry.families.iter().flat_map(|family| &family.variants) {
+            let line = &variant.description;
+            assert!(!line.is_empty() && line.len() <= 60, "{}: {line:?}", variant.id);
+            assert!(line.starts_with(char::is_uppercase) && line.ends_with('.'), "{line:?}");
+            assert!(!line.contains('\n'), "one line: {line:?}");
+        }
+        for appearance in Appearance::ALL {
+            assert!(registry.variants_for(appearance).count() >= 3, "{appearance:?}");
+        }
+        assert!(registry.variant("high-contrast-dark").is_some());
+        assert!(registry.variant("high-contrast-light").is_some());
+        let black = registry.variant("slopty-black").unwrap();
+        assert_eq!(black.colors.background, Color::rgb(0, 0, 0), "true black");
+    }
+
+    // slopty: a theme that is no longer built in resolves to the house's own, so an old
+    // settings file still opens.
+    #[test]
+    fn a_theme_no_longer_built_in_resolves_to_the_houses() {
+        let registry = ThemeRegistry::builtin();
+        let gone = ThemeSelection { light: "gruvbox-light".into(), dark: "nord".into() };
+        assert_eq!(registry.resolve(&gone, Appearance::Light).id, "slopty-light");
+        assert_eq!(registry.resolve(&gone, Appearance::Dark).id, "slopty-dark");
     }
 }

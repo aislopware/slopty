@@ -259,14 +259,17 @@ impl Changes {
             .flex_row()
             .items_center()
             .gap(px(4.0))
-            .rounded(px(6.0))
+            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
             .cursor_pointer()
             .bg(motion::hover_blend(
                 "changes-turn-trigger",
                 crate::theme::wash(0.0),
-                crate::theme::wash(0.12),
+                crate::theme::control_hover(),
             ))
             .hover_fade("changes-turn-trigger")
+            // slopty: held selected while its menu is open (opencode's `[data-expanded]`).
+            .when(self.turn_menu.get().is_some(), |el| el.bg(crate::theme::selected_wash()))
+            .aria_expanded(self.turn_menu.get().is_some())
             // slopty: a keyboard stop with the shell's ring (M8).
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -297,13 +300,13 @@ impl Changes {
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text)
                     .child(SharedString::from(label)),
             )
             .child(
                 crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                    .size(px(11.0))
+                    .size(px(12.0))
                     .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),
             );
@@ -374,7 +377,7 @@ impl Changes {
                 .children(time.map(|time| {
                     div()
                         .flex_none()
-                        .text_size(px(11.5))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_faint)
                         .child(SharedString::from(time))
                 }))
@@ -414,7 +417,6 @@ impl Changes {
         let find = Self::header_toggle(
             "changes-find",
             crate::icons::MAGNIFER,
-            "Find in diff",
             self.find.is_some(),
             theme,
         )
@@ -435,7 +437,6 @@ impl Changes {
         let tree = Self::header_toggle(
             "changes-tree-toggle",
             crate::icons::FILE_TREE,
-            "File tree",
             self.show_tree,
             theme,
         )
@@ -449,13 +450,14 @@ impl Changes {
             this.toggle_tree(cx);
         }))
         .into_any_element();
-        let whitespace = glyph_toggle(
+        // slopty: the set's pilcrow, not the font's "¶", which sat heavier and off its baseline.
+        let whitespace = Self::header_toggle(
             "changes-whitespace",
-            "¶",
-            "Ignore whitespace",
+            crate::icons::PILCROW,
             self.ignore_whitespace,
             theme,
         )
+        .hint("Ignore whitespace")
         .on_click(cx.listener(|this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_ignore_whitespace(cx);
@@ -578,8 +580,9 @@ impl Changes {
                             .flex_none()
                             .flex()
                             .gap(px(4.0))
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(10.5))
+                            // slopty: counts in the file headers' tabular figures (item 18).
+                            .font_features(crate::typography::tabular())
+                            .text_size(crate::typography::ui_rems(11.0))
                             .when(diff.additions > 0, |el| {
                                 el.child(
                                     div()
@@ -630,7 +633,7 @@ impl Changes {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(12.0))
+                                .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(if on || file.is_none() { theme.text_dim } else { theme.text_muted })
                                 .child(SharedString::from(row.name)),
                         )
@@ -665,45 +668,6 @@ impl popover::ScrollRailHost for Changes {
             None
         }
     }
-}
-
-/// A toolbar toggle like [`Changes::header_toggle`], with a glyph of text in place of an icon.
-fn glyph_toggle(
-    id: &'static str,
-    glyph: &'static str,
-    label: &'static str,
-    active: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .role(gpui::Role::Button)
-        .size(px(crate::surface_chrome::CONTROL_SIZE))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
-        .cursor_pointer()
-        .map(|el| {
-            if active {
-                el.bg(crate::theme::wash(0.14))
-            } else {
-                el.bg(motion::hover_blend(id, crate::theme::wash(0.0), crate::theme::wash(0.14)))
-                    .hover_fade(id)
-            }
-        })
-        .occlude()
-        // slopty: a keyboard stop with the shell's ring (M8).
-        .map(|el| crate::surface_chrome::key_stop(el, theme))
-        .hint(label)
-        .child(
-            div()
-                .text_size(px(13.0))
-                .line_height(px(14.0))
-                .text_color(if active { theme.text } else { theme.text_muted.opacity(0.7) })
-                .child(glyph),
-        )
 }
 
 /// A time of day, as the turn list shows when a message was sent; none for an unknown time.

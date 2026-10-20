@@ -1665,7 +1665,7 @@ impl Pickers {
             self.config.harness = None;
             self.model_rail = ModelRail::Harness;
         } else if kind == PickerKind::HarnessModel {
-            self.model_rail = if self.compact_model_picker(cx) {
+            self.model_rail = if self.compact_model_picker() {
                 ModelRail::All
             } else if !self.harness_locked(cx) && !self.defaults.favorites.is_empty() {
                 ModelRail::Favorites
@@ -2532,7 +2532,7 @@ impl Pickers {
     fn activate_model_row(&mut self, cx: &mut Context<Self>) {
         if self.setting_menu.is_some() {
             self.activate_setting_choice(cx);
-        } else if self.compact_model_picker(cx) && self.compact_model_list {
+        } else if self.compact_model_picker() && self.compact_model_list {
             self.activate_model_index(self.active, cx);
         } else if let Some(index) = self.active.checked_sub(self.model_rows_len(cx)) {
             if let Some(group) = self.setting_groups(cx).get(index) {
@@ -2560,7 +2560,7 @@ impl Pickers {
             self.pick_harness(row.harness, cx);
         }
         self.pick_model(row.model.id, cx);
-        if self.compact_model_picker(cx) {
+        if self.compact_model_picker() {
             self.compact_model_list = false;
             self.focus_on_mount = true;
         }
@@ -2569,7 +2569,7 @@ impl Pickers {
     /// Star/unstar a model and persist it with the sticky defaults.
     fn toggle_model_favorite(&mut self, harness: HarnessId, model: &str, cx: &mut Context<Self>) {
         self.reload_defaults();
-        let keyboard_row = (self.compact_model_picker(cx) && self.compact_keyboard)
+        let keyboard_row = (self.compact_model_picker() && self.compact_keyboard)
             .then(|| self.model_rows(cx).get(self.active).cloned())
             .flatten();
         self.defaults.toggle_favorite(harness, model);
@@ -3236,7 +3236,7 @@ impl Pickers {
         if !self.open.is_open() {
             return;
         }
-        if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker(cx) {
+        if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker() {
             // Escape only steps back a page or closes a submenu: it should
             // not light focus rings on the controls it returns to. The next
             // navigation key brings them back.
@@ -3281,7 +3281,7 @@ impl Pickers {
             cx.notify();
             return;
         }
-        if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker(cx) {
+        if self.open_kind() == Some(PickerKind::HarnessModel) && self.compact_model_picker() {
             if !self.compact_model_list {
                 self.compact_panel_key(event, cx);
                 return;
@@ -3293,7 +3293,7 @@ impl Pickers {
             }
         }
         if event.keystroke.key == "right"
-            && !self.compact_model_picker(cx)
+            && !self.compact_model_picker()
             && self.open_kind() == Some(PickerKind::HarnessModel)
             && self.active >= self.model_rows_len(cx)
         {
@@ -3332,7 +3332,7 @@ impl Pickers {
                     // Continue from model rows into the pinned settings triggers.
                     Some(PickerKind::HarnessModel) => {
                         self.model_rows_len(cx)
-                            + if self.compact_model_picker(cx) {
+                            + if self.compact_model_picker() {
                                 0
                             } else {
                                 self.setting_groups(cx).len()
@@ -3391,7 +3391,7 @@ impl Pickers {
 
     fn measure_trigger(&self, kind: PickerKind, cx: &Context<Self>) -> impl IntoElement {
         let entity = cx.entity().downgrade();
-        let compact = kind == PickerKind::HarnessModel && self.compact_model_picker(cx);
+        let compact = kind == PickerKind::HarnessModel && self.compact_model_picker();
         // New-thread model and workspace menus open down, matching the
         // centered composer's layout. In-thread menus retain adaptive placement.
         let below = (self.title.is_some() || self.state.read(cx).selected_chat.is_none())
@@ -3686,11 +3686,8 @@ impl Pickers {
             .rounded(px(FOOTER_CHIP_RADIUS))
             .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(motion::hover_blend(
-                &id,
-                theme.text_muted.opacity(0.7),
-                theme.text.opacity(0.8),
-            ))
+            // slopty: read at a glance on the canvas: muted at rest, full text under the pointer.
+            .text_color(motion::hover_blend(&id, theme.text_muted, theme.text))
             .bg(if open {
                 theme.element_hover
             } else {
@@ -4130,7 +4127,7 @@ impl Pickers {
         popover::popover_card_flush(&theme)
             .w(px(width))
             .h(px(self.menu_geometry().height.min(self.open_model_height)))
-            .when(self.compact_model_picker(cx), |el| {
+            .when(self.compact_model_picker(), |el| {
                 el.h(px(self.compact_motion.frame_height))
             })
             .track_focus(&self.focus)
@@ -4460,7 +4457,7 @@ impl Pickers {
     /// Model picker with favorites and harness tabs above a scoped search.
     /// Existing chats show only their own harness tab and models.
     fn render_harness_model_popover(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let compact = self.compact_model_picker(cx);
+        let compact = self.compact_model_picker();
         let height = self.menu_geometry().height.min(self.open_model_height);
         let (list_height, tray_height) = model_menu_budgets(height, self.setting_groups(cx).len());
         let list_height = if compact {
@@ -4816,7 +4813,7 @@ impl Pickers {
         row: &ModelRowData,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.compact_model_picker(cx) {
+        if self.compact_model_picker() {
             return self.render_compact_model_row(ix, row, cx);
         }
         let theme = Theme::of(cx).for_popup();
@@ -5226,7 +5223,7 @@ impl Pickers {
             return Vec::new();
         }
         if self.selected_model(cx).is_some_and(configured_in_place) {
-            return if self.compact_model_picker(cx) {
+            return if self.compact_model_picker() {
                 card_order(self.live_groups(cx))
             } else {
                 Vec::new()
@@ -5527,7 +5524,7 @@ impl Pickers {
             .filter(|g| tray || !is_toggle(g));
         for (ix, group) in groups.enumerate() {
             if tray
-                && self.compact_model_picker(cx)
+                && self.compact_model_picker()
                 && !Self::compact_option_visible(&group.id, &self.compact_hidden_options(cx))
             {
                 continue;
@@ -5552,7 +5549,7 @@ impl Pickers {
             )
             .id((row_id, ix))
             .relative()
-            .h(px(if self.compact_model_picker(cx) {
+            .h(px(if self.compact_model_picker() {
                 26.0
             } else {
                 30.0
@@ -5770,7 +5767,7 @@ impl Pickers {
         }
         // The compact panel's own inset already closes the card below the
         // last row; a second one left the bottom twice as deep as the sides.
-        let compact = tray && self.compact_model_picker(cx);
+        let compact = tray && self.compact_model_picker();
         div()
             .flex()
             .flex_col()
@@ -6539,7 +6536,7 @@ impl Render for Pickers {
             | Some(PickerKind::Space)
             | Some(PickerKind::Device) => None,
             Some(PickerKind::HarnessModel) => {
-                let menu = if self.compact_model_picker(cx) {
+                let menu = if self.compact_model_picker() {
                     self.render_compact_menu(window, cx)
                 } else {
                     let content = self.render_harness_model_popover(cx);
@@ -7072,109 +7069,6 @@ mod tests {
             .unwrap();
     }
 
-    #[gpui::test]
-    fn model_shortcut_focuses_mounted_picker_and_routes_navigation(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            cx.set_global(Theme::dark());
-            crate::composer::init(cx, Default::default());
-            cx.bind_keys([gpui::KeyBinding::new(
-                "cmd-/",
-                crate::shell::OpenModelPicker,
-                None,
-            )]);
-        });
-        let handle = cx.add_window(|_, cx| ModelShortcutHost {
-            focus_sub: None,
-            root: cx.focus_handle(),
-            editor: cx.focus_handle(),
-            neutral: cx.focus_handle(),
-            pickers: cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                let mut pickers = Pickers::new(state, cx);
-                pickers.config.harness = Some(HarnessId::CLAUDE_CODE);
-                pickers.config.model = Some("first".into());
-                pickers.harnesses =
-                    Loadable::Ready(vec![descriptor(HarnessId::CLAUDE_CODE, "Claude Code")]);
-                pickers.models.insert(
-                    HarnessId::CLAUDE_CODE,
-                    Loadable::Ready(vec![
-                        bare_model("first", "First"),
-                        bare_model("second", "Second"),
-                    ]),
-                );
-                pickers
-            }),
-        });
-        cx.run_until_parked();
-        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-        handle
-            .update(cx, |host, window, cx| window.focus(&host.editor, cx))
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "cmd-/");
-        cx.run_until_parked();
-        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-        handle
-            .update(cx, |host, window, cx| {
-                host.pickers.read_with(cx, |pickers, cx| {
-                    assert!(pickers.is_open());
-                    assert!(
-                        pickers.focus.contains_focused(window, cx),
-                        "shortcut must transfer focus into the mounted picker"
-                    );
-                });
-            })
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down");
-        handle
-            .read_with(cx, |host, cx| assert_eq!(host.pickers.read(cx).active, 1))
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "up");
-        handle
-            .read_with(cx, |host, cx| assert_eq!(host.pickers.read(cx).active, 0))
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "escape");
-        handle
-            .read_with(cx, |host, cx| assert!(!host.pickers.read(cx).is_open()))
-            .unwrap();
-
-        // Catalog loading/error/empty cards omit the input but still need
-        // immediate keyboard focus on their mounted frame for Escape.
-        for catalog in [
-            Loadable::Loading,
-            Loadable::Error("offline".into()),
-            Loadable::Ready(vec![]),
-        ] {
-            cx.executor().advance_clock(Duration::from_secs(1));
-            cx.run_until_parked();
-            handle
-                .update(cx, |host, window, cx| {
-                    host.pickers.update(cx, |pickers, cx| {
-                        pickers.config.harness = None;
-                        pickers.defaults.harness = None;
-                        pickers.harnesses = catalog;
-                        cx.notify();
-                    });
-                    window.focus(&host.editor, cx);
-                })
-                .unwrap();
-            cx.simulate_keystrokes(handle.into(), "cmd-/");
-            cx.run_until_parked();
-            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
-            handle
-                .update(cx, |host, window, cx| {
-                    assert!(host.pickers.read(cx).focus.contains_focused(window, cx));
-                })
-                .unwrap();
-            cx.simulate_keystrokes(handle.into(), "escape");
-            handle
-                .read_with(cx, |host, cx| assert!(!host.pickers.read(cx).is_open()))
-                .unwrap();
-        }
-    }
-
     #[test]
     fn model_menu_height_tracks_both_sides_and_long_settings() {
         for (top, bottom, viewport, below) in [
@@ -7390,109 +7284,6 @@ mod tests {
         assert!(widths[0] > short, "{widths:?} vs {short:?}");
         assert!(widths[1] > widths[0], "{widths:?}");
         assert_eq!(widths[2], short);
-    }
-
-    #[gpui::test]
-    fn open_model_card_keeps_height_when_options_change(cx: &mut gpui::TestAppContext) {
-        use std::{cell::Cell, rc::Rc};
-        struct Fixture {
-            pickers: Entity<Pickers>,
-            bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
-        }
-        impl Render for Fixture {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let measured = self.bounds.clone();
-                let menu = self.pickers.update(cx, |pickers, cx| {
-                    let content = pickers.render_harness_model_popover(cx);
-                    pickers.popover_frame_flush(304.0, content, cx)
-                });
-                div().size_full().relative().child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .w(px(304.0))
-                        .child(menu)
-                        .child(
-                            gpui::canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
-                                .absolute()
-                                .inset_0(),
-                        ),
-                )
-            }
-        }
-        cx.update(|cx| cx.set_global(Theme::dark()));
-        let bounds = Rc::new(Cell::new(gpui::Bounds::default()));
-        let handle = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            let pickers = cx.new(|cx| {
-                let mut pickers = Pickers::new(state, cx);
-                pickers.config.harness = Some(HarnessId::CODEX);
-                pickers.config.model = Some("model".into());
-                pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::CODEX, "Codex")]);
-                pickers.open_model_height = model_menu_height(2);
-                pickers.menu_geometry.insert(
-                    PickerKind::HarnessModel,
-                    popover::MenuGeometry {
-                        height: 500.0,
-                        below: false,
-                    },
-                );
-                pickers.open.open(PickerKind::HarnessModel);
-                pickers
-            });
-            Fixture {
-                pickers,
-                bounds: bounds.clone(),
-            }
-        });
-        for available in [500.0, 200.0, 500.0] {
-            for settings in [0, 1, 3, 0] {
-                handle
-                    .update(cx, |fixture, _, cx| {
-                        fixture.pickers.update(cx, |pickers, cx| {
-                            let mut model = bare_model("model", "Model");
-                            model.options = (0..settings)
-                                .map(|i| ModelOption {
-                                    id: format!("option-{i}"),
-                                    label: format!("Option {i}"),
-                                    default_choice: "on".into(),
-                                    choices: vec![
-                                        ModelOptionChoice {
-                                            id: "on".into(),
-                                            label: "On".into(),
-                                        },
-                                        ModelOptionChoice {
-                                            id: "off".into(),
-                                            label: "Off".into(),
-                                        },
-                                    ],
-                                })
-                                .collect();
-                            pickers
-                                .models
-                                .insert(HarnessId::CODEX, Loadable::Ready(vec![model]));
-                            pickers
-                                .menu_geometry
-                                .get_mut(&PickerKind::HarnessModel)
-                                .unwrap()
-                                .height = available;
-                            cx.notify();
-                        });
-                        cx.notify();
-                    })
-                    .unwrap();
-                cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-                    .unwrap();
-                assert!(
-                    (f32::from(bounds.get().size.height) - available.min(model_menu_height(2)))
-                        .abs()
-                        < 0.1,
-                    "settings={settings}, available={available}, bounds={:?}",
-                    bounds.get()
-                );
-            }
-        }
     }
 
     #[gpui::test]
@@ -8000,135 +7791,6 @@ mod tests {
             .unwrap();
     }
 
-    #[gpui::test]
-    fn nested_model_settings_navigate_and_preserve_independent_choices(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
-            cx.set_global(Theme::dark());
-            crate::composer::init(cx, Default::default());
-        });
-        let handle = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Pickers::new(state, cx)
-        });
-        handle
-            .update(cx, |pickers, window, cx| {
-                let mut model = bare_model("opus", "Opus");
-                model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
-                model.options = ["contextWindow", "serviceTier"]
-                    .map(|id| ModelOption {
-                        id: id.into(),
-                        label: id.into(),
-                        default_choice: "standard".into(),
-                        choices: ["standard", "extended"]
-                            .map(|id| ModelOptionChoice {
-                                id: id.into(),
-                                label: id.into(),
-                            })
-                            .into(),
-                    })
-                    .into();
-                pickers.config.harness = Some(HarnessId::CLAUDE_CODE);
-                pickers.harnesses =
-                    Loadable::Ready(vec![descriptor(HarnessId::CLAUDE_CODE, "Claude Code")]);
-                pickers.models.insert(
-                    HarnessId::CLAUDE_CODE,
-                    Loadable::Ready(vec![model, bare_model("haiku", "Haiku")]),
-                );
-                pickers.pick_model("opus".into(), cx);
-                pickers.open.open(PickerKind::HarnessModel);
-                window.focus(&pickers.focus, cx);
-                assert_eq!(pickers.setting_groups(cx).len(), 3);
-                let key = |key: &str| KeyDownEvent {
-                    keystroke: gpui::Keystroke::parse(key).unwrap(),
-                    is_held: false,
-                    prefer_character_input: false,
-                };
-                pickers.active = pickers.model_rows_len(cx);
-                pickers.on_key_down(&key("right"), window, cx);
-                assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
-                pickers.on_key_down(&key("up"), window, cx);
-                pickers.on_key_down(&key("enter"), window, cx);
-                assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::Low));
-                assert!(pickers.setting_menu.is_none());
-                assert!(pickers.is_open());
-                for id in ["contextWindow", "serviceTier"] {
-                    pickers.open_setting(SettingScope::Tray, ModelSetting::Option(id.into()), cx);
-                    assert_eq!(pickers.setting_active, 0);
-                    pickers.on_key_down(&key("down"), window, cx);
-                    pickers.on_key_down(&key("enter"), window, cx);
-                    assert_eq!(pickers.resolved(cx).model_options[id], "extended");
-                }
-                // Returning to one setting keeps its choice, and restoring its
-                // default does not reset a sibling option or close the picker.
-                pickers.open_setting(
-                    SettingScope::Tray,
-                    ModelSetting::Option("contextWindow".into()),
-                    cx,
-                );
-                assert_eq!(pickers.setting_active, 1);
-                pickers.on_key_down(&key("up"), window, cx);
-                pickers.on_key_down(&key("enter"), window, cx);
-                assert!(
-                    !pickers
-                        .resolved(cx)
-                        .model_options
-                        .contains_key("contextWindow")
-                );
-                assert_eq!(
-                    pickers.resolved(cx).model_options["serviceTier"],
-                    "extended"
-                );
-                pickers.open_setting(SettingScope::Tray, ModelSetting::Reasoning, cx);
-                pickers.on_key_down(&key("escape"), window, cx);
-                assert!(pickers.is_open());
-                assert!(pickers.setting_menu.is_none());
-                pickers.open_setting(SettingScope::Tray, ModelSetting::Reasoning, cx);
-                pickers.pick_model("haiku".into(), cx);
-                assert!(pickers.setting_menu.is_none());
-                assert!(pickers.setting_groups(cx).is_empty());
-            })
-            .unwrap();
-        for setting in [
-            ModelSetting::Reasoning,
-            ModelSetting::Option("contextWindow".into()),
-            ModelSetting::Option("serviceTier".into()),
-        ] {
-            handle
-                .update(cx, |pickers, _, cx| {
-                    pickers.pick_model("opus".into(), cx);
-                    pickers.open_setting(SettingScope::Tray, setting, cx);
-                })
-                .unwrap();
-            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
-        }
-        handle
-            .update(cx, |pickers, window, cx| {
-                pickers.setting_menu = None;
-                pickers.active = 0;
-                window.focus(&pickers.search.read(cx).focus_handle(cx), cx);
-            })
-            .unwrap();
-        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down down right");
-        handle
-            .read_with(cx, |pickers, _| {
-                assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning))
-            })
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "down enter");
-        handle
-            .read_with(cx, |pickers, cx| {
-                assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::High));
-                assert!(pickers.setting_menu.is_none());
-                assert!(pickers.is_open());
-            })
-            .unwrap();
-    }
-
     /// Devin Fusion: one row configured in place. Its hover card lists Lead,
     /// Effort, Sidekick and a Fast Mode switch; any choice made there selects
     /// Fusion and applies to it.
@@ -8276,541 +7938,6 @@ mod tests {
             .unwrap();
     }
 
-    /// Pointer paths through the Fusion card: the cone toward a card row's
-    /// choice list keeps both open, a pick keeps the card, and the selected
-    /// Fusion's settings live only in its card (not the tray).
-    #[gpui::test]
-    fn fusion_card_mouse_paths(cx: &mut gpui::TestAppContext) {
-        use std::{cell::Cell, rc::Rc};
-        struct CardFixture {
-            pickers: Entity<Pickers>,
-            bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
-        }
-        impl Render for CardFixture {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let measured = self.bounds.clone();
-                let menu = self.pickers.update(cx, |pickers, cx| {
-                    let content = pickers.render_harness_model_popover(cx);
-                    pickers.popover_frame_flush(304.0, content, cx)
-                });
-                div().size_full().relative().child(
-                    div()
-                        .absolute()
-                        .top(px(60.0))
-                        .left(px(32.0))
-                        .w(px(304.0))
-                        .child(menu)
-                        .child(
-                            gpui::canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
-                                .absolute()
-                                .inset_0(),
-                        ),
-                )
-            }
-        }
-        cx.update(|cx| cx.set_global(Theme::dark()));
-        let measured = Rc::new(Cell::new(gpui::Bounds::default()));
-        let handle = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            let pickers = cx.new(|cx| Pickers::new(state, cx));
-            pickers.update(cx, |pickers, cx| {
-                let option = |id: &str, label: &str, choices: &[(&str, &str)]| ModelOption {
-                    id: id.into(),
-                    label: label.into(),
-                    default_choice: choices[0].0.into(),
-                    choices: choices
-                        .iter()
-                        .map(|(id, label)| ModelOptionChoice {
-                            id: (*id).into(),
-                            label: (*label).into(),
-                        })
-                        .collect(),
-                };
-                let mut fusion = bare_model("fusion", "Fusion");
-                fusion.reasoning_levels = vec![ReasoningLevel::Medium, ReasoningLevel::High];
-                fusion.options = vec![
-                    option(
-                        "lead",
-                        "Lead",
-                        &[("a", "Lead A"), ("b", "Lead B"), ("c", "Lead C")],
-                    ),
-                    option("sidekick", "Sidekick", &[("x", "Side X"), ("y", "Side Y")]),
-                    option(
-                        "speed",
-                        "Fast Mode",
-                        &[("standard", "Standard"), ("fast", "Fast")],
-                    ),
-                ];
-                pickers.config.harness = Some(HarnessId::DEVIN);
-                pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DEVIN, "Devin")]);
-                pickers.models.insert(
-                    HarnessId::DEVIN,
-                    Loadable::Ready(vec![bare_model("adaptive", "Adaptive"), fusion]),
-                );
-                pickers.open.open(PickerKind::HarnessModel);
-                pickers.pick_model("adaptive".into(), cx);
-            });
-            CardFixture {
-                pickers,
-                bounds: measured.clone(),
-            }
-        });
-        let pickers = handle
-            .read_with(cx, |fixture, _| fixture.pickers.clone())
-            .unwrap();
-        let hover = |window: &mut Window, cx: &mut App, position| {
-            window.dispatch_event(
-                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                    position,
-                    ..Default::default()
-                }),
-                cx,
-            );
-            window.draw(cx).clear(cx);
-            window.draw(cx).clear(cx);
-        };
-        let click = |window: &mut Window, cx: &mut App, position| {
-            for input in [
-                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    click_count: 1,
-                    ..Default::default()
-                }),
-                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                    button: gpui::MouseButton::Left,
-                    position,
-                    click_count: 1,
-                    ..Default::default()
-                }),
-            ] {
-                window.dispatch_event(input, cx);
-            }
-            window.draw(cx).clear(cx);
-            window.draw(cx).clear(cx);
-        };
-        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-        let parent = measured.get();
-        // Find the Fusion row by hovering down the list.
-        let mut row = None;
-        for step in 0..60 {
-            let at = gpui::point(
-                parent.left() + px(60.0),
-                parent.top() + px(4.0 * step as f32),
-            );
-            cx.update_window(handle.into(), |_, window, cx| hover(window, cx, at))
-                .unwrap();
-            if pickers.read_with(cx, |p, _| p.config_row) == Some(1) {
-                row = Some(at);
-                break;
-            }
-        }
-        row.expect("hovering the Fusion row opens its card");
-        let card = pickers
-            .read_with(cx, |p, _| p.config_bounds)
-            .expect("card measured");
-        assert!(card.left() > parent.right(), "card opens beside the menu");
-        // Find the Lead trigger inside the card.
-        let mut lead = None;
-        for step in 0..40 {
-            let at = gpui::point(card.left() + px(40.0), card.top() + px(3.0 * step as f32));
-            cx.update_window(handle.into(), |_, window, cx| hover(window, cx, at))
-                .unwrap();
-            if pickers.read_with(cx, |p, _| p.setting_menu.clone())
-                == Some(ModelSetting::Option("lead".into()))
-            {
-                lead = Some(at);
-                break;
-            }
-        }
-        let lead = lead.expect("hovering Lead opens its choices");
-        let list = pickers
-            .read_with(cx, |p, _| p.setting_bounds)
-            .expect("choices measured");
-        assert!(list.left() > card.right());
-        // Diagonal path from the Lead row to the bottom of its list: through
-        // the gap and below the Lead row — inside the cone, not the card.
-        let target = gpui::point(list.left() + px(12.0), list.bottom() - px(10.0));
-        for t in 1..=10 {
-            let f = t as f32 / 10.0;
-            let at = gpui::point(
-                lead.x + (target.x - lead.x) * f,
-                lead.y + (target.y - lead.y) * f,
-            );
-            cx.update_window(handle.into(), |_, window, cx| hover(window, cx, at))
-                .unwrap();
-            pickers.read_with(cx, |p, _| {
-                assert_eq!(p.config_row, Some(1), "card closed at step {t}");
-                assert_eq!(
-                    p.setting_menu,
-                    Some(ModelSetting::Option("lead".into())),
-                    "choices closed at step {t}"
-                );
-            });
-        }
-        // Pick the last choice: Fusion is selected, the list closes, the
-        // card stays — also while the pointer rests where the list was.
-        cx.update_window(handle.into(), |_, window, cx| {
-            click(window, cx, target);
-            hover(window, cx, target + gpui::point(px(3.0), px(-2.0)));
-        })
-        .unwrap();
-        pickers.read_with(cx, |p, cx| {
-            assert_eq!(p.resolved(cx).model.as_deref(), Some("fusion"));
-            assert_eq!(p.resolved(cx).model_options["lead"], "c");
-            assert!(p.setting_menu.is_none());
-            assert_eq!(p.config_row, Some(1), "a pick keeps the card open");
-            // Selected Fusion keeps its settings out of the tray.
-            assert!(p.setting_groups(cx).is_empty());
-            assert!(!p.card_groups(cx).is_empty());
-        });
-        // Back into the card, then far away: the card closes.
-        cx.update_window(handle.into(), |_, window, cx| {
-            hover(window, cx, card.center());
-            hover(window, cx, gpui::point(px(4.0), px(4.0)));
-        })
-        .unwrap();
-        pickers.read_with(cx, |p, _| assert!(p.config_row.is_none()));
-    }
-
-    #[gpui::test]
-    fn nested_model_menu_mouse_paths_work_on_both_sides(cx: &mut gpui::TestAppContext) {
-        use std::{cell::Cell, rc::Rc};
-        struct MouseFixture {
-            pickers: Entity<Pickers>,
-            on_left: bool,
-            bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
-        }
-        impl Render for MouseFixture {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let measured = self.bounds.clone();
-                let menu = self.pickers.update(cx, |pickers, cx| {
-                    let content = pickers.render_harness_model_popover(cx);
-                    pickers.popover_frame_flush(304.0, content, cx)
-                });
-                div().size_full().relative().child(
-                    div()
-                        .absolute()
-                        .top(px(100.0))
-                        .w(px(304.0))
-                        .when(self.on_left, |el| el.right(px(32.0)))
-                        .when(!self.on_left, |el| el.left(px(32.0)))
-                        .child(menu)
-                        .child(
-                            gpui::canvas(move |bounds, _, _| measured.set(bounds), |_, _, _, _| {})
-                                .absolute()
-                                .inset_0(),
-                        ),
-                )
-            }
-        }
-        cx.update(|cx| cx.set_global(Theme::dark()));
-        for on_left in [false, true] {
-            let measured = Rc::new(Cell::new(gpui::Bounds::default()));
-            let handle = cx.add_window(|_, cx| {
-                let state = cx.new(|_| AppState::new());
-                let pickers = cx.new(|cx| Pickers::new(state, cx));
-                pickers.update(cx, |pickers, cx| {
-                    let mut model = bare_model("test", "Test model");
-                    model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
-                    model.options.push(ModelOption {
-                        id: "contextWindow".into(),
-                        label: "Context window".into(),
-                        choices: ["200k", "1m"]
-                            .map(|id| ModelOptionChoice {
-                                id: id.into(),
-                                label: id.into(),
-                            })
-                            .into(),
-                        default_choice: "200k".into(),
-                    });
-                    pickers.config.harness = Some(HarnessId::CLAUDE_CODE);
-                    pickers.harnesses =
-                        Loadable::Ready(vec![descriptor(HarnessId::CLAUDE_CODE, "Claude Code")]);
-                    pickers
-                        .models
-                        .insert(HarnessId::CLAUDE_CODE, Loadable::Ready(vec![model]));
-                    pickers.open.open(PickerKind::HarnessModel);
-                    pickers.pick_model("test".into(), cx);
-                });
-                MouseFixture {
-                    pickers,
-                    on_left,
-                    bounds: measured.clone(),
-                }
-            });
-            let pickers = handle
-                .read_with(cx, |fixture, _| fixture.pickers.clone())
-                .unwrap();
-            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
-            let parent = measured.get();
-            let trigger = gpui::point(
-                parent.center().x,
-                parent.bottom() - px(popover::CARD_INSET + 30.0 + popover::MENU_GAP + 15.0),
-            );
-            let click = |window: &mut Window, cx: &mut App, position| {
-                window.dispatch_event(
-                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                        position,
-                        ..Default::default()
-                    }),
-                    cx,
-                );
-                window.dispatch_event(
-                    gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                        button: gpui::MouseButton::Left,
-                        position,
-                        click_count: 1,
-                        ..Default::default()
-                    }),
-                    cx,
-                );
-                window.dispatch_event(
-                    gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                        button: gpui::MouseButton::Left,
-                        position,
-                        click_count: 1,
-                        ..Default::default()
-                    }),
-                    cx,
-                );
-            };
-            let hover = |window: &mut Window, cx: &mut App, position| {
-                window.dispatch_event(
-                    gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                        position,
-                        ..Default::default()
-                    }),
-                    cx,
-                );
-                window.draw(cx).clear(cx);
-                window.draw(cx).clear(cx);
-            };
-            cx.update_window(handle.into(), |_, window, cx| {
-                hover(window, cx, trigger);
-                window.draw(cx).clear(cx);
-                window.draw(cx).clear(cx);
-            })
-            .unwrap();
-            let submenu = pickers.read_with(cx, |pickers, _| {
-                assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
-                assert_eq!(pickers.setting_on_left, on_left);
-                pickers
-                    .setting_bounds
-                    .expect("submenu measured after opening")
-            });
-            if on_left {
-                assert!(submenu.right() < parent.left());
-            } else {
-                assert!(submenu.left() > parent.right());
-            }
-            // Clicking the hovered trigger dismisses its child and keeps it closed.
-            cx.update_window(handle.into(), |_, window, cx| {
-                click(window, cx, trigger);
-                window.draw(cx).clear(cx);
-            })
-            .unwrap();
-            pickers.read_with(cx, |pickers, _| {
-                assert!(
-                    pickers.setting_menu.is_none(),
-                    "trigger click dismisses the hovered submenu"
-                );
-                assert!(pickers.is_open());
-            });
-            cx.update_window(handle.into(), |_, window, cx| {
-                // Moving inside the same hovered row must not reopen it.
-                hover(window, cx, trigger + gpui::point(px(2.0), px(0.0)));
-                assert!(pickers.read(cx).setting_menu.is_none());
-                hover(window, cx, gpui::point(px(8.0), px(8.0)));
-                hover(window, cx, trigger);
-            })
-            .unwrap();
-            // Cross the neighboring trigger diagonally toward the open child.
-            // It must not steal the menu while the pointer is inside the cone.
-            let diagonal = gpui::point(
-                if on_left {
-                    parent.left() + px(8.0)
-                } else {
-                    parent.right() - px(8.0)
-                },
-                trigger.y + px(32.0),
-            );
-            cx.update_window(handle.into(), |_, window, cx| {
-                hover(window, cx, diagonal);
-                assert_eq!(pickers.read(cx).setting_menu, Some(ModelSetting::Reasoning));
-                assert!(pickers.read(cx).setting_hover.pending().is_some());
-            })
-            .unwrap();
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(200));
-            cx.run_until_parked();
-            cx.update_window(handle.into(), |_, window, cx| {
-                hover(
-                    window,
-                    cx,
-                    diagonal + gpui::point(px(if on_left { -3.0 } else { 3.0 }), px(0.0)),
-                );
-            })
-            .unwrap();
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(200));
-            cx.run_until_parked();
-            cx.update_window(handle.into(), |_, window, cx| {
-                assert_eq!(
-                    pickers.read(cx).setting_menu,
-                    Some(ModelSetting::Reasoning),
-                    "forward progress renews grace"
-                );
-                hover(window, cx, submenu.center());
-            })
-            .unwrap();
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(400));
-            cx.run_until_parked();
-            pickers.read_with(cx, |pickers, _| {
-                assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
-                assert!(pickers.setting_hover.pending().is_none());
-            });
-            // Resting on the sibling expresses intent to switch after grace.
-            cx.update_window(handle.into(), |_, window, cx| {
-                hover(window, cx, trigger);
-                hover(window, cx, diagonal);
-            })
-            .unwrap();
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(350));
-            cx.run_until_parked();
-            pickers.read_with(cx, |pickers, _| {
-                assert_eq!(
-                    pickers.setting_menu,
-                    Some(ModelSetting::Option("contextWindow".into()))
-                );
-            });
-            // Moving away from the cone switches immediately. A click during
-            // the grace period dismisses instead, with no delayed reopening.
-            cx.update_window(handle.into(), |_, window, cx| {
-                hover(window, cx, trigger);
-                hover(window, cx, diagonal);
-                hover(window, cx, trigger + gpui::point(px(0.0), px(32.0)));
-                assert_eq!(
-                    pickers.read(cx).setting_menu,
-                    Some(ModelSetting::Option("contextWindow".into()))
-                );
-                hover(window, cx, trigger);
-                hover(window, cx, diagonal);
-                click(window, cx, diagonal);
-                window.draw(cx).clear(cx);
-            })
-            .unwrap();
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(400));
-            cx.run_until_parked();
-            pickers.read_with(cx, |pickers, _| {
-                assert!(pickers.setting_menu.is_none());
-                assert!(pickers.setting_hover.pending().is_none());
-                assert!(pickers.is_open());
-            });
-            cx.update_window(handle.into(), |_, window, cx| hover(window, cx, trigger))
-                .unwrap();
-            let gap_x = if on_left {
-                (submenu.right() + parent.left()) / 2.0
-            } else {
-                (parent.right() + submenu.left()) / 2.0
-            };
-            // Leaving the safe corridor closes the child and clears its
-            // trigger selection, while preserving the parent picker.
-            for outside in [
-                gpui::point(gap_x, submenu.bottom() + px(20.0)),
-                gpui::point(parent.center().x, parent.top() + px(60.0)),
-                gpui::point(px(8.0), px(8.0)),
-            ] {
-                cx.update_window(handle.into(), |_, window, cx| {
-                    hover(window, cx, outside);
-                    assert!(pickers.read(cx).setting_menu.is_none());
-                    assert_eq!(pickers.read(cx).active, 0);
-                    assert!(pickers.read(cx).is_open());
-                    hover(window, cx, trigger);
-                    assert_eq!(pickers.read(cx).setting_menu, Some(ModelSetting::Reasoning));
-                })
-                .unwrap();
-            }
-            // Moving through the gap into the child remains safe.
-            let target = gpui::point(
-                submenu.left() + px(30.0),
-                submenu.bottom() - px(popover::CARD_INSET + 30.0 + popover::MENU_GAP + 15.0),
-            );
-            for position in [gpui::point(gap_x, trigger.y + px(16.0)), target] {
-                cx.update_window(handle.into(), |_, window, cx| {
-                    window.dispatch_event(
-                        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                            position,
-                            ..Default::default()
-                        }),
-                        cx,
-                    );
-                    window.draw(cx).clear(cx);
-                })
-                .unwrap();
-                cx.executor().advance_clock(Duration::from_secs(2));
-                cx.run_until_parked();
-                pickers.read_with(cx, |pickers, _| {
-                    assert!(pickers.is_open());
-                    assert_eq!(pickers.setting_menu, Some(ModelSetting::Reasoning));
-                });
-            }
-            cx.update_window(handle.into(), |_, window, cx| click(window, cx, target))
-                .unwrap();
-            pickers.read_with(cx, |pickers, cx| {
-                assert_eq!(pickers.effective_reasoning(cx), Some(ReasoningLevel::Low));
-                assert!(pickers.setting_menu.is_none());
-                assert!(pickers.is_open());
-            });
-            // Hover switches directly between sibling triggers without clicking.
-            cx.update_window(handle.into(), |_, window, cx| {
-                window.draw(cx).clear(cx);
-                hover(window, cx, trigger);
-                hover(window, cx, trigger + gpui::point(px(0.0), px(32.0)));
-                window.draw(cx).clear(cx);
-                window.draw(cx).clear(cx);
-            })
-            .unwrap();
-            pickers.read_with(cx, |pickers, _| {
-                assert_eq!(
-                    pickers.setting_menu,
-                    Some(ModelSetting::Option("contextWindow".into()))
-                );
-                assert!(pickers.is_open());
-            });
-            // Clicking the parent's search closes only the child and focuses
-            // the input on that same click, rather than swallowing the press.
-            cx.update_window(handle.into(), |_, window, cx| {
-                click(
-                    window,
-                    cx,
-                    gpui::point(parent.center().x, parent.top() + px(60.0)),
-                );
-                pickers.read_with(cx, |pickers, cx| {
-                    assert!(pickers.setting_menu.is_none());
-                    assert!(pickers.is_open());
-                    assert!(pickers.search.read(cx).focus_handle(cx).is_focused(window));
-                });
-                window.draw(cx).clear(cx);
-                hover(window, cx, trigger);
-                window.draw(cx).clear(cx);
-                window.draw(cx).clear(cx);
-            })
-            .unwrap();
-            pickers.read_with(cx, |pickers, _| assert!(pickers.setting_menu.is_some()));
-            cx.update_window(handle.into(), |_, window, cx| {
-                click(window, cx, gpui::point(px(8.0), px(8.0)))
-            })
-            .unwrap();
-            pickers.read_with(cx, |pickers, _| assert!(!pickers.is_open()));
-        }
-    }
-
     #[gpui::test]
     fn remembered_options_stay_valid_for_the_sent_model_without_a_catalog(
         cx: &mut gpui::TestAppContext,
@@ -8889,9 +8016,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
-            let mut settings = crate::settings::UiSettings::default();
-            settings.compact_model_picker = true;
-            crate::settings::init(settings, dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -8954,9 +8079,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
-            let mut settings = crate::settings::UiSettings::default();
-            settings.compact_model_picker = true;
-            crate::settings::init(settings, dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let laddered = |id: &str, label: &str| {
             let mut model = bare_model(id, label);
@@ -9091,9 +8214,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
-            let mut settings = crate::settings::UiSettings::default();
-            settings.compact_model_picker = true;
-            crate::settings::init(settings, dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -9154,9 +8275,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
-            let mut settings = crate::settings::UiSettings::default();
-            settings.compact_model_picker = true;
-            crate::settings::init(settings, dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -9215,9 +8334,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
-            let mut settings = crate::settings::UiSettings::default();
-            settings.compact_model_picker = true;
-            crate::settings::init(settings, dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -9279,9 +8396,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
-            let mut settings = crate::settings::UiSettings::default();
-            settings.compact_model_picker = true;
-            crate::settings::init(settings, dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -9330,9 +8445,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
-            let mut settings = crate::settings::UiSettings::default();
-            settings.compact_model_picker = true;
-            crate::settings::init(settings, dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -9410,9 +8523,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
-            let mut settings = crate::settings::UiSettings::default();
-            settings.compact_model_picker = true;
-            crate::settings::init(settings, dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());

@@ -194,8 +194,14 @@ pub(crate) struct Glide {
 }
 
 /// slopty: the most frames a glide takes before it lands exactly: [`motion::SCROLL_GLIDE`] at
-/// 120 Hz and room to spare.
+/// 120 Hz and room to spare, at the motion's own speed ([`glide_max_steps`]).
 const GLIDE_MAX_STEPS: usize = 240;
+
+/// slopty: [`GLIDE_MAX_STEPS`] stretched by [`motion::speed_scale`], so a slowed motion glides
+/// its whole length rather than jumping at the bound.
+fn glide_max_steps() -> usize {
+    (GLIDE_MAX_STEPS as f32 * motion::speed_scale().max(1.0)).ceil() as usize
+}
 
 // ---------------------------------------------------------------------------
 // Duration-based glide timeline (pure)
@@ -323,7 +329,7 @@ impl Transcript {
         glide.steps += 1;
         let list = self.list_state().clone();
         // The timeline runs out (it shouldn't, on frames): land exactly.
-        if raw >= 1.0 || glide.steps > GLIDE_MAX_STEPS {
+        if raw >= 1.0 || glide.steps > glide_max_steps() {
             list.scroll_to(ListOffset {
                 item_ix: target,
                 offset_in_item: px(-land),

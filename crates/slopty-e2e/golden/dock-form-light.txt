@@ -1,10 +1,15 @@
 Window
+Button │ Filter projects: All projects
+Button │ Needs you, 1
 Button │ dialog remote_callout
 Status │ Needs you
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
-Button │ Copy message
+Splitter │ Resize sidebar
+Article │ Claude Code
+Paragraph │ Dialog remote_callout: completed "yes"
 Article │ You
 Paragraph │ elicit
 Button │ Copy message
@@ -19,7 +24,6 @@ Button │ Decline
 Button │ Cancel
 Button │ Submit form
 Button │ Mode: Auto
-Button │ Context 1%
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel
@@ -28,4 +32,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

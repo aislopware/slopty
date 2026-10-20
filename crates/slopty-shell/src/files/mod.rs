@@ -15,6 +15,7 @@ use slopty_view_proto::ListWorkspaceDirectoryRequest;
 
 use crate::{
     composer::{ComposerInput, ComposerInputEvent},
+    motion::HoverFade as _,
     state::AppState,
 };
 
@@ -53,9 +54,7 @@ pub(crate) enum FileColumn {
 }
 
 static NEXT_REVIEW_COMMENT_FLUSH_SOURCE: AtomicU64 = AtomicU64::new(1);
-use crate::surface_chrome::{
-    CONTROL_RADIUS as TOOLBAR_BUTTON_RADIUS, CONTROL_SIZE as TOOLBAR_BUTTON_SIZE, toolbar,
-};
+use crate::surface_chrome::toolbar;
 
 /// A file document opened by absolute path beyond the workspace root — a
 /// link-opened host file. It has no tree entry and no watch, and the owning
@@ -71,6 +70,40 @@ gpui::actions!(
     files,
     [ToggleHiddenFiles, ToggleMarkdownPreview, ToggleWordWrap, CopyPath, DeleteSelection]
 );
+
+// slopty: the files speak of the chat's folder and name its machine, never "workspace".
+/// What a chat with no folder shows instead of its files.
+pub(super) const NO_FOLDER: &str = "This chat has no folder to show.";
+
+impl FilesSurface {
+    /// The chat's machine by its name.
+    pub(super) fn host_name(&self, cx: &gpui::App) -> String {
+        let state = self.state.read(cx);
+        state
+            .chats
+            .iter()
+            .find(|chat| chat.id == self.chat_id)
+            .map(|chat| state.device_name(&chat.device_id).unwrap_or(&chat.device_id).to_owned())
+            .unwrap_or_else(|| "This chat's machine".to_owned())
+    }
+
+    /// What shows while the chat's machine is not up yet.
+    pub(super) fn starting_note(&self, cx: &gpui::App) -> String {
+        format!("{} is still starting. Files show in a moment.", self.host_name(cx))
+    }
+
+    /// The chat's folder by its own name ("slopty"), for the tree's root row.
+    pub(super) fn folder_name(&self) -> String {
+        self.request_context
+            .as_ref()
+            .and_then(|context| {
+                std::path::Path::new(&context.cwd)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "This folder".to_owned())
+    }
+}
 
 /// The key context of every files surface, and of its tree.
 pub(crate) const KEY_CONTEXT: &str = "Files";
@@ -107,7 +140,22 @@ pub(super) fn toolbar_button_keyed(
     cx: &gpui::App,
 ) -> gpui::Stateful<gpui::Div> {
     use crate::settings::widgets::{ActionHint as _, Keys};
-    toolbar_button_frame(id, theme).action_hint(label, Keys::ActionIn(action, focus), cx)
+    toolbar_button_frame(id, None, theme).action_hint(label, Keys::ActionIn(action, focus), cx)
+}
+
+/// [`toolbar_button_keyed`] for a toggle: latched while `on` (the pane's `icon_toggle` look),
+/// and a screen reader hears whether it is.
+pub(super) fn toolbar_toggle_keyed(
+    id: &'static str,
+    label: &'static str,
+    on: bool,
+    action: Box<dyn gpui::Action>,
+    focus: FocusHandle,
+    theme: &crate::theme::Theme,
+    cx: &gpui::App,
+) -> gpui::Stateful<gpui::Div> {
+    use crate::settings::widgets::{ActionHint as _, Keys};
+    toolbar_button_frame(id, Some(on), theme).action_hint(label, Keys::ActionIn(action, focus), cx)
 }
 
 pub(super) fn toolbar_button(
@@ -116,24 +164,22 @@ pub(super) fn toolbar_button(
     theme: &crate::theme::Theme,
 ) -> gpui::Stateful<gpui::Div> {
     use crate::settings::widgets::ActionHint as _;
-    toolbar_button_frame(id, theme).hint(label)
+    toolbar_button_frame(id, None, theme).hint(label)
 }
 
-// slopty: a keyboard stop with the shell's ring; a press leaves the keyboard where it was (M8).
-fn toolbar_button_frame(id: &'static str, theme: &crate::theme::Theme) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .size(px(TOOLBAR_BUTTON_SIZE))
-        .flex_none()
-        .rounded(px(TOOLBAR_BUTTON_RADIUS))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .role(gpui::Role::Button)
+// slopty: the pane's one icon button (`surface_chrome::icon_button_frame`): a faded hover, a
+// deeper press, a latched toggle that still answers hover; a keyboard stop whose press leaves the
+// keyboard where it was (M8). `toggled` is a toggle's state, `None` for a plain button.
+fn toolbar_button_frame(
+    id: &'static str,
+    toggled: Option<bool>,
+    theme: &crate::theme::Theme,
+) -> gpui::Stateful<gpui::Div> {
+    crate::surface_chrome::icon_button_frame(id, toggled == Some(true), theme)
         .occlude()
-        .map(|el| crate::surface_chrome::key_stop(el, theme))
-        .hover(|style| style.bg(crate::theme::wash(0.14)))
+        .when_some(toggled, |el, on| {
+            el.aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
+        })
 }
 
 // slopty: a failure says what failed in the person's words, then the way on: "Try again" and the
@@ -149,7 +195,6 @@ pub(crate) fn failure_state(
 ) -> gpui::AnyElement {
     let copy_key: SharedString = format!("{id}-copy").into();
     let copied = crate::motion::copied(&copy_key, cx);
-    let copy_glyph = crate::motion::copy_icon(&copy_key, cx);
     let copied_detail = detail.clone();
     div()
         .id(id)
@@ -191,6 +236,7 @@ pub(crate) fn failure_state(
                 .child({
                     use crate::settings::widgets::ActionHint as _;
                     let key = copy_key.clone();
+                    let key_for_glyph = copy_key.clone();
                     state_button(SharedString::from(format!("{id}-copy")), "Copy error", theme)
                         .hint(if copied { "Copied" } else { "Copy the error" })
                         .on_click(move |_, _, cx| {
@@ -199,12 +245,12 @@ pub(crate) fn failure_state(
                             ));
                             crate::motion::copy_feedback(key.clone(), cx);
                         })
-                        .child(
-                            crate::icons::icon(copy_glyph)
-                                .size(px(12.0))
-                                .flex_none()
-                                .text_color(if copied { theme.text } else { theme.text_muted }),
-                        )
+                        // slopty: the check drawn in as the copy lands (design-inspiration item 12).
+                        .child(crate::loaders::copy_glyph::CopyGlyph::new(
+                            key_for_glyph,
+                            12.0,
+                            theme.text_muted,
+                        ))
                 }),
         )
         .into_any_element()
@@ -216,6 +262,8 @@ pub(super) fn state_button(
     label: &'static str,
     theme: &crate::theme::Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    // slopty: on the ladder (r 6, 12 pt), its hover faded in and its press a step deeper.
+    let fade = format!("{id}-fade");
     div()
         .id(id)
         .role(gpui::Role::Button)
@@ -223,18 +271,23 @@ pub(super) fn state_button(
         .h(px(28.0))
         .px(px(12.0))
         .gap(px(6.0))
-        .rounded(px(7.0))
+        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
         .border_1()
         .border_color(theme.border)
-        .bg(crate::theme::wash(0.04))
-        .hover(|style| style.bg(crate::theme::wash(0.09)))
+        .bg(crate::motion::hover_blend(
+            &fade,
+            crate::theme::wash(0.04),
+            crate::theme::control_hover(),
+        ))
+        .hover_fade(fade)
+        .active(|style| style.bg(crate::theme::pressed_wash()))
         .cursor_pointer()
         // slopty: a keyboard stop with the shell's ring (M8).
         .map(|el| crate::surface_chrome::key_stop(el, theme))
         .flex()
         .flex_row()
         .items_center()
-        .text_size(crate::typography::ui_rems(11.5))
+        .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text)
         .child(label)
 }
@@ -345,12 +398,12 @@ impl Render for WorkspacePathDragGhost {
             .px(px(8.0))
             .flex()
             .items_center()
-            .gap(px(5.0))
-            .rounded(px(6.0))
+            .gap(px(crate::theme::Theme::SPACE_SNUG))
+            .rounded(px(crate::theme::Theme::CONTROL_RADIUS))
             .bg(theme.surface_raised)
             .border_1()
             .border_color(theme.border_strong)
-            .text_size(px(11.5))
+            .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text)
             .opacity(0.85)
             .child({
@@ -580,7 +633,7 @@ impl FilesSurface {
                 .child(
                     div()
                         .text_center()
-                        .text_size(px(12.0))
+                        .text_size(crate::typography::ui_rems(12.0))
                         .text_color(theme.text_muted)
                         .child(error),
                 )
@@ -617,7 +670,7 @@ impl FilesSurface {
                         .flex_none()
                         .px(px(10.0))
                         .py(px(5.0))
-                        .text_size(px(10.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
                         .truncate()
                         .child(SharedString::from(label)),
@@ -629,7 +682,7 @@ impl FilesSurface {
                         .flex_none()
                         .px(px(10.0))
                         .py(px(4.0))
-                        .text_size(px(10.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint)
                         .child(notice),
                 )
@@ -646,11 +699,11 @@ impl FilesSurface {
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .text_size(px(10.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.warning_muted)
                         .child(
                             crate::icons::icon(crate::icons::REFRESH)
-                                .size(px(10.5))
+                                .size(px(12.0))
                                 .flex_none()
                                 .text_color(theme.warning_muted),
                         )
@@ -661,16 +714,21 @@ impl FilesSurface {
                                 .h(px(20.0))
                                 .flex_none()
                                 .px(px(6.0))
-                                .rounded(px(5.0))
+                                .rounded(px(crate::theme::Theme::RADIUS_SM))
                                 .flex()
                                 .items_center()
                                 .cursor_pointer()
                                 .role(gpui::Role::Button)
-                                .aria_label("Refresh workspace files now")
+                                .aria_label("Refresh the files now")
                                 // slopty: a keyboard stop with the shell's ring (M8).
                                 .map(|el| crate::surface_chrome::key_stop(el, theme))
                                 .text_color(theme.text_muted)
-                                .hover(|style| style.bg(crate::theme::wash(0.07)))
+                                .bg(crate::motion::hover_blend(
+                                    "files-watch-refresh-now",
+                                    crate::theme::wash(0.0),
+                                    crate::theme::control_hover(),
+                                ))
+                                .hover_fade("files-watch-refresh-now")
                                 .child("Refresh now")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.refresh(cx);
@@ -1181,7 +1239,7 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) {
         let Some(request_context) = self.request_context.clone() else {
-            self.error = Some("No workspace available for this chat.".into());
+            self.error = Some(NO_FOLDER.into());
             cx.notify();
             return;
         };
@@ -1199,12 +1257,8 @@ impl FilesSurface {
         }
         self.sync_tree_list();
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.tree.fail_load(
-                &directory,
-                cursor,
-                "Workspace service is still starting.",
-                generation,
-            );
+            let starting = self.starting_note(cx);
+            self.tree.fail_load(&directory, cursor, &starting, generation);
             self.sync_tree_list();
             cx.notify();
             return;
@@ -1346,7 +1400,7 @@ impl FilesSurface {
         self.reset_search_results();
         self.sync_tree_list();
         self.error = if next.is_none() {
-            Some("No workspace available for this chat.".into())
+            Some(NO_FOLDER.into())
         } else {
             None
         };
@@ -1411,7 +1465,13 @@ impl FilesSurface {
                     .debug_selector(|| "files-search".into())
                     .overflow_hidden()
                     .cursor_text()
-                    .hover(|style| style.bg(crate::theme::ink(0.055)))
+                    // slopty: the field's hover deepens its wash, faded in.
+                    .bg(crate::motion::hover_blend(
+                        "files-search-field",
+                        crate::theme::ink(0.035),
+                        crate::theme::ink(0.055),
+                    ))
+                    .hover_fade("files-search-field")
                     // Clicking the field's padding focuses the input too.
                     .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                         window.focus(&search_focus, cx);
@@ -1432,22 +1492,20 @@ impl FilesSurface {
                     ),
             )
             .child(
-                toolbar_button_keyed(
+                toolbar_toggle_keyed(
                     "files-toggle-ignored",
                     if include_ignored {
                         "Hide hidden files"
                     } else {
                         "Show hidden files"
                     },
+                    include_ignored,
                     Box::new(ToggleHiddenFiles),
                     self.tree_focus.clone(),
                     theme,
                     cx,
                 )
                 .debug_selector(|| "files-toggle-ignored".into())
-                .when(include_ignored, |element| {
-                    element.bg(crate::theme::wash(0.1))
-                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     this.toggle_ignored(cx);

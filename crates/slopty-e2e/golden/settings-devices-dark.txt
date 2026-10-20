@@ -17,4 +17,4 @@ Button │ Connect a phone or iPad
 Button │ Change server
 Button │ Show in Finder surfaces
 Button │ Copy device ID f90c4d49078400a418850c6d7ec25b6b
-Button │ Add device
+Button │ Add a device

@@ -126,9 +126,6 @@ pub struct RenderOptions {
     pub run: Option<Rc<dyn Fn(String, &mut Window, &mut gpui::App)>>,
     // slopty: a code block's right-click menu, its header's actions; `None` offers none.
     pub code_menu: Option<Rc<MenuFn>>,
-    /// Whether and in which face formulas typeset; owners fill it from
-    /// [`crate::settings::math_style`].
-    pub math: super::math::MathStyle,
     /// slopty: the prose's size and line height, in points: paragraphs and list items
     /// ([`MD_TEXT_SIZE`], or [`MD_COMPACT_TEXT_SIZE`] in a card).
     pub body: (f32, f32),
@@ -279,10 +276,8 @@ type ReleaseHandler = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 #[derive(Clone)]
 pub struct CodeUi {
     pub key: SharedString,
-    pub fit_content: bool,
     pub scroll: gpui::ScrollHandle,
     pub scrollbar: Option<CodeScrollbarUi>,
-    pub toggle_fit: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
     pub viewport_hover: HoverHandler,
     pub drag_move: PointerHandler,
 }
@@ -302,11 +297,11 @@ pub struct CodeFenceRuntime {
     pub scrollbar: crate::popover::HorizontalScrollbarState,
 }
 
-/// Build the interaction state shared by chat and file-preview code fences.
-/// The durable Fit choice is global; scroll and drag state stay with one fence.
+/// Build the interaction state shared by chat and file-preview code fences:
+/// scroll and drag state stay with one fence. // slopty: a fence always scrolls
+/// sideways, full width, and never wraps (the Amp study's P8).
 pub fn code_ui_for<V, F>(
     key: SharedString,
-    fit_content: bool,
     runtime: &mut CodeFenceRuntime,
     entity: gpui::WeakEntity<V>,
     runtimes: F,
@@ -316,9 +311,9 @@ where
     F: Fn(&mut V) -> &mut HashMap<SharedString, CodeFenceRuntime> + Clone + 'static,
 {
     let scroll = runtime.scroll.clone();
-    let scrollbar = (!fit_content)
-        .then(|| runtime.scrollbar.metrics(&scroll))
-        .flatten()
+    let scrollbar = runtime
+        .scrollbar
+        .metrics(&scroll)
         .filter(|_| runtime.scrollbar.visible())
         .map(|metrics| CodeScrollbarUi {
             metrics,
@@ -372,16 +367,8 @@ where
 
     CodeUi {
         key: key.clone(),
-        fit_content,
         scroll,
         scrollbar,
-        toggle_fit: Rc::new(move |_, cx| {
-            let fit = !crate::settings::current(cx).code_fences_fit_content;
-            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
-                settings.code_fences_fit_content = fit
-            });
-            cx.refresh_windows();
-        }),
         viewport_hover: {
             let entity = entity.clone();
             let key = key.clone();
@@ -442,7 +429,6 @@ impl RenderOptions {
             code: None,
             run: None, // slopty: no Run outside the transcript.
             code_menu: None,
-            math: super::math::MathStyle::default(),
             body: (MD_TEXT_SIZE, MD_LINE_HEIGHT),
         }
     }
@@ -463,8 +449,6 @@ impl RenderOptions {
 /// valid for the palette that produced it — content-only keys silently serve
 /// dark-mode text onto a light background after an appearance switch.
 /// [`RenderCache::sync_style`] drops everything when color or typography moves.
-/// Flat text also holds laid-out formulas, so [`RenderCache::sync_math`]
-/// drops it when the math style moves.
 #[derive(Default)]
 pub struct RenderCache {
     flats: HashMap<(SharedString, usize, usize), Rc<FlatText>>,
@@ -476,8 +460,6 @@ pub struct RenderCache {
         HashMap<(SharedString, usize, usize), (String, Option<std::sync::Arc<slopty_math::Formula>>)>,
     /// The [`crate::theme::style_generation`] these entries were shaped under.
     generation: u32,
-    /// The math style `flats` were laid out in.
-    math: super::math::MathStyle,
 }
 
 /// Cached per-line code runs (validity: code length + highlight identity).
@@ -524,13 +506,6 @@ impl RenderCache {
         }
     }
 
-    fn sync_math(&mut self, math: super::math::MathStyle) {
-        if self.math != math {
-            self.flats.clear();
-            self.display.clear();
-            self.math = math;
-        }
-    }
 }
 
 /// Per-line highlight tokens for a code block, or `None` while pending.
@@ -831,8 +806,7 @@ pub fn render_block(
 /// Display math: the formula centered in the column on a line box of its own
 /// height, scrolling sideways when wider than the column. It's one line of
 /// selectable text (see [`super::math`]), so drags cross it and copy yields
-/// `$$tex$$`. Source slopty_math can't render, or any with math off, stays a `math`
-/// code block.
+/// `$$tex$$`. Source slopty_math can't render stays a `math` code block.
 fn render_math_block(
     tex: &str,
     top_ix: usize,
@@ -841,17 +815,11 @@ fn render_math_block(
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
-    let math = opts.math;
-    let lay_out = || {
-        math.enabled
-            .then(|| super::math::formula(tex, true, math.face))
-            .flatten()
-    };
+    let lay_out = || super::math::formula(tex, true, super::math::MATH_FACE);
     let formula = match &opts.cache {
         Some(cache) => {
             let mut cache = cache.borrow_mut();
             cache.sync_style();
-            cache.sync_math(math);
             let entry = cache
                 .display
                 .entry((opts.row_key.clone(), top_ix, ix))
@@ -867,9 +835,9 @@ fn render_math_block(
         return render_code_block(Some("math"), tex, top_ix, ix, opts, theme, highlight);
     };
     let line_height =
-        super::math::display_line_height(&formula, math.scale(), MD_TEXT_SIZE, MD_LINE_HEIGHT);
+        super::math::display_line_height(&formula, super::math::MATH_SCALE, MD_TEXT_SIZE, MD_LINE_HEIGHT);
     // Too big to set: the source, as for a formula slopty_math can't render.
-    let Some(flat) = super::math::display_flat(tex, formula, math.scale(), theme.text) else {
+    let Some(flat) = super::math::display_flat(tex, formula, super::math::MATH_SCALE, theme.text) else {
         return render_code_block(Some("math"), tex, top_ix, ix, opts, theme, highlight);
     };
     let line = div()
@@ -1241,7 +1209,6 @@ pub const CODE_HAIR_AFTER: &str = "\u{200A}";
 pub const INLINE_CODE_INSET_Y: f32 = 2.0;
 
 /// Flatten inline runs into shaped-text inputs. Pure given a theme.
-/// Math sets in the default [`super::math::MathStyle`].
 pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> FlatText {
     flatten_runs_weighted(
         runs,
@@ -1251,19 +1218,12 @@ pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> Fl
         } else {
             FontWeight::NORMAL
         },
-        super::math::MathStyle::default(),
     )
 }
 
 /// [`flatten_runs`] with an explicit base weight (table headers are 700 per
-/// slopty's `table.headerWeight`; strong runs never drop below semibold) and
-/// math style.
-fn flatten_runs_weighted(
-    runs: &[InlineRun],
-    theme: &Theme,
-    base_weight: FontWeight,
-    math_style: super::math::MathStyle,
-) -> FlatText {
+/// slopty's `table.headerWeight`; strong runs never drop below semibold).
+fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWeight) -> FlatText {
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
@@ -1319,19 +1279,19 @@ fn flatten_runs_weighted(
             hair(CODE_HAIR_BEFORE, &mut text, &mut out, &mut omissions, source.len());
         }
         // Inline math reads back as `$tex$`. A formula shows as its slot; one
-        // slopty_math can't render, too big to set, or any with math off, shows
-        // that source as inline code instead.
+        // slopty_math can't render, or too big to set, shows that source as
+        // inline code instead.
         let formula = run.style.math.then(|| {
-            (math_style.enabled && !rtl)
-                .then(|| super::math::formula(&run.text, false, math_style.face))
+            (!rtl)
+                .then(|| super::math::formula(&run.text, false, super::math::MATH_FACE))
                 .flatten()
                 // An inline formula taller than a few lines would open every
                 // line of its paragraph (one line height per element).
                 .filter(|formula| {
-                    formula.height() * math_style.scale() <= super::math::MAX_INLINE_EMS
+                    formula.height() * super::math::MATH_SCALE <= super::math::MAX_INLINE_EMS
                 })
                 .and_then(|formula| {
-                    let slot = super::math::slot_text(&formula, math_style.scale())?;
+                    let slot = super::math::slot_text(&formula, super::math::MATH_SCALE)?;
                     Some((formula, slot))
                 })
         });
@@ -1362,7 +1322,7 @@ fn flatten_runs_weighted(
                 range: start..text.len(),
                 formula,
                 display: false,
-                scale: math_style.scale(),
+                scale: super::math::MATH_SCALE,
                 tex: run.text.clone().into(), // slopty: its math node's label
             });
         }
@@ -1486,16 +1446,15 @@ fn flatten_cached(
         Some(cache) => {
             let mut cache = cache.borrow_mut();
             cache.sync_style();
-            cache.sync_math(opts.math);
             cache
                 .flats
                 .entry((opts.row_key.clone(), top_ix, ix))
                 .or_insert_with(|| {
-                    Rc::new(flatten_runs_weighted(runs, theme, base_weight, opts.math))
+                    Rc::new(flatten_runs_weighted(runs, theme, base_weight))
                 })
                 .clone()
         }
-        None => Rc::new(flatten_runs_weighted(runs, theme, base_weight, opts.math)),
+        None => Rc::new(flatten_runs_weighted(runs, theme, base_weight)),
     }
 }
 
@@ -2618,8 +2577,11 @@ fn code_copy_button(
         let code_text: SharedString = code.to_string().into();
         let handler = copy.handler.clone();
         let fade_key = format!("{}-copy{ix}", opts.row_key);
-        // slopty: the copy keeps its size: COPY swaps to CHECK and its tooltip says "Copied",
-        // so Fit content and Run beside it never move under the pointer.
+        // slopty: the copy keeps its size: its tooltip says "Copied" while the check is drawn in
+        // (`CopyGlyph`; design-inspiration item 12), so Run beside it never moves under the
+        // pointer.
+        let copied_key = SharedString::from(format!("{}-copied{ix}", opts.row_key));
+        let feedback_key = copied_key.clone();
         div()
             .id(SharedString::from(fade_key.clone()))
             .debug_selector(|| "code-copy".into())
@@ -2641,18 +2603,11 @@ fn code_copy_button(
             .hover_fade(fade_key)
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
+                crate::motion::copy_feedback(feedback_key.clone(), cx);
                 handler(ix, code_text.clone(), window, cx);
             })
             .hint(if copied { "Copied" } else { "Copy code" })
-            .child(
-                crate::icons::icon(if copied {
-                    crate::icons::CHECK
-                } else {
-                    crate::icons::COPY
-                })
-                .size(px(CODE_ACTION_GLYPH))
-                .text_color(if copied { theme.text } else { theme.text_muted }),
-            )
+            .child(crate::loaders::copy_glyph::CopyGlyph::new(copied_key, CODE_ACTION_GLYPH, theme.text_muted))
             .into_any_element()
     })
 }
@@ -2975,44 +2930,7 @@ fn render_code_block_source_with_actions(
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
     let sel_wash = selection_wash(theme);
     let code_ui = opts.code.as_ref().and_then(|code| code.get(&ix)).cloned();
-    let fit_content = code_ui.as_ref().is_some_and(|ui| ui.fit_content);
-
-    let fit_button = code_ui.as_ref().map(|ui| {
-        let toggle = ui.toggle_fit.clone();
-        let fade_key = format!("{}-fit{ix}", opts.row_key);
-        let base = if fit_content {
-            crate::theme::ink(0.09)
-        } else {
-            gpui::transparent_black()
-        };
-        let hover = crate::theme::ink(if fit_content { 0.13 } else { 0.08 });
-        div()
-            .id(SharedString::from(fade_key.clone()))
-            // slopty: the wrap toggle is a named button and a tab stop with the shared ring.
-            .role(gpui::Role::Button)
-            .tab_index(0)
-            .map(|el| crate::surface_chrome::focus_ring(el, theme))
-            .size(px(CODE_ACTION_SIZE))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .bg(crate::motion::hover_blend(&fade_key, base, hover))
-            .hover_fade(fade_key)
-            .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                toggle(window, cx);
-            })
-            .hint(if fit_content { "Use horizontal scrolling" } else { "Fit content" })
-            .child(
-                crate::icons::icon(crate::icons::WRAP_TEXT)
-                    .size(px(CODE_ACTION_GLYPH))
-                    .text_color(theme.text_muted),
-            )
-    });
     let mut actions = Vec::new();
-    actions.extend(fit_button.map(IntoElement::into_any_element));
     actions.append(&mut extra_actions);
     // slopty: a one-line shell command runs in the chat's terminal on the person's click.
     if let (Some(run), Some(line)) = (opts.run.clone(), runnable_line(language, code)) {
@@ -3027,25 +2945,14 @@ fn render_code_block_source_with_actions(
     actions.extend(code_copy_button(code, ix, opts, theme));
 
     let lines = div()
-        .map(|el| {
-            if fit_content {
-                el.w_full().min_w_0()
-            } else {
-                el.min_w_full().flex_none()
-            }
-        })
+        .min_w_full()
+        .flex_none()
         .px(px(CODE_PADDING_X))
         .py(px(CODE_PADDING_Y))
         .font_family(theme.font_mono.clone())
         .text_size(px(theme.code_font_size))
         .line_height(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
-        .map(|el| {
-            if fit_content {
-                el.whitespace_normal()
-            } else {
-                el.whitespace_nowrap()
-            }
-        })
+        .whitespace_nowrap()
         .flex()
         .flex_col()
         .children((0..cached.lines.len()).scan(0usize, move |off, li| {
@@ -3057,42 +2964,25 @@ fn render_code_block_source_with_actions(
             let key = code_line_selection_key(&opts.row_key, ix, li);
             Some(
                 div()
-                    .map(|el| {
-                        if fit_content {
-                            el.w_full()
-                                .min_w_0()
-                                .min_h(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
-                        } else {
-                            el.h(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
-                                .flex_none()
-                        }
-                    })
+                    .h(px(theme.code_font_size * CODE_LINE_HEIGHT_RATIO))
+                    .flex_none()
                     .child(selectable_text_element(key, line.clone(), runs, sel_wash)),
             )
         }));
 
     let body: AnyElement = if let Some(ui) = code_ui.as_ref() {
-        if fit_content {
-            div()
-                .w_full()
-                .min_w_0()
-                .overflow_hidden()
-                .child(lines)
-                .into_any_element()
-        } else {
-            let mut scroller = div()
-                .id(scroll_id)
-                .w_full()
-                .min_w_0()
-                .flex()
-                .overflow_x_scroll()
-                .track_scroll(&ui.scroll)
-                .child(lines);
-            // A vertical wheel over code must keep bubbling to the transcript;
-            // only a true horizontal gesture moves this local viewport.
-            scroller.style().restrict_scroll_to_axis = Some(true);
-            scroller.into_any_element()
-        }
+        let mut scroller = div()
+            .id(scroll_id)
+            .w_full()
+            .min_w_0()
+            .flex()
+            .overflow_x_scroll()
+            .track_scroll(&ui.scroll)
+            .child(lines);
+        // A vertical wheel over code must keep bubbling to the transcript;
+        // only a true horizontal gesture moves this local viewport.
+        scroller.style().restrict_scroll_to_axis = Some(true);
+        scroller.into_any_element()
     } else {
         // Non-transcript previews keep their existing native scroll behavior.
         div()
@@ -3103,10 +2993,7 @@ fn render_code_block_source_with_actions(
             .into_any_element()
     };
 
-    let scrollbar = (!fit_content)
-        .then(|| code_ui.as_ref())
-        .flatten()
-        .and_then(|ui| {
+    let scrollbar = code_ui.as_ref().and_then(|ui| {
             let bar = ui.scrollbar.as_ref()?;
             let metrics = bar.metrics;
             let hover = bar.hover.clone();
@@ -3173,13 +3060,6 @@ fn render_code_block_source_with_actions(
                 label: "Copy code".into(),
                 keys: None,
                 act: Rc::new(move |window: &mut Window, cx: &mut gpui::App| handler(ix, text.clone(), window, cx)),
-            });
-        }
-        if let Some(ui) = code_ui.as_ref() {
-            choices.push(MenuChoice {
-                label: (if fit_content { "Use horizontal scrolling" } else { "Fit content" }).into(),
-                keys: None,
-                act: ui.toggle_fit.clone(),
             });
         }
         if let (Some(run), Some(line)) = (opts.run.clone(), runnable_line(language, code)) {
@@ -3438,8 +3318,7 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct MathSelectionHarness(super::super::math::MathStyle);
+    struct MathSelectionHarness;
 
     impl Render for MathSelectionHarness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3447,8 +3326,7 @@ mod tests {
             let source = "Before $x = \\frac{a}{b}$ after.\n\n\
                 $$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\n\
                 Tail $\\nope$ text.";
-            let mut opts = RenderOptions::settled("math-selection-test".into(), std::time::Instant::now());
-            opts.math = self.0;
+            let opts = RenderOptions::settled("math-selection-test".into(), std::time::Instant::now());
             div()
                 .size_full()
                 .child(selection_frame_reset())
@@ -3466,7 +3344,7 @@ mod tests {
     fn markdown_math_paints_and_copies_its_tex_source(cx: &mut TestAppContext) {
         let _selection = super::super::selection::test_state_lock();
         cx.update(|cx| cx.set_global(Theme::dark()));
-        let (_, cx) = cx.add_window_view(|_, _| MathSelectionHarness::default());
+        let (_, cx) = cx.add_window_view(|_, _| MathSelectionHarness);
         cx.simulate_resize(size(px(560.0), px(800.0)));
         cx.update(|window, cx| {
             window.refresh();
@@ -3503,33 +3381,6 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn math_size_grows_the_formula_lines(cx: &mut TestAppContext) {
-        let _selection = super::super::selection::test_state_lock();
-        cx.update(|cx| cx.set_global(Theme::dark()));
-        let (view, cx) = cx.add_window_view(|_, _| MathSelectionHarness::default());
-        cx.simulate_resize(size(px(560.0), px(800.0)));
-        let heights = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| {
-                window.refresh();
-                window.draw(cx).clear(cx);
-            });
-            [
-                r"Before $x = \frac{a}{b}$ after.",
-                r"$$\int_0^1 x^2\,dx = \frac{1}{3}$$",
-            ]
-            .map(|text| selection_test_bounds(&selection_key_for_text(text)).size)
-        };
-        let normal = heights(cx);
-        view.update(cx, |harness, _| harness.0.size = 150);
-        let larger = heights(cx);
-        for (normal, larger) in normal.iter().zip(&larger) {
-            assert!(larger.height > normal.height, "{normal:?} vs {larger:?}");
-        }
-        // The display slot widens with the formula.
-        assert!(larger[1].width > normal[1].width);
-    }
-
     /// slopty: a reply of `count` paragraphs, each with a formula in its line and one on its own,
     /// none the same as another's, so none is laid out before.
     fn formula_reply(count: usize, salt: &str) -> String {
@@ -3544,13 +3395,12 @@ mod tests {
     }
 
     /// slopty: a reply with formulas, set as the window draws it.
-    struct MathCostHarness(String, super::super::math::MathStyle);
+    struct MathCostHarness(String);
 
     impl Render for MathCostHarness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
-            let mut opts = RenderOptions::settled("math-cost".into(), std::time::Instant::now());
-            opts.math = self.1;
+            let opts = RenderOptions::settled("math-cost".into(), std::time::Instant::now());
             div().size_full().child(render_tree(
                 &parse_full(&self.0),
                 &opts,
@@ -3563,17 +3413,17 @@ mod tests {
 
     /// slopty: what a formula costs a frame: the first frame lays out and paints every formula,
     /// later ones only paint (docs/MEASUREMENTS.md, "Math typeset by zatex"). The same reply with
-    /// math off, its formulas set as code, is the baseline.
+    /// its `$` delimiters gone, its formulas plain words, is the baseline.
     #[gpui::test]
     fn a_formula_costs_its_frame_little(cx: &mut TestAppContext) {
         const COUNT: usize = 40;
         let _selection = super::super::selection::test_state_lock();
         cx.update(|cx| cx.set_global(Theme::dark()));
         let mut frames = Vec::new();
-        for (salt, enabled) in [("off", false), ("on", true)] {
-            let style = super::super::math::MathStyle { enabled, ..Default::default() };
+        for (salt, math) in [("off", false), ("on", true)] {
             let source = formula_reply(COUNT, salt);
-            let (_, cx) = cx.add_window_view(|_, _| MathCostHarness(source, style));
+            let source = if math { source } else { source.replace('$', "") };
+            let (_, cx) = cx.add_window_view(|_, _| MathCostHarness(source));
             cx.simulate_resize(size(px(720.0), px(4000.0)));
             let draw = |cx: &mut gpui::VisualTestContext| {
                 let started = std::time::Instant::now();
@@ -3599,40 +3449,6 @@ mod tests {
              {warm:.3} ms after"
         );
         assert!(cold < 5.0, "a formula's first frame: {cold:.3} ms");
-    }
-
-    #[gpui::test]
-    fn math_off_shows_every_formula_as_its_source(cx: &mut TestAppContext) {
-        let _selection = super::super::selection::test_state_lock();
-        cx.update(|cx| cx.set_global(Theme::dark()));
-        let (_, cx) = cx.add_window_view(|_, _| {
-            MathSelectionHarness(super::super::math::MathStyle {
-                enabled: false,
-                ..Default::default()
-            })
-        });
-        cx.simulate_resize(size(px(560.0), px(800.0)));
-        cx.update(|window, cx| {
-            window.refresh();
-            window.draw(cx).clear(cx);
-        });
-        // Inline math is inline code on an ordinary line; display math is
-        // the `math` code block, which reads back as its bare source.
-        let before = selection_key_for_text(r"Before $x = \frac{a}{b}$ after.");
-        assert_eq!(
-            selection_test_bounds(&before).size.height,
-            px(MD_LINE_HEIGHT)
-        );
-        selection_key_for_text(r"\int_0^1 x^2\,dx = \frac{1}{3}");
-        REGISTRY.with(|registry| {
-            assert!(
-                registry
-                    .borrow()
-                    .iter()
-                    .all(|entry| !entry.text.starts_with("$$")),
-                "no display formula"
-            )
-        });
     }
 
     #[gpui::test]
@@ -4507,6 +4323,10 @@ mod tests {
         assert_eq!(flat.runs[2].color, inline_code_text(&theme));
         assert_eq!(flat.runs[2].background_color, None);
         assert_eq!(flat.runs[0].color, theme.text);
+        // slopty: an empty run between two code runs is passed over by the lead as by the trail:
+        // one box, its hair spaces one either side.
+        let flat = flatten_runs(&[code("foo"), plain(""), code("()")], &theme, false);
+        assert_eq!(flat.text.as_ref(), format!("{CODE_HAIR_BEFORE}foo(){CODE_HAIR_AFTER}"));
     }
 
     #[test]
@@ -4582,7 +4402,7 @@ mod tests {
             text: "Header".into(),
             style: InlineStyle::default(),
         }];
-        let flat = flatten_runs_weighted(&runs, &theme, TABLE_HEADER_WEIGHT, Default::default());
+        let flat = flatten_runs_weighted(&runs, &theme, TABLE_HEADER_WEIGHT);
         assert_eq!(flat.runs[0].font.weight, FontWeight::BOLD);
         // Strong runs inside a 700 header stay 700 (never drop to semibold).
         let bold_runs = vec![InlineRun {
@@ -4593,7 +4413,7 @@ mod tests {
             },
         }];
         let flat =
-            flatten_runs_weighted(&bold_runs, &theme, TABLE_HEADER_WEIGHT, Default::default());
+            flatten_runs_weighted(&bold_runs, &theme, TABLE_HEADER_WEIGHT);
         assert_eq!(flat.runs[0].font.weight, FontWeight::BOLD);
     }
 
@@ -4691,87 +4511,6 @@ mod tests {
         assert!(flat.original.is_none());
     }
 
-    #[test]
-    fn math_style_sets_the_face_and_turns_math_off() {
-        use super::super::math::MathStyle;
-        use slopty_math::bundled::Face;
-        let runs = [math_run("so ", false), math_run(r"\mathcal{L}^2", true)];
-        let theme = Theme::dark();
-        let stix = MathStyle {
-            face: Face::StixTwo,
-            ..Default::default()
-        };
-        let flat = flatten_runs_weighted(&runs, &theme, FontWeight::NORMAL, stix);
-        let [slot] = flat.math.as_slice() else {
-            panic!("one formula slot");
-        };
-        let laid = super::super::math::formula(r"\mathcal{L}^2", false, Face::StixTwo).unwrap();
-        assert!(
-            std::sync::Arc::ptr_eq(&slot.formula, &laid),
-            "laid out in STIX Two"
-        );
-
-        let off = MathStyle {
-            enabled: false,
-            ..stix
-        };
-        let flat = flatten_runs_weighted(&runs, &theme, FontWeight::NORMAL, off);
-        assert!(flat.math.is_empty());
-        assert_eq!(flat.text.as_ref(), r"so $\mathcal{L}^2$");
-        assert_eq!(flat.code_ranges, vec![3..flat.text.len()]);
-        assert!(flat.original.is_none());
-    }
-
-    #[test]
-    fn math_style_change_invalidates_cached_runs() {
-        use super::super::math::MathStyle;
-        use slopty_math::bundled::Face;
-        let runs = [math_run(r"\alpha + \mathcal{B}", true)];
-        let theme = Theme::dark();
-        let mut opts = RenderOptions::settled("math-style-cache".into(), std::time::Instant::now());
-        opts.cache = Some(Rc::default());
-        let face = |flat: &FlatText| {
-            let fira = super::super::math::formula(r"\alpha + \mathcal{B}", false, Face::Fira);
-            std::sync::Arc::ptr_eq(&flat.math[0].formula, &fira.unwrap())
-        };
-        let first = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
-        assert!(face(&first));
-        let again = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
-        assert!(
-            Rc::ptr_eq(&first, &again),
-            "an unchanged style reuses the entry"
-        );
-        opts.math = MathStyle {
-            face: Face::StixTwo,
-            ..Default::default()
-        };
-        let stix = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
-        assert!(!face(&stix), "the other face never serves a stale layout");
-        opts.math.enabled = false;
-        let off = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
-        assert!(off.math.is_empty() && !off.code_ranges.is_empty());
-    }
-
-    #[test]
-    fn math_size_change_rebuilds_cached_slots() {
-        let runs = [math_run(r"\alpha + \mathcal{B}", true)];
-        let theme = Theme::dark();
-        let mut opts = RenderOptions::settled("math-size-cache".into(), std::time::Instant::now());
-        opts.cache = Some(Rc::default());
-        let first = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
-        opts.math.size = 150;
-        let larger = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
-        assert!(!Rc::ptr_eq(&first, &larger), "only the size moved");
-        // The same laid-out formula, in a wider slot.
-        assert!(std::sync::Arc::ptr_eq(
-            &first.math[0].formula,
-            &larger.math[0].formula
-        ));
-        assert_eq!((first.math[0].scale, larger.math[0].scale), (1.0, 1.5));
-        assert!(larger.text.len() > first.text.len());
-        let again = flatten_cached(&runs, FontWeight::NORMAL, 0, 0, &opts, &theme);
-        assert!(Rc::ptr_eq(&larger, &again));
-    }
 
     #[test]
     fn math_slots_follow_link_presentation() {

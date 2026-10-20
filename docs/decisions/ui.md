@@ -13586,8 +13586,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     left edge, under it, or flush with its right edge under a narrower bubble so it never leaves
     the column (`the_rewind_menu_hangs_from_the_bubble_and_says_what_its_row_does`,
     `transcript::rewind::tests::the_note_says_what_the_choice_does`). A shell command's
-    approval leads with the command in the code face on a faint plate, the view model marking
-    it (`UserInputQuestion::code`; `a_commands_approval_sets_it_as_code`,
+    approval leads with the command in the code face on a faint plate, the view model carrying
+    it (`UserInputQuestion::command`; `a_commands_approval_carries_its_command_whole`,
     `a_cards_body_has_a_title_and_a_risky_approval_marks_its_deny`). A worker's loopback page
     names the session that asked as the worker's ("e2e-worker's shell") and says that opening
     forwards the port to this Mac, or this device on a phone or tablet
@@ -13598,3 +13598,612 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`replay::tests::a_permission_request_holds_the_turn_until_it_is_answered`). A request only the card
     answers says "Answer in Slopty", which a phone's note can act on, where "Answer here" read
     as the note itself; the refusal says the same.
+- ✅ **The chrome around the chats reads as Claude desktop's and T3 Code's, on zeron's look
+  (2026-10-19).** A study of the sidebar, titlebar, palettes, History, the Add device dialog,
+  Settings and the first-run canvas (`.research/polish-chrome-2026-10-19.md`) rated thirty
+  details, and the Claude desktop 2.42304.2 study two more. Each became:
+  - **The palettes and the Add device dialog stand by their top**, where a centred 480 px
+    dialog would start (opencode's anchor, below), so typing or a tab change moves only their
+    foot, and they rise in over 150 ms with their scrim (`shell::chrome_tests::the_palette_keeps_its_top_as_its_results_change`,
+    `settings::devices::tests::the_add_device_dialog_keeps_its_top_across_tabs`). Closing still
+    snaps: holding a palette's rows alive for 100 ms more buys nothing a person sees.
+  - **Sidebar headers read at the full muted tone and brighten under the pointer**; each is a
+    button a screen reader names and hears open or shut, and a keyboard stop
+    (`a_sidebar_header_is_a_named_button_that_says_it_is_open`).
+  - **A row at rest wears no dot**; only a state worth a glance does, its slot kept
+    (`a_row_at_rest_draws_no_dot`). **A selected row under the pointer goes a step past its
+    selection**, as Claude desktop's does, on the theme's one table of wash steps
+    (`theme::selected_hover_wash`; `a_selected_row_under_the_pointer_goes_past_its_selection`).
+  - **A sidebar header or History row under the pointer keeps its hover** through frames the
+    window draws the sidebar from its last one: the hover fades let go of a key no frame read,
+    so the one sidebar element the pointer is over says so again before its fade is read, as a
+    page card does (`a_sidebar_row_under_the_pointer_keeps_its_hover_over_frames_drawn_from_the_last`;
+    the e2e's retained check caught it). A disclosure's chevron turns only on opening or
+    shutting, not when an open body grows as its rows arrive.
+  - **History rows share the active rows' grid**, height, radius and hover, their Claude mark
+    in its clay, and both History headers are the sidebar's one header, tweened open and shut
+    like every section (`past_sessions::tests::a_history_title_runs_up_to_its_time`,
+    `history_folds_over_the_sidebars_tween`); the global one's tooltip takes its key from the
+    keymap.
+  - **The project filter shows a caret that turns** while its menu is open and is a named
+    button (`the_project_filter_is_a_named_menu_button`).
+  - **Before the first project** the sidebar says "No projects yet" with no key that cannot
+    make a chat, hides the filter, and the canvas's one action is a named button under a
+    heading, its glyph a folder or laptop instead of the logo that read as a spinner
+    (`before_any_project_the_sidebar_says_so_and_offers_only_what_works`).
+  - **The sidebar's list is one keyboard stop** at the open chat's row; Up and Down walk it,
+    Enter opens, Delete archives (`the_sidebar_list_is_one_stop_walked_with_up_and_down`).
+  - **The chat menu's rows are named menu items**, Copy saying whether its submenu is open
+    (`the_chat_menu_names_its_rows`); **the titlebar title opens that menu on a right-click**,
+    under the bar (`the_title_opens_its_chats_menu`). The title stays zeron's 12 pt.
+  - **Back and Forward say when they are off** (`back_and_forward_say_when_they_are_off`).
+  - **Row times use tabular figures**, and the row's hover card says the time in full
+    (`session_hover_card::tests::the_age_reads_as_a_sentence`).
+  - **Settings pages share one head**: title, a one-line subtitle, and the page action centred
+    on the title's row (`settings::widgets::page_head_tests::a_page_head_centres_its_action_on_the_title_row`).
+    Buttons come in fewer kinds: a page's quiet actions are text, a destructive one quiet
+    danger. Archived is built as every other page, its rows saying where they ran as the app
+    does (`an_archived_chat_says_where_it_ran_as_the_app_does`). Shortcuts is titled as its nav
+    item and leads with Chats, its lone keys gathered under Other
+    (`the_page_leads_with_chats_and_gathers_lone_keys_at_the_foot`). Appearance's wallpaper line
+    drops its double stop and its small buttons are named. Devices has one add action, its row,
+    one name for the dialog ("Connect a phone or iPad"), a link that looks like one, and the
+    same laptop glyph as the server menu. Providers says "Installed" where nothing else speaks
+    for an agent, and an agent that is off shows no caret it cannot open
+    (`an_installed_agent_says_so_and_an_off_one_offers_no_dead_caret`).
+  - **The palette speaks as the app does**: sentence-case headings, "New project…", and the
+    titlebar's plus for New chat (`the_palette_speaks_as_the_app_does`).
+  - **The new chat's target chips read at the full muted tone**, the text's under the pointer.
+  - **Moving between Settings and the chats fades the new page in** over 150 ms, no slide;
+    the first frame still rises in as zeron's
+    (`each_move_between_settings_and_the_chats_fades_the_page_in`).
+  - Rejected: marking the open chat read in the e2e golden (the shell marks it seen while the
+    window is in front, which the e2e window never is). Sentence-case menu headings were first
+    kept as zeron's tracked capitals; the entry below adopts them. Measured against Claude
+    desktop's 24/28 px controls and 32 px rows: sidebar rows 29, headers 28, window controls 24,
+    header buttons 28, picker rows 32, none looser; the palette's 30 px rows grew to 32 below.
+    The phone's side page and terminal layout went to the pane
+    lane. The e2e harness now clears a root a failed run left with a folder locked, which had
+    failed every later run of History's unreadable-store case
+    (`harness::tests::a_root_left_with_a_locked_folder_is_cleared`).
+- ✅ **The side pane and the design system read as Claude desktop's and T3 Code's, on zeron's
+  look (2026-10-19).** A study of the changes, files, editor, terminal dock, browser, remote
+  screen and the shared chrome (`.research/polish-pane-system-2026-10-19.md`) rated 24 details,
+  and the Claude desktop 2.42304.2 study two more. Each became:
+  - **A side-pane tab is as wide as its title needs**, 96 to 168 px, measured once for the
+    strip so every chip in it matches; a cut title shows whole in its tooltip, and the terminal
+    dock's tabs are the same chip (`right_tabs_fit_their_widest_title`).
+  - **Diff headers read as a summary, not data**: a file shows only the counts that changed, in
+    tabular figures; a hunk header sets its range apart from its context, and a new or deleted
+    file's single hunk shows none (`a_file_header_counts_only_what_changed`,
+    `a_hunk_header_splits_its_range_from_its_context`). The hunk band keeps the accent's tint:
+    it is zeron's colour, and every theme sets its own.
+  - **The editor's gutter breathes** (16 px between numbers and code, 12 px inset), and the
+    caret's line number reads a step brighter, a gpui-kit fork change
+    (aislopware/gpui-kit#12; `the_current_line_number_reads_brighter_than_the_gutter`).
+  - **One code size per pane**: the diff, the editor and a read-only file draw at the code-size
+    setting on one 20 px line (`the_pane_draws_code_at_one_size`).
+  - **Tooltips are 12 pt in the text colour, 240 px wide at most**, and fade in over 120 ms; they
+    still leave at once, as gpui removes them.
+  - **One icon button for every pane toolbar** (`surface_chrome::icon_button`/`icon_toggle`):
+    24 px, radius 6, a faded hover, a deeper press, and a toggle that says whether it is on.
+    Ignore whitespace wears a pilcrow and Changes a file-diff glyph, both drawn in Solar Linear.
+  - **The empty pane and the `+` menu offer one list under one name each** (Changes, Files,
+    Terminal, Browser, Remote window), under "Open in this pane"
+    (`the_pane_offers_one_list_under_one_name_each`).
+  - **One empty and loading voice**: the diff's clean and whitespace-only states and the
+    screen's failures use zeron's empty state; every load waits 200 ms before it says so.
+  - **The pane's copy follows the house grammar**: sentence case, "Try again", "Couldn't reach
+    {host}", the machine's own name, "Open file", "Add to chat" in the terminal's block menu.
+  - **Accessibility**: the diff scope trigger, the open-file button and every toggle are named
+    buttons with their state; each tab's close names its tab; terminal tabs are keyboard stops
+    with the inset ring; the side pane's resize handle is a named splitter that ← and → move by
+    16 px (`the_side_pane_splitter_nudges_within_its_bounds`).
+  - **Wash steps, not raw alphas**: hover 6/4 %, a control's hover 11/6 %, selected 10/6 %,
+    selected under the pointer 14/9 %, pressed 16/10 % (dark/light), every pane hover faded in
+    (`the_wash_steps_climb_in_one_order_in_both_appearances`).
+  - **A type, spacing and radius ladder**: `typography::ladder` (11/12/13/14/16/20), spacing
+    2/4/6/8/12/16, radii 4/6/10/12/16. The pane's chrome text follows the font-size setting;
+    only the code surfaces set pixels (`pane_chrome_text_scales_with_the_font_size_setting`).
+  - **The diff's gutter takes what its digits need** (28 px for two, 34 for three) and its
+    marker 16 px, giving code about 40 px back; a line cut by the pane fades over 16 px at the
+    edge, and at the left once scrolled.
+  - **The composer rests on Claude desktop's lift**: `0 4px 20px` black at 3.5 %, 7.5 % while
+    it holds the keyboard, eased; its ring at 8 % dark and 12 % light in zeron's slate. A
+    frosted composer takes no shadow, which would grey its glass from behind
+    (`the_composer_lifts_with_focus_only_where_it_is_opaque`).
+  - Rejected: the blank band under the iPad and iPhone terminal (the golden is the app's own
+    frame, which leaves out the system keyboard's window, and gpui-fast already clears the
+    overlap when the keyboard hides); per-row shortcut keys in the pane picker (no key opens a
+    single surface); hiding the chat from screen readers during a takeover (gpui-fast has no
+    hidden attribute, and dropping the column would break the takeover's glide); restroking
+    zeron's own arrows and check, and Claude desktop's 1.25 px icon stroke (Solar has no such
+    weight, and the set is zeron's); the folder-tree glyph (already 1.5 once scaled); the
+    floating pill's 13 px right pad (zeron's optical pad); re-timing zeron's motion catalogue.
+- ✅ **Wave 1's transcript and composer polish, reviewed and set right (2026-10-19).** An
+  adversarial review of it (`.research/review-wave1-2026-10-19.md`) found twenty-two defects;
+  twenty-one were fixed and one rejected:
+  - **An approval holds its command whole.** The view model carries the command a request asks
+    to run (`UserInputQuestion::command`), from its call, not a flag on the card's words, so a
+    heredoc with blank lines stays one block on the code plate and a Codex request shows its
+    command, the agent's reason under it as the description. A request about no command (an
+    edit, a fetch) has no plate (`view_model::tests::a_commands_approval_carries_its_command_whole`,
+    `composer::dock_tests::a_cards_body_has_a_title_and_a_risky_approval_marks_its_deny`).
+  - **"Risky" means a destructive command**, the view model's own judgement (`risky`), no
+    longer every request whose deny comes first (`only_a_destructive_command_is_risky`).
+  - **The tray lifts the card in the frame it opens.** The stack over it reads the tray card's
+    laid-out height in its own prepaint, since every element is laid out before any is
+    prepainted, where before it waited for a second frame nothing asked for; a test draws once
+    (`the_tray_opens_over_the_chat_without_moving_it`).
+  - **The tray's dot rests while only a long-lived command runs**: it breathes while the turn
+    works or a row that wakes the agent runs, a dev server left on holds a steady green, so an
+    idle chat no longer draws at the pulse's clock for hours
+    (`background_tray::tests::the_header_dot_breathes_only_for_what_wakes_the_agent`).
+  - **A settled subagent says what it answered** from its run's report when its reply line is
+    not at hand, else "Done" (`a_card_reads_its_step_then_its_outcome`,
+    `a_subagent_card_follows_its_run`).
+  - **The device is named as what it is**: "This Mac is offline" on a Mac, "This device" on
+    iPhone and iPad (`slopty_shell::THIS_DEVICE`), and a queued send waits for the person's own
+    connection when it is this side that is offline ("sends when you're back online"), not for
+    the worker's (`the_notice_names_the_machine_and_when_it_was_last_heard`,
+    `a_queued_send_says_who_it_waits_for`).
+  - **The done line's Copy rides on its line**, not alone under it
+    (`a_done_lines_copy_rides_on_its_line`); **only the agent's words are its articles**, a
+    system row is not said in its name (`a_chats_words_are_articles_and_paragraphs`).
+  - **A call held on a request says what it waits for**: approval, a plan to review, or an
+    answer; an AskUserQuestion reads "Asked about {header}" (`a_calls_result_reads_as_the_tuis`).
+  - **The held prompt stands under a phone's navigation bar** (`a_phones_held_prompt_stands_under_its_navigation_bar`),
+    **shows while the list rests at its end**, where the list keeps no top row and gave no
+    row's bounds, so the band never came at the end of a long turn
+    (`a_list_held_at_its_end_holds_the_prompt_it_scrolled_past`), and **reads a chat listed
+    after it opened** as what it is, a subagent's run then taking its alignment and holding
+    none (`a_run_listed_after_it_opened_reads_as_one`). It comes and goes in one frame, as
+    the page's own edge does.
+  - **A finished turn's group never says running**: its calls left open say how many stopped
+    (`a_finished_turns_summary_never_says_running`).
+  - **A short run reads "<1s"** in the notice as in the tray (`slopty_view_doc::work::ran_for_words`;
+    `a_short_run_reads_under_a_second`).
+  - **A jump's glide is proven on frames**: frames 8 ms apart drive it, it moves on most and
+    never back, and lands on its clock; its frame bound stretches with a slowed motion
+    (`a_jump_glides_on_frames_and_flashes_where_it_lands`).
+  - **Per-frame work trimmed**: the strip's focus handles exist only for rows with a strip and
+    are pruned to the rows drawn or focused, its time is formatted only when shown, the
+    prompt rule is read once a sync, and the bubbles' feet are kept per chat. A chip's
+    accessible name still joins its words each frame: zeron's own chip formats the same words
+    every frame, and caching them would add a field to every call row or a second copy of
+    zeron's wording in the view model, for two short strings.
+  - **Smaller seams**: an approval chip wears the key, not the lock; a form field is named for
+    assistive tech by its title over an empty placeholder (`a_forms_field_is_named_and_its_ways_out_differ`);
+    a note's dismiss is a keyboard stop with the focus ring (`a_dismissed_note_stays_away_until_a_newer_one`);
+    "Answer in Slopty" is one constant the card and the refusal share.
+  - **The e2e stand-in names the first call alike not yet asked about**, so two identical
+    calls in flight each get their own card, and a request with no call stays about none
+    (`replay::tests::each_request_names_the_first_call_alike_not_yet_asked_about`).
+  - Rejected: inline code's hair spaces after an empty run. Empty runs are passed over before
+    either side is decided, so the box stays symmetric
+    (`markdown::render::tests::flatten_collects_and_merges_inline_code_ranges`).
+
+- ✅ **Zeron is the base; the premium references set the bar (2026-10-19).** This partly
+  supersedes "The interface is zeron's UI and UX, copied as Slopty's own" and "Zeron's colours
+  stay". The person no longer holds the interface to zeron's look in every detail. Slopty keeps
+  zeron's shell as its base, and keeps taking zeron's improvements through `xtask upstream adopt`.
+  But where a premium reference does something more beautiful, more elegant or more striking,
+  Slopty adopts it. The references are Claude Code desktop, T3 Code, opencode and Amp, each with
+  a study in `.research`. Each adoption is weighed on its renders, not on its source. Two things
+  hold from before:
+  - Colour is never muted into grey; a hue changes only to one a reference shows is better.
+  - A shell edit stays marked `// slopty:`, so zeron's changes still merge.
+  Audit items rejected only because "zeron is the spec" are reconsidered on these terms.
+- ✅ **The chrome takes opencode's palette anchor, status slot and settings leading, and the
+  references' menu voice (2026-10-19).** The opencode study (`.research/opencode-study-2026-10-19.md`)
+  gave the chrome five items, and "Zeron is the base" reopened what the chrome audit had kept
+  only because zeron drew it so. Each became:
+  - **The palettes sit where a centred 480 px dialog would start**, never above 48 px from the
+    window's top, between 280 and 480 tall with their footer at the foot, so results grow and
+    shrink downward only (opencode #8; `the_palette_keeps_its_top_as_its_results_change`). The
+    resume picker and the Add device dialog share the anchor (`popover::modal_top`). Groups part
+    by 16 px of air with no rule, their titles 13 pt in sentence case and the muted ink, and
+    every result row is the pickers' 32 px. The search row stays the full-width 44 px row over
+    a hairline, as Claude desktop's palette draws it, rather than opencode's inset field.
+  - **A row's leading slot carries only a state worth a glance**; unread is a small accent dot
+    on the agent mark's corner, ringed in the sidebar's tone where the sidebar is opaque, and
+    the mark keeps its full clay, History's too (opencode #9;
+    `sidebar_status::tests::an_unread_result_marks_its_agents_corner`).
+  - **Titles and reason lines fade at their end** rather than stopping at "…" (opencode #21):
+    the sidebar already drew them so. The reason line's text is still cut at 60 characters, with
+    "…", by the view model (`slopty_ui::view_model::rows::waiting_on`); at the sidebar's widths
+    the cut lies past the fade.
+  - **Every settings row's description sits 4 px under its title**, where 1 px pressed the two
+    lines into one block, and Permissions draws its description with the same line (opencode
+    #28). Sections already stood 32 px apart.
+  - **Menu group headings are sentence case**, 11 pt in the muted ink, as Claude desktop's and
+    opencode's menus head theirs; zeron's tracked capitals shouted over the rows they named.
+  - **Tooltip key caps** arrive through the tooltip card every tooltip draws
+    (`live::chrome::tooltip_keys`, the pane lane's); a menu row's key stays plain faint text, as
+    Claude desktop's and the system's menus set it.
+  - **A titlebar toggle that is on** rests on the selected wash and deepens on hover and press,
+    one table of steps with the sidebar (`theme::selected_wash` and its neighbours). It names its
+    state in its label ("Hide files panel"), so it is not also announced as a toggle.
+  - Rejected: **sticky group headers** (opencode #20). A sidebar group shows ten rows before
+    "Show more", so one outgrows the column only after the person asks for more; opencode's list
+    never pages, which is why it pins its headers. Over glass the rows under a pinned header
+    must be cut by a fade that follows the scroll, and a header and fade drawn from the offset
+    make every scroll frame rebuild and repaint the sidebar, losing the scroll layer that
+    composites its scrolling from tiles. Claude's "flat panes and seam lines" for the sidebar:
+    the sidebar is already one flat wash parted from the chat by a single hairline. The
+    titlebar's title stays 12 pt, as no reference gives a better size.
+- ✅ **The transcript, composer and cards take opencode's motion, hierarchy and touch rules
+  (2026-10-19).** The opencode study (`.research/opencode-study-2026-10-19.md`) gave the
+  transcript and composer fourteen items. Each became:
+  - **A running call's title shimmers on the one shared clock** (#1): the group's summary and
+    the running row's verb ink each glyph from faint to full as the band passes
+    (`motion::shimmer_ink`, the pane lane's, so every shimmer moves in step). Zeron's 3.4 s
+    strip sweep is gone. The settled tense still rolls in with `roll_text`'s Scritto roll: its
+    blur and tilt read better than opencode's 240 ms crossfade, and its width settles on the 200 ms
+    resize so nothing after the label moves once its glyphs land. The working line keeps its
+    spinner and its warming words rather than a second live cue.
+  - **An approval has a primary and a danger** (#2): the view model names the once-allow as the
+    card's recommendation (`UserInputQuestion::primary_option`), none where the card starts on
+    its deny, and the choices that stop the turn (`stop_options`). The primary row wears the
+    primary button's contrast fill; a stop reads in danger ink on its neutral row, never a red
+    fill. Digits already show wherever a key picks; a click-only card keeps none, so a key held
+    down can never allow a destructive call.
+  - **An open group's header holds under the bands above it** while its rows scroll (#3): a
+    28 pt band of its chevron and summary, on the page with the prompt band's hairline, under
+    the held prompt when there is one; a press folds the group and glides back to it
+    (`an_open_groups_header_holds_while_its_rows_scroll`).
+  - **A touch screen shows what a hover reveals** (#4, `motion::revealed_by_hover`): every
+    message's strip (its time, Copy and Rewind) stands at rest, so the long press that showed
+    one is deleted; a subagent card's controls, the background tray's row actions and a note's
+    dismiss stand too.
+  - **The drop target arrives** (#7): a 25 % veil under a 4 % (6 % dark) ink wash fades in over
+    200 ms on an ease-out cubic, a field of 135° stripes (12 on, 12 off, 7 % or 14 % ink)
+    drifts one period every 3 s, held to the reading column and an ellipse, and a 40 pt round
+    badge with the attach glyph rises 4 pt into place over the words. Still under reduced motion.
+  - **A picked choice is an accent tile** (#13): a pale accent wash (15 % in the dark) and an
+    accent ring; a choice of several leads with a 16 pt box the accent fills with its check.
+  - **"Queue ⏎" stands beside Send** while a draft would queue (#14), growing in with the
+    clock that replaces the arrow; a press queues. Only where a key can press it.
+  - **The working line says "Esc to stop"** when Escape stops the agent (#15).
+  - **A toast lines up on its first line** (#17): its lead in a cell of that line's height, its
+    buttons overhanging it, and a button whose words would wrap beside it on a row of its own
+    under them.
+  - **Jumping to the end is an arrow on a 32 × 28 button** (#18), corners of 8, haloed in the
+    page's colour, rising 8 pt into place; its words stay for the screen reader and tooltip.
+  - **Several questions show their progress as segments** (#19), 14 × 2 in 20 pt targets:
+    answered in the accent, the one shown muted, the rest faint; a press goes to an answered
+    page or the first after them.
+  - **A subagent card's chevron arrives with the pointer** (#26), from no width, sliding in from
+    4 pt back; an open run keeps it.
+  - **A thought's headings read as its prose** (#27): body size and weight, faint ink.
+  - **Counts growing into place** (#16) waits for the one-sentence group summary of the Amp
+    study, which rebuilds the summary as clauses: each clause grows in then.
+- ✅ **Spinners read on light, and the pane takes opencode's and Amp's details (2026-10-19).**
+  Lane P's items from the opencode study (`.research/opencode-study-2026-10-19.md`) and the Amp
+  study (`.research/amp-study-2026-10-19.md`), with light-mode spinners first:
+  - **Every spinner clears 3:1 on every light surface** (WCAG's floor for a non-text mark). Dark
+    stays as it was. On light each tint keeps its hue and deepens its lightness until it passes
+    over the page and every raised plane (`Theme::spinner_ink`), and the pulse rests at 30 %
+    rather than 8 %, so a dim cell still shows the mark's shape (`Theme::spinner_floor`;
+    `light_spinners_clear_three_to_one_on_every_surface`). The grey alternative was refused:
+    colour is never muted into grey.
+  - **A running label shimmers on one clock** (`motion::shimmer_text`): each glyph is lit 45 ms
+    after the one before, over a 1.2 s round, from the faint ink through the accent to a crest
+    of the accent lifted toward the text (`motion::shimmer_color`, below).
+  - **A tooltip draws each key as a cap**, 14 pt tall, radius 2, a faint fill
+    (`a_shortcut_draws_a_cap_per_key`). Opencode's 4 pt padding beats Amp's 3 at that height.
+  - **A strip closed by the pointer keeps its tab widths** until the pointer leaves or 5 s pass,
+    so the next ✕ is under it (`a_strip_holds_its_width_after_a_close_until_the_pointer_leaves`).
+  - **An empty state sits at the optical centre**, lifted by 18 % of its region (160 at most), in
+    the quiet voice: a 20 pt faint mark, a 14 pt medium headline, a 13 pt muted line.
+  - **A diff marks a changed line with a 2 px bar alone**, in the full add or delete hue; the
+    +/− column is gone. The gutter holds three digits from the start, so a file under a thousand
+    lines keeps one width. **What a diff leaves out between hunks reads "N unchanged lines"**,
+    muted italic on a neutral 4 % wash, with the function git names and the unfold mark in the
+    warning hue at 70 %: Amp's amber diff meta. Both references draw that band neutral and put
+    the colour in its ink, so the accent-tinted `@@` band went. A click shows the 20 lines above
+    the next change, ⌥-click all of them, from the file's new side, fetched once and checked
+    against the patch (`unchanged_lines_count_between_hunks_and_open_from_the_new_side`).
+  - **The side pane opens over 240 ms on the quint ease-out**, whatever its width. Its contents
+    fade in over 200 ms after 40 ms, and out over the first 160 ms of a close; the frame does not
+    fade. Reduced motion snaps. The pane draws a hairline, not a shadow, so no shadow needs to
+    drop.
+  - **A long wait paces down**: a pulse runs at full pace as its wait starts and eases to 0.6
+    over the first minute. The pace is integrated, so the phase never jumps, and the gap against
+    the calm clock closes over that same minute, so every calm pulse is in step again
+    (`a_long_wait_paces_down_without_a_jump_and_lands_in_step`).
+  - **Floats draw a ring, not a border** (`Theme::elevation`): a 0.5 pt ring inside the edge
+    (Amp's white 14 % on dark, black 10 % on light; a tooltip's a step lighter), opencode's lit top
+    edge at white 6 % on dark, and Amp's shadows where the surface is opaque: two long soft ones
+    under a menu, popover, palette or dialog (`0 24 60 −28`, `0 10 28 −20`), the medium pair
+    under a tooltip. A frosted float casts none: it would grey its glass.
+  - **Every stroked icon draws one weight**, 1.75 in 24 units, scaled to its own view box, with
+    round caps and joins, and a test fails any other
+    (`every_stroked_icon_draws_one_weight_with_round_ends`). Claude desktop's 1.25 is refused: at
+    14 pt on dark it reads thin beside text.
+  - **The chrome keeps two weights**, regular and medium; markdown and agents' visuals keep
+    bold. The iPhone and iPad navigation titles stay semibold, as the platform sets them.
+  - Reconsidered once zeron became the base: Claude desktop's flat panes are already ours (a
+    flush panel parted by one hairline), and its type scale is now the ladder 11, 12, 13, 14, 16
+    and 20 (`typography::ladder`). The tooltip stays at 12 pt as Claude desktop and T3 set it,
+    not opencode's 11.
+- ✅ **A tooltip fades out, and the pane takes the design-inspiration study's details
+  (2026-10-19).** Lane P's items from `.research/design-inspiration-2026-10-19.md`, in its order,
+  and opencode's tooltip exit:
+  - **One status mark morphs through a run's states** (`loaders::status_mark::StatusMark`, Clanker
+    UI's): six turning dashes while working, closed to an amber ring while waiting, a green disc
+    with its tick drawn in when done, a red ring with its `!` drawn on failure. Every move is on
+    the quint ease-out, the colour crossfades over 150 ms, the turn rides the shared pulse clock,
+    and reduced motion draws each state at once. The sidebar and the Todo tray take it in place
+    of their check, spinner and dot.
+  - **A scrolled list's top and bottom fades grow with what is hidden past them**
+    (`EdgeFade::fade_scroll_y`): no fade at rest at the top, the full band once a band's height
+    has scrolled under it. A fade over content that is not there read as a seam.
+  - **A file's change size reads as five squares** after its `+N −N` (`changes::diffstat_blocks`):
+    one square per changed line up to five, split between green and red by share.
+  - **The shimmer's crest passes through the accent** (`motion::shimmer_color`): faint to the
+    accent over the band's first half, then to the accent mixed toward the text, 55 % on dark and
+    35 % on light. A grey crest was the one place the working line had no colour.
+  - **One fold for groups, cards and trays** (`motion::fold_frame`, Clanker's `Collapsible`): the
+    height opens over 280 ms on the quint ease-out while the contents wait 80 ms, then fade in over
+    220 ms rising 3 pt (for its 2 pt blur, which gpui cannot draw yet); closing, the contents fade
+    over 150 ms while the height closes over 220 ms on (0.4, 0, 0.6, 1). A diff's file fold moved
+    onto it (the contents read under 0.2 at 60 ms,
+    `a_fold_opens_its_height_before_its_contents_and_hides_them_first`).
+  - **A key cap stands on a 1 pt lip and presses with the real key** (`live::chrome::pressable_cap`,
+    HextaUI's `Kbd`): while ↑, ↓, ↵, Tab or Esc is down in the focused palette or picker, its cap
+    sinks 1 pt, its fill deepens to `ink(0.16)` and its lip goes, over 100 ms; auto-repeat keeps it
+    down, and a palette forgets held keys as it opens, since the key that closed the last one came
+    up where nothing listened (`a_key_cap_presses_with_the_real_key`).
+  - **A loader never flashes** (`loaders::delayed`, HextaUI's `useDelayedLoading`): it waits 150 ms
+    (the grace was 200), and once shown stays 400 ms though the load lands sooner, so it never
+    blinks on and straight off. The diff's preparing state and the remote screen's waits use it
+    (`a_delayed_loader_never_flashes`).
+  - **A copy control draws its check in** (`loaders::copy_glyph::CopyGlyph`): the copy glyph
+    fades over 180 ms, then the check is stroked over 180 ms in the success green, and the copy
+    glyph returns after 1.5 s (the span was 1.2 s). HextaUI also rolls the button's words to
+    "Copied"; refused, since a copy control keeps its words and size so nothing beside it moves,
+    and its tooltip already says so.
+  - **A wrapped diff line marks each row it wraps onto with `»`** under its number, in the faint
+    ink (AgentCraft's), so one wrapped line never reads as two.
+  - **A changed line lights the words it changed** (Hunk's intraline marks, `changes/words.rs`):
+    a run of up to eight deleted lines followed by up to eight added ones pairs line by line,
+    each pair is compared by word, and what the other side lacks is washed in the line's hue at
+    22 % on dark and 16 % on light, worked out once per hunk. A pair sharing no word is a
+    rewrite and lights nothing, nor does a lone line. The wash is square-cornered, not the
+    study's radius 2: gpui draws a text run's background as a plain box.
+  - **A tooltip fades out over 80 ms where it stood** (opencode's exit; gpui-fast
+    `fast/tooltip_exit.rs`), ease-in, rather than vanishing the frame its element lets it go. A
+    new tooltip, a prompt or a drag ends the fade at once; reduced motion keeps the cut.
+  - **The unchanged-lines band stays neutral; the shell's `diff_hunk_bg` is deleted.** The
+    files e2e's repository now diffs as two hunks with three lines between them, so
+    `surface-files-changes` draws the band. Next to it, the band redrawn in the theme's accent
+    wash (8 % dark, 7 % light) reads as a separate violet stripe, a third hue between the amber
+    ink and the red and green rows. The neutral 4 % wash reads as the same ground as the file
+    headers, and the hue stays in the amber unfold mark and function name. The theme model's
+    `diff_hunk` no longer has a reader in the shell.
+  - **A word that turns with the clock turns when its timer runs, not when a frame passes its
+    moment.** A frame can begin past a deadline before the timer that announces it has run, and
+    draw a view again from the last frame. H's e2e frame checker caught three cases: Stop on a
+    turn whose lease had just gone stale, a goal's age in the footer, and the terminal's
+    scrollbar thumb after its fade. The fixes:
+    - the state's indicators read a moment held short of the next clock transition until the
+      state has announced it (`AppState::announced`);
+    - the dock's ticking words (a goal's age, a note's or band's time, a `!` command's) read a
+      moment stamped when the dock arrives and on each tick (`DockFeed::now`);
+    - a rail's fade begins when its linger's wake runs and plays as a GPUI animation, so the
+      view is drawn on every frame of it.
+
+    Each case is a headless test that moves the dispatcher's clock and runs nothing that came
+    due: `shell/stale_frames_tests.rs` and the terminal's
+    `a_frame_before_the_rails_wake_draws_the_thumb_as_one_from_scratch`. Each fails on the old
+    code with the e2e's own difference.
+- ✅ **The sidebar, settings and themes take Amp's details and prunes (2026-10-20).** Lane H's
+  items from the Amp study (`.research/amp-study-2026-10-19.md`) and the design-inspiration
+  study (`.research/design-inspiration-2026-10-19.md`):
+  - **A status group's header is quiet** (#10): 13 pt regular in the muted ink, its count in
+    tabular figures fading in only under the pointer, and its chevron turning −90° over 200 ms on
+    the ease-out as it shuts (`a_sidebar_headers_count_shows_under_the_pointer`). The custom
+    sidebar sections and the sidebar's view menu went: status groups, pins and the project filter
+    already sort the work, as Amp's do with no user sections.
+  - **A finished chat untouched for three days folds into Inactive** (#11): a group shut at
+    start, after Done, its threshold one constant (`sidebar_status::INACTIVE_AFTER_HOURS`, 72),
+    reading "No inactive chats" while it is empty
+    (`a_chat_untouched_for_three_days_folds_into_inactive`). History is one list across every
+    project, or the filtered one.
+  - **A title the agent gives rolls in** (#12), in the sidebar row and the titlebar, on
+    `roll_text`'s roll (0.35 em, 550 ms with stagger) rather than Amp's 200 ms: one roll for
+    every changing word in the app reads as one hand. Still under reduced motion; a first sight
+    never rolls (`a_chat_title_the_agent_gives_rolls_in`).
+  - **Nine curated themes, each with one line of voice** (#13, P5): Slopty Dark, Light and a
+    true-black Slopty Black; a high-contrast pair after VS Code's (orange on black, deep blue on
+    white, every border drawn); Tokyo Night, Catppuccin Mocha, Dracula and Rosé Pine Dawn, so
+    colour stays rich. The chosen theme's line sits under its row in Appearance and is read to a
+    screen reader (`a_theme_row_says_the_chosen_themes_line`). Theme import, the theme library
+    and their actions are gone, with json5, plist and anyhow; a settings file naming a theme no
+    longer built in opens on the house's own (`a_theme_no_longer_built_in_resolves_to_the_houses`).
+  - **Prunes** (P6, P9, P11, P12), each setting deleted with every reader; an old settings file
+    holding the keys still loads and drops them
+    (`a_file_holding_deleted_settings_still_loads`):
+    - the compact model picker is the one picker (`compactModelPicker`);
+    - conversation width is three presets for the window, not a 560–1200 slider: Default (672,
+      724 from 1280, 750 from 1600), Wide (six tenths, never under 672) and Full
+      (`conversation_widths_follow_the_window_and_persist`);
+    - `$` picks a skill and `/` a command for every agent, so the per-agent toggles and the
+      Providers disclosure that held only them are gone (`dollar_picks_skills_and_slash_picks_commands`);
+    - reduced motion follows the OS alone (`reduceMotion`); pausing animations in the background
+      stays, having no OS equivalent;
+    - a wallpaper is one chosen image (P7): the folder source, its shuffle and ⌘U go
+      (`wallpaperFolder`, `wallpaperSource`, `wallpaperHistory`, `randomWallpaper`), and so do
+      the dither, ASCII, halftone and scanline effects (`newThreadBackgroundEffect`). Lane B's
+      glyph field is the hero's one treatment and the better ASCII; a chosen wallpaper still
+      wins over it, drawn as it is, decoded once off the UI thread
+      (`prewarming_decodes_off_thread_and_reuses_artwork_without_hero_geometry`). zeron's copies
+      of the cut files are skipped in `xtask/zeron.toml`.
+  - **A select trigger under the pointer stays lifted** through frames the window draws its
+    settings page from the last one: those read no hover fade, so the fades let go of the
+    trigger's key and a page built afresh drew it at rest. The trigger remembers the pointer
+    over it and says so again when next read, as the sidebar's rows do
+    (`a_trigger_under_the_pointer_keeps_its_lift_over_frames_drawn_from_the_last`).
+  - **A closing menu keeps its view drawing until it is reaped**: its fade's own span ended a
+    beat before the popup went, and a frame between drew the view's last build, the menu
+    faintly there, where a build at that moment drew it gone. The closing layer now asks for
+    every frame while it is mounted (`the_server_menu_offers_devices_and_a_server_change`, whose
+    frame checker caught it).
+  - **Before any project, a phone's chat list says "No projects yet"** as the desktop's sidebar
+    and the canvas do; "No chats yet" is for a project with none. Its capsule then offers the
+    canvas's one step, "Add a device" and then "Add a project", never a new chat with nowhere to
+    go; one `Shell::first_step` feeds both, and a project added lands the phone on its new chat
+    as it lands the Mac (`before_any_project_the_capsule_offers_the_step_a_chat_needs`, and the
+    iPhone e2e adds its first project through the capsule). The project picker's device,
+    location and folder rows are buttons a screen reader names, a device with its state in
+    words, where they were silent before.
+  - **A footer key cap presses with its key** in the command palette, History and Add project
+    (`a_footer_cap_sinks_while_its_key_is_held`), on lane P's `pressable_cap`.
+  - **A sidebar row and a session lane wear one morphing status mark** (`loaders::status_mark`)
+    for working, waiting, done and failed, where a spinner, a check and a dot cut; a send waiting
+    its turn keeps the clock, and a row at rest says nothing (`a_rows_mark_follows_its_state`).
+  - **Floats share one elevation**: the palette, popovers, dialogs and toasts draw
+    `Theme::elevation(Floating)` for their border and shadow, and a dialog's title is medium.
+    A copy control in a toast draws its check in (`CopyGlyph`); the sidebar's and the menus'
+    fades grow with what lies past them (`fade_scroll_y`).
+- ✅ **The new-thread hero breathes a glyph field over a warm and cool light (2026-10-20).** Lane
+  B. With no wallpaper set, the hero's ground takes Claude desktop's "wind" texture
+  (`.research/claude-desktop-2.42304.2-2026-10-19.md` §A, its shaders ported to the CPU), under
+  Amp's warm and cool hero light (`.research/amp-study-2026-10-19.md`, item 17), with opencode's
+  restraint (`.research/opencode-study-2026-10-19.md`). A wallpaper still wins.
+  - **The wind** (`new_thread_background_field.rs`) is Claude's: value and gradient noise
+    gusting along a seeded heading, warped by turns and eddies, streaked, with a leading edge, in
+    one of Claude's three character sets, never the last visit's. The ink rests near invisible
+    (3 %), a gust lifts it, and only a ripple tints it to the accent. Claude draws light and dark
+    alike; opencode keeps its dark hero far below its light one, and Slopty's near-black page
+    makes the same ink read brighter, so dark draws it at 65 %, a ripple's peak the accent at
+    about half, near Claude's `#5b90bc` on its `#141517`. A Gaussian calm (250 × 80 pt,
+    a 30 % floor) is centred on the composer, and no cell under the composer is drawn, so it
+    stays opaque even on a frosted theme.
+  - **The hand**: a stroke faster than a walk leaves warmth along its path; a left click outside
+    every control (nothing prevented its default, below the titlebar, clear of the composer)
+    sends a ring out to 620 pt, and every third is a heart. A key stirs the field but adds no
+    light.
+  - **The timeline** (`new_thread_background_schedule.rs`): 3 s of nothing, a 3 s fade in, then
+    25 frames a second for 180 s, after which the wind slows over 8 s to a still frame that
+    asks for no frames until the pointer or a key stirs it. A hidden or background window pauses
+    it, asking for nothing, and resumes without a jump; hidden before it shows, the wait starts
+    over. The first send fades it out over 500 ms. Reduced motion draws one composed still frame
+    (a fixed seed) at once; increased contrast takes the field away (macOS
+    `accessibilityDisplayShouldIncreaseContrast`, iOS darker system colours). No setting.
+  - **The light beneath** (`new_thread_background_backdrop.rs`): Amp's ember at 12 % / 100 % and
+    its cool glow high on the right, the ember's hue halfway between the theme's danger and
+    warning, the cool one its accent. Each only adds colour; Amp's vignette and grain were left
+    out, since a vignette darkens the page edge into a seam and grain on a near-black page reads
+    as noise. Opencode keeps its dark hero far fainter, so the glows peak at 6 % on dark and 8 %
+    on light. It is a dithered 256 × 192 image the GPU stretches, made once a theme, rather than
+    a radial gradient gpui-fast does not have yet: one textured quad a frame.
+  - **Cost**: the wind is lit at one sample per two columns, its noise batched by row so it
+    vectorises, and a frame drawn again at the same moment is not lit again; cells too faint to
+    see are not drawn (`docs/MEASUREMENTS.md`, 2026-10-20). Tests:
+    `the_field_waits_three_seconds_then_fades_in_over_three`,
+    `the_first_send_fades_the_field_out_over_half_a_second`,
+    `a_window_in_the_background_asks_the_field_for_no_frames`,
+    `reduced_motion_holds_the_field_still`, `the_field_rests_after_its_budget_and_a_stir_wakes_it`,
+    `the_calm_thins_the_field_behind_the_composer`, `increased_contrast_takes_the_field_away`,
+    `leaving_the_hero_fades_the_field_out`, `the_ember_glows_low_left_and_the_accent_high_right`.
+- ✅ **The transcript takes Amp's settled turn, lit message and prunes, and the design-inspiration
+  study's motion (2026-10-20).** Lane T's items from the Amp study
+  (`.research/amp-study-2026-10-19.md`) and the design-inspiration study
+  (`.research/design-inspiration-2026-10-19.md`):
+  - **A settled turn is its prompt, one divider and its reply** (Amp #1, P2). Every working step
+    folds into one centred divider, "Worked for 1m 12s" between two hairlines, 12 pt from a 6 × 2
+    button with a 7 % wash and a 12 pt chevron. When the turn ended goes in its tooltip, so the
+    separate done line is gone. While the turn runs the divider stays shut and its summary says
+    what runs now, shimmering, then crossfades to "Worked for" as the turn settles; Amp keeps a
+    running turn open, but one live line reads better across many agents than a scrolling log.
+    A screen reader hears the work behind a settled divider too ("Worked for 6s, ran 2
+    commands"), what the eye finds by opening it. Work the person opened stays open when they
+    leave the chat and come back, a subagent drilled into and left with Escape, so the saved
+    place lands on rows still drawn (`a_chat_come_back_to_keeps_the_work_its_person_opened`).
+    Compact mode is the only mode, so its
+    setting and every non-compact path are deleted (`a_turns_work_folds_behind_one_divider`,
+    `the_divider_stays_shut_while_the_turn_runs`).
+  - **A work group reads as one sentence** (Amp #2): clauses joined by ", " or " and ", each
+    clause's detail in parentheses after it, "Ran 3 commands (1 failed), edited 2 files (+40
+    −12)". The joins and parentheses are faint and an edit's counts wear the diff's inks. Slopty
+    keeps Claude Code's verbs. Every clause says what was done: a thought is "thought for 12s",
+    "thought briefly" under a second, or "thought once" when it says no time, never its row's name
+    "Thought process" (which read "Worked for 1s, thought process" aloud); a subagent's run is
+    "delegated to 1 subagent", "running 1 subagent" while it works, not a tool called. A
+    subagent's end that lands in its own call's turn draws no notice under the divider, since its
+    card already says its answer and how it ended; one left running that ends in a later turn
+    keeps its notice (`a_subagents_end_in_its_own_turn_is_said_by_its_card`). A chat left and
+    come back to clears the pointer's hover, whose row unmounted with no leave, so no message's
+    strip comes back lit.
+  - **A chevron arrives under the pointer** (Amp #3) and stays while its group is open; a touch
+    screen shows it at rest. A read that went through shows its path and opens nothing.
+  - **The person's message is lit** (Amp #4). Over the bubble's wash lie three soft radial glows,
+    each ellipse 70 % of the bubble across and 400 pt down. The accent sits at 25 % / 20 %, and a
+    cool blue and a warm clay sit at 150 % / 35 % and 150 % / 90 %. The two lights take the
+    accent's saturation and lightness, so colour stays and no theme turns grey. Alpha runs from
+    7 % at the centre to 0.7 % at the edge, at a third of that on a 1x display, as Amp does. Dark
+    adds a hairline ring of the text's ink at 7 %. A high-contrast theme, or a system asked for
+    more contrast or less transparency, keeps the flat wash. The glows are gpui-fast's new
+    `radial_gradient` (`fast/radial_gradient.rs`, aislopware/gpui-fast#59), three quads in the
+    bubble's own corners, rather than an image. Grain was left out: on a near-black page it reads
+    as noise (`the_persons_message_is_lit_in_the_themes_hues_and_flat_when_asked`).
+  - **A send not yet taken is tinted, not faded** (Amp #5): 14 % of the accent in its fill,
+    settling over 200 ms once the agent takes it.
+  - **Escape stops on its second press** (Amp #6). The first arms it for 1.5 s, and the working
+    line ends "Esc again to stop" in warning ink, read aloud as a sentence.
+  - **A subagent's status word rolls** (Amp #7): the new word enters 4 pt below over 350 ms as
+    the old leaves 4 pt up over 150 ms (`a_status_word_swaps_from_the_last`).
+  - **An error is a title, one calm sentence and one way on** (Amp #8). Try Again appears where
+    the turn can be retried. The agent's own words open under Details. A retried request counts
+    down in its row and a usage limit counts down in the composer
+    (`an_error_says_a_title_and_one_sentence`).
+  - **A message's time and actions fade** (Amp #9) in and out over 200 ms on the Tailwind ease
+    as the pointer comes and goes, and stand at rest on touch (`a_message_strip_fades_in_and_out`).
+  - **Prunes.**
+    - Math always renders, in Fira Math at the text's size (P8). Fences are always full width,
+      scrolling sideways, so the fit-content toggle and its menu choice are gone.
+    - The context ring shows only past 70 % of the window, or while the agent compacts (P10,
+      `the_context_ring_shows_only_as_the_window_fills`).
+    - A finished Todo list leaves on its own once its rule has filled (P13). A list seen
+      already finished never shows. The transcript row keeps the record
+      (`a_finished_or_dismissed_list_stays_gone_until_the_list_changes`).
+    - The compact model picker, the width presets and the skill keys landed with lane H (P6,
+      P9, P11).
+  - **One status mark** (design #1) for a subagent card and a Todo step: its ring turns while
+    the run works and draws its tick as it finishes, where a spinner and a check cut. A Todo step
+    in progress but idle keeps its ring, a pending one its empty circle.
+  - **The Todo header fills as steps finish** (design #3). Under the header lies a 2 pt rule on
+    an 8 % track. It fills over 500 ms on the ease-out quint, turns green when the list is done,
+    holds 1.2 s and quiets over 300 ms. A different list snaps to its own share
+    (`the_todo_rule_fills_as_steps_finish`).
+  - **Fades grow as you scroll** (design #4): the transcript's top edge, the Todo and Background
+    trays fade only as far as there is content past them, on `EdgeFade::fade_scroll_y`.
+  - **The files card counts in blocks** (design #5): `changes::diffstat_blocks` after its counts.
+  - **One fold** (design #7) for a work group, a subagent card, the files card and the Todo and
+    Background trays, on `motion::fold_frame`. The height opens on the ease-out quint over
+    280 ms. The contents fade in over 220 ms after an 80 ms wait and rise 3 pt, and on closing
+    they go over 150 ms before the height (`a_tool_fold_shows_its_contents_after_its_height`,
+    `a_fold_opens_its_height_before_its_contents`).
+  - **A phase label crossfades** (design #8): the outgoing words fade over 120 ms, the incoming
+    fade in over 200 ms and rise 3 pt, as a running summary becomes "Worked for".
+  - **The jump pill says how much is new** (design #11): "↓ 3 new" with the count in the
+    accent, rolling as it changes, counted from the rows that arrived since the reader left the
+    end. It rises in over 200 ms on the ease-out quint and sinks away over 300 ms on an ease-in
+    that gathers speed as it goes (`the_jump_button_plays_one_leave_then_goes`).
+  - **Copy turns to Copied with a drawn check** (design #12) on a message's and a code block's
+    copy, on `loaders::copy_glyph`.
+  - **A running title shimmers in the shared colours** (`motion::shimmer_color`), as every
+    shimmer does.
+  - **The Background tray's running times read at the dock's moment**, which its one-second tick
+    turns, as the dock's other ticking words do, never at the frame's: the composer is drawn
+    again from its last frame between ticks, and a time read at the frame's moment said "12s"
+    in a frame drawn afresh where the one shown said "11s"
+    (`an_open_trays_time_reads_at_the_docks_tick`).
+  - **A background task's note names its task once.** The description sits on the right only
+    where the note's words do not already say it: Claude Code's `Background command "Build"
+    completed` named the task twice in one row (`work_rows_link_to_the_tray`). The stand-in
+    `claude` that replays a recording now streams a recorded background task's end as Claude
+    Code does (`task_notification`), so the tray no longer kept a finished command running
+    after the turn ended; the worker's replay test holds that nothing runs on.

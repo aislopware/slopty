@@ -162,8 +162,11 @@ impl Composer {
     pub(super) fn render_folded_question(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let wizard = self.wizard.as_ref().filter(|wizard| wizard.folded)?;
         let question = wizard.current()?;
+        // slopty: an approval's command says what it asks before its words do.
         let ask = question
-            .question
+            .command
+            .as_deref()
+            .unwrap_or(&question.question)
             .lines()
             .find(|line| !line.trim().is_empty())
             .map_or_else(|| question.header.clone(), str::to_owned);

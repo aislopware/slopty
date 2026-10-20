@@ -380,10 +380,10 @@ pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
 
 pub fn popover_card(theme: &Theme) -> gpui::Div {
     div()
-        .border_1()
-        .border_color(theme.border)
         .rounded(px(CARD_RADIUS))
-        .when(!theme.is_frost(), |el| el.shadow_lg())
+        // slopty: Amp's floating elevation: a ring inside the edge, and the long soft shadows
+        // where the surface is opaque (`Theme::elevation`).
+        .shadow(theme.elevation(crate::theme::Elevation::Floating))
         .bg(surface_bg(theme))
         .p(px(CARD_INSET))
         .gap(px(MENU_GAP))
@@ -443,11 +443,12 @@ pub fn completion_list(
 }
 
 /// All picker lists use the same paint-time, overflow-dependent edge fades.
+// slopty: each as tall as what lies past its edge, up to its band (`fade_scroll_y`).
 pub fn faded_menu_list(
     scroll: &ScrollHandle,
     list: impl IntoElement,
 ) -> crate::edge_fade::EdgeFaded {
-    crate::edge_fade::edge_faded(12.0, true, true, list).fade_overflow_y(scroll)
+    crate::edge_fade::edge_faded(12.0, true, true, list).fade_scroll_y(scroll)
 }
 
 /// Shared completion-row typography and shrink rules. Long skill names and
@@ -585,7 +586,14 @@ fn menu_motion_from(
     from: f32,
 ) -> AnyElement {
     if let Some(t) = exit {
-        let inner = inner.relative().child(div().absolute().inset_0().occlude());
+        // slopty: a closing menu asks its view for every frame until its popup is reaped
+        // (`reap_popup`, a beat after the fade ends), not only for the fade's own span: a frame
+        // between the two would draw the view's last build, the menu still faintly there, where
+        // a build at that moment draws it gone.
+        let pump = gpui::canvas(|_, window, _| window.request_animation_frame(), |_, (), _, _| {})
+            .absolute()
+            .size_0();
+        let inner = inner.relative().child(div().absolute().inset_0().occlude()).child(pump);
         motion::menu_out_toward(SharedString::from(format!("{id}-out")), from, t, inner)
             .into_any_element()
     } else {
@@ -932,6 +940,47 @@ pub fn modal_glass(
     modal_with(id, viewport, card, corner_radius, 0.35)
 }
 
+// slopty: a dialog whose body changes as it is used (the Add device tabs) keeps its top edge,
+// as Claude desktop's and T3's do, so only its foot moves: where the palettes stand
+// (`shell::command_palette::palette_top`, opencode's `max(48px, (100vh − 480px) / 2)`).
+/// The tallest a top-pinned dialog or palette stands (opencode's command dialog's 480).
+pub const MODAL_MAX_HEIGHT: f32 = 480.0;
+
+/// Where a top-pinned dialog's top edge stands in a window `height` tall: where a centred one at
+/// its tallest would start, 48 at the least.
+pub fn modal_top_edge(height: Pixels) -> Pixels {
+    px(((f32::from(height) - MODAL_MAX_HEIGHT) / 2.0).max(48.0))
+}
+
+/// [`modal`] pinned by its top edge rather than centred, for a card whose height changes.
+pub fn modal_top(
+    id: impl Into<ElementId>,
+    viewport: gpui::Size<Pixels>,
+    card: AnyElement,
+) -> AnyElement {
+    let card = crate::frost::frosted(16.0, crate::frost::MENU_BLUR, card).into_any_element();
+    let top = modal_top_edge(viewport.height);
+    gpui::deferred(
+        gpui::anchored()
+            .position(gpui::point(px(0.0), px(0.0)))
+            .child(
+                div()
+                    .occlude()
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .bg(scrim_alpha(0.35))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .pt(top)
+                    .child(motion::dialog_in(id, div().child(card))),
+            ),
+    )
+    .priority(2)
+    .into_any_element()
+}
+
 fn modal_with(
     id: impl Into<ElementId>,
     viewport: gpui::Size<Pixels>,
@@ -1033,7 +1082,10 @@ pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
         .pt(px(6.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_muted)
-        .child(crate::typography::tracked_caps(label, 10.0, 0.1))
+        // slopty: in sentence case, as Claude desktop's and opencode's menus head their
+        // groups, where zeron's tracked capitals shouted over the rows.
+        .text_size(crate::typography::ui_rems(11.0))
+        .child(SharedString::from(label.to_owned()))
 }
 
 /// Hairline divider between menu sections (slopty `MenuSeparator`:
@@ -1067,10 +1119,10 @@ pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> gpui::D
     div()
         .w(width)
         .rounded(px(corner_radius))
-        .border_1()
-        .border_color(hairline(0.10))
         .bg(surface_bg(theme))
-        .shadow_lg()
+        // slopty: Amp's floating elevation: a ring inside the edge, and the long soft shadows
+        // where the surface is opaque (`Theme::elevation`).
+        .shadow(theme.elevation(crate::theme::Elevation::Floating))
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -1422,19 +1474,20 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
         .p(px(20.0))
         .rounded(px(16.0))
         .bg(surface_bg(theme))
-        .border_1()
-        .border_color(hairline(0.10))
-        .when(!theme.is_frost(), |el| el.shadow_lg())
+        // slopty: Amp's floating elevation: a ring inside the edge, and the long soft shadows
+        // where the surface is opaque (`Theme::elevation`).
+        .shadow(theme.elevation(crate::theme::Elevation::Floating))
         .flex()
         .flex_col()
         .text_color(theme.text)
 }
 
-/// Dialog title: `text-[15px] font-semibold tracking-tight`.
+/// Dialog title: `text-[15px] font-medium tracking-tight`.
 pub fn dialog_title(theme: &Theme, title: &str) -> gpui::Div {
     div()
         .text_size(crate::typography::ui_rems(15.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        // slopty: medium, as every other title in the app is.
+        .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text)
         .child(SharedString::from(title.to_string()))
 }
@@ -1487,8 +1540,10 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
 }
 
 /// Primary button (`btnPrimary`): white fill, near-black text.
+// slopty: the keyboard reaches it (Tab, then Enter or Space) and the shell's ring shows it; the
+// caller gives it the id a keyboard stop needs, and names it ([`named_button`]).
 pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
-    div()
+    let button = div()
         .px(px(12.0))
         .py(px(6.0))
         .rounded(px(8.0))
@@ -1497,8 +1552,20 @@ pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.on_solid)
         .cursor_pointer()
+        .tab_index(0)
         .hover(|s| s.opacity(0.9))
-        .child(SharedString::from(label.to_string()))
+        .child(SharedString::from(label.to_string()));
+    crate::surface_chrome::focus_ring(button, theme)
+}
+
+// slopty: a button a screen reader names by its words, which a press dims a step, as Claude
+// desktop's and T3's answer the pointer.
+/// `button` (a [`btn_primary`] with its id) as a named button that shows a press.
+pub fn named_button(
+    button: gpui::Stateful<gpui::Div>,
+    label: impl Into<SharedString>,
+) -> gpui::Stateful<gpui::Div> {
+    button.role(gpui::Role::Button).aria_label(label).active(|s| s.opacity(0.8))
 }
 
 /// Destructive button (`btnDestructive`): the muted red fill.
@@ -1621,9 +1688,6 @@ pub const MENU_SCROLLBAR_MIN_THUMB: f32 = 24.0;
 pub const MENU_SCROLLBAR_LINGER_MS: u64 = 1400;
 /// How long the rail takes to fade out after the linger window.
 pub const MENU_SCROLLBAR_FADE_MS: u64 = 260;
-/// Repaint cadence through the fade window — each wake repaints the next
-/// intermediate [`MenuScrollbarState::fade`] value.
-const MENU_SCROLLBAR_FADE_FRAME_MS: u64 = 16;
 
 /// Geometry of the floating thumb for a scroll viewport at one instant.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1703,8 +1767,14 @@ impl gpui::Render for MenuScrollbarDragGhost {
 /// When the motion stops the rail lingers [`MENU_SCROLLBAR_LINGER_MS`], fades
 /// over [`MENU_SCROLLBAR_FADE_MS`], and disappears — but hopping onto the
 /// track mid-linger freezes it open, and leaving the track restarts the wait
-/// (it never hides under the pointer). [`schedule_scrollbar_hide`] keeps
-/// wake-ups scheduled so the fade lands without any further input.
+/// (it never hides under the pointer). [`schedule_scrollbar_hide`] wakes the
+/// view as the linger ends so the fade lands without any further input.
+///
+/// slopty: the fade starts when that wake runs, not when the linger's time
+/// passes: a frame can begin past the linger before the wake does, and a view
+/// it did not draw again must still show what a view drawn from scratch then
+/// shows. The fade itself is a GPUI animation, which draws the view on every
+/// frame until the rail is gone.
 #[derive(Default)]
 pub struct MenuScrollbarState {
     list_hovered: bool,
@@ -1714,9 +1784,12 @@ pub struct MenuScrollbarState {
     last_scroll_y: Option<f32>,
     /// When that change was seen.
     last_scroll_at: Option<Instant>,
-    /// When the in-flight hide wake-up fires; one wake is in flight at a
-    /// time, and its render re-arms while the countdown runs.
-    hide_wake_at: Option<Instant>,
+    /// slopty: the motion whose linger wake is in flight, one per motion.
+    linger_armed: Option<Instant>,
+    /// slopty: when the fade began: the moment the linger's wake ran.
+    fade_from: Option<Instant>,
+    /// slopty: how many fades began, which keys each one's animation.
+    fades: u64,
 }
 
 impl MenuScrollbarState {
@@ -1741,10 +1814,16 @@ impl MenuScrollbarState {
             None => self.last_scroll_y = Some(position),
             Some(previous) if previous != position => {
                 self.last_scroll_y = Some(position);
-                self.last_scroll_at = Some(at);
+                self.moved_at(at);
             }
             Some(_) => {}
         }
+    }
+
+    /// slopty: motion at `at`: the rail stands whole again and lingers from then.
+    const fn moved_at(&mut self, at: Instant) {
+        self.last_scroll_at = Some(at);
+        self.fade_from = None;
     }
 
     /// Forget the baseline entirely: the next [`Self::note_scroll`] observes
@@ -1753,19 +1832,16 @@ impl MenuScrollbarState {
     pub fn clear_scroll_baseline(&mut self) {
         self.last_scroll_y = None;
         self.last_scroll_at = None;
+        self.fade_from = None;
     }
 
-    fn scroll_countdown(&self, now: Instant) -> bool {
-        self.scroll_countdown_for(now, false)
-    }
-
-    /// slopty: the countdown under `reduced` motion skips the fade: the rail stands whole
-    /// through the linger and goes at its end.
+    /// slopty: whether the rail stands after scroll motion at `now`: whole through the linger
+    /// until its wake has run, then through the fade, which `reduced` motion skips.
     fn scroll_countdown_for(&self, now: Instant, reduced: bool) -> bool {
-        let fade = if reduced { 0 } else { MENU_SCROLLBAR_FADE_MS };
-        self.last_scroll_at.is_some_and(|at| {
-            now.saturating_duration_since(at) < Duration::from_millis(MENU_SCROLLBAR_LINGER_MS + fade)
-        })
+        self.last_scroll_at.is_some()
+            && self.fade_from.is_none_or(|from| {
+                !reduced && now.saturating_duration_since(from) < Duration::from_millis(MENU_SCROLLBAR_FADE_MS)
+            })
     }
 
     /// Metrics from any scroll handle's live bounds/offset — both
@@ -1795,65 +1871,35 @@ impl MenuScrollbarState {
         self.grab.is_some() || self.bar_hovered || self.scroll_countdown_for(now, reduced)
     }
 
-    /// 1 → 0 across the fade window once the scroll motion stops; full while
-    /// a drag or a track-hover holds the rail open. slopty: at `now`, the frame's moment, and
-    /// whole under `reduced` motion.
-    pub fn fade(&self, now: Instant, reduced: bool) -> f32 {
-        if self.grab.is_some() || self.bar_hovered || reduced {
-            return 1.0;
-        }
-        let Some(at) = self.last_scroll_at else {
-            return 0.0;
-        };
-        let elapsed = now.saturating_duration_since(at).as_millis() as f32;
-        let linger = MENU_SCROLLBAR_LINGER_MS as f32;
-        let fade = MENU_SCROLLBAR_FADE_MS as f32;
-        (1.0 - (elapsed - linger) / fade).clamp(0.0, 1.0)
+    /// slopty: the fade under way, by the number that keys its animation: none while a drag or
+    /// a track-hover holds the rail whole, or before the linger's wake has run.
+    fn fading(&self) -> Option<u64> {
+        (self.fade_from.is_some() && self.grab.is_none() && !self.bar_hovered).then_some(self.fades)
     }
 
-    fn animating_at(&self, now: Instant) -> bool {
-        self.grab.is_none() && !self.bar_hovered && self.scroll_countdown(now)
-    }
-
-    /// When the countdown next needs a repaint: the rest of the linger (the
-    /// wake lands as the fade starts), then frame steps through the fade so
-    /// [`Self::fade`]'s intermediate values actually get painted. `None`
-    /// when nothing is winding down or the window has fully elapsed.
-    fn next_wake_at(&self, now: Instant) -> Option<Instant> {
-        if !self.animating_at(now) {
-            return None;
-        }
-        let linger = Duration::from_millis(MENU_SCROLLBAR_LINGER_MS);
-        let total = Duration::from_millis(MENU_SCROLLBAR_LINGER_MS + MENU_SCROLLBAR_FADE_MS);
+    /// slopty: the wake the linger of the motion last seen asks for, once per motion: that
+    /// motion and how long its linger has left at `now`. `None` with no motion, a wake already
+    /// in flight for it or its fade begun.
+    fn arm_linger_wake(&mut self, now: Instant) -> Option<(Instant, Duration)> {
         let motion = self.last_scroll_at?;
-        let elapsed = now.duration_since(motion);
-        if elapsed < linger {
-            Some(motion + linger)
-        } else if elapsed < total {
-            Some(now + Duration::from_millis(MENU_SCROLLBAR_FADE_FRAME_MS))
-        } else {
-            None
-        }
-    }
-
-    /// Arm the next hide wake-up and return how long the caller should wait.
-    /// `None` when there is nothing to schedule. One wake is in flight at a
-    /// time; its render re-arms for whatever the countdown needs then, so
-    /// resumed scrolling or a refreshed linger converges on the next wake.
-    pub fn arm_hide_timer(&mut self) -> Option<Duration> {
-        self.arm_hide_timer_at(crate::clock::event_now())
-    }
-
-    fn arm_hide_timer_at(&mut self, now: Instant) -> Option<Duration> {
-        let Some(wake) = self.next_wake_at(now) else {
-            self.hide_wake_at = None;
-            return None;
-        };
-        if self.hide_wake_at.is_some_and(|pending| pending > now) {
+        if self.fade_from.is_some() || self.linger_armed == Some(motion) {
             return None;
         }
-        self.hide_wake_at = Some(wake);
-        Some(wake - now)
+        self.linger_armed = Some(motion);
+        let ends = motion + Duration::from_millis(MENU_SCROLLBAR_LINGER_MS);
+        Some((motion, ends.saturating_duration_since(now)))
+    }
+
+    /// slopty: the linger of `motion` ran out, its wake running at `now`: the fade begins then,
+    /// unless newer motion came or a drag or the pointer on the track holds the rail (letting
+    /// go is motion of its own). Whether it began.
+    fn linger_ended(&mut self, motion: Instant, now: Instant) -> bool {
+        if self.last_scroll_at != Some(motion) || self.fade_from.is_some() || self.grab.is_some() || self.bar_hovered {
+            return false;
+        }
+        self.fade_from = Some(now);
+        self.fades = self.fades.wrapping_add(1);
+        true
     }
 
     /// Whether the thumb carries the expanded/stronger treatment.
@@ -1872,7 +1918,7 @@ impl MenuScrollbarState {
             // the rail doesn't vanish under a departing pointer (the strip's
             // own leave event usually does this first).
             self.bar_hovered = false;
-            self.last_scroll_at = Some(crate::clock::event_now());
+            self.moved_at(crate::clock::event_now());
         }
         true
     }
@@ -1889,7 +1935,7 @@ impl MenuScrollbarState {
         }
         self.bar_hovered = active;
         if !active {
-            self.last_scroll_at = Some(crate::clock::event_now());
+            self.moved_at(crate::clock::event_now());
         }
         true
     }
@@ -1967,7 +2013,7 @@ impl MenuScrollbarState {
     pub fn end_press(&mut self) -> bool {
         self.grab = None;
         // Releasing a drag lingers like a stopped scroll.
-        self.last_scroll_at = Some(crate::clock::event_now());
+        self.moved_at(crate::clock::event_now());
         if !self.list_hovered && self.bar_hovered {
             self.bar_hovered = false;
             true
@@ -1987,7 +2033,7 @@ impl MenuScrollbarState {
     /// onto this strip; reach for the raw element only when a surface needs
     /// different listeners. Either way `.id(...)` comes first (hover needs
     /// element state).
-    /// slopty: `now` and `reduced` as [`Self::visible`] takes them.
+    /// slopty: `now` and `reduced` as [`Self::visible`] takes them; drawn whole, [`rail`] fades it.
     pub fn render_rail(
         &self,
         theme: &Theme,
@@ -2011,9 +2057,6 @@ impl MenuScrollbarState {
                 .bottom(px(0.0))
                 .right(px(0.0))
                 .w(px(MENU_SCROLLBAR_HIT_WIDTH))
-                // Post-scroll fade: full while hovered/held, then 1 → 0
-                // across the fade window (see [`MenuScrollbarState::fade`]).
-                .opacity(self.fade(now, reduced))
                 // The thumb is an absolute child inside a fixed-width hit
                 // rail, so hover expansion never reflows rows. Hovering the
                 // thumb itself brightens it on top of the strip-hover
@@ -2034,23 +2077,47 @@ impl MenuScrollbarState {
     }
 }
 
-/// Keep wake-ups scheduled while a scroll-triggered linger/fade countdown
-/// runs: one wake at the end of the linger (the fade's first repaint), then
-/// frame-cadence wakes through the fade, so the rail fades out and hides
+/// Wake the view as a scroll's linger ends, so the rail fades out and hides
 /// [`MENU_SCROLLBAR_LINGER_MS`] + [`MENU_SCROLLBAR_FADE_MS`] after the last
 /// scroll motion instead of sticking until the next unrelated render. Call
 /// once per render after the rail's activity note
 /// ([`MenuScrollbarState::note_scroll`] / [`MenuScrollbarState::note_scroll_offset`]);
-/// at most one wake is in flight at a time.
-pub fn schedule_scrollbar_hide<T: 'static>(bar: &mut MenuScrollbarState, cx: &mut Context<T>) {
-    let Some(delay) = bar.arm_hide_timer() else {
+/// one wake per motion. slopty: the fade begins as the wake runs, and `reach` finds `bar` on
+/// the view then.
+pub fn schedule_scrollbar_hide<T: 'static>(
+    bar: &mut MenuScrollbarState,
+    reach: impl Fn(&mut T) -> &mut MenuScrollbarState + 'static,
+    cx: &mut Context<T>,
+) {
+    let Some((motion, delay)) = bar.arm_linger_wake(crate::clock::event_now()) else {
         return;
     };
     cx.spawn(async move |this, cx| {
         cx.background_executor().timer(delay).await;
-        this.update(cx, |_, cx| cx.notify()).ok();
+        this.update(cx, |this, cx| {
+            if reach(this).linger_ended(motion, crate::clock::event_now()) {
+                cx.notify();
+            }
+        })
+        .ok();
     })
     .detach();
+}
+
+/// slopty: `strip` fading out over [`MENU_SCROLLBAR_FADE_MS`] while `bar` fades, keyed by `id`
+/// and the fade's number: a GPUI animation, which draws the view each frame of it.
+pub fn fading_rail(strip: Stateful<Div>, bar: &MenuScrollbarState, id: &'static str) -> AnyElement {
+    use gpui::AnimationExt as _;
+    match bar.fading() {
+        Some(fade) => strip
+            .with_animation(
+                ElementId::NamedInteger(SharedString::new_static(id), fade),
+                gpui::Animation::new(Duration::from_millis(MENU_SCROLLBAR_FADE_MS)),
+                |strip, delta| strip.opacity(1.0 - delta),
+            )
+            .into_any_element(),
+        None => strip.into_any_element(),
+    }
 }
 
 /// The view-side halves of one floating rail. Implement on the view that owns
@@ -2116,10 +2183,10 @@ pub fn rail<V: ScrollRailHost>(
     cx: &mut Context<V>,
 ) -> Option<AnyElement> {
     let metrics = host.rail_metrics()?;
-    schedule_scrollbar_hide(host.rail_bar(), cx);
+    schedule_scrollbar_hide(host.rail_bar(), V::rail_bar, cx);
     let (now, reduced) = (cx.frame_time(), cx.reduce_motion()); // slopty: the frame's moment
     let strip = host.rail_bar().render_rail(theme, metrics, now, reduced)?;
-    Some(
+    Some(fading_rail(
         strip
             .id(id)
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -2160,9 +2227,10 @@ pub fn rail<V: ScrollRailHost>(
                     this.rail_bar().end_press();
                     cx.notify();
                 }),
-            )
-            .into_any_element(),
-    )
+            ),
+        host.rail_bar(),
+        id,
+    ))
 }
 
 /// One handle-backed rail on a view that hosts several: where its state
@@ -2195,10 +2263,10 @@ pub fn rail_for<V: 'static>(
     let bar = (access.bar)(host);
     bar.note_scroll(&scroll);
     let metrics = bar.metrics(&scroll)?;
-    schedule_scrollbar_hide(bar, cx);
+    schedule_scrollbar_hide(bar, access.bar, cx);
     let (now, reduced) = (cx.frame_time(), cx.reduce_motion()); // slopty: the frame's moment
     let strip = (access.bar)(host).render_rail(theme, metrics, now, reduced)?;
-    Some(
+    Some(fading_rail(
         strip
             .id(id)
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -2241,9 +2309,10 @@ pub fn rail_for<V: 'static>(
                     (access.bar)(this).end_press();
                     cx.notify();
                 }),
-            )
-            .into_any_element(),
-    )
+            ),
+        (access.bar)(host),
+        id,
+    ))
 }
 
 /// Rewind a handle-owned menu list to its top and drop its rail activity
@@ -2603,59 +2672,45 @@ mod tests {
         );
     }
 
+    /// slopty: the linger asks for one wake per motion, and the fade begins only as that wake
+    /// runs, however late: until then the rail stands whole at any moment past the linger, so
+    /// a frame that begins before the wake runs draws it as a frame drawn from scratch does.
     #[test]
-    fn hide_wakes_step_from_linger_end_through_the_fade() {
+    fn the_fade_begins_when_the_lingers_wake_runs() {
         let mut bar = MenuScrollbarState::default();
         let t0 = Instant::now();
-        // Nothing winding down → nothing to schedule.
-        assert_eq!(bar.arm_hide_timer_at(t0), None);
-
+        assert_eq!(bar.arm_linger_wake(t0), None, "no motion, no wake");
         bar.note_scroll_offset_at(0.0, t0);
         bar.note_scroll_offset_at(10.0, t0);
-        // Mid-linger: the next wake is the rest of the linger, so the first
-        // repaint lands as the fade starts.
-        let mid = t0 + Duration::from_millis(MENU_SCROLLBAR_LINGER_MS / 2);
-        assert_eq!(
-            bar.arm_hide_timer_at(mid),
-            Some(Duration::from_millis(MENU_SCROLLBAR_LINGER_MS / 2))
-        );
-        // The pending wake fired and rendered; from the fade's first frame
-        // on, wakes run at frame cadence so intermediate fade values paint.
-        bar.hide_wake_at = None;
-        let fade_start = t0 + Duration::from_millis(MENU_SCROLLBAR_LINGER_MS);
-        assert_eq!(
-            bar.arm_hide_timer_at(fade_start),
-            Some(Duration::from_millis(MENU_SCROLLBAR_FADE_FRAME_MS))
-        );
-        bar.hide_wake_at = None;
-        let mid_fade =
-            t0 + Duration::from_millis(MENU_SCROLLBAR_LINGER_MS + MENU_SCROLLBAR_FADE_MS / 2);
-        assert_eq!(
-            bar.arm_hide_timer_at(mid_fade),
-            Some(Duration::from_millis(MENU_SCROLLBAR_FADE_FRAME_MS))
-        );
-        // Past the window the countdown is over — the rail is hidden.
-        bar.hide_wake_at = None;
-        let past =
-            t0 + Duration::from_millis(MENU_SCROLLBAR_LINGER_MS + MENU_SCROLLBAR_FADE_MS + 1);
-        assert_eq!(bar.arm_hide_timer_at(past), None);
+        let linger = Duration::from_millis(MENU_SCROLLBAR_LINGER_MS);
+        let fade = Duration::from_millis(MENU_SCROLLBAR_FADE_MS);
+        let mid = t0 + linger / 2;
+        assert_eq!(bar.arm_linger_wake(mid), Some((t0, linger / 2)));
+        assert_eq!(bar.arm_linger_wake(mid), None, "one wake per motion");
+        let late = t0 + linger + fade * 4;
+        assert!(bar.visible(late, false) && bar.fading().is_none(), "whole until the wake runs");
+        assert!(bar.linger_ended(t0, late));
+        assert_eq!(bar.fading(), Some(1));
+        assert!(bar.visible(late + fade / 2, false), "fading");
+        assert!(!bar.visible(late + fade, false), "gone once faded");
+        assert!(!bar.visible(late, true), "reduced motion: gone as the wake runs");
+        assert_eq!(bar.arm_linger_wake(late + fade), None, "faded: nothing to wake");
     }
 
+    /// slopty: a wake for motion since superseded, or one that finds a drag holding the rail,
+    /// begins no fade; the motion after each asks for its own wake.
     #[test]
-    fn hide_timer_keeps_one_wake_in_flight() {
+    fn a_superseded_or_held_wake_begins_no_fade() {
         let mut bar = MenuScrollbarState::default();
         let t0 = Instant::now();
         bar.note_scroll_offset_at(0.0, t0);
         bar.note_scroll_offset_at(10.0, t0);
-        assert_eq!(
-            bar.arm_hide_timer_at(t0),
-            Some(Duration::from_millis(MENU_SCROLLBAR_LINGER_MS))
-        );
-        // A pending wake covers re-renders while it is still in flight; its
-        // own render re-arms for whatever the countdown needs then.
-        assert_eq!(bar.arm_hide_timer_at(t0 + Duration::from_millis(10)), None);
-        // A drag or track-hover holds the rail open — no countdown, no wake.
-        bar.hide_wake_at = None;
+        assert!(bar.arm_linger_wake(t0).is_some());
+        let t1 = t0 + Duration::from_millis(100);
+        bar.note_scroll_offset_at(20.0, t1);
+        let later = t1 + Duration::from_secs(2);
+        assert!(!bar.linger_ended(t0, later), "newer motion came");
+        assert!(bar.arm_linger_wake(t1).is_some(), "the newer motion's own wake");
         bar.begin_press_in(
             &MenuScrollbarMetrics {
                 track_height: 300.0,
@@ -2666,7 +2721,9 @@ mod tests {
             px(0.0),
             px(10.0),
         );
-        assert_eq!(bar.arm_hide_timer_at(t0 + Duration::from_millis(20)), None);
+        assert!(!bar.linger_ended(t1, later), "a drag holds it");
+        bar.end_press();
+        assert!(bar.fading().is_none() && bar.arm_linger_wake(later).is_some(), "letting go lingers anew");
     }
 
     #[test]

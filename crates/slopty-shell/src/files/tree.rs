@@ -12,6 +12,7 @@ use super::{
 use crate::{
     file_icons::{self, FileIconIdentity},
     icons::{self, icon},
+    motion::HoverFade as _,
     popover,
     theme::Theme,
 };
@@ -339,7 +340,7 @@ impl FilesSurface {
                     })
                     .when(
                         is_directory && self.tree_drag.destination.as_deref() == Some(&path),
-                        |el| el.bg(crate::theme::wash(0.18)),
+                        |el| el.bg(crate::theme::pressed_wash()),
                     )
                     .aria_selected(selected)
                     .when(is_directory, |element| element.aria_expanded(expanded))
@@ -355,19 +356,24 @@ impl FilesSurface {
                     .when(node.entry.ignored && decoration.is_none(), |element| {
                         element.opacity(0.52)
                     })
+                    // slopty: the pane's wash steps, each lighter on white, and a faded hover.
                     .when(selected, |element| {
-                        element.bg(crate::theme::wash(match (focused, distinct_cursor) {
-                            (true, true) => 0.16,
-                            (true, false) => 0.12,
-                            (false, _) => 0.08,
-                        }))
+                        element.bg(match (focused, distinct_cursor) {
+                            (true, true) => crate::theme::selected_hover_wash(),
+                            (true, false) => crate::theme::selected_wash(),
+                            (false, _) => crate::theme::hover_wash(),
+                        })
                     })
                     .when(!selected, |element| {
+                        let fade = format!("tree-row-{path}");
+                        let rest = if distinct_cursor {
+                            crate::theme::hover_wash()
+                        } else {
+                            crate::theme::wash(0.0)
+                        };
                         element
-                            .when(distinct_cursor, |element| {
-                                element.bg(crate::theme::wash(0.04))
-                            })
-                            .hover(|style| style.bg(crate::theme::wash(0.055)))
+                            .bg(crate::motion::hover_blend(&fade, rest, crate::theme::hover_wash()))
+                            .hover_fade(fade)
                     })
                     .on_click(
                         cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
@@ -434,7 +440,7 @@ impl FilesSurface {
                             .min_w_0()
                             .truncate()
                             .font_family(theme.font_sans.clone())
-                            .text_size(px(11.5))
+                            .text_size(crate::typography::ui_rems(12.0))
                             .text_color(text_color)
                             .child(node.entry.name)
                             .into_any_element()
@@ -475,7 +481,12 @@ impl FilesSurface {
                 .cursor_pointer()
                 // slopty: a keyboard stop with the shell's ring, inside the tree (M8).
                 .map(|el| crate::surface_chrome::key_stop_inset(el, &theme))
-                .hover(|style| style.bg(crate::theme::wash(0.055)))
+                .bg(crate::motion::hover_blend(
+                    &format!("tree-error-{index}"),
+                    crate::theme::wash(0.0),
+                    crate::theme::hover_wash(),
+                ))
+                .hover_fade(format!("tree-error-{index}"))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let cursor = this
                         .tree
@@ -492,14 +503,14 @@ impl FilesSurface {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(10.5))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.danger.opacity(0.82))
                         .child(format!("Couldn't open · {message}")),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(10.5))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
                         .child("Try again"),
                 )
@@ -517,13 +528,18 @@ impl FilesSurface {
                 // slopty: a keyboard stop with the shell's ring, inside the tree (M8).
                 .map(|el| crate::surface_chrome::key_stop_inset(el, &theme))
                 .role(gpui::Role::Button)
-                .hover(|style| style.bg(crate::theme::wash(0.055)))
+                .bg(crate::motion::hover_blend(
+                    &format!("tree-more-{index}"),
+                    crate::theme::wash(0.0),
+                    crate::theme::hover_wash(),
+                ))
+                .hover_fade(format!("tree-more-{index}"))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.load_directory(directory.clone(), Some(cursor.clone()), cx);
                 }))
                 .child(
                     div()
-                        .text_size(px(10.5))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_muted)
                         .child("Load more…"),
                 )
@@ -714,7 +730,7 @@ fn status_row(
         .flex()
         .items_center()
         .font_family(theme.font_sans.clone())
-        .text_size(px(10.5))
+        .text_size(crate::typography::ui_rems(11.0))
         .text_color(color)
         .child(label)
         .into_any_element()

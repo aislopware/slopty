@@ -1,28 +1,29 @@
 Window
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Say hello
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
 Article │ You
 Paragraph │ Say hello
 Button │ Copy message
 Button │ Rewind…
-Article │ Claude Code
-Button │ Thought process
 Paragraph │ Done: Say hello
-Status │ Worked for 1s · done $CLOCK │ done
 Button │ Copy message
 Button │ Attach images
 MultilineTextInput │ Do anything…
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Button │ Window controls
+Splitter │ Resize side pane
 Button │ Open in…
 Button │ Show chat details
 Button │ Synthetic editor
-Button │ Close tab
+Button │ Close Synthetic editor
 Button │ New tab
 Button │ Expand side pane
 Button │ Show files panel
@@ -31,4 +32,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

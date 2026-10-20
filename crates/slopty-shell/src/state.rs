@@ -500,7 +500,6 @@ pub struct AppState {
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
     queue_task: Option<Task<()>>,
-    change_requests_visible: bool,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
     /// feed must survive chat switches — the tab itself is what scopes it.
@@ -607,7 +606,6 @@ impl AppState {
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
             queue_task: None,
-            change_requests_visible: true,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
             auto_selected: false,
@@ -1888,10 +1886,23 @@ impl AppState {
     /// Staleness-checked status dot for a chat row. A send in flight reads as
     /// Working (see [`Self::display_status_for`]).
     pub fn indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {
+        let now = self.announced(now); // slopty: no flip before the state says it
         if self.send_pending(chat_id, now) {
             return Indicator::Working;
         }
         effective_indicator(self.session_for(chat_id), now)
+    }
+
+    /// slopty: `now` held short of the next clock transition until this state has announced it
+    /// (its timer ran and notified): a frame can begin past a deadline before the timer that
+    /// announces it runs, and a view drawn then must read what a view it did not draw again
+    /// still shows, a turn's Stop going stale with its lease included. Between frames and once
+    /// announced, `now` itself.
+    pub fn announced(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        match self.clock.wake_at {
+            Some(wake) if now >= wake => wake - chrono::TimeDelta::milliseconds(1),
+            _ => now,
+        }
     }
 
     /// The earliest moment after `now` at which a clock-derived value flips
@@ -2322,13 +2333,9 @@ impl AppState {
             self.change_request_tasks.clear();
             return;
         };
-        let targets = if self.change_requests_visible {
-            desired_watch_targets(&self.chats, &self.spaces, |device| {
-                !self.change_requests.is_supported(device)
-            })
-        } else {
-            HashSet::new()
-        };
+        let targets = desired_watch_targets(&self.chats, &self.spaces, |device| {
+            !self.change_requests.is_supported(device)
+        });
 
         self.change_request_tasks
             .retain(|target, _| targets.contains(target));
@@ -2349,12 +2356,6 @@ impl AppState {
         }
     }
 
-    pub fn set_change_requests_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        if self.change_requests_visible != visible {
-            self.change_requests_visible = visible;
-            self.reconcile_change_request_watches(cx);
-        }
-    }
 
     pub fn open_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
         match crate::links::parse_slopty_conversation_link(url) {

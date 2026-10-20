@@ -15,6 +15,6 @@ Button │ Close settings
 Button │ Connect a phone or iPad
 Button │ Change server
 Button │ Copy device ID bc12344ba6976680a329238068e2abab
-Button │ Add device
+Button │ Add a device
 Button │ Copy link
 Button │ Done

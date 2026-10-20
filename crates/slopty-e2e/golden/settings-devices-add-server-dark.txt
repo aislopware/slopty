@@ -16,7 +16,7 @@ Button │ Close settings
 Button │ Connect a phone or iPad
 Button │ Change server
 Button │ Copy device ID e9f40ba7495a0133207565d661dd6a9c
-Button │ Add device
+Button │ Add a device
 Dialog │ Add device
 TabList
 Tab │ This Mac

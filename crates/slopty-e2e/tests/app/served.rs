@@ -166,6 +166,15 @@ const TRANSCRIPT_LEFT: f32 = 400.0;
 /// test pins.
 const ALWAYS_MOVING: [&str; 1] = ["Worked for "];
 
+/// The rectangles of `a11y`'s nodes that move in every frame of a thread ([`ALWAYS_MOVING`]),
+/// at the window's `scale`: a golden of any surface over a thread leaves them out.
+pub fn always_moving(a11y: &[A11yNode], scale: f32) -> Vec<PixelRect> {
+    a11y.iter()
+        .filter(|n| n.label.as_deref().is_some_and(|l| ALWAYS_MOVING.iter().any(|m| l.contains(m))))
+        .map(|n| mask_of(n, scale))
+        .collect()
+}
+
 /// The pixel rectangle of `node` at the window's `scale`, a few points wider each way.
 fn mask_of(node: &A11yNode, scale: f32) -> PixelRect {
     let [x, y, w, h] = node.bounds;

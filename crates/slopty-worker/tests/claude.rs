@@ -955,7 +955,7 @@ mod claude {
 
     /// A turn Claude Code really took, played over the stream by the stand-in, comes through
     /// the drive whole: every tool call of the recording is a call of the thread, its subagent a
-    /// thread of its own, and the turn ends complete.
+    /// thread of its own, and the turn ends complete with nothing it started left running.
     #[tokio::test]
     async fn a_recorded_turn_plays_through_the_drive_with_its_subagent() {
         let rig = Rig::new(&[("STUB_REPLAY", "tools")]).await;
@@ -969,6 +969,9 @@ mod claude {
             .count();
         assert_eq!(calls, recorded_calls("tools"), "{:#?}", state.items);
         assert_eq!(rig.host.threads().len(), 2, "the thread and its subagent's");
+        // The background command the turn started ended in it, as Claude Code streamed it.
+        let live: Vec<_> = state.tasks.iter().filter(|task| task.is_live()).collect();
+        assert!(live.is_empty(), "no task runs on: {live:#?}");
     }
 
     /// Each permission a recorded turn asked for holds the played turn until it is answered,

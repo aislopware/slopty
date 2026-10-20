@@ -240,6 +240,8 @@ pub fn done_lines<Tz: TimeZone>(
         );
         let worked = ended.as_millis().saturating_sub(turn.started_ms.as_millis());
         let ended_at = i64::try_from(ended.as_millis()).unwrap_or(i64::MAX);
+        // slopty: the turn's divider says the same time as its done line, which it folds in.
+        entry.duration_ms = Some(i64::try_from(worked.max(1_000)).unwrap_or(i64::MAX));
         let text = done_words(worked, ended_at, tz);
         entry.parts.push(MessagePart::Note {
             id: format!("{}:done", entry.id),

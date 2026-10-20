@@ -24,6 +24,15 @@ async fn stack() -> ServedApp {
 }
 
 /// The person's own message `words`, as the transcript names it.
+/// Open the one chat once the app holds its finished turn, and wait until it reads as seen: its
+/// row says nothing more, whether or not the guest's window is the active one, so a golden of
+/// it never catches the row before or after the look.
+async fn open_read(drv: &mut Driver) {
+    seen(drv, "the finished chat's row", STEP, |d| node(d, "Status", "Done").is_some()).await;
+    open_thread(drv, 1).await;
+    seen(drv, "the chat read", STEP, |d| node(d, "Status", "Done").is_none()).await;
+}
+
 fn said<'a>(dump: &'a Dump, words: &str) -> Option<&'a A11yNode> {
     node(dump, "Paragraph", words)
 }
@@ -109,7 +118,7 @@ async fn code_copies_in_place_and_ansi_draws_in_colour() {
 
     let renders = stack.path("");
     let drv = &mut stack.driver;
-    open_thread(drv, 1).await;
+    open_read(drv).await;
     tokio::time::sleep(SETTLE).await;
     let shown =
         seen(drv, "the code's Copy", STEP, |d| node(d, "Button", "Copy code").is_some()).await;
@@ -166,7 +175,7 @@ async fn a_link_shows_where_it_goes_on_hover() {
 
     let renders = stack.path("");
     let drv = &mut stack.driver;
-    open_thread(drv, 1).await;
+    open_read(drv).await;
     tokio::time::sleep(SETTLE).await;
     let shown = seen(drv, "the link", STEP, |d| link(d).is_some()).await;
     let at = link(&shown).cloned().unwrap();

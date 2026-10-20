@@ -44,13 +44,14 @@ pub fn places(state: &AppState) -> Vec<Place> {
         .map(|space| Place {
             device_id: space.device_id.clone(),
             cwd: Some(space.path.clone()),
-            label: format!("{} · {}", space.display_name(), device_name(&space.device_id)),
+            // slopty: "project @ device", as the app names a place everywhere.
+            label: format!("{} @ {}", space.display_name(), device_name(&space.device_id)),
         })
         .collect();
     places.extend(state.devices.iter().map(|device| Place {
         device_id: device.id.clone(),
         cwd: None,
-        label: format!("{} · any folder", device.name),
+        label: format!("Any folder @ {}", device.name),
     }));
     places
 }
@@ -312,12 +313,11 @@ impl PermissionsPage {
                             })
                             .child(widgets::row_title(theme, row.rule.clone()).font_family(theme.font_mono.clone())),
                     )
-                    .child(
-                        div()
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(meta.iter().map(SharedString::as_ref).collect::<Vec<_>>().join(" · "))),
-                    ),
+                    // slopty: the one description line every settings row draws (opencode #28).
+                    .child(widgets::meta_line(
+                        theme,
+                        meta.iter().map(|part| part.clone().into_any_element()).collect(),
+                    )),
             )
             .when(row.editable, |el| {
                 el.child(
@@ -523,24 +523,14 @@ impl Render for PermissionsPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_end()
-                                        .gap(px(16.0))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(widgets::page_header(&theme, "Permissions", None))
-                                                .child(widgets::page_subtitle(
-                                                    &theme,
-                                                    "What agents may do without asking, by folder, as their own settings say.",
-                                                )),
-                                        )
-                                        .children(picker),
-                                )
+                                // slopty: one page head (`widgets::page_head`).
+                                .child(widgets::page_head(
+                                    &theme,
+                                    "Permissions",
+                                    None,
+                                    "What agents may do without asking, by folder, as their own settings say.",
+                                    picker.map(IntoElement::into_any_element),
+                                ))
                                 .children(body),
                         ),
                 )

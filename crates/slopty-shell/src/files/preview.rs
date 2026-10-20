@@ -21,7 +21,7 @@ use super::{
     FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface,
     client::{FilesRequestContext, WorkspaceFilesClient},
     document::{DocumentKey, DocumentPhase, FileDocument},
-    toolbar, toolbar_button, toolbar_button_keyed,
+    toolbar, toolbar_button, toolbar_toggle_keyed,
 };
 use crate::{
     comments::{self, ReviewComment},
@@ -32,17 +32,11 @@ use crate::{
 };
 use crate::motion::HoverFade as _;
 
+// slopty: one code size for the pane (the diff's, the editor's and a read-only file's), the
+// `code_font_size` setting on a 20 px line at its default: opening a file from its diff, or a
+// file that cannot be edited, no longer moves its text 1 or 1.5 px.
 const PREVIEW_LINE_HEIGHT: f32 = 20.0;
-/// One shared `code_font_size` setting drives two surfaces in this file that
-/// never agreed on a size: the editable editor and the plain preview. Each
-/// scales off its own baseline so the default setting reproduces the size that
-/// surface always had, and a user-chosen size moves both while keeping their
-/// proportions.
-const EDITOR_TEXT_SIZE: f32 = 13.0;
-const PREVIEW_TEXT_SIZE: f32 = 11.5;
-const EDITOR_TEXT_SIZE_RATIO: f32 = EDITOR_TEXT_SIZE / crate::typography::CODE_FONT_SIZE_DEFAULT;
-const PREVIEW_TEXT_SIZE_RATIO: f32 = PREVIEW_TEXT_SIZE / crate::typography::CODE_FONT_SIZE_DEFAULT;
-const PREVIEW_LINE_HEIGHT_RATIO: f32 = PREVIEW_LINE_HEIGHT / PREVIEW_TEXT_SIZE;
+const PREVIEW_LINE_HEIGHT_RATIO: f32 = PREVIEW_LINE_HEIGHT / crate::typography::CODE_FONT_SIZE_DEFAULT;
 const EDITOR_COMMENT_CARD_WIDTH: f32 = 320.0;
 const EDITOR_COMMENT_CARD_MARGIN: f32 = 8.0;
 const EDITOR_COMMENT_CARD_MIN_ANCHORED_WIDTH: f32 = 220.0;
@@ -275,17 +269,12 @@ impl FilePreviewState {
     /// fixed 20 px row clips glyphs at larger code sizes, and a hint that
     /// disagrees with the painted row desyncs the virtualized measurements.
     fn line_height(&self) -> gpui::Pixels {
-        px((self.preview_text_size() * PREVIEW_LINE_HEIGHT_RATIO).max(PREVIEW_LINE_HEIGHT))
+        px((self.code_text_size() * PREVIEW_LINE_HEIGHT_RATIO).max(PREVIEW_LINE_HEIGHT))
     }
 
-    /// Text size of the editable editor.
-    fn editor_text_size(&self) -> f32 {
-        crate::typography::clamp_font_size(self.editor_font_size * EDITOR_TEXT_SIZE_RATIO)
-    }
-
-    /// Text size of the plain (non-editable) preview rows.
-    fn preview_text_size(&self) -> f32 {
-        crate::typography::clamp_font_size(self.editor_font_size * PREVIEW_TEXT_SIZE_RATIO)
+    /// Text size of the editable editor and the plain (non-editable) preview rows alike.
+    fn code_text_size(&self) -> f32 {
+        crate::typography::clamp_font_size(self.editor_font_size)
     }
 
     pub(super) fn set_editor_font_size(&mut self, editor_font_size: f32) {
@@ -1204,9 +1193,9 @@ impl FilesSurface {
             return;
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
+            let starting = self.starting_note(cx);
             if let Some(document) = self.preview.documents.get_mut(&path) {
-                document.phase =
-                    DocumentPhase::Error("Workspace service is still starting.".into());
+                document.phase = DocumentPhase::Error(starting.into());
             }
             return;
         };
@@ -1286,8 +1275,9 @@ impl FilesSurface {
             return;
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
+            let starting = self.starting_note(cx);
             if let Some(document) = self.preview.documents.get_mut(&path) {
-                document.set_error("Workspace service is still starting.");
+                document.set_error(starting.as_str());
             }
             return;
         };
@@ -2189,11 +2179,11 @@ impl FilesSurface {
                         .border_b_1()
                         .border_color(theme.warning.opacity(0.25))
                         .bg(theme.warning.opacity(0.055))
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.warning_muted)
                         .child(div().min_w_0().max_w_full().whitespace_normal().child(
                             if self.target_change_pending {
-                                "Workspace changed. Switch back to save, or discard these edits."
+                                "The folder changed. Switch back to save, or discard these edits."
                             } else if lifecycle_blocked {
                                 "Changes could not be saved safely."
                             } else {
@@ -2213,7 +2203,7 @@ impl FilesSurface {
                                         .ml_auto()
                                         .cursor_pointer()
                                         .text_color(theme.text)
-                                        .child("Retry")
+                                        .child("Try again")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.retry_pending_close(cx)
                                         })),
@@ -2228,7 +2218,7 @@ impl FilesSurface {
                                             .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                             .cursor_pointer()
                                             .text_color(theme.text_muted)
-                                            .child("Keep Open")
+                                            .child("Keep open")
                                             .on_click(
                                                 cx.listener(|this, _, _, cx| this.keep_open(cx)),
                                             ),
@@ -2243,7 +2233,7 @@ impl FilesSurface {
                                         .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                         .cursor_pointer()
                                         .text_color(theme.danger_muted)
-                                        .child("Discard Changes")
+                                        .child("Discard changes")
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.discard_changes_and_close(cx)
                                         })),
@@ -2267,7 +2257,7 @@ impl FilesSurface {
                             .border_b_1()
                             .border_color(theme.warning.opacity(0.25))
                             .bg(theme.warning.opacity(0.055))
-                            .text_size(px(11.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.warning_muted)
                             .child(div().min_w_0().max_w_full().whitespace_normal().child(
                                 if confirming_reload {
@@ -2294,7 +2284,7 @@ impl FilesSurface {
                                                     .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text_muted)
-                                                    .child("Keep Editing")
+                                                    .child("Keep editing")
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.keep_external_edits(cx)
                                                     })),
@@ -2308,7 +2298,7 @@ impl FilesSurface {
                                                     .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text)
-                                                    .child("Reload from Disk")
+                                                    .child("Reload from disk")
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.request_reload_active_document(cx)
                                                     })),
@@ -2339,7 +2329,7 @@ impl FilesSurface {
                                                     .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text)
-                                                    .child("Discard & Reload")
+                                                    .child("Discard and reload")
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.confirm_reload_active_document(cx)
                                                     })),
@@ -2448,7 +2438,7 @@ impl FilesSurface {
                 crumbs = crumbs.child(
                     div()
                         .mx(px(4.0))
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(theme.text_faint.opacity(0.65))
                         .child("›"),
                 );
@@ -2458,7 +2448,7 @@ impl FilesSurface {
                     .min_w_0()
                     .truncate()
                     .font_family(theme.font_sans.clone())
-                    .text_size(px(11.0))
+                    .text_size(crate::typography::ui_rems(11.0))
                     .text_color(if index + 1 == parts.len() {
                         theme.text_muted
                     } else {
@@ -2484,19 +2474,19 @@ impl FilesSurface {
             .child(crumbs)
             .when(markdown, |element| {
                 element.child(
-                    toolbar_button_keyed(
+                    toolbar_toggle_keyed(
                         "files-toggle-markdown",
                         if showing_markdown {
                             "Show Markdown code"
                         } else {
                             "Preview Markdown"
                         },
+                        showing_markdown,
                         Box::new(super::ToggleMarkdownPreview),
                         keys_focus.clone(),
                         theme,
                         cx,
                     )
-                    .when(showing_markdown, |el| el.bg(crate::theme::wash(0.1)))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_markdown_preview(window, cx);
                     }))
@@ -2507,7 +2497,7 @@ impl FilesSurface {
                             icons::EYE
                         })
                         .size(px(crate::surface_chrome::ICON_SIZE))
-                        .text_color(theme.text_muted),
+                        .text_color(if showing_markdown { theme.text } else { theme.text_muted }),
                     ),
                 )
             })
@@ -2522,14 +2512,21 @@ impl FilesSurface {
                         .items_center()
                         .flex_none()
                         .font_family(theme.font_sans.clone())
-                        .text_size(px(11.0))
+                        .text_size(crate::typography::ui_rems(11.0))
                         .text_color(color)
                         .when(retry, |element| {
+                            // slopty: a control's hover, faded in, and its press (M23).
                             element
                                 .cursor_pointer()
                                 .role(gpui::Role::Button)
                                 .aria_label("Save file")
-                                .hover(|style| style.bg(crate::theme::wash(0.14)))
+                                .bg(crate::motion::hover_blend(
+                                    "files-save-status-fade",
+                                    crate::theme::wash(0.0),
+                                    crate::theme::control_hover(),
+                                ))
+                                .hover_fade("files-save-status-fade")
+                                .active(|style| style.bg(crate::theme::pressed_wash()))
                                 // slopty: a keyboard stop with the shell's ring (M8).
                                 .map(|el| crate::surface_chrome::key_stop(el, theme))
                                 .on_click(
@@ -2577,24 +2574,23 @@ impl FilesSurface {
                 )
             })
             .child(
-                toolbar_button_keyed(
+                toolbar_toggle_keyed(
                     "files-toggle-word-wrap",
                     if self.preview.word_wrap() {
                         "Turn off word wrap"
                     } else {
                         "Turn on word wrap"
                     },
+                    self.preview.word_wrap(),
                     Box::new(super::ToggleWordWrap),
                     keys_focus,
                     theme,
                     cx,
                 )
-                .when(self.preview.word_wrap(), |element| {
-                    element.bg(crate::theme::wash(0.1))
-                })
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_word_wrap(window, cx)))
                 .child(
-                    icon(icons::LIST)
+                    // slopty: the set's wrap glyph, as the diff's wrap toggle wears.
+                    icon(icons::WRAP_TEXT)
                         .size(px(crate::surface_chrome::ICON_SIZE))
                         .text_color(if self.preview.word_wrap() {
                             theme.text
@@ -2741,7 +2737,7 @@ impl FilesSurface {
     ) -> AnyElement {
         if self.target_change_pending && super::image_preview::is_image(path) {
             return centered_state(
-                "Workspace changed. Image preview suspended.",
+                "The folder changed. Switch back to see this image.",
                 theme.text_muted,
             );
         }
@@ -2839,10 +2835,8 @@ impl FilesSurface {
                 .relative()
                 .overflow_hidden()
                 .font_family(theme.font_mono.clone())
-                .text_size(px(self.preview.editor_text_size()))
-                .line_height(px(
-                    (self.preview.editor_text_size() + 8.5).max(PREVIEW_LINE_HEIGHT)
-                ))
+                .text_size(px(self.preview.code_text_size()))
+                .line_height(self.preview.line_height())
                 .child(super::editor::editor_element(&editor))
                 .children(overlays)
                 .into_any_element();
@@ -2945,21 +2939,27 @@ impl FilesSurface {
                 .justify_center();
             if let Some(comment) = comments_by_line.get(&row.line) {
                 let id = comment.id.clone();
+                let fade = format!("files-comment-mark-{}-fade", row.line);
                 overlays.push(
-                    cell.bg(theme.surface_card)
+                    // slopty: the mark's hover fades a control step over its card (M23).
+                    cell.bg(crate::motion::hover_blend(
+                        &fade,
+                        theme.surface_card,
+                        theme.surface_card.blend(crate::theme::control_hover()),
+                    ))
+                    .hover_fade(fade)
                         .cursor_pointer()
                         .role(gpui::Role::Button)
                         .aria_label(format!("Open comment on line {}", row.line))
                         // slopty: a comment's mark is a keyboard stop; the empty lines' adders
                         // are not, or Tab would walk every line (M8).
                         .map(|el| crate::surface_chrome::key_stop(el, theme))
-                        .hover(|style| style.bg(crate::theme::wash(0.08)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_editor_comment(id.clone(), cx)
                         }))
                         .child(
                             icon(icons::CHAT_ROUND_LINE)
-                                .size(px(10.5))
+                                .size(px(12.0))
                                 .text_color(theme.text_muted),
                         )
                         .into_any_element(),
@@ -3123,7 +3123,7 @@ impl FilesSurface {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .text_size(px(12.0))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .line_height(px(comments::CARD_LINE_HEIGHT))
                     .text_color(theme.text_dim)
                     .child(SharedString::from(comment.body)),
@@ -3164,13 +3164,13 @@ impl FilesSurface {
                     .h(px(48.0))
                     .flex_none()
                     .overflow_hidden()
-                    .rounded(px(7.0))
+                    .rounded(px(Theme::CONTROL_RADIUS))
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.input_glass_bg())
                     .px(px(8.0))
-                    .py(px(5.0))
-                    .text_size(px(12.0))
+                    .py(px(Theme::SPACE_SNUG))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .child(input.into_any_element()),
             )
             .child(
@@ -3329,7 +3329,7 @@ impl FilesSurface {
                     // Same source `row_height` derives from; a second reading of
                     // the code size could drift from the geometry the glyphs
                     // are measured against.
-                    .text_size(px(self.preview.preview_text_size()))
+                    .text_size(px(self.preview.code_text_size()))
                     .child(gpui::StyledText::new(line.clone()).with_runs(runs)),
             )
             .into_any_element()
@@ -3375,7 +3375,7 @@ fn editor_comment_action(
         .flex()
         .items_center()
         .rounded(px(6.0))
-        .text_size(px(11.0))
+        .text_size(crate::typography::ui_rems(11.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .cursor_pointer()
         .role(gpui::Role::Button)
@@ -3405,7 +3405,7 @@ fn centered_state(message: impl Into<SharedString>, color: gpui::Hsla) -> AnyEle
         .justify_center()
         .px(px(24.0))
         .text_center()
-        .text_size(px(11.5))
+        .text_size(crate::typography::ui_rems(12.0))
         .text_color(color)
         .child(message.into())
         .into_any_element()
@@ -3653,31 +3653,24 @@ mod tests {
         assert_eq!(minimum.line_height(), px(PREVIEW_LINE_HEIGHT));
     }
 
-    /// The regression this guards: collapsing both surfaces onto the raw
-    /// setting silently resized them on a fresh install.
+    // slopty: one file, one size: the editor, a read-only file and the diff draw the same code
+    // at the same size and line.
     #[test]
-    fn the_default_code_font_size_reproduces_the_historical_per_surface_sizes() {
+    fn the_pane_draws_code_at_one_size() {
         let default =
             FilePreviewState::new(false, 900, false, crate::typography::CODE_FONT_SIZE_DEFAULT);
-        assert_eq!(default.editor_text_size(), 13.0);
-        assert_eq!(default.preview_text_size(), 11.5);
-    }
-
-    #[test]
-    fn scaled_preview_sizes_keep_their_proportions_and_stay_clamped() {
+        let theme = Theme::dark();
+        assert_eq!(default.code_text_size(), crate::changes::diff_text_size(&theme));
+        assert_eq!(f32::from(default.line_height()), crate::changes::diff_line_height(&theme));
         let doubled = FilePreviewState::new(
             false,
             900,
             false,
             2.0 * crate::typography::CODE_FONT_SIZE_DEFAULT,
         );
-        assert_eq!(doubled.editor_text_size(), 26.0);
-        assert_eq!(doubled.preview_text_size(), 23.0);
-
-        // The editor ratio is >1, so the maximum setting would overshoot.
+        assert_eq!(doubled.code_text_size(), 25.0);
         let maximum = FilePreviewState::new(false, 900, false, crate::typography::FONT_SIZE_MAX);
-        assert_eq!(maximum.editor_text_size(), crate::typography::FONT_SIZE_MAX);
-        assert!(maximum.preview_text_size() < crate::typography::FONT_SIZE_MAX);
+        assert_eq!(maximum.code_text_size(), crate::typography::FONT_SIZE_MAX);
     }
 
     fn cached_document(path: &str, text: &str) -> FileDocument {

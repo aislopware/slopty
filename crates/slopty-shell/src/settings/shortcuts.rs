@@ -439,16 +439,6 @@ pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Opt
 
 /// slopty: compact mode's default: off.
 const COMPACT_MODE_DEFAULT: bool = false;
-/// slopty: the compact model picker's default: on.
-const COMPACT_MODEL_PICKER_DEFAULT: bool = true;
-
-/// slopty: turn the compact model picker on or off, every window drawing it again.
-fn set_compact_model_picker(on: bool, cx: &mut gpui::App) {
-    crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
-        settings.compact_model_picker = on;
-    });
-    cx.refresh_windows();
-}
 
 pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {
     combo == "mod-enter"
@@ -464,31 +454,27 @@ pub fn modifier_send_label(is_macos: bool) -> String {
 /// extends the match and appears on the page by construction
 /// (`every_shortcut_lands_in_a_rendered_group` holds the other half: its group
 /// name must be listed here).
-const GROUP_ORDER: [&str; 7] = [ // slopty: dictation and appshots removed.
-    "Appearance",
-    "Files",
-    "Browser",
-    "Panels",
+// slopty: the keys used most lead; the one-key groups fold into one "Other" card at the foot.
+const GROUP_ORDER: [&str; 4] = [ // slopty: dictation and appshots removed.
     "Chats", // slopty: one word for them, as everywhere (M17)
-    "Projects",
+    "Panels",
     "Jump to chat",
+    "Other",
 ];
 
 /// The section a shortcut's row renders under.
 fn group(id: ShortcutId) -> &'static str {
     match id {
-        ShortcutId::RandomWallpaper => "Appearance",
-        // slopty: appshots removed.
-        ShortcutId::SaveFile => "Files",
-        ShortcutId::BrowserReload => "Browser",
+        // slopty: appshots and the wallpaper shuffle removed; one-key groups fold into "Other".
+        ShortcutId::SaveFile | ShortcutId::BrowserReload => "Other",
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
         | ShortcutId::ToggleFiles
         | ShortcutId::ToggleTerminal
         | ShortcutId::ReopenClosedTab => "Panels", // slopty: the right pane's last closed tab
-        ShortcutId::NewProject => "Projects",
-        // slopty: dictation removed.
-        ShortcutId::OpenModelPicker
+        // slopty: dictation removed; a new project is how a chat starts somewhere new.
+        ShortcutId::NewProject
+        | ShortcutId::OpenModelPicker
         | ShortcutId::NewSession
         | ShortcutId::NextSession
         | ShortcutId::PrevSession
@@ -516,13 +502,11 @@ impl Render for ShortcutsPage {
         let escape_stops_active_agent = self.escape_stops_active_agent;
         let send_behavior = self.composer_send_behavior;
         let compact_mode = crate::settings::transcript_compact_mode(cx);
-        let compact_model_picker = crate::settings::compact_model_picker(cx);
         // slopty: every choice these pages hold counts, each against its default.
         let customized = self.keymap != KeymapConfig::default()
             || escape_stops_active_agent
             || send_behavior != ComposerSendBehavior::default()
-            || compact_mode != COMPACT_MODE_DEFAULT
-            || compact_model_picker != COMPACT_MODEL_PICKER_DEFAULT;
+            || compact_mode != COMPACT_MODE_DEFAULT;
         let mac = crate::keys::MOD_IS_COMMAND; // slopty: an iPad's ⌘ too
         let send_behaviors = [
             (ComposerSendBehavior::Enter, SharedString::from(crate::keys::combo_text_on(mac, "enter"))),
@@ -571,18 +555,6 @@ impl Render for ShortcutsPage {
         .map(|reset| {
             reset.on_click(cx.listener(|_, _, _, cx| {
                 crate::settings::set_transcript_compact_mode(COMPACT_MODE_DEFAULT, cx);
-                cx.notify();
-            }))
-        });
-        let compact_model_picker_reset = widgets::reset_action(
-            &theme,
-            "compact-model-picker-reset",
-            "Compact model picker",
-            compact_model_picker == COMPACT_MODEL_PICKER_DEFAULT,
-        )
-        .map(|reset| {
-            reset.on_click(cx.listener(|_, _, _, cx| {
-                set_compact_model_picker(COMPACT_MODEL_PICKER_DEFAULT, cx);
                 cx.notify();
             }))
         });
@@ -638,40 +610,6 @@ impl Render for ShortcutsPage {
                     .cursor_pointer()
                     .on_click(cx.listener(move |_, _, _, cx| {
                         crate::settings::set_transcript_compact_mode(!compact_mode, cx);
-                        cx.notify();
-                    })),
-            );
-        let compact_model_picker_row = widgets::card_row(&theme, false)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(widgets::row_title(&theme, "Compact model picker"))
-                    .child(widgets::meta_line(
-                        &theme,
-                        vec![
-                            div()
-                                .child("Adjust effort with a slider, then open the model list when needed.")
-                                .into_any_element(),
-                        ],
-                    )),
-            )
-            .children(compact_model_picker_reset)
-            .child(
-                widgets::toggle_switch(&theme, compact_model_picker, "compact-model-picker")
-                    .id("compact-model-picker-toggle")
-                    .tab_index(0)
-                    .role(gpui::Role::Switch)
-                    .aria_label("Compact model picker")
-                    .aria_toggled(if compact_model_picker {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        set_compact_model_picker(!compact_model_picker, cx);
                         cx.notify();
                     })),
             );
@@ -733,12 +671,18 @@ impl Render for ShortcutsPage {
                             .track_scroll(&self.scroll.scroll)
                             .child(
                                 widgets::page_column()
-                                    .child(widgets::page_header(&theme, "General", None))
+                                    // slopty: one page head (`widgets::page_head`).
+                                    .child(widgets::page_head(
+                                        &theme,
+                                        "General",
+                                        None,
+                                        "How messages send and agents stop.",
+                                        None,
+                                    ))
                                     .child(
                                         widgets::section_card(&theme)
                                             .child(send_behavior_row)
                                             .child(compact_mode_row)
-                                            .child(compact_model_picker_row)
                                             .child(escape_behavior_row),
                                     ), // slopty: no thread naming.
                             ),
@@ -790,35 +734,15 @@ impl Render for ShortcutsPage {
                     .track_focus(&self.focus)
                     .child(
                         widgets::page_column()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_start()
-                                    .flex_wrap()
-                                    .justify_between()
-                                    .gap(px(24.0))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(200.0))
-                                            .flex()
-                                            .flex_col()
-                                            .child(widgets::page_header(
-                                                &theme,
-                                                "Keyboard shortcuts",
-                                                None,
-                                            ))
-                                            .child(
-                                                widgets::page_subtitle(
-                                                    &theme,
-                                                    "Click a binding, then press the new key combination.",
-                                                )
-                                                .max_w(px(512.0))
-                                                .line_height(px(20.0)),
-                                            ),
-                                    )
-                                    .child({
+                            // slopty: one page head (`widgets::page_head`), titled as the nav
+                            // names the page (`SettingsSection::label`).
+                            .child(widgets::page_head(
+                                &theme,
+                                crate::shell::SettingsSection::Shortcuts.label(),
+                                None,
+                                "Click a binding, then press the new key combination.",
+                                Some(
+                                    {
                                         // slopty: dimmed when nothing differs or while recording.
                                         let enabled = customized && recording.is_none();
                                         widgets::restore_defaults(
@@ -841,14 +765,12 @@ impl Render for ShortcutsPage {
                                                     COMPACT_MODE_DEFAULT,
                                                     cx,
                                                 );
-                                                set_compact_model_picker(
-                                                    COMPACT_MODEL_PICKER_DEFAULT,
-                                                    cx,
-                                                );
                                             }))
                                         })
-                                    }),
-                            )
+                                    }
+                                    .into_any_element(),
+                                ),
+                            ))
                             .child(
                                 div()
                                     .flex()
@@ -963,7 +885,7 @@ mod tests {
         });
         window
             .update(cx, |page, window, cx| {
-                page.start_recording(ShortcutId::RandomWallpaper, window, cx) // slopty: appshots removed.
+                page.start_recording(ShortcutId::SaveFile, window, cx) // slopty: appshots removed.
             })
             .unwrap();
         cx.simulate_keystrokes(window.into(), &crate::settings::platform_combo("mod-n"));
@@ -977,8 +899,8 @@ mod tests {
                         .contains("New chat")
                 );
                 assert_eq!(
-                    page.keymap.random_wallpaper, // slopty: appshots removed.
-                    ShortcutId::RandomWallpaper.default_combo()
+                    page.keymap.save_file, // slopty: appshots removed.
+                    ShortcutId::SaveFile.default_combo()
                 );
                 assert!(page.recording.is_none());
                 assert!(page.recording_interceptor.is_none());
@@ -1049,6 +971,19 @@ mod tests {
         }
     }
 
+    // slopty: the page leads with the keys used most, and no card holds a lone key but the
+    // "Other" card at its foot.
+    #[test]
+    fn the_page_leads_with_chats_and_gathers_lone_keys_at_the_foot() {
+        assert_eq!(GROUP_ORDER[0], "Chats");
+        assert_eq!(GROUP_ORDER.last(), Some(&"Other"));
+        assert_eq!(group(ShortcutId::NewProject), "Chats", "a new project starts a chat");
+        for name in &GROUP_ORDER[..GROUP_ORDER.len() - 1] {
+            let rows = ShortcutId::ALL.into_iter().filter(|&id| group(id) == *name).count();
+            assert!(rows > 1, "{name} holds a lone key: fold it into Other");
+        }
+    }
+
     #[test]
     fn conflicting_records_are_refused() {
         // slopty parity: a combo bound elsewhere is refused at record time (the
@@ -1085,7 +1020,6 @@ mod tests {
     fn the_general_rows_reset_to_the_settings_defaults() {
         let defaults = crate::settings::UiSettings::default();
         assert_eq!(defaults.transcript_compact_mode, COMPACT_MODE_DEFAULT);
-        assert_eq!(defaults.compact_model_picker, COMPACT_MODEL_PICKER_DEFAULT);
     }
 
     #[test]

@@ -33,20 +33,6 @@ pub fn validate_sidebar_pin_update(
 pub struct SidebarPreferences {
     #[serde(default)]
     pub pinned_session_ids: Vec<String>,
-    #[serde(default)]
-    pub sections: Vec<SidebarSection>,
-}
-
-/// A user-named sidebar section. Archived sessions retain membership so restoring
-/// them restores their section; deleting the section never deletes sessions.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SidebarSection {
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub session_ids: Vec<String>,
-    #[serde(default)]
-    pub collapsed: bool,
 }
 
 /// Watch payload for pins. `initialized` records known cached state, including
@@ -62,8 +48,6 @@ pub struct SidebarPreferencesState {
     pub initialized: bool,
     #[serde(default)]
     pub pinned_session_ids: Vec<String>,
-    #[serde(default)]
-    pub sections: Vec<SidebarSection>,
 }
 
 impl SidebarPreferencesState {

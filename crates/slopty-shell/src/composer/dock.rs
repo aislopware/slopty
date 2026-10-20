@@ -68,12 +68,33 @@ pub(crate) struct DockFeed {
     /// The newest note the person dismissed, by chat (its time): it and every older note stay
     /// away; a newer one shows.
     pub notes_dismissed: HashMap<String, i64>,
+    /// slopty: the moment the dock's ticking words read (a goal's age, a note's or a band's
+    /// time, a `!` command's): taken as the dock or its work arrives, a command starts or ends
+    /// and the tick turns, never as a frame is drawn, so a composer drawn again from scratch says
+    /// what the one shown says. `None` before any.
+    clock: Option<std::time::Instant>,
 }
 
 impl DockFeed {
     /// The dock of `chat`, when it is the one watched.
     pub fn dock_of(&self, chat: &str) -> Option<&ChatDock> {
         (self.chat.as_deref() == Some(chat)).then_some(self.dock.as_deref()).flatten()
+    }
+
+    /// slopty: the dock's ticking words read now ([`Self::clock`]).
+    fn stamp(&mut self, cx: &App) {
+        self.clock = Some(crate::clock::now(cx));
+    }
+
+    /// slopty: the moment the dock's ticking words read ([`Self::clock`]); the frame's before
+    /// any.
+    pub(crate) fn now(&self, cx: &App) -> std::time::Instant {
+        self.clock.unwrap_or_else(|| crate::clock::now(cx))
+    }
+
+    /// slopty: [`Self::now`] as a wall date, in milliseconds.
+    pub(crate) fn now_ms(&self, cx: &App) -> i64 {
+        crate::clock::utc_at(self.now(cx)).timestamp_millis()
     }
 }
 
@@ -159,6 +180,7 @@ impl Composer {
         if self.dock.chat.as_deref() != Some(chat) {
             return;
         }
+        self.dock.stamp(cx); // slopty: its words read as it arrives
         let now = crate::clock::utc(cx).timestamp_millis();
         let mut toasts = Vec::new();
         for note in dock.notes.iter().filter(|note| note_showing(note, now)) {
@@ -203,6 +225,7 @@ impl Composer {
             return;
         }
         self.dock.tray = Some(Arc::new(tray));
+        self.dock.stamp(cx); // slopty: its words read as it arrives
         self.tray_rows_changed(cx);
         self.dock_tick(cx);
         cx.notify();
@@ -231,6 +254,7 @@ impl Composer {
             cx.background_executor().timer(TICK).await;
             this.update(cx, |this, cx| {
                 this.dock.tick = None;
+                this.dock.stamp(cx); // slopty: the words turn with the tick
                 if let Some(run) = &this.dock.shell
                     && run.ended.is_some_and(|at| crate::clock::now(cx).saturating_duration_since(at) >= SHELL_DONE_SHOWN)
                 {
@@ -328,6 +352,7 @@ impl Composer {
             outcome: None,
             ended: None,
         });
+        self.dock.stamp(cx); // slopty: its time starts at nothing
         let params = serde_json::json!({ "chatId": chat, "command": command });
         self.dock.shell_task = Some(cx.spawn(async move |this, cx| {
             let answer = engine.client().call(calls::RUN_SHELL, params).await;
@@ -336,6 +361,7 @@ impl Composer {
                     run.outcome = Some(answer.map(|_| ()).map_err(|err| err.to_string()));
                     run.ended = Some(crate::clock::now(cx));
                 }
+                this.dock.stamp(cx); // slopty: its time stops where it ended
                 this.dock_tick(cx);
                 cx.notify();
             })
@@ -431,7 +457,7 @@ impl Composer {
     pub(super) fn render_dock_lines(&mut self, drawer: Option<f32>, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut lines = Vec::new();
         let Some(chat) = self.state.read(cx).selected_chat.clone() else { return lines };
-        let now = crate::clock::utc(cx).timestamp_millis();
+        let now = self.dock.now_ms(cx); // slopty: the dock's moment, not the frame's
         // slopty: what still runs is said once, by the Background tray's header, by kind; the
         // waiting line stands only while no tray of this chat says it.
         let tray_says = self.dock.chat.as_deref() == Some(chat.as_str())
@@ -524,7 +550,8 @@ impl Composer {
     /// A `!` command's live chip: what runs and for how long, then where its output went.
     fn render_shell_run(&self, run: &ShellRun, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let elapsed = slopty_view_doc::duration_words(
-            u64::try_from(run.ended.unwrap_or_else(|| crate::clock::now(cx)).duration_since(run.started).as_millis())
+            // slopty: the dock's moment, not the frame's.
+            u64::try_from(run.ended.unwrap_or_else(|| self.dock.now(cx)).saturating_duration_since(run.started).as_millis())
                 .unwrap_or(u64::MAX),
         );
         let (words, color) = match &run.outcome {
@@ -591,8 +618,9 @@ fn caption_line(
     let hover: SharedString = format!("{id}-hover").into();
     let close = dismiss.map(|(chat, at)| {
         let close_hover: SharedString = format!("{id}-close-hover").into();
-        div()
-            .id(SharedString::from(format!("{id}-dismiss")))
+        // slopty: the keyboard reaches it too, and shows it while it holds focus (#19).
+        crate::surface_chrome::focus_ring_revealing(div().id(SharedString::from(format!("{id}-dismiss"))), theme)
+            .tab_index(0)
             .role(Role::Button)
             .flex_none()
             .size(px(24.0))
@@ -604,11 +632,7 @@ fn caption_line(
             .rounded(px(6.0))
             .cursor_pointer()
             // Under a pointer it comes with the hover; a touch screen has none, so there it stays.
-            .opacity(if crate::shell::touch_screen() {
-                1.0
-            } else {
-                crate::motion::hover_t(&hover).max(crate::motion::hover_t(&close_hover))
-            })
+            .opacity(crate::motion::revealed_by_hover(&hover).max(crate::motion::hover_t(&close_hover)))
             .bg(crate::motion::hover_blend(&close_hover, gpui::transparent_black(), crate::theme::ink(0.06)))
             .hover_fade(close_hover)
             .hint("Dismiss note")

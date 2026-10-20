@@ -1,14 +1,15 @@
 Window (focused)
+Button │ Filter projects: All projects
+Button │ Working, 1
 Button │ background sleep 600
 Status │ Background work
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
 Article │ You
 Paragraph │ background sleep 600
-Article │ Claude Code
-Button │ Run sleep 600 │ Running in the background · task b00000001
-Link │ Running in the background · task b00000001, in the background tray
 Paragraph │ Done: it runs in the background.
 Group │ Background work
 Button │ Expand background work │ 1 command
@@ -17,7 +18,6 @@ MultilineTextInput │ Do anything…
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Button │ Show chat details
 Button │ Show files panel
 Button │ Show side pane
@@ -25,4 +25,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

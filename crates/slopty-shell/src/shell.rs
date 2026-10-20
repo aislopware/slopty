@@ -52,7 +52,7 @@ use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
-    SidebarOrganization, TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
+    TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
     TERMINAL_MIN_HEIGHT, UiSettings, jump_hints_visible, modifier_send_hint_visible,
     platform_combo, sidebar_pin_profile_key,
 };
@@ -86,6 +86,8 @@ mod panel_interaction_tests;
 #[cfg(test)]
 mod retention_tests; // slopty: the whole shell under retention against a frame from scratch
 #[cfg(test)]
+mod stale_frames_tests; // slopty: frames that begin before the timer that turns a view's words
+#[cfg(test)]
 mod fuzz_tests; // slopty: seeded action sequences over the whole shell, shrunk on a failure
 pub(crate) mod project_icon;
 mod session_hover_card;
@@ -93,7 +95,6 @@ mod session_info;
 mod session_lanes;
 mod side_chats;
 mod sidebar_pins;
-mod sidebar_sections;
 mod sidebar_status; // slopty: status groups, reasons and the hover card
 mod search_warm;
 pub(crate) mod spaces;
@@ -101,6 +102,7 @@ mod thread_search;
 use side_chats::SideChatTab;
 mod tabs;
 mod live_surfaces; // slopty: remote window and desktop surfaces
+mod pane_offers; // slopty: what a side pane offers to open, one list
 mod kept_tabs; // slopty: the pane's tabs kept across launches
 mod mod_panes; // slopty: a mod's pane as a tab (S2)
 mod page_panes; // slopty: a page an agent showed, as a tab (M)
@@ -119,6 +121,8 @@ mod open_in; // slopty: a chat's folder in the person's editor
 mod subagent_drill; // slopty: a subagent drilled into from its card
 mod terminal_runs; // slopty: a transcript's Run in the chat's own shell terminal
 mod past_sessions; // slopty: Claude Code's past sessions: History, and Resume a Claude Code session…
+#[cfg(test)]
+mod chrome_tests; // slopty: the chrome as a person and assistive tech meet it
 pub mod agent_ui; // slopty: an agent drives this window (`slopty ui`)
 // slopty: voice removed.
 
@@ -142,7 +146,6 @@ actions!(
     shell,
     [
         SaveFile,
-        RandomWallpaper,
         ToggleSidebar,
         ToggleChanges,
         ToggleFiles,
@@ -470,11 +473,6 @@ pub fn apply_keymap(
     crate::app_menus::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new(
-            &valid_or_default(&keymap.random_wallpaper, "mod-u"),
-            RandomWallpaper,
-            None,
-        ),
-        KeyBinding::new(
             &valid_or_default(&keymap.save_file, "mod-s"),
             SaveFile,
             None,
@@ -588,8 +586,6 @@ pub enum SettingsSection {
     /// Which harnesses the composer offers (enable/disable toggles) —
     /// labeled "Providers".
     Harnesses,
-    /// Per-provider CLI accounts (login, usage) — labeled "Accounts".
-    Agents,
     Appearance,
     Files,
     Notifications,
@@ -604,7 +600,7 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
+    /// Sections shown in Settings.
     pub const ALL: [SettingsSection; 9] = [ // slopty: voice and appshots removed.
         SettingsSection::General,
         SettingsSection::Appearance,
@@ -617,38 +613,11 @@ impl SettingsSection {
         SettingsSection::Archived,
     ];
 
-    /// The former Accounts page is folded into Providers. Keep its route alias
-    /// for old navigation entries and dev links without showing a hidden tab.
-    fn canonical(self) -> Self {
-        if self == Self::Agents {
-            Self::Harnesses
-        } else {
-            self
-        }
-    }
-
-    fn visible_in_nav(self) -> bool {
-        self != Self::Agents // slopty: appshots removed.
-    }
-
-    /// Where a generic "open Settings" lands for a remembered section: legacy
-    /// aliases resolve to their page, and a section this build does not show
-    /// falls back to General. // slopty: appshots removed.
-    pub(crate) fn reopenable(self) -> Self {
-        let section = self.canonical();
-        if section.visible_in_nav() {
-            section
-        } else {
-            Self::General
-        }
-    }
-
     /// Stable name shared by `ui-settings.json` and `SLOPTY_OPEN_ROUTE`.
     fn slug(self) -> &'static str {
         match self {
             SettingsSection::Devices => "devices",
             SettingsSection::Harnesses => "providers",
-            SettingsSection::Agents => "agents",
             SettingsSection::Appearance => "appearance",
             SettingsSection::Files => "files",
             SettingsSection::Notifications => "notifications",
@@ -664,7 +633,6 @@ impl SettingsSection {
         Some(match slug {
             "devices" => SettingsSection::Devices,
             "providers" | "harnesses" => SettingsSection::Harnesses,
-            "agents" => SettingsSection::Agents,
             "appearance" => SettingsSection::Appearance,
             "files" => SettingsSection::Files,
             "notifications" => SettingsSection::Notifications,
@@ -688,7 +656,6 @@ impl SettingsSection {
         match self {
             SettingsSection::Devices => "Devices",
             SettingsSection::Harnesses => "Providers",
-            SettingsSection::Agents => "Accounts",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
             SettingsSection::Notifications => "Notifications",
@@ -721,12 +688,11 @@ impl<'de> serde::Deserialize<'de> for SettingsSection {
 /// remembered one). `None` for anything else, including unknown slugs.
 fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<SettingsSection> {
     if route == "settings" {
-        return Some(remembered.reopenable());
+        return Some(remembered);
     }
     route
         .strip_prefix("settings/")
         .and_then(SettingsSection::from_slug)
-        .map(SettingsSection::canonical)
 }
 
 /// What the main outlet shows.
@@ -1099,11 +1065,34 @@ pub(super) fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f
         47.0 + metadata_height
     }
 }
-fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -> f32 {
-    if compact {
-        29.0
-    } else {
-        chat_row_height(branch, pr) - if show_label { 0.0 } else { 16.0 }
+// slopty: one sidebar row (Amp's prune of the view toggles): the status slot, the agent's mark,
+// the title and its trailing time on one 29 line, and a waiting row's reason on a line under it,
+// 14 tall, 2 apart.
+fn sidebar_row_height(reason: bool) -> f32 {
+    29.0 + if reason { 16.0 } else { 0.0 }
+}
+
+/// slopty: the state a sidebar row's status mark says, if one: a send that never left fails, one
+/// waiting its turn wears the clock, and a row at rest says nothing.
+fn sidebar_mark_state(
+    status: slopty_view_proto::ChatIndicator,
+    queued: bool,
+    undelivered: bool,
+) -> Option<crate::loaders::status_mark::MarkState> {
+    use crate::loaders::status_mark::MarkState;
+    use slopty_view_proto::ChatIndicator;
+    if undelivered {
+        return Some(MarkState::Failed);
+    }
+    if queued {
+        return None;
+    }
+    match status {
+        ChatIndicator::Working => Some(MarkState::Working),
+        ChatIndicator::AwaitingInput => Some(MarkState::Waiting),
+        ChatIndicator::Errored => Some(MarkState::Failed),
+        ChatIndicator::Completed => Some(MarkState::Done),
+        ChatIndicator::Idle => None,
     }
 }
 
@@ -1114,12 +1103,6 @@ fn sidebar_row_height(compact: bool, show_label: bool, branch: bool, pr: bool) -
 fn transcript_floor_fade(stack_h: f32, floor: f32) -> (f32, f32) {
     let floor = floor.clamp(0.0, (stack_h - Theme::STATUS_STRIP_HEIGHT).max(0.0));
     (floor, (stack_h - Theme::STATUS_STRIP_HEIGHT - floor).max(1.0))
-}
-
-// slopty: a waiting row's reason takes a line of its own where no location line carries it
-// (compact rows, rows with Location off): 14 tall, 2 apart.
-fn sidebar_reason_height(compact: bool, show_label: bool, reason: bool) -> f32 {
-    if reason && (compact || !show_label) { 16.0 } else { 0.0 }
 }
 
 /// Flex gap between sidebar list items.
@@ -1150,29 +1133,6 @@ pub(crate) fn sidebar_faded_label(
     fill: bool,
     label: impl IntoElement,
 ) -> impl IntoElement {
-    sidebar_faded_label_clear(id, fill, 0.0, label)
-}
-
-/// slopty: the window's cursor while a drag runs, wherever the pointer is (Zed's
-/// `pane_group.rs`): a resize that outruns its handle keeps its cursor.
-fn drag_cursor(style: gpui::CursorStyle) -> impl IntoElement {
-    gpui::canvas(|_, _, _| {}, move |_, _, window, _| window.set_window_cursor_style(style))
-        .absolute()
-        .size_0()
-}
-
-/// slopty: how far the hovered row's archive pill reaches into the label beside its corner:
-/// "Unarchive" (about 71 px with its glyph) past the corner's 4 px overhang, the narrowest
-/// resting corner ("3m", 12 px) and the line's 8 px gap.
-const ARCHIVE_PILL_CLEAR: f32 = 48.0;
-
-/// slopty: [`sidebar_faded_label`] keeping its last `clear` px empty, for a pill laid over it.
-pub(crate) fn sidebar_faded_label_clear(
-    id: SharedString,
-    fill: bool,
-    clear: f32,
-    label: impl IntoElement,
-) -> impl IntoElement {
     let overflow = gpui::ScrollHandle::new();
     crate::edge_fade::edge_faded(
         20.0,
@@ -1190,8 +1150,16 @@ pub(crate) fn sidebar_faded_label_clear(
     )
     .fade_right(true)
     .fade_label_overflow(&overflow)
-    .clear_right(clear)
 }
+
+/// slopty: the window's cursor while a drag runs, wherever the pointer is (Zed's
+/// `pane_group.rs`): a resize that outruns its handle keeps its cursor.
+fn drag_cursor(style: gpui::CursorStyle) -> impl IntoElement {
+    gpui::canvas(|_, _, _| {}, move |_, _, window, _| window.set_window_cursor_style(style))
+        .absolute()
+        .size_0()
+}
+
 /// Square action beside the account trigger in the sidebar footer.
 const SIDEBAR_FOOTER_ACTION_SIZE: f32 = SIDEBAR_FOOTER_BUTTON_SIZE;
 /// Breathing room between the account trigger and its adjacent action.
@@ -1246,6 +1214,9 @@ const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 760.0;
 struct SidebarResize;
 /// Drag marker for the right-pane resize handle.
 struct RightPaneResize;
+
+/// slopty: how far ← or → moves the side pane's splitter.
+const RIGHT_PANE_NUDGE: f32 = 16.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaneResizeKind {
@@ -1303,7 +1274,6 @@ struct SidebarSessionDrag {
 enum SidebarSessionDrop {
     Pinned(usize),
     Regular,
-    Section(String),
 }
 
 struct SidebarSessionTransfer {
@@ -1384,39 +1354,9 @@ struct PinnedSessionDragState {
     autoscroll_active: bool,
 }
 
-/// Drag payload for reordering custom sections by their header.
-#[derive(Clone)]
-struct SidebarSectionDrag {
-    section_id: String,
-    profile_key: String,
-    /// The section order the drag started from.
-    ids: std::sync::Arc<Vec<String>>,
-}
-
-/// Live reorder of the custom sections. The lifted section rides under the
-/// pointer while its siblings slide between slots, as pinned rows do.
-struct SidebarSectionDragState {
-    payload: SidebarSectionDrag,
-    from: usize,
-    over: usize,
-    /// Natural slot heights at lift, shared by hit testing and displacement.
-    heights: Vec<f32>,
-    /// The first slot's top in the list's content coordinates.
-    top: f32,
-    /// The slots' left edge within the list, and their width.
-    left: f32,
-    width: f32,
-    /// The pointer's offset below the lifted section's top.
-    grab_y: f32,
-    pointer: Point<Pixels>,
-    siblings: std::collections::HashMap<String, SidebarSessionSlide>,
-    generation: u64,
-}
-
 type SidebarKeyedRow = (String, f32, AnyElement);
 
 struct SidebarSessionRows {
-    custom_count: usize,
     rows: Vec<SidebarKeyedRow>,
     pinned_count: usize,
     moving_row: Option<(AnyElement, f32)>,
@@ -1425,25 +1365,12 @@ struct SidebarSessionRows {
 /// Ghost chip following the pointer while a surface tab drags.
 struct SurfaceTabGhost {
     title: SharedString,
+    width: f32, // slopty: the strip's fitted chip width
 }
 
 impl Render for SurfaceTabGhost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .h(px(24.0))
-            .w(px(112.0))
-            .px(px(8.0))
-            .flex()
-            .items_center()
-            .rounded(px(6.0))
-            .bg(theme.surface_raised)
-            .border_1()
-            .border_color(theme.border_strong)
-            .text_size(crate::typography::ui_rems(11.5))
-            .text_color(theme.text)
-            .opacity(0.85)
-            .child(div().truncate().child(self.title.clone()))
+        crate::surface_chrome::tab_ghost(self.title.clone(), self.width, Theme::of(cx)) // slopty:
     }
 }
 
@@ -1497,18 +1424,12 @@ impl WidthTween {
         }
     }
 
-    /// A panel column moving from `from` to `to`. Longer moves take longer,
-    /// so a wide pane travels at about the pace of the sidebar instead of
-    /// covering twice the distance in the same time: 180ms up to the
-    /// sidebar's width, growing with the square root of the distance to
-    /// 240ms. The dialog entrance curve eases into the movement and settles
-    /// without overshoot, rather than starting a large column at full speed.
+    /// A panel column moving from `from` to `to` over [`PANEL_RESIZE`]. slopty: one 240 ms
+    /// whatever the distance, as opencode's panel; the quint ease-out covers a wide move early
+    /// and lands soft, so it no longer needs stretching by distance (item 12).
     fn panel(from: f32, to: f32, now: std::time::Instant) -> Self {
-        let scale = ((to - from).abs() / SIDEBAR_DEFAULT)
-            .sqrt()
-            .clamp(1.0, 4.0 / 3.0);
         Self {
-            duration: PANEL_RESIZE.total().mul_f32(motion::speed_scale() * scale),
+            duration: PANEL_RESIZE.total().mul_f32(motion::speed_scale()),
             curve: PANEL_RESIZE.curve,
             ..Self::new(from, to, now)
         }
@@ -1706,10 +1627,12 @@ impl ClockRedraw {
     }
 }
 
+// slopty: Escape over a turn under way stops it on its second press (Amp); the first arms it and
+// the working line says so (`composer::escape_stops`). Anything that takes Escape first (a menu,
+// the find bar) still does.
 fn resolve_shell_escape(
     key: &str,
     blocking_overlay: bool,
-    escape_stops_active_agent: bool,
     route: Route,
     selected_chat: Option<&str>,
     indicator: Indicator,
@@ -1719,7 +1642,7 @@ fn resolve_shell_escape(
         ShellEscapeOutcome::OtherKey
     } else if blocking_overlay {
         ShellEscapeOutcome::Blocked
-    } else if !escape_stops_active_agent || !matches!(route, Route::Chat) || interrupting {
+    } else if !matches!(route, Route::Chat) || interrupting {
         ShellEscapeOutcome::Ignored
     } else if matches!(indicator, Indicator::Working | Indicator::AwaitingInput) {
         selected_chat
@@ -1817,7 +1740,7 @@ pub struct Shell {
     // slopty: rows at rest each sidebar group shows before "Show more", by its collapse key
     // (`sidebar_status::page_at_rest`); a group not named shows the first page.
     pub(super) sidebar_group_shown: std::collections::HashMap<String, usize>,
-    /// Ephemeral collapsed project/device sections, keyed by organization + id.
+    /// Ephemeral shut status groups, by collapse key (`status:<group>`).
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
     pub(super) sidebar_disclosure_motion:
@@ -1890,6 +1813,8 @@ pub struct Shell {
     right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
     /// In-flight surface-tab drag (slide animation state).
     right_tab_drag: Option<RightTabDragState>,
+    /// slopty: the chip width the strip holds after a close by pointer.
+    right_tab_hold: crate::surface_chrome::HeldTabWidth,
     /// Surface-tab strip scroll (the strip overflows horizontally, t3
     /// ScrollArea-style; drag drop-math reads the offset back out).
     right_tab_scroll: gpui::ScrollHandle,
@@ -1942,12 +1867,6 @@ pub struct Shell {
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
-    sidebar_section_migration: Option<(String, crate::state::EngineHandle)>,
-    section_dialog: Option<sidebar_sections::SectionDialog>,
-    section_menu: Option<(String, Point<Pixels>)>,
-    section_header_hover: Option<String>,
-    section_menu_focus: FocusHandle,
-    section_menu_active: Option<usize>,
     /// Space id awaiting delete confirmation (hard delete + session cascade).
     delete_space_confirm: Option<String>,
     /// The add-space palette (device tabs + folder search), `Some`
@@ -1965,10 +1884,6 @@ pub struct Shell {
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
     /// Hover/drag + scroll-linger state of the dropdown's floating rail.
     spaces_menu_bar: popover::MenuScrollbarState,
-    /// Persisted organization/sort/metadata controls beside the project filter.
-    sidebar_view_menu: popover::Popup<spaces::SidebarViewMenu>,
-    /// Natural-tab-order focus target for the icon-only view-options button.
-    sidebar_view_trigger_focus: gpui::FocusHandle,
     /// Current pinned-row metrics shared by hit testing and displacement animations.
     sidebar_pinned_heights: Vec<f32>,
     project_icons: project_icon::ProjectIcons,
@@ -1996,9 +1911,6 @@ pub struct Shell {
     pinned_session_drag_generation: u64,
     sidebar_session_transfer: Option<SidebarSessionTransfer>,
     sidebar_session_return: Option<SidebarSessionReturn>,
-    sidebar_section_drag: Option<SidebarSectionDragState>,
-    /// Each custom section's painted bounds, measured every frame.
-    sidebar_section_bounds: std::rc::Rc<std::cell::RefCell<Vec<gpui::Bounds<Pixels>>>>,
     /// Pending pin intents are scoped to the active profile and engine attachment.
     sidebar_pin_write: Option<sidebar_pins::PendingSidebarPins>,
     sidebar_pin_write_generation: u64,
@@ -2041,6 +1953,11 @@ pub struct Shell {
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
     /// for the §1.6 resort glide.
     sidebar_prev_order: Vec<(String, f32)>,
+    /// slopty: the sidebar's rows as keyboard stops (`spaces::SidebarKeys`).
+    sidebar_keys: spaces::SidebarKeys,
+    /// slopty: whether the outlet last drew Settings, and how often it has changed between
+    /// Settings and the chats since launch (`route_outlet`).
+    route_shown: Option<(bool, u64)>,
     /// Per-key paint offsets of the resort in flight, keyed elements restart on
     /// `resort_epoch` bumps.
     sidebar_resort: std::collections::HashMap<String, f32>,
@@ -2263,10 +2180,7 @@ impl Shell {
         let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
         let data_dir = boot.data_dir.clone();
         let mut settings = settings::current(cx);
-        state.update(cx, |state, cx| {
-            state.watch_clock_transitions(cx);
-            state.set_change_requests_visible(settings.sidebar_show_pull_request, cx)
-        });
+        state.update(cx, |state, cx| state.watch_clock_transitions(cx));
         // slopty: appshots removed.
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
@@ -2349,7 +2263,11 @@ impl Shell {
             pinned_open: true,
             archived_shown: 0,
             sidebar_group_shown: std::collections::HashMap::new(), // slopty
-            sidebar_collapsed_groups: std::collections::HashSet::new(),
+            // slopty: Inactive starts shut (Amp's).
+            sidebar_collapsed_groups: std::collections::HashSet::from([format!(
+                "status:{}",
+                sidebar_status::StatusGroup::Inactive.key()
+            )]),
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -2385,6 +2303,7 @@ impl Shell {
             browser_profile: None,
             right_tabs: std::collections::HashMap::new(),
             right_tab_drag: None,
+            right_tab_hold: crate::surface_chrome::HeldTabWidth::default(), // slopty
             right_tab_scroll: gpui::ScrollHandle::new(),
             route,
             settings_focus: cx.focus_handle(),
@@ -2425,12 +2344,6 @@ impl Shell {
             // slopty: no Discard changes (ruled out).
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
-            sidebar_section_migration: None,
-            section_dialog: None,
-            section_menu: None,
-            section_header_hover: None,
-            section_menu_focus: cx.focus_handle(),
-            section_menu_active: None,
             delete_space_confirm: None,
             add_space: None,
             project_crumb_menu: popover::Popup::default(),
@@ -2440,8 +2353,6 @@ impl Shell {
             pending_workspace_command: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
-            sidebar_view_menu: popover::Popup::default(),
-            sidebar_view_trigger_focus: cx.focus_handle().tab_stop(true),
             sidebar_pinned_heights: Vec::new(),
             project_icons: Default::default(),
             chat_status_hover: None,
@@ -2455,8 +2366,6 @@ impl Shell {
             pinned_session_drag_generation: 0,
             sidebar_session_transfer: None,
             sidebar_session_return: None,
-            sidebar_section_drag: None,
-            sidebar_section_bounds: Default::default(),
             sidebar_pin_write: None,
             sidebar_pin_write_generation: 0,
             sidebar_pin_write_notice: None,
@@ -2480,6 +2389,8 @@ impl Shell {
             active_owner: None,
             // slopty: appshots removed.
             sidebar_prev_order: Vec::new(),
+            sidebar_keys: spaces::SidebarKeys::default(), // slopty
+            route_shown: None, // slopty
             sidebar_resort: std::collections::HashMap::new(),
             sidebar_new_keys: std::collections::HashSet::new(),
             resort_epoch: 0,
@@ -4418,6 +4329,18 @@ impl Shell {
         cx.notify();
     }
 
+    // slopty: the side pane's splitter from the keyboard.
+    /// Widens the side pane by `wider` pt (narrows it when negative), within its bounds.
+    fn nudge_right_pane(&mut self, wider: f32, cx: &mut Context<Self>) {
+        let max = self.surface_max_width(cx).max(RIGHT_PANE_MIN);
+        self.settings.right_pane_width =
+            (self.settings.right_pane_width + wider).clamp(RIGHT_PANE_MIN, max);
+        self.right_tween = None;
+        self.right_content_tween = None;
+        self.schedule_save(cx);
+        cx.notify();
+    }
+
     /// Publish this view's working copy to the central settings store. The
     /// store owns the single debounce task and the only production writer.
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
@@ -4447,6 +4370,21 @@ impl Shell {
     }
 
     // ---- routes / settings ----
+
+    // slopty: the app's first frame rises in as zeron's does; each move between Settings and the
+    // chats after it fades the new page in, with no slide (a section within Settings does not).
+    fn route_outlet(&mut self, frame: gpui::Div) -> AnyElement {
+        let settings = matches!(self.route, Route::Settings(_));
+        let (was, changes) = self.route_shown.unwrap_or((settings, 0));
+        let changes = changes + u64::from(was != settings);
+        self.route_shown = Some((settings, changes));
+        if changes == 0 {
+            motion::fade_in("phase-app", frame).into_any_element()
+        } else {
+            motion::fade_quick(gpui::ElementId::NamedInteger("route".into(), changes), frame)
+                .into_any_element()
+        }
+    }
 
     fn set_route(&mut self, route: Route, _cx: &mut Context<Self>) { // slopty: no pull-request pages.
         self.command_palette = None;
@@ -4592,6 +4530,10 @@ impl Shell {
         let exit_entity = entity.clone();
         let mut row = popover::menu_row_nav(theme, open, false, format!("chat-menu-copy-{chat_id}"))
             .id("chat-menu-copy")
+            // slopty: a named menu item that says whether its submenu is open.
+            .role(gpui::Role::MenuItem)
+            .aria_label("Copy")
+            .aria_expanded(open)
             .relative()
             .on_click(cx.listener(|this, _, _, cx| {
                 this.chat_copy_intent.reset();
@@ -4813,31 +4755,7 @@ impl Shell {
         }
     }
 
-    fn random_wallpaper(&mut self, cx: &mut Context<Self>) {
-        self.ensure_appearance_page(cx);
-        if settings::current(cx).wallpaper_folder.is_none() {
-            self.open_settings(SettingsSection::Appearance, cx);
-            if let Some(page) = &self.appearance_page {
-                page.update(cx, |page, cx| page.choose_wallpaper_folder(cx));
-            }
-            return;
-        }
-        let task = settings::wallpaper::randomize(cx);
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = task.await {
-                let _ = this.update(cx, |this, cx| {
-                    this.open_settings(SettingsSection::Appearance, cx);
-                    if let Some(page) = &this.appearance_page {
-                        page.update(cx, |page, cx| page.show_wallpaper_error(error, cx));
-                    }
-                });
-            }
-        })
-        .detach();
-    }
-
     pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        let section = section.canonical();
         self.command_palette = None;
         // Recreate per visit: the page's ListHarnesses load re-probes which
         // CLIs are installed, so installing one shows up on the next open.
@@ -4944,14 +4862,13 @@ impl Shell {
     /// `/settings`) reopen the section last viewed. Links that name a
     /// section go through [`Self::open_settings`] instead.
     fn open_last_settings(&mut self, cx: &mut Context<Self>) {
-        self.open_settings(self.settings.settings_section.reopenable(), cx);
+        self.open_settings(self.settings.settings_section, cx);
     }
 
     /// Every section shown is the one to reopen. Written through the shell's
     /// own settings copy: [`Self::schedule_save`] replaces the whole file
     /// from it, so a write that bypassed it would be undone by the next save.
     fn remember_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        let section = section.canonical();
         if self.settings.settings_section != section {
             self.settings.settings_section = section;
             self.schedule_save(cx);
@@ -4975,16 +4892,13 @@ impl Shell {
         let Route::Settings(section) = self.route else {
             return false;
         };
-        match section.canonical() {
+        match section {
             SettingsSection::Devices => self
                 .devices_page
                 .as_ref()
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
-            // slopty: no agent accounts: Slopty never touches a credential.
-            SettingsSection::Appearance => self
-                .appearance_page
-                .as_ref()
-                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
+            // slopty: no agent accounts: Slopty never touches a credential. Appearance's one dialog
+            // (the background adjustment) takes its own Escape.
             SettingsSection::Archived => self
                 .archived_page
                 .as_ref()
@@ -5046,7 +4960,7 @@ impl Shell {
                 if !matches!(self.route, Route::Settings(_)) {
                     self.settings_return_route = self.route;
                 }
-                self.set_route(Route::Settings(section.canonical()), cx);
+                self.set_route(Route::Settings(section), cx);
                 self.remember_settings_section(section, cx);
             }
         }
@@ -5073,7 +4987,7 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            SettingsSection::Harnesses | SettingsSection::Agents => { // slopty: no agent accounts: Slopty never touches a credential.
+            SettingsSection::Harnesses => {
                 if self.harnesses_page.is_none() {
                     let state = self.state.clone();
                     self.harnesses_page = Some(cx.new(|cx| HarnessesPage::new(state, cx)));
@@ -5215,6 +5129,11 @@ impl Shell {
                                 }
                                 ShortcutsEvent::EscapeStopsActiveAgentChanged(enabled) => {
                                     this.settings.escape_stops_active_agent = *enabled;
+                                    // slopty: the working line says Esc stops it as the switch flips.
+                                    let enabled = *enabled;
+                                    settings::update(SavePolicy::Debounced, cx, |s| {
+                                        s.escape_stops_active_agent = enabled;
+                                    });
                                 }
                                 ShortcutsEvent::ComposerSendBehaviorChanged(behavior) => {
                                     this.settings.composer_send_behavior = *behavior;
@@ -5491,7 +5410,6 @@ impl Shell {
 
     fn reconcile_sidebar_pins(&mut self, cx: &mut Context<Self>) {
         self.discard_stale_sidebar_pin_writes(cx);
-        self.migrate_sidebar_sections(cx);
         let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
             return;
         };
@@ -5525,17 +5443,6 @@ impl Shell {
     }
 
     fn active_sidebar_pins(&self, cx: &App) -> Vec<String> {
-        let mut pins = self.raw_sidebar_pins(cx);
-        let sections = self.active_sidebar_sections(cx);
-        pins.retain(|id| {
-            !sections
-                .iter()
-                .any(|section| section.session_ids.contains(id))
-        });
-        pins
-    }
-
-    fn raw_sidebar_pins(&self, cx: &App) -> Vec<String> {
         if let Some(pins) = self.optimistic_sidebar_pins(cx) {
             return pins;
         }
@@ -5593,10 +5500,10 @@ impl Shell {
         change: slopty_view_proto::SidebarPinChange,
         cx: &mut Context<Self>,
     ) -> bool {
-        let mut pinned_session_ids = self.raw_sidebar_pins(cx);
+        let mut pinned_session_ids = self.active_sidebar_pins(cx);
         change.project(&mut pinned_session_ids);
         if !self.validate_sidebar_pin_change(&profile_key, &pinned_session_ids, cx)
-            || self.raw_sidebar_pins(cx) == pinned_session_ids
+            || self.active_sidebar_pins(cx) == pinned_session_ids
         {
             return false;
         }
@@ -5640,11 +5547,6 @@ impl Shell {
         if pins.contains(&chat_id) == pinned {
             return;
         }
-        if pinned && self.raw_sidebar_pins(cx).contains(&chat_id) {
-            self.assign_sidebar_section(&chat_id, None, cx);
-            cx.notify();
-            return;
-        }
         let change = if pinned {
             slopty_view_proto::SidebarPinChange::Pin {
                 session_id: chat_id.clone(),
@@ -5656,12 +5558,7 @@ impl Shell {
                 session_id: chat_id.clone(),
             }
         };
-        if self.apply_sidebar_pin_change(profile_key, change, cx)
-            && pinned
-            && self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local)
-        {
-            self.assign_sidebar_section(&chat_id, None, cx);
-        }
+        self.apply_sidebar_pin_change(profile_key, change, cx);
         cx.notify();
     }
 
@@ -5721,8 +5618,6 @@ impl Shell {
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
         self.command_palette.is_some()
             // slopty: voice removed.
-            || self.section_dialog.is_some()
-            || self.section_menu.is_some()
             || self.add_space.is_some()
             || self.composer.read(cx).pickers().read(cx).is_open()
             || self.open_side_chat_pickers(cx).is_some()
@@ -5916,6 +5811,22 @@ impl Shell {
                 self.right_edge_bounce,
                 self.right_pane_open(cx) && !self.right_pane_expanded,
             )
+    }
+
+    /// slopty: the side pane's contents' opacity while its width opens from or closes to
+    /// nothing ([`motion::pane_content_opacity`]); whole otherwise, and under reduced motion.
+    fn right_content_opacity(&self) -> f32 {
+        let Some(tween) = self.right_tween.filter(|tween| self.tween_active(Some(*tween))) else {
+            return 1.0;
+        };
+        let elapsed = self.tween_elapsed(tween.started);
+        if tween.from < 1.0 && tween.to > tween.from {
+            motion::pane_content_opacity(true, elapsed)
+        } else if tween.to < 1.0 && tween.from > tween.to {
+            motion::pane_content_opacity(false, elapsed)
+        } else {
+            1.0
+        }
     }
 
     fn tween_active(&self, tween: Option<WidthTween>) -> bool {
@@ -6209,42 +6120,6 @@ impl Shell {
                     )
             }))
             .into_any_element()
-    }
-
-    /// The sidebar's view options ride the titlebar at the sidebar's trailing
-    /// edge, sliding and fading with it as it collapses. They never cross
-    /// back over the control cluster on a narrow sidebar.
-    fn render_sidebar_options_titlebar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let sidebar = self.sidebar_now();
-        let reveal = (sidebar / self.sidebar_content_width().max(1.0)).clamp(0.0, 1.0);
-        if reveal <= 0.01 {
-            return None;
-        }
-        let cluster_end = self.eval_tween(
-            self.titlebar_tween,
-            cluster_buttons_start(
-                cfg!(target_os = "macos"),
-                self.fullscreen.unwrap_or(false),
-                self.linux_left_caption_count(),
-            ),
-        ) + CLUSTER_BUTTONS_WIDTH
-            + TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
-        let left = (sidebar - Theme::SPACE_SM - 24.0).max(cluster_end + TITLEBAR_GROUP_GAP);
-        let theme = Theme::of(cx).clone();
-        let trigger = self.render_sidebar_view_trigger(&theme, cx);
-        Some(
-            div()
-                .absolute()
-                .top_0()
-                .left(px(left))
-                .h(px(Theme::TITLEBAR_HEIGHT))
-                .pt(px(titlebar_top_pad())) // slopty: a finger's presses inside the window
-                .flex()
-                .items_center()
-                .opacity(reveal)
-                .child(trigger)
-                .into_any_element(),
-        )
     }
 
     /// The titlebar owns new-session creation regardless of sidebar state. It
@@ -6651,7 +6526,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let section = section.canonical();
         let theme = Theme::of(cx).for_settings_surface();
         if self.settings_focus_pending {
             self.settings_focus_pending = false;
@@ -6768,9 +6642,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let section_icon = |item: SettingsSection| match item {
-            SettingsSection::Devices => icons::MONITOR,
+            SettingsSection::Devices => icons::LAPTOP, // slopty: as the server menu's Devices
             SettingsSection::Harnesses => icons::WIDGET,
-            SettingsSection::Agents => icons::KEY_MINIMALISTIC,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Files => icons::FOLDER,
             SettingsSection::Notifications => icons::BELL,
@@ -6802,7 +6675,6 @@ impl Shell {
                         .children(
                             SettingsSection::ALL
                                 .into_iter()
-                                .filter(|item| item.visible_in_nav())
                                 .map(|item| {
                                     let index = SettingsSection::ALL
                                         .iter()
@@ -6840,10 +6712,7 @@ impl Shell {
                                     .tab_stop(selected)
                                     .on_key_down(cx.listener(
                                         move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                            let items: Vec<_> = SettingsSection::ALL
-                                                .into_iter()
-                                                .filter(|s| s.visible_in_nav())
-                                                .collect();
+                                            let items: Vec<_> = SettingsSection::ALL.into_iter().collect();
                                             let current =
                                                 items.iter().position(|s| *s == item).unwrap_or(0);
                                             let next = match event.keystroke.key.as_str() {
@@ -6907,9 +6776,6 @@ impl Shell {
         // nine chips appear together instead of leaving a hole on whichever
         // row is busy or under the pointer.
         jump_label: Option<SharedString>,
-        // Whether the row wears its project icon. Rows inside a project
-        // group leave it to the group header.
-        project_icon: bool,
         search_query: Option<&str>,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -6934,13 +6800,14 @@ impl Shell {
             .iter()
             .find(|chat| chat.id == id)
             .map(|chat| chat.device_id.clone());
-        let compact = search_query.is_none() && self.settings.sidebar_compact;
+        // slopty: the sidebar draws one row (`sidebar_row_height`); the palette's copy spells out
+        // where the chat runs, its branch and its pull request.
+        let compact = search_query.is_none();
         let pr_surface = if search_query.is_some() {
             crate::change_requests::ChangeRequestBadgeSurface::Sidebar
         } else {
             crate::change_requests::ChangeRequestBadgeSurface::SessionRow
         };
-        let show_label = search_query.is_some() || self.settings.sidebar_show_project_label;
         // slopty: every row says which machine it runs on by that machine's kind (laptop,
         // server, phone), so where a chat runs reads without the hover card; with every chat on
         // one machine the glyph would say nothing, so none draws (`sidebar_status::span_machines`).
@@ -6966,17 +6833,8 @@ impl Shell {
                 .child(icon(glyph).size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)).text_color(color))
                 .into_any_element()
         };
-        let project_icon = (project_icon && search_query.is_none())
-            .then(|| self.render_project_icon(&id, SIDEBAR_ACTIVE_HARNESS_ICON_SIZE, selected, cx));
         let corner_hovered = !preview && self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
-        let project_icon = project_icon.map(|icon| {
-            div()
-                .flex_none()
-                .opacity(if archived_muted { 0.4 } else { 1.0 })
-                .child(icon)
-                .into_any_element()
-        });
         let content_id = id.clone();
         // Send-truth overrides: a send unadopted past the grace window is
         // FAILED (explicit, with the transcript's retry affordance); a send
@@ -7013,7 +6871,6 @@ impl Shell {
         };
         let shows_metadata = branch.is_some() || change_request.is_some();
         let queued = queued && !undelivered;
-        let working = status == slopty_view_proto::ChatIndicator::Working && !queued && !undelivered;
         // slopty: why it stands as it does (`sidebar_status`): what a waiting agent waits on,
         // an agent waiting on its own work, a finished result nobody has seen.
         let (reason, waiting_self) = {
@@ -7056,29 +6913,49 @@ impl Shell {
                 )
             })
         };
-        let compact_status = compact.then(|| {
-            let glyph = if working {
-                loaders::mini_glyph_spinner(
-                    format!("{row_id}-working"),
-                    2.0,
-                    theme.glyph,
-                    self.sidebar_pane.entity_id(),
-                    cx,
+        // slopty: one mark morphs between working, waiting, done and failed
+        // (`loaders::status_mark`), where a spinner, a check and a dot cut; the tick is cut
+        // through its disc in the row's own ground.
+        let mark_state = sidebar_mark_state(status, queued, undelivered);
+        let mark_ground = if selected {
+            crate::theme::flatten(crate::theme::glass_selected_bg(), theme.bg)
+        } else {
+            theme.bg
+        };
+        let status_mark = |state| {
+            let id = id.clone();
+            div()
+                .debug_selector(move || format!("chat-mark-{id}")) // slopty: for the tests
+                .flex_none()
+                .child(
+                    crate::loaders::status_mark::StatusMark::new(
+                        SharedString::from(format!("{row_id}-mark")),
+                        state,
+                    )
+                    .size(crate::loaders::status_mark::MARK_SMALL)
+                    .ground(mark_ground),
                 )
                 .into_any_element()
-            } else if status == slopty_view_proto::ChatIndicator::Completed && !queued && !undelivered {
-                icon(icons::CHECK)
-                    .size(px(11.0))
-                    .text_color(status_color)
-                    .into_any_element()
+        };
+        let compact_status = compact.then(|| {
+            let glyph = if let Some(state) = mark_state {
+                status_mark(state)
             } else if waiting_self {
                 // slopty: at rest on its own work: a calm clock, not a live state.
                 icon(icons::CLOCK_CIRCLE)
                     .size(px(11.0))
                     .text_color(theme.text_muted)
                     .into_any_element()
+            } else if status_label.is_none() {
+                // slopty: a row at rest says nothing, as Claude desktop's and T3's: its slot stays
+                // so the titles keep one edge.
+                div().into_any_element()
             } else {
                 div()
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("chat-dot-{id}") // slopty: for the tests
+                    })
                     .size(px(6.0))
                     .rounded_full()
                     .bg(status_color)
@@ -7101,57 +6978,10 @@ impl Shell {
                 .child(glyph)
                 .into_any_element()
         });
-        let compact_jump_label = compact.then(|| jump_label.clone()).flatten();
-        // slopty: the archive pill lays over the corner's right end while the row is hovered, so
-        // the status or time under it keeps its width and the title never re-truncates (M12).
-        let show_pill = corner_hovered && !compact && jump_label.is_none();
-        let archive_pill = show_pill.then(|| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(18.0))
-                .px(px(4.0))
-                .rounded(px(5.0))
-                .bg(crate::theme::wash(0.10))
-                .hover(|s| s.bg(crate::theme::wash(0.18)))
-                .child(
-                    icon(if archived {
-                        icons::ARCHIVE_UP_MINIMALISTIC
-                    } else {
-                        icons::ARCHIVE_MINIMALISTIC
-                    })
-                    .size(px(11.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
-                )
-                .child(
-                    div()
-                        .whitespace_nowrap()
-                        .text_size(crate::typography::ui_rems(10.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(if archived { "Unarchive" } else { "Archive" })),
-                )
-        });
-        let corner_body: AnyElement = if let Some(label) = jump_label.filter(|_| !compact) {
-            // The jump hint replaces the status/time corner while the modifier
-            // is held, in the shared legend voice (the compact rows' plain
-            // muted text, `popover::kbd_hint`).
-            div()
-                .debug_selector({
-                    let id = format!("jump-hint-{id}"); // slopty: for the tests
-                    move || id
-                })
-                .flex_none()
-                .whitespace_nowrap()
-                .font_family(crate::popover::KEY_GLYPH_FONT)
-                .text_size(crate::typography::ui_rems(11.0))
-                .text_color(theme.text_muted.opacity(0.5))
-                .child(label)
-                .into_any_element()
-        } else if compact {
-            // slopty: compact rows draw their own trailing cluster, the machine's kind in it.
+        let compact_jump_label = jump_label.filter(|_| compact);
+        // slopty: the sidebar's rows draw their own trailing cluster, the machine's kind in it;
+        // the palette's copy says its status here.
+        let corner_body: AnyElement = if compact {
             div().into_any_element()
         } else {
             match status_label {
@@ -7166,21 +6996,8 @@ impl Shell {
                             .flex_none()
                             .text_color(theme.text_muted)
                             .into_any_element()
-                    } else if status == slopty_view_proto::ChatIndicator::Completed {
-                        icon(icons::CHECK)
-                            .size(px(11.0))
-                            .flex_none()
-                            .text_color(status_color)
-                            .into_any_element()
-                    } else if working {
-                        loaders::mini_glyph_spinner(
-                            format!("{row_id}-working"),
-                            2.0,
-                            theme.glyph,
-                            self.sidebar_pane.entity_id(),
-                            cx,
-                        )
-                        .into_any_element()
+                    } else if let Some(state) = mark_state {
+                        status_mark(state)
                     } else {
                         div()
                             .size(px(6.0))
@@ -7238,19 +7055,15 @@ impl Shell {
                     .gap(px(6.0))
                     .text_size(crate::typography::ui_rems(10.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
+                    // slopty: tabular figures, so "1m" and "11m" keep the column.
+                    .font_features(crate::typography::tabular())
                     .children(subagent_pill("idle"))
                     .child(time_ago.clone())
                     .into_any_element(),
             }
         };
-        // One stable wrapper across both states (identity keeps the hover
-        // from flickering as the content swaps); the swap is driven by the
-        // ROW's hover (user request — corner-only felt undiscoverable), but
-        // archiving only clicks on the pill itself, so the row's own click
-        // stays the selector.
+        // slopty: the sidebar row's archive control sits in its trailing cluster.
         let corner: AnyElement = {
-            let archive_id = id.clone();
-            let archive_selector = format!("{row_id}-archive");
             div()
                 .id(SharedString::from(format!("{row_id}-corner")))
                 .debug_selector({
@@ -7264,51 +7077,10 @@ impl Shell {
                 })
                 .when(compact, |el| el.w(px(18.0)).justify_center())
                 .flex_none()
-                .relative()
-                // Pin the corner to line 1's text height so the archive pill
-                // (taller, padded) overflows vertically instead of growing the
-                // row — the swap must not shift the card's content.
-                // NO occlude: the ROW's hover drives the swap, and an
-                // occluding corner un-hovered the row underneath it —
-                // pill mounts, steals the pointer, row un-hovers, pill
-                // unmounts, repeat (user-reported flicker). The pill's
-                // stop_propagation click is separation enough.
                 .h(px(14.0))
                 .flex()
                 .items_center()
-                // slopty: the resting corner holds its width under the pill.
-                .child(div().when(show_pill, |el| el.opacity(0.0)).child(corner_body))
-                .children(archive_pill.map(|pill| {
-                    div()
-                        .id(SharedString::from(archive_selector.clone()))
-                        .debug_selector(move || archive_selector.clone())
-                        .absolute()
-                        .top_0()
-                        .right(px(-4.0))
-                        .h(px(14.0))
-                        .flex()
-                        .items_center()
-                        .role(gpui::Role::Button)
-                        .aria_label(if archived { "Unarchive chat" } else { "Archive chat" })
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.dismiss_session_card(cx);
-                                cx.stop_propagation();
-                            }),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.chat_hover_resync = true;
-                            this.set_chat_archived(archive_id.clone(), !archived, cx);
-                        }))
-                        // Above the pill: below it the chip would cover the next row.
-                        .tooltip(archive_tooltip(archived, selected))
-                        .tooltip_placement(gpui::TooltipPlacement::Above)
-                        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-                        .child(pill)
-                }))
+                .child(corner_body)
                 .into_any_element()
         };
         let mut corner = Some(corner);
@@ -7325,6 +7097,16 @@ impl Shell {
         let search_query_none = search_query.is_none();
         let rename_input = (search_query_none && !preview)
             .then(|| self.rename_input_for(&id, ChatRenameSurface::Sidebar))
+            .flatten();
+        let rolling_title = (search_query_none && !preview)
+            .then(|| {
+                crate::roll_text::rolling(
+                    format!("sidebar-title-{id}"),
+                    title.clone(),
+                    motion::reduced_motion(cx),
+                    crate::clock::now(cx),
+                )
+            })
             .flatten();
         // Sidebar rows only: the palette's copy already spells out its row,
         // and a row being renamed keeps the pointer's attention on the field.
@@ -7353,7 +7135,9 @@ impl Shell {
         // fills are identical so the blend is a no-op, but light's hover sits
         // below its near-opaque selected fill, and blending toward it visibly
         // dimmed the active row under the pointer (user report).
-        let hover_bg = if selected { selected_wash } else { hover };
+        // slopty: under the pointer the selected row goes a step past its selection, as Claude
+        // desktop's (`theme::selected_hover_wash`), so the pointer reads on it too.
+        let hover_bg = if selected { crate::theme::selected_hover_wash() } else { hover };
         // slopty: an unread result reads at full strength, as a selected row does.
         let rest_text = if selected || search_query.is_some() || unread {
             text
@@ -7369,12 +7153,11 @@ impl Shell {
                 let row_id = row_id.clone();
                 move || row_id.clone()
             })
-            .h(px(sidebar_row_height(
-                compact,
-                show_label,
-                branch.is_some(),
-                change_request.is_some(),
-            ) + sidebar_reason_height(compact, show_label, reason.is_some())))
+            .h(px(if compact {
+                sidebar_row_height(reason.is_some())
+            } else {
+                chat_row_height(branch.is_some(), change_request.is_some())
+            }))
             .flex()
             .flex_col()
             .gap(px(2.0))
@@ -7424,6 +7207,22 @@ impl Shell {
                 // (`session_hover_card`), carrying Slopty's facts.
                 .when(search_query_none, |el| {
                     el.role(gpui::Role::Button).aria_label(row_label.clone())
+                })
+                // slopty: the list is one keyboard stop, its rows walked with Up and Down
+                // (`spaces::SidebarKeys`); a press leaves the keyboard where it was.
+                .when(search_query_none, |el| {
+                    let focus = self.sidebar_keys.focus(&id, cx);
+                    let key_id = id.clone();
+                    el.track_focus(&focus)
+                        .tab_index(0)
+                        .tab_stop(self.sidebar_keys.stops_at(&id))
+                        .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if this.sidebar_row_key(&key_id, &event.keystroke, window, cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
                 })
                 // Pressing, scrolling or opening the menu puts the hover card
                 // away: the row has the pointer's intent now.
@@ -7554,7 +7353,7 @@ impl Shell {
             )
             .children(hover_card)
             // Line 1: "project @ device", status word / time-ago right.
-            .when(!compact && show_label, |el| {
+            .when(!compact, |el| {
                 el.child(
                     div()
                         .w_full()
@@ -7565,10 +7364,9 @@ impl Shell {
                         // slopty: the machine's kind leads the place line, and stays when a
                         // waiting reason takes the place's words.
                         .children(machine.clone().map(|mark| machine_mark(mark, subline)))
-                        .child(sidebar_faded_label_clear(
+                        .child(sidebar_faded_label(
                             format!("chat-device-{content_id}").into(),
                             true,
-                            if show_pill { ARCHIVE_PILL_CLEAR } else { 0.0 },
                             // slopty: a waiting row says why in place of where; the hover card
                             // keeps the place.
                             match reason.clone() {
@@ -7604,59 +7402,56 @@ impl Shell {
                     .when_some(
                         harness.map(crate::pickers::harness_brand_icon),
                         |el, (path, tint)| {
+                            // slopty: the agent's mark at its full colour (only an archived row
+                            // dims it, with the rest of the row), and a result nobody has seen
+                            // as a small accent dot on its corner, beside the heavier title
+                            // (opencode's unread mark).
                             el.child(
-                                icon(path)
-                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                div()
+                                    .relative()
                                     .flex_none()
-                                    .text_color(
-                                        tint.unwrap_or(subline).opacity(if archived_muted {
-                                            0.4
-                                        } else {
-                                            0.8
-                                        }),
-                                    ),
+                                    .child(
+                                        icon(path)
+                                            .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                            .text_color(match tint {
+                                                Some(tint) if !archived_muted => tint,
+                                                Some(tint) => tint.opacity(0.4),
+                                                None if archived_muted => subline.opacity(0.4),
+                                                None => subline.opacity(0.8),
+                                            }),
+                                    )
+                                    .when(unread, |el| el.child(spaces::unread_corner(&id, theme))),
                             )
                         },
                     )
-                    .children(project_icon)
                     .child(match rename_input {
                         Some(input) => chat_title_editor(
                             format!("chat-title-editor-{content_id}").into(),
                             input,
                             theme,
                         ),
-                        None => sidebar_faded_label_clear(
+                        None => sidebar_faded_label(
                             format!("chat-title-{content_id}").into(),
                             true,
-                            if show_pill && !show_label { ARCHIVE_PILL_CLEAR } else { 0.0 },
                             div()
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .line_height(px(17.0))
                                 // slopty: the heavier weight marks a result nobody has seen.
                                 .when(unread, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
-                                .child(popover::search_highlight(title, search_query, theme)),
+                                // slopty: a title the agent gives rises in over the old (Amp's),
+                                // on the house's roll.
+                                .child(rolling_title.unwrap_or_else(|| {
+                                    popover::search_highlight(title, search_query, theme)
+                                })),
                         )
                         .into_any_element(),
                     })
-                    // slopty: the machine's kind trails the title when no place line shows.
-                    .when_some(machine.clone().filter(|_| !compact && !show_label), |el, mark| {
-                        el.child(div().when(show_pill, |el| el.opacity(0.0)).child(machine_mark(mark, subline)))
-                    })
-                    .when(!compact && !show_label, |el| {
-                        el.child(
-                            div()
-                                .flex_none()
-                                .text_color(subline)
-                                .children(corner.take()),
-                        )
-                    })
-                    // Compact trailing cluster, right-packed: the PR badge sits
-                    // LEFT of one fixed slot that shows the relative time, swaps
-                    // to the archive affordance while the row is hovered, and
-                    // shows the Cmd+N jump legend while the modifier is held.
-                    // The legend wins over the hover archive (user request).
-                    // There is no remote globe — the slot's fixed width keeps
-                    // the column aligned across rows regardless of a PR badge.
+                    // Compact trailing cluster, right-packed: one fixed slot that
+                    // shows the relative time, swaps to the archive affordance
+                    // while the row is hovered, and shows the Cmd+N jump legend
+                    // while the modifier is held. The legend wins over the hover
+                    // archive (user request). The slot's fixed width keeps the
+                    // column aligned across rows.
                     .when(compact, |el| {
                         // Cmd-held legend beats the hover archive; preview rows
                         // (the palette) never archive.
@@ -7674,26 +7469,9 @@ impl Shell {
                             .then(|| subagent_pill("compact"))
                             .flatten();
                         let archive_id = id.clone();
-                        // slopty: the machine's kind, before the PR badge and the time.
+                        // slopty: the machine's kind, before the time; the pull request is the
+                        // hover card's.
                         el.children(machine.clone().map(|mark| machine_mark(mark, subline)))
-                        .children(change_request.clone().map(|summary| {
-                            if preview {
-                                crate::change_requests::pull_request_badge_preview(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    pr_surface,
-                                    theme,
-                                )
-                            } else {
-                                crate::change_requests::pull_request_badge(
-                                    format!("{row_id}-compact-pr").into(),
-                                    summary,
-                                    pr_surface,
-                                    pr_device.clone(),
-                                    theme,
-                                )
-                            }
-                        }))
                         .child(
                             div()
                                 .id(SharedString::from(format!("{row_id}-corner")))
@@ -7756,9 +7534,15 @@ impl Shell {
                                     pill
                                 } else {
                                     div()
+                                        .when(show_legend, |el| {
+                                            let id = format!("jump-hint-{id}"); // slopty: for the tests
+                                            el.debug_selector(move || id)
+                                        })
                                         .whitespace_nowrap()
                                         .text_right()
                                         .text_size(crate::typography::ui_rems(11.0))
+                                        // slopty: tabular figures, so "1m" and "11m" keep the column.
+                                        .font_features(crate::typography::tabular())
                                         .text_color(subline)
                                         .child(compact_jump_label.unwrap_or(time_ago))
                                         .into_any_element()
@@ -7768,7 +7552,7 @@ impl Shell {
             )
             // slopty: the reason line, where no location line carries it: under the title,
             // past the status glyph.
-            .when_some(reason.filter(|_| compact || !show_label), |row, reason| {
+            .when_some(reason.filter(|_| compact), |row, reason| {
                 row.child(
                     div()
                         .id(SharedString::from(format!("{row_id}-reason")))
@@ -7777,7 +7561,7 @@ impl Shell {
                             move || format!("chat-reason-{id}")
                         })
                         .w_full()
-                        .pl(px(if compact { 17.0 } else { 0.0 }))
+                        .pl(px(17.0))
                         .child(sidebar_faded_label(
                             format!("chat-reason-label-{content_id}").into(),
                             true,
@@ -8035,11 +7819,6 @@ impl Shell {
         {
             self.cancel_pinned_session_drag(cx);
         }
-        if self.sidebar_section_drag.is_some()
-            && (!cx.has_active_drag() || !self.sidebar_section_drag_is_valid(cx))
-        {
-            self.cancel_sidebar_section_drag(cx);
-        }
 
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
@@ -8049,10 +7828,8 @@ impl Shell {
             .moving_row
             .map(|(row, height)| self.render_moving_sidebar_session(row, height, theme));
         let pinned_count = session_rows.pinned_count;
-        let custom_count = session_rows.custom_count;
-        let mut keyed = session_rows.rows;
-        // slopty: every organisation groups (by status or by project): no ungrouped "Sessions"
-        // disclosure.
+        let keyed = session_rows.rows;
+        // slopty: the rows group by status: no ungrouped "Sessions" disclosure.
         let pinned_body_height = spaces::SIDEBAR_DISCLOSURE_BODY_INSET
             + self.sidebar_transfer_extra_gap("pinned")
             + keyed
@@ -8090,7 +7867,6 @@ impl Shell {
         }
         if self.pinned_session_drag.is_none()
             && self.sidebar_session_transfer.is_none()
-            && self.sidebar_section_drag.is_none()
             && self.sidebar_prev_order != order
         {
             let key_order_changed = sidebar_key_order_changed(&self.sidebar_prev_order, &order);
@@ -8132,32 +7908,10 @@ impl Shell {
                     .is_none_or(|drag| drag.preview.as_ref().is_none_or(|gap| gap.pinned))
             })
             .map(|drag| (drag.from, drag.over, drag.prev_over, drag.epoch));
-        // A lifted custom section leaves an empty slot behind and paints in
-        // the list's movement layer; its siblings slide around the gap.
-        let section_offsets = self
-            .sidebar_section_drag_offsets()
-            .filter(|(_, offsets)| offsets.len() == custom_count);
-        let lifted_section = section_offsets.as_ref().and_then(|(from, _)| {
-            let height = self.sidebar_section_drag.as_ref()?.heights[*from];
-            let (_, _, slot) = keyed.get_mut(pinned_count + from)?;
-            let placeholder = div().flex_none().h(px(height)).into_any_element();
-            let section = std::mem::replace(slot, placeholder);
-            self.render_lifted_sidebar_section(section, theme)
-        });
         let list_items: Vec<AnyElement> = keyed
             .into_iter()
             .enumerate()
             .map(|(ix, (key, _, element))| {
-                if let Some((_, offsets)) = &section_offsets
-                    && let Some(offset) =
-                        ix.checked_sub(pinned_count).and_then(|ix| offsets.get(ix))
-                {
-                    return div()
-                        .relative()
-                        .top(px(*offset))
-                        .child(element)
-                        .into_any_element();
-                }
                 if ix < pinned_count
                     && let Some((from, over, prev_over, drag_epoch)) = pinned_drag
                 {
@@ -8227,12 +7981,10 @@ impl Shell {
         let filter_row = self.render_spaces_filter(theme, cx);
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
-            let mut custom_items = pinned_items.split_off(pinned_count);
-            let regular_items = custom_items.split_off(custom_count);
+            let regular_items = pinned_items.split_off(pinned_count);
             let regular_empty = regular_items.is_empty();
             let pinned_group = show_pinned_section
                 .then(|| self.render_pinned_section(pinned_items, pinned_body_height, theme, cx));
-            let section_bounds = self.sidebar_section_bounds.clone();
             div()
                 .id("sidebar-active-sessions")
                 .flex()
@@ -8240,20 +7992,6 @@ impl Shell {
                 .gap(px(SIDEBAR_LIST_GAP))
                 .pb(px(Theme::SPACE_SM))
                 .when_some(pinned_group, |el, group| el.child(group))
-                // Each section's painted slot measures the reorder's hit
-                // testing and displacement.
-                .when(!custom_items.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(SIDEBAR_LIST_GAP))
-                            .on_children_prepainted(move |bounds, _, _| {
-                                *section_bounds.borrow_mut() = bounds;
-                            })
-                            .children(custom_items),
-                    )
-                })
                 .when(
                     !regular_items.is_empty() || self.sidebar_session_transfer.is_some(),
                     |el| {
@@ -8327,7 +8065,11 @@ impl Shell {
             // slopty: the empty list names the key that fills it (M16); a phone's Sessions page
             // has no key to offer and says its own noun.
             let compact = self.compact();
-            let combo = if compact { "" } else { self.settings.keymap.get(ShortcutId::NewSession) };
+            // slopty: before any project, the list says what fills it first, and offers no key
+            // that cannot make a chat yet (the canvas offers Add a project).
+            let no_projects = self.awaits_first_project(cx);
+            let combo = if compact || no_projects { "" } else { self.settings.keymap.get(ShortcutId::NewSession) };
+            let empty: &'static str = if no_projects { "No projects yet" } else { "No chats yet" };
             div()
                 .px(px(Theme::SPACE_SM))
                 .pb(px(Theme::SPACE_SM))
@@ -8340,10 +8082,10 @@ impl Shell {
                     // slopty: a screen reader (and the goldens' text) reads the empty line too.
                     div()
                         .id("sidebar-empty")
-                        .debug_selector(|| "sidebar-empty: No chats yet".to_owned())
+                        .debug_selector(move || format!("sidebar-empty: {empty}"))
                         .role(gpui::Role::Label)
-                        .aria_label("No chats yet")
-                        .child(SharedString::from("No chats yet")),
+                        .aria_label(empty)
+                        .child(SharedString::from(empty)),
                 )
                 .when(!combo.is_empty(), |el| {
                     el.child(
@@ -8404,17 +8146,6 @@ impl Shell {
                             this.cancel_sidebar_session_transfer(cx);
                         },
                     ))
-                    // A section reorder lands wherever it is released in the list.
-                    .on_drag_move::<SidebarSectionDrag>(cx.listener(
-                        |this, event: &gpui::DragMoveEvent<SidebarSectionDrag>, _, cx| {
-                            this.track_sidebar_section_drag(event.event.position, cx);
-                        },
-                    ))
-                    .on_drop::<SidebarSectionDrag>(cx.listener(
-                        |this, payload: &SidebarSectionDrag, _, cx| {
-                            this.finish_sidebar_section_drag(payload, cx);
-                        },
-                    ))
                     .px(px(Theme::SPACE_SM))
                     .flex()
                     .flex_col()
@@ -8425,10 +8156,10 @@ impl Shell {
                     .children(history_section) // slopty
                     .children(archived_section)
                     .children(moving_row)
-                    .children(lifted_section),
             )),
         )
-        .fade_overflow_y(&self.sidebar_scroll);
+        // slopty: each fade as tall as what lies past its edge, up to its band.
+        .fade_scroll_y(&self.sidebar_scroll);
 
         // slopty: no self-updater and no Star on GitHub banner.
 
@@ -8526,7 +8257,7 @@ impl Shell {
         ];
         if invite {
             rows.push(
-                row("user-menu-connect-phone", icons::SMARTPHONE, "Connect a phone")
+                row("user-menu-connect-phone", icons::SMARTPHONE, crate::settings::devices::INVITE)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.close_user_menu(cx);
                         this.open_connect_phone(cx);
@@ -8905,12 +8636,9 @@ impl Shell {
         let interrupting = selected_chat
             .as_deref()
             .is_some_and(|chat_id| composer.read(cx).is_interrupting(chat_id));
-        let escape_stops_active_agent = self.settings.escape_stops_active_agent;
-
         match resolve_shell_escape(
             &event.keystroke.key,
             false,
-            escape_stops_active_agent,
             self.route,
             selected_chat.as_deref(),
             indicator,
@@ -8919,7 +8647,11 @@ impl Shell {
             ShellEscapeOutcome::Blocked => cx.stop_propagation(),
             ShellEscapeOutcome::InterruptChat(chat_id) => {
                 cx.stop_propagation();
-                composer.update(cx, |composer, cx| composer.interrupt_chat(chat_id, cx));
+                // slopty: the second press stops; the first arms it, which the line says.
+                if crate::composer::escape_stops(&chat_id, crate::clock::now(cx)) {
+                    composer.update(cx, |composer, cx| composer.interrupt_chat(chat_id, cx));
+                }
+                cx.refresh_windows();
             }
             ShellEscapeOutcome::OtherKey | ShellEscapeOutcome::Ignored => {}
         }
@@ -8979,6 +8711,9 @@ impl Shell {
                 let rename = popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
                     .id("chat-menu-rename")
                     .debug_selector(|| "chat-menu-rename".into())
+                    // slopty: every row of the menu is a named menu item, as the tab rows are.
+                    .role(gpui::Role::MenuItem)
+                    .aria_label("Rename")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_rename_chat(rename_id.clone(), cx)
                     }))
@@ -8990,6 +8725,8 @@ impl Shell {
                 } else {
                     let pin = popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
                         .id("chat-menu-pin")
+                        .role(gpui::Role::MenuItem) // slopty
+                        .aria_label(if is_pinned { "Unpin" } else { "Pin" })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_chat_pinned(pin_id.clone(), !is_pinned, cx)
                         }))
@@ -8998,6 +8735,8 @@ impl Shell {
                     let archive =
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
                             .id("chat-menu-archive")
+                            .role(gpui::Role::MenuItem) // slopty
+                            .aria_label("Archive")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.archive_chat(archive_id.clone(), cx)
                             }))
@@ -9016,6 +8755,8 @@ impl Shell {
                         let open_id = chat_id.clone();
                         let row = popover::menu_row(&theme, false, format!("chat-menu-open-in-{chat_id}"))
                             .id("chat-menu-open-in")
+                            .role(gpui::Role::MenuItem) // slopty
+                            .aria_label("Open in\u{2026}")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_open_in(open_id.clone(), position, cx)
                             }))
@@ -9030,6 +8771,8 @@ impl Shell {
                 };
                 let delete = popover::menu_row(&theme, false, format!("chat-menu-delete-{chat_id}"))
                     .id("chat-menu-delete")
+                    .role(gpui::Role::MenuItem) // slopty
+                    .aria_label("Delete\u{2026}")
                     .text_color(theme.danger)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.close_chat_menu(cx);
@@ -9073,6 +8816,8 @@ impl Shell {
                     let row = popover::menu_row(&theme, false, label)
                             .id(SharedString::from(label))
                             .role(gpui::Role::MenuItem)
+                            .aria_label(label) // slopty
+                            .aria_disabled(!enabled)
                             .when(!enabled, |el| {
                                 el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
                             })
@@ -9103,6 +8848,8 @@ impl Shell {
                 let row = popover::menu_row(&theme, false, reopen_label)
                     .id(SharedString::from(reopen_label))
                     .role(gpui::Role::MenuItem)
+                    .aria_label(reopen_label) // slopty
+                    .aria_disabled(!can_reopen)
                     .when(!can_reopen, |el| {
                         el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
                     })
@@ -9132,7 +8879,6 @@ impl Shell {
         overlays.extend(self.render_open_in_menu(cx)); // slopty: `open_in`
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
-        overlays.extend(self.render_section_overlays(viewport, window, cx));
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
         }
@@ -9239,8 +8985,37 @@ impl Shell {
         let clear = highlight.opacity(0.0);
         let release_key = fade_key.clone();
         let release_out_key = fade_key.clone();
+        // slopty: a splitter a screen reader names (T3's `role="separator"`); the side pane's
+        // takes ← and → by 16 pt from the keyboard, its ring on the seam.
+        let ring = crate::surface_chrome::ring(theme, -crate::surface_chrome::RING_WIDTH);
+        let name = match kind {
+            PaneResizeKind::Sidebar => "Resize sidebar",
+            PaneResizeKind::Right => "Resize side pane",
+            PaneResizeKind::Files => "Resize files panel",
+            PaneResizeKind::Terminal => "Resize terminal",
+        };
         div()
             .id(id)
+            .role(gpui::Role::Splitter)
+            .aria_label(name)
+            .aria_orientation(if kind == PaneResizeKind::Terminal {
+                gpui::Orientation::Horizontal
+            } else {
+                gpui::Orientation::Vertical
+            })
+            .when(kind == PaneResizeKind::Right, |el| {
+                el.tab_index(0).focus_visible(move |style| style.outline_ring(ring)).on_key_down(
+                    cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        let wider = match event.keystroke.key.as_str() {
+                            "left" => RIGHT_PANE_NUDGE,
+                            "right" => -RIGHT_PANE_NUDGE,
+                            _ => return,
+                        };
+                        this.nudge_right_pane(wider, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+            })
             .absolute()
             .top(px(PANE_RESIZE_HITBOX_TOP))
             .bottom_0()
@@ -9335,20 +9110,17 @@ impl Shell {
         );
         let ui_settings = settings::current(cx);
         let new_thread_background_setting = ui_settings.new_thread_composer_background;
-        let new_thread_background_effect = ui_settings.new_thread_background_effect;
         let new_thread_background_adjustment = new_thread_background_setting
             .as_ref()
             .map(|background| background.adjustment)
             .unwrap_or_default();
         let frame_time = self.render_time.unwrap_or_else(|| crate::clock::now(cx));
-        // Prewarm even in an established thread. Decode/effect work is not
-        // contingent on a hero measurement or a navigation gesture.
+        // Prewarm even in an established thread. Decoding is not contingent on a
+        // hero measurement or a navigation gesture.
         let artwork = new_thread_background_setting
             .as_ref()
             .and_then(|background| {
                 crate::new_thread_background_effects::prepare(
-                    new_thread_background_effect,
-                    theme,
                     std::path::Path::new(&background.path),
                     cx,
                 )
@@ -9386,7 +9158,7 @@ impl Shell {
         let composer_width = self.composer_dock.borrow_mut().layout_width(
             composer_target_width(
                 main_content_width - session_reserve,
-                ui_settings.transcript_width,
+                settings::transcript_width(self.viewport_width, cx),
                 has_selection,
             ),
             direct_width,
@@ -9405,7 +9177,20 @@ impl Shell {
                 ),
             )));
         let term_h = self.terminal_geometry.get().height;
-        let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
+        // slopty: the living glyph field when no wallpaper is set; it stays mounted while it
+        // fades out after the first send (`new_thread_background_glyphs`).
+        let new_thread_field = crate::new_thread_background_glyphs::field(
+            !has_selection && new_thread_background_setting.is_none(),
+            self.composer.read(cx).surface_bounds(),
+            theme,
+            window,
+            cx,
+        );
+        let new_thread_field_showing = new_thread_field.read(cx).showing();
+        let new_thread_background_layer = (!has_selection
+            || dock_frame.active
+            || new_thread_field_showing)
+            .then(|| {
             if artwork_frame.active {
                 window.request_animation_frame();
             }
@@ -9415,6 +9200,7 @@ impl Shell {
             div()
                 .absolute()
                 .inset_0()
+                .child(new_thread_field)
                 .child(new_thread_background(
                     artwork_frame.previous,
                     artwork_frame.previous_adjustment,
@@ -9468,16 +9254,17 @@ impl Shell {
                     el.child(div().absolute().inset_0().occlude())
                 })
                 .into_any_element()
-        } else if !has_spaces && !no_project {
+        } else if let Some(step) = self.first_step(cx) {
             // Onboarding (first boot / after the destructive wipe): no folders
             // to work in yet — one clear affordance.
             let _ = faint;
             // slopty: with no device yet there is nowhere for a project: add one first.
-            let no_devices = self.state.read(cx).devices.is_empty();
-            let (headline, line, action) = if no_devices {
-                ("Add a device to get started", "A device is a machine Slopty works on.", "Add a device")
+            let no_devices = step == spaces::FirstStep::AddDevice;
+            let action = step.action();
+            let (headline, line) = if no_devices {
+                ("Add a device to get started", "A device is a machine Slopty works on.")
             } else {
-                ("Add a project to get started", "A project is a folder on one of your devices.", "Add a project")
+                ("Add a project to get started", "A project is a folder on one of your devices.")
             };
             div()
                 .size_full()
@@ -9491,15 +9278,19 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .items_center()
+                        // slopty: the glyph of what fills the canvas, as Archived's empty page
+                        // says its own, where the logo's dots read as the app's spinner.
                         .child(
-                            icon(icons::SLOPTY_LOGO)
-                                .w(px(41.9))
-                                .h(px(48.0))
-                                .text_color(theme.text.opacity(0.09)),
+                            icon(step.glyph())
+                                .size(px(28.0))
+                                .text_color(theme.text_muted.opacity(0.2)),
                         )
                         .child(
                             div()
-                                .mt(px(24.0))
+                                .id("onboarding-headline")
+                                .role(gpui::Role::Heading) // slopty: read as the canvas's title
+                                .aria_label(headline)
+                                .mt(px(16.0))
                                 .text_size(crate::typography::ui_rems(16.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
@@ -9507,18 +9298,22 @@ impl Shell {
                         )
                         .child(
                             div()
+                                .id("onboarding-line")
+                                .role(gpui::Role::Label) // slopty
+                                .aria_label(line)
                                 .mt(px(6.0))
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text_muted.opacity(0.7))
                                 .child(SharedString::from(line)), // slopty: devices first.
                         )
                         .child(
-                            popover::btn_primary(&theme_owned, action) // slopty: devices first.
-                                .id(if no_devices { "onboarding-add-device" } else { "onboarding-add-space" })
+                            popover::named_button(
+                                popover::btn_primary(&theme_owned, action) // slopty: devices first.
+                                    .id(if no_devices { "onboarding-add-device" } else { "onboarding-add-space" }),
+                                action, // slopty: named, as the canvas's one action
+                            )
                                 .mt(px(20.0))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if no_devices { this.open_add_device(cx) } else { this.open_add_space(cx) }
-                                })),
+                                .on_click(cx.listener(move |this, _, _, cx| step.take(this, cx))),
                         ),
                 ))
                 .into_any_element()
@@ -9745,8 +9540,9 @@ impl Shell {
                         .inset_0()
                     })
             })
-            .children(Self::attachment_drop_overlay(theme, cx))
-            .children(Self::mention_drop_overlay(theme, cx))
+            // slopty: keyed, so the main chat's drop target arrives on its own clock.
+            .children(Self::attachment_drop_overlay("chat", theme, cx))
+            .children(Self::mention_drop_overlay("chat", theme, cx))
             .into_any_element()
     }
 
@@ -9756,8 +9552,12 @@ impl Shell {
     /// floating six pixels above the composer. It shares the composer's
     /// measured dock transform and paints after it, outside the transcript fade.
     fn render_jump_to_bottom(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.transcript.read(cx).jump_button_shown() {
-            return None;
+        // slopty: and it leaves faster than it came (design-inspiration item 11).
+        let shown = self.transcript.read(cx).jump_button_shown();
+        let leaving = jump_presence("jump-to-bottom", shown, crate::clock::now(cx))?;
+        if leaving.is_some() {
+            // Drawn again until it has gone, so a spent button never lingers unseen.
+            cx.notify();
         }
         Some(
             div()
@@ -9770,7 +9570,7 @@ impl Shell {
                 .right(px(10.0))
                 .flex()
                 .justify_center()
-                .child(self.jump_pill("jump-to-bottom", "jump-pill", self.transcript.clone(), cx))
+                .child(self.jump_pill("jump-to-bottom", "jump-pill", self.transcript.clone(), leaving, cx))
                 .into_any_element(),
         )
     }
@@ -9786,30 +9586,16 @@ impl Shell {
         anim_key: &'static str,
         hover_key: &'static str,
         transcript: Entity<Transcript>,
+        leaving: Option<u64>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // slopty: the anatomy is [`crate::live::chrome::floating_pill`], which Slopty's own views
-        // float too.
-        let theme = Theme::of(cx);
-        let content = |theme: &Theme| {
-            // slopty: the app's arrow glyph, not a text arrow.
-            let glyph = crate::icons::icon(crate::icons::ARROW_DOWN)
-                .size(px(14.0))
-                .text_color(theme.text_muted)
-                .into_any_element();
-            let words = div()
-                .text_size(crate::typography::ui_rems(13.0))
-                .text_color(theme.text)
-                .child(SharedString::from("Scroll to bottom"))
-                .into_any_element();
-            (Some(glyph), words)
-        };
-        let hover = Some(hover_key.into());
-        crate::live::chrome::floating_pill(anim_key, hover, theme, content, |pill| {
-            pill.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
-                transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
-            }))
-        })
+        // slopty: it says how many rows arrived while the person read above (item 11).
+        let unseen = transcript.read(cx).jump_unseen();
+        let roll = (motion::reduced_motion(cx), crate::clock::now(cx));
+        let button = jump_button(anim_key, hover_key, unseen, roll, Theme::of(cx), cx.listener(move |_, _, _, cx| {
+            transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
+        }));
+        jump_out(anim_key, leaving, button)
     }
 
     /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
@@ -10107,6 +9893,9 @@ impl Shell {
         } else {
             gpui::Empty.into_any_element()
         };
+        // slopty: while the pane opens or closes its contents fade, late in and early out; the
+        // frame does not (item 12).
+        let content_opacity = self.right_content_opacity();
         // Flush panel (user request — the inset card is gone): full window
         // height with a left hairline, glass-friendly like the terminal dock
         // (translucent over the frost; solid otherwise). The resize grabber
@@ -10149,7 +9938,16 @@ impl Shell {
                 !matches!(self.resolved_right_active(cx), RightSurface::SideChat(_)),
                 |el| el.pt(px(Theme::TITLEBAR_HEIGHT)),
             )
-            .child(content);
+            .child(
+                div() // slopty: the fading layer.
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .opacity(content_opacity)
+                    .child(content),
+            );
         let target = self.right_target(cx);
         let edge_offset = self.eval_resize_edge_bounce(
             self.right_edge_bounce,
@@ -10163,89 +9961,20 @@ impl Shell {
         )
     }
 
-    /// The right pane's empty state: a compact vertical list of surface rows
-    /// (icon + label). The old two-card grid clipped in narrow panes and
-    /// wasted short ones.
-    fn render_surface_picker(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let text = theme.text;
-        let muted = theme.text_muted;
-        let border = theme.border;
-        let border_strong = theme.border_strong;
-        let row = |id: &'static str, icon_path: &'static str, title: &'static str| {
-            div()
-                .id(id)
-                .role(gpui::Role::Button) // slopty: named for a screen reader
-                .aria_label(title)
-                .w_full()
-                .h(px(44.0))
-                .px(px(14.0))
-                .rounded(px(10.0))
-                .border_1()
-                .border_color(border)
-                .bg(crate::theme::ink(0.02))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .cursor_pointer()
-                .hover(move |s| s.bg(crate::theme::ink(0.05)).border_color(border_strong))
-                .child(icon(icon_path).size(px(15.0)).flex_none().text_color(muted))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(text)
-                        .child(SharedString::from(title)),
-                )
-        };
-        div()
-            .size_full()
-            .relative()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(16.0))
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(280.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .child(
-                        row("surface-card-browser", icons::GLOBE, "Browser").on_click(cx.listener(
-                            |this, _, window, cx| this.add_browser_surface(None, window, cx),
-                        )),
-                    )
-                    .child(
-                        row("surface-card-terminal", icons::TERMINAL, "Terminal").on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.add_terminal_surface(cx);
-                            }),
-                        ),
-                    )
-                    // slopty: a remote window or desktop of the chat's machine.
-                    .child(
-                        row("surface-card-screen", icons::MONITOR, "Remote window").on_click(
-                            cx.listener(|this, _, _, cx| this.add_screen_surface(cx)),
-                        ),
-                    )
-                    // Git surfaces only where there IS git — the pane itself
-                    // no longer gates on it (terminals work anywhere).
-                    .when(self.space_git_detected(cx), |el| {
-                        el.child(row("surface-card-diffs", icons::LIST, "Diffs").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.add_diff_surface(window, cx);
-                            }),
-                        ))
-                        // slopty: no History surface (ruled out).
-                    }),
-            )
-            .into_any_element()
-    }
+    // slopty: the empty pane's list is `pane_offers`' (one list with the `+` menu).
 
     // slopty: no accounts, sync or sign-in.
+
+    /// slopty: holds the strip's chips at `width` after a close by pointer, letting go by itself
+    /// after [`crate::surface_chrome::TAB_HOLD`].
+    fn hold_right_tab_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.right_tab_hold.hold(width, crate::clock::now(cx));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::surface_chrome::TAB_HOLD).await;
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
 
     fn close_right_plus(&mut self, cx: &mut Context<Self>) {
         if self.right_plus.begin_close(crate::clock::now(cx)) {
@@ -10258,9 +9987,7 @@ impl Shell {
     /// (icon · title · ✕) plus the `+` menu — the t3code RightPanelTabs bar,
     /// living in the top row; the diff options moved into the pane below.
     pub(crate) fn render_right_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        use crate::surface_chrome::{
-            TAB_CHIP_HEIGHT as CHIP_H, TAB_CHIP_SLOT as CHIP_SLOT, TAB_CHIP_WIDTH as CHIP_W,
-        };
+        use crate::surface_chrome::TAB_CHIP_HEIGHT as CHIP_H;
 
         let theme = Theme::of(cx).clone();
         // Heal drag state if the pointer was released outside the strip.
@@ -10269,6 +9996,20 @@ impl Shell {
         }
         let rows = self.right_surface_rows(cx);
         let count = rows.len();
+        // slopty: the chips fit the widest title, one width for the strip (drag maths stay
+        // uniform).
+        let widths =
+            crate::surface_chrome::tab_widths(rows.iter().map(|(_, title, ..)| title.as_ref()), cx);
+        // slopty: after a close by pointer the chips hold their width while it stays.
+        let (chip_w, held_moving) = self.right_tab_hold.width(
+            widths.chip,
+            crate::clock::now(cx),
+            crate::motion::reduced_motion(cx),
+        );
+        if held_moving {
+            self.motion_active.set(true);
+        }
+        let chip_slot = chip_w + crate::surface_chrome::CONTROL_GAP;
         let active = self.resolved_right_active(cx);
         let drag = self
             .right_tab_drag
@@ -10297,6 +10038,12 @@ impl Shell {
             // behind each chip. Stop at the scroller so the titlebar cannot
             // claim tab clicks, while wheel events still reach this scroller.
             .when(cfg!(target_os = "windows"), |strip| strip.occlude())
+            // slopty: the pointer leaving lets a held width go.
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered && this.right_tab_hold.release(crate::clock::now(cx)) {
+                    cx.notify();
+                }
+            }))
             .on_drag_move::<RightTabDrag>(cx.listener(
                 move |this, event: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
                     let payload = event.drag(cx);
@@ -10307,7 +10054,7 @@ impl Shell {
                     let rel_x = f32::from(event.event.position.x)
                         - f32::from(event.bounds.left())
                         - f32::from(scroll_for_drag.offset().x);
-                    let over = crate::terminal::panel::drop_index(rel_x, CHIP_SLOT, count);
+                    let over = crate::terminal::panel::drop_index(rel_x, chip_slot, count);
                     this.update_right_tab_drag_over(from, over, cx);
                 },
             ))
@@ -10340,7 +10087,7 @@ impl Shell {
             .map(crate::pickers::harness_brand_icon);
             let icon_path = match surface {
                 RightSurface::File(_) => icons::DOCUMENT,
-                RightSurface::Diff(_) => icons::LIST, // slopty: no History surface (ruled out).
+                RightSurface::Diff(_) => icons::FILE_DIFF, // slopty: the Changes glyph.
                 RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
@@ -10350,7 +10097,7 @@ impl Shell {
                     self.screen_surface_chosen(id, cx).map(|(id, _)| id).as_deref(),
                 ),
                 RightSurface::ModPane(_) => icons::WIDGET, // slopty:
-                RightSurface::Page(_) => icons::GLOBAL, // slopty:
+                RightSurface::Page(_) => icons::GLOBE, // slopty: one globe in the pane
                 RightSurface::Picker => icons::PLUS,
             };
             // Working chats and subagents swap their harness icon for the
@@ -10377,6 +10124,11 @@ impl Shell {
                 _ => false,
             };
             let ghost_title = title.clone();
+            // slopty: every chip names itself in full on hover: its detail (a file's path), or
+            // its title when the chip cuts it.
+            let tip = detail
+                .clone()
+                .or_else(|| widths.cut.get(ix).copied().unwrap_or(false).then(|| title.clone()));
             let workspace_path = self.workspace_path_for_surface(surface, cx);
             let accessible_name = detail.as_ref().unwrap_or(&title);
             let accessible_label = if dirty {
@@ -10400,7 +10152,8 @@ impl Shell {
                     .id(SharedString::from(format!("right-tab-favicon-{ix}")))
                     .role(gpui::Role::Image)
                     .aria_label("Page icon")
-                    .child(gpui::img(favicon).size(px(12.0)))
+                    // slopty: every leading glyph in the strip is 14 (item 21).
+                    .child(gpui::img(favicon).size(px(crate::surface_chrome::ICON_SIZE)))
                     .into_any_element()
             } else if matches!(surface, RightSurface::File(_)) {
                 crate::file_icons::icon(
@@ -10412,7 +10165,7 @@ impl Shell {
                 .into_any_element()
             } else if let Some((icon_path, Some(brand_color))) = harness_icon {
                 icon(icon_path)
-                    .size(px(12.0))
+                    .size(px(crate::surface_chrome::ICON_SIZE))
                     .text_color(brand_color.opacity(if is_active { 1.0 } else { 0.7 }))
                     .into_any_element()
             } else {
@@ -10428,16 +10181,22 @@ impl Shell {
                     title,
                     dirty,
                     leading,
+                    width: chip_w,
+                    close_hint: "Close tab",
                 },
                 &theme,
-                cx.listener(move |this, _, window, cx| {
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    // slopty: a close by pointer holds the strip's width (keys need no hold).
+                    if !event.is_keyboard() {
+                        this.hold_right_tab_width(chip_w, cx);
+                    }
                     this.close_right_surface(surface, window, cx);
                 }),
             )
             .aria_label(accessible_label)
             // slopty: the house tooltip chip, at the house delay.
-            .when_some(detail, |chip, detail| {
-                chip.tooltip(crate::settings::widgets::text_tooltip(detail))
+            .when_some(tip, |chip, tip| {
+                chip.tooltip(crate::settings::widgets::text_tooltip(tip))
                     .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
             })
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -10478,10 +10237,10 @@ impl Shell {
                     title: ghost_title,
                     workspace_path,
                 },
-                |payload, _point, _, cx| {
+                move |payload, _point, _, cx| {
                     let title = payload.title.clone();
                     cx.stop_propagation();
-                    cx.new(|_| SurfaceTabGhost { title })
+                    cx.new(|_| SurfaceTabGhost { title, width: chip_w })
                 },
             )
             // The chip's BlockMouse hitbox (the titlebar/scroll carve-out)
@@ -10514,9 +10273,9 @@ impl Shell {
             // ghost carries it.
             let wrapped: AnyElement = match drag {
                 Some((from, over, epoch, prev_over)) if ix != from => {
-                    let target = crate::terminal::panel::slide_offset(ix, from, over) * CHIP_SLOT;
+                    let target = crate::terminal::panel::slide_offset(ix, from, over) * chip_slot;
                     let start =
-                        crate::terminal::panel::slide_offset(ix, from, prev_over) * CHIP_SLOT;
+                        crate::terminal::panel::slide_offset(ix, from, prev_over) * chip_slot;
                     div()
                         .relative()
                         .child(chip.with_animation(
@@ -10527,7 +10286,7 @@ impl Shell {
                         .into_any_element()
                 }
                 Some((from, ..)) if ix == from => div()
-                    .w(px(CHIP_W))
+                    .w(px(chip_w))
                     .h(px(CHIP_H))
                     .flex_none()
                     .into_any_element(),
@@ -10538,22 +10297,8 @@ impl Shell {
         // The `+` — a small menu offering the available surfaces (t3 "Add panel
         // surface"); mirrors the picker cards.
         let plus_open = self.right_plus.get().is_some();
-        let plus_fade = "right-surface-add-fade";
-        let mut plus = div()
-            .id("right-surface-add")
-            .size(px(24.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                plus_fade,
-                crate::theme::wash(0.0),
-                crate::theme::wash(0.11),
-            ))
-            .hover_fade(plus_fade)
+        // slopty: the pane's one icon button (24, r 6, a 14 glyph, faded hover, deeper press).
+        let mut plus = crate::surface_chrome::icon_menu_button("right-surface-add", icons::PLUS, plus_open, &theme)
             .block_mouse_except_scroll()
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -10571,24 +10316,15 @@ impl Shell {
                     cx.notify();
                 }
             }))
-            // slopty: named with its key, out of the way while its menu is up; Tab reaches it,
-            // and its glyph is a 24 control's 14.
-            .role(gpui::Role::Button)
-            .tab_index(0)
-            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
-            .active(|style| style.bg(theme_pressed()))
+            // slopty: named with its key, out of the way while its menu is up.
+            .aria_expanded(plus_open)
             .map(|el| {
                 if plus_open {
                     el.aria_label("New tab")
                 } else {
                     el.action_hint("New tab", Keys::Action(Box::new(chrome_keys::NewRightTab)), cx)
                 }
-            })
-            .child(
-                icon(icons::PLUS)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
-            );
+            });
         if plus_open {
             let closing = self.right_plus.closing_at(crate::clock::now(cx));
             let menu = popover::popover_card(&theme)
@@ -10599,84 +10335,8 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .child(
-                            popover::menu_row(&theme, false, "right-plus-files")
-                                .id("right-plus-files-row")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_files_surface(window, cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::FOLDER_WITH_FILES)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Files")),
-                        )
-                        .child(
-                            popover::menu_row(&theme, false, "right-plus-browser")
-                                .id("right-plus-browser-row")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_browser_surface(None, window, cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::GLOBE)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Browser")),
-                        )
-                        .child(
-                            popover::menu_row(&theme, false, "right-plus-terminal")
-                                .id("right-plus-terminal-row")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.add_terminal_surface(cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::TERMINAL)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Terminal")),
-                        )
-                        // slopty: a remote window or desktop of the chat's machine, as the empty
-                        // pane's picker offers it.
-                        .child(
-                            popover::menu_row(&theme, false, "right-plus-screen")
-                                .id("right-plus-screen-row")
-                                .debug_selector(|| "right-plus-screen-row".into())
-                                .role(gpui::Role::MenuItem)
-                                .aria_label("Remote window")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.add_screen_surface(cx);
-                                    this.close_right_plus(cx);
-                                }))
-                                .child(
-                                    icon(icons::MONITOR)
-                                        .size(px(13.0))
-                                        .text_color(theme.text_muted),
-                                )
-                                .child(SharedString::from("Remote window")),
-                        )
-                        .when(self.space_git_detected(cx), |menu| {
-                            menu.child(
-                                popover::menu_row(&theme, false, "right-plus-diff")
-                                    .id("right-plus-diff-row")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_diff_surface(window, cx);
-                                        this.close_right_plus(cx);
-                                    }))
-                                    .child(
-                                        icon(icons::LIST)
-                                            .size(px(13.0))
-                                            .text_color(theme.text_muted),
-                                    )
-                                    .child(SharedString::from("Diffs")),
-                            )
-                            // slopty: no History surface (ruled out).
-                        }),
+                        // slopty: the empty pane's offers, in its order and names (`pane_offers`).
+                        .children(self.render_pane_offer_rows(&theme, cx)),
                 )
                 .into_any_element();
             plus = plus.relative().child(popover::anchored_menu_below_gap(
@@ -11118,6 +10778,7 @@ fn nav_history_button(
             .id(id)
             .debug_selector(move || id.to_owned())
             .role(gpui::Role::Button)
+            .aria_disabled(true) // slopty: says it is off, not only looks it.
             .action_hint(label, keys, cx)
             .size(px(24.0 + 2.0 * reach))
             .m(px(-reach))
@@ -11176,13 +10837,18 @@ fn header_icon_button_with(
         .justify_center()
         .rounded(px(6.0))
         // slopty __root.tsx header buttons: `transition-colors`.
-        .bg(motion::hover_blend(
-            &fade_key,
-            crate::theme::wash(0.0),
-            crate::theme::wash(0.11),
-        ))
-        .when(on, |drawn| drawn.bg(crate::theme::wash(0.09)))
-        .group_active(group.clone(), |style| style.bg(theme_pressed()))
+        // slopty: the theme's one table of wash steps, as every icon toggle's
+        // (`surface_chrome::icon_button_frame`): a latched button under the pointer still
+        // answers, a step past its latch.
+        .bg({
+            let (rest, hover) = if on {
+                (crate::theme::selected_wash(), crate::theme::selected_hover_wash())
+            } else {
+                (crate::theme::wash(0.0), crate::theme::control_hover())
+            };
+            motion::hover_blend(&fade_key, rest, hover)
+        })
+        .group_active(group.clone(), |style| style.bg(crate::theme::pressed_wash()))
         .child(glyph);
     div()
         .id(id)
@@ -11248,7 +10914,6 @@ impl Render for Shell {
         for files in hidden_explorers {
             files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
         }
-        settings::wallpaper::preload(cx);
         // slopty: voice removed.
         self.navigation_focus
             .remember(&self.shortcut_focus, window, cx);
@@ -11543,9 +11208,6 @@ impl Render for Shell {
                     this.toggle_sidebar(cx)
                 }
             }))
-            .on_action(cx.listener(|this, _: &RandomWallpaper, _, cx| {
-                this.random_wallpaper(cx);
-            }))
             // slopty: no pull-request pages.
             // New chat works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
@@ -11706,10 +11368,11 @@ impl Render for Shell {
                         // slopty: voice removed.
                         .child(drag)
                         .children(overlays);
+                    let frame = self.compact_frame(page, window, cx);
                     break 'ready root
                         .child(sidebar_tone)
                         // slopty: clear of a phone's or tablet's edges.
-                        .child(motion::fade_in("phase-app", self.compact_frame(page, window, cx)));
+                        .child(self.route_outlet(frame));
                 }
                 // slopty: the phone's Sessions page in place of the columns.
                 if let Some(page) = self.render_compact_sessions(window, cx) {
@@ -11946,11 +11609,11 @@ impl Render for Shell {
                             .into_any_element(),
                         None => self.render_titlebar_cluster(cx),
                     })
-                    .children(self.render_sidebar_options_titlebar(cx).filter(|_| !self.compact()))
                     .children(overlays);
+                let frame = self.compact_frame(page, window, cx);
                 root.child(sidebar_tone)
                     // slopty: clear of a phone's or tablet's edges.
-                    .child(motion::fade_in("phase-app", self.compact_frame(page, window, cx)))
+                    .child(self.route_outlet(frame))
             }
             GatePhase::Loading => root, // splash overlay covers boot
             GatePhase::Failed(error) => { // slopty: no accounts, sync or sign-in.
@@ -12332,7 +11995,6 @@ mod tests {
             resolve_shell_escape(
                 "escape",
                 false,
-                true,
                 Route::Chat,
                 Some("chat-a"),
                 Indicator::Working,
@@ -12344,7 +12006,6 @@ mod tests {
             resolve_shell_escape(
                 "escape",
                 false,
-                true,
                 Route::Chat,
                 Some("chat-b"),
                 Indicator::AwaitingInput,
@@ -12494,7 +12155,6 @@ mod tests {
             resolve_shell_escape(
                 "escape",
                 true,
-                true,
                 Route::Chat,
                 Some("chat-a"),
                 Indicator::Working,
@@ -12517,7 +12177,6 @@ mod tests {
                 resolve_shell_escape(
                     "escape",
                     false,
-                    true,
                     route,
                     selected,
                     indicator,
@@ -12530,29 +12189,12 @@ mod tests {
             resolve_shell_escape(
                 "enter",
                 true,
-                true,
                 Route::Chat,
                 Some("chat-a"),
                 Indicator::Working,
                 false,
             ),
             ShellEscapeOutcome::OtherKey
-        );
-    }
-
-    #[test]
-    fn escape_interrupt_is_opt_in() {
-        assert_eq!(
-            resolve_shell_escape(
-                "escape",
-                false,
-                false,
-                Route::Chat,
-                Some("chat-a"),
-                Indicator::Working,
-                false,
-            ),
-            ShellEscapeOutcome::Ignored
         );
     }
 
@@ -12602,9 +12244,11 @@ mod tests {
     fn default_composer_width_preserves_main_resizing_and_many_attachment_rows() {
         for panel_width in (0..=1600).step_by(8) {
             let panel_width = panel_width as f32;
+            // slopty: the Default preset's narrowest column (P9), padded as the composer is.
+            let column = settings::ConversationWidth::Default.cap(1000.0);
             assert_eq!(
-                composer_target_width(panel_width, settings::TRANSCRIPT_WIDTH_DEFAULT, true),
-                panel_width.min(crate::composer::COMPOSER_MAX_WIDTH),
+                composer_target_width(panel_width, column, true),
+                panel_width.min(column + 2.0 * Theme::SPACE_LG),
                 "default width must preserve main's responsive layout at {panel_width}px"
             );
         }
@@ -13306,7 +12950,9 @@ mod exit_regressions {
                     "file content stays painted through the closing mask"
                 );
                 let frame_time = shell.render_time;
-                shell.render_time = Some(shell.right_tween.unwrap().started + duration);
+                // slopty: the close runs on its own spec (`PANEL_RESIZE`), read off the tween.
+                let close = shell.right_tween.unwrap();
+                shell.render_time = Some(close.started + close.duration);
                 shell.suspend_hidden_right_images(cx);
                 assert!(
                     !files.read(cx).test_images_visible(),
@@ -13347,10 +12993,8 @@ mod exit_regressions {
                 cx,
             )
         });
-        for (index, effect) in settings::NewThreadBackgroundEffect::ALL
-            .into_iter()
-            .enumerate()
-        {
+        for index in 0..5 {
+            let match_wallpaper = index % 2 == 1;
             let open_links_in_slopty = index % 2 == 0;
             let terminal_family = if open_links_in_slopty {
                 crate::typography::UiFontFamily::System
@@ -13364,7 +13008,7 @@ mod exit_regressions {
             };
             let terminal_size = 15.0 + index as f32;
             let code_size = 11.0 + index as f32;
-            let transcript_width = 736.0 + 16.0 * index as f32;
+            let conversation_width = settings::ConversationWidth::ALL[index % 3];
             let geometry = Some(settings::WindowGeometry {
                 display_uuid: Some(uuid::Uuid::from_u128(7)),
                 x: 80.0 + index as f32,
@@ -13378,11 +13022,8 @@ mod exit_regressions {
                     // cached snapshot. Include a previously queued geometry save.
                     shell.settings.sidebar_width = 280.0;
                     shell.schedule_save(cx);
-                    settings::set_new_thread_background_effect(effect, cx);
                     settings::update(settings::SavePolicy::Immediate, cx, |settings| {
-                        settings.wallpaper_folder = Some(dir.path().join("wallpapers"));
-                        settings.wallpaper_source = Some(dir.path().join("wallpapers/current.png"));
-                        settings.wallpaper_history = vec![dir.path().join("wallpapers/current.png")];
+                        settings.wallpaper_theme_colors = match_wallpaper;
                         settings.window_geometry = geometry;
                         settings.open_web_links_in_slopty = open_links_in_slopty;
                         // slopty: no pull-request pages.
@@ -13390,14 +13031,7 @@ mod exit_regressions {
                         settings.terminal_font_size = terminal_size;
                         settings.code_font_family = code_family.clone();
                         settings.code_font_size = code_size;
-                        settings.transcript_width = transcript_width;
-                        settings.skill_completion_by_harness.insert(
-                            slopty_view_proto::HarnessId::CLAUDE_CODE,
-                            settings::SkillCompletionSettings {
-                                dollar: open_links_in_slopty,
-                                separate_from_slash: true,
-                            },
-                        );
+                        settings.conversation_width = conversation_width;
                     });
                     for step in 0..3 {
                         shell.settings.sidebar_width = 290.0 + step as f32;
@@ -13405,50 +13039,27 @@ mod exit_regressions {
                         shell.settings.terminal_height = 300.0 + step as f32;
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
-                        assert_eq!(current.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
-                        assert_eq!(current.wallpaper_folder, Some(dir.path().join("wallpapers")));
-                        assert_eq!(
-                            current.wallpaper_source,
-                            Some(dir.path().join("wallpapers/current.png"))
-                        );
+                        assert_eq!(current.wallpaper_theme_colors, match_wallpaper);
                         // slopty: no pull-request pages.
                         assert_eq!(current.window_geometry, geometry);
-                        assert_eq!(current.new_thread_background_effect, effect);
                         assert_eq!(current.open_web_links_in_slopty, open_links_in_slopty);
                         assert_eq!(current.terminal_font_family, terminal_family);
                         assert_eq!(current.terminal_font_size, terminal_size);
                         assert_eq!(current.code_font_family, code_family);
                         assert_eq!(current.code_font_size, code_size);
-                        assert_eq!(current.transcript_width, transcript_width);
-                        assert_eq!(
-                            current
-                                .skill_completion(slopty_view_proto::HarnessId::CLAUDE_CODE)
-                                .dollar,
-                            open_links_in_slopty
-                        );
-                        assert!(
-                            current
-                                .skill_completion(slopty_view_proto::HarnessId::CLAUDE_CODE)
-                                .separate_from_slash
-                        );
+                        assert_eq!(current.conversation_width, conversation_width);
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
                     // slopty: no pull-request pages.
                     assert_eq!(loaded.window_geometry, geometry);
-                    assert_eq!(loaded.wallpaper_history, vec![dir.path().join("wallpapers/current.png")]);
-                    assert_eq!(loaded.wallpaper_folder, Some(dir.path().join("wallpapers")));
-                    assert_eq!(
-                        loaded.wallpaper_source,
-                        Some(dir.path().join("wallpapers/current.png"))
-                    );
-                    assert_eq!(loaded.new_thread_background_effect, effect);
+                    assert_eq!(loaded.wallpaper_theme_colors, match_wallpaper);
                     assert_eq!(loaded.open_web_links_in_slopty, open_links_in_slopty);
                     assert_eq!(loaded.terminal_font_family, terminal_family);
                     assert_eq!(loaded.terminal_font_size, terminal_size);
                     assert_eq!(loaded.code_font_family, code_family);
                     assert_eq!(loaded.code_font_size, code_size);
-                    assert_eq!(loaded.transcript_width, transcript_width);
+                    assert_eq!(loaded.conversation_width, conversation_width);
                     assert_eq!(loaded.sidebar_width, 292.0);
                     assert_eq!(loaded.right_pane_width, 542.0);
                     assert_eq!(loaded.terminal_height, 302.0);
@@ -13482,13 +13093,11 @@ mod exit_regressions {
         let before = cx.update(|cx| settings::current(cx));
         window
             .update(cx, |shell, _, cx| {
-                // Toggles that write the store directly (the General page's
-                // Compact mode, notification and sidebar switches, ...).
-                settings::set_transcript_compact_mode(!before.transcript_compact_mode, cx);
+                // Toggles that write the store directly (the notification and diff switches,
+                // ...). slopty: Compact mode and Esc-to-stop are no longer settings.
                 settings::update(SavePolicy::Immediate, cx, |s| {
                     s.notifications_enabled = !before.notifications_enabled;
-                    s.sidebar_show_branch = !before.sidebar_show_branch;
-                    s.escape_stops_active_agent = !before.escape_stops_active_agent;
+                    s.diff_wrap = !before.diff_wrap;
                 });
                 // Navigating away saves the shell's own working copy.
                 shell.remember_settings_section(SettingsSection::Notifications, cx);
@@ -13498,19 +13107,11 @@ mod exit_regressions {
             })
             .unwrap();
         let after = cx.update(|cx| settings::current(cx));
-        assert_eq!(
-            after.transcript_compact_mode,
-            !before.transcript_compact_mode
-        );
         assert_eq!(after.notifications_enabled, !before.notifications_enabled);
-        assert_eq!(after.sidebar_show_branch, !before.sidebar_show_branch);
-        assert_eq!(
-            after.escape_stops_active_agent,
-            !before.escape_stops_active_agent
-        );
+        assert_eq!(after.diff_wrap, !before.diff_wrap);
         assert_eq!(
             after.settings_section,
-            SettingsSection::Notifications.canonical()
+            SettingsSection::Notifications
         );
         assert_eq!(after.sidebar_width, before.sidebar_width + 10.0);
     }
@@ -13607,14 +13208,12 @@ mod exit_regressions {
                 // The Appearance page writes these straight to the store,
                 // outside the shell's working copy.
                 settings::update(SavePolicy::Immediate, cx, |settings| {
-                    settings.reduce_motion = crate::motion::ReduceMotion::On;
                     settings.pause_animations_in_background = true;
                 });
                 // Any shell-owned change (sidebar width, panels) republishes
                 // the working copy; it must not revert the motion choices.
                 shell.schedule_save(cx);
                 let saved = settings::current(cx);
-                assert_eq!(saved.reduce_motion, crate::motion::ReduceMotion::On);
                 assert!(saved.pause_animations_in_background);
             })
             .unwrap();
@@ -13647,9 +13246,7 @@ mod exit_regressions {
                 // Voice, transcript and diff controls save straight to the
                 // store. None of them is known to the Shell.
                 settings::update(SavePolicy::Immediate, cx, |settings| {
-                    // slopty: voice and dictation removed.
-                    settings.transcript_compact_mode = true;
-                    settings.code_fences_fit_content = true;
+                    // slopty: voice and dictation removed; no compact mode or fitted fences.
                     settings.diff_split = true;
                     settings.diff_wrap = true;
                 });
@@ -13658,9 +13255,6 @@ mod exit_regressions {
                 shell.settings.sidebar_width = 300.0;
                 shell.schedule_save(cx);
                 let saved = settings::current(cx);
-                // slopty: voice and dictation removed.
-                assert!(saved.transcript_compact_mode);
-                assert!(saved.code_fences_fit_content);
                 assert!(saved.diff_split);
                 assert!(saved.diff_wrap);
                 assert_eq!(saved.settings_section, SettingsSection::Appearance);
@@ -13668,12 +13262,12 @@ mod exit_regressions {
                 // An outside change to a field the Shell also holds still wins
                 // once the Shell has nothing newer of its own.
                 settings::update(SavePolicy::Immediate, cx, |settings| {
-                    settings.transcript_compact_mode = false; // slopty: voice and dictation removed.
+                    settings.diff_split = false; // slopty: voice, dictation and compact mode removed.
                     settings.sidebar_width = 320.0;
                 });
                 shell.schedule_save(cx);
                 let saved = settings::current(cx);
-                assert!(!saved.transcript_compact_mode); // slopty: voice and dictation removed.
+                assert!(!saved.diff_split); // slopty: voice, dictation and compact mode removed.
                 assert_eq!(saved.sidebar_width, 320.0);
                 assert_eq!(shell.settings.sidebar_width, 320.0);
             })
@@ -14792,6 +14386,243 @@ impl Shell {
     }
 }
 
+// slopty: the jump button's shape and arrival (opencode's, `.research/opencode-study-2026-10-19.md`
+// item 18): 32 × 28 with corners of 8, rising 8 px into place over 200 ms on an ease-out.
+const JUMP_WIDTH: f32 = 32.0;
+const JUMP_HEIGHT: f32 = 28.0;
+const JUMP_RADIUS: f32 = 8.0;
+const JUMP_RISE: f32 = 8.0;
+// slopty: in on the quint ease-out over 200 ms, out over 300 ms on (0.7, 0, 0.84, 0), gathering
+// speed as it sinks back the way it came (HextaUI's `MessageScrollerButton`;
+// design-inspiration item 11). Its 0.95 scale is left out: a div has no scale here.
+const JUMP_IN: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT_QUINT);
+const JUMP_OUT: motion::MotionSpec =
+    motion::MotionSpec::new(300, motion::CubicBezier::new(0.7, 0.0, 0.84, 0.0));
+/// The arrow's side margins: with no count the button, its 1 px border with them, is
+/// [`JUMP_WIDTH`] wide.
+const JUMP_PAD: f32 = (JUMP_WIDTH - 16.0 - 2.0) / 2.0;
+
+thread_local! {
+    /// slopty: each jump button's last showing, when it began to leave, and how many leaves it
+    /// has begun.
+    static JUMP_SHOWN: std::cell::RefCell<JumpMarks> = std::cell::RefCell::new(JumpMarks::new());
+}
+
+type JumpMarks = std::collections::HashMap<&'static str, (bool, Option<std::time::Instant>, u64)>;
+
+/// slopty: whether `key`'s jump button is drawn at `now`: `None` gone, `Some(None)` shown, and
+/// `Some(Some(n))` leaving, `n` naming this leave so its animation plays once.
+fn jump_presence(key: &'static str, shown: bool, now: std::time::Instant) -> Option<Option<u64>> {
+    JUMP_SHOWN.with(|marks| {
+        let mut marks = marks.borrow_mut();
+        let (was, leave, leaves) = marks.entry(key).or_insert((false, None, 0));
+        let result = if shown {
+            *leave = None;
+            Some(None)
+        } else {
+            if *was {
+                *leave = Some(now);
+                *leaves += 1;
+            }
+            let leaving = JUMP_OUT.total().mul_f32(motion::speed_scale());
+            leave
+                .filter(|at| now.saturating_duration_since(*at) < leaving)
+                .map(|_| Some(*leaves - 1))
+        };
+        *was = shown;
+        result
+    })
+}
+
+/// slopty: the jump button leaving: faded out and sunk [`JUMP_RISE`] over [`JUMP_OUT`].
+fn jump_out(key: &'static str, leaving: Option<u64>, button: AnyElement) -> AnyElement {
+    let Some(n) = leaving else {
+        return button;
+    };
+    div()
+        .child(button)
+        .with_animation(
+            gpui::ElementId::NamedInteger(SharedString::from(format!("{key}-out")), n),
+            JUMP_OUT.animation(),
+            |el, t| el.relative().opacity(1.0 - t).top(px(JUMP_RISE * t)),
+        )
+        .into_any_element()
+}
+
+/// slopty: the button that glides a transcript back to its end, `on_click`.
+fn jump_button(
+    anim_key: &'static str,
+    hover_key: &'static str,
+    unseen: usize,
+    (reduced, now): (bool, std::time::Instant),
+    theme: &Theme,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    // slopty: opencode's jump button (`.research/opencode-study-2026-10-19.md` item 18): the
+    // arrow alone, 32 × 28 with corners of 8, on the popover's frosted surface, lifted and
+    // ringed by a halo of the page's own colour so the text scrolling under it never touches
+    // its edge; it says what it does to a screen reader and in its tooltip.
+    let theme = theme.for_popup();
+    let glass = theme.is_frost();
+    // On frost the hover's wash rides a layer of its own over the glass (a div has one fill).
+    let wash = if glass {
+        motion::hover_blend(hover_key, gpui::transparent_black(), theme.glass_hover())
+    } else {
+        gpui::transparent_black()
+    };
+    let page = if glass { theme.glass() } else { theme.surface };
+    let button = div()
+        .id(anim_key)
+        .role(gpui::Role::Button)
+        .aria_label("Scroll to bottom")
+        .tooltip(crate::settings::widgets::text_tooltip("Scroll to bottom"))
+        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+        // slopty: as wide as the arrow and the count it says; with none, [`JUMP_WIDTH`].
+        .min_w(px(JUMP_WIDTH))
+        .h(px(JUMP_HEIGHT))
+        .flex_none()
+        .rounded(px(JUMP_RADIUS))
+        .border_1()
+        .border_color(theme.border)
+        .bg(if glass {
+            crate::popover::surface_bg(&theme)
+        } else {
+            motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover)
+        })
+        .when(!glass, |button| {
+            let shadow = |color, y: f32, blur: f32, spread: f32| gpui::BoxShadow {
+                color,
+                offset: gpui::point(px(0.0), px(y)),
+                blur_radius: px(blur),
+                spread_radius: px(spread),
+                inset: false,
+            };
+            // The halo first, so the lift's shade lies over it.
+            button.shadow(vec![
+                shadow(page, 2.0, 8.0, 0.0),
+                shadow(gpui::hsla(0.0, 0.0, 0.0, 0.1), 4.0, 6.0, -1.0),
+                shadow(gpui::hsla(0.0, 0.0, 0.0, 0.1), 2.0, 4.0, -2.0),
+            ])
+        })
+        .hover_fade(hover_key)
+        .cursor_pointer()
+        .on_click(on_click)
+        .child(
+            div()
+                .h_full()
+                .px(px(JUMP_PAD))
+                .rounded(px(JUMP_RADIUS - 1.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(wash)
+                .child(crate::icons::icon(crate::icons::ARROW_DOWN).size(px(16.0)).text_color(theme.text_muted))
+                // slopty: "↓ 3 new", the count in the accent as new content is, each part
+                // rolled in and out (`roll_text`), the button's width gliding with them.
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .text_size(crate::typography::ui_rems(12.5))
+                        .child(div().text_color(theme.accent).child(crate::roll_text::roll_text(
+                            format!("{anim_key}-count"),
+                            if unseen > 0 { format!(" {unseen}").into() } else { SharedString::default() },
+                            reduced,
+                            now,
+                        )))
+                        .child(div().text_color(theme.text_muted).child(crate::roll_text::roll_text(
+                            format!("{anim_key}-new"),
+                            if unseen > 0 { " new".into() } else { SharedString::default() },
+                            reduced,
+                            now,
+                        ))),
+                ),
+        );
+    let button = jump_in(anim_key, button.debug_selector(move || anim_key.to_owned()));
+    crate::frost::frosted(JUMP_RADIUS, crate::frost::MENU_BLUR, button).into_any_element()
+}
+
+/// slopty: the jump button arriving: faded in and risen [`JUMP_RISE`] into place.
+fn jump_in<E>(id: impl Into<gpui::ElementId>, element: E) -> gpui::AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    element.with_animation(id, JUMP_IN.animation(), |el, t| {
+        el.relative().opacity(t).top(px(JUMP_RISE * (1.0 - t)))
+    })
+}
+
+#[cfg(test)]
+mod jump_button_tests {
+    use std::rc::Rc;
+
+    use super::*;
+    use gpui::TestAppContext;
+
+    struct Host(Rc<std::cell::Cell<u32>>, usize);
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let clicks = Rc::clone(&self.0);
+            let unseen = self.1;
+            // As the transcript lays it out: a row that centres it at its own width.
+            div().size_full().flex().justify_center().child(jump_button("jump-test", "jump-test-hover", unseen, (true, std::time::Instant::now()), Theme::of(cx), move |_, _, _| {
+                clicks.set(clicks.get() + 1);
+            }))
+        }
+    }
+
+    /// slopty: the jump to the end is the arrow alone on a 32 × 28 button (opencode's), named
+    /// for a screen reader, and a click on it jumps.
+    #[gpui::test]
+    fn the_jump_button_is_an_arrow_that_jumps(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let clicks = Rc::new(std::cell::Cell::new(0));
+        let host = Rc::clone(&clicks);
+        let (view, cx) = cx.add_window_view(move |_, _| Host(host, 0));
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("jump-test").expect("the button");
+        assert_eq!((f32::from(bounds.size.width), f32::from(bounds.size.height)), (JUMP_WIDTH, JUMP_HEIGHT));
+        let named = cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            window
+                .a11y_tree()
+                .is_some_and(|tree| tree.nodes.iter().any(|(_, node)| node.label() == Some("Scroll to bottom")))
+        });
+        assert!(named, "named for a screen reader");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+        assert_eq!(clicks.get(), 1, "a click jumps");
+
+        // slopty: rows that arrived while the person read above widen it to say so (item 11).
+        view.update(cx, |host, cx| {
+            host.1 = 3;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let wide = cx.debug_bounds("jump-test").expect("the button");
+        assert!(f32::from(wide.size.width) > JUMP_WIDTH + 20.0, "it says \"3 new\": {wide:?}");
+    }
+
+    /// slopty: the jump button leaves over 300 ms, and plays its leave once.
+    #[test]
+    fn the_jump_button_plays_one_leave_then_goes() {
+        let start = std::time::Instant::now();
+        assert_eq!(jump_presence("jump-leave-test", false, start), None, "never shown");
+        assert_eq!(jump_presence("jump-leave-test", true, start), Some(None));
+        assert_eq!(jump_presence("jump-leave-test", false, start), Some(Some(0)), "leaving");
+        let mid = start + Duration::from_millis(150);
+        assert_eq!(jump_presence("jump-leave-test", false, mid), Some(Some(0)), "the same leave");
+        assert_eq!(jump_presence("jump-leave-test", false, start + Duration::from_millis(301)), None, "gone");
+        assert_eq!(jump_presence("jump-leave-test", true, mid), Some(None));
+        assert_eq!(jump_presence("jump-leave-test", false, mid), Some(Some(1)), "a new leave");
+    }
+}
+
 #[cfg(test)]
 mod right_tab_mouse_regressions {
     use super::*;
@@ -14879,6 +14710,54 @@ mod right_tab_mouse_regressions {
             "close is not after the title"
         );
         assert_eq!(close.right(), tab.right() - px(4.));
+    }
+
+    // slopty: a pane's tabs fit their titles, one width for the strip, so a title never cuts
+    // beside an empty strip ("Working t…") and a drag's slots stay uniform.
+    #[gpui::test]
+    fn right_tabs_fit_their_widest_title(cx: &mut TestAppContext) {
+        use crate::surface_chrome::{TAB_CHIP_MAX_WIDTH, TAB_CHIP_MIN_WIDTH, tab_widths};
+        let (shell, cx) = setup(cx);
+        let widths = shell.read_with(cx, |shell, cx| {
+            let rows = shell.right_surface_rows(cx);
+            tab_widths(rows.iter().map(|(_, title, ..)| title.as_ref()), cx)
+        });
+        assert_eq!(widths.cut, [false, false], "both titles read whole");
+        for (ix, id) in ["right-surface-tab-0", "right-surface-tab-1"].into_iter().enumerate() {
+            let tab = cx.debug_bounds(id).unwrap();
+            assert_eq!(f32::from(tab.size.width), widths.chip, "tab {ix} takes the strip's width");
+        }
+        cx.update(|_, cx| {
+            let long = "a title far longer than any pane tab should ever draw in full";
+            let fitted = tab_widths(["Working tree", "a"], cx);
+            assert!(fitted.chip > TAB_CHIP_MIN_WIDTH && fitted.cut == [false, false], "{fitted:?}");
+            assert_eq!(tab_widths(["a"], cx).chip, TAB_CHIP_MIN_WIDTH);
+            let capped = tab_widths([long, "a"], cx);
+            assert_eq!(capped.chip, TAB_CHIP_MAX_WIDTH);
+            assert_eq!(capped.cut, [true, false], "only the long title is cut");
+        });
+    }
+
+    // slopty: the side pane's splitter moves 16 pt a key, within the pane's bounds.
+    #[gpui::test]
+    fn the_side_pane_splitter_nudges_within_its_bounds(cx: &mut TestAppContext) {
+        let (shell, cx) = setup(cx);
+        cx.update(|_, cx| {
+            shell.update(cx, |shell, cx| {
+                let start = shell.settings.right_pane_width;
+                shell.nudge_right_pane(-RIGHT_PANE_NUDGE, cx);
+                assert_eq!(shell.settings.right_pane_width, (start - RIGHT_PANE_NUDGE).max(RIGHT_PANE_MIN));
+                for _ in 0..200 {
+                    shell.nudge_right_pane(-RIGHT_PANE_NUDGE, cx);
+                }
+                assert_eq!(shell.settings.right_pane_width, RIGHT_PANE_MIN, "never under its least");
+                for _ in 0..400 {
+                    shell.nudge_right_pane(RIGHT_PANE_NUDGE, cx);
+                }
+                let max = shell.surface_max_width(cx).max(RIGHT_PANE_MIN);
+                assert_eq!(shell.settings.right_pane_width, max, "never past what the window holds");
+            });
+        });
     }
 
     #[gpui::test]
@@ -15260,17 +15139,15 @@ mod settings_modal_regressions {
                 let selected = shell.state.read(cx).selected_chat.clone();
                 for section in SettingsSection::ALL {
                     shell.open_settings(section, cx);
-                    assert_eq!(shell.route, Route::Settings(section.canonical()));
+                    assert_eq!(shell.route, Route::Settings(section));
                     assert_eq!(shell.nav.current().clone(), history);
                     assert_eq!(shell.state.read(cx).selected_chat, selected);
                     shell.toggle_settings(cx);
                     assert_eq!(shell.route, Route::Chat);
                     assert!(!shell.settings_focus_pending);
                     shell.toggle_settings(cx);
-                    assert_eq!(shell.route, Route::Settings(section.reopenable()));
+                    assert_eq!(shell.route, Route::Settings(section));
                 }
-                shell.open_settings(SettingsSection::Agents, cx);
-                assert_eq!(shell.route, Route::Settings(SettingsSection::Harnesses));
                 shell.close_settings(cx);
                 assert_eq!(shell.route, Route::Chat);
                 assert_eq!(shell.nav.current().clone(), history);
@@ -15308,19 +15185,8 @@ mod settings_modal_regressions {
     }
 
     #[test]
-    fn remembered_sections_reopen_only_where_the_nav_can_show_them() {
-        assert_eq!(
-            SettingsSection::Shortcuts.reopenable(),
-            SettingsSection::Shortcuts
-        );
-        // The legacy Accounts alias lands on the page that absorbed it.
-        assert_eq!(
-            SettingsSection::Agents.reopenable(),
-            SettingsSection::Harnesses
-        );
-        // slopty: appshots removed.
+    fn every_section_reads_back_from_its_name() {
         for section in SettingsSection::ALL {
-            assert!(section.reopenable().visible_in_nav(), "{section:?}");
             assert_eq!(SettingsSection::from_slug(section.slug()), Some(section));
         }
     }
@@ -15332,14 +15198,9 @@ mod settings_modal_regressions {
             settings_open_route("settings", remembered),
             Some(SettingsSection::Notifications)
         );
-        assert_eq!(
-            settings_open_route("settings", SettingsSection::Agents),
-            Some(SettingsSection::Harnesses)
-        );
         for (route, section) in [
             ("settings/devices", SettingsSection::Devices),
             ("settings/providers", SettingsSection::Harnesses),
-            ("settings/agents", SettingsSection::Harnesses),
             ("settings/harnesses", SettingsSection::Harnesses),
             ("settings/general", SettingsSection::General),
             ("settings/conversations", SettingsSection::General),
@@ -15451,19 +15312,13 @@ mod settings_modal_regressions {
                 assert_eq!(shell.route, Route::Settings(SettingsSection::Appearance));
                 shell.close_settings(cx);
 
-                // Legacy aliases are remembered as the page they resolve to.
-                shell.open_settings(SettingsSection::Agents, cx);
-                assert_eq!(shell.settings.settings_section, SettingsSection::Harnesses);
-                shell.close_settings(cx);
-                shell.toggle_settings(cx);
-                assert_eq!(shell.route, Route::Settings(SettingsSection::Harnesses));
                 settings::flush(cx);
             })
             .unwrap();
         // It survives a restart.
         assert_eq!(
             settings::UiSettings::load(dir.path()).settings_section,
-            SettingsSection::Harnesses
+            SettingsSection::Appearance
         );
     }
 
@@ -15580,7 +15435,6 @@ mod settings_modal_regressions {
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
-            shell.settings.sidebar_organization = SidebarOrganization::ByStatus;
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
@@ -15595,6 +15449,9 @@ mod settings_modal_regressions {
                     })
                     .collect();
             });
+            // The gate and splash are set behind the shell's back: it draws them on its next
+            // frame only when told.
+            cx.notify();
         });
         crate::motion::run_on(cx.executor());
         let settle = |cx: &mut gpui::VisualTestContext, wait: std::time::Duration| {

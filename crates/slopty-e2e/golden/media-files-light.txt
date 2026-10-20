@@ -1,16 +1,21 @@
 Window
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Chart:…
 Status │ Done
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
-Article │ Claude Code
-Button │ Tool mcp__slopty__show_page
+Splitter │ Resize sidebar
+Article │ You
+Paragraph │ Show the files
+Button │ Copy message
+Button │ Rewind…
 Group │ Page: Report │ live
 Button │ Copy image
 Button │ Open in pane
 Image │ page 1 of 1 │ drawn
-Button │ Tool mcp__slopty__show_page
 Group │ Page: Latency │ live
 Button │ Copy table
 Button │ Open in pane
@@ -40,7 +45,7 @@ MultilineTextInput │ Do anything… (focused)
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
+Button │ Scroll to bottom
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel
@@ -49,5 +54,4 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options
 Button │ Back to your prompt: Show the files

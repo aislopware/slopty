@@ -286,132 +286,59 @@ impl Render for ArchivedPage {
                     device_names.get(&chat.device_id).cloned().map(Into::into);
                 let at = chat.last_message_at.unwrap_or(chat.created_at);
                 let time_ago: SharedString = crate::state::format_time_ago(at, now).into();
-                let location: Option<SharedString> =
-                    crate::state::chat_location(&chat).map(Into::into);
+                // slopty: where it ran as the app says it everywhere ("project @ device"), then
+                // its branch, as one meta line.
+                let place: Option<SharedString> = place_of(&chat, device.as_deref()).map(Into::into);
+                let branch: Option<SharedString> = chat
+                    .branch
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|branch| !branch.is_empty())
+                    .map(|branch| SharedString::from(branch.to_owned()));
                 let is_busy = busy.as_deref() == Some(chat.id.as_str());
                 let chat_id = chat.id.clone();
-                // slopty settings.archived.tsx row: archive tile, medium title
-                // + tabular time, quiet device · location meta, Unarchive.
-                div()
+                // slopty: a card's row like every other page's: its tile, its title and meta, its
+                // time and Unarchive.
+                let meta: Vec<AnyElement> = place
+                    .into_iter()
+                    .chain(branch)
+                    .map(|fragment| div().min_w_0().truncate().child(fragment).into_any_element())
+                    .collect();
+                widgets::card_row(&theme, ix == 0)
                     .id(("archived-row", ix))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(12.0))
-                    .rounded(px(8.0))
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .hover(|s| s.bg(crate::theme::ink(0.03)))
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(px(32.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                crate::icons::icon(crate::icons::ARCHIVE_MINIMALISTIC)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted.opacity(0.6)),
-                            ),
-                    )
+                    .flex_nowrap()
+                    .child(widgets::row_tile(&theme, crate::icons::ARCHIVE_MINIMALISTIC))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(crate::typography::ui_rems(13.0))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text)
-                                            .child(title),
-                                    )
-                                    // slopty: tabular figures, and the full date on hover (M39).
-                                    .child(
-                                        div()
-                                            .id(("archived-time", ix))
-                                            .flex_none()
-                                            .font_features(crate::typography::tabular())
-                                            .text_size(crate::typography::ui_rems(11.0))
-                                            .text_color(theme.text_muted)
-                                            .tooltip(widgets::text_tooltip(
-                                                absolute_time(at, now),
-                                            ))
-                                            .tooltip_show_delay(widgets::TOOLTIP_DELAY)
-                                            .child(time_ago),
-                                    ),
-                            )
-                            .child({
-                                // device · location, separator at the line's
-                                // own tone (slopty: a plain span inheriting
-                                // `text-muted-foreground/55`).
-                                let mut meta = div()
-                                    .mt(px(2.0))
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(theme.text_muted);
-                                let both = device.is_some() && location.is_some();
-                                if let Some(device) = device {
-                                    meta = meta.child(device);
-                                }
-                                if both {
-                                    meta = meta.child(SharedString::from("·"));
-                                }
-                                if let Some(location) = location {
-                                    meta = meta.child(div().min_w_0().truncate().child(location));
-                                }
-                                meta
-                            }),
+                            .child(widgets::row_title(&theme, title).truncate())
+                            .when(!meta.is_empty(), |el| el.child(widgets::meta_line(&theme, meta))),
+                    )
+                    // slopty: tabular figures, and the full date on hover (M39).
+                    .child(
+                        div()
+                            .id(("archived-time", ix))
+                            .flex_none()
+                            .font_features(crate::typography::tabular())
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_muted)
+                            .tooltip(widgets::text_tooltip(absolute_time(at, now)))
+                            .tooltip_show_delay(widgets::TOOLTIP_DELAY)
+                            .child(time_ago),
                     )
                     .child(
-                        // Keep the action visible without list-wide hover invalidation.
-                        div()
+                        widgets::action_button_when(&theme, widgets::ActionTone::Quiet, !is_busy)
                             .id(("unarchive", ix))
                             .flex_none()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(10.0))
-                            .py(px(4.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.text_muted)
-                            .when(is_busy, |el| {
-                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
-                            })
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.surface_raised).text_color(theme.text))
                             .tab_index(0)
                             .role(gpui::Role::Button)
                             .aria_label("Unarchive") // slopty: named in the accessibility tree.
-                            .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
+                            .aria_disabled(is_busy)
+                            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.unarchive(chat_id.clone(), cx);
                             }))
-                            .child(
-                                crate::icons::icon(crate::icons::ARCHIVE_UP_MINIMALISTIC)
-                                    .size(px(14.0))
-                                    .text_color(theme.text_muted),
-                            )
                             .child(SharedString::from(if is_busy {
                                 "Unarchiving…"
                             } else {
@@ -459,13 +386,7 @@ impl Render for ArchivedPage {
                 )
                 .into_any_element()
         } else {
-            div()
-                .mt(px(24.0))
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .children(items)
-                .into_any_element()
+            widgets::section_card(&theme).children(items).into_any_element()
         };
 
         let pagination = (count > ARCHIVE_PAGE_SIZE).then(|| {
@@ -517,9 +438,9 @@ impl Render for ArchivedPage {
         });
         let deleting = self.delete_all_task.is_some();
         let delete_all = (count > 0).then(|| {
-            // slopty: quiet at rest; red is spent on the confirmation's own button, which is
-            // where something may be lost.
-            widgets::action_button_when(&theme, widgets::ActionTone::Outlined, !deleting)
+            // slopty: words alone in a muted red, quiet at rest: the full red is spent on the
+            // confirmation's own button, which is where something may be lost.
+            widgets::action_button_when(&theme, widgets::ActionTone::QuietDanger, !deleting)
                 .id("archived-delete-all")
                 .flex_none()
                 .aria_label("Delete all archived chats")
@@ -528,11 +449,6 @@ impl Render for ArchivedPage {
                 .role(gpui::Role::Button)
                 .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                 .on_click(cx.listener(|this, _, _, cx| this.request_delete_all(cx)))
-                .child(
-                    crate::icons::icon(crate::icons::TRASH_BIN_MINIMALISTIC)
-                        .size(px(16.0))
-                        .text_color(theme.text_muted),
-                )
                 .child(SharedString::from(if deleting {
                     "Deleting…"
                 } else {
@@ -557,30 +473,15 @@ impl Render for ArchivedPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                .child(
-                                    // Delete all sits bottom-right, level with
-                                    // the subtitle rather than the title.
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_end()
-                                        .gap(px(16.0))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .child(widgets::page_header(
-                                                    &theme,
-                                                    "Archived chats",
-                                                    (count > 0).then_some(count),
-                                                ))
-                                                .child(widgets::page_subtitle(
-                                                    &theme,
-                                                    "Hidden from the sidebar until restored.",
-                                                )),
-                                        )
-                                        .children(delete_all),
-                                )
+                                // slopty: one page head (`widgets::page_head`): Delete all on the
+                                // title's row, as every page's action.
+                                .child(widgets::page_head(
+                                    &theme,
+                                    "Archived chats",
+                                    (count > 0).then_some(count),
+                                    "Hidden from the sidebar until restored.",
+                                    delete_all.map(IntoElement::into_any_element),
+                                ))
                                 .child(body)
                                 .children(pagination),
                         ),
@@ -589,6 +490,24 @@ impl Render for ArchivedPage {
             )
             .children(scrollbar)
             .children(dialog)
+    }
+}
+
+// slopty: where an archived chat ran, as the app says it everywhere: "project @ device".
+/// Where `chat` ran, on the machine named `device`: "project @ device", the project or the
+/// machine alone, or nothing.
+fn place_of(chat: &slopty_view_proto::Chat, device: Option<&str>) -> Option<String> {
+    let project = chat
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|cwd| !slopty_view_proto::projectless::is_projectless_cwd(Some(cwd)))
+        .map(|cwd| slopty_view_proto::view::project_label(Some(cwd)));
+    match (project, device) {
+        (Some(project), Some(device)) => Some(format!("{project} @ {device}")),
+        (Some(project), None) => Some(project),
+        (None, Some(device)) => Some(format!("@ {device}")),
+        (None, None) => None,
     }
 }
 
@@ -610,7 +529,7 @@ fn delete_all_failure(failed: usize) -> String {
 
 // slopty: when a relative time was, in full, for its tooltip: "Oct 16, 14:05", with the year when
 // it is not this one (M39).
-fn absolute_time(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+pub(crate) fn absolute_time(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
     absolute_time_in(then, &chrono::Local, now)
 }
 
@@ -661,6 +580,19 @@ mod tests {
             room_gen: None,
             draft: None, // slopty: new field.
         }
+    }
+
+    // slopty: an archived chat says where it ran as the sidebar and the palette do, "project @
+    // device", never the machine first with its own separators.
+    #[test]
+    fn an_archived_chat_says_where_it_ran_as_the_app_does() {
+        let mut ran = chat("a", true);
+        ran.cwd = Some("/work/surfaces".into());
+        assert_eq!(place_of(&ran, Some("Studio")).as_deref(), Some("surfaces @ Studio"));
+        assert_eq!(place_of(&ran, None).as_deref(), Some("surfaces"));
+        ran.cwd = Some("~".into());
+        assert_eq!(place_of(&ran, Some("Studio")).as_deref(), Some("@ Studio"), "no project");
+        assert_eq!(place_of(&ran, None), None);
     }
 
     #[test]

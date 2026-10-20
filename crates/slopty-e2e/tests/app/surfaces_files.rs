@@ -22,10 +22,10 @@ const MACHINE: &str = "surfaces";
 /// What the agent is asked to do.
 const PROMPT: &str = "Tidy the greeting";
 
-/// The repository's first commit, then what the agent has changed since.
-const MAIN_BEFORE: &str = "fn main() {\n    println!(\"hello\");\n}\n";
-const MAIN_AFTER: &str =
-    "fn main() {\n    let name = \"surfaces\";\n    println!(\"hello, {name}\");\n}\n";
+/// The repository's first commit, then what the agent has changed since: two hunks with
+/// unchanged lines between them, so the diff shows its unchanged-lines row.
+const MAIN_BEFORE: &str = "fn main() {\n    println!(\"hello\");\n}\n\n/// The first number.\nfn one() -> u32 {\n    1\n}\n\n/// The second.\nfn two() -> u32 {\n    1 + 1\n}\n";
+const MAIN_AFTER: &str = "fn main() {\n    let name = \"surfaces\";\n    println!(\"hello, {name}\");\n}\n\n/// The first number.\nfn one() -> u32 {\n    1\n}\n\n/// The second.\nfn two() -> u32 {\n    one() + 1\n}\n";
 const README: &str = "# Surfaces\n\nA repository an agent works in.\n";
 const NOTES: &str = "The agent's notes, new and not yet committed.\n";
 /// The project's permission rules (`.claude/settings.json`): one allowed, one always asked, one
@@ -80,7 +80,7 @@ async fn click(drv: &mut Driver, role: &str, label: &str) {
 }
 
 /// A stand-in agent's thread in a repository with changes: ⌘1 selects it, ⌘R opens the right
-/// pane, whose Diffs surface shows the working tree's two changed files with their hunks; ⌘E
+/// pane, whose Changes surface shows the working tree's two changed files with their hunks; ⌘E
 /// opens the files column on the thread's folder, and the titlebar has no TUI switch: an agent
 /// is driven, never shown as a terminal. Then ⌘, opens Settings, whose Providers page
 /// lists the machine's agents and the autonomy setting, its Appearance and Shortcuts pages,
@@ -127,8 +127,10 @@ async fn changes_files_and_settings_show_the_threads_work() {
 
     // The right pane's surface list, then the working tree's diff: its two files, its hunks.
     drv.keys("cmd-r").await.unwrap();
-    click(drv, "Button", "Diffs").await;
-    drv.wait_for("the diff surface", STEP, |d| node(d, "Button", "Diffs").is_none()).await.unwrap();
+    click(drv, "Button", "Changes").await;
+    drv.wait_for("the diff surface", STEP, |d| node(d, "Button", "Changes").is_none())
+        .await
+        .unwrap();
     // The worker's first diff of the tree.
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "surface-files-changes").await;
@@ -164,7 +166,7 @@ async fn changes_files_and_settings_show_the_threads_work() {
     let page = drv.dump().await.unwrap();
     assert!(
         node(&page, "Button", "Reset Glass to default").is_some()
-            && node(&page, "Button", "Reset Reduce motion to default").is_none(),
+            && node(&page, "Button", "Reset Conversation width to default").is_none(),
         "Reset only off the default:\n{}",
         slopty_e2e::frame_text(&page.a11y)
     );
@@ -205,10 +207,12 @@ async fn changes_files_and_settings_show_the_threads_work() {
 
     // Devices: this Mac's worker, then Add device's dialog, which a self-test has no ssh for.
     click(drv, "Tab", "Devices").await;
-    drv.wait_for("the add row", STEP, |d| node(d, "Button", "Add device").is_some()).await.unwrap();
+    drv.wait_for("the add row", STEP, |d| node(d, "Button", "Add a device").is_some())
+        .await
+        .unwrap();
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "settings-devices").await;
-    click(drv, "Button", "Add device").await;
+    click(drv, "Button", "Add a device").await;
     drv.wait_for("the dialog", STEP, |d| node(d, "Dialog", "Add device").is_some()).await.unwrap();
     goldens(drv, &renders, "settings-devices-add").await;
     drv.keys("escape").await.unwrap();

@@ -322,8 +322,9 @@ impl Pickers {
             .into_any_element()
     }
 
-    pub(super) fn compact_model_picker(&self, cx: &App) -> bool {
-        self.title.is_none() && crate::settings::compact_model_picker(cx)
+    // slopty: the compact picker is the one model picker; a titled picker keeps the list.
+    pub(super) fn compact_model_picker(&self) -> bool {
+        self.title.is_none()
     }
 
     pub(super) fn show_compact_models(&mut self, cx: &mut Context<Self>) {

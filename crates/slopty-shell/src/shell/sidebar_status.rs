@@ -3,7 +3,9 @@
 //!
 //! - **Groups.** "By status" sorts rows into Needs you, Working and Done, in that order. A row
 //!   changes group only when its agent's phase changes, and inside a group rows keep the order
-//!   their sessions started in, so nothing moves on its own while the person reads.
+//!   their sessions started in, so nothing moves on its own while the person reads. A finished
+//!   chat nobody has touched for [`INACTIVE_AFTER_HOURS`] folds into Inactive, last and shut at
+//!   first (Amp's "Inactive last 72h"), so Done holds the work of the last days.
 //! - **Reasons.** A row that waits says why, from what the agent holds open: "Waiting for your
 //!   answer", "Plan ready for review", "Needs your approval · run cargo test"; an agent waiting
 //!   on its own work says "Background work · 4m"; one summarising its context says so.
@@ -44,11 +46,29 @@ pub(super) enum StatusGroup {
     Working,
     /// At rest: finished, stopped, or idle.
     Done,
+    /// At rest, and untouched for [`INACTIVE_AFTER_HOURS`].
+    Inactive,
 }
 
+/// slopty: how long a finished chat rests untouched before it folds into Inactive (Amp's 72 h).
+pub(super) const INACTIVE_AFTER_HOURS: i64 = 72;
+
 impl StatusGroup {
-    /// The group a row with display status `status` and session `session` sits in.
-    pub(super) fn of(status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> Self {
+    /// The group the row of `chat`, with display status `status` and session `session`, sits in.
+    pub(super) fn of(
+        status: ChatIndicator,
+        chat: &Chat,
+        session: Option<&Session>,
+        now: DateTime<Utc>,
+    ) -> Self {
+        match Self::phase(status, session, now) {
+            Self::Done if inactive(chat, now) => Self::Inactive,
+            group => group,
+        }
+    }
+
+    /// The group of a row's phase alone: Needs you, Working or Done.
+    fn phase(status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> Self {
         match status {
             ChatIndicator::AwaitingInput | ChatIndicator::Errored => Self::NeedsYou,
             ChatIndicator::Working => Self::Working,
@@ -68,6 +88,7 @@ impl StatusGroup {
             Self::NeedsYou => "status:needs-you",
             Self::Working => "status:working",
             Self::Done => "status:done",
+            Self::Inactive => "status:inactive",
         }
     }
 
@@ -77,14 +98,25 @@ impl StatusGroup {
             Self::NeedsYou => "Needs you",
             Self::Working => "Working",
             Self::Done => "Done",
+            Self::Inactive => "Inactive",
         }
     }
 }
 
+/// Whether `chat` has gone untouched (no message, else since it started) for
+/// [`INACTIVE_AFTER_HOURS`].
+fn inactive(chat: &Chat, now: DateTime<Utc>) -> bool {
+    let touched = chat.last_message_at.unwrap_or(chat.created_at);
+    now.signed_duration_since(touched) >= chrono::TimeDelta::hours(INACTIVE_AFTER_HOURS)
+}
+
+/// What the Inactive group says while no chat rests in it.
+pub(super) const NO_INACTIVE: &str = "No inactive chats";
+
 /// Whether a row with display status `status` and session `session` is at rest (Done): the rows
 /// a group pages behind "Show more".
 pub(super) fn at_rest(status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> bool {
-    StatusGroup::of(status, session, now) == StatusGroup::Done
+    StatusGroup::phase(status, session, now) == StatusGroup::Done
 }
 
 /// Rows at rest a sidebar group shows before "Show more", as the Archived shelf's first page.
@@ -145,6 +177,32 @@ pub(super) fn show_more_row(
         .child(words)
 }
 
+/// The line a sidebar group with no rows shows under its header (only Inactive stands empty):
+/// its key, its height with the list's gap above it, and the line, quiet as "Show more". A shut
+/// group's line is drawn for its open motion but says nothing to a screen reader.
+pub(super) fn empty_group_row(
+    collapse_key: &str,
+    open: bool,
+    theme: &Theme,
+) -> (String, f32, AnyElement) {
+    let height = super::sidebar_row_height(false);
+    let id = format!("sidebar-group-empty-{collapse_key}");
+    let element = div()
+        .id(SharedString::from(id.clone()))
+        .debug_selector(move || id)
+        .h(px(height))
+        .flex_none()
+        .flex()
+        .items_center()
+        .px(px(Theme::SPACE_SM))
+        .text_size(crate::typography::ui_rems(13.0))
+        .text_color(theme.text_muted.opacity(0.55))
+        .when(open, |line| line.role(gpui::Role::Status).aria_label(NO_INACTIVE))
+        .child(NO_INACTIVE)
+        .into_any_element();
+    (format!("empty:{collapse_key}"), height + super::SIDEBAR_LIST_GAP, element)
+}
+
 impl super::Shell {
     /// The "Show more" line under the sidebar group of `collapse_key`, when `hidden` rows wait:
     /// its key, its height with the list's gap above it, and the line, which shows another page.
@@ -158,12 +216,8 @@ impl super::Shell {
         if hidden == 0 {
             return None;
         }
-        // As the Archived shelf's: a compact row's height, else 36.
-        let height = if self.settings.sidebar_compact {
-            super::sidebar_row_height(true, true, false, false)
-        } else {
-            36.0
-        };
+        // As the Archived shelf's: a row's height.
+        let height = super::sidebar_row_height(false);
         let key = collapse_key.to_owned();
         let id = SharedString::from(format!("sidebar-group-more-{collapse_key}"));
         let element = show_more_row(id, hidden, height, theme)
@@ -187,8 +241,8 @@ fn live(session: Option<&Session>, now: DateTime<Utc>) -> Option<&Session> {
 /// message never moves it.
 pub(super) fn order_by_status(rows: &mut [(ChatIndicator, Chat)], state: &AppState, now: DateTime<Utc>) {
     rows.sort_by(|(left_status, left), (right_status, right)| {
-        let left_group = StatusGroup::of(*left_status, state.session_for(&left.id), now);
-        let right_group = StatusGroup::of(*right_status, state.session_for(&right.id), now);
+        let left_group = StatusGroup::of(*left_status, left, state.session_for(&left.id), now);
+        let right_group = StatusGroup::of(*right_status, right, state.session_for(&right.id), now);
         left_group
             .cmp(&right_group)
             .then_with(|| right.created_at.cmp(&left.created_at))
@@ -203,10 +257,11 @@ pub(super) fn needing_you(state: &AppState, now: DateTime<Utc>) -> Vec<String> {
     let mut rows: Vec<(ChatIndicator, Chat)> =
         state.overview_chats(now).into_iter().map(|(status, chat)| (status, chat.clone())).collect();
     order_by_status(&mut rows, state, now);
-    let group = |status: ChatIndicator, chat: &Chat| StatusGroup::of(status, state.session_for(&chat.id), now);
+    let group = |status: ChatIndicator, chat: &Chat| StatusGroup::of(status, chat, state.session_for(&chat.id), now);
     let needs = rows.iter().filter(|(status, chat)| group(*status, chat) == StatusGroup::NeedsYou);
-    let unseen =
-        rows.iter().filter(|(status, chat)| group(*status, chat) == StatusGroup::Done && chat.unseen());
+    let unseen = rows.iter().filter(|(status, chat)| {
+        matches!(group(*status, chat), StatusGroup::Done | StatusGroup::Inactive) && chat.unseen()
+    });
     needs.chain(unseen).map(|(_, chat)| chat.id.clone()).collect()
 }
 
@@ -488,18 +543,37 @@ mod tests {
         assert_eq!(reason(ChatIndicator::Idle, Some(&stale), now), None, "its machine went quiet");
     }
 
-    // Rows sit in Needs you, Working, Done; a waiting-on-itself agent is still at work.
+    // Rows sit in Needs you, Working, Done; a waiting-on-itself agent is still at work; a
+    // finished chat untouched for 72 hours is Inactive, and only a finished one.
     #[test]
     fn rows_group_by_phase() {
         let now = Utc::now();
         let resting = session("a", SessionStatus::Waiting, now);
-        assert_eq!(StatusGroup::of(ChatIndicator::AwaitingInput, None, now), StatusGroup::NeedsYou);
-        assert_eq!(StatusGroup::of(ChatIndicator::Errored, None, now), StatusGroup::NeedsYou);
-        assert_eq!(StatusGroup::of(ChatIndicator::Working, None, now), StatusGroup::Working);
-        assert_eq!(StatusGroup::of(ChatIndicator::Idle, Some(&resting), now), StatusGroup::Working);
-        assert_eq!(StatusGroup::of(ChatIndicator::Completed, None, now), StatusGroup::Done);
-        assert_eq!(StatusGroup::of(ChatIndicator::Idle, None, now), StatusGroup::Done);
-        assert!(StatusGroup::NeedsYou < StatusGroup::Working && StatusGroup::Working < StatusGroup::Done);
+        let fresh: Chat = serde_json::from_value(serde_json::json!({
+            "id": "a", "deviceId": "local", "archived": false, "createdAt": now - TimeDelta::hours(100),
+            "lastMessageAt": now - TimeDelta::hours(71),
+        }))
+        .unwrap();
+        let of = |status, session| StatusGroup::of(status, &fresh, session, now);
+        assert_eq!(of(ChatIndicator::AwaitingInput, None), StatusGroup::NeedsYou);
+        assert_eq!(of(ChatIndicator::Errored, None), StatusGroup::NeedsYou);
+        assert_eq!(of(ChatIndicator::Working, None), StatusGroup::Working);
+        assert_eq!(of(ChatIndicator::Idle, Some(&resting)), StatusGroup::Working);
+        assert_eq!(of(ChatIndicator::Completed, None), StatusGroup::Done);
+        assert_eq!(of(ChatIndicator::Idle, None), StatusGroup::Done);
+        let mut stale = fresh.clone();
+        stale.last_message_at = Some(now - TimeDelta::hours(INACTIVE_AFTER_HOURS));
+        let of = |status, session| StatusGroup::of(status, &stale, session, now);
+        assert_eq!(of(ChatIndicator::Idle, None), StatusGroup::Inactive);
+        assert_eq!(of(ChatIndicator::Completed, None), StatusGroup::Inactive);
+        assert_eq!(of(ChatIndicator::AwaitingInput, None), StatusGroup::NeedsYou, "waits, so never");
+        assert_eq!(of(ChatIndicator::Working, None), StatusGroup::Working, "at work, so never");
+        assert!(at_rest(ChatIndicator::Idle, None, now), "paged as Done is");
+        assert!(
+            StatusGroup::NeedsYou < StatusGroup::Working
+                && StatusGroup::Working < StatusGroup::Done
+                && StatusGroup::Done < StatusGroup::Inactive
+        );
     }
 
     /// A sidebar alone, drawn from a shell with no engine.
@@ -548,7 +622,6 @@ mod tests {
 
     fn sidebar(
         cx: &mut gpui::TestAppContext,
-        organization: crate::settings::SidebarOrganization,
     ) -> (gpui::Entity<super::super::Shell>, &mut gpui::VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -560,7 +633,7 @@ mod tests {
         let (host, cx) = cx.add_window_view(move |_, cx| {
             SidebarHost(cx.new(|cx| {
                 let state = cx.new(|_| AppState::new());
-                let mut shell = super::super::Shell::new(
+                let shell = super::super::Shell::new(
                     state,
                     crate::state::EngineBootConfig {
                         data_dir: path.clone(),
@@ -568,8 +641,6 @@ mod tests {
                     },
                     cx,
                 );
-                shell.settings.sidebar_organization = organization;
-                shell.settings.sidebar_compact = true;
                 let now = Utc::now();
                 let (chats, sessions) = four(now);
                 shell.state.update(cx, |state, _| {
@@ -590,9 +661,9 @@ mod tests {
     /// one nobody has seen, and comes round again; the chat at work is never one.
     #[gpui::test]
     fn the_needs_you_key_walks_the_waiting_then_the_unseen(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::ByProject);
+        let (shell, cx) = sidebar(cx);
         let order = shell.read_with(cx, |shell, cx| needing_you(shell.state.read(cx), Utc::now()));
-        assert_eq!(order, ["question", "approval", "finished"], "whatever the sidebar's organisation");
+        assert_eq!(order, ["question", "approval", "finished"]);
         let mut opened = Vec::new();
         for _ in 0..4 {
             shell.update(cx, |shell, cx| assert!(shell.open_next_needing_you(cx)));
@@ -609,7 +680,7 @@ mod tests {
     /// A row draws its machine's glyph only while the visible chats span more than one machine.
     #[gpui::test]
     fn the_machine_glyph_shows_only_across_machines(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::ByStatus);
+        let (shell, cx) = sidebar(cx);
         let device = |id: &str, platform: &str| -> slopty_view_proto::Device {
             serde_json::from_value(serde_json::json!({ "id": id, "name": id, "platform": platform }))
                 .unwrap()
@@ -650,7 +721,7 @@ mod tests {
     // unread result in the heavier weight; and ten republishes with fresh activity move nothing.
     #[gpui::test]
     fn by_status_groups_say_why_and_never_reorder_on_republish(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::ByStatus);
+        let (shell, cx) = sidebar(cx);
         redraw(cx);
         let needs = [top(cx, "approval"), top(cx, "question")];
         let (working, finished) = (top(cx, "working"), top(cx, "finished"));
@@ -688,11 +759,38 @@ mod tests {
         }
     }
 
+    // slopty: a result nobody has read wears an accent dot on its agent's mark (opencode's
+    // unread mark), beside its heavier title; a row read, waiting or at work wears none.
+    #[gpui::test]
+    fn an_unread_result_marks_its_agents_corner(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = sidebar(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                for chat in &mut state.chats {
+                    chat.config = Some(
+                        serde_json::from_value(
+                            serde_json::json!({ "harness": "claude-code", "sandbox": "workspace-write" }),
+                        )
+                        .expect("a chat config"),
+                    );
+                }
+                cx.notify();
+            });
+        });
+        redraw(cx);
+        let finished = cx.debug_bounds("chat-unread-finished").expect("the unread dot");
+        assert!(finished.size.width > gpui::px(0.0));
+        for id in ["working", "approval", "question"] {
+            let selector: &'static str = Box::leak(format!("chat-unread-{id}").into_boxed_str());
+            assert!(cx.debug_bounds(selector).is_none(), "{id} has been read");
+        }
+    }
+
     // The server menu offers what to do about servers and machines, Connect a phone only while
     // the server shows its code; Devices opens Settings → Devices.
     #[gpui::test]
     fn the_server_menu_has_rows(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::ByStatus);
+        let (shell, cx) = sidebar(cx);
         cx.update(|window, _| window.activate_window());
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
@@ -736,7 +834,7 @@ mod tests {
     // machine the app does not know wears none rather than a guess.
     #[gpui::test]
     fn every_row_says_which_machine_it_runs_on(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = sidebar(cx, crate::settings::SidebarOrganization::ByStatus);
+        let (shell, cx) = sidebar(cx);
         let device = |id: &str, name: &str, platform: &str| -> slopty_view_proto::Device {
             serde_json::from_value(serde_json::json!({
                 "id": id, "name": name, "platform": platform, "lastSeenAt": null,
@@ -754,19 +852,12 @@ mod tests {
                 }
             });
         });
-        for (compact, label) in [(true, false), (false, true), (false, false)] {
-            shell.update(cx, |shell, cx| {
-                shell.settings.sidebar_compact = compact;
-                shell.settings.sidebar_show_project_label = label;
-                cx.notify();
-            });
-            redraw(cx);
-            for id in ["approval", "question", "working"] {
-                let selector: &'static str = Box::leak(format!("chat-{id}-machine").into_boxed_str());
-                assert!(cx.debug_bounds(selector).is_some(), "{id} wears its machine ({compact}, {label})");
-            }
-            assert!(cx.debug_bounds("chat-finished-machine").is_none(), "an unknown machine is not guessed");
+        redraw(cx);
+        for id in ["approval", "question", "working"] {
+            let selector: &'static str = Box::leak(format!("chat-{id}-machine").into_boxed_str());
+            assert!(cx.debug_bounds(selector).is_some(), "{id} wears its machine");
         }
+        assert!(cx.debug_bounds("chat-finished-machine").is_none(), "an unknown machine is not guessed");
         assert_eq!(super::super::spaces::device_glyph("linux"), crate::icons::REMOTE_SERVER);
         assert_eq!(super::super::spaces::device_glyph("macos"), crate::icons::LAPTOP);
         assert_eq!(super::super::spaces::device_glyph("ios"), crate::icons::SMARTPHONE);
@@ -786,12 +877,10 @@ mod tests {
         assert_eq!(page_at_rest(&mut few, REST_FIRST, |row| row.1, |_| false), 0, "nothing to page");
     }
 
-    /// A shell window, its sidebar by status and `compact` or not, with `count` chats at rest,
-    /// newest first: c00, c01…
+    /// A shell window with `count` chats at rest in its sidebar, newest first: c00, c01…
     fn shell_with_chats(
         cx: &mut gpui::TestAppContext,
         count: usize,
-        compact: bool,
     ) -> (gpui::Entity<super::super::Shell>, &mut gpui::VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -809,7 +898,7 @@ mod tests {
         let path = dir.path().to_path_buf();
         let (shell, cx) = cx.add_window_view(move |_, cx| {
             let state = cx.new(|_| AppState::new());
-            let mut shell = super::super::Shell::new(
+            let shell = super::super::Shell::new(
                 state,
                 crate::state::EngineBootConfig {
                     data_dir: path.clone(),
@@ -818,8 +907,6 @@ mod tests {
                 cx,
             );
             crate::motion::set_reduced_motion(cx, true);
-            shell.settings.sidebar_organization = crate::settings::SidebarOrganization::ByStatus;
-            shell.settings.sidebar_compact = compact;
             let now = Utc::now();
             let chats = (0..count).map(|n| chat(&format!("c{n:02}"), i64::try_from(n).unwrap(), now, false));
             shell.state.update(cx, |state, _| {
@@ -843,7 +930,7 @@ mod tests {
     /// skip a row it does not draw. The open chat shows wherever it falls.
     #[gpui::test]
     fn a_long_group_shows_more_on_request(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = shell_with_chats(cx, 14, true);
+        let (shell, cx) = shell_with_chats(cx, 14);
         redraw(cx);
         const MORE: &str = "sidebar-group-more-status:status:done";
         assert!(shown(cx, "c09") && !shown(cx, "c10"), "the first page");
@@ -869,7 +956,7 @@ mod tests {
     /// numbers go; the key opens its row.
     #[gpui::test]
     fn holding_the_modifier_numbers_the_rows(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = shell_with_chats(cx, 3, false);
+        let (shell, cx) = shell_with_chats(cx, 3);
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         redraw(cx);

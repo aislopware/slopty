@@ -382,7 +382,11 @@ impl Driver {
     pub async fn dump(&mut self) -> Result<Dump> {
         match self.call(&Command::Dump).await? {
             Reply::Dump(dump) => match &dump.stale {
-                Some(stale) => bail!("the app drew a stale frame: {stale}"),
+                // What a frame from scratch says there, to tell the place the sprites name.
+                Some(stale) => bail!(
+                    "the app drew a stale frame: {stale}\na frame from scratch says:\n{}",
+                    crate::frame_text(&dump.a11y)
+                ),
                 None => Ok(*dump),
             },
             Reply::Error { message } => bail!("dump: {message}"),

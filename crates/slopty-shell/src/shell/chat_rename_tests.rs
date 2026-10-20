@@ -247,23 +247,6 @@ fn rename_opens_collapsed_sessions_groups_and_the_sidebar(cx: &mut TestAppContex
         assert!(!shell.settings.sidebar_collapsed);
     });
     assert_eq!(editing(&shell, cx).as_deref(), Some("newer"));
-
-    // Grouped by project: the chat's collapsed group opens.
-    shell.update(cx, |shell, cx| {
-        shell.finish_rename_chat(false, cx);
-        shell.settings.sidebar_organization = SidebarOrganization::ByProject;
-        shell
-            .sidebar_collapsed_groups
-            .insert("project:home:local".into());
-        cx.notify();
-    });
-    redraw(cx);
-    rename(&shell, cx, "older");
-    shell.read_with(cx, |shell, _| {
-        assert!(shell.sidebar_collapsed_groups.is_empty());
-        assert!(shell.sidebar_reveal_motions.is_empty());
-    });
-    assert!(cx.debug_bounds("chat-title-editor-older").is_some());
 }
 
 #[gpui::test]
@@ -330,65 +313,18 @@ fn rename_refuses_a_row_the_project_filter_hides(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn rename_expands_a_collapsed_custom_section(cx: &mut TestAppContext) {
-    use slopty_view_proto::SidebarSectionChange;
-
+fn inline_rename_keeps_the_row_height(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    shell.update(cx, |shell, cx| {
-        for change in [
-            SidebarSectionChange::Create {
-                id: "work".into(),
-                name: "Work".into(),
-            },
-            SidebarSectionChange::Assign {
-                session_id: "older".into(),
-                section_id: Some("work".into()),
-                after: None,
-                before: None,
-            },
-            SidebarSectionChange::Collapse {
-                id: "work".into(),
-                collapsed: true,
-            },
-        ] {
-            assert!(shell.change_sidebar_section(change, cx));
-        }
-    });
     redraw(cx);
+    let row = cx.debug_bounds("chat-older").unwrap();
+    double_click(cx, row.center());
 
-    rename(&shell, cx, "older");
-    shell.update(cx, |shell, cx| {
-        let sections = shell.active_sidebar_sections(cx);
-        assert!(!sections[0].collapsed);
-        assert!(shell.sidebar_reveal_motions.is_empty());
-        assert!(shell.sidebar_disclosure_motion.contains_key("custom:work"));
-    });
-    assert!(cx.debug_bounds("chat-title-editor-older").is_some());
-}
+    // The field takes the title's place without growing the row.
+    let field = cx.debug_bounds("chat-title-editor-older").unwrap();
+    assert!(row.contains(&field.center()));
+    assert_eq!(cx.debug_bounds("chat-older").unwrap().size.height, row.size.height);
 
-#[gpui::test]
-fn inline_rename_keeps_the_row_height_in_compact_and_full_rows(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    for compact in [true, false] {
-        shell.update(cx, |shell, cx| {
-            shell.settings.sidebar_compact = compact;
-            cx.notify();
-        });
-        redraw(cx);
-        let row = cx.debug_bounds("chat-older").unwrap();
-        double_click(cx, row.center());
-
-        // The field takes the title's place without growing the row.
-        let field = cx.debug_bounds("chat-title-editor-older").unwrap();
-        assert!(row.contains(&field.center()), "compact: {compact}");
-        assert_eq!(
-            cx.debug_bounds("chat-older").unwrap().size.height,
-            row.size.height,
-            "compact: {compact}"
-        );
-
-        cx.simulate_keystrokes("escape");
-        redraw(cx);
-        assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_none()));
-    }
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_none()));
 }

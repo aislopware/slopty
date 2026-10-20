@@ -383,124 +383,22 @@ async fn a_rows_hover_card_names_where_it_runs() {
     stack.shutdown().await;
 }
 
-/// The sidebar's sections as this device's interface settings keep them for its local workspace
-/// (`interface/ui-settings.json`, `sidebarSectionsByProfile.local`), in the light opaque
-/// interface the harness pins.
-fn sidebar_sections(names: &[&str]) -> serde_json::Value {
-    let sections: Vec<serde_json::Value> = names
-        .iter()
-        .map(|name| {
-            serde_json::json!({
-                "id": format!("s-{}", name.to_lowercase()),
-                "name": name,
-                "session_ids": [],
-                "collapsed": false
-            })
-        })
-        .collect();
-    serde_json::json!({
-        "appearance": "light",
-        "surface": "opaque",
-        "sidebarSectionsByProfile": { "local": sections }
-    })
-}
-
-/// The section names in `settings`' local workspace, in their order.
-fn kept_order(settings: &str) -> Vec<String> {
-    serde_json::from_str::<serde_json::Value>(settings)
-        .ok()
-        .and_then(|v| v["sidebarSectionsByProfile"]["local"].as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|s| s["name"].as_str().map(str::to_owned))
-        .collect()
-}
-
-/// A section's header, named by the section.
-fn section_header<'a>(dump: &'a slopty_e2e::Dump, name: &str) -> Option<&'a slopty_e2e::A11yNode> {
-    dump.a11y.iter().find(|n| n.role == "Button" && n.label.as_deref() == Some(name))
-}
-
-/// Dragging a section by its header moves it among the others: the last lifted above the first
-/// lands first, and the order is kept for the next launch.
-#[tokio::test]
-#[ignore = "live: cargo xtask e2e app"]
-async fn a_section_dragged_by_its_header_keeps_its_place() {
-    let mut stack = slopty_e2e::harness::ServedApp::launch_rooted("e2e-sections", &[], |root| {
-        let interface = root.join("app").join("interface");
-        std::fs::create_dir_all(&interface).unwrap();
-        let state = sidebar_sections(&["Alpha", "Beta", "Gamma"]);
-        std::fs::write(interface.join("ui-settings.json"), state.to_string()).unwrap();
-        Vec::new()
-    })
-    .await
-    .unwrap();
-    let kept = stack.path("app").join("interface").join("ui-settings.json");
-    let drv = &mut stack.driver;
-    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let shown = drv
-        .wait_for("the three sections", STEP, |d| {
-            ["Alpha", "Beta", "Gamma"].iter().all(|name| section_header(d, name).is_some())
-        })
-        .await
-        .unwrap();
-    let top = |dump: &slopty_e2e::Dump, name: &str| section_header(dump, name).unwrap().bounds[1];
-    assert!(
-        top(&shown, "Alpha") < top(&shown, "Beta") && top(&shown, "Beta") < top(&shown, "Gamma")
-    );
-    let [gx, gy, gw, gh] = section_header(&shown, "Gamma").unwrap().bounds;
-    let [_, ay, _, _] = section_header(&shown, "Alpha").unwrap().bounds;
-    let (x, from) = (gx + gw / 3.0, gy + gh / 2.0);
-    // Lift Gamma and carry it, a step at a time, above Alpha.
-    drv.press(x, from).await.unwrap();
-    let to = ay - 4.0;
-    for step in 1..=8_u8 {
-        let y = from + (to - from) * f32::from(step) / 8.0;
-        drv.drag_to(x, y).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-    }
-    drv.release(x, to).await.unwrap();
-    let moved = drv
-        .wait_for("Gamma first", STEP, |d| {
-            ["Alpha", "Beta", "Gamma"].iter().all(|name| section_header(d, name).is_some())
-                && top(d, "Gamma") < top(d, "Alpha")
-                && top(d, "Alpha") < top(d, "Beta")
-        })
-        .await
-        .unwrap();
-    println!(
-        "MEASURE sections after the drag: Gamma {:.0}, Alpha {:.0}, Beta {:.0}",
-        top(&moved, "Gamma"),
-        top(&moved, "Alpha"),
-        top(&moved, "Beta")
-    );
-    // The order is kept on disk, as the next launch reads it.
-    let started = std::time::Instant::now();
-    let order = loop {
-        let order = kept_order(&std::fs::read_to_string(&kept).unwrap_or_default());
-        if order == ["Gamma", "Alpha", "Beta"] || started.elapsed() > STEP {
-            break order;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    };
-    assert_eq!(order, ["Gamma", "Alpha", "Beta"], "kept as dragged");
-    stack.shutdown().await;
-}
-
 // The window's own keys and Open in, on a stand-in agent's thread: a closed tab comes back with
 // ⌘⇧T, and Open in hands the thread's folder to an editor through the app's one open seam, which
 // a run points at a file (`SLOPTY_E2E_OPEN_LOG`) so nothing is launched.
 
-/// The tab-close buttons in `dump`: one per tab in the right pane.
+/// The tab-close buttons in `dump`: one per tab in the right pane, each named for its tab.
 fn tab_closes(dump: &slopty_e2e::Dump) -> Vec<[f32; 4]> {
     dump.a11y
         .iter()
-        .filter(|n| n.role == "Button" && n.label.as_deref() == Some("Close tab"))
+        .filter(|n| {
+            n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Close "))
+        })
         .map(|n| n.bounds)
         .collect()
 }
 
-/// ⌘T opens the right pane's tabs; a Diffs tab closed comes back, in front, with ⌘⇧T.
+/// ⌘T opens the right pane's tabs; a Changes tab closed comes back, in front, with ⌘⇧T.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_closed_tab_comes_back_with_cmd_shift_t() {
@@ -511,18 +409,18 @@ async fn a_closed_tab_comes_back_with_cmd_shift_t() {
     drv.keys("cmd-t").await.unwrap();
     let picker = drv
         .wait_for("the pane's surfaces", STEP, |d| {
-            d.a11y.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some("Diffs"))
+            d.a11y.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some("Changes"))
         })
         .await
         .unwrap();
     let diffs = picker
         .a11y
         .iter()
-        .find(|n| n.role == "Button" && n.label.as_deref() == Some("Diffs"))
+        .find(|n| n.role == "Button" && n.label.as_deref() == Some("Changes"))
         .unwrap()
         .bounds;
     drv.click(diffs[0] + diffs[2] / 2.0, diffs[1] + diffs[3] / 2.0).await.unwrap();
-    let open = drv.wait_for("the Diffs tab", STEP, |d| !tab_closes(d).is_empty()).await.unwrap();
+    let open = drv.wait_for("the Changes tab", STEP, |d| !tab_closes(d).is_empty()).await.unwrap();
     let tabs = tab_closes(&open).len();
     let [x, y, w, h] = *tab_closes(&open).last().unwrap();
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
@@ -720,7 +618,7 @@ async fn a_pages_icon_shows_on_its_tab() {
         .await
         .unwrap();
     let [_, _, w, h] = shown.a11y_node("Image", Some("Page icon")).unwrap().bounds;
-    assert!((w - 12.0).abs() < 1.0 && (h - 12.0).abs() < 1.0, "the chip's 12 pt slot: {w}x{h}");
+    assert!((w - 14.0).abs() < 1.0 && (h - 14.0).abs() < 1.0, "the strip's 14 pt glyph: {w}x{h}");
     stack.shutdown().await;
 }
 

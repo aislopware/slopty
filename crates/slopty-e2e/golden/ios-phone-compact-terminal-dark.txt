@@ -4,10 +4,10 @@ Button │ Attach images
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Tab │ Terminal 1
-Button │ Close terminal
+Button │ Close Terminal 1
 Button │ New terminal
 Button │ Hide terminal
 Group (focused)
 Terminal │ shell │ $SCRATCH/repo %
+Button │ Back to your prompt: Say hello

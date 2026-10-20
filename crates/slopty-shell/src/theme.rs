@@ -730,8 +730,6 @@ pub struct Theme {
     pub diff_add: Hsla,
     /// Diff: deleted lines.
     pub diff_del: Hsla,
-    /// Diff: hunk-header wash (bluish grey).
-    pub diff_hunk_bg: Hsla,
 
     /// Theme-owned terminal background, selection, and ANSI16 palette.
     pub terminal: TerminalColors,
@@ -783,7 +781,7 @@ impl TerminalColors {
             Appearance::Dark => "slopty-dark",
             Appearance::Light => "slopty-light",
         };
-        let registry = ThemeRegistry::active();
+        let registry = ThemeRegistry::builtin();
         Self::from_variant(registry.variant(id).expect("Slopty terminal palette exists"))
     }
 }
@@ -841,8 +839,14 @@ impl Theme {
     pub const PANEL_RADIUS: f32 = 10.0;
     /// Small control radius (buttons, chips).
     pub const CONTROL_RADIUS: f32 = 6.0;
-    /// Base spacing steps.
+    /// slopty: the smallest radius, for marks inside a control (a key hint, a pill's inner
+    /// button). The ladder is 4 / 6 / 10 / 12 (`popover::CARD_RADIUS`) / 16.
+    pub const RADIUS_SM: f32 = 4.0;
+    /// Base spacing steps. slopty: 2 and 6 are steps too, so a hairline nudge and the most used
+    /// gap stay on the ladder: 2 / 4 / 6 / 8 / 12 / 16.
+    pub const SPACE_2XS: f32 = 2.0;
     pub const SPACE_XS: f32 = 4.0;
+    pub const SPACE_SNUG: f32 = 6.0;
     pub const SPACE_SM: f32 = 8.0;
     pub const SPACE_MD: f32 = 12.0;
     pub const SPACE_LG: f32 = 16.0;
@@ -1040,14 +1044,85 @@ impl Theme {
     /// (sits more naturally there than the general-purpose separator), the
     /// theme border otherwise.
     pub fn composer_surface_border(&self) -> Hsla {
+        // slopty: Claude desktop's composer ring strength (8 % on dark, 12 % on light) in
+        // zeron's slate.
         if self.is_frost() {
             match self.appearance {
-                Appearance::Dark => hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
-                Appearance::Light => hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
+                Appearance::Dark => hsla(210.0 / 360.0, 0.18, 0.78, 0.08),
+                Appearance::Light => hsla(210.0 / 360.0, 0.18, 0.32, 0.12),
             }
         } else {
             self.border
         }
+    }
+
+    /// slopty: the composer's lift on an opaque surface, Claude desktop's `0 4px 20px` black at
+    /// 3.5 % resting and 7.5 % at `focus_t` 1. A frosted composer draws none: a drop shadow is
+    /// painted behind the element and would grey its glass (see [`card_selected_shadows`]).
+    pub fn composer_shadow(&self, focus_t: f32) -> Vec<gpui::BoxShadow> {
+        if self.is_frost() {
+            return Vec::new();
+        }
+        let alpha = 0.035 + (0.075 - 0.035) * focus_t.clamp(0.0, 1.0);
+        vec![gpui::BoxShadow {
+            color: hsla(0.0, 0.0, 0.0, alpha),
+            offset: gpui::point(gpui::px(0.0), gpui::px(4.0)),
+            blur_radius: gpui::px(20.0),
+            spread_radius: gpui::px(0.0),
+            inset: false,
+        }]
+    }
+
+    /// slopty: the edge and depth of a surface floating at `level` (opencode's ring and lit top
+    /// edge, Amp's long shadows; `docs/decisions/ui.md`): in place of a 1 px border,
+    ///
+    /// - a 0.5 px ring inside the edge (one device pixel at 2×), Amp's white 14 % on dark and
+    ///   black 10 % on light, a step lighter for a tooltip's;
+    /// - on dark, a 0.5 px highlight along the top inside edge at white 6 %, a lit bevel;
+    /// - where the surface is opaque, Amp's shadows: two long soft ones (`0 24 60 −28` and
+    ///   `0 10 28 −20`) under a menu, popover, the palette or a dialog, the medium pair under a
+    ///   tooltip. A frosted float draws none: a drop shadow is painted behind it and would grey
+    ///   its glass.
+    ///
+    /// The ring and highlight are inset shadows, painted over the fill, so they cost no layout.
+    pub fn elevation(&self, level: Elevation) -> Vec<gpui::BoxShadow> {
+        let dark = self.appearance.is_dark();
+        let shadow = |x: f32, y: f32, blur: f32, spread: f32, color: Hsla, inset: bool| {
+            gpui::BoxShadow {
+                color,
+                offset: gpui::point(gpui::px(x), gpui::px(y)),
+                blur_radius: gpui::px(blur),
+                spread_radius: gpui::px(spread),
+                inset,
+            }
+        };
+        let ring = match (level, dark) {
+            (Elevation::Raised, true) => hsla(0.0, 0.0, 1.0, 0.10),
+            (Elevation::Raised, false) => hsla(0.0, 0.0, 0.0, 0.08),
+            (_, true) => hsla(0.0, 0.0, 1.0, 0.14),
+            (_, false) => hsla(0.0, 0.0, 0.0, 0.10),
+        };
+        let mut layers = vec![shadow(0.0, 0.0, 0.0, ELEVATION_RING, ring, true)];
+        if dark {
+            let lit = hsla(0.0, 0.0, 1.0, 0.06);
+            layers.push(shadow(0.0, ELEVATION_RING, 0.0, 0.0, lit, true));
+        }
+        if self.is_frost() {
+            return layers;
+        }
+        let black = |alpha: f32| hsla(0.0, 0.0, 0.0, alpha);
+        match level {
+            Elevation::Raised => {
+                layers.push(shadow(0.0, 4.0, 6.0, -1.0, black(0.10), false));
+                layers.push(shadow(0.0, 2.0, 4.0, -2.0, black(0.10), false));
+            }
+            Elevation::Floating => {
+                let (far, near) = if dark { (0.80, 0.55) } else { (0.42, 0.26) };
+                layers.push(shadow(0.0, 24.0, 60.0, -28.0, black(far), false));
+                layers.push(shadow(0.0, 10.0, 28.0, -20.0, black(near), false));
+            }
+        }
+        layers
     }
 
     pub fn composer_sidebar_tint(&self) -> Hsla {
@@ -1206,7 +1281,6 @@ impl Theme {
             ),
             diff_add: oklch(0.765, 0.177, 163.223), // emerald-400
             diff_del: oklch(0.704, 0.191, 22.216),  // red-400
-            diff_hunk_bg: hsla(0.6, 0.35, 0.6, 0.05),
             terminal: TerminalColors::slopty(Appearance::Dark).selecting(accent.selection),
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
@@ -1306,7 +1380,6 @@ impl Theme {
             ),
             diff_add: oklch(0.596, 0.145, 163.225), // emerald-600
             diff_del: oklch(0.577, 0.245, 27.325),  // red-600
-            diff_hunk_bg: hsla(0.6, 0.35, 0.35, 0.07),
             terminal: TerminalColors::slopty(Appearance::Light).selecting(accent.selection),
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
@@ -1381,7 +1454,7 @@ impl Theme {
         surface_preference: SurfacePreference,
         wallpaper_color: Option<slopty_shell_theme::Color>,
     ) -> Self {
-        let registry = ThemeRegistry::active();
+        let registry = ThemeRegistry::builtin();
         let fallback_id = match appearance {
             Appearance::Dark => "slopty-dark",
             Appearance::Light => "slopty-light",
@@ -1499,7 +1572,6 @@ impl Theme {
         theme.syntax = SyntaxPalette::from_variant(variant, theme.syntax);
         theme.diff_add = model_color(colors.diff_add);
         theme.diff_del = model_color(colors.diff_delete);
-        theme.diff_hunk_bg = model_color(colors.diff_hunk);
         theme.terminal = TerminalColors::from_variant(variant);
         // slopty: a built-in theme's terminal selects in the app's selection colour; an imported
         // terminal theme keeps the one it chose (M40).
@@ -1767,6 +1839,42 @@ fn wash_for(appearance: Appearance, alpha: f32) -> Hsla {
     }
 }
 
+// slopty: the interactive washes as dark/light pairs (Claude desktop's alpha-1 and alpha-2). A
+// raw `wash(N)` keeps its dark alpha on white, where it reads about twice as heavy, so the light
+// steps are the ones `glass_selected_bg` already settled on: a pane reads as light as the
+// sidebar beside it.
+/// A row's hover: 6 % dark, 4 % light.
+pub fn hover_wash() -> Hsla {
+    step_wash(0.06, 0.04)
+}
+
+/// A control's hover (an icon button, a tab's ✕): 11 % dark, 6 % light.
+pub fn control_hover() -> Hsla {
+    step_wash(0.11, 0.06)
+}
+
+/// A selected or latched control (the tab in front, a toggle that is on): 10 % dark, 6 % light.
+pub fn selected_wash() -> Hsla {
+    step_wash(0.10, 0.06)
+}
+
+/// A pressed control: 16 % dark, 10 % light, a step past a selected row under the pointer.
+pub fn pressed_wash() -> Hsla {
+    step_wash(0.16, 0.10)
+}
+
+/// A latched control under the pointer: a step past [`selected_wash`], so hover still answers.
+pub fn selected_hover_wash() -> Hsla {
+    step_wash(0.14, 0.09)
+}
+
+fn step_wash(dark: f32, light: f32) -> Hsla {
+    match current_appearance() {
+        Appearance::Dark => wash_for(Appearance::Dark, dark),
+        Appearance::Light => wash_for(Appearance::Light, light),
+    }
+}
+
 /// Alpha of the standard modal backdrop in dark mode. Call sites that need a
 /// heavier or lighter scrim pass their own dark-mode alpha to [`scrim`].
 pub const SCRIM_ALPHA_DARK: f32 = 0.60;
@@ -2022,16 +2130,75 @@ pub fn flatten(fg: Hsla, bg: Hsla) -> Hsla {
     hsla(h, s, l, 1.0)
 }
 
+// slopty: a spinner on a light surface must read at a glance. Pale tints (the sunrise rows, an
+// accent's light glyph row, `text_muted`) take a deeper tone of their own hue, as the light theme
+// already does for its other roles, until they clear 3:1, WCAG's bar for non-text UI.
+
+/// The minimum contrast a spinner's lit cell keeps against the surface under it.
+/// slopty: how high a surface floats over the window ([`Theme::elevation`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Elevation {
+    /// A tooltip or hover card: a lighter ring and a short shadow.
+    Raised,
+    /// A menu, popover, the palette or a dialog.
+    Floating,
+}
+
+/// slopty: the ring a floating surface draws inside its edge: one device pixel at 2×.
+pub const ELEVATION_RING: f32 = 0.5;
+
+pub const SPINNER_CONTRAST: f32 = 3.0;
+
+/// WCAG contrast of `fg` drawn over the opaque `bg` (a translucent `fg` is composited first).
+pub fn contrast(fg: Hsla, bg: Hsla) -> f32 {
+    contrast_ratio(flatten(fg, bg), bg)
+}
+
+/// `tint` in the deepest step of its own hue and saturation it needs to clear `minimum` against
+/// every surface in `surfaces`: only its lightness moves, so the colour stays itself.
+pub fn legible_on(tint: Hsla, surfaces: &[Hsla], minimum: f32) -> Hsla {
+    let mut color = Hsla { a: 1.0, ..tint };
+    while color.l > 0.0 && surfaces.iter().any(|surface| contrast(color, *surface) < minimum) {
+        color.l = (color.l - 0.01).max(0.0);
+    }
+    color
+}
+
+impl Theme {
+    /// The opaque surfaces a spinner sits on: the canvas, the sidebar's and a card's, a dialog's.
+    pub fn spinner_surfaces(&self) -> [Hsla; 5] {
+        [self.surface, self.surface_raised, self.surface_card, self.surface_dialog, self.surface_overlay]
+            .map(|surface| flatten(surface, self.bg))
+    }
+
+    /// A spinner cell's ink: as given on dark, and on light the tone of the same hue that reads
+    /// at [`SPINNER_CONTRAST`] on every [`Self::spinner_surfaces`] and the canvas.
+    pub fn spinner_ink(&self, tint: Hsla) -> Hsla {
+        match self.appearance {
+            Appearance::Dark => tint,
+            Appearance::Light => {
+                let [a, b, c, d, e] = self.spinner_surfaces();
+                legible_on(tint, &[self.bg, a, b, c, d, e], SPINNER_CONTRAST)
+            }
+        }
+    }
+
+    /// The opacity a spinner's cells rest at between pulses: zeron's floor on dark, and on light
+    /// a higher one, so the grid keeps its shape on white instead of vanishing.
+    pub fn spinner_floor(&self, dark: f32) -> f32 {
+        match self.appearance {
+            Appearance::Dark => dark,
+            Appearance::Light => dark.max(LIGHT_SPINNER_FLOOR),
+        }
+    }
+}
+
+/// A light-mode spinner cell's resting opacity.
+pub const LIGHT_SPINNER_FLOOR: f32 = 0.3;
+
 /// Shared silver/slate edge for the composer and its companion surfaces.
 pub fn composer_surface_border(theme: &Theme) -> Hsla {
-    if theme.is_frost() {
-        match theme.appearance {
-            Appearance::Dark => hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
-            Appearance::Light => hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
-        }
-    } else {
-        theme.border
-    }
+    theme.composer_surface_border() // slopty: one ring
 }
 
 /// Linear per-component mix of two colors (paint helper for the gradient spinner).
@@ -3077,5 +3244,104 @@ mod tests {
         assert_eq!(Theme::HEADER_HEIGHT, 44.0); // h-11
         assert_eq!(Theme::STATUS_STRIP_HEIGHT, 24.0); // h-6
         assert_eq!(Theme::BUBBLE_RADIUS, 16.0);
+    }
+
+    /// The composer rests on a faint lift and deepens it with the keyboard on an opaque
+    /// surface; frosted glass takes no shadow, which would grey it from behind.
+    #[test]
+    fn the_composer_lifts_with_focus_only_where_it_is_opaque() {
+        let mut theme = Theme::light();
+        theme.surface_treatment = SurfaceTreatment::Opaque;
+        let alpha = |t: f32| theme.composer_shadow(t)[0].color.a;
+        assert!((alpha(0.0) - 0.035).abs() < 1e-6);
+        assert!((alpha(1.0) - 0.075).abs() < 1e-6);
+        assert!(alpha(0.5) > alpha(0.0) && alpha(0.5) < alpha(1.0));
+        assert_eq!(theme.composer_shadow(0.0)[0].blur_radius, gpui::px(20.0));
+        theme.surface_treatment = SurfaceTreatment::Frosted;
+        if theme.is_frost() {
+            assert!(theme.composer_shadow(1.0).is_empty());
+            assert!((theme.composer_surface_border().a - 0.12).abs() < 1e-6);
+        }
+    }
+
+    /// A float rings its edge from inside, 0.5 px, lit along the top on dark, and casts Amp's
+    /// two long shadows (the medium pair for a tooltip) only where it is opaque.
+    #[test]
+    fn a_float_rings_its_edge_and_casts_shadows_only_where_it_is_opaque() {
+        for (mut theme, dark) in [(Theme::dark(), true), (Theme::light(), false)] {
+            theme.surface_treatment = SurfaceTreatment::Opaque;
+            let menu = theme.elevation(Elevation::Floating);
+            let ring = menu[0].clone();
+            assert!(ring.inset && ring.spread_radius == gpui::px(ELEVATION_RING));
+            assert_eq!(ring.color.l, if dark { 1.0 } else { 0.0 });
+            assert!((ring.color.a - if dark { 0.14 } else { 0.10 }).abs() < 1e-6);
+            let lit = menu.iter().filter(|s| s.inset && s.offset.y > gpui::px(0.0)).count();
+            assert_eq!(lit, usize::from(dark), "the lit top edge is dark's");
+            let cast: Vec<_> = menu.iter().filter(|s| !s.inset).collect();
+            assert_eq!(cast.len(), 2);
+            assert_eq!((cast[0].offset.y, cast[0].blur_radius), (gpui::px(24.0), gpui::px(60.0)));
+            assert_eq!(cast[0].spread_radius, gpui::px(-28.0));
+            assert_eq!((cast[1].offset.y, cast[1].blur_radius), (gpui::px(10.0), gpui::px(28.0)));
+            let tip = theme.elevation(Elevation::Raised);
+            assert!(tip[0].color.a < ring.color.a, "a tooltip's ring is lighter");
+            assert!(tip.iter().filter(|s| !s.inset).all(|s| s.blur_radius <= gpui::px(6.0)));
+
+            theme.surface_treatment = SurfaceTreatment::Frosted;
+            if theme.is_frost() {
+                let glass = theme.elevation(Elevation::Floating);
+                assert!(glass.iter().all(|s| s.inset), "nothing painted behind glass");
+                assert!(!glass.is_empty());
+            }
+        }
+    }
+
+    /// The pane's wash steps climb in one order in both appearances (rest, hover, selected,
+    /// selected under the pointer, pressed; a control's hover above a row's), and light runs
+    /// lighter than dark, as the theme's light rule wants.
+    #[test]
+    fn the_wash_steps_climb_in_one_order_in_both_appearances() {
+        let _guard = lock_appearance();
+        let mut pressed_alphas = Vec::new();
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            set_current_appearance(appearance);
+            let (hover, control) = (hover_wash().a, control_hover().a);
+            let (selected, selected_hover) = (selected_wash().a, selected_hover_wash().a);
+            let pressed = pressed_wash().a;
+            assert!(hover < selected && selected < selected_hover && selected_hover < pressed);
+            assert!(hover < control && control < pressed);
+            pressed_alphas.push(pressed);
+        }
+        set_current_appearance(Appearance::Dark);
+        assert!(pressed_alphas[1] < pressed_alphas[0], "light presses lighter than dark");
+    }
+
+    /// Every spinner reads on every light surface: the sunrise rows, each accent preset's glyph
+    /// rows and the muted grey all clear 3:1 against the canvas and each surface, keep their hue,
+    /// and rest higher than on dark; dark keeps its colours and floor as they were.
+    #[test]
+    fn light_spinners_clear_three_to_one_on_every_surface() {
+        let light = Theme::light();
+        let mut tints: Vec<Hsla> = crate::loaders::GSPIN_ROW_TINTS
+            .iter()
+            .map(|rgb| gpui::rgb(*rgb).into())
+            .collect();
+        tints.extend(light.glyph.rows());
+        tints.extend([light.text_muted, light.text_faint, light.busy]);
+        let surfaces = light.spinner_surfaces();
+        for tint in tints {
+            let ink = light.spinner_ink(tint);
+            for surface in surfaces.iter().chain([&light.bg]) {
+                let ratio = contrast(ink, *surface);
+                assert!(ratio >= SPINNER_CONTRAST, "{tint:?} as {ink:?}: {ratio:.2}:1 on {surface:?}");
+            }
+            assert!((ink.h - tint.h).abs() < 1e-4 && (ink.s - tint.s).abs() < 1e-4, "same hue");
+        }
+        let pale: Hsla = gpui::rgb(crate::loaders::GSPIN_ROW_TINTS[0]).into();
+        assert!(contrast(pale, light.bg) < 2.0, "the sunrise's light end vanished on white");
+        assert!(light.spinner_floor(crate::loaders::GSPIN_DIM) >= LIGHT_SPINNER_FLOOR);
+
+        let dark = Theme::dark();
+        assert_eq!(dark.spinner_ink(pale), pale);
+        assert_eq!(dark.spinner_floor(crate::loaders::GSPIN_DIM), crate::loaders::GSPIN_DIM);
     }
 }

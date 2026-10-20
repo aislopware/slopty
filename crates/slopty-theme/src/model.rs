@@ -464,8 +464,6 @@ pub struct ThemeColors {
     pub diff_add: Color,
     /// A deleted line.
     pub diff_delete: Color,
-    /// A hunk header's wash.
-    pub diff_hunk: Color,
 }
 
 /// A variant's terminal colours.
@@ -591,7 +589,6 @@ fn variant(seed: &Seeds) -> ThemeVariant {
         cursor: text.with_alpha(if dark { 0.40 } else { 0.55 }),
         diff_add: success,
         diff_delete: danger,
-        diff_hunk: accent.primary.with_alpha(if dark { 0.08 } else { 0.07 }),
     };
     let terminal_background = Color::hex(seed.terminal_background);
     ThemeVariant {
@@ -754,7 +751,6 @@ mod tests {
             c.success_muted,
             c.input,
             c.cursor,
-            c.diff_hunk,
         ]
         .map(hex);
         let want = [
@@ -778,7 +774,6 @@ mod tests {
             "#61d8ad",
             "#343438b8",
             "#e8e8ea66",
-            "#8b7cf614",
         ];
         assert_eq!(got, want, "dark");
         assert_eq!(hex(dark.accent.wash), "#8b7cf638", "dark wash");
@@ -809,7 +804,6 @@ mod tests {
             c.success_muted,
             c.input,
             c.cursor,
-            c.diff_hunk,
         ]
         .map(hex);
         let want = [
@@ -833,7 +827,6 @@ mod tests {
             "#1c6c3b",
             "#ffffff",
             "#3030358c",
-            "#5b43e812",
         ];
         assert_eq!(got, want, "light");
         assert_eq!(hex(light.accent.wash), "#5b43e81f", "light wash");

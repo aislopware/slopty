@@ -64,10 +64,12 @@ pub fn keep_keyboard<E: gpui::InteractiveElement>(el: E) -> E {
     el.on_mouse_down(gpui::MouseButton::Left, |_ev, window, _cx| window.prevent_default())
 }
 
-/// A square button round one icon, a surface toolbar's: [`CONTROL_SIZE`] at [`CONTROL_RADIUS`],
-/// the icon at [`ICON_SIZE`] in `text_muted`, its hover fading in an ink wash, and `label` as its
-/// accessible name and its tooltip. `id` is also its debug selector and its hover fade's key, so
-/// it is unique app-wide.
+/// A square button round one icon, a surface toolbar's: the pane's one icon button
+/// ([`crate::surface_chrome::icon_button`]), `label` as its accessible name and its tooltip at
+/// the house delay. `id` is also its debug selector and keys its hover fade, so it is unique
+/// app-wide. A press leaves the keyboard where it was.
+// slopty: one recipe for every pane button; this one drew its own ink washes and showed its
+// tooltip at gpui's 500 ms.
 #[must_use]
 pub fn icon_button(
     id: impl Into<SharedString>,
@@ -75,34 +77,12 @@ pub fn icon_button(
     label: impl Into<SharedString>,
     theme: &Theme,
 ) -> gpui::Stateful<Div> {
+    use crate::settings::widgets::ActionHint as _;
     let id: SharedString = id.into();
-    let label: SharedString = label.into();
     let selector = id.to_string();
-    div()
-        .id(gpui::ElementId::Name(id.clone()))
+    crate::surface_chrome::icon_button(id, icon, theme)
         .debug_selector(move || selector)
-        .role(gpui::Role::Button)
-        .aria_label(label.clone())
-        .tab_index(0)
-        .size(px(CONTROL_SIZE))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(CONTROL_RADIUS))
-        .cursor_pointer()
-        .bg(crate::motion::hover_blend(
-            &id,
-            gpui::transparent_black(),
-            crate::theme::ink(0.05),
-        ))
-        .hover_fade(id)
-        // slopty: pressed reads a step darker; the ring is the shell's one (M8, M22).
-        .active(|style| style.bg(crate::theme::ink(0.09)))
-        .map(|el| focus_ring(el, theme))
-        .map(keep_keyboard)
-        .tooltip(crate::settings::widgets::text_tooltip(label))
-        .child(crate::icons::icon(icon).size(px(ICON_SIZE)).text_color(theme.text_muted))
+        .hint(label)
 }
 
 /// How loud a [`button`] is: the shell's dialog buttons.
@@ -143,7 +123,7 @@ pub fn button(
         .map(|el| crate::surface_chrome::focus_ring(el, theme))
         // slopty: pressed reads a step deeper (M22).
         .map(|el| match tone {
-            Tone::Ghost => el.active(|style| style.bg(crate::theme::ink(0.09))),
+            Tone::Ghost => el.active(|style| style.bg(crate::theme::pressed_wash())),
             Tone::Primary | Tone::Danger => el.active(|style| style.opacity(0.85)),
         })
         .map(keep_keyboard)
@@ -183,33 +163,31 @@ pub fn note(text: impl Into<SharedString>, theme: &Theme) -> Div {
         .child(text.into())
 }
 
-/// A surface on its way, zeron's loading anatomy (the Changes pane's "Preparing diff…"): the
-/// gradient spinner over a 12 pt caption in `text_faint`, in its middle. `view` keeps its pulse.
+// slopty: one loading voice for every surface, and a quick load never flashes (the 150 ms grace,
+// `loaders::pending`; `docs/decisions/ui.md`, "A load waits 200 ms before it says so", now 150).
+/// A surface on its way, in its middle: [`crate::loaders::pending`]'s spinner and words, shown
+/// once the load has run its grace. `theme` and `view` are the caller's; the loader reads both
+/// itself.
 pub fn loading(
     caption: impl Into<SharedString>,
-    theme: &Theme,
-    view: EntityId,
-    cx: &mut App,
+    _theme: &Theme,
+    _view: EntityId,
+    _cx: &mut App,
 ) -> Div {
+    let caption: SharedString = caption.into();
     div()
         .size_full()
         .flex()
-        .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(Theme::SPACE_SM))
-        .child(crate::loaders::gradient_spinner("live-loading", theme, 3.0, view, cx))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(theme.text_faint)
-                .child(caption.into()),
-        )
+        .child(crate::loaders::pending(format!("live-loading-{caption}"), caption))
 }
 
-/// What a surface says when it cannot go on, zeron's empty-state anatomy (the "Add a project"
-/// canvas): an optional mark 48 tall at 9 % of the text, a 16 pt medium headline 24 under it, a
-/// 13 pt line in `text_muted` at 0.7 6 under that, and an optional action 20 lower, fading in.
+/// What a pane says when it has nothing to show or cannot go on, in opencode's quiet voice: an
+/// optional 20 pt mark in `text_faint`, a 14 pt medium headline 8 under it, a 13 pt line in
+/// `text_muted` 8 under that (282 to 360 wide), and an optional action 16 lower, fading in. It
+/// fills its region and sits at the optical centre, lifted by the smaller of 18 % of the region
+/// and 160 (opencode's `padding-bottom: 160px`), not the middle.
 pub fn empty_state(
     id: impl Into<gpui::ElementId>,
     mark: Option<&'static str>,
@@ -218,21 +196,21 @@ pub fn empty_state(
     action: Option<AnyElement>,
     theme: &Theme,
 ) -> AnyElement {
-    let marked = mark.is_some();
     let body = div()
+        .flex_none()
         .flex()
         .flex_col()
         .items_center()
-        .max_w(px(360.0))
+        .max_w(px(EMPTY_STATE_WIDTH))
         .px(px(16.0))
         .text_center()
+        .gap(px(8.0))
         .when_some(mark, |el, mark| {
-            el.child(crate::icons::icon(mark).size(px(48.0)).text_color(theme.text.opacity(0.09)))
+            el.child(crate::icons::icon(mark).size(px(20.0)).text_color(theme.text_faint))
         })
         .child(
             div()
-                .when(marked, |el| el.mt(px(24.0)))
-                .text_size(crate::typography::ui_rems(16.0))
+                .text_size(crate::typography::ui_rems(crate::typography::ladder::HEADING))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .child(headline.into()),
@@ -240,14 +218,35 @@ pub fn empty_state(
         .when_some(line, |el, line| {
             el.child(
                 div()
-                    .mt(px(6.0))
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .text_color(theme.text_muted.opacity(0.7))
+                    .text_size(crate::typography::ui_rems(crate::typography::ladder::BODY))
+                    .text_color(theme.text_muted)
                     .child(line),
             )
         })
-        .when_some(action, |el, action| el.child(div().mt(px(20.0)).child(action)));
-    crate::motion::fade_in(id, body).into_any_element()
+        .when_some(action, |el, action| el.child(div().mt(px(8.0)).child(action)))
+        .debug_selector(|| "empty-state".to_owned());
+    optically_centred(crate::motion::fade_in(id, body)).into_any_element()
+}
+
+/// The widest an empty state's words run (opencode's 360).
+const EMPTY_STATE_WIDTH: f32 = 360.0;
+/// The most an empty state is lifted above the middle, as bottom room (opencode's 160).
+const OPTICAL_LIFT_MAX: f32 = 160.0;
+/// An empty state's lift as a share of its region.
+const OPTICAL_LIFT_SHARE: f32 = 0.18;
+
+/// `content` in a region it fills, centred across and a little above the middle: the room under
+/// it gains the smaller of 18 % of the region and 160, so the eye finds it where it looks first.
+pub fn optically_centred(content: impl IntoElement) -> Div {
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(div().flex_1())
+        .child(content)
+        .child(div().flex_1())
+        .child(div().h(gpui::relative(OPTICAL_LIFT_SHARE)).max_h(px(OPTICAL_LIFT_MAX)))
 }
 
 /// The transcript's "Scroll to bottom" pill as a free function, so Slopty's own views
@@ -349,9 +348,16 @@ pub fn tooltip_card_keyed(
 pub const TOOLTIP_KEY_GAP: f32 = 8.0;
 /// The tooltip's corners, which its frost masks to.
 pub const TOOLTIP_RADIUS: f32 = 6.0;
+/// The tooltip's words, at the 16 px baseline.
+pub const TOOLTIP_TEXT_SIZE: f32 = crate::typography::ladder::LABEL;
+/// The widest a tooltip draws before its words wrap.
+pub const TOOLTIP_MAX_WIDTH: f32 = 240.0;
 
-/// The chip every tooltip is: frosted, hairline, the muted interface voice at the font-size
-/// setting, entering with [`crate::motion::fade_quick`] (none under reduced motion). It is one
+// slopty: legible as Claude desktop's and T3's: 12 pt words in the primary ink (11 pt muted was
+// hard to read, worst over white frost), on the spacing ladder, 240 wide at most; zeron's frost
+// stays (an inverted chip would be a seam beside the frosted menus).
+/// The chip every tooltip is: frosted, ringed, 12 pt in the primary ink at the font-size
+/// setting, entering with [`crate::motion::tooltip_in`] (none under reduced motion). It is one
 /// `Tooltip` node for assistive tech, `spoken` as its label and value (the words, then the key).
 pub fn tooltip_frame(
     theme: &Theme,
@@ -363,34 +369,177 @@ pub fn tooltip_frame(
         .id("tooltip")
         .role(gpui::Role::Tooltip)
         .aria_label(label)
-        .max_w(px(320.0))
-        .px(px(9.0))
-        .py(px(6.0))
+        .max_w(px(TOOLTIP_MAX_WIDTH))
+        .px(px(Theme::SPACE_SM))
+        .py(px(6.0)) // slopty: the border's pixel, now the ring draws inside the edge.
         .rounded(px(TOOLTIP_RADIUS))
-        .border_1()
-        .border_color(theme.border)
+        // slopty: a ring, the lit top edge on dark and a short shadow, not a 1 px border
+        // (opencode's and Amp's floats; `Theme::elevation`).
+        .shadow(theme.elevation(crate::theme::Elevation::Raised))
         .bg(crate::popover::surface_bg(theme))
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(theme.text_muted)
+        .text_size(crate::typography::ui_rems(TOOLTIP_TEXT_SIZE))
+        .text_color(theme.text)
         .when_some(value, |card, value| card.aria_value(value))
         .child(content);
     crate::frost::frosted(
         TOOLTIP_RADIUS,
         crate::frost::MENU_BLUR,
-        crate::motion::fade_quick("tooltip-in", card),
+        crate::motion::tooltip_in("tooltip-in", card),
     )
 }
 
-/// A tooltip's key, as [`crate::popover::kbd_hint`] sets one (the system face, so ⇧ ⌥ ⏎ draw),
-/// in `text_faint`: the chip is already muted and small.
+/// A tooltip's keys, each drawn as its own cap (opencode's keybind: 14 px tall, at least as wide,
+/// 4 px each side, radius 2, a faint fill, the glyph at 11 px in the system face so ⇧ ⌥ ⏎ draw).
 pub fn tooltip_keys(theme: &Theme, keys: SharedString) -> Div {
     div()
         .flex_none()
-        .whitespace_nowrap()
-        .font_family(crate::popover::KEY_GLYPH_FONT)
-        .text_size(crate::typography::ui_rems(11.0))
-        .text_color(theme.text_faint)
-        .child(keys)
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .children(key_caps(&keys).into_iter().map(|cap| {
+            div()
+                .h(px(KEY_CAP_SIZE))
+                .min_w(px(KEY_CAP_SIZE))
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(2.0))
+                .bg(crate::theme::ink(0.10))
+                .shadow(vec![cap_lip(1.0)]) // slopty: the cap's lip (design-inspiration item 9).
+                .whitespace_nowrap()
+                .font_family(crate::popover::KEY_GLYPH_FONT)
+                .text_size(crate::typography::ui_rems(11.0))
+                .text_color(theme.text_muted)
+                .child(cap)
+        }))
+}
+
+/// A key cap's height and least width.
+const KEY_CAP_SIZE: f32 = 14.0;
+
+// slopty: key caps press with the real key (HextaUI's `Kbd` with `useHeldKeys`; design-inspiration
+// item 9). A cap stands on a 1 px lip; while its key is down in the focused palette or picker it
+// sinks 1 px onto it, its fill deepening to `ink(0.16)` and the lip gone, over 100 ms. The palette
+// or picker's root records what is held ([`track_held_keys`]) and forgets it as it opens
+// ([`release_held_keys`]); auto-repeat keeps a key down.
+
+/// How long a cap takes to press or come back up.
+pub const CAP_PRESS: crate::motion::MotionSpec =
+    crate::motion::MotionSpec::new(100, crate::motion::EASE_OUT);
+/// A pressed cap's fill.
+const CAP_PRESSED_FILL: f32 = 0.16;
+/// A cap's lip at rest.
+const CAP_LIP: f32 = 0.14;
+
+/// A cap's 1 px lip along its bottom edge, drawn inside it so it takes no room; `shown` is 1 at
+/// rest and 0 pressed.
+fn cap_lip(shown: f32) -> gpui::BoxShadow {
+    gpui::BoxShadow {
+        color: crate::theme::ink(CAP_LIP * shown),
+        offset: gpui::point(px(0.0), px(-1.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(0.0),
+        inset: true,
+    }
+}
+
+/// The keys held down in the focused palette or picker, each with when it went down or came up.
+#[derive(Default)]
+pub struct HeldKeys {
+    keys: std::collections::HashMap<SharedString, (bool, std::time::Instant)>,
+}
+
+impl gpui::Global for HeldKeys {}
+
+impl HeldKeys {
+    fn set(key: &str, down: bool, window: &mut gpui::Window, cx: &mut App) {
+        let now = crate::clock::now(cx);
+        let held = cx.default_global::<Self>();
+        let was = held.keys.get(key).is_some_and(|(down, _)| *down);
+        if was != down {
+            held.keys.insert(SharedString::from(key.to_owned()), (down, now));
+            window.refresh();
+        }
+    }
+
+    /// How far a cap for `key` (a gpui key name) is pressed: 0 up, 1 down, between while it moves.
+    fn pressed(key: &str, cx: &App) -> (f32, bool) {
+        let Some(&(down, at)) = cx.try_global::<Self>().and_then(|held| held.keys.get(key)) else {
+            return (0.0, false);
+        };
+        if crate::motion::reduced_motion(cx) {
+            return (if down { 1.0 } else { 0.0 }, false);
+        }
+        let elapsed = crate::clock::now(cx).saturating_duration_since(at);
+        let total = CAP_PRESS.total().mul_f32(crate::motion::speed_scale());
+        let moved = CAP_PRESS.progress(elapsed.as_secs_f32() / total.as_secs_f32());
+        (if down { moved } else { 1.0 - moved }, elapsed < total)
+    }
+}
+
+/// `root`, a palette's or picker's focused root, recording which keys are held for its caps.
+pub fn track_held_keys<E: gpui::InteractiveElement>(root: E) -> E {
+    root.capture_key_down(|event: &gpui::KeyDownEvent, window, cx| {
+        HeldKeys::set(&event.keystroke.key, true, window, cx);
+    })
+    .capture_key_up(|event: &gpui::KeyUpEvent, window, cx| {
+        HeldKeys::set(&event.keystroke.key, false, window, cx);
+    })
+}
+
+/// Forgets every held key: a palette or picker calls it as it opens, since the key that closed
+/// the last one (↵, Esc) came up where no root was listening.
+pub fn release_held_keys(cx: &mut App) {
+    if cx.try_global::<HeldKeys>().is_some_and(|held| !held.keys.is_empty()) {
+        cx.set_global(HeldKeys::default());
+    }
+}
+
+/// The gpui key a cap's glyph or word stands for.
+fn cap_key(cap: &str) -> Option<&'static str> {
+    Some(match cap {
+        "↑" => "up",
+        "↓" => "down",
+        "←" => "left",
+        "→" => "right",
+        "⏎" | "↵" | "Return" | "Enter" | "return" | "enter" => "enter",
+        "Esc" | "esc" | "⎋" => "escape",
+        "Tab" | "tab" | "⇥" => "tab",
+        _ => return None,
+    })
+}
+
+/// `cap`, a key cap resting on `fill` (an `ink` alpha) for `keys` (glyphs or words split by
+/// spaces, "↑ ↓" one cap for both), drawn with its lip, sunk while one of its keys is held.
+pub fn pressable_cap(cap: Div, keys: &str, fill: f32, window: &mut gpui::Window, cx: &App) -> Div {
+    let (pressed, moving) = keys
+        .split_whitespace()
+        .filter_map(cap_key)
+        .map(|key| HeldKeys::pressed(key, cx))
+        .fold((0.0_f32, false), |(p, m), (q, n)| (p.max(q), m || n));
+    if moving {
+        window.request_animation_frame();
+    }
+    cap.relative()
+        .top(px(pressed))
+        .bg(crate::theme::ink(crate::motion::lerp(fill, CAP_PRESSED_FILL, pressed)))
+        .shadow(vec![cap_lip(1.0 - pressed)])
+}
+
+/// The caps a shortcut's words draw as: each modifier glyph its own cap, then the key; a chord
+/// written with spaces or `+` splits there.
+fn key_caps(keys: &str) -> Vec<String> {
+    const MODIFIERS: [char; 5] = ['⌘', '⇧', '⌥', '⌃', '⇪'];
+    let mut caps = Vec::new();
+    for word in keys.split([' ', '+']).filter(|word| !word.is_empty()) {
+        let key = word.trim_start_matches(MODIFIERS);
+        caps.extend(word[..word.len() - key.len()].chars().map(String::from));
+        if !key.is_empty() {
+            caps.push(key.to_owned());
+        }
+    }
+    caps
 }
 
 // slopty: a float's controls are touch targets on an iPad: none under 24 pt either way.
@@ -399,6 +548,57 @@ mod tests {
     use gpui::{Render, div};
 
     use super::*;
+
+    /// A shortcut draws one cap per modifier and one for its key, whichever way it is written.
+    #[test]
+    fn a_shortcut_draws_a_cap_per_key() {
+        assert_eq!(key_caps("⌘⇧E"), ["⌘", "⇧", "E"]);
+        assert_eq!(key_caps("⌘↵"), ["⌘", "↵"]);
+        assert_eq!(key_caps("Ctrl L"), ["Ctrl", "L"]);
+        assert_eq!(key_caps("Ctrl+Shift+Tab"), ["Ctrl", "Shift", "Tab"]);
+        assert_eq!(key_caps("⌘K ⌘S"), ["⌘", "K", "⌘", "S"]);
+        assert_eq!(key_caps("Esc"), ["Esc"]);
+    }
+
+    struct Empty;
+
+    impl Render for Empty {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let theme = theme(cx).clone();
+            div().size_full().child(empty_state(
+                "empty",
+                None,
+                "Nothing here",
+                Some("A line under it.".into()),
+                None,
+                &theme,
+            ))
+        }
+    }
+
+    /// An empty state sits above the middle of its region by half its lift, the smaller of 18 %
+    /// of the region and 160.
+    #[gpui::test]
+    fn an_empty_state_sits_at_the_optical_centre(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (_view, cx) = cx.add_window_view(|_, _| Empty);
+        cx.simulate_resize(gpui::size(px(500.0), px(800.0)));
+        // Drawn once to start its fade-in, then again once the 4 px rise has settled.
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        }
+        let body = cx.debug_bounds("empty-state").expect("drawn");
+        let centre = f32::from(body.center().y);
+        let lift = (0.18_f32 * 800.0).min(160.0);
+        assert!((centre - (400.0 - lift / 2.0)).abs() < 1.5, "centre at {centre}");
+    }
 
     /// What the iPad's floats are built of: a toolbar button, a toggle chip with one letter, the
     /// shortest dialog button and a pill.
@@ -440,5 +640,57 @@ mod tests {
             let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
             assert!(w >= 24.0 && h >= 24.0, "{id} is {w}x{h}");
         }
+    }
+    /// A palette footer: the arrows' cap, in a root that records held keys.
+    struct Footer {
+        focus: gpui::FocusHandle,
+    }
+
+    impl Render for Footer {
+        fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let cap = div().h(px(22.0)).w(px(30.0)).debug_selector(|| "arrows-cap".into());
+            track_held_keys(div().track_focus(&self.focus).size_full().p(px(10.0)))
+                .child(pressable_cap(cap, "↑ ↓", 0.05, window, cx))
+        }
+    }
+
+    /// A cap sinks 1 px while its key is held (auto-repeat too) and comes back up as it is let go;
+    /// a key no cap shows moves nothing.
+    #[gpui::test]
+    fn a_key_cap_presses_with_the_real_key(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+        });
+        let (footer, cx) = cx.add_window_view(|_, cx| Footer { focus: cx.focus_handle() });
+        let focus = footer.read_with(cx, |footer, _| footer.focus.clone());
+        cx.update(|window, cx| window.focus(&focus, cx));
+        let top = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(CAP_PRESS.total() * 2);
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            f32::from(cx.debug_bounds("arrows-cap").expect("drawn").origin.y)
+        };
+        let rest = top(cx);
+        let key = |key: &str| gpui::Keystroke::parse(key).unwrap();
+        let down = |key: &str, is_held: bool| gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse(key).unwrap(),
+            is_held,
+            prefer_character_input: false,
+        };
+        cx.simulate_event(down("tab", false));
+        assert_eq!(top(cx), rest, "Tab has no cap here");
+        cx.simulate_event(down("down", false));
+        assert_eq!(top(cx), rest + 1.0, "pressed");
+        cx.simulate_event(down("down", true));
+        assert_eq!(top(cx), rest + 1.0, "held through the repeat");
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: key("down") });
+        assert_eq!(top(cx), rest, "let go");
+        cx.simulate_event(down("up", false));
+        assert_eq!(top(cx), rest + 1.0, "either arrow");
+        cx.update(|_, cx| release_held_keys(cx));
+        assert_eq!(top(cx), rest, "forgotten as a palette opens");
     }
 }

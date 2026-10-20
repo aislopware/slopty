@@ -1,17 +1,19 @@
 Window
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Say hello
 Status │ Done
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
+Paragraph │ Done: Say hello
 Button │ Copy message
 Article │ You
 Paragraph │ Read the plot
 Button │ Copy message
 Button │ Rewind…
-Article │ Claude Code
-Button │ Read /work/plot.png │ Read image (5.9KB)
-Status │ Read image (5.9KB)
 Button │ Image: plot.png
 Paragraph │ The plot climbs in five red bars.
 Button │ Copy message
@@ -20,7 +22,6 @@ MultilineTextInput │ Do anything…
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel
@@ -29,7 +30,6 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options
 Dialog │ plot.png (focused)
 Image │ plot.png
 Button │ Close

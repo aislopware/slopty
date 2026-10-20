@@ -174,8 +174,11 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
         let source = before.widths[column];
         let first = draw(&shell, cx, 16);
         let progress = (first.widths[column] - source) / (target - source);
+        // slopty: a pane opens on the quint ease-out (`PANEL_RESIZE`, opencode's), quick off the
+        // mark by design; no column may run ahead of that curve's first frame.
+        let quickest = motion::PANEL_RESIZE.progress(0.016 / motion::PANEL_RESIZE.total().as_secs_f32());
         assert!(
-            progress > 0.0 && progress < 0.1,
+            progress > 0.0 && progress < quickest.max(0.1) + 0.02,
             "column {column} lurches: {progress}"
         );
         let mut previous = first.widths[column];

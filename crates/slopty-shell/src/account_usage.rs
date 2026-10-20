@@ -488,6 +488,16 @@ impl AccountUsage {
     // slopty: no agent accounts: Slopty never touches a credential.
 }
 
+/// slopty: how full the context window is before its ring shows.
+const CONTEXT_SHOWN_FROM: f64 = 0.7;
+
+/// slopty: whether the context ring shows, the window `fraction` full: past
+/// [`CONTEXT_SHOWN_FROM`], while the agent compacts or is nearly full (`pressing`), or while its
+/// card is open.
+fn ring_shows(fraction: Option<f64>, pressing: bool, card_up: bool) -> bool {
+    fraction.is_some_and(|fraction| fraction >= CONTEXT_SHOWN_FROM) || pressing || card_up
+}
+
 /// Which footer ring's popover is up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FooterCard {
@@ -541,7 +551,25 @@ impl Render for AccountUsage {
                 cx,
             )
         });
-        let context = self.has_context(cx).then(|| {
+        // slopty: the ring keeps out of the way until the window fills (the Amp study's P10): it
+        // shows past 70 %, while the agent compacts, when nearly full with nothing to compact
+        // it, and while its card is open (`/context`, `/mcp` reach it any time).
+        let compacting = {
+            let state = self.state.read(cx);
+            state
+                .selected_chat
+                .as_deref()
+                .and_then(|chat| state.session_for(chat))
+                .and_then(|session| session.waiting_on.as_ref())
+                .is_some_and(|wait| wait.kind == slopty_view_proto::SessionWait::COMPACTING)
+        };
+        let shown = self.has_context(cx)
+            && ring_shows(
+                context.and_then(slopty_view_proto::ContextUsage::fraction),
+                compacting || urgent,
+                self.popup.get() == Some(&FooterCard::Context),
+            );
+        let context = shown.then(|| {
             let mut chip = crate::context_usage::chip(
                 context,
                 self.popup.get() == Some(&FooterCard::Context),
@@ -572,6 +600,17 @@ mod tests {
 
     fn window(label: &str, used: f32) -> AgentUsageWindow {
         AgentUsageWindow { label: label.into(), used_fraction: used, resets_at: None }
+    }
+
+    /// slopty: the context ring keeps out of the way until the window fills (the Amp study's
+    /// P10): past 70 %, while the agent compacts, or while its card is open.
+    #[test]
+    fn the_context_ring_shows_only_as_the_window_fills() {
+        assert!(!ring_shows(None, false, false), "unknown");
+        assert!(!ring_shows(Some(0.69), false, false), "room to spare");
+        assert!(ring_shows(Some(0.7), false, false), "filling");
+        assert!(ring_shows(Some(0.1), true, false), "compacting");
+        assert!(ring_shows(None, false, true), "its card is open");
     }
 
     #[test]

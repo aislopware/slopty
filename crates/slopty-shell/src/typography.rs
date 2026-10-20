@@ -123,6 +123,24 @@ pub const fn ui_rems(pixels_at_default: f32) -> Rems {
     rems(pixels_at_default / 16.0)
 }
 
+/// slopty: the interface's type ladder, each size at the 16 px baseline for [`ui_rems`]
+/// (Claude desktop's compact scale: caption 11, footnote 12, body 13, heading 14, title 20).
+/// Chrome takes its sizes from here; code, diffs and the terminal keep their own settings.
+pub mod ladder {
+    /// Counts, badges, key hints, notices.
+    pub const CAPTION: f32 = 11.0;
+    /// Controls, tabs, menus, tooltips.
+    pub const LABEL: f32 = 12.0;
+    /// Rows and running text.
+    pub const BODY: f32 = 13.0;
+    /// Section and empty-state headlines.
+    pub const HEADING: f32 = 14.0;
+    /// Dialog and page titles.
+    pub const TITLE: f32 = 16.0;
+    /// The few hero lines.
+    pub const DISPLAY: f32 = 20.0;
+}
+
 /// slopty: the faces text falls back to before the platform's own cascade: the bundled symbol
 /// face (`slopty_kit::fonts::SYMBOLS_FAMILY`, registered at launch), so a prompt's powerline,
 /// devicon and box-drawing glyphs draw wherever the shell sets text, not as empty boxes. It
@@ -992,5 +1010,36 @@ mod tests {
                 "missing static faces for {expected_family}"
             );
         }
+    }
+
+    /// The pane's chrome follows the font-size setting (M28): only the surfaces that draw code at
+    /// the code size (the diff, the editor, the terminal) may set text in absolute pixels.
+    #[test]
+    fn pane_chrome_text_scales_with_the_font_size_setting() {
+        const DRAWS_CODE: [&str; 3] = ["changes.rs", "files/preview.rs", "terminal/panel.rs"];
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![src.join("surface_chrome.rs")];
+        for dir in ["changes", "files", "live", "browser", "terminal"] {
+            for entry in std::fs::read_dir(src.join(dir)).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut offenders = Vec::new();
+        for path in files {
+            let name = path.strip_prefix(&src).unwrap().to_string_lossy().replace('\\', "/");
+            if DRAWS_CODE.contains(&name.as_str()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (line, source) in text.lines().enumerate() {
+                if source.contains("text_size(px(") || source.contains("text_size(gpui::px(") {
+                    offenders.push(format!("{name}:{}", line + 1));
+                }
+            }
+        }
+        assert!(offenders.is_empty(), "chrome text in px, use ui_rems: {offenders:?}");
     }
 }

@@ -192,8 +192,6 @@ pub(super) struct MarkdownPreview {
     diagram_snapshot: Rc<HashMap<String, Result<crate::image_media::MediaImage, String>>>,
     visible_rows: HashSet<gpui::SharedString>,
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
-    code_fences_generation: u64,
-    math_generation: u64,
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
     needs_focus: bool,
@@ -423,8 +421,6 @@ impl MarkdownPreview {
             diagram_snapshot: Rc::default(),
             visible_rows: HashSet::new(),
             code_fences: HashMap::new(),
-            code_fences_generation: crate::settings::code_fences_generation(cx),
-            math_generation: crate::settings::math_generation(cx),
             copied_code: None,
             copied_clear: None,
             needs_focus: true,
@@ -958,7 +954,6 @@ impl MarkdownPreview {
         let runtime = self.code_fences.entry(key.clone()).or_default();
         render::code_ui_for(
             key,
-            crate::settings::current(cx).code_fences_fit_content,
             runtime,
             cx.weak_entity(),
             |view| &mut view.code_fences,
@@ -1086,7 +1081,6 @@ impl MarkdownPreview {
                 let top = self.tree.blocks.get(ix)?.clone();
                 let mut opts = RenderOptions::settled(format!("{}{ix}", self.scope).into(), crate::clock::now(cx));
                 opts.code = self.code_uis_for(&opts.row_key, &top.block, ix, cx);
-                opts.math = crate::settings::math_style(cx);
                 let editor = self.editor.as_ref().and_then(|editor| editor.upgrade());
                 let source = self.parsed_source.clone();
                 opts.tasks = Some(render::TaskUi {
@@ -1139,7 +1133,7 @@ impl MarkdownPreview {
                             ),
                             Some(Err(error)) => div()
                                 .p(px(12.0))
-                                .text_size(px(12.0))
+                                .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.warning_muted)
                                 .child(format!("Couldn't draw this diagram · {error}"))
                                 .into_any_element(),
@@ -1334,19 +1328,6 @@ impl MarkdownPreview {
 impl Render for MarkdownPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        let code_fences_generation = crate::settings::code_fences_generation(cx);
-        if self.code_fences_generation != code_fences_generation {
-            self.code_fences_generation = code_fences_generation;
-            for runtime in self.code_fences.values() {
-                runtime.scroll.set_offset(gpui::Point::default());
-            }
-            self.list.remeasure();
-        }
-        let math_generation = crate::settings::math_generation(cx);
-        if self.math_generation != math_generation {
-            self.math_generation = math_generation;
-            self.list.remeasure();
-        }
         if self.needs_focus {
             self.needs_focus = false;
             window.focus(&self.focus, cx);
@@ -1641,33 +1622,6 @@ mod layout_tests {
                     .copied_ix,
                 Some(0),
                 "the next frame renders the Copied confirmation"
-            );
-            cx.update_window(window.into(), |_, window, cx| (ui.toggle_fit)(window, cx))
-                .unwrap();
-            assert!(crate::settings::current(cx).code_fences_fit_content);
-            cx.update_window(window.into(), |_, window, cx| {
-                window.refresh();
-                let _ = window.draw(cx);
-            })
-            .unwrap();
-            assert_eq!(
-                view.read(cx)
-                    .code_fences
-                    .values()
-                    .next()
-                    .unwrap()
-                    .scroll
-                    .offset(),
-                gpui::Point::default(),
-                "changing the persistent mode resets ephemeral offsets"
-            );
-            let second =
-                cx.new(|cx| MarkdownPreview::new("SECOND.md".into(), Rc::new(|_, _| {}), cx));
-            let second_row: SharedString = format!("{}0", second.read(cx).scope).into();
-            assert!(
-                second
-                    .update(cx, |view, cx| view.code_ui_for(&second_row, 0, cx))
-                    .fit_content
             );
             cx.spawn(async move |cx| cx.update(|cx| cx.quit())).detach();
         });

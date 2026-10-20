@@ -2,9 +2,7 @@ Window (focused)
 Article │ You
 Paragraph │ bash rm -rf build
 Article │ Claude Code
-Paragraph │ Let me run it.
-Button │ Run rm -rf build │ Waiting for permission…
-Status │ Waiting for permission…
+Button │ Wrote a note and waiting for approval (run rm -rf build)
 Status │ Needs your approval: rm -rf build
 Group │ rm -rf build
 Note │ Risky
@@ -18,7 +16,6 @@ Button │ Deny and stop
 Button │ Allow, and say what's next…
 Button │ Say what to do instead…
 Button │ Mode: Auto
-Button │ Context —
 Group │ Navigation
 Heading │ bash rm -rf build
 Button │ Back to Chats

@@ -2,8 +2,7 @@ Window (focused)
 Article │ You
 Paragraph │ ask
 Article │ Claude Code
-Button │ Tool AskUserQuestion │ Waiting for permission…
-Status │ Waiting for permission…
+Button │ Waiting for your answer (asked a question)
 Status │ Waiting for your answer: Color
 Group │ Which color?
 Note │ Answer in Slopty
@@ -14,7 +13,6 @@ MultilineTextInput │ Type your own answer, or pick an option above
 Button │ Skip
 Button │ Submit
 Button │ Mode: Auto
-Button │ Context —
 Group │ Navigation
 Heading │ ask
 Button │ Back to Chats

@@ -57,18 +57,9 @@ fn loopback_offer(
     };
     match forward {
         Some(here) => format!("{wants}: it opens here at localhost:{here}"),
-        None => format!("{wants}? Opening forwards the port to {THIS_DEVICE}."),
+        None => format!("{wants}? Opening forwards the port to {}.", slopty_shell::THIS_DEVICE),
     }
 }
-
-/// This device, as an offer names it.
-const THIS_DEVICE: &str = if cfg!(target_os = "macos") {
-    "this Mac"
-} else if cfg!(target_os = "ios") {
-    "this device"
-} else {
-    "this computer"
-};
 
 /// The page `url` names on a worker's loopback: its port, and the rest after the host.
 fn on_loopback(url: &str) -> Option<(u16, String)> {
@@ -472,9 +463,10 @@ mod tests {
     };
     use slopty_proto::items::{Item, ItemKind, ItemSync};
     use slopty_proto::orchestration::Port;
+    use slopty_shell::THIS_DEVICE;
     use slopty_theme::Theme;
 
-    use super::{THIS_DEVICE, absolute, escaped, loopback_offer, on_loopback};
+    use super::{absolute, escaped, loopback_offer, on_loopback};
     use crate::workspace::WorkspaceView;
     use crate::workspace::rig::{KEY, hear, link, mac, shell};
 

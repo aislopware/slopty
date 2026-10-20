@@ -303,21 +303,6 @@ impl Shell {
         project_icon_frame(chat_id, &name, &device, size, art)
     }
 
-    /// A project group header's icon: the same artwork its rows would wear,
-    /// without the tooltip — the label beside it already names the project.
-    pub(super) fn render_project_group_icon(
-        &self,
-        chat_id: &str,
-        size: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .size(px(size))
-            .flex_none()
-            .child(self.project_icon_art(chat_id, false, cx))
-            .into_any_element()
-    }
-
     /// Artwork for a chat's project, shared by every space of the project:
     /// the representative's name and color, read from this device's checkout
     /// when there is one (no round trip), else from the representative.

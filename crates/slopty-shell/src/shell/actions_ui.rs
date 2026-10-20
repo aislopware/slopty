@@ -730,11 +730,14 @@ impl Shell {
                                     })),
                             )
                             .child(
-                                popover::btn_primary(
-                                    &theme,
+                                popover::named_button( // slopty: a named button
+                                    popover::btn_primary(
+                                        &theme,
+                                        if saving { "Saving…" } else { "Save action" },
+                                    )
+                                    .id("action-save"),
                                     if saving { "Saving…" } else { "Save action" },
                                 )
-                                .id("action-save")
                                 .when(!saving, |button| {
                                     button.on_click(
                                         cx.listener(|this, _, _, cx| this.save_project_action(cx)),

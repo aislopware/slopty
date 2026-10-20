@@ -37,10 +37,7 @@ use crate::state::{AppState, CANVAS_PANEL_PREFIX, EngineHandle};
 use crate::theme::Theme;
 
 use super::view::terminal_panel_bg;
-use crate::motion::HoverFade as _;
 
-/// Fixed tab width — drag-reorder math stays analytic.
-pub const TAB_WIDTH: f32 = 118.0;
 pub const TAB_BAR_HEIGHT: f32 = 40.0;
 
 // slopty: ⌘T opens a terminal tab where the panel has the keyboard (Terminal.app, Ghostty).
@@ -201,25 +198,12 @@ struct TabDragPayload {
 
 struct TabGhost {
     title: SharedString,
+    width: f32,
 }
 
 impl Render for TabGhost {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div()
-            .w(px(TAB_WIDTH))
-            .h(px(28.0))
-            .px(px(Theme::SPACE_SM))
-            .flex()
-            .items_center()
-            .rounded(px(Theme::CONTROL_RADIUS))
-            .bg(theme.surface_raised)
-            .border_1()
-            .border_color(theme.border_strong)
-            .text_size(px(12.0))
-            .text_color(theme.text)
-            .opacity(0.85)
-            .child(div().truncate().child(self.title.clone()))
+        crate::surface_chrome::tab_ghost(self.title.clone(), self.width, Theme::of(cx))
     }
 }
 
@@ -1042,6 +1026,13 @@ impl TerminalPanel {
             })
             .unwrap_or_default();
 
+        // slopty: the chips fit the widest title, as the side pane's do.
+        let crate::surface_chrome::TabWidths { chip: chip_w, cut } = crate::surface_chrome::tab_widths(
+            tab_elements.iter().map(|(_, _, title, ..)| title.as_ref()),
+            cx,
+        );
+        let chip_slot = chip_w + crate::surface_chrome::CONTROL_GAP;
+        let (reduced, now) = (motion::reduced_motion(cx), cx.frame_time());
         let bar_chat = chat_owned.clone();
         let drop_chat = chat_owned.clone();
         // Slopty terminal-panel.tsx: `flex h-10 items-center border-b
@@ -1067,7 +1058,7 @@ impl TerminalPanel {
                     }
                     let from = payload.from;
                     let rel_x = f32::from(event.event.position.x) - f32::from(event.bounds.left());
-                    let over = drop_index(rel_x, TAB_WIDTH, count);
+                    let over = drop_index(rel_x, chip_slot, count);
                     this.update_drag_over(from, over, cx);
                 },
             ))
@@ -1090,147 +1081,95 @@ impl TerminalPanel {
                         let chat_close2 = chat_owned.clone();
                         let chat_drag = chat_owned.clone();
                         let ghost_title = title.clone();
-                        // Slopty tab: `h-7 rounded-lg pl-2 pr-1 gap-1.5 text-xs`,
-                        // terminal glyph + label + close; active = white/8 wash.
-                        let (text_color, bg, glyph_alpha) = if selected {
-                            (theme.text, crate::theme::ink(0.08), 0.8)
-                        } else {
-                            (
-                                theme.text_muted.opacity(0.6),
-                                gpui::transparent_black(),
-                                0.6,
-                            )
-                        };
-                        // slopty: the side pane's tab close: 18 square, r 6, its wash faded,
-                        // shown on the tab in front and on any tab under the pointer; the one in
-                        // front names ⌘W.
-                        let group: SharedString = format!("terminal-tab-group-{key}").into();
-                        let close_fade = format!("terminal-tab-close-{key}");
-                        let close_btn = div()
-                            .id(("terminal-tab-close", key))
-                            .size(px(18.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(6.0))
-                            .role(gpui::Role::Button)
-                            .when(!selected, |el| {
-                                el.opacity(0.0).group_hover(group.clone(), |s| s.opacity(1.0))
-                            })
-                            .cursor_pointer()
-                            .bg(motion::hover_blend(
-                                &close_fade,
-                                crate::theme::wash(0.0),
-                                crate::theme::wash(0.11),
-                            ))
-                            .hover_fade(close_fade)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(&chat_close2, key, window, cx);
-                            }))
-                            .map(|el| {
-                                if selected {
-                                    el.action_hint(
-                                        "Close terminal",
-                                        Keys::Action(Box::new(crate::app_menus::CloseTab)),
-                                        cx,
-                                    )
-                                } else {
-                                    el.hint("Close terminal")
-                                }
-                            })
-                            .child(
-                                crate::icons::icon(crate::icons::CLOSE)
-                                    .size(px(12.0))
-                                    .text_color(theme.text_muted.opacity(0.8)),
-                            );
+                        // slopty: the side pane's tab chip (24, r 6, 12 px, the ✕ on hover), so the
+                        // dock's strip and the pane's read as one; the glyph slot keeps the
+                        // program's progress.
+                        let tip = cut.get(ix).copied().unwrap_or(false).then(|| title.clone());
+                        // slopty: an exited tab dims over the quick fade, not at once.
+                        let dim = motion::state_t(
+                            &format!("terminal-tab-exited-{key}"),
+                            exited,
+                            motion::FADE_QUICK,
+                            reduced,
+                            now,
+                        );
+                        let leading = tab_glyph(
+                            key,
+                            progress,
+                            if selected { theme.text_muted } else { theme.text_muted.opacity(0.7) },
+                            &theme,
+                            cx.entity_id(),
+                            cx,
+                        );
                         let chat_menu = chat_owned.clone();
-                        let tab_el = div()
-                            .id(("terminal-tab", key))
-                            .group(group)
-                            .w(px(TAB_WIDTH))
-                            .h(px(28.0))
-                            .flex_none()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .pl(px(8.0))
-                            .pr(px(4.0))
-                            .rounded(px(8.0))
-                            // slopty terminal-panel.tsx tab: `transition-colors`.
-                            .bg(motion::hover_blend(
-                                &format!("term-tab-{key}"),
-                                bg,
-                                theme.element_hover,
-                            ))
-                            .hover_fade(format!("term-tab-{key}"))
-                            .text_size(px(12.0))
-                            .text_color(text_color)
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.select_tab(&chat_select, ix, cx);
-                                this.request_focus(cx);
-                            }))
-                            // Middle-click closes (§1.10).
-                            .on_mouse_down(
-                                MouseButton::Middle,
-                                cx.listener(move |this, _, window, cx| {
-                                    this.close_tab(&chat_close, key, window, cx);
-                                }),
-                            )
-                            // slopty: right-click offers what the side pane's tabs offer.
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.tab_menu.open(TabMenu {
-                                        chat: chat_menu.clone(),
-                                        key,
-                                        position: event.position,
-                                    });
-                                    cx.notify();
-                                }),
-                            )
-                            .on_drag(
-                                TabDragPayload {
-                                    chat: chat_drag,
-                                    from: ix,
-                                    title: ghost_title,
-                                },
-                                |payload, _point, _, cx| {
-                                    let title = payload.title.clone();
-                                    cx.stop_propagation();
-                                    cx.new(|_| TabGhost { title })
-                                },
-                            )
-                            .when(exited, |el| el.opacity(0.55))
-                            // slopty: the tab is named for a screen reader as for the eye.
-                            .role(gpui::Role::Tab)
-                            .aria_label(title.clone())
-                            .aria_selected(selected)
-                            .child(tab_glyph(
-                                key,
-                                progress,
-                                text_color.opacity(glyph_alpha),
-                                &theme,
-                                cx.entity_id(),
-                                cx,
-                            ))
-                            // slopty: a cut title shows whole in a tooltip.
-                            .child(crate::settings::widgets::truncate_with_tip(
-                                format!("terminal-tab-title-{key}"),
-                                title,
-                            ))
-                            .child(close_btn);
+                        let tab_el = crate::surface_chrome::tab_chip(
+                            crate::surface_chrome::TabChip {
+                                id: "terminal-tab",
+                                close_id: "terminal-tab-close",
+                                ix: usize::try_from(key).unwrap_or(usize::MAX),
+                                active: selected,
+                                title: title.clone(),
+                                dirty: false,
+                                leading,
+                                width: chip_w,
+                                close_hint: "Close terminal",
+                            },
+                            &theme,
+                            cx.listener(move |this, _, window, cx| {
+                                this.close_tab(&chat_close2, key, window, cx);
+                            }),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_tab(&chat_select, ix, cx);
+                            this.request_focus(cx);
+                        }))
+                        // Middle-click closes (§1.10).
+                        .on_mouse_down(
+                            MouseButton::Middle,
+                            cx.listener(move |this, _, window, cx| {
+                                this.close_tab(&chat_close, key, window, cx);
+                            }),
+                        )
+                        // slopty: right-click offers what the side pane's tabs offer.
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.tab_menu.open(TabMenu {
+                                    chat: chat_menu.clone(),
+                                    key,
+                                    position: event.position,
+                                });
+                                cx.notify();
+                            }),
+                        )
+                        .on_drag(
+                            TabDragPayload {
+                                chat: chat_drag,
+                                from: ix,
+                                title: ghost_title,
+                            },
+                            move |payload, _point, _, cx| {
+                                let title = payload.title.clone();
+                                cx.stop_propagation();
+                                cx.new(|_| TabGhost { title, width: chip_w })
+                            },
+                        )
+                        .opacity(motion::lerp(1.0, 0.55, dim))
+                        // slopty: the tab is named for a screen reader as for the eye.
+                        .role(gpui::Role::Tab)
+                        .aria_label(title)
+                        .when_some(tip, |el, tip| {
+                            el.tooltip(crate::settings::widgets::text_tooltip(tip))
+                                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                        });
 
                         // Sliding transform while a sibling is dragged over: animate
                         // 150 ms between committed offsets.
                         match drag {
                             Some((from, over, epoch, prev_over)) if ix != from => {
-                                let target = slide_offset(ix, from, over) * TAB_WIDTH;
-                                let start = slide_offset(ix, from, prev_over) * TAB_WIDTH;
+                                let target = slide_offset(ix, from, over) * chip_slot;
+                                let start = slide_offset(ix, from, prev_over) * chip_slot;
                                 div()
                                     .relative()
                                     .child(tab_el.with_animation(
@@ -1244,8 +1183,8 @@ impl TerminalPanel {
                             // dimmed original overlapped the sibling that
                             // slides into the vacated slot.
                             Some((from, ..)) if ix == from => div()
-                                .w(px(TAB_WIDTH))
-                                .h(px(28.0))
+                                .w(px(chip_w))
+                                .h(px(crate::surface_chrome::TAB_CHIP_HEIGHT))
                                 .flex_none()
                                 .into_any_element(),
                             _ => tab_el.into_any_element(),
@@ -1255,7 +1194,7 @@ impl TerminalPanel {
             // slopty: the strip's controls are the side pane's: 24 square, r 6, a faded wash, a 14
             // glyph, reached by Tab, named with their keys.
             .child(
-                strip_button("terminal-new-tab", crate::icons::PLUS, &theme)
+                crate::surface_chrome::icon_button("terminal-new-tab", crate::icons::PLUS, &theme)
                     .on_click(cx.listener(|this, _, _, cx| {
                         let chat = this.selected_chat(cx);
                         this.open_tab(chat, cx);
@@ -1270,38 +1209,13 @@ impl TerminalPanel {
             // Collapse chevron pinned right (slopty "Hide terminal" ⌘J).
             .child(div().flex_1())
             .child(
-                strip_button("terminal-collapse", crate::icons::ALT_ARROW_DOWN, &theme)
+                crate::surface_chrome::icon_button("terminal-collapse", crate::icons::ALT_ARROW_DOWN, &theme)
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(ToggleTerminal), cx);
                     })
                     .action_hint("Hide terminal", Keys::Action(Box::new(ToggleTerminal)), cx),
             )
     }
-}
-
-/// slopty: a control in the tab strip, as the side pane's strip draws one.
-fn strip_button(id: &'static str, glyph: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    let fade = format!("{id}-fade");
-    let button = div()
-        .id(id)
-        .size(px(24.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .cursor_pointer()
-        .role(gpui::Role::Button)
-        .tab_index(0)
-        .bg(motion::hover_blend(&fade, crate::theme::wash(0.0), crate::theme::wash(0.11)))
-        .hover_fade(fade)
-        .active(|style| style.bg(crate::theme::wash(0.16)))
-        .child(
-            crate::icons::icon(glyph)
-                .size(px(14.0))
-                .text_color(theme.text_muted),
-        );
-    crate::surface_chrome::focus_ring(button, theme)
 }
 
 /// slopty: a tab's leading glyph. While its program reports progress (`OSC 9;4`) the slot holds
@@ -1318,7 +1232,7 @@ fn tab_glyph(
 ) -> gpui::AnyElement {
     let Some(progress) = progress else {
         return crate::icons::icon(crate::icons::TERMINAL)
-            .size(px(16.0))
+            .size(px(crate::surface_chrome::ICON_SIZE))
             .flex_none()
             .text_color(ink)
             .into_any_element();
@@ -1332,7 +1246,7 @@ fn tab_glyph(
     let mark = match percent {
         Some(percent) => crate::loaders::upload_progress_arc(
             percent,
-            14.0,
+            12.0,
             theme.text_muted.opacity(0.25),
             arc,
         ),
@@ -1347,7 +1261,7 @@ fn tab_glyph(
     };
     div()
         .id(("terminal-tab-progress", key))
-        .size(px(16.0))
+        .size(px(crate::surface_chrome::ICON_SIZE))
         .flex_none()
         .flex()
         .items_center()

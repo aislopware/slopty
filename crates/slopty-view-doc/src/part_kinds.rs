@@ -124,8 +124,8 @@ pub struct SubagentProgress {
     pub started_at: Option<i64>,
     /// Its figures in words, time left out: "12 tools · 41k tokens"; empty with none.
     pub figures: String,
-    /// How it ended, once it did, in words: "Done", "Failed: out of turns", "Stopped",
-    /// "Waiting on its own background work".
+    /// How it ended, once it did, in words: the first line of what it answered (else "Done"),
+    /// "Failed: out of turns", "Stopped", "Waiting on its own background work".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
     /// What it asks of the person, while it waits on them: answered in this chat's dock.

@@ -40,10 +40,12 @@ const PERMISSION: &str = "Touch three files";
 /// recorded agent spoke between calls, which a new recording may move.
 const CALLS: [(&str, u32); 4] = [("command", 3), ("searched", 2), ("failed", 1), ("edited", 1)];
 
-/// The counts `summary` (one group's line) gives for each of [`CALLS`]' kinds.
+/// The counts `summary` (one group's sentence: "Ran 2 commands (1 failed), searched 2 times and
+/// edited 1 file") gives for each of [`CALLS`]' kinds.
 fn counted(summary: &str) -> [u32; 4] {
     let mut counts = [0_u32; 4];
-    for part in summary.split(" · ") {
+    let clauses = summary.replace(" (", ", ").replace(')', "").replace(" and ", ", ");
+    for part in clauses.split(", ") {
         let number = part.split_whitespace().find_map(|w| w.parse::<u32>().ok()).unwrap_or(0);
         for (slot, (kind, _)) in counts.iter_mut().zip(CALLS) {
             if part.contains(kind) {
@@ -86,6 +88,10 @@ async fn subagent_card(drv: &mut Driver, renders: &Path, missing: &mut Vec<Strin
         missing.push(format!("the card {CARD:?}"));
         return;
     };
+    // Settled, it says what its run answered ("4"), never a blank line.
+    if !card.value.as_deref().is_some_and(|value| value.starts_with("4 · ")) {
+        missing.push(format!("the settled card says its run's answer: {:?}", card.value));
+    }
     let [x, y, w, h] = card.bounds;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
     if let Err(e) = drv
@@ -181,10 +187,11 @@ async fn start(stack: &ServedApp, folder: &str, prompt: &str) -> String {
 }
 
 /// A recorded Claude Code turn reads as zeron draws it. The `tools` recording, played to its
-/// end: its calls fold under a summary on each side of the subagent's card, counting them by
-/// kind ("Ran 2 commands", the glob and grep as searches, the one that failed; then the file
-/// written), the task list's tray counts what is done, and the subagent the turn ran is a card
-/// that opens in place and drills in; a click on a summary opens its group. The turn ends with what
+/// end: settled, the turn is its prompt, one "Worked for" divider and its answer, and its finished
+/// task list leaves no tray. The divider opens on the work: its calls fold under a summary on
+/// each side of the subagent's card, counting them by kind ("Ran 2 commands (1 failed)", the glob
+/// and grep as searches; then the file written), and the subagent the turn ran is a card that
+/// opens in place and drills in; a click on a summary opens its group. The turn ends with what
 /// it changed, and ⌘F finds words in the thread, counted and stepped through. Then the `permission`
 /// recording, held at its first request: the composer asks for the command, which it names.
 #[tokio::test]
@@ -209,9 +216,31 @@ async fn a_recorded_turn_reads_as_zeron_draws_it() {
     // The thread's history arrives and draws; the turn is over, so nothing moves after.
     tokio::time::sleep(SETTLE.saturating_mul(2)).await;
     let words = goldens(drv, &renders, "transcript-turn").await;
-    let summary = drv.dump().await.unwrap();
     // What the frames fail to say, gathered so every state is still drawn and judged.
     let mut missing: Vec<String> = Vec::new();
+
+    // The settled turn reads as its prompt, one divider and its answer (Amp's settled turn): its
+    // work folds behind "Worked for", which a click opens. A finished task list on an ended turn
+    // leaves no tray; the work's own Todo row keeps the record.
+    if words.contains("2/2") {
+        missing.push("a finished task list leaves its tray once the turn ends".to_owned());
+    }
+    let folded = drv.dump().await.unwrap();
+    let summary = if let Some(divider) = labelled(&folded, "Button", "Worked for ") {
+        let closed = folded.a11y.len();
+        let [x, y, w, h] = divider.bounds;
+        drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+        if drv.wait_for("the turn's work open", STEP, |d| d.a11y.len() > closed).await.is_ok() {
+            tokio::time::sleep(SETTLE).await;
+            goldens(drv, &renders, "transcript-turn-work").await;
+        } else {
+            missing.push("a click on the divider opens the turn's work".to_owned());
+        }
+        drv.dump().await.unwrap()
+    } else {
+        missing.push("the settled turn folds its work behind a \"Worked for\" divider".to_owned());
+        folded
+    };
 
     // A summary for the calls on each side of the subagent's card, counted by kind: the
     // commands (one failed), the glob and the grep and the task list before it, a command and the
@@ -239,13 +268,9 @@ async fn a_recorded_turn_reads_as_zeron_draws_it() {
         missing.push("a group's summary says \"Todo 2/2 done\"".to_owned());
     }
     let group = labelled(&summary, "Button", "Ran ");
-    // The task list's tray: both of the turn's tasks done.
-    if !words.contains("2/2") {
-        missing.push("the todo tray counts 2/2".to_owned());
-    }
-    // The subagent the turn ran: a card in the transcript named for its task, no longer a row
+    // The subagent the turn ran: a card in the turn's work named for its task, no longer a row
     // of the sidebar.
-    if !words.contains("Count lines") {
+    if !slopty_e2e::frame_text(&summary.a11y).contains("Count lines") {
         missing.push("the subagent's card names its task, Count lines".to_owned());
     }
     if labelled(&summary, "Button", "Subagent Count lines").is_none() {

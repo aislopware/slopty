@@ -1,9 +1,14 @@
 Window
+Button │ Filter projects: All projects
+Button │ Working, 1
 Button │ background sleep 600
 Status │ Background work
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
+Paragraph │ Done: it runs in the background.
 Button │ Copy message
 Article │ You
 Paragraph │ signals
@@ -16,7 +21,6 @@ Status │ Switched to claude-sonnet-5-5 │ fallback
 Status │ PreToolUse hook failed: lint failed │ hook
 Paragraph │ The instruction files are long: 50000 characters, over 40000
 Paragraph │ Done: signalled.
-Button │ Copy message
 Status │ Heads up from the stand-in
 Button │ Dismiss note
 Group │ Background work
@@ -26,7 +30,6 @@ MultilineTextInput │ Do anything… (focused)
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel
@@ -35,4 +38,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

@@ -13,7 +13,7 @@ Tab │ Files
 Tab │ Archived chats
 Button │ Server: e2e-server, Connected
 Button │ Close settings
-Button │ Folder: repo · surfaces
+Button │ Folder: repo @ surfaces
 List │ Allowed
 ListItem │ Bash(cargo test:*): This project, shared
 Button │ Remove Bash(cargo test:*)

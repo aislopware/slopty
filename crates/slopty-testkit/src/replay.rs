@@ -167,12 +167,13 @@ impl Recording {
                     }
                 }
                 // Claude Code's hook names no call, where its `can_use_tool` does: the call asked
-                // about is the last one called with its input.
+                // about is the first one called with its input not asked about yet, so of two
+                // alike in flight each request names its own. One with no such call names none.
                 "PermissionRequest" if payload.get("tool_use_id").is_none() => {
                     let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
-                    let id = called.iter().rev().find(|(called, _)| *called == input);
-                    if let (Some((_, id)), Some(fields)) = (id, payload.as_object_mut()) {
-                        fields.insert("tool_use_id".to_owned(), id.clone());
+                    let first = called.iter().position(|(called, _)| *called == input);
+                    if let (Some(first), Some(fields)) = (first, payload.as_object_mut()) {
+                        fields.insert("tool_use_id".to_owned(), called.remove(first).1);
                     }
                 }
                 _ => {}
@@ -651,6 +652,40 @@ mod tests {
         assert!(before.contains("touch refused.txt"), "the call is in the transcript");
         assert!(!before.contains("\"tool_use_id\":\"toolu_01\""), "its result is not");
         assert_eq!(steps.iter().filter(|s| matches!(s, Step::Hook { waits: true, .. })).count(), 3);
+    }
+
+    /// Of two calls alike in flight, each request names its own, the first asked first; a
+    /// request with no call before it names none, as a request about no item.
+    #[test]
+    fn each_request_names_the_first_call_alike_not_yet_asked_about() {
+        let input = serde_json::json!({ "command": "ls" });
+        let hook = |event: &str, id: Option<&str>, input: &Value| {
+            let mut hook = serde_json::json!({ "hook_event_name": event, "tool_input": input });
+            if let Some(id) = id {
+                hook["tool_use_id"] = id.into();
+            }
+            hook
+        };
+        let rec = Recording {
+            lines: Vec::new(),
+            hooks: vec![
+                hook("PreToolUse", Some("toolu_first"), &input),
+                hook("PreToolUse", Some("toolu_second"), &input),
+                hook("PermissionRequest", None, &input),
+                hook("PermissionRequest", None, &input),
+                hook("PermissionRequest", None, &serde_json::json!({ "command": "pwd" })),
+            ],
+            subagents: Vec::new(),
+        };
+        let asked: Vec<Value> = rec
+            .schedule(&session("List"))
+            .into_iter()
+            .filter_map(|s| match s {
+                Step::Hook { payload, waits: true } => Some(payload["tool_use_id"].clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, ["toolu_first".into(), "toolu_second".into(), Value::Null]);
     }
 
     #[test]

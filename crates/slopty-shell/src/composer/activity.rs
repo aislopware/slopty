@@ -15,6 +15,44 @@ use slopty_view_doc::work::{duration_words, tokens_short};
 
 use crate::theme::Theme;
 
+/// slopty: Escape stops the agent on its second press (Amp): the first arms it, and the working
+/// line ends "Esc again to stop" in warning ink while it is armed, then lets it go.
+pub(crate) const ESCAPE_ARMED: std::time::Duration = std::time::Duration::from_millis(1_500);
+/// What a screen reader hears of the armed stop.
+pub(crate) const ARMED_SPOKEN: &str = "Press Escape again to stop the agent";
+/// How long the armed hint takes to go at the end of [`ESCAPE_ARMED`].
+const ESCAPE_HINT_FADE: std::time::Duration = std::time::Duration::from_millis(300);
+
+thread_local! {
+    /// The chat a first Escape armed, and when.
+    static ARMED: std::cell::RefCell<Option<(String, std::time::Instant)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// slopty: Escape pressed over chat `chat_id`'s turn at `now`: whether it stops the agent, a
+/// second press while the first still holds; else it arms the stop.
+pub(crate) fn escape_stops(chat_id: &str, now: std::time::Instant) -> bool {
+    ARMED.with_borrow_mut(|armed| {
+        let second = armed.as_ref().is_some_and(|(chat, at)| {
+            chat == chat_id && now.saturating_duration_since(*at) < ESCAPE_ARMED
+        });
+        *armed = if second { None } else { Some((chat_id.to_owned(), now)) };
+        second
+    })
+}
+
+/// slopty: how much of the armed hint chat `chat_id`'s working line shows at `now`, 0 to 1:
+/// whole while it holds, fading out over its last 300 ms.
+pub(crate) fn escape_hint(chat_id: &str, now: std::time::Instant) -> f32 {
+    ARMED.with_borrow(|armed| match armed {
+        Some((chat, at)) if chat == chat_id => {
+            let left = ESCAPE_ARMED.saturating_sub(now.saturating_duration_since(*at));
+            (left.as_secs_f32() / ESCAPE_HINT_FADE.as_secs_f32()).min(1.0)
+        }
+        _ => 0.0,
+    })
+}
+
 /// The live line's words at `now`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActivityWords {
@@ -95,11 +133,9 @@ pub fn working_line(
     let words = activity_words(line, word, elapsed_secs, now);
     let theme = Theme::of(cx).clone();
     let reduced = cx.reduce_motion();
-    let spoken = [Some(words.lead.clone()), Some(words.figures.join(" · ")).filter(|f| !f.is_empty()), words.below.clone()]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
+    // slopty: a first Escape armed the stop: the line ends by saying a second one stops it.
+    let armed = armed_hint(chat_id, view, cx);
+    let spoken = spoken(&words, armed.is_some().then_some(ARMED_SPOKEN));
     let lead = if words.retrying { words.lead.clone() } else { format!("{}…", words.lead) };
     let figures = figures_element(&words, view, turn, reduced, crate::clock::now(cx), &theme);
     Some(
@@ -146,7 +182,8 @@ pub fn working_line(
                                 crate::clock::now(cx),
                             )),
                     )
-                    .children(figures),
+                    .children(figures)
+                    .children(armed.map(|(hint, shown)| armed_element(hint, shown, &theme))),
             )
             .when_some(words.below, |el, below| {
                 el.child(
@@ -165,6 +202,44 @@ pub fn working_line(
 /// slopty: the faint figures after the line's words: its timer, which rolls its digits under the
 /// key the transcript's own working line rolls them under (`render_working_trailer`), so the line
 /// taking over from that one mid-turn carries on rolling; then its tokens and thinking (#21).
+/// The line as a screen reader hears it: its words, its figures and `stop_hint`, then what it
+/// says under it.
+fn spoken(words: &ActivityWords, stop_hint: Option<&str>) -> String {
+    let figures = words.figures.iter().map(String::as_str).chain(stop_hint).collect::<Vec<_>>().join(" · ");
+    [Some(words.lead.clone()), Some(figures).filter(|f| !f.is_empty()), words.below.clone()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// slopty: what the working line says while a first Escape has armed the stop: "Esc again to
+/// stop".
+fn stop_hint() -> String {
+    format!("{} again to stop", crate::keys::stroke_text(&gpui::Modifiers::default(), "escape"))
+}
+
+/// slopty: the armed hint for chat `chat_id`'s working line and how much of it shows, while a
+/// first Escape holds; frames keep coming until it has gone.
+pub(crate) fn armed_hint(chat_id: &str, view: EntityId, cx: &mut App) -> Option<(String, f32)> {
+    let shown = escape_hint(chat_id, crate::clock::now(cx));
+    (shown > 0.0).then(|| {
+        crate::motion::pulse_lease(view, cx);
+        (stop_hint(), shown)
+    })
+}
+
+/// slopty: the armed hint after the line's figures, in warning ink, fading as the stop lets go.
+pub(crate) fn armed_element(hint: String, shown: f32, theme: &Theme) -> gpui::Div {
+    div()
+        .flex_none()
+        .relative()
+        .top(px(1.0))
+        .text_color(theme.warning)
+        .opacity(shown)
+        .child(SharedString::from(hint))
+}
+
 fn figures_element(
     words: &ActivityWords,
     view: EntityId,
@@ -227,6 +302,36 @@ mod tests {
             crate::roll_text::rolling(key, "4s".into(), false, later).is_some(),
             "the dock's line moved the same timer on to 5s"
         );
+    }
+
+    /// slopty: Escape stops the agent on its second press: the first arms it and the line says
+    /// so, in what it shows and in what a screen reader hears, until it lets go; a press over
+    /// another chat, or after the hold, arms again instead.
+    #[test]
+    fn a_second_escape_stops_and_the_line_says_so() {
+        assert_eq!(stop_hint(), "Esc again to stop");
+        let start = std::time::Instant::now();
+        assert_eq!(escape_hint("a", start), 0.0);
+        assert!(!escape_stops("a", start), "the first press arms");
+        assert_eq!(escape_hint("a", start), 1.0);
+        assert_eq!(escape_hint("b", start), 0.0, "only over the chat it armed");
+        let fading = start + ESCAPE_ARMED - ESCAPE_HINT_FADE / 2;
+        assert!((escape_hint("a", fading) - 0.5).abs() < 0.01, "{}", escape_hint("a", fading));
+        assert!(escape_stops("a", start + std::time::Duration::from_millis(400)), "the second stops");
+        assert_eq!(escape_hint("a", start), 0.0, "and the hint goes with the stop");
+        assert!(!escape_stops("a", start), "the next press arms again");
+        assert!(!escape_stops("a", start + ESCAPE_ARMED), "after the hold, a press arms again");
+        assert!(!escape_stops("b", start + ESCAPE_ARMED), "over another chat it arms that one");
+        let line = ActivityLine { started_at: Some(0), ..ActivityLine::default() };
+        let words = activity_words(&line, "Working", 0, 5_000);
+        assert_eq!(
+            spoken(&words, Some(ARMED_SPOKEN)),
+            "Working · 5s · Press Escape again to stop the agent"
+        );
+        assert_eq!(spoken(&words, None), "Working · 5s");
+        let bare = ActivityWords { figures: Vec::new(), ..words };
+        let view = EntityId::from(7u64);
+        assert!(figures_element(&bare, view, 1, true, start, &Theme::dark()).is_none());
     }
 
     /// The line names the agent's phrase, its time, its tokens and its thinking, the TUI's way.

@@ -17,6 +17,9 @@ use gpui::{
     Styled, Window, canvas, div, point, px,
 };
 
+pub mod status_mark; // slopty: the one mark a run's state morphs through
+pub mod copy_glyph; // slopty: a copy control's glyph, its check drawn as the copy lands
+
 use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, SLOPTY_PULSE};
 use crate::theme::{GlyphPalette, Theme};
 
@@ -39,6 +42,7 @@ pub fn slopty_mark_loader(
     cx: &mut App,
 ) -> impl IntoElement {
     let color = theme.text;
+    let floor = theme.spinner_floor(PULSE_FLOOR); // slopty: a light floor that keeps its shape
     let scale = height_px / 940.0;
     let cell = 100.0 * scale;
     let delta = motion::pulse_delta(&SLOPTY_PULSE, view, cx);
@@ -64,7 +68,7 @@ pub fn slopty_mark_loader(
                     div()
                         .rounded(px(16.0 * scale))
                         .bg(color)
-                        .opacity(motion::pulse_opacity(phase))
+                        .opacity(lift_floor(motion::pulse_opacity(phase), floor))
                         .size(px(cell * motion::pulse_scale(phase)))
                 })
         }))
@@ -83,6 +87,7 @@ pub fn slopty_loader(
     cx: &mut App,
 ) -> impl IntoElement {
     let color = theme.text;
+    let floor = theme.spinner_floor(PULSE_FLOOR); // slopty: a light floor that keeps its shape
     let slot = cell_px;
     let delta = motion::pulse_delta(&SLOPTY_PULSE, view, cx);
     div()
@@ -102,7 +107,7 @@ pub fn slopty_loader(
                     div()
                         .rounded(px(slot / 4.0))
                         .bg(color)
-                        .opacity(motion::pulse_opacity(phase))
+                        .opacity(lift_floor(motion::pulse_opacity(phase), floor))
                         .size(px(slot * motion::pulse_scale(phase)))
                 })
         }))
@@ -118,7 +123,7 @@ pub use slopty_view_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
 /// as travelling upward.
 pub fn gradient_spinner(
     _id: &'static str,
-    _theme: &Theme,
+    theme: &Theme,
     cell_px: f32,
     view: EntityId,
     cx: &mut App,
@@ -126,12 +131,16 @@ pub fn gradient_spinner(
     let center = (MATRIX_SIDE as f32 - 1.0) / 2.0;
     let max = MATRIX_SIDE as f32 - 1.0 + center;
     let pulse = motion::activity_pulse_slow(view, cx);
+    // slopty: on light, each sunrise row takes the deeper tone of its hue that reads on white,
+    // and the cells rest higher (`Theme::spinner_ink`, `Theme::spinner_floor`).
+    let tints = gradient_tints(theme);
+    let floor = theme.spinner_floor(GSPIN_DIM);
     div()
         .flex()
         .flex_col()
         .gap(px(cell_px / 2.0))
         .children((0..MATRIX_SIDE).map(move |row| {
-            let tint: gpui::Hsla = gpui::rgb(GSPIN_ROW_TINTS[row]).into();
+            let tint = tints[row];
             div()
                 .flex()
                 .flex_row()
@@ -145,9 +154,22 @@ pub fn gradient_spinner(
                         .size(px(cell_px))
                         .rounded(px(cell_px / 2.0))
                         .bg(tint)
-                        .opacity(pulse.opacity(phase, GSPIN_DIM))
+                        .opacity(pulse.opacity(phase, floor))
                 }))
         }))
+}
+
+/// The resting opacity of the slopty wave and mark loaders (`motion::pulse_opacity`'s low end).
+const PULSE_FLOOR: f32 = 0.08;
+
+/// `opacity` from [`motion::pulse_opacity`] (0.08..1) rescaled to rest at `floor` instead.
+fn lift_floor(opacity: f32, floor: f32) -> f32 {
+    floor + (opacity - PULSE_FLOOR) / (1.0 - PULSE_FLOOR) * (1.0 - floor)
+}
+
+/// The gradient spinner's three row tints as `theme` draws them.
+pub(crate) fn gradient_tints(theme: &Theme) -> [gpui::Hsla; MATRIX_SIDE] {
+    GSPIN_ROW_TINTS.map(|rgb| theme.spinner_ink(gpui::rgb(rgb).into()))
 }
 
 /// A 2×3 activity glyph sized for compact status slots. Its color is an
@@ -181,12 +203,16 @@ fn mini_spinner_tinted(
     cell_px: f32,
     row_tints: [gpui::Hsla; 3],
     _view: EntityId,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> impl IntoElement {
+    // slopty: legible on light (`Theme::spinner_ink`), its cells resting higher there; as given
+    // where no theme is installed.
+    let theme = cx.try_global::<Theme>();
     MiniSpinner {
         key: key.into(),
         cell_px,
-        row_tints,
+        row_tints: row_tints.map(|tint| theme.map_or(tint, |theme| theme.spinner_ink(tint))),
+        floor: theme.map_or(GSPIN_DIM, |theme| theme.spinner_floor(GSPIN_DIM)),
     }
 }
 
@@ -195,6 +221,7 @@ struct MiniSpinner {
     key: SharedString,
     cell_px: f32,
     row_tints: [gpui::Hsla; 3],
+    floor: f32,
 }
 
 impl RenderOnce for MiniSpinner {
@@ -207,12 +234,17 @@ impl RenderOnce for MiniSpinner {
                     cx.new(|_| MiniSpinnerView {
                         cell_px: self.cell_px,
                         row_tints: self.row_tints,
+                        floor: self.floor,
                     })
                 });
                 view.update(cx, |view, cx| {
-                    if view.cell_px != self.cell_px || view.row_tints != self.row_tints {
+                    if view.cell_px != self.cell_px
+                        || view.row_tints != self.row_tints
+                        || view.floor != self.floor
+                    {
                         view.cell_px = self.cell_px;
                         view.row_tints = self.row_tints;
+                        view.floor = self.floor;
                         cx.notify();
                     }
                 });
@@ -230,17 +262,19 @@ impl RenderOnce for MiniSpinner {
 struct MiniSpinnerView {
     cell_px: f32,
     row_tints: [gpui::Hsla; 3],
+    floor: f32,
 }
 
 impl Render for MiniSpinnerView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        mini_spinner_cells(self.cell_px, self.row_tints, cx.entity_id(), cx)
+        mini_spinner_cells(self.cell_px, self.row_tints, self.floor, cx.entity_id(), cx)
     }
 }
 
 fn mini_spinner_cells(
     cell_px: f32,
     row_tints: [gpui::Hsla; 3],
+    floor: f32,
     view: EntityId,
     cx: &mut App,
 ) -> impl IntoElement {
@@ -267,7 +301,7 @@ fn mini_spinner_cells(
                         .size(px(cell_px))
                         .rounded(px(cell_px / 2.0))
                         .bg(tint)
-                        .opacity(pulse.opacity(phase, GSPIN_DIM))
+                        .opacity(pulse.opacity(phase, floor))
                 }))
         }))
 }
@@ -309,7 +343,15 @@ struct PulseGlow {
 
 impl RenderOnce for PulseGlow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let style = self.style;
+        // slopty: legible on light, as every spinner (`Theme::spinner_ink`).
+        let style = match cx.try_global::<Theme>() {
+            Some(theme) => GlowStyle {
+                tint: theme.spinner_ink(self.style.tint),
+                floor: theme.spinner_floor(self.style.floor),
+                ..self.style
+            },
+            None => self.style,
+        };
         let view = window.with_global_id(self.key.into(), |id, window| {
             window.with_element_state(id, |previous: Option<Entity<PulseGlowView>>, _| {
                 let view = previous.unwrap_or_else(|| cx.new(|_| PulseGlowView { style }));
@@ -378,7 +420,7 @@ pub fn upload_progress_ring(percent: u8, diameter: f32) -> AnyElement {
         .child(
             div()
                 .text_size(px(9.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui::FontWeight::MEDIUM) // slopty: two weights (item 23).
                 .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.95))
                 .child(SharedString::from(format!("{percent}%"))),
         )
@@ -495,8 +537,11 @@ const _: () = {
 
 // slopty: one loading voice for every surface (`.research/micro-details-2026-10-16.md` M30).
 
-/// How long a load runs before it says so: a fast one never flashes "Loading…".
-pub const PENDING_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+/// How long a load runs before it says so: a fast one never flashes "Loading…" (HextaUI's
+/// `useDelayedLoading`, 150 ms; design-inspiration item 10).
+pub const PENDING_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+/// How long a loader, once shown, stays: it never blinks on and straight off.
+pub const PENDING_HOLD: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// "Loading file…" and its like: the mono spinner and muted words, shown only once the load has
 /// run [`PENDING_GRACE`]. `key` names the load, so a new one waits its own grace.
@@ -504,6 +549,7 @@ pub fn pending(key: impl Into<SharedString>, text: impl Into<SharedString>) -> P
     Pending {
         key: key.into(),
         text: text.into(),
+        wait: true,
     }
 }
 
@@ -511,6 +557,74 @@ pub fn pending(key: impl Into<SharedString>, text: impl Into<SharedString>) -> P
 pub struct Pending {
     key: SharedString,
     text: SharedString,
+    wait: bool,
+}
+
+impl Pending {
+    /// Shown at once: [`delayed`] has waited already.
+    #[must_use]
+    pub fn at_once(mut self) -> Self {
+        self.wait = false;
+        self
+    }
+}
+
+// slopty: a loader that never flashes (HextaUI's `useDelayedLoading`; design-inspiration item 10):
+// it waits [`PENDING_GRACE`] before it shows, and once shown stays [`PENDING_HOLD`] even if the
+// load lands meanwhile, so it never blinks on and off.
+/// Where a load stands for its place: [`delayed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delayed {
+    /// Loading, too briefly to say so: the place stays blank.
+    Waiting,
+    /// The loader shows ([`Pending::at_once`]), the load running or its loader's hold not over.
+    Shown,
+    /// Loaded: the content shows.
+    Done,
+}
+
+/// Whether the place `key` names shows its loader while `loading`: blank for the first
+/// [`PENDING_GRACE`], then the loader, held at least [`PENDING_HOLD`] once shown. Ask it every
+/// time the place draws, loading or not, so it knows when its load ends.
+pub fn delayed(key: impl Into<SharedString>, loading: bool, window: &mut Window, cx: &mut App) -> Delayed {
+    let key: SharedString = key.into();
+    let state = window.use_keyed_state(
+        gpui::ElementId::Name(format!("delayed-{key}").into()),
+        cx,
+        |_, _: &mut Context<DelayedLoad>| DelayedLoad::default(),
+    );
+    state.update(cx, |load, cx| {
+        if load.shown && (!load.held || loading) {
+            return Delayed::Shown;
+        }
+        if !loading {
+            *load = DelayedLoad::default();
+            return Delayed::Done;
+        }
+        if load.timer.is_none() {
+            load.timer = Some(cx.spawn(async move |load, cx| {
+                cx.background_executor().timer(PENDING_GRACE).await;
+                let _ = load.update(cx, |load, cx| {
+                    load.shown = true;
+                    cx.notify();
+                });
+                cx.background_executor().timer(PENDING_HOLD).await;
+                let _ = load.update(cx, |load, cx| {
+                    load.held = true;
+                    cx.notify();
+                });
+            }));
+        }
+        Delayed::Waiting
+    })
+}
+
+/// A [`delayed`] place's load: whether its loader has shown and has been held long enough.
+#[derive(Default)]
+struct DelayedLoad {
+    shown: bool,
+    held: bool,
+    timer: Option<gpui::Task<()>>,
 }
 
 /// Whether a load's grace has passed: a mark its timer sets, never the clock read while drawing.
@@ -520,10 +634,14 @@ struct PendingGrace {
 
 impl RenderOnce for Pending {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let wait = self.wait;
         let grace = window.use_keyed_state(
             gpui::ElementId::Name(format!("pending-{}", self.key).into()),
             cx,
             |_, cx: &mut Context<PendingGrace>| {
+                if !wait {
+                    return PendingGrace { over: true };
+                }
                 cx.spawn(async move |grace, cx| {
                     cx.background_executor().timer(PENDING_GRACE).await;
                     let _ = grace.update(cx, |grace, cx| {
@@ -545,7 +663,8 @@ impl RenderOnce for Pending {
         if !grace.read(cx).over {
             return row;
         }
-        let theme = Theme::of(cx).clone();
+        // slopty: the theme as a live surface reads it, so a window with none set still draws.
+        let theme = crate::live::chrome::theme(cx).clone();
         let view = window.current_view();
         row.role(gpui::Role::Status)
             .aria_label(self.text.clone())
@@ -638,6 +757,50 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().w(px(200.0)).child(pending("file", "Loading file…"))
         }
+    }
+
+    /// A place whose load the test starts and ends.
+    struct Place {
+        loading: bool,
+    }
+
+    impl Render for Place {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let stands = delayed("place", self.loading, window, cx);
+            div().child(div().debug_selector(move || format!("{stands:?}")).size(px(4.0)))
+        }
+    }
+
+    /// A delayed loader stays blank through a quick load, shows once the load passes its grace,
+    /// and once shown stays its hold though the load lands sooner.
+    #[gpui::test]
+    fn a_delayed_loader_never_flashes(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::default()));
+        let (place, cx) = cx.add_window_view(|_, _| Place { loading: true });
+        let at = |cx: &mut gpui::VisualTestContext, ms: u64, loading: bool| {
+            cx.executor().advance_clock(Duration::from_millis(ms));
+            cx.run_until_parked();
+            place.update(cx, |place, cx| {
+                place.loading = loading;
+                cx.notify();
+            });
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            ["Waiting", "Shown", "Done"]
+                .into_iter()
+                .find(|stands| cx.debug_bounds(stands).is_some())
+                .expect("drawn")
+        };
+        assert_eq!(at(cx, 0, true), "Waiting");
+        assert_eq!(at(cx, 100, false), "Done", "a quick load never shows its loader");
+        assert_eq!(at(cx, 1000, false), "Done");
+        assert_eq!(at(cx, 0, true), "Waiting");
+        assert_eq!(at(cx, 150, true), "Shown");
+        assert_eq!(at(cx, 50, false), "Shown", "held, though loaded");
+        assert_eq!(at(cx, 300, false), "Shown");
+        assert_eq!(at(cx, 60, false), "Done", "let go once held 400 ms");
     }
 
     #[gpui::test]

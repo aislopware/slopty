@@ -1,21 +1,24 @@
 Window
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Tidy the greeting
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
 Article │ You
 Paragraph │ Tidy the greeting
 Button │ Copy message
 Button │ Rewind…
 Article │ Claude Code
 Paragraph │ Done: Tidy the greeting
-Button │ Copy message
 MultilineTextInput │ Do anything…
 Button │ Attach images
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
+Button │ Diff scope: Working tree
 Button │ Find in diff
 Button │ Show file tree
 Button │ Ignore whitespace
@@ -23,8 +26,12 @@ Button │ Split view
 Button │ Wrap long lines
 Button │ Collapse all files
 Button │ .claude/settings.json, expanded
+Button │ Open file
 Button │ NOTES.md, expanded
+Button │ Open file
 Button │ src/main.rs, expanded
+Button │ Open file
+Button │ Show these lines
 Group │ Workspace files
 SearchInput │ Search files
 Button │ Show hidden files
@@ -32,10 +39,12 @@ Tree │ Workspace file tree (focused)
 TreeItem │ src
 TreeItem │ NOTES.md
 TreeItem │ README.md
+Splitter │ Resize files panel
+Splitter │ Resize side pane
 Button │ Open in…
 Button │ Show chat details
 Button │ Working tree
-Button │ Close tab
+Button │ Close Working tree
 Button │ New tab
 Button │ Expand side pane
 Button │ Hide files panel
@@ -44,4 +53,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

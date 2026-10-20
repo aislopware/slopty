@@ -14,6 +14,13 @@ use crate::theme::Theme;
 
 pub(super) type FileEditorState = EditorState;
 
+// slopty: the editor's gutter breathes as Zed's and VS Code's do: its numbers 12 from the pane's
+// edge and 16 clear of the code (gpui-kit's 6 put them against it).
+/// The space between a line number and its code.
+pub(super) const LINE_NUMBER_GAP: f32 = 16.0;
+/// The space between the pane's edge and the widest line number.
+pub(super) const GUTTER_INSET: f32 = 12.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct EditorMenuAvailability {
     pub(super) cut: bool,
@@ -54,6 +61,7 @@ pub(super) fn new_file_editor(
         EditorState::new(window, cx)
             .language(path.to_string())
             .line_number(true)
+            .line_number_gap(gpui::px(LINE_NUMBER_GAP))
             .folding(false)
             .soft_wrap(soft_wrap)
             .default_value(text)
@@ -62,6 +70,7 @@ pub(super) fn new_file_editor(
     let menu_editor = editor.downgrade();
     editor.update(cx, |state, cx| {
         state.set_editor_style(super::editor_adapter::editor_style(theme));
+        state.set_editor_paddings(gpui::Edges { left: gpui::px(GUTTER_INSET), ..Default::default() });
         state.set_readonly(false, cx);
         state.on_context_menu(Rc::new(move |_, capabilities, position, _, cx| {
             let clipboard_has_text = cx

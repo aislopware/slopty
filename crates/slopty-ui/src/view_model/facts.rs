@@ -295,6 +295,20 @@ fn title(call: &ToolCall, input: Option<&serde_json::Value>) -> Option<String> {
         "EnterWorktree" => format!("EnterWorktree({})", arg(&["name", "path"])?),
         "ExitWorktree" => "ExitWorktree".to_owned(),
         "EnterPlanMode" => "Entered plan mode".to_owned(),
+        // slopty: Claude Code's question to the person, named as the person reads it (#9).
+        "AskUserQuestion" => {
+            let header = input
+                .and_then(|i| i.get("questions"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|questions| questions.first())
+                .and_then(|q| q.get("header").or_else(|| q.get("question")))
+                .and_then(serde_json::Value::as_str)
+                .map(short);
+            match header {
+                Some(header) => format!("Asked about {header}"),
+                None => "Asked a question".to_owned(),
+            }
+        }
         _ => return None,
     })
 }
@@ -359,6 +373,17 @@ fn rejected(call: &ToolCall) -> String {
             format!("User rejected update to {name}")
         }
         _ => "Tool use rejected".to_owned(),
+    }
+}
+
+/// What a call held on a request of `kind` waits for, in the words of the request's chip.
+fn waiting_on(kind: &str) -> &'static str {
+    match kind {
+        slopty_proto::thread::Request::APPROVAL | slopty_proto::thread::Request::RETRY => {
+            "Waiting for approval"
+        }
+        slopty_proto::thread::Request::PLAN => "Plan ready for review",
+        _ => "Waiting for your answer",
     }
 }
 
@@ -556,6 +581,13 @@ pub fn tool_facts(
             || task.item.as_ref().is_some_and(|i| i.0 == item)
     });
     let (mut result_line, mut failed) = result(call, task).unzip();
+    // slopty: a call held for the person says what it waits for in its request's words, as
+    // the request's own chip does: a question is never called a permission (#9).
+    if let ToolState::Pending { ask } = &call.state
+        && let Some(request) = state.requests.iter().find(|request| request.id == *ask)
+    {
+        result_line = Some(waiting_on(&request.kind).to_owned());
+    }
     // How it ended in the agent's own words, where its state alone does not say.
     if let Some(said) = note.and_then(|n| n.said.clone()).filter(|s| !s.trim().is_empty()) {
         // The person's own no is not a failure, whatever words it ended with.
@@ -790,8 +822,22 @@ fn progress(
     };
     let running = matches!(state_now, SubagentProgress::RUNNING | SubagentProgress::NEEDS_YOU);
     let outcome = match state_now {
-        // The time it ran is the card's figures' to say, once: the outcome is the word.
-        SubagentProgress::DONE => Some("Done".to_owned()),
+        // The time it ran is the card's figures' to say, once: the outcome is the first line
+        // of what it answered, its heading and strong marks left out, else the word.
+        SubagentProgress::DONE => Some(
+            agent
+                .and_then(|a| a.report.as_ref())
+                .and_then(|report| {
+                    report
+                        .text
+                        .lines()
+                        .map(|line| {
+                            line.trim_start_matches('#').replace("**", "").trim().to_owned()
+                        })
+                        .find(|line| !line.is_empty())
+                })
+                .unwrap_or_else(|| "Done".to_owned()),
+        ),
         SubagentProgress::FAILED => Some(match task.and_then(|t| t.outcome.as_deref()) {
             Some(why) => format!("Failed: {why}"),
             None => "Failed".to_owned(),
@@ -857,7 +903,10 @@ pub fn task_part(
         _ => note.summary.clone(),
     };
     let text = match duration {
-        Some(ms) if !summary.contains(" · ") => format!("{summary} · {}", duration_words(ms)),
+        // slopty: in the tray's words, "<1s" for a run under a second (#16).
+        Some(ms) if !summary.contains(" · ") => {
+            format!("{summary} · {}", slopty_view_doc::work::ran_for_words(ms))
+        }
         _ => summary,
     };
     let tone = match note.status.as_str() {

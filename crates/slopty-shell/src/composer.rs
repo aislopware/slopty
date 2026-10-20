@@ -58,6 +58,7 @@ mod side; // slopty: side questions (`/btw`).
 mod surfaces;
 mod request_card; // slopty: a request's card by its kind.
 pub use activity::working_line;
+pub(crate) use activity::{ARMED_SPOKEN, armed_element, armed_hint, escape_stops};
 pub(crate) use footer::ansi_color; // slopty: a code fence's terminal colours.
 pub use dock::{DockCache, chat_dock};
 pub use surfaces::{ModPane, PaneAsk};
@@ -607,6 +608,14 @@ pub const APPSHOT_IMAGE_MAX_WIDTH: f32 = 320.0;
 pub const APPSHOT_IMAGE_MAX_HEIGHT: f32 = 132.0;
 pub const APPSHOT_TILE_HEIGHT: f32 = 192.0;
 
+// slopty: a page's progress segment, and the height its press reaches.
+const PROGRESS_SEGMENT: f32 = 14.0;
+const PROGRESS_TARGET: f32 = 20.0;
+
+// slopty: the queue's words beside Send: their side padding, and the gap before their key.
+const QUEUE_WORDS_PAD: f32 = 6.0;
+const QUEUE_WORDS_GAP: f32 = 4.0;
+
 // slopty: appshots removed.
 pub fn send_button_mode(run_live: bool, has_text: bool) -> SendButtonMode {
     match (run_live, has_text) {
@@ -811,8 +820,28 @@ impl Wizard {
         })
     }
 
+    // slopty: where the pages stand, as their progress segments say it.
+    /// "1 of 3": the page shown of how many, as a screen reader hears the progress.
     pub fn counter(&self) -> String {
-        format!("{}/{}", self.page + 1, self.questions.len().max(1))
+        format!("{} of {}", self.page + 1, self.questions.len().max(1))
+    }
+
+    /// Whether page `page` has an answer: an option picked or words typed.
+    pub fn answered(&self, page: usize) -> bool {
+        self.picked.get(page).is_some_and(|p| !p.is_empty())
+            || self.typed.get(page).is_some_and(|t| !t.trim().is_empty())
+    }
+
+    /// Go to page `page`, one answered or the first after them; false where it cannot.
+    pub fn go_to(&mut self, page: usize) -> bool {
+        let reach = (0..self.questions.len()).find(|p| !self.answered(*p)).unwrap_or(self.questions.len() - 1);
+        if page == self.page || page > reach || page >= self.questions.len() {
+            return false;
+        }
+        self.page = page;
+        self.focused = self.questions.get(self.page).and_then(initial_focus);
+        self.read_through = false;
+        true
     }
 
     pub fn current(&self) -> Option<&UserInputQuestion> {
@@ -2018,6 +2047,9 @@ pub struct ComposerInput {
     edit_revision: u64,
     pub(crate) read_only: bool,
     placeholder: SharedString,
+    /// slopty: what assistive tech calls the field when its placeholder is not its name (a form
+    /// field whose label shows above it); none names it by its placeholder.
+    name: Option<SharedString>,
     /// What the agent guesses comes next, shown faint in place of the placeholder while the draft
     /// is empty; it takes no room of its own, so it comes and goes without moving anything.
     hint: Option<SharedString>,
@@ -2153,6 +2185,7 @@ impl ComposerInput {
             edit_revision: 0,
             read_only: false,
             placeholder: placeholder.into(),
+            name: None,
             hint: None,
             selected_range: 0..0,
             selection_reversed: false,
@@ -2234,6 +2267,13 @@ impl ComposerInput {
 
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
+        self
+    }
+
+    /// slopty: names the field for assistive tech apart from its placeholder.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<SharedString>) -> Self {
+        self.name = Some(name.into());
         self
     }
 
@@ -5137,7 +5177,11 @@ impl Render for ComposerInput {
             .id(("composer-input", cx.entity_id()))
             .role(self.accessibility_role)
             // slopty: shell mode's field is a command's, and says so.
-            .aria_label(if self.hides_bang { SharedString::from("Shell command") } else { self.placeholder.clone() })
+            .aria_label(if self.hides_bang {
+                SharedString::from("Shell command")
+            } else {
+                self.name.clone().unwrap_or_else(|| self.placeholder.clone())
+            })
             .aria_placeholder(self.shown_placeholder())
             // slopty: a screen reader reads the words in the field, not only its placeholder.
             // slopty: a chip says the words it shows ("Image 1"), never the link under it.
@@ -5545,18 +5589,13 @@ fn pasted_reference_tokens(text: &str, pasted: Range<usize>) -> Vec<(char, Menti
     tokens
 }
 
-/// Interpret the trigger before discovery so a disabled $ stays ordinary text.
-fn completion_trigger(
-    text: &str,
-    cursor: usize,
-    preferences: crate::settings::SkillCompletionSettings,
-) -> (Option<MentionToken>, bool, bool, bool) {
-    let skill_token = preferences
-        .dollar
-        .then(|| invocation_token(text, cursor, '$'))
-        .flatten();
+/// Interpret the trigger before discovery.
+// slopty: `$` picks a skill and `/` a command, for every agent; the per-agent toggles are gone
+// (`docs/decisions/ui.md`, "Amp's prunes").
+fn completion_trigger(text: &str, cursor: usize) -> (Option<MentionToken>, bool, bool, bool) {
+    let skill_token = invocation_token(text, cursor, '$');
     let skill = skill_token.is_some();
-    let include_skills = skill || !preferences.separate_from_slash;
+    let include_skills = skill;
     let token = skill_token.or_else(|| slash_token(text, cursor));
     let commands_allowed = token.is_some() && !skill;
     (token, skill, include_skills, commands_allowed)
@@ -7123,15 +7162,10 @@ impl Composer {
             return;
         }
         let harness = self.pickers.read(cx).resolved(cx).harness;
-        let preferences =
-            crate::settings::current(cx).skill_completion(harness.unwrap_or(HarnessId::CODEX));
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let context = format!(
-            "{}:{params}:{preferences:?}",
-            self.completion_connection_context(cx)
-        );
+        let context = format!("{}:{params}", self.completion_connection_context(cx));
         cx.spawn(async move |this, cx| {
             let mut candidates = Vec::new();
             if tokens.iter().any(|(prefix, _)| *prefix != '@') && harness.is_some() {
@@ -7196,8 +7230,6 @@ impl Composer {
                         );
                     }
                     files.get(&token.query).cloned().flatten()
-                } else if prefix == '$' && !preferences.dollar {
-                    None
                 } else {
                     let exact: Vec<_> = candidates
                         .iter()
@@ -7215,11 +7247,8 @@ impl Composer {
                 return;
             }
             this.update(cx, |this, cx| {
-                let harness = this.pickers.read(cx).resolved(cx).harness;
-                let preferences = crate::settings::current(cx)
-                    .skill_completion(harness.unwrap_or(HarnessId::CODEX));
                 let current = format!(
-                    "{}:{}:{preferences:?}",
+                    "{}:{}",
                     this.completion_connection_context(cx),
                     this.catalog_params(cx)
                 );
@@ -7692,10 +7721,7 @@ impl Composer {
     /// harness's command list on each open, filter locally per keystroke.
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
         let harness = self.pickers.read(cx).resolved(cx).harness;
-        let preferences =
-            crate::settings::current(cx).skill_completion(harness.unwrap_or(HarnessId::CODEX));
-        let (token, skill, include_skills, commands_allowed) =
-            completion_trigger(text, cursor, preferences);
+        let (token, skill, include_skills, commands_allowed) = completion_trigger(text, cursor);
         if token.is_none() {
             // Leaving a token must not replace the catalog identity with the
             // idle (commands_allowed=false) context and evict the warm cache.
@@ -7703,10 +7729,7 @@ impl Composer {
             return;
         }
         let params = self.catalog_params(cx);
-        let catalog_context = format!(
-            "{preferences:?}:{}:{params}",
-            self.completion_connection_context(cx),
-        );
+        let catalog_context = format!("{}:{params}", self.completion_connection_context(cx));
         let context = format!(
             "{}:{include_skills}:{commands_allowed}:{catalog_context}",
             if skill { "skill" } else { "command" },
@@ -8003,22 +8026,12 @@ impl Composer {
                             } else {
                                 "This agent has no skills" // slopty: plain words
                             }
-                        } else if !crate::settings::current(cx)
-                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::CODEX))
-                            .separate_from_slash
-                        {
-                            "No commands or skills available"
                         } else {
                             "No commands here" // slopty: plain words
                         }
                     } else {
                         if self.slash.skill {
                             "No matching skills"
-                        } else if !crate::settings::current(cx)
-                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::CODEX))
-                            .separate_from_slash
-                        {
-                            "No matching commands or skills"
                         } else {
                             "No matching commands"
                         }
@@ -8522,8 +8535,7 @@ impl Composer {
             // Enter never stops a run: Stop mode implies an empty composer,
             // so a stray extra Enter right after sending landed an interrupt
             // on the just-dispatched prompt and the agent ate it silently
-            // (issue #406). Stop stays on the button — and on Esc when
-            // escape_stops_active_agent is enabled.
+            // (issue #406). Stop stays on the button — and on Escape pressed twice.
             SendButtonMode::Stop => {}
             _ if no_content => {}
             _ if self.send_blocked(cx) => {}
@@ -9478,6 +9490,20 @@ impl Composer {
         }
     }
 
+    // slopty: a progress segment's press goes to its page, keeping the words typed on this one.
+    fn wizard_go_to(&mut self, page: usize, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).text().to_string();
+        if let Some(wizard) = self.wizard.as_mut() {
+            wizard.set_typed(text);
+            if wizard.go_to(page) {
+                let text = wizard.typed.get(wizard.page).cloned().unwrap_or_default();
+                self.input.update(cx, |input, cx| input.set_text(text, cx));
+                self.card.preview = None;
+                cx.notify();
+            }
+        }
+    }
+
     // slopty: whether there was a page to go back to.
     fn wizard_back(&mut self, cx: &mut Context<Self>) -> bool {
         let text = self.input.read(cx).text().to_string();
@@ -9739,14 +9765,23 @@ impl Composer {
         } else {
             question.question.clone()
         };
-        let title: String =
-            body.lines().next().unwrap_or(header.as_str()).chars().take(160).collect();
+        // slopty: an approval's command names it before its words do.
+        let title: String = question
+            .command
+            .as_deref()
+            .unwrap_or(&body)
+            .lines()
+            .next()
+            .unwrap_or(header.as_str())
+            .chars()
+            .take(160)
+            .collect();
         let gate_holds = (0..question.options.len()).any(|ix| wizard.allow_blocked(ix));
         let focused = wizard.focused();
         let click_only = question.click_only;
         let keys_pick = question.choices_only && !click_only;
-        // slopty: an approval the view model judged long, unknown or destructive.
-        let risky = question.deny_first;
+        // slopty: an approval the view model judged destructive (never merely long or unknown).
+        let risky = question.risky;
 
         // slopty: what the card adds by the request's kind (`composer/request_card.rs`).
         let header_chips = self.card_header_chips(&question, crate::clock::utc(cx), &theme);
@@ -9792,9 +9827,30 @@ impl Composer {
             // slopty: one rule for every card: the digit that picks it, where a key can press
             // it, never on a click-only page; its badge and its screen reader's shortcut alike.
             let digit = (ix < 9 && !click_only && keys_live).then(|| SharedString::from(format!("{}", ix + 1)));
+            // slopty: the answer the card recommends wears the contrast fill of a primary button,
+            // and a choice that stops the turn reads in danger ink on its neutral row (opencode's
+            // permission dock: a destructive choice is never a red fill).
+            let primary = question.primary_option == Some(ix);
+            let stops = question.stop_options.contains(&ix);
+            // slopty: a picked tile is tinted with the accent and ringed in it (opencode's question
+            // tiles: a pale accent wash in the light, the accent at 15 % in the dark).
+            let dark = matches!(theme.appearance, crate::theme::Appearance::Dark);
+            let picked_wash = theme.accent.opacity(if dark { 0.15 } else { 0.08 });
+            let multi = question.multi_select;
+            let ink = if primary {
+                theme.on_solid
+            } else if stops {
+                theme.danger
+            } else if picked {
+                theme.text
+            } else {
+                theme.text.opacity(0.9)
+            };
             div()
                 .id(("wizard-option", ix))
-                .when(keyed, |el| el.debug_selector(|| "wizard-option-keyed".into())) // slopty: for the tests
+                .when(primary, |el| el.debug_selector(|| "wizard-option-primary".into())) // slopty: for the tests
+                // slopty: for the tests; an element has one selector, and the primary's wins.
+                .when(keyed && !primary, |el| el.debug_selector(|| "wizard-option-keyed".into()))
                 // slopty: each choice names itself; a held-back allow says so.
                 .role(Role::Button)
                 .aria_label(SharedString::from(if blocked {
@@ -9821,14 +9877,18 @@ impl Composer {
                 .py(px(10.0))
                 .rounded(px(12.0))
                 .border_1()
-                .border_color(if picked || keyed {
-                    crate::theme::ink(if keyed { 0.12 } else { 0.16 })
+                .border_color(if picked && !primary {
+                    theme.accent
+                } else if keyed {
+                    crate::theme::ink(0.12)
                 } else {
                     gpui::transparent_black()
                 })
                 // slopty question-panel.tsx option rows: `transition-colors`.
-                .bg(if picked {
-                    crate::theme::ink(0.09)
+                .bg(if primary {
+                    motion::hover_blend(&format!("wizard-option-{ix}"), theme.text, theme.text.opacity(0.9))
+                } else if picked {
+                    picked_wash
                 } else {
                     motion::hover_blend(
                         &format!("wizard-option-{ix}"),
@@ -9846,19 +9906,39 @@ impl Composer {
                         }
                     }))
                 })
-                .when(!blocked, |el| el.cursor_pointer().active(|s| s.bg(crate::theme::ink(0.12)))) // slopty: a press shows
+                .when(!blocked, |el| {
+                    // slopty: a press shows
+                    el.cursor_pointer().active(move |s| if primary { s.opacity(0.8) } else { s.bg(crate::theme::ink(0.12)) })
+                })
                 .on_click(cx.listener(move |this, _, _, cx| this.wizard_select(ix, cx)))
+                // slopty: a choice of several leads with its box (opencode's 16 px check box),
+                // filled with the accent and its check once picked.
+                .when(multi, |el| {
+                    el.child(
+                        div()
+                            .id(("wizard-option-box", ix))
+                            .when(picked, |b| b.role(Role::Image).aria_label("Picked"))
+                            .flex_none()
+                            .size(px(16.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(if picked { theme.accent } else { crate::theme::ink(0.24) })
+                            .when(picked, |b| b.bg(theme.accent))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .when(picked, |b| {
+                                b.child(crate::icons::icon(crate::icons::CHECK).size(px(12.0)).text_color(theme.on_accent))
+                            }),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .text_size(crate::typography::ui_rems(13.5))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(if picked {
-                            theme.text
-                        } else {
-                            theme.text.opacity(0.9)
-                        })
+                        .text_color(ink)
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
@@ -9868,14 +9948,14 @@ impl Composer {
                                 div()
                                     .text_size(crate::typography::ui_rems(12.0))
                                     .font_weight(gpui::FontWeight::NORMAL)
-                                    .text_color(theme.text_muted)
+                                    .text_color(if primary { theme.on_solid.opacity(0.7) } else { theme.text_muted })
                                     .child(SharedString::from(d)),
                             )
                         }),
                 )
-                // slopty: a picked row shows a check where its digit stood (T3's selected
+                // slopty: a picked row of a single choice shows a check where its digit stood (T3's selected
                 // option); the digit comes back when it is unpicked.
-                .when(picked, |el| {
+                .when(picked && !multi, |el| {
                     el.child(
                         div()
                             .id(("wizard-option-check", ix))
@@ -9886,10 +9966,10 @@ impl Composer {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(crate::icons::icon(crate::icons::CHECK).size(px(14.0)).text_color(theme.text)),
+                            .child(crate::icons::icon(crate::icons::CHECK).size(px(14.0)).text_color(if primary { theme.on_solid } else { theme.text })),
                     )
                 })
-                .when_some(digit.filter(|_| !picked), |el, digit| {
+                .when_some(digit.filter(|_| multi || !picked), |el, digit| {
                     el.child(
                         // Number kbd chip: `size-[22px] rounded-md text-[11px]`.
                         div()
@@ -9899,9 +9979,9 @@ impl Composer {
                             .items_center()
                             .justify_center()
                             .rounded(px(6.0))
-                            .bg(crate::theme::ink(0.05))
+                            .bg(if primary { theme.on_solid.opacity(0.15) } else { crate::theme::ink(0.05) })
                             .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted.opacity(0.6))
+                            .text_color(if primary { theme.on_solid.opacity(0.7) } else { theme.text_muted.opacity(0.6) })
                             .child(digit),
                     )
                 })
@@ -9982,19 +10062,42 @@ impl Composer {
                                         .child(SharedString::from(format!("1 of {open}"))),
                                 )
                             })
+                            // slopty: the pages as a row of segments (opencode's question
+                            // progress): answered in the accent, the one shown in muted ink, the
+                            // rest faint; each a 14 × 2 bar in a 20 px target that goes to its page.
                             .when(wizard.questions.len() > 1, |el| {
-                                el.child(
+                                let page = wizard.page;
+                                let segments = (0..wizard.questions.len()).map(|ix| {
+                                    let fill = if ix == page {
+                                        theme.text_muted
+                                    } else if wizard.answered(ix) {
+                                        theme.accent
+                                    } else {
+                                        crate::theme::ink(0.12)
+                                    };
                                     div()
-                                        .h(px(20.0))
-                                        .px(px(6.0))
+                                        .id(("wizard-progress-segment", ix))
+                                        .role(Role::Button)
+                                        .aria_label(SharedString::from(format!("Question {}", ix + 1)))
+                                        .w(px(PROGRESS_SEGMENT))
+                                        .h(px(PROGRESS_TARGET))
                                         .flex()
                                         .items_center()
-                                        .rounded(px(6.0))
-                                        .bg(crate::theme::ink(0.06))
-                                        .text_size(crate::typography::ui_rems(10.0))
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.text_muted.opacity(0.6))
-                                        .child(SharedString::from(counter)),
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| this.wizard_go_to(ix, cx)))
+                                        .child(div().w_full().h(px(2.0)).rounded_full().bg(fill))
+                                });
+                                el.child(
+                                    div()
+                                        .id("wizard-progress")
+                                        .role(Role::Group)
+                                        .aria_label("Questions")
+                                        .aria_value(SharedString::from(counter.clone()))
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(2.0))
+                                        .children(segments),
                                 )
                             })
                             .children(header_chips), // slopty
@@ -10002,19 +10105,23 @@ impl Composer {
                     // slopty: a request its title says whole asks no line more. A read-gated
                     // body scrolls in place, and an edit shows its change. Its first paragraph
                     // is the title; what follows a blank line describes it, smaller and muted,
-                    // and a title the header already says is not said twice.
-                    .when(!body.is_empty(), |el| {
-                        let (lead, rest) = request_card::split_body(&body, &header);
+                    // and a title the header already says is not said twice. An approval's
+                    // command is its title, whole and set as code, and its words all describe.
+                    .when(!body.is_empty() || question.command.is_some(), |el| {
+                        let (lead, rest) = match &question.command {
+                            Some(_) => (None, Some(body.trim().to_owned()).filter(|b| !b.is_empty())),
+                            None => request_card::split_body(&body, &header),
+                        };
                         let text = div()
                             .flex()
                             .flex_col()
-                            .when_some(lead, |el, lead| {
+                            .when_some(question.command.clone(), |el, command| {
                                 // slopty: a command reads as code, on a plate (#4).
-                                el.child(if question.code {
+                                el.child(
                                     div()
                                         .id("wizard-command")
                                         .role(Role::Code)
-                                        .aria_label(SharedString::from(lead.clone()))
+                                        .aria_label(SharedString::from(command.clone()))
                                         .self_start()
                                         .max_w_full()
                                         .px(px(8.0))
@@ -10025,17 +10132,18 @@ impl Composer {
                                         .text_size(crate::typography::ui_rems(13.0))
                                         .line_height(px(20.0))
                                         .text_color(theme.text)
-                                        .child(SharedString::from(lead))
-                                        .into_any_element()
-                                } else {
+                                        .child(SharedString::from(command)),
+                                )
+                            })
+                            .when_some(lead, |el, lead| {
+                                el.child(
                                     div()
                                         .text_size(crate::typography::ui_rems(15.0))
                                         .line_height(px(20.0))
                                         .font_weight(gpui::FontWeight::MEDIUM)
                                         .text_color(theme.text)
-                                        .child(SharedString::from(lead))
-                                        .into_any_element()
-                                })
+                                        .child(SharedString::from(lead)),
+                                )
                             })
                             .when_some(rest, |el, rest| {
                                 el.child(
@@ -10341,8 +10449,6 @@ impl Composer {
                 ))
                 .into_any_element(),
             SendButtonMode::Stop => {
-                // slopty: Escape stops only when the setting says so; the hint names it then.
-                let escape = crate::settings::current(cx).escape_stops_active_agent;
                 // slopty: a finger's press on a touch screen, the circle drawn as before (#23).
                 let (press, reach) = finger_press("composer-stop", 28.0, 28.0);
                 let stop = crate::surface_chrome::focus_ring_within(
@@ -10373,11 +10479,8 @@ impl Composer {
                         .active(|s| s.opacity(0.7)) // slopty: a press shows
                         .child(div().size(px(11.0)).rounded(px(3.0)).bg(theme.bg)),
                 );
-                if escape {
-                    stop.action_hint("Stop", Keys::Fixed("escape"), cx).into_any_element()
-                } else {
-                    stop.hint("Stop").into_any_element()
-                }
+                // slopty: Escape stops it, on its second press (`escape_stops`).
+                stop.action_hint("Stop", Keys::Fixed("escape"), cx).into_any_element()
             }
             SendButtonMode::Send | SendButtonMode::Queue => {
                 // Share the submission guard with Enter, including pending
@@ -10719,7 +10822,7 @@ impl Render for Composer {
             .px(px(Theme::SPACE_LG))
             .pb(px(Theme::SPACE_LG + footer_touch_reach()));
         // slopty: the failure chip heads the stack over the composer, which an open Background
-        // tray lifts (`tray_lift`).
+        // tray lifts (`ride_over_tray`).
         let failure_section = {
             // slopty: the message leads, with Copy and ✕ (`render_failure`).
             let chip = failure.map(|message| self.render_failure(message, &theme, cx));
@@ -10812,13 +10915,10 @@ impl Render for Composer {
         // slopty: an open Background tray rises over the transcript from its closed place; what
         // is stacked above it rides up with it, so the card covers none of it (the folded
         // question's Answer least of all) and the chat under the stack still keeps its place.
-        let lift = self.tray_lift();
         let container = container
-            .child(
-                upper
-                    .child(stack_section("composer-todo-section", todo))
-                    .when(lift > 0.0, |el| el.relative().top(px(-lift))),
-            )
+            .child(self.ride_over_tray(
+                upper.child(stack_section("composer-todo-section", todo)).into_any_element(),
+            ))
             .child(stack_section("composer-background-section", tray))
             .child(stack_section("composer-queue-section", queue));
         // Escape backs out of a queue-row edit (the row keeps its old text).
@@ -11071,6 +11171,54 @@ impl Render for Composer {
             window.request_animation_frame();
         }
         let send_button = self.render_send_button(mode, queue_t, cx);
+        // slopty: while the agent works and the draft would queue, its words and key stand beside
+        // Send (opencode's "Queue ⌘↵"), growing in as the arrow turns to a clock; only where a
+        // key can press it, and only in the full composer, whose footer has the room.
+        let queue_words = (queue_t > 0.0 && expanded && request_card::keys_press(cx)).then(|| {
+            let key = crate::keys::combo_text(if send_with_mod { "mod-enter" } else { "enter" });
+            let size = crate::typography::ui_rems(12.0).to_pixels(window.rem_size());
+            let style = window.text_style();
+            let width = |text: &str| {
+                let line = window.text_system().shape_line(
+                    SharedString::from(text.to_owned()),
+                    size,
+                    &[gpui::TextRun { font: gpui::Font { weight: gpui::FontWeight::MEDIUM, ..style.font() }, ..style.to_run(text.len()) }],
+                    None,
+                );
+                f32::from(line.width())
+            };
+            let full = width("Queue") + QUEUE_WORDS_GAP + width(&key) + QUEUE_WORDS_PAD * 2.0;
+            div()
+                .id("composer-queue-words")
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("Queue message {key}")))
+                .flex_none()
+                .w(px((full * queue_t).ceil()))
+                .h(px(28.0))
+                .overflow_hidden()
+                .rounded(px(8.0))
+                .flex()
+                .items_center()
+                .justify_end()
+                .cursor_pointer()
+                .hover(|s| s.bg(crate::theme::ink(0.05)))
+                .on_click(cx.listener(|this, _, _, cx| this.on_submit(cx)))
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(QUEUE_WORDS_PAD))
+                        .flex()
+                        .items_center()
+                        .gap(px(QUEUE_WORDS_GAP))
+                        .whitespace_nowrap()
+                        .opacity(queue_t)
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.text_muted)
+                        .child("Queue")
+                        .child(div().text_color(theme.text_faint).child(key)),
+                )
+        });
         let shell_tag = shell_mode.then(|| self.render_shell_tag(&theme, cx)); // slopty
         // slopty: dictation removed.
         let attach_action = cx.entity().downgrade();
@@ -11150,6 +11298,18 @@ impl Render for Composer {
         let comments_chip = self.render_comments_chip(&theme, cx);
 
         let pill_border = theme.composer_surface_border();
+        // slopty: the composer lifts a step while it holds the keyboard (Claude desktop's
+        // resting and focused shadow), eased like the pane's other state changes.
+        let lift_t = motion::state_t(
+            &format!("composer-lift-{}", cx.entity_id()),
+            self.input.focus_handle(cx).is_focused(window),
+            motion::FADE_QUICK,
+            motion::reduced_motion(cx),
+            cx.frame_time(),
+        );
+        if lift_t > 0.0 && lift_t < 1.0 {
+            window.request_animation_frame();
+        }
         // Compensate for the transcript canvas beneath the frosted surface.
         // Keep the opaque fallback when frost is disabled or unsupported.
         let pill = div()
@@ -11170,7 +11330,7 @@ impl Render for Composer {
             .border_1()
             .border_color(pill_border)
             .bg(theme.composer_surface_bg())
-            .when(!theme.is_frost(), |el| el.shadow_lg());
+            .shadow(theme.composer_shadow(lift_t));
         // The pill's bottom edge is stationary on screen (the composer sits at
         // the bottom of the shell column; growth moves the TOP edge), so the
         // controls pin to the bottom and only the text glides with the reveal
@@ -11266,6 +11426,7 @@ impl Render for Composer {
                                 .items_center()
                                 .gap(px(ACTION_PRIMARY_GAP))
                                 // slopty: dictation removed.
+                                .children(queue_words)
                                 .child(send_button),
                         ),
                 )
@@ -11630,67 +11791,60 @@ mod tests {
         let input = handle
             .read_with(cx, |composer, _| composer.input.clone())
             .unwrap();
-        // The trigger stays beside Send whichever picker the chip opens.
-        for compact_picker in [false, true] {
-            cx.update(|cx| {
-                crate::settings::update(crate::settings::SavePolicy::Debounced, cx, |settings| {
-                    settings.compact_model_picker = compact_picker;
-                });
-            });
-            for thread_width in [436.0, 592.0, 768.0, 1232.0] {
-                for docked in [true, false] {
-                    let amounts = if docked {
-                        [0.0, 0.2, 0.6, 0.98, 1.0]
-                    } else {
-                        [1.0, 0.98, 0.6, 0.2, 0.0]
-                    };
-                    for amount in amounts {
-                        let outer_width = motion::lerp(COMPOSER_MAX_WIDTH, thread_width, amount);
-                        cx.update(|cx| {
-                        handle
-                            .update(cx, |composer, window, cx| {
-                                window.resize(size(px(outer_width), px(800.0)));
-                                composer.set_available_width(outer_width, cx);
-                                composer.state.update(cx, |state, _| {
-                                    state.selected_chat = docked.then(|| "chat".into());
-                                });
-                                composer.on_state_changed(cx);
-                                composer
-                                    .input
-                                    .update(cx, |input, cx| input.set_text("Hi", cx));
-                                composer.expanded_mode = false;
-                                let mut frame = crate::composer_dock::DockFrame::settled(docked);
-                                frame.amount = amount;
-                                frame.active = amount != if docked { 1.0 } else { 0.0 };
-                                composer.set_dock_frame(frame, cx);
-                            })
-                            .unwrap();
-                        cx.update_window(handle.into(), |_, window, cx| {
-                            window.refresh();
-                            window.draw(cx).clear(cx);
+        // The trigger stays beside Send.
+        for thread_width in [436.0, 592.0, 768.0, 1232.0] {
+            for docked in [true, false] {
+                let amounts = if docked {
+                    [0.0, 0.2, 0.6, 0.98, 1.0]
+                } else {
+                    [1.0, 0.98, 0.6, 0.2, 0.0]
+                };
+                for amount in amounts {
+                    let outer_width = motion::lerp(COMPOSER_MAX_WIDTH, thread_width, amount);
+                    cx.update(|cx| {
+                    handle
+                        .update(cx, |composer, window, cx| {
+                            window.resize(size(px(outer_width), px(800.0)));
+                            composer.set_available_width(outer_width, cx);
+                            composer.state.update(cx, |state, _| {
+                                state.selected_chat = docked.then(|| "chat".into());
+                            });
+                            composer.on_state_changed(cx);
+                            composer
+                                .input
+                                .update(cx, |input, cx| input.set_text("Hi", cx));
+                            composer.expanded_mode = false;
+                            let mut frame = crate::composer_dock::DockFrame::settled(docked);
+                            frame.amount = amount;
+                            frame.active = amount != if docked { 1.0 } else { 0.0 };
+                            composer.set_dock_frame(frame, cx);
                         })
                         .unwrap();
-                        // Inspect the first painted frame before TestAppContext
-                        // flushes effects and automatically draws dirty views.
-                        handle.read_with(cx, |composer, cx| {
-                        assert_eq!(composer.input, input);
-                        let surface = composer.surface_bounds.get().unwrap();
-                        assert!((f32::from(surface.size.width) - (outer_width - 2.0 * Theme::SPACE_LG)).abs() <= 1.0,
-                            "surface width clipped: docked={docked}, amount={amount}, outer={outer_width}, surface={surface:?}");
-                        let origin = input.read(cx).last_bounds.unwrap().origin;
-                        assert!((f32::from(origin.y - surface.top()) - (17.0 - 4.0 * amount)).abs() <= 1.0,
-                            "editor jumped: docked={docked}, amount={amount}, origin={origin:?}, surface={surface:?}");
-                        let model = composer.model_bounds.get().unwrap();
-                        let inset = motion::lerp(12.0, 8.0, amount);
-                        let expected_right = surface.right() - px(1.0 + inset + 28.0 + ACTION_PRIMARY_GAP);
-                        assert!((f32::from(model.right() - expected_right)).abs() <= 1.0,
-                            "model must stay right aligned: compact_picker={compact_picker}, docked={docked}, amount={amount}, actual={model:?}, expected={expected_right:?}");
-                        let expected = if docked { COMPACT_TOTAL_HEIGHT } else { COMPOSER_MIN_HEIGHT };
-                        assert!((composer.last_rendered_height + composer.dock_clearance_correction - expected).abs() < 0.1);
-                        assert!((composer.last_rendered_height - motion::lerp(COMPOSER_MIN_HEIGHT, COMPACT_TOTAL_HEIGHT, amount)).abs() < 0.1);
-                            }).unwrap();
-                        });
-                    }
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear(cx);
+                    })
+                    .unwrap();
+                    // Inspect the first painted frame before TestAppContext
+                    // flushes effects and automatically draws dirty views.
+                    handle.read_with(cx, |composer, cx| {
+                    assert_eq!(composer.input, input);
+                    let surface = composer.surface_bounds.get().unwrap();
+                    assert!((f32::from(surface.size.width) - (outer_width - 2.0 * Theme::SPACE_LG)).abs() <= 1.0,
+                        "surface width clipped: docked={docked}, amount={amount}, outer={outer_width}, surface={surface:?}");
+                    let origin = input.read(cx).last_bounds.unwrap().origin;
+                    assert!((f32::from(origin.y - surface.top()) - (17.0 - 4.0 * amount)).abs() <= 1.0,
+                        "editor jumped: docked={docked}, amount={amount}, origin={origin:?}, surface={surface:?}");
+                    let model = composer.model_bounds.get().unwrap();
+                    let inset = motion::lerp(12.0, 8.0, amount);
+                    let expected_right = surface.right() - px(1.0 + inset + 28.0 + ACTION_PRIMARY_GAP);
+                    assert!((f32::from(model.right() - expected_right)).abs() <= 1.0,
+                        "model must stay right aligned: docked={docked}, amount={amount}, actual={model:?}, expected={expected_right:?}");
+                    let expected = if docked { COMPACT_TOTAL_HEIGHT } else { COMPOSER_MIN_HEIGHT };
+                    assert!((composer.last_rendered_height + composer.dock_clearance_correction - expected).abs() < 0.1);
+                    assert!((composer.last_rendered_height - motion::lerp(COMPOSER_MIN_HEIGHT, COMPACT_TOTAL_HEIGHT, amount)).abs() < 0.1);
+                        }).unwrap();
+                    });
                 }
             }
         }
@@ -12488,8 +12642,8 @@ mod tests {
     /// Issue #406: Enter submits — it must never stop a run. Stop mode only
     /// exists on a live run with an EMPTY composer, so a habitual
     /// double-Enter after sending interrupted the just-dispatched prompt
-    /// and the agent ate it silently. Keyboard stop is the Esc setting's
-    /// job; Enter on an empty composer is a no-op.
+    /// and the agent ate it silently. Keyboard stop is Escape's, pressed
+    /// twice; Enter on an empty composer is a no-op.
     #[gpui::test]
     fn enter_on_empty_composer_during_a_live_run_never_interrupts(cx: &mut gpui::TestAppContext) {
         // RpcClient::new spawns its reader on tokio — give the test a reactor.
@@ -13899,7 +14053,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn delayed_catalogs_cannot_replace_current_harness_or_preferences(
+    fn delayed_catalogs_cannot_replace_the_current_harness_or_checkout(
         cx: &mut gpui::TestAppContext,
     ) {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -13966,22 +14120,11 @@ mod tests {
             assert_eq!(batch.len(), 2, "catalog requests for {harness:?}");
             delayed.extend(batch);
         }
-        // Change the active checkout and slash separation while its original
-        // catalog is still in flight. The token itself remains unchanged.
+        // Change the active checkout while its original catalog is still in flight. The token
+        // itself remains unchanged.
         state.update(cx, |state, cx| {
             state.chats.last_mut().unwrap().cwd = Some("/current-checkout".into());
             cx.notify();
-        });
-        cx.update(|cx| {
-            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
-                settings.skill_completion_by_harness.insert(
-                    HarnessId::OPENCODE,
-                    crate::settings::SkillCompletionSettings {
-                        dollar: true,
-                        separate_from_slash: true,
-                    },
-                );
-            });
         });
         cx.run_until_parked();
         let mut current = Vec::new();
@@ -14226,51 +14369,6 @@ mod tests {
                 }
             }
         });
-    }
-
-    #[gpui::test]
-    fn changing_slash_skill_preference_invalidates_open_completion(cx: &mut gpui::TestAppContext) {
-        let (_dir, handle) = composer_focus_window(cx);
-        handle
-            .update(cx, |composer, _, cx| {
-                composer
-                    .input
-                    .update(cx, |input, cx| input.set_text("/review", cx));
-                composer.on_input_edited(cx);
-                composer
-                    .slash_cache
-                    .insert(composer.slash.context.clone(), vec![]);
-            })
-            .unwrap();
-        let (context, request) = handle
-            .read_with(cx, |composer, _| {
-                (composer.slash.context.clone(), composer.slash.request)
-            })
-            .unwrap();
-        cx.update(|cx| {
-            crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |s| {
-                s.skills_in_slash_menu = true
-            });
-        });
-        cx.run_until_parked();
-        handle
-            .read_with(cx, |composer, _| {
-                assert_ne!(composer.slash.context, context);
-                assert!(
-                    composer.slash.request > request,
-                    "late responses must be rejected"
-                );
-                assert!(!composer.slash_cache.contains_key(&context));
-                assert!(
-                    composer
-                        .slash_cache
-                        .values()
-                        .flatten()
-                        .all(|row| row.workspace_command.is_some())
-                );
-                assert_eq!(composer.slash.token.as_ref().unwrap().query, "review");
-            })
-            .unwrap();
     }
 
     #[gpui::test]
@@ -14602,30 +14700,15 @@ mod tests {
             .unwrap();
     }
 
+    // slopty: `$` opens skills alone and `/` commands alone, for every agent alike.
     #[test]
-    fn every_harness_respects_both_skill_completion_toggles() {
-        use crate::settings::SkillCompletionSettings;
-        for (harness, _) in crate::settings::SKILL_COMPLETION_HARNESSES {
-            for dollar in [false, true] {
-                for separate_from_slash in [false, true] {
-                    let preferences = SkillCompletionSettings {
-                        dollar,
-                        separate_from_slash,
-                    };
-                    let (token, skill, include, _) = completion_trigger("$review", 7, preferences);
-                    assert_eq!(token.is_some(), dollar, "{harness:?}");
-                    assert_eq!(skill, dollar);
-                    assert_eq!(include, dollar || !separate_from_slash);
-                    let (token, skill, include, commands) =
-                        completion_trigger("/review", 7, preferences);
-                    assert!(token.is_some() && !skill && commands);
-                    assert_eq!(include, !separate_from_slash);
-                    let (token, _, _, commands) =
-                        completion_trigger("please /review", 14, preferences);
-                    assert!(token.is_some() && commands);
-                }
-            }
-        }
+    fn dollar_picks_skills_and_slash_picks_commands() {
+        let (token, skill, include, commands) = completion_trigger("$review", 7);
+        assert!(token.is_some() && skill && include && !commands);
+        let (token, skill, include, commands) = completion_trigger("/review", 7);
+        assert!(token.is_some() && !skill && !include && commands);
+        let (token, _, _, commands) = completion_trigger("please /review", 14);
+        assert!(token.is_some() && commands);
     }
 
     #[test]
@@ -15781,11 +15864,11 @@ mod tests {
                 question("q2", &["x"], false),
             ],
         );
-        assert_eq!(w.counter(), "1/2");
+        assert_eq!(w.counter(), "1 of 2");
         assert_eq!(w.select(1), WizardStep::AutoAdvance);
         assert!(w.is_picked(1));
         assert_eq!(w.advance(), WizardStep::Stay);
-        assert_eq!(w.counter(), "2/2");
+        assert_eq!(w.counter(), "2 of 2");
         assert_eq!(w.select(0), WizardStep::AutoAdvance);
         let WizardStep::Done(answers) = w.advance() else {
             panic!("expected Done")
@@ -15793,6 +15876,26 @@ mod tests {
         assert_eq!(answers.len(), 2);
         assert_eq!(answers[0].labels, vec!["b"]);
         assert_eq!(answers[1].labels, vec!["x"]);
+    }
+
+    /// slopty: a progress segment goes to its page: any answered one, or the first after them,
+    /// never past an unanswered page; the answers stay.
+    #[test]
+    fn a_progress_segment_goes_to_its_page() {
+        let mut w = Wizard::new(
+            "req".into(),
+            vec![question("q1", &["a", "b"], false), question("q2", &["x"], false), question("q3", &["y"], false)],
+        );
+        assert!(!w.go_to(2), "not past the unanswered first page");
+        assert!(!w.answered(0));
+        w.select(1);
+        assert!(w.answered(0));
+        assert!(w.go_to(1), "the first page after the answered");
+        assert_eq!(w.counter(), "2 of 3");
+        assert!(!w.go_to(2), "not past the unanswered second");
+        assert!(w.go_to(0), "back to an answered page");
+        assert!(w.is_picked(1), "its answer kept");
+        assert!(!w.go_to(0), "already there");
     }
 
     /// A choice-only request (an approval, a trust prompt) goes on the click

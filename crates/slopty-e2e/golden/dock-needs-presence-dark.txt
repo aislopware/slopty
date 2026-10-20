@@ -1,16 +1,19 @@
 Window
+Button │ Filter projects: All projects
+Button │ Needs you, 1
 Button │ ask
 Status │ Needs you
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
 Article │ You
 Paragraph │ ask
 Button │ Copy message
 Button │ Rewind…
 Article │ Claude Code
-Button │ Tool AskUserQuestion │ Waiting for permission…
-Status │ Waiting for permission…
+Button │ Waiting for your answer (asked a question)
 Status │ Waiting for your answer: Color
 Group │ Which color? (focused)
 Note │ Answer in Slopty
@@ -21,7 +24,6 @@ MultilineTextInput │ Type your own answer, or pick an option above
 Button │ Skip
 Button │ Submit
 Button │ Mode: Auto
-Button │ Context —
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel
@@ -30,4 +32,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

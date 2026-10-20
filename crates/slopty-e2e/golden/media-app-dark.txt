@@ -1,16 +1,19 @@
 Window
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Say hello
 Status │ Done
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
+Paragraph │ Done: Say hello
 Button │ Copy message
 Article │ You
 Paragraph │ Echo hi through the app
 Button │ Copy message
 Button │ Rewind…
-Article │ Claude Code
-Button │ Tool mcp__apps__echo
 Group │ Page: echo │ live
 Button │ Copy image
 Button │ Save
@@ -24,7 +27,6 @@ MultilineTextInput │ Do anything… (focused)
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel
@@ -33,4 +35,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

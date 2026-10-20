@@ -19,6 +19,7 @@ use super::{
 use crate::{
     file_icons::{self, FileIconIdentity},
     icons::{self, icon},
+    motion::HoverFade as _,
     theme::Theme,
 };
 
@@ -321,13 +322,13 @@ impl FilesSurface {
         });
         let Some(context) = self.request_context.clone() else {
             self.search_state.loading = false;
-            self.search_state.error = Some("No workspace available for this chat.".into());
+            self.search_state.error = Some(super::NO_FOLDER.into());
             cx.notify();
             return;
         };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.search_state.loading = false;
-            self.search_state.error = Some("Workspace service is still starting.".into());
+            self.search_state.error = Some(self.starting_note(cx).into());
             cx.notify();
             return;
         };
@@ -578,7 +579,7 @@ impl FilesSurface {
                             .flex()
                             .items_center()
                             .font_family(theme.font_sans.clone())
-                            .text_size(px(10.0))
+                            .text_size(crate::typography::ui_rems(11.0))
                             .text_color(theme.text_faint)
                             .child("Showing the first 200 matches"),
                     )
@@ -631,9 +632,17 @@ impl FilesSurface {
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            .when(selected, |element| element.bg(crate::theme::wash(0.1)))
+            // slopty: the pane's wash steps, the hover faded in (M23).
+            .when(selected, |element| element.bg(crate::theme::selected_wash()))
             .when(!selected, |element| {
-                element.hover(|style| style.bg(crate::theme::wash(0.055)))
+                let fade = format!("files-search-row-{index}");
+                element
+                    .bg(crate::motion::hover_blend(
+                        &fade,
+                        crate::theme::wash(0.0),
+                        crate::theme::hover_wash(),
+                    ))
+                    .hover_fade(fade)
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.search_state.active = index;
@@ -679,7 +688,7 @@ impl FilesSurface {
                     .min_w_0()
                     .truncate()
                     .font_family(theme.font_sans.clone())
-                    .text_size(px(11.5))
+                    .text_size(crate::typography::ui_rems(12.0))
                     .text_color(if let Some(value) = decoration {
                         value.color(&theme)
                     } else if is_directory {
@@ -702,7 +711,7 @@ fn centered_search_message(message: SharedString, color: gpui::Hsla) -> AnyEleme
         .justify_center()
         .px(px(24.0))
         .text_center()
-        .text_size(px(11.5))
+        .text_size(crate::typography::ui_rems(12.0))
         .text_color(color)
         .child(message)
         .into_any_element()

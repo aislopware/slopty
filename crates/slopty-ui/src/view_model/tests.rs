@@ -529,7 +529,7 @@ fn an_open_turn_of_a_thread_at_rest_reads_as_finished() {
 
 /// The shell may queue messages with their files kept as chips, send its chips, and start a
 /// chat with no project in a scratch folder of its own: Slopty answers each. A scratch folder
-/// is no project. Its sidebar sections may be dragged into an order.
+/// is no project.
 #[test]
 fn the_shell_is_told_what_slopty_answers() {
     use slopty_view_proto::capabilities as can;
@@ -540,7 +540,6 @@ fn the_shell_is_told_what_slopty_answers() {
         can::MESSAGE_QUEUE_ACTIONS_V1,
         can::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         can::PROJECTLESS_SCRATCH_V1,
-        can::SIDEBAR_SECTION_ORDER_V1,
     ] {
         assert!(claimed.iter().any(|c| c == capability), "{capability}");
     }
@@ -1556,15 +1555,46 @@ fn a_request_needing_the_person_reaches_its_card_as_one() {
     let mut approval = approval_of(&mut state, "git status");
     approval.needs_presence = true;
     assert!(asked_of(&mut state, approval).needs_presence);
+    // The card and a refused answer say the same words.
+    let card = slopty_view_proto::UserInputQuestion::NEEDS_PRESENCE;
+    let why = slopty_view_proto::UserInputQuestion::NEEDS_PRESENCE_WHY;
+    assert_eq!(card, slopty_proto::thread::Request::NEEDS_PRESENCE);
+    let (first, rest) = why.split_at(1);
+    assert_eq!(
+        format!("{card}: {}{rest}", first.to_lowercase()),
+        slopty_proto::thread::Request::NEEDS_PRESENCE_REFUSED
+    );
 }
 
-/// A shell command's approval leads with its command set as code; an approval of no command
-/// keeps its words.
+/// A shell command's approval carries its command whole, apart from the agent's words about
+/// it: a heredoc's blank line stays inside the command (Claude Code's "command, blank line,
+/// description"), a Codex reason is never taken for the command, and a request of no command
+/// carries none.
 #[test]
-fn a_commands_approval_sets_it_as_code() {
+fn a_commands_approval_carries_its_command_whole() {
     let mut state = fixtures::thread("tools");
-    let approval = approval_of(&mut state, "rm -rf target");
-    assert!(asked_of(&mut state, approval).code, "the command as code");
+    let commit = "git commit -m \"$(cat <<'EOF'\nSubject\n\nBody line\nEOF\n)\"";
+    let mut approval = approval_of(&mut state, commit);
+    approval.text = Some(slopty_proto::thread::detail::Clipped::whole(&format!(
+        "{commit}\n\nCommit the change"
+    )));
+    let asked = asked_of(&mut state, approval);
+    assert_eq!(asked.command.as_deref(), Some(commit), "the whole command");
+    assert_eq!(asked.question, "Commit the change", "only the words about it");
+
+    // Codex: the title names the run, the text is the agent's reason.
+    let mut approval = approval_of(&mut state, "cargo test");
+    approval.title = "Run cargo test?".to_owned();
+    approval.text = Some(slopty_proto::thread::detail::Clipped::whole("because the tests changed"));
+    let asked = asked_of(&mut state, approval);
+    assert_eq!(asked.command.as_deref(), Some("cargo test"));
+    assert_eq!(asked.question, "because the tests changed", "the reason stays prose");
+
+    // A text that only starts like the command keeps its words.
+    let mut approval = approval_of(&mut state, "ls");
+    approval.text = Some(slopty_proto::thread::detail::Clipped::whole("ls -la\n\nList it"));
+    assert_eq!(asked_of(&mut state, approval).question, "ls -la\n\nList it");
+
     let plain = request(
         slopty_proto::thread::Request::APPROVAL,
         &[
@@ -1572,7 +1602,58 @@ fn a_commands_approval_sets_it_as_code() {
             ("deny", "Deny", slopty_proto::thread::Effect::Deny),
         ],
     );
-    assert!(!asked_of(&mut state, plain).code, "no command, no code");
+    assert_eq!(asked_of(&mut state, plain).command, None, "no call, no command");
+}
+
+/// Only a destructive command is risky: a long harmless heredoc and a call of no known detail
+/// start on their deny without being called risky.
+#[test]
+fn only_a_destructive_command_is_risky() {
+    let mut state = fixtures::thread("tools");
+    let approval = approval_of(&mut state, "rm -rf target");
+    let asked = asked_of(&mut state, approval);
+    assert!(asked.risky && asked.deny_first, "{asked:?}");
+
+    let heredoc = "cat > notes.md <<'EOF'\none\ntwo\nthree\nfour\nfive\nsix\nEOF";
+    let approval = approval_of(&mut state, heredoc);
+    let asked = asked_of(&mut state, approval);
+    assert!(asked.deny_first && !asked.risky, "long, not risky: {asked:?}");
+
+    let unknown = request(
+        slopty_proto::thread::Request::APPROVAL,
+        &[
+            ("allow", "Allow", slopty_proto::thread::Effect::Allow),
+            ("deny", "Deny", slopty_proto::thread::Effect::Deny),
+        ],
+    );
+    let asked = asked_of(&mut state, unknown);
+    assert!(asked.deny_first && !asked.risky, "unknown, not risky: {asked:?}");
+}
+
+/// slopty: an approval's answers have a hierarchy: its once-allow leads where the card does not
+/// start on its deny, and a choice that stops the turn is marked as one.
+#[test]
+fn an_approval_leads_with_its_once_allow_and_marks_its_stop() {
+    let mut state = fixtures::thread("tools");
+    let mut approval = approval_of(&mut state, "cargo test");
+    approval.options.insert(1, approval.options[0].clone());
+    approval.options[1].id = "always".to_owned();
+    approval.options[1].scope = Some("this session".to_owned());
+    let mut stop = approval.options[2].clone();
+    stop.id = "deny-stop".to_owned();
+    stop.stops = true;
+    approval.options.push(stop);
+    let asked = asked_of(&mut state, approval.clone());
+    assert!(!asked.deny_first, "{asked:?}");
+    assert_eq!(asked.primary_option, Some(0), "the once-allow, never the always");
+    assert_eq!(asked.stop_options, vec![3]);
+
+    let mut risky = approval_of(&mut state, "rm -rf target");
+    risky.options = approval.options;
+    let asked = asked_of(&mut state, risky);
+    assert!(asked.deny_first);
+    assert_eq!(asked.primary_option, None, "a card that starts on its deny leads with nothing");
+    assert_eq!(asked.stop_options, vec![3]);
 }
 
 /// An approval says why the agent asks, in its words.
@@ -1595,7 +1676,7 @@ fn an_approval_shows_bidi_overrides_as_visible_escapes() {
     let mut approval = approval_of(&mut state, "cat notes\u{202E}txt.sh");
     approval.options[0].label = "Allow \u{200B}once".to_owned();
     let asked = asked_of(&mut state, approval.clone());
-    assert_eq!(asked.question, "cat notes[U+202E]txt.sh");
+    assert_eq!(asked.command.as_deref(), Some("cat notes[U+202E]txt.sh"));
     assert_eq!(asked.options[0], "Allow [U+200B]once");
     assert_eq!(
         transcript::answer(&approval, &[picked(&asked.id, &asked.options[0])]),
@@ -1830,6 +1911,16 @@ fn a_done_line_leaves_what_still_runs_to_the_tray() {
         .collect();
     assert!(!done.is_empty(), "the turn ends on its done line: {notes:?}");
     assert!(done.iter().all(|d| d.starts_with("Worked for ")), "{done:?}");
+    // The turn's divider folds the line in and says the same time from the entry.
+    let ended = entries
+        .iter()
+        .find(|e| {
+            e.parts.iter().any(|p| {
+                matches!(p, MessagePart::Note { note, .. } if note.kind == crate::view_model::folds::DONE)
+            })
+        })
+        .expect("the entry the line ends");
+    assert!(ended.duration_ms.is_some_and(|ms| ms >= 1_000), "{:?}", ended.duration_ms);
     assert!(notes.iter().all(|(_, text)| !text.contains("still running")), "{notes:?}");
 }
 
@@ -1984,4 +2075,53 @@ fn notes_go_beside_the_answers() {
     let (choice, notes) = transcript::answer(&asked, &[answer]).expect("answered");
     assert!(choice.contains("Split"), "{choice}");
     assert_eq!(notes.as_deref(), Some(r#"{"Which layout?":"keep the gutter"}"#));
+}
+
+/// A subagent's end that lands in the turn of the call that started it is said by its card, so
+/// it draws no notice of its own; a command's end, and an agent's whose call is not in the thread,
+/// keep theirs.
+#[test]
+fn a_subagents_end_in_its_own_turn_is_said_by_its_card() {
+    use slopty_proto::thread::{BackgroundTask, Item, ItemBody, ItemId, TaskNote};
+    let mut state = fixtures::thread("tools");
+    let call = state
+        .items
+        .iter()
+        .find(|item| matches!(item.body, ItemBody::Tool(_)))
+        .expect("a call")
+        .clone();
+    let note = |n: usize, kind: &str, of: Option<ItemId>| Item {
+        id: ItemId(format!("note-{n}")),
+        turn: call.turn,
+        at_ms: call.at_ms,
+        body: ItemBody::Task(Box::new(TaskNote {
+            task: format!("task-{n}"),
+            kind: kind.to_owned(),
+            status: TaskNote::COMPLETED.to_owned(),
+            title: "Look".to_owned(),
+            summary: format!("finished {n}"),
+            body: None,
+            call: of,
+            usage: None,
+            exit_code: None,
+            links: Vec::new(),
+        })),
+    };
+    let notes = [
+        note(1, BackgroundTask::AGENT, Some(call.id.clone())),
+        note(2, BackgroundTask::SHELL, Some(call.id.clone())),
+        note(3, BackgroundTask::AGENT, None),
+    ];
+    state.items.extend(notes);
+    let said: Vec<String> = transcript::entries(&state, &transcript::Look::new("w"))
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .filter_map(|part| match part {
+            MessagePart::Task { task, .. } if task.task.starts_with("task-") => {
+                Some(task.text.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, ["finished 2", "finished 3"]);
 }

@@ -97,6 +97,7 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         scroll_x: None,
         smooth_overflow_x: false,
         grow_x: false,
+        hidden_y: None, // slopty
         clear_right: 0.0, // slopty
         child: child.into_any_element(),
     }
@@ -118,6 +119,8 @@ pub struct EdgeFaded {
     scroll_x: Option<ScrollHandle>,
     smooth_overflow_x: bool,
     grow_x: bool,
+    /// slopty: how much content lies past the top and the bottom ([`Self::fade_scroll_y_with`]).
+    hidden_y: Option<Box<dyn Fn(&App) -> (f32, f32)>>,
     clear_right: f32, // slopty: see `clear_right`
     child: AnyElement,
 }
@@ -184,6 +187,24 @@ impl EdgeFaded {
     pub fn fade_scroll_x(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_x = Some(handle.clone());
         self.grow_x = true;
+        self
+    }
+
+    /// slopty: [`Self::fade_scroll_x`] for the vertical edges: each ramp is as tall as the
+    /// content hidden past it, up to its band, so a list scrolled by 4 px dims 4 px at its top
+    /// rather than snapping a whole band on (HextaUI's scroll area; design-inspiration item 4).
+    pub fn fade_scroll_y(self, handle: &ScrollHandle) -> Self {
+        let handle = handle.clone();
+        self.fade_scroll_y_with(move |_| {
+            let hidden_top = (-f32::from(handle.offset().y)).max(0.0);
+            (hidden_top, (f32::from(handle.max_offset().y) - hidden_top).max(0.0))
+        })
+    }
+
+    /// slopty: [`Self::fade_scroll_y`] for a scroller without a [`ScrollHandle`] (a list):
+    /// `hidden` says how much content lies past the top and the bottom, read at paint time.
+    pub fn fade_scroll_y_with(mut self, hidden: impl Fn(&App) -> (f32, f32) + 'static) -> Self {
+        self.hidden_y = Some(Box::new(hidden));
         self
     }
 
@@ -317,6 +338,15 @@ impl EdgeFaded {
             top &= overflow_top;
             bottom &= overflow_bottom;
         }
+        // slopty: a ramp that grows with what is hidden past its edge.
+        let (mut band_top, mut band_bottom) = (self.band_top, self.band_bottom);
+        if let Some(hidden) = &self.hidden_y {
+            let (hidden_top, hidden_bottom) = hidden(cx);
+            top &= hidden_top > 0.5;
+            bottom &= hidden_bottom > 0.5;
+            band_top = Some(hidden_top.min(band_top.unwrap_or(self.band)));
+            band_bottom = Some(hidden_bottom.min(band_bottom.unwrap_or(self.band)));
+        }
         let (mut left, mut right) = (self.left, self.right);
         let mut outset_right = 0.0;
         let (mut band_left, mut band_right) = (None, None);
@@ -359,8 +389,8 @@ impl EdgeFaded {
             EdgeFade {
                 bounds,
                 band: px(self.band),
-                band_top: self.band_top.map(px),
-                band_bottom: self.band_bottom.map(px),
+                band_top: band_top.map(px),
+                band_bottom: band_bottom.map(px),
                 band_left,
                 band_right,
                 top,
@@ -475,6 +505,54 @@ mod tests {
             observed.borrow().iter().all(|(_, fade)| fade.is_none()),
             "shrinking content clears both fades in the same paint"
         );
+    }
+
+    /// slopty: a growing vertical fade's ramp is as tall as what is hidden past its edge, up to
+    /// the band, and off with nothing hidden (design-inspiration item 4).
+    #[gpui::test]
+    fn a_vertical_ramp_grows_with_the_content_hidden_past_it(cx: &mut gpui::TestAppContext) {
+        struct Fixture {
+            hidden: (f32, f32),
+            observed: Rc<RefCell<Vec<Option<EdgeFade>>>>,
+        }
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let observed = self.observed.clone();
+                let probe = gpui::canvas(
+                    |_, _, _| (),
+                    move |_, _, window, cx| observed.borrow_mut().push(active_fade(window, cx)),
+                )
+                .w(px(100.0))
+                .h(px(100.0));
+                let hidden = self.hidden;
+                edge_faded(24.0, true, true, div().size(px(100.0)).child(probe))
+                    .fade_scroll_y_with(move |_| hidden)
+            }
+        }
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let handle = cx.add_window(|_, _| Fixture { hidden: (0.0, 0.0), observed: observed.clone() });
+        let mut ramps = |hidden: (f32, f32)| {
+            handle
+                .update(cx, |view, _, cx| {
+                    view.hidden = hidden;
+                    cx.notify();
+                })
+                .unwrap();
+            observed.borrow_mut().clear();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            })
+            .unwrap();
+            let fade = *observed.borrow().last().unwrap();
+            fade.map(|fade| {
+                let side = |on: bool, band: Option<Pixels>| on.then(|| f32::from(band.unwrap()));
+                (side(fade.top, fade.band_top), side(fade.bottom, fade.band_bottom))
+            })
+        };
+        assert_eq!(ramps((0.0, 0.0)), None, "nothing hidden, no fade");
+        assert_eq!(ramps((4.0, 300.0)), Some((Some(4.0), Some(24.0))), "4 px under the top");
+        assert_eq!(ramps((60.0, 0.0)), Some((Some(24.0), None)), "a band at most, none below");
     }
 
     #[gpui::test]

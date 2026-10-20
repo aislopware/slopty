@@ -486,7 +486,7 @@ impl Composer {
     pub(super) fn render_mod_bands(&mut self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(chat) = self.state.read(cx).selected_chat.clone() else { return Vec::new() };
         let Some(dock) = self.dock.dock_of(&chat).cloned() else { return Vec::new() };
-        let now = crate::clock::utc(cx).timestamp_millis();
+        let now = self.dock.now_ms(cx); // slopty: the dock's moment, not the frame's
         for pane in dock.surfaces.iter().filter(|s| s.kind == ModSurface::PANE) {
             if self.surfaces.panes.insert(format!("{chat}/{}", pane.id)) {
                 let seq = cx.try_global::<PaneAsk>().map_or(1, |last| last.seq.wrapping_add(1));

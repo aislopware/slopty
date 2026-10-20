@@ -1,16 +1,19 @@
-Window
-Button │ New chat in project
+Window (focused)
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Say hello
 Status │ Done
+Button │ Inactive, 0
 Button │ History, open: past Claude Code sessions
 Button │ Past session: Explain the parser, 1d
 Button │ Past session: Rename the lexer module to scanner, 1d
 Button │ Past session: Profile the startup path, 1d
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
 Button │ Project: repo
 Button │ Device: past
-MultilineTextInput │ Do anything… (focused)
+MultilineTextInput │ Do anything…
 Button │ Attach images
 Button │ Mode: Auto
 Button │ Model: Opus 5.5, High
@@ -18,4 +21,3 @@ Button │ Send message
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ Sidebar view options

@@ -128,11 +128,17 @@ icon_assets![
     // Hand-drawn fold-all chevrons, drawn as a family with EXPAND_ARROWS
     // (same stroke, caps, 90° joints) — Solar has no unfold-less either.
     (FOLD_VERTICAL, "fold-vertical"),
+    // slopty: its outward twin, on a diff's "N unchanged lines" row: the lines it shows.
+    (UNFOLD_VERTICAL, "unfold-vertical"),
     // The changes pane's unified/split toggle: a rounded frame halved by a
     // centre rule (Solar Linear weight).
     (SPLIT_COLUMNS, "split-columns"),
     // Long-line wrapping toggle shared by changes and agent Markdown fences.
     (WRAP_TEXT, "wrap-text"),
+    // slopty: drawn in the Solar Linear frame (24 box, 1.5 stroke, round caps): the diff's
+    // ignore-whitespace toggle, and the Changes surface's own glyph (a page with + and −).
+    (PILCROW, "pilcrow"),
+    (FILE_DIFF, "file-diff"),
     (SMARTPHONE, "smartphone"),
     (ARCHIVE_UP_MINIMALISTIC, "archive-up-minimalistic"),
     (REFRESH, "refresh"),
@@ -369,6 +375,8 @@ mod tests {
             ALT_ARROW_LEFT,
             ALT_ARROW_DOWN,
             ARROW_UP_RIGHT,
+            PILCROW,
+            FILE_DIFF,
             EXPAND_ARROWS,
             COLLAPSE_ARROWS,
             CHAT_ROUND_LINE,
@@ -402,6 +410,48 @@ mod tests {
             assert!(text.contains("<svg"), "{path} is not an svg");
             assert!(text.contains("viewBox"), "{path} lacks a viewBox");
         }
+    }
+
+    /// slopty: every stroked control icon draws one weight, 1.75 in 24 units (scaled to its own
+    /// view box), with round caps and joins (Amp forces the same; Amp item 15), so no glyph reads
+    /// heavier or lighter than its neighbours.
+    #[test]
+    fn every_stroked_icon_draws_one_weight_with_round_ends() {
+        let assets = Assets;
+        let values = |text: &str, attribute: &str| -> Vec<String> {
+            let key = format!("{attribute}=\"");
+            text.match_indices(&key)
+                .filter_map(|(at, _)| {
+                    let rest = &text[at + key.len()..];
+                    rest.find('"').map(|end| rest[..end].to_owned())
+                })
+                .collect()
+        };
+        let mut stroked = 0;
+        for path in assets.list("icons/").unwrap() {
+            let bytes = assets.load(&path).unwrap().unwrap_or_else(|| panic!("missing {path}"));
+            let text = std::str::from_utf8(&bytes).expect("icon svg is utf-8");
+            let widths = values(text, "stroke-width");
+            if widths.is_empty() {
+                continue;
+            }
+            stroked += 1;
+            let view_box = values(text, "viewBox");
+            let side: f32 = view_box[0].split_whitespace().nth(2).unwrap().parse().unwrap();
+            for width in widths {
+                let width: f32 = width.parse().unwrap();
+                assert!(
+                    (width * 24.0 / side - 1.75).abs() < 1e-3,
+                    "{path}: stroke {width} in a {side} box is not 1.75 in 24"
+                );
+            }
+            let root = &text[..text.find('>').unwrap()];
+            for attribute in ["stroke-linecap", "stroke-linejoin"] {
+                assert_eq!(values(root, attribute), ["round"], "{path}: {attribute} on its root");
+                assert!(values(text, attribute).iter().all(|v| v == "round"), "{path}: {attribute}");
+            }
+        }
+        assert!(stroked > 100, "the stroked set is the control icons ({stroked})");
     }
 
     #[test]

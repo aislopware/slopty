@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use slopty_e2e::harness::artifacts_dir;
 use slopty_e2e::snapshot::{
-    MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches, assert_matches_apart,
+    MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches_apart, assert_matches_masked,
 };
 use slopty_e2e::{A11yNode, Button, Command, Driver, Dump, Stack};
 
@@ -26,7 +26,9 @@ async fn goldens(drv: &mut Driver, renders: &Path, name: &str) {
         let golden = format!("{name}-{appearance}");
         let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
         println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-        assert_matches(&golden, &frame, TOLERANCE, &artifacts_dir()).unwrap();
+        // The thread's turn under the surface says how long it worked, which the run decides.
+        let moving = crate::served::always_moving(&frame.a11y, frame.scale);
+        assert_matches_masked(&golden, &frame, TOLERANCE, &artifacts_dir(), &moving).unwrap();
     }
     drv.ok(&Command::Appearance { dark: false }).await.unwrap();
 }
@@ -294,8 +296,8 @@ mod stream {
         })
     }
 
-    /// [`goldens`] with the pixels and the words inside `masks` left out, and the pixels of the
-    /// chat's done line, whose clock says when the run got there.
+    /// [`goldens`] with the pixels and the words inside `masks` left out, and those of the chat's
+    /// divider, whose time says how long the run's turn worked.
     async fn goldens_masked(drv: &mut Driver, renders: &Path, name: &str, masks: &[PixelRect]) {
         for (dark, appearance) in [(false, "light"), (true, "dark")] {
             drv.ok(&Command::Appearance { dark }).await.unwrap();
@@ -303,15 +305,11 @@ mod stream {
             let golden = format!("{name}-{appearance}");
             let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
             println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-            // The chat's turn ended when this run got there, and its done line says when: its
-            // words read `$CLOCK` (`Frame::text`), and its pixels are left out with the stream's.
-            let clocks = frame.a11y.iter().filter(|n| {
-                n.role == "Status" && n.label.as_deref().is_some_and(|l| l.contains("\u{b7} done "))
-            });
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
-            let clocks = clocks.map(|n| n.bounds.map(|v| (v * frame.scale).round() as u32));
-            let pixels: Vec<PixelRect> = masks.iter().copied().chain(clocks).collect();
-            let masks = (pixels.as_slice(), masks);
+            // The chat's turn says how long it worked, which the run decides: its divider's
+            // pixels and words are left out with the stream's.
+            let moving = crate::served::always_moving(&frame.a11y, frame.scale);
+            let left_out: Vec<PixelRect> = masks.iter().copied().chain(moving).collect();
+            let masks = (left_out.as_slice(), left_out.as_slice());
             assert_matches_apart(&golden, &frame, TOLERANCE, &artifacts_dir(), masks).unwrap();
         }
         drv.ok(&Command::Appearance { dark: false }).await.unwrap();

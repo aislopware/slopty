@@ -133,8 +133,11 @@ async fn a_visual_draws_from_its_script_read_through_the_thread() {
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "media-visual", &[]).await;
 
-    // The pointer rests on the sidebar for both pictures, so no hover strip or wash differs.
+    // The pointer rests on the sidebar for both pictures, so no hover strip or wash differs; the
+    // shown tab is pressed first, so the composer has let the keyboard go (and settled its lift)
+    // in both.
     let rest = slopty_e2e::Command::Move { x: 100.0, y: 600.0 };
+    click(drv, "Tab", "p95").await;
     drv.ok(&rest).await.unwrap();
     tokio::time::sleep(SETTLE).await;
     let before = drv.render(&renders.join("media-visual-p95.png")).await.unwrap();
@@ -1012,11 +1015,17 @@ async fn a_picture_a_tool_returned_shows_inline_and_opens_in_the_lightbox() {
     let renders = stack.path("");
     let drv = &mut stack.driver;
     let picture = "Image: plot.png";
-    let shown =
-        seen(drv, "the picture in the chat", STEP, |d| node(d, "Button", picture).is_some()).await;
-    let button = node(&shown, "Button", picture).cloned().unwrap();
+    seen(drv, "the picture in the chat", STEP, |d| node(d, "Button", picture).is_some()).await;
+    // The turn settles round the picture as it arrives (its work folding behind the divider),
+    // so its button is read from the frame that is rendered, not from the first that showed it.
     tokio::time::sleep(SETTLE).await;
     let inline = drv.render(&renders.join("inline.png")).await.unwrap();
+    let button = inline
+        .a11y
+        .iter()
+        .find(|n| n.role == "Button" && n.label.as_deref() == Some(picture))
+        .cloned()
+        .expect("the picture's button in the frame rendered");
     let [in_x, in_y, in_w, in_h] = red_extent(&inline).expect("the picture is drawn in the chat");
     // 640 by 400 scaled into the 512-wide frame, where its button is.
     assert!((in_w - 512.0).abs() <= 2.0 && (in_h - 320.0).abs() <= 2.0, "inline {in_w}x{in_h}");

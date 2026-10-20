@@ -102,7 +102,7 @@ pub struct Feed {
     queues: Mutex<HashMap<String, watch::Sender<Arc<[QueuedMessage]>>>>,
     /// The pull requests the threads' branches have, as their rows show them.
     pulls: watch::Sender<Arc<[Pull]>>,
-    /// The sidebar's pins and sections, `None` until the workspace says them.
+    /// The sidebar's pins, `None` until the workspace says them.
     sidebar: watch::Sender<Option<SidebarPreferencesState>>,
 }
 
@@ -276,7 +276,7 @@ impl Feed {
         self.sessions.borrow().clone()
     }
 
-    /// The sidebar's pins and sections.
+    /// The sidebar's pins.
     pub fn sidebar(&self, state: SidebarPreferencesState) {
         self.sidebar.send_if_modified(|now| {
             let changed = now.as_ref() != Some(&state);
@@ -471,7 +471,7 @@ pub struct ViewModel {
 /// Its composer's chips, put in each agent's words on the way; the thread's queue of messages
 /// sent while the agent works, whose files stay chips beside the words; and a chat with no
 /// project in a dated scratch folder of its own, which the view model makes on its machine
-/// before the agent starts there. Sidebar sections keep the order the person drags them into.
+/// before the agent starts there.
 /// Updating an agent Slopty does not do.
 #[must_use]
 pub fn capabilities() -> Vec<String> {
@@ -484,7 +484,6 @@ pub fn capabilities() -> Vec<String> {
         can::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         can::MESSAGE_QUEUE_EDIT_LEASE_V1,
         can::PROJECTLESS_SCRATCH_V1,
-        can::SIDEBAR_SECTION_ORDER_V1,
     ]
     .into_iter()
     .map(str::to_owned)
@@ -831,7 +830,7 @@ impl RpcService for ViewModel {
                 Ok(RpcReply::Stream(frames.boxed()))
             }
             methods::WATCH_CHECKOUT_CHANGE_REQUEST => Ok(self.change_request(&params)),
-            // Pins and sections are this client's own, kept by the workspace.
+            // Pins are this client's own, kept by the workspace.
             methods::WATCH_SIDEBAR_PREFERENCES => {
                 let sidebar = self.feed.sidebar.subscribe();
                 let _sent = self.asks.send(Ask::Republish);

@@ -1,14 +1,14 @@
 Window
 Article │ You
 Paragraph │ agent
-Article │ Claude Code
-Button │ Subagent Look
+Button │ Subagent Look │ Subagent found it.
 Button │ Open subagent
-Button │ Subagent found it. │ completed
 Paragraph │ Done: the agent is back.
+Group │ Background work
+Button │ Expand background work │ 1 command
 MultilineTextInput │ Do anything… │ Image 1  (focused)
 Button │ Attach images
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
+Heading │ background sleep 600

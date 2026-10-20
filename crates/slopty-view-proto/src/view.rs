@@ -414,14 +414,6 @@ pub fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
-    if n == 1 {
-        format!("{n} {one}")
-    } else {
-        format!("{n} {many}")
-    }
-}
-
 /// Per-kind chip label + one-line detail. Labels match slopty's `describeTool`
 /// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
@@ -464,83 +456,6 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
             None => ("Tool", name.clone()),
         },
     }
-}
-
-/// The ToolGroup summary line — "Ran 3 commands · edited 2 files".
-///
-/// Takes `(call, is_error)` pairs so each viewport can keep its own row model;
-/// the summary itself is one implementation for both.
-pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
-    use crate::ToolCall;
-    let mut commands = 0usize;
-    let mut edited: Vec<&str> = Vec::new();
-    let mut reads = 0usize;
-    let mut searches = 0usize;
-    let mut fetches = 0usize;
-    let mut todos = 0usize;
-    let mut other = 0usize;
-    let mut failed = 0usize;
-    for (call, is_error) in tools {
-        if *is_error {
-            failed += 1;
-        }
-        match call {
-            ToolCall::Exec { .. } => commands += 1,
-            ToolCall::WriteFile { path, .. } | ToolCall::EditFile { path, .. } => {
-                if !edited.contains(&path.as_str()) {
-                    edited.push(path);
-                }
-            }
-            ToolCall::ApplyPatch { path } => {
-                let p = path.as_deref().unwrap_or("patch");
-                if !edited.contains(&p) {
-                    edited.push(p);
-                }
-            }
-            ToolCall::ReadFile { .. } => reads += 1,
-            ToolCall::Search { .. } | ToolCall::Glob { .. } | ToolCall::WebSearch { .. } => {
-                searches += 1
-            }
-            ToolCall::WebFetch { .. } => fetches += 1,
-            ToolCall::Todo { .. } => todos += 1,
-            ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => other += 1,
-        }
-    }
-    let mut segments: Vec<String> = Vec::new();
-    if commands > 0 {
-        segments.push(format!("ran {}", plural(commands, "command", "commands")));
-    }
-    if !edited.is_empty() {
-        segments.push(format!("edited {}", plural(edited.len(), "file", "files")));
-    }
-    if reads > 0 {
-        segments.push(format!("read {}", plural(reads, "file", "files")));
-    }
-    if searches > 0 {
-        segments.push(format!("searched {}", plural(searches, "time", "times")));
-    }
-    if fetches > 0 {
-        segments.push(format!("fetched {}", plural(fetches, "page", "pages")));
-    }
-    if todos > 0 {
-        segments.push("updated todos".to_string());
-    }
-    if other > 0 {
-        segments.push(format!("called {}", plural(other, "tool", "tools")));
-    }
-    if segments.is_empty() {
-        segments.push(plural(tools.len(), "tool", "tools"));
-    }
-    if failed > 0 {
-        segments.push(format!("{failed} failed"));
-    }
-    let mut summary = segments.join(" · ");
-    // Capitalize the first segment only (slopty's style).
-    if let Some(first) = summary.get(0..1) {
-        let upper = first.to_uppercase();
-        summary.replace_range(0..1, &upper);
-    }
-    summary
 }
 
 /// The status-dot palette, as oklch triples (L, C, H°).

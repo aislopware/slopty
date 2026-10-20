@@ -80,6 +80,9 @@ struct Shown {
     at: Instant,
     /// A tick notified the view since it last drew.
     due: bool,
+    /// slopty: the tick its pulse started on, kept while it stays leased: the start of the wait
+    /// it shows, which paces it down ([`paced_phase`]).
+    since: Instant,
 }
 
 struct PulseLease {
@@ -151,8 +154,52 @@ fn pulse_delta_every(spec: &MotionSpec, view: EntityId, stride: u64, cx: &mut Ap
 }
 
 fn pulse_phase(spec: &MotionSpec, view: EntityId, cx: &mut App) -> f32 {
-    // slopty: on the process's one clock ([`locked_phase`]), not the clock's first use.
-    locked_phase(spec.total(), pulse_moment(view, cx))
+    // slopty: on the process's one clock ([`locked_phase`]), not the clock's first use, slowing
+    // as the wait it shows grows long ([`paced_phase`]).
+    let moment = pulse_moment(view, cx);
+    let since = cx
+        .try_global::<PulseClock>()
+        .and_then(|clock| clock.shown.get(&view))
+        .map(|shown| shown.since);
+    paced_phase(spec.total(), moment, since)
+}
+
+// slopty: a long wait paces down (opencode's working indicators; item 22): a pulse runs at full
+// pace as its wait starts and eases to 0.6 of it over the first minute, so a row left working for
+// an hour reads calm, not urgent. The pace is integrated, so the phase never jumps, and the slack
+// against the calm clock is taken up over the same minute, so every calm pulse is in step again.
+/// How long a wait takes to reach its calm pace.
+const PACE_RAMP: Duration = Duration::from_secs(60);
+/// The calm pace, against the pace a wait starts at.
+const PACE_CALM: f64 = 0.6;
+
+/// The phase `[0,1)` at `now` of a repeating animation lasting `period` that has shown a wait
+/// since `since`: [`locked_phase`] as the wait starts, and the phase of one process-wide clock
+/// slowed to [`PACE_CALM`] once it is [`PACE_RAMP`] old, eased between them without a jump.
+pub fn paced_phase(period: Duration, now: Instant, since: Option<Instant>) -> f32 {
+    let Some(since) = since.filter(|_| !period.is_zero()) else {
+        return locked_phase(period, now);
+    };
+    let epoch = process_epoch();
+    let period = period.as_secs_f64();
+    let ramp = PACE_RAMP.as_secs_f64();
+    let start = since.saturating_duration_since(epoch).as_secs_f64();
+    let age = now.saturating_duration_since(since).as_secs_f64();
+    let u = (age / ramp).min(1.0);
+    // ∫ pace over the wait, with pace = 1 − (1 − calm)·smoothstep(age / ramp).
+    let slack = 1.0 - PACE_CALM;
+    let travelled = if age < ramp {
+        age - slack * ramp * (u.powi(3) - u.powi(4) / 2.0)
+    } else {
+        PACE_CALM * age + slack * ramp / 2.0
+    };
+    // What the calm clock is ahead of this wait's once both are calm, taken up over the ramp.
+    let ahead = -(slack * ramp / 2.0 + slack * start) / period;
+    let ahead = ahead - ahead.round();
+    let smooth = u * u * (3.0 - 2.0 * u);
+    #[expect(clippy::cast_possible_truncation, reason = "a phase in [0,1)")]
+    let phase = ((start + travelled) / period + smooth * ahead).rem_euclid(1.0) as f32;
+    phase
 }
 
 // slopty: what a pulse-driven view shows is the moment of the tick that drew it, not the frame's.
@@ -167,7 +214,7 @@ pub fn pulse_moment(view: EntityId, cx: &mut App) -> Instant {
     };
     let tick = clock.ticked_at.unwrap_or(frame);
     let clock = cx.default_global::<PulseClock>();
-    let shown = clock.shown.entry(view).or_insert(Shown { at: tick, due: false });
+    let shown = clock.shown.entry(view).or_insert(Shown { at: tick, due: false, since: tick });
     if std::mem::take(&mut shown.due) {
         shown.at = tick;
     }
@@ -487,6 +534,15 @@ pub const FADE_QUICK: MotionSpec = MotionSpec::new(150, EASE);
 /// Wallpaper replacement: immediate attack with a short, soft landing.
 pub const WALLPAPER_CROSSFADE: MotionSpec =
     MotionSpec::new(180, CubicBezier::new(1.0 / 3.0, 1.0, 2.0 / 3.0, 1.0));
+/// slopty: how opaque a side pane's contents are `elapsed` into its width opening or closing
+/// ([`PANE_CONTENT_IN`], [`PANE_CONTENT_OUT`]); honours [`speed_scale`].
+pub fn pane_content_opacity(opening: bool, elapsed: Duration) -> f32 {
+    let spec = if opening { PANE_CONTENT_IN } else { PANE_CONTENT_OUT };
+    let total = spec.total().as_secs_f32() * speed_scale();
+    let shown = spec.progress(elapsed.as_secs_f32() / total);
+    if opening { shown } else { 1.0 - shown }
+}
+
 /// Popover-in: 0.14s (scale 0.96 approximated, translateY −2).
 pub const MENU_IN: MotionSpec = MotionSpec::new(140, EASE);
 /// Popover-out: 0.1s — quicker than the entrance (exits should get out of the
@@ -498,9 +554,62 @@ pub const DIALOG_IN: MotionSpec = MotionSpec::new(180, EASE);
 pub const SPLASH_OUT: MotionSpec = MotionSpec::new(500, EASE).with_delay(150);
 /// Sidebar / pane width+height transitions: 200ms ease-out.
 pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
-/// Panel columns share the dialog entrance's gentle acceleration and soft
-/// landing. Wide moves stretch this base to at most 240ms in the shell.
-pub const PANEL_RESIZE: MotionSpec = DIALOG_IN;
+/// Panel columns: 240 ms on the quint ease-out, quick off the mark and long on the landing.
+/// slopty: opencode's side panel, one duration whatever the distance (item 12).
+pub const PANEL_RESIZE: MotionSpec = MotionSpec::new(240, EASE_OUT_QUINT);
+/// slopty: a side pane's contents fade in a beat after its width starts to open (opencode's
+/// 40 ms delay and 200 ms fade; item 12), so they never slide in half drawn.
+pub const PANE_CONTENT_IN: MotionSpec = MotionSpec::new(200, EASE).with_delay(40);
+/// slopty: and fade out over the first 160 ms of a close, gone before the width lands.
+pub const PANE_CONTENT_OUT: MotionSpec = MotionSpec::new(160, EASE);
+// slopty: one fold for groups, cards and trays (Clanker's `Collapsible`; design-inspiration
+// item 7). Opening, the height grows on [`FOLD_OPEN`] while the contents wait 80 ms and fade in on
+// [`FOLD_REVEAL`], rising [`FOLD_RISE`] (standing in for its 2 px blur), so they never arrive half
+// drawn; closing, they fade out on [`FOLD_HIDE`], gone before the height lands on [`FOLD_CLOSE`].
+/// A fold opening: 280 ms on the quint ease-out.
+pub const FOLD_OPEN: MotionSpec = MotionSpec::new(280, EASE_OUT_QUINT);
+/// The ease a fold closes on: slow off, slow in (Clanker's ease-exit).
+pub const EASE_EXIT: CubicBezier = CubicBezier::new(0.4, 0.0, 0.6, 1.0);
+/// A fold closing: 220 ms on [`EASE_EXIT`].
+pub const FOLD_CLOSE: MotionSpec = MotionSpec::new(220, EASE_EXIT);
+/// A fold's contents fading in: 220 ms after an 80 ms wait.
+pub const FOLD_REVEAL: MotionSpec = MotionSpec::new(220, EASE_OUT_QUINT).with_delay(80);
+/// A fold's contents fading out: 150 ms.
+pub const FOLD_HIDE: MotionSpec = MotionSpec::new(150, EASE_EXIT);
+/// How far a fold's contents rise as they fade in, in pixels.
+pub const FOLD_RISE: f32 = 3.0;
+
+/// A fold `elapsed` into opening (or closing): its height's share of the way open, its contents'
+/// opacity, and how far below their place they stand. Honours [`speed_scale`]; settled at once
+/// under reduced motion (`still`).
+pub fn fold_frame(opening: bool, elapsed: Duration, still: bool) -> FoldFrame {
+    if still {
+        let open = if opening { 1.0 } else { 0.0 };
+        return FoldFrame { height: open, opacity: open, rise: 0.0 };
+    }
+    let at = |spec: MotionSpec| {
+        let total = spec.total().as_secs_f32() * speed_scale();
+        spec.progress(elapsed.as_secs_f32() / total)
+    };
+    if opening {
+        let shown = at(FOLD_REVEAL);
+        FoldFrame { height: at(FOLD_OPEN), opacity: shown, rise: FOLD_RISE * (1.0 - shown) }
+    } else {
+        FoldFrame { height: 1.0 - at(FOLD_CLOSE), opacity: 1.0 - at(FOLD_HIDE), rise: 0.0 }
+    }
+}
+
+/// Where a fold stands: see [`fold_frame`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FoldFrame {
+    /// The height's share of the way open, 0 to 1.
+    pub height: f32,
+    /// The contents' opacity.
+    pub opacity: f32,
+    /// How far below their place the contents stand, in pixels.
+    pub rise: f32,
+}
+
 /// Terminal tab drag-reorder sliding transforms: 150ms (§1.10).
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).
@@ -528,6 +637,9 @@ pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
 pub const GLYPH_STATE: MotionSpec = MotionSpec::new(280, EASE_OUT_QUINT);
 /// CSS `cubic-bezier(0.2, 0, 0, 1)` — fast start, long soft landing.
 pub const EASE_OUT_SOFT: CubicBezier = CubicBezier::new(0.2, 0.0, 0.0, 1.0);
+// slopty: a tooltip enters as Claude desktop's does, quick and landing soft (`duration-snap`).
+/// Tooltip-in: 120ms over [`EASE_OUT_SOFT`].
+pub const TOOLTIP_IN: MotionSpec = MotionSpec::new(120, EASE_OUT_SOFT);
 /// Selection indicator glide between the segments of a pill nav: 260ms.
 pub const INDICATOR_SLIDE: MotionSpec = MotionSpec::new(260, EASE_OUT_SOFT);
 /// Slopty loader pulse period: 2.4s.
@@ -653,6 +765,15 @@ where
     E: Styled + IntoElement + 'static,
 {
     element.with_animation(id, FADE_QUICK.animation(), |el, t| el.opacity(t))
+}
+
+/// slopty: a tooltip's entrance, a fade over [`TOOLTIP_IN`] (gpui has no div scale for the
+/// reference's 0.98).
+pub fn tooltip_in<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E>
+where
+    E: Styled + IntoElement + 'static,
+{
+    element.with_animation(id, TOOLTIP_IN.animation(), |el, t| el.opacity(t))
 }
 
 /// Popover entrance: fade + translateY −2→0 over [`MENU_IN`].
@@ -1005,6 +1126,13 @@ pub(crate) fn run_on(executor: gpui::BackgroundExecutor) {
 /// Hover progress (0..1) for `key` this frame.
 pub fn hover_t(key: &str) -> f32 {
     HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, hover_frame()))
+}
+
+/// slopty: how far a control that a hover reveals shows: on a touch screen, where nothing hovers,
+/// it is there at rest (opencode gates every reveal on `(hover: hover)`); elsewhere it is `key`'s
+/// hover fade, as [`hover_t`].
+pub fn revealed_by_hover(key: &str) -> f32 {
+    if cfg!(target_os = "ios") { 1.0 } else { hover_t(key) }
 }
 
 /// slopty: whether the fades hold `key`, hovered or fading. They let go of a key no frame read,
@@ -1382,10 +1510,8 @@ pub fn set_preference(preference: ReduceMotion, cx: &mut App) {
         return;
     }
     state.preference = preference;
+    // slopty: no longer saved; the override setting is gone (P12).
     apply(cx);
-    crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
-        settings.reduce_motion = preference;
-    });
 }
 
 pub fn set_pause_in_background(enabled: bool, cx: &mut App) {
@@ -1507,8 +1633,122 @@ fn refresh_system(cx: &mut App) {
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 fn refresh_system(_cx: &mut App) {}
 
+// slopty: a line of text that is alive while its work runs (opencode's `text-shimmer`): a band of
+// strong ink sweeps across faint glyphs. Its values are opencode's: 45 ms per glyph, a 1200 ms
+// cycle, a band 5.2 glyphs wide, linear and endless. The phase is the process's one clock
+// ([`locked_phase`]), so every shimmer on screen moves in step.
+
+/// Milliseconds the shimmer's band takes to move one glyph on.
+pub const SHIMMER_STEP_MS: f32 = 45.0;
+/// One sweep of the shimmer, in milliseconds.
+pub const SHIMMER_PERIOD_MS: f32 = 1200.0;
+/// The shimmer band's width, in glyphs.
+pub const SHIMMER_BAND: f32 = 5.2;
+
+/// How strongly glyph `index` is lit (0 faint, 1 full ink) at `phase_ms` into the cycle: the band
+/// reaches each glyph [`SHIMMER_STEP_MS`] after the one before and lights it on a sine's hump.
+pub fn shimmer_ink(index: usize, phase_ms: f32) -> f32 {
+    #[expect(clippy::cast_precision_loss, reason = "a glyph index in a short title")]
+    let delay = index as f32 * SHIMMER_STEP_MS;
+    let local = (phase_ms - delay).rem_euclid(SHIMMER_PERIOD_MS);
+    let pass = SHIMMER_BAND * SHIMMER_STEP_MS;
+    if local >= pass {
+        return 0.0;
+    }
+    (std::f32::consts::PI * local / pass).sin()
+}
+
+/// `text` as a shimmering line while `active`: each glyph inked from `theme.text_faint` to
+/// `theme.text` as the band crosses it, asking for the next frame meanwhile. Settled, or under
+/// reduced motion, it is plain `theme.text_muted`. The caller sets font and size around it.
+pub fn shimmer_text(
+    text: impl Into<SharedString>,
+    active: bool,
+    theme: &crate::theme::Theme,
+    window: &mut Window,
+    cx: &App,
+) -> gpui::StyledText {
+    let text: SharedString = text.into();
+    if !active || reduced_motion(cx) || text.is_empty() {
+        let len = text.len();
+        return gpui::StyledText::new(text).with_highlights([(0..len, ink_style(theme.text_muted))]);
+    }
+    window.request_animation_frame();
+    let period = Duration::from_secs_f32(SHIMMER_PERIOD_MS / 1000.0);
+    let phase_ms = locked_phase(period, window.frame_time()) * SHIMMER_PERIOD_MS;
+    let runs = shimmer_runs(&text, phase_ms, theme);
+    gpui::StyledText::new(text).with_highlights(runs)
+}
+
+// slopty: the shimmer's crest passes through the accent hue (HextaUI's `text-shimmer`;
+// design-inspiration item 6): faint to the accent over the band's first half, then the accent to
+// a crest of the accent mixed toward the text (55 % in the dark, 35 % on light), colour where the
+// crest was grey.
+/// A shimmering glyph's colour at `ink` (0 unlit, 1 at the crest; [`shimmer_ink`]).
+pub fn shimmer_color(ink: f32, theme: &crate::theme::Theme) -> Hsla {
+    let toward_text = if theme.appearance.is_dark() { 0.55 } else { 0.35 };
+    let crest = mix(theme.accent, theme.text, toward_text);
+    if ink <= 0.5 {
+        mix(theme.text_faint, theme.accent, ink * 2.0)
+    } else {
+        mix(theme.accent, crest, ink * 2.0 - 1.0)
+    }
+}
+
+fn ink_style(color: Hsla) -> gpui::HighlightStyle {
+    gpui::HighlightStyle { color: Some(color), ..Default::default() }
+}
+
+/// The colour runs of [`shimmer_text`] at `phase_ms`: one per lit glyph ([`shimmer_color`]), the
+/// unlit stretches between them merged into one run of the faint ink.
+fn shimmer_runs(
+    text: &str,
+    phase_ms: f32,
+    theme: &crate::theme::Theme,
+) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+    let faint = theme.text_faint;
+    let mut runs = Vec::new();
+    let mut unlit: Option<usize> = None;
+    for (index, (start, ch)) in text.char_indices().enumerate() {
+        let ink = shimmer_ink(index, phase_ms);
+        if ink <= 0.0 {
+            unlit.get_or_insert(start);
+            continue;
+        }
+        if let Some(from) = unlit.take() {
+            runs.push((from..start, ink_style(faint)));
+        }
+        runs.push((start..start + ch.len_utf8(), ink_style(shimmer_color(ink, theme))));
+    }
+    if let Some(from) = unlit {
+        runs.push((from..text.len(), ink_style(faint)));
+    }
+    runs
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// A fold opens its height first and its contents late: at 60 ms the height is well on its
+    /// way while the contents are still under 0.2 opacity and below their place; closing, the
+    /// contents are gone before the height lands; reduced motion settles at once.
+    #[test]
+    fn a_fold_opens_its_height_before_its_contents_and_hides_them_first() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let early = super::fold_frame(true, ms(60), false);
+        assert!(early.height > 0.5, "height {}", early.height);
+        assert!(early.opacity < 0.2, "contents {}", early.opacity);
+        assert!(early.rise > 2.5);
+        let open = super::fold_frame(true, ms(300), false);
+        assert!(open.height > 0.999 && open.opacity > 0.999 && open.rise < 1e-3, "{open:?}");
+        let closing = super::fold_frame(false, ms(150), false);
+        assert!(closing.opacity < 1e-3, "{closing:?}");
+        assert!(closing.height > 0.05, "the height still landing: {closing:?}");
+        assert!(super::fold_frame(false, ms(220), false).height < 1e-3);
+        assert_eq!(super::fold_frame(true, ms(0), true).opacity, 1.0);
+        assert_eq!(super::fold_frame(false, ms(0), true).height, 0.0);
+    }
 
     /// A hover fade read in a view of its own, which the window draws from its last frame while
     /// nothing notifies it, moves on through the fade: its element asks that view for each
@@ -2202,6 +2442,91 @@ mod tests {
             set_system(false, cx);
             assert!(!reduced_motion(cx));
         });
+    }
+
+    /// The shimmer's band reaches each glyph 45 ms after the one before, lights it fully at the
+    /// middle of its 234 ms pass, leaves the rest faint, and comes round every 1200 ms; its runs
+    /// tile the text with the unlit stretches merged, and its crest passes through the accent.
+    #[test]
+    fn the_shimmer_sweeps_one_glyph_per_step() {
+        let pass = super::SHIMMER_BAND * super::SHIMMER_STEP_MS;
+        assert!((super::shimmer_ink(0, pass / 2.0) - 1.0).abs() < 1e-4);
+        assert!((super::shimmer_ink(1, pass / 2.0 + 45.0) - 1.0).abs() < 1e-4);
+        assert!(super::shimmer_ink(1, pass / 2.0) < 1.0);
+        assert_eq!(super::shimmer_ink(0, pass + 1.0), 0.0);
+        assert!((super::shimmer_ink(0, pass / 2.0 + 1200.0) - 1.0).abs() < 1e-3);
+
+        let theme = crate::theme::Theme::dark();
+        let text = "Running tests";
+        let runs = super::shimmer_runs(text, pass / 2.0 + 3.0 * 45.0, &theme);
+        let mut end = 0;
+        for (range, _) in &runs {
+            assert_eq!(range.start, end, "runs tile the text");
+            end = range.end;
+        }
+        assert_eq!(end, text.len());
+        assert!(runs.len() < text.len(), "unlit glyphs share a run");
+        let crest = super::shimmer_color(1.0, &theme);
+        assert!(
+            runs.iter().any(|(_, style)| style.color == Some(crest)),
+            "a glyph at the crest"
+        );
+        // The ramp passes through the accent hue, and the crest keeps colour, lighter than it.
+        assert_eq!(super::shimmer_color(0.5, &theme), theme.accent);
+        assert_eq!(super::shimmer_color(0.0, &theme), theme.text_faint);
+        assert!(crest.s > 0.05, "a crest in colour, not grey");
+        assert!(crate::theme::contrast(crest, theme.bg) > crate::theme::contrast(theme.accent, theme.bg));
+    }
+
+    /// The side pane moves over 240 ms on the quint ease-out; its contents wait 40 ms before
+    /// fading in over 200, and are gone 160 ms into a close, before the width lands.
+    #[test]
+    fn a_pane_moves_on_the_quint_and_its_contents_fade_late_in_early_out() {
+        use super::{PANEL_RESIZE, pane_content_opacity};
+        let ms = Duration::from_millis;
+        assert_eq!((PANEL_RESIZE.total(), PANEL_RESIZE.curve), (ms(240), super::EASE_OUT_QUINT));
+        assert_eq!(pane_content_opacity(true, ms(0)), 0.0);
+        assert_eq!(pane_content_opacity(true, ms(40)), 0.0, "nothing before the delay");
+        let mid = pane_content_opacity(true, ms(140));
+        assert!(mid > 0.0 && mid < 1.0);
+        assert_eq!(pane_content_opacity(true, ms(240)), 1.0, "whole as the width lands");
+        assert_eq!(pane_content_opacity(false, ms(0)), 1.0);
+        assert_eq!(pane_content_opacity(false, ms(160)), 0.0, "gone before the width lands");
+    }
+
+    /// A pulse starts in step with the process clock, slows without a jump over the first
+    /// minute of its wait, and then runs on the calm clock, in step with every other calm pulse.
+    #[test]
+    fn a_long_wait_paces_down_without_a_jump_and_lands_in_step() {
+        use super::{locked_phase, paced_phase};
+        let period = Duration::from_millis(750);
+        let gap = |a: f32, b: f32| {
+            let d = (a - b).rem_euclid(1.0);
+            d.min(1.0 - d)
+        };
+        let base = super::process_epoch() + Duration::from_secs(1000);
+        for offset_ms in [0_u64, 137, 512] {
+            let since = base + Duration::from_millis(offset_ms);
+            assert!(gap(paced_phase(period, since, Some(since)), locked_phase(period, since)) < 1e-4);
+            let calm = period.div_f64(0.6);
+            for later in [60.0, 61.3, 3600.0] {
+                let now = since + Duration::from_secs_f64(later);
+                assert!(
+                    gap(paced_phase(period, now, Some(since)), locked_phase(calm, now)) < 1e-3,
+                    "{offset_ms} ms in, {later} s on: on the calm clock"
+                );
+            }
+            // No jump: a 5 ms step never moves the phase more than a 5 ms step at full pace.
+            let mut last = paced_phase(period, since, Some(since));
+            for step in 1..=12_400 {
+                let now = since + Duration::from_millis(5 * step);
+                let phase = paced_phase(period, now, Some(since));
+                assert!(gap(phase, last) <= 5.0 / 750.0 + 1e-4, "a jump at {step}");
+                last = phase;
+            }
+        }
+        let now = base + Duration::from_secs(30);
+        assert_eq!(paced_phase(period, now, None), locked_phase(period, now));
     }
 }
 

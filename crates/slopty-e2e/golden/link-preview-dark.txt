@@ -1,13 +1,15 @@
 Window
+Button │ Filter projects: All projects
+Button │ Done, 1
 Button │ Read the guide before the first run.
+Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
+Splitter │ Resize sidebar
 Article │ You
 Paragraph │ Read [the guide](https://example.com/docs/guide/getting-started) before the first run.
 Button │ Rewind…
-Article │ Claude Code
-Button │ Thought process
 Paragraph │ Done: Read the guide before the first run.
 Link │ the guide
 Button │ Attach images
@@ -15,7 +17,6 @@ MultilineTextInput │ Do anything… (focused)
 Button │ Model: Opus 5.5, High
 Button │ Send message
 Button │ Mode: Auto
-Button │ Context 1%
 Button │ Open in…
 Button │ Show chat details
 Button │ Show files panel
@@ -24,4 +25,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Sidebar view options

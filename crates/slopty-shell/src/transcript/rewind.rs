@@ -71,7 +71,7 @@ pub(super) struct RewindState {
     /// The rewind in flight.
     pending: Option<Task<()>>,
     /// Where each person's bubble was last drawn, by its entry: the menu hangs from its left edge.
-    feet: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, gpui::Bounds<Pixels>>>>,
+    pub(super) feet: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<SharedString, gpui::Bounds<Pixels>>>>,
 }
 
 struct RewindMenu {
@@ -84,7 +84,7 @@ struct RewindMenu {
 impl Transcript {
     /// What notes where the bubble of entry `entry` draws, set in its foot.
     pub(super) fn bubble_foot_watch(&self, entry: &SharedString) -> AnyElement {
-        let (feet, entry) = (self.rewind.feet.clone(), entry.to_string());
+        let (feet, entry) = (self.rewind.feet.clone(), entry.clone());
         gpui::canvas(
             move |bounds, _, _| {
                 feet.borrow_mut().insert(entry, bounds);
@@ -211,7 +211,7 @@ impl Transcript {
         }
         // Hung from the bubble's left edge, under it, not from wherever the press landed; under
         // a bubble narrower than it, flush with its right edge, so it stays in the column.
-        let position = self.rewind.feet.borrow().get(&message).map_or(position, |foot| {
+        let position = self.rewind.feet.borrow().get(message.as_str()).map_or(position, |foot| {
             let left = foot.left().min(foot.right() - px(MENU_WIDTH));
             gpui::point(left, foot.bottom() + px(Theme::SPACE_XS))
         });

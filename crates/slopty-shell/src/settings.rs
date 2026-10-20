@@ -32,7 +32,6 @@ pub mod notifications;
 pub mod permissions; // slopty: an agent's permission rules (S2)
 pub mod shortcuts;
 // slopty: no thread naming: an agent's thread is titled by the agent.
-pub mod wallpaper;
 pub mod wallpaper_colors;
 pub mod widgets;
 // slopty: no per-device worktree locations (the engine side is not taken).
@@ -56,7 +55,6 @@ pub const RIGHT_PANE_MIN: f32 = 360.0;
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
 /// The Pull requests route's side pane defaults wider than the chat's: the
 /// detail's Code tab needs room beside the board.
-pub const PULL_REQUEST_PANE_DEFAULT: f32 = 640.0;
 /// Minimum width retained for the conversation when the right pane is open.
 pub const CHAT_PANEL_MIN: f32 = 300.0;
 
@@ -120,47 +118,6 @@ impl Default for NewThreadBackgroundAdjustment {
             focal_x: 0.5,
             focal_y: 0.5,
             zoom: 1.0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum NewThreadBackgroundEffect {
-    #[default]
-    None,
-    Dither,
-    Ascii,
-    Halftone,
-    Scanlines,
-}
-
-impl NewThreadBackgroundEffect {
-    pub const ALL: [Self; 5] = [
-        Self::None,
-        Self::Dither,
-        Self::Ascii,
-        Self::Halftone,
-        Self::Scanlines,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Dither => "Dither",
-            Self::Ascii => "ASCII",
-            Self::Halftone => "Halftone",
-            Self::Scanlines => "Scanlines",
-        }
-    }
-
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::None => "Shows the original artwork.",
-            Self::Dither => "Rebuilds the artwork with a dithered color palette.",
-            Self::Ascii => "Recreates the artwork with colored characters on black.",
-            Self::Halftone => "Recreates the artwork with colored print dots on black.",
-            Self::Scanlines => "Adds a pronounced horizontal display-line texture.",
         }
     }
 }
@@ -286,31 +243,66 @@ fn deserialize_math_size<'de, D: serde::Deserializer<'de>>(
 
 // slopty: no History surface (ruled out).
 
-pub const TRANSCRIPT_WIDTH_MIN: f32 = 560.0;
-pub const TRANSCRIPT_WIDTH_MAX: f32 = 1200.0;
-pub const TRANSCRIPT_WIDTH_DEFAULT: f32 = 736.0;
-pub const TRANSCRIPT_WIDTH_STEP: f32 = 16.0;
-
-pub fn normalize_transcript_width(width: f32) -> f32 {
-    let width = clamp_or(
-        width,
-        TRANSCRIPT_WIDTH_MIN,
-        TRANSCRIPT_WIDTH_MAX,
-        TRANSCRIPT_WIDTH_DEFAULT,
-    );
-    TRANSCRIPT_WIDTH_MIN
-        + ((width - TRANSCRIPT_WIDTH_MIN) / TRANSCRIPT_WIDTH_STEP).round() * TRANSCRIPT_WIDTH_STEP
+/// slopty: how wide a conversation reads, as one of Amp's three presets in place of a pixel
+/// slider (prune P9, `docs/decisions/ui.md`): measured against the window, as Amp's breakpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConversationWidth {
+    /// 672, then 724 in a window 1280 wide and 750 at 1600.
+    #[default]
+    Default,
+    /// Six tenths of the window, never under the default's 672.
+    Wide,
+    /// The whole column.
+    Full,
 }
 
-pub fn transcript_width(cx: &App) -> f32 {
+impl ConversationWidth {
+    pub const ALL: [Self; 3] = [Self::Default, Self::Wide, Self::Full];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Wide => "Wide",
+            Self::Full => "Full",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Default => "Grows a little with the window.",
+            Self::Wide => "Six tenths of the window.",
+            Self::Full => "As wide as the window allows.",
+        }
+    }
+
+    /// The widest messages and the docked composer go in a window `window` wide.
+    pub fn cap(self, window: f32) -> f32 {
+        const NARROWEST: f32 = 672.0;
+        match self {
+            Self::Default if window >= 1600.0 => 750.0,
+            Self::Default if window >= 1280.0 => 724.0,
+            Self::Default => NARROWEST,
+            Self::Wide => (window * 0.6).max(NARROWEST),
+            Self::Full => window.max(NARROWEST),
+        }
+    }
+}
+
+pub fn conversation_width(cx: &App) -> ConversationWidth {
     cx.try_global::<SettingsStore>()
-        .map(|store| store.current.transcript_width)
-        .unwrap_or(TRANSCRIPT_WIDTH_DEFAULT)
+        .map(|store| store.current.conversation_width)
+        .unwrap_or_default()
 }
 
-pub fn set_transcript_width(width: f32, cx: &mut App) {
+/// The widest messages and the docked composer go, in a window `window` wide.
+pub fn transcript_width(window: f32, cx: &App) -> f32 {
+    conversation_width(cx).cap(window)
+}
+
+pub fn set_conversation_width(width: ConversationWidth, cx: &mut App) {
     if update(SavePolicy::Debounced, cx, |settings| {
-        settings.transcript_width = normalize_transcript_width(width);
+        settings.conversation_width = width;
     }) {
         cx.refresh_windows();
     }
@@ -404,12 +396,6 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
-/// Read the picker preference without cloning the full settings for each model row.
-pub fn compact_model_picker(cx: &App) -> bool {
-    cx.try_global::<SettingsStore>()
-        .is_some_and(|store| store.current.compact_model_picker)
-}
-
 /// Copy a selected image into Slopty's device-local data directory and make it
 /// the new-thread canvas background. A unique file name avoids stale image
 /// caches when the background is replaced.
@@ -422,32 +408,17 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
     })?;
     let proxy = image.thumbnail(64, 64).to_rgba8();
     let color = wallpaper_colors::extract(proxy.pixels().map(|pixel| pixel.0));
-    install_staged_background(source, staged, color, cx)
-}
-
-fn install_staged_background(
-    source: &Path,
-    staged: crate::attachments::StagedAttachment,
-    color: Option<slopty_shell_theme::Color>,
-    cx: &mut App,
-) -> Result<(), String> {
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
         .ok_or_else(|| "Couldn\u{2019}t save the image. Restart Slopty and try again.".to_string())?;
     let prepared = prepare_background_file(staged, &data_dir)?;
-    commit_background(source, prepared, color, cx)
+    commit_background(prepared, color, cx)
 }
 
-/// Owns a prewritten managed file until it is committed; dropped queue entries
-/// and failed commits clean up their files without touching the active image.
-pub(super) struct PreparedBackgroundFile(Option<NewThreadComposerBackground>);
-
-impl PreparedBackgroundFile {
-    fn path(&self) -> &Path {
-        Path::new(&self.0.as_ref().unwrap().path)
-    }
-}
+/// Owns a prewritten managed file until it is committed; a failed commit cleans up its file
+/// without touching the active image.
+struct PreparedBackgroundFile(Option<NewThreadComposerBackground>);
 
 impl Drop for PreparedBackgroundFile {
     fn drop(&mut self) {
@@ -495,7 +466,6 @@ fn prepare_background_file(
 }
 
 fn commit_background(
-    source: &Path,
     mut prepared: PreparedBackgroundFile,
     color: Option<slopty_shell_theme::Color>,
     cx: &mut App,
@@ -507,11 +477,6 @@ fn commit_background(
     let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
     let replacement = prepared.0.as_ref().unwrap().clone();
     let mut next = current(cx);
-    if let Some(previous) = &next.wallpaper_source {
-        wallpaper::remember(&mut next.wallpaper_history, previous);
-    }
-    wallpaper::remember(&mut next.wallpaper_history, source);
-    next.wallpaper_source = Some(source.to_path_buf());
     next.wallpaper_color = color;
     let previous = next
         .new_thread_composer_background
@@ -541,7 +506,6 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
         .ok_or_else(|| "Couldn\u{2019}t remove the image. Restart Slopty and try again.".to_string())?;
     let mut next = current(cx);
     let previous = next.new_thread_composer_background.take();
-    next.wallpaper_source = None;
     next.wallpaper_color = None;
     if previous.is_none() {
         return Ok(());
@@ -561,14 +525,6 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
     }
     cx.refresh_windows();
     Ok(())
-}
-
-pub fn set_new_thread_background_effect(effect: NewThreadBackgroundEffect, cx: &mut App) {
-    if update(SavePolicy::Immediate, cx, |settings| {
-        settings.new_thread_background_effect = effect;
-    }) {
-        cx.refresh_windows();
-    }
 }
 
 pub fn set_new_thread_background_adjustment(
@@ -626,20 +582,9 @@ pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     }
 }
 
-/// How Markdown surfaces set math, read each render without cloning the
-/// settings.
-pub fn math_style(cx: &App) -> crate::markdown::math::MathStyle {
-    cx.try_global::<SettingsStore>()
-        .map(|store| crate::markdown::math::MathStyle {
-            enabled: store.current.render_math,
-            face: store.current.math_font.face(),
-            size: store.current.math_size,
-        })
-        .unwrap_or_default()
-}
-
-/// Monotonic id of [`math_style`]: Markdown surfaces that keep measured row
-/// heights compare it during render and remeasure when it moves.
+// slopty: math has one look now (`markdown::math::MATH_FACE`, the Amp study's P8); what reads
+// the math settings goes with them.
+/// Monotonic id of the math settings.
 pub fn math_generation(cx: &App) -> u64 {
     cx.try_global::<SettingsStore>()
         .map(|store| store.math_generation)
@@ -741,19 +686,6 @@ fn flush_latest(cx: &mut App) {
     }
 }
 
-// slopty: two organisations, by status (Needs you, Working, Done; `shell/sidebar_status.rs`) the
-// default, and by project; one list and by device are gone, and rows keep the order their
-// sessions started in, so nothing moves on its own (`docs/decisions/ui.md`, "The sidebar groups by
-// status"). A file naming a gone organisation reads as the default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub enum SidebarOrganization {
-    ByProject,
-    #[default]
-    #[serde(other)]
-    ByStatus,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowGeometry {
@@ -831,25 +763,6 @@ impl WindowGeometry {
     }
 }
 
-/// Trigger preferences belong to each harness, not the currently selected model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillCompletionSettings {
-    pub dollar: bool,
-    pub separate_from_slash: bool,
-}
-
-impl SkillCompletionSettings {
-    /// Every harness defaults to `$` skills kept out of the `/` menu; an
-    /// explicit per-harness choice (or the legacy slash-menu flag) wins.
-    pub fn for_harness(_harness: slopty_view_proto::HarnessId) -> Self {
-        Self {
-            dollar: true,
-            separate_from_slash: true,
-        }
-    }
-}
-
 pub const SKILL_COMPLETION_HARNESSES: [(slopty_view_proto::HarnessId, &str); 9] = [
     (slopty_view_proto::HarnessId::ANTIGRAVITY, "Antigravity"),
     (slopty_view_proto::HarnessId::CLAUDE_CODE, "Claude Code"),
@@ -906,28 +819,10 @@ pub struct UiSettings {
     pub window_geometry: Option<WindowGeometry>,
     /// Submit using Enter or the platform modifier plus Enter.
     pub composer_send_behavior: ComposerSendBehavior,
-    /// Legacy global opt-in; per-harness preferences take precedence.
-    pub skills_in_slash_menu: bool,
-    pub skill_completion_by_harness:
-        std::collections::HashMap<slopty_view_proto::HarnessId, SkillCompletionSettings>,
-    /// Open model selection with an effort slider and a separate model list.
-    pub compact_model_picker: bool,
+    // slopty: `$` skills and `/` commands for every agent; the toggles are gone (P11).
+    // slopty: the compact model picker is the one picker (Amp's prune P6).
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
-    /// How active sessions are partitioned in the sidebar.
-    pub sidebar_organization: SidebarOrganization,
-    /// Optional harness branding and repository metadata shown below each
-    /// session title.
-    pub sidebar_show_project_label: bool,
-    pub sidebar_compact: bool,
-    pub sidebar_show_project_icon: bool,
-    pub sidebar_show_harness: bool,
-    pub sidebar_show_branch: bool,
-    pub sidebar_show_pull_request: bool,
-    /// The project filter row at the top of the sidebar.
-    pub sidebar_show_project_filter: bool,
-    /// The Archived accordion below the active session list.
-    pub sidebar_show_archived: bool,
     // slopty: no Star on GitHub banner.
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
@@ -946,20 +841,9 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
-    /// Custom sidebar organization, isolated between account profiles on this device.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub sidebar_sections_by_profile: HashMap<String, Vec<SidebarSection>>,
     /// Device-local pins for local profiles; synced profiles use registry pins.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sidebar_pinned_session_ids_by_profile: HashMap<String, Vec<String>>,
-    /// Legacy: per-space tab order, from when tabs were the selected space's
-    /// non-archived sessions. Kept for file compatibility; no longer read.
-    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub tab_order: std::collections::HashMap<String, Vec<String>>,
-    /// Legacy: manual sidebar space order, from when spaces were a sidebar
-    /// list. Kept for file compatibility; no longer read.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub space_order: Vec<String>,
     /// Master switch for session notification chimes. `SLOPTY_DISABLE_SOUND`
     /// overrides every per-event preference below.
     pub sound_enabled: bool,
@@ -977,15 +861,7 @@ pub struct UiSettings {
     pub notifications_background_only: bool,
     pub files_panel_width: f32,
     pub right_pane_width: f32,
-    /// Width of the pull request pane beside the board.
-    pub pull_request_pane_width: f32,
-    /// Legacy: panel *open* flags are session-scoped in-memory state now
-    /// (`shell::SessionPanels`, slopty `sessionPanels` parity). Kept for file
-    /// compatibility; no longer read or written by the shell.
-    pub right_pane_open: bool,
     pub terminal_height: f32,
-    /// Legacy — see [`Self::right_pane_open`].
-    pub terminal_open: bool,
     /// slopty: which panes each chat had open, kept across launches (`shell::SessionPanels`).
     pub session_panels: std::collections::BTreeMap<String, SavedPanels>,
     /// slopty: what each chat's pane showed, kept across launches (`shell::kept_tabs`).
@@ -1036,9 +912,9 @@ pub struct UiSettings {
     /// tolerantly ([`deserialize_math_size`]).
     #[serde(deserialize_with = "deserialize_math_size")]
     pub math_size: u16,
-    /// Maximum message and docked composer surface width in logical pixels.
+    /// How wide messages and the docked composer go ([`ConversationWidth`]).
     /// The centered new-chat composer keeps its own width.
-    pub transcript_width: f32,
+    pub conversation_width: ConversationWidth,
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
     pub open_web_links_in_slopty: bool,
@@ -1058,31 +934,21 @@ pub struct UiSettings {
     /// The user hid the session card (project, device, side chats, actions)
     /// that otherwise shows beside a transcript with room for it.
     pub session_info_hidden: bool,
-    /// Interactive identity overlay; imported themes default to their own accent.
+    /// Interactive identity overlay; the theme default keeps each theme's own accent.
     pub accent: slopty_shell_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
     pub surface: slopty_shell_theme::SurfacePreference,
     /// Optional device-local artwork behind the blank new-thread composer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_thread_composer_background: Option<NewThreadComposerBackground>,
-    /// Device-local folder used by the random wallpaper shortcut.
-    pub wallpaper_folder: Option<PathBuf>,
-    pub wallpaper_source: Option<PathBuf>,
-    /// Most recently displayed sources first; bounded by the shuffle cooldown.
-    pub wallpaper_history: Vec<PathBuf>,
+    // slopty: the wallpaper folder and its shuffle are gone; a wallpaper is one chosen image.
     pub wallpaper_theme_colors: bool,
     pub wallpaper_color: Option<slopty_shell_theme::Color>,
-    /// Non-destructive treatment composited inside the artwork's fade mask.
-    pub new_thread_background_effect: NewThreadBackgroundEffect,
-    /// Snap animations to rest. Defaults to following the OS.
-    pub reduce_motion: crate::motion::ReduceMotion,
+    // slopty: the artwork's effects are gone; the glyph field is the hero's treatment.
+    // slopty: reduced motion follows the OS alone (Amp's prune P12).
     /// Also snap animations while the main window is not focused.
     pub pause_animations_in_background: bool,
     // slopty: voice removed.
-    /// Pre-theme settings used `accentColor`. Read it once, migrate to
-    /// [`Self::accent`], and never write it again.
-    #[serde(default, rename = "accentColor", skip_serializing)]
-    legacy_accent_color: Option<crate::theme::AccentColor>,
 }
 
 impl Default for UiSettings {
@@ -1092,24 +958,12 @@ impl Default for UiSettings {
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
-            sidebar_organization: SidebarOrganization::ByStatus,
-            sidebar_show_project_label: true,
-            sidebar_compact: true,
-            sidebar_show_project_icon: true,
-            sidebar_show_harness: true,
-            sidebar_show_branch: true,
-            sidebar_show_pull_request: true,
-            sidebar_show_project_filter: true,
-            sidebar_show_archived: true,
             // slopty: no Star on GitHub banner.
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
             sidebar_pinned_session_ids_by_profile: HashMap::new(),
-            sidebar_sections_by_profile: HashMap::new(),
-            tab_order: std::collections::HashMap::new(),
-            space_order: Vec::new(),
             sound_enabled: true,
             sound_completion_enabled: true,
             sound_input_enabled: true,
@@ -1118,19 +972,13 @@ impl Default for UiSettings {
             notifications_background_only: true,
             files_panel_width: FILES_PANEL_DEFAULT,
             right_pane_width: RIGHT_PANE_DEFAULT,
-            pull_request_pane_width: PULL_REQUEST_PANE_DEFAULT,
-            right_pane_open: false,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
-            terminal_open: false,
             session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
             session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
             keymap: KeymapConfig::default(),
             escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
-            skills_in_slash_menu: false,
-            skill_completion_by_harness: Default::default(),
-            compact_model_picker: true,
             // slopty: appshots removed.
             appearance: crate::appearance::AppearanceMode::default(),
             // slopty: no History surface (ruled out).
@@ -1149,7 +997,7 @@ impl Default for UiSettings {
             render_math: true,
             math_font: MathFont::Fira,
             math_size: MATH_SIZE_DEFAULT,
-            transcript_width: TRANSCRIPT_WIDTH_DEFAULT,
+            conversation_width: ConversationWidth::Default,
             open_web_links_in_slopty: true,
             transcript_compact_mode: false,
             // slopty: no pull-request pages.
@@ -1161,16 +1009,10 @@ impl Default for UiSettings {
             accent: slopty_shell_theme::AccentSelection::default(),
             surface: slopty_shell_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
-            wallpaper_folder: None,
-            wallpaper_source: None,
-            wallpaper_history: Vec::new(),
             wallpaper_theme_colors: false,
             wallpaper_color: None,
-            new_thread_background_effect: NewThreadBackgroundEffect::None,
-            reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
             // slopty: voice removed.
-            legacy_accent_color: None,
         }
     }
 }
@@ -1206,8 +1048,7 @@ const JUMP_LABELS: [&str; JUMP_SLOTS] = [
 /// rather than panicking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutId {
-    // slopty: dictation and appshots removed.
-    RandomWallpaper,
+    // slopty: dictation, appshots and the wallpaper shuffle removed.
     SaveFile,
     BrowserReload,
     ToggleSidebar,
@@ -1230,8 +1071,7 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 18 + JUMP_SLOTS] = [ // slopty: dictation and appshots removed.
-        ShortcutId::RandomWallpaper,
+    pub const ALL: [ShortcutId; 17 + JUMP_SLOTS] = [ // slopty: dictation and appshots removed.
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
         ShortcutId::ToggleSidebar,
@@ -1266,7 +1106,6 @@ impl ShortcutId {
     pub fn label(self) -> &'static str {
         match self {
             // slopty: dictation removed.
-            ShortcutId::RandomWallpaper => "Random wallpaper",
             // slopty: appshots removed.
             ShortcutId::SaveFile => "Save file",
             // slopty: each name is the one its button, menu and palette row use.
@@ -1300,7 +1139,6 @@ impl ShortcutId {
     pub fn default_combo_on(self, mac: bool) -> &'static str {
         match self {
             // slopty: dictation removed.
-            ShortcutId::RandomWallpaper => "mod-u",
             // slopty: appshots removed.
             ShortcutId::SaveFile => "mod-s",
             ShortcutId::BrowserReload => "mod-shift-r",
@@ -1356,8 +1194,7 @@ impl ShortcutId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct KeymapConfig {
-    // slopty: dictation and appshots removed.
-    pub random_wallpaper: String,
+    // slopty: dictation, appshots and the wallpaper shuffle removed.
     pub save_file: String,
     pub browser_reload: String,
     pub toggle_sidebar: String,
@@ -1428,7 +1265,6 @@ impl Default for KeymapConfig {
     fn default() -> Self {
         Self {
             // slopty: dictation and appshots removed.
-            random_wallpaper: ShortcutId::RandomWallpaper.default_combo().into(),
             save_file: ShortcutId::SaveFile.default_combo().into(),
             browser_reload: ShortcutId::BrowserReload.default_combo().into(),
             toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
@@ -1455,7 +1291,6 @@ impl KeymapConfig {
     pub fn get(&self, id: ShortcutId) -> &str {
         match id {
             // slopty: dictation and appshots removed.
-            ShortcutId::RandomWallpaper => &self.random_wallpaper,
             ShortcutId::SaveFile => &self.save_file,
             ShortcutId::BrowserReload => &self.browser_reload,
             ShortcutId::ToggleSidebar => &self.toggle_sidebar,
@@ -1484,7 +1319,6 @@ impl KeymapConfig {
     pub fn set(&mut self, id: ShortcutId, combo: String) {
         match id {
             // slopty: dictation and appshots removed.
-            ShortcutId::RandomWallpaper => self.random_wallpaper = combo,
             ShortcutId::SaveFile => self.save_file = combo,
             ShortcutId::BrowserReload => self.browser_reload = combo,
             ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
@@ -1674,19 +1508,6 @@ impl UiSettings {
             .or_default()
     }
 
-    pub fn skill_completion(&self, harness: slopty_view_proto::HarnessId) -> SkillCompletionSettings {
-        self.skill_completion_by_harness
-            .get(&harness)
-            .copied()
-            .unwrap_or_else(|| {
-                let mut settings = SkillCompletionSettings::for_harness(harness);
-                if self.skills_in_slash_menu {
-                    settings.separate_from_slash = false;
-                }
-                settings
-            })
-    }
-
     // slopty: appshots removed.
     /// Whether this session event may produce audio.
     pub fn session_sound_enabled(&self, sound: crate::sound::Sound) -> bool {
@@ -1716,29 +1537,14 @@ impl UiSettings {
             // slopty: dictation removed.
             window_geometry,
             composer_send_behavior,
-            skills_in_slash_menu,
-            skill_completion_by_harness,
-            compact_model_picker,
             sidebar_width,
             sidebar_collapsed,
-            sidebar_organization,
-            sidebar_show_project_label,
-            sidebar_compact,
-            sidebar_show_project_icon,
-            sidebar_show_harness,
-            sidebar_show_branch,
-            sidebar_show_pull_request,
-            sidebar_show_project_filter,
-            sidebar_show_archived,
             // slopty: no Star on GitHub banner.
             last_space_id,
             last_project_action_by_space_id,
             open_tabs,
             space_filter,
-            sidebar_sections_by_profile,
             sidebar_pinned_session_ids_by_profile,
-            tab_order,
-            space_order,
             sound_enabled,
             sound_completion_enabled,
             sound_input_enabled,
@@ -1747,10 +1553,7 @@ impl UiSettings {
             notifications_background_only,
             files_panel_width,
             right_pane_width,
-            pull_request_pane_width,
-            right_pane_open,
             terminal_height,
-            terminal_open,
             session_panels, // slopty: kept panes
             session_tabs, // slopty: kept panes
             keymap,
@@ -1774,7 +1577,7 @@ impl UiSettings {
             render_math,
             math_font,
             math_size,
-            transcript_width,
+            conversation_width,
             open_web_links_in_slopty,
             transcript_compact_mode,
             files_autosave_enabled,
@@ -1785,16 +1588,10 @@ impl UiSettings {
             accent,
             surface,
             new_thread_composer_background,
-            wallpaper_folder,
-            wallpaper_source,
-            wallpaper_history,
             wallpaper_theme_colors,
             wallpaper_color,
-            new_thread_background_effect,
-            reduce_motion,
             pause_animations_in_background,
             // slopty: voice removed.
-            legacy_accent_color,
             // slopty: no pull-request pages.
         );
         current
@@ -1802,7 +1599,6 @@ impl UiSettings {
 
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
     pub fn clamped(mut self) -> Self {
-        self.transcript_width = normalize_transcript_width(self.transcript_width);
         self.window_geometry = self.window_geometry.filter(|geometry| geometry.is_valid());
         self.sidebar_width = clamp_or(
             self.sidebar_width,
@@ -1819,11 +1615,6 @@ impl UiSettings {
             FILES_PANEL_DEFAULT,
         );
         self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
-        self.pull_request_pane_width = min_or(
-            self.pull_request_pane_width,
-            RIGHT_PANE_MIN,
-            PULL_REQUEST_PANE_DEFAULT,
-        );
         self.terminal_height = clamp_or(
             self.terminal_height,
             TERMINAL_MIN_HEIGHT,
@@ -1948,7 +1739,7 @@ impl UiSettings {
                     }
                     serde_json::from_value::<UiSettings>(value)
                 }) {
-                    Ok(settings) => settings.migrated().clamped(),
+                    Ok(settings) => settings.clamped(),
                     Err(err) => {
                         // slopty: a file that does not parse is moved aside and said, never
                         // overwritten by the next save.
@@ -1978,16 +1769,6 @@ impl UiSettings {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)
-    }
-
-    fn migrated(mut self) -> Self {
-        if self.accent == slopty_shell_theme::AccentSelection::ThemeDefault
-            && let Some(accent) = self.legacy_accent_color.take()
-        {
-            self.accent = slopty_shell_theme::AccentSelection::Preset(accent.into());
-        }
-        self.legacy_accent_color = None;
-        self
     }
 
     pub fn path(data_dir: &Path) -> PathBuf {
@@ -2068,78 +1849,9 @@ fn min_or(value: f32, min: f32, default: f32) -> f32 {
     }
 }
 
-pub use slopty_view_proto::SidebarSection;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn skill_completion_defaults_overrides_and_persistence_are_per_harness() {
-        use slopty_view_proto::HarnessId;
-        let dir = tempfile::tempdir().unwrap();
-        let mut settings = UiSettings::default();
-        for (harness, _) in SKILL_COMPLETION_HARNESSES {
-            let preferences = settings.skill_completion(harness);
-            assert!(preferences.dollar);
-            assert!(preferences.separate_from_slash);
-        }
-        settings.skill_completion_by_harness.insert(
-            HarnessId::CLAUDE_CODE,
-            SkillCompletionSettings {
-                dollar: false,
-                separate_from_slash: true,
-            },
-        );
-        settings.skill_completion_by_harness.insert(
-            HarnessId::OPENCODE,
-            SkillCompletionSettings {
-                dollar: true,
-                separate_from_slash: false,
-            },
-        );
-        settings.save(dir.path()).unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(
-            settings.skill_completion_by_harness,
-            loaded.skill_completion_by_harness
-        );
-        assert!(!loaded.skill_completion(HarnessId::CLAUDE_CODE).dollar);
-        assert!(loaded.skill_completion(HarnessId::CURSOR).dollar);
-        let legacy: UiSettings = serde_json::from_str(r#"{"skillsInSlashMenu":true}"#).unwrap();
-        assert!(
-            !legacy
-                .skill_completion(HarnessId::CODEX)
-                .separate_from_slash
-        );
-        assert!(legacy.skill_completion(HarnessId::CODEX).dollar);
-    }
-
-    #[test]
-    fn slash_skills_are_opt_in_and_persist() {
-        let old: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(!old.skills_in_slash_menu);
-        let dir = tempfile::tempdir().unwrap();
-        let mut settings = old;
-        settings.skills_in_slash_menu = true;
-        settings.save(dir.path()).unwrap();
-        assert!(UiSettings::load(dir.path()).skills_in_slash_menu);
-    }
-
-    #[test]
-    fn compact_model_picker_is_default_and_opt_out_persists() {
-        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(legacy.compact_model_picker);
-        let settings = UiSettings {
-            compact_model_picker: false,
-            ..legacy
-        };
-        let saved = serde_json::to_string(&settings).unwrap();
-        let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
-        assert!(!loaded.compact_model_picker);
-    }
-
-    // slopty: no pull-request pages.
 
     #[test]
     fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
@@ -2154,11 +1866,6 @@ mod tests {
         assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
         assert!(loaded.open_web_links_in_slopty);
         assert!(loaded.new_thread_composer_background.is_none());
-        assert_eq!(
-            loaded.new_thread_background_effect,
-            NewThreadBackgroundEffect::None
-        );
-        assert_eq!(loaded.reduce_motion, crate::motion::ReduceMotion::System);
         assert!(!loaded.pause_animations_in_background);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
@@ -2264,13 +1971,6 @@ mod tests {
             assert_eq!(loaded.settings_section, SettingsSection::General, "{raw}");
             assert_eq!(loaded.sidebar_width, 300.0, "{raw}");
         }
-        // The legacy Accounts alias still reads, and reopens as Providers.
-        let alias: UiSettings = serde_json::from_str(r#"{"settingsSection":"agents"}"#).unwrap();
-        assert_eq!(alias.settings_section, SettingsSection::Agents);
-        assert_eq!(
-            alias.settings_section.reopenable(),
-            SettingsSection::Harnesses
-        );
     }
 
     #[test]
@@ -2635,11 +2335,7 @@ mod tests {
             .save(&second)
             .unwrap();
         cx.update(|cx| {
-            let initial = UiSettings {
-                new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
-                ..Default::default()
-            };
-            init(initial, dir.path(), cx);
+            init(UiSettings::default(), dir.path(), cx);
             install_new_thread_composer_background(&first, cx).unwrap();
             set_new_thread_background_adjustment(
                 NewThreadBackgroundAdjustment {
@@ -2659,10 +2355,6 @@ mod tests {
             let decoded = crate::new_thread_background_image::decode(&saved_image).unwrap();
             assert_eq!((decoded.width(), decoded.height()), (12, 10));
             assert_eq!(UiSettings::load(dir.path()), settings);
-            assert_eq!(
-                settings.new_thread_background_effect,
-                NewThreadBackgroundEffect::Ascii
-            );
             assert_eq!(
                 replacement.adjustment,
                 NewThreadBackgroundAdjustment::default()
@@ -2719,15 +2411,6 @@ mod tests {
             window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
-            sidebar_organization: SidebarOrganization::ByProject,
-            sidebar_compact: true,
-            sidebar_show_project_icon: false,
-            sidebar_show_project_label: false,
-            sidebar_show_harness: false,
-            sidebar_show_branch: false,
-            sidebar_show_pull_request: false,
-            sidebar_show_project_filter: false,
-            sidebar_show_archived: false,
             // slopty: no Star on GitHub banner.
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
@@ -2736,7 +2419,6 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
-            sidebar_sections_by_profile: HashMap::new(),
             sidebar_pinned_session_ids_by_profile: HashMap::from([
                 (
                     "local".to_string(),
@@ -2747,11 +2429,6 @@ mod tests {
                     vec!["synced-1".to_string()],
                 ),
             ]),
-            tab_order: std::collections::HashMap::from([(
-                "space-1".to_string(),
-                vec!["b".to_string(), "a".to_string()],
-            )]),
-            space_order: vec!["space-2".to_string(), "space-1".to_string()],
             sound_enabled: false,
             sound_completion_enabled: false,
             sound_input_enabled: true,
@@ -2760,10 +2437,7 @@ mod tests {
             notifications_background_only: false,
             files_panel_width: 310.0,
             right_pane_width: 700.0,
-            pull_request_pane_width: 820.0,
-            right_pane_open: true,
             terminal_height: 320.0,
-            terminal_open: true,
             session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
             session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
             keymap: KeymapConfig {
@@ -2773,16 +2447,13 @@ mod tests {
             escape_stops_active_agent: true,
             settings_section: crate::shell::SettingsSection::Shortcuts,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
-            skills_in_slash_menu: true,
-            skill_completion_by_harness: Default::default(),
-            compact_model_picker: true,
             // slopty: appshots removed.
             appearance: crate::appearance::AppearanceMode::Light,
             // slopty: no History surface (ruled out).
             ui_font_family: crate::typography::UiFontFamily::Installed("Arial".into()),
             ui_font_size: crate::typography::UiFontSize::ALL[5],
             theme_selection: slopty_shell_theme::ThemeSelection {
-                light: "catppuccin-latte".into(),
+                light: "rose-pine-dawn".into(),
                 dark: "catppuccin-mocha".into(),
             },
             diff_split: true,
@@ -2793,7 +2464,7 @@ mod tests {
             render_math: false,
             math_font: MathFont::StixTwo,
             math_size: 135,
-            transcript_width: 960.0,
+            conversation_width: ConversationWidth::Wide,
             open_web_links_in_slopty: false,
             transcript_compact_mode: true,
             // slopty: no pull-request pages.
@@ -2817,15 +2488,9 @@ mod tests {
                     zoom: 1.8,
                 },
             }),
-            wallpaper_folder: Some("/tmp/wallpapers".into()),
-            wallpaper_source: Some("/tmp/wallpapers/background.png".into()),
-            wallpaper_history: vec!["/tmp/wallpapers/background.png".into()],
             wallpaper_theme_colors: false,
             wallpaper_color: None,
-            new_thread_background_effect: NewThreadBackgroundEffect::Ascii,
-            reduce_motion: crate::motion::ReduceMotion::On,
             pause_animations_in_background: true,
-            legacy_accent_color: None,
         };
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
@@ -2836,11 +2501,10 @@ mod tests {
         assert!(json.contains(r#""mathFont": "stixTwo""#));
         assert!(json.contains(r#""mathSize": 135"#));
         assert!(json.contains(r#""openWebLinksInSlopty": false"#));
-        assert!(json.contains(r#""newThreadBackgroundEffect": "ascii""#));
         assert!(json.contains(r#""focalX": 0.25"#));
         assert!(json.contains(r#""focalY": 0.75"#));
         assert!(json.contains(r#""zoom": 1.8"#));
-        assert!(json.contains(r#""reduceMotion": "on""#));
+        assert!(json.contains(r#""conversationWidth": "wide""#));
         assert!(json.contains(r#""pauseAnimationsInBackground": true"#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
@@ -2882,30 +2546,26 @@ mod tests {
         );
     }
 
+    // slopty: each preset's cap against the window, Amp's breakpoints; the choice persists.
     #[test]
-    fn transcript_width_loads_legacy_defaults_and_normalizes_persisted_values() {
-        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(legacy.transcript_width, 736.0);
-        for (value, expected) in [
-            (100.0, 560.0),
-            (2000.0, 1200.0),
-            (745.0, 752.0),
-            (f32::NAN, 736.0),
+    fn conversation_widths_follow_the_window_and_persist() {
+        use ConversationWidth::*;
+        assert_eq!(UiSettings::default().conversation_width, Default);
+        for (window, default, wide, full) in [
+            (1000.0, 672.0, 672.0, 1000.0),
+            (1279.0, 672.0, 767.4, 1279.0),
+            (1280.0, 724.0, 768.0, 1280.0),
+            (1600.0, 750.0, 960.0, 1600.0),
+            (500.0, 672.0, 672.0, 672.0),
         ] {
-            let settings = UiSettings {
-                transcript_width: value,
-                ..Default::default()
-            }
-            .clamped();
-            assert_eq!(settings.transcript_width, expected);
+            assert_eq!(Default.cap(window), default, "{window}");
+            assert!((Wide.cap(window) - wide).abs() < 0.01, "{window}");
+            assert_eq!(Full.cap(window), full, "{window}");
         }
         let dir = tempfile::tempdir().unwrap();
-        let settings = UiSettings {
-            transcript_width: 1024.0,
-            ..Default::default()
-        };
+        let settings = UiSettings { conversation_width: Full, ..UiSettings::default() };
         settings.save(dir.path()).unwrap();
-        assert_eq!(UiSettings::load(dir.path()).transcript_width, 1024.0);
+        assert_eq!(UiSettings::load(dir.path()).conversation_width, Full);
     }
 
     #[test]
@@ -3092,56 +2752,6 @@ mod tests {
         assert_eq!(settings.math_size, MATH_SIZE_DEFAULT);
     }
 
-    #[test]
-    fn sidebar_display_defaults_and_preferences_round_trip() {
-        let settings: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(settings.sidebar_compact);
-        assert!(settings.sidebar_show_project_icon);
-        assert!(settings.sidebar_show_project_label);
-        assert!(settings.sidebar_show_project_filter);
-        assert!(settings.sidebar_show_archived);
-        let customized = UiSettings {
-            sidebar_compact: false,
-            sidebar_show_project_icon: false,
-            sidebar_show_project_label: false,
-            sidebar_show_project_filter: false,
-            sidebar_show_archived: false,
-            sidebar_organization: SidebarOrganization::ByProject,
-            ..settings
-        };
-        let restored: UiSettings =
-            serde_json::from_str(&serde_json::to_string(&customized).unwrap()).unwrap();
-        assert_eq!(restored.clamped(), customized);
-    }
-
-    #[test]
-    fn project_organization_survives_loading() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarOrganization":"byProject"}"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            UiSettings::load(dir.path()).sidebar_organization,
-            SidebarOrganization::ByProject
-        );
-        // slopty: by status is the default, and a gone organisation reads as it, keeping the
-        // rest of the file.
-        assert_eq!(UiSettings::default().sidebar_organization, SidebarOrganization::ByStatus);
-        for gone in ["inOneList", "byDevice"] {
-            std::fs::write(
-                UiSettings::path(dir.path()),
-                format!(r#"{{"sidebarOrganization":"{gone}","sidebarSort":"created","sidebarWidth":300}}"#),
-            )
-            .unwrap();
-            let loaded = UiSettings::load(dir.path());
-            assert_eq!(loaded.sidebar_organization, SidebarOrganization::ByStatus, "{gone}");
-            assert_eq!(loaded.sidebar_width, 300.0, "{gone}: the rest of the file kept");
-        }
-    }
-
     /// A settings file written before light mode existed has no `appearance`
     /// key; it must load as "follow the OS" rather than failing the whole parse
     /// and resetting every other preference to defaults.
@@ -3215,20 +2825,6 @@ mod tests {
             ..settings
         };
         assert!(!muted.session_sound_enabled(crate::sound::Sound::Request));
-    }
-
-    #[test]
-    fn legacy_accent_color_migrates_to_an_explicit_preset() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"accentColor":"cyan"}"#).unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(
-            loaded.accent,
-            slopty_shell_theme::AccentSelection::Preset(slopty_shell_theme::AccentPreset::Cyan)
-        );
-        loaded.save(dir.path()).unwrap();
-        let saved = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
-        assert!(!saved.contains("accentColor"));
     }
 
     #[test]
@@ -3538,8 +3134,78 @@ mod tests {
         assert_eq!(d.sidebar_width, 256.0);
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
-        assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
+        assert!(!d.sidebar_collapsed);
         assert!(!d.escape_stops_active_agent);
+    }
+
+    // slopty: settings a pre-release build stopped keeping are deleted outright; a file that
+    // still holds them loads as if they were not there, its other choices kept.
+    #[test]
+    fn a_file_holding_deleted_settings_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{
+                "sidebarWidth": 300,
+                "tabOrder": {"space-1": ["b", "a"]},
+                "spaceOrder": ["space-2"],
+                "rightPaneOpen": true,
+                "terminalOpen": true,
+                "skillsInSlashMenu": true,
+                "accentColor": "cyan",
+                "pullRequestPaneWidth": 820,
+                "settingsSection": "agents",
+                "sidebarOrganization": "byProject",
+                "sidebarCompact": false,
+                "sidebarShowProjectLabel": false,
+                "sidebarShowProjectIcon": false,
+                "sidebarShowHarness": false,
+                "sidebarShowBranch": false,
+                "sidebarShowPullRequest": false,
+                "sidebarShowProjectFilter": false,
+                "sidebarShowArchived": false,
+                "sidebarSectionsByProfile": {"local": [{"id": "a", "name": "Focus", "sessionIds": ["c"], "collapsed": false}]},
+                "compactModelPicker": false,
+                "skillCompletionByHarness": {"claudeCode": {"dollar": false, "separateFromSlash": false}},
+                "reduceMotion": "on",
+                "transcriptWidth": 960,
+                "wallpaperFolder": "/wallpapers",
+                "wallpaperSource": "/wallpapers/a.png",
+                "wallpaperHistory": ["/wallpapers/a.png"],
+                "newThreadBackgroundEffect": "ascii",
+                "keymap": {"randomWallpaper": "mod-shift-u", "saveFile": "mod-alt-s"}
+            }"#,
+        )
+        .unwrap();
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.sidebar_width, 300.0);
+        assert_eq!(loaded.settings_section, crate::shell::SettingsSection::General);
+        assert!(!backup_path(dir.path()).exists(), "nothing was set aside");
+        assert_eq!(loaded.keymap.save_file, "mod-alt-s", "the keymap's live combos kept");
+        loaded.save(dir.path()).unwrap();
+        let saved = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
+        for gone in [
+            "tabOrder",
+            "spaceOrder",
+            "rightPaneOpen",
+            "skillsInSlashMenu",
+            "accentColor",
+            "sidebarOrganization",
+            "sidebarCompact",
+            "sidebarShow",
+            "sidebarSections",
+            "compactModelPicker",
+            "skillCompletion",
+            "reduceMotion",
+            "transcriptWidth",
+            "wallpaperFolder",
+            "wallpaperSource",
+            "wallpaperHistory",
+            "newThreadBackgroundEffect",
+            "randomWallpaper",
+        ] {
+            assert!(!saved.contains(gone), "{gone} is not written back");
+        }
     }
 
     #[test]

@@ -284,7 +284,8 @@ impl Shell {
         f32::from(floor) + self.bottom_stack.get()
     }
 
-    fn set_compact_sessions(up: bool, cx: &mut App) {
+    /// Bring the phone's Chats page up, or take it down for the chat page.
+    pub(super) fn set_compact_sessions(up: bool, cx: &mut App) {
         cx.default_global::<Pages>().sessions = Some(up);
     }
 
@@ -412,10 +413,14 @@ impl Shell {
                 })
         };
         let said = summary(working, waiting);
+        // slopty: before the first chat can start, the capsule offers the step it needs, as the
+        // desktop's canvas does, never a new chat that has nowhere to go.
+        let step = self.first_step(cx);
+        let words = step.map_or("New chat", super::spaces::FirstStep::action);
         let label: SharedString = if said.is_empty() {
-            "New chat".into()
+            words.into()
         } else {
-            format!("New chat, {}", said.replace(" · ", ", ")).into()
+            format!("{words}, {}", said.replace(" · ", ", ")).into()
         };
         let popup = theme.for_popup();
         let glass = popup.is_frost();
@@ -447,9 +452,14 @@ impl Shell {
             .flex()
             .items_center()
             .justify_center()
-            .child(icon(icons::PLUS).size(px(15.0)).text_color(theme.accent));
+            .child(
+                icon(step.map_or(icons::PLUS, super::spaces::FirstStep::glyph))
+                    .size(px(15.0))
+                    .text_color(theme.accent),
+            );
         let capsule = div()
             .id("compact-new-session")
+            .debug_selector(|| "compact-new-session".into())
             .role(gpui::Role::Button)
             .aria_label(label)
             .h(px(CAPSULE))
@@ -469,7 +479,11 @@ impl Shell {
             .items_center()
             .gap(px(11.0))
             .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(step) = step {
+                    step.take(this, cx);
+                    return;
+                }
                 Self::set_compact_sessions(false, cx);
                 this.open_new_session(None, cx);
             }))
@@ -482,7 +496,7 @@ impl Shell {
                     .text_size(ui_rems(16.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(popup.text)
-                    .child("New chat"),
+                    .child(words),
             )
             .children(glyph.map(|glyph| glyph.mr(px(-4.0))))
             .when(!said.is_empty(), |el| {
@@ -1237,6 +1251,76 @@ mod tests {
         assert_eq!(crate::keys::combo_text_on(true, "mod-n"), "⌘N", "a Mac's key");
     }
 
+    // slopty: before the first chat can start, the capsule offers the step it needs, as the
+    // desktop's canvas does: a device first, then a project, and a new chat only once one can.
+    #[gpui::test]
+    fn before_any_project_the_capsule_offers_the_step_a_chat_needs(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        shell.update(cx, |shell, cx| shell.state.update(cx, |state, _| state.chats.clear()));
+        let offers = |cx: &mut gpui::VisualTestContext| {
+            a11y(cx)
+                .into_iter()
+                .filter(|(role, label)| {
+                    *role == gpui::Role::Button
+                        && ["Add a", "New chat"].iter().any(|start| label.starts_with(start))
+                })
+                .map(|(_, label)| label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(offers(cx), ["Add a device"], "no device: nowhere for a project yet");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.devices = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "local", "name": "Studio", "platform": "macos",
+                    }))
+                    .unwrap(),
+                ];
+            });
+        });
+        assert_eq!(offers(cx), ["Add a project"], "a device, no project: the canvas's action");
+        let read = a11y(cx);
+        assert!(read.contains(&(gpui::Role::Label, "No projects yet".to_owned())), "{read:?}");
+        let capsule = cx.debug_bounds("compact-new-session").expect("the capsule").center();
+        cx.simulate_click(capsule, gpui::Modifiers::default());
+        shell.update(cx, |shell, cx| {
+            assert!(shell.add_space.is_some(), "the press opens the project picker");
+            assert!(shell.compact_sessions_up(cx), "over the Chats page, which stays");
+        });
+        // A screen reader reads the picker's devices as buttons, the dot's state in words.
+        let read = a11y(cx);
+        assert!(
+            read.iter().any(|(role, label)| *role == gpui::Role::Button && label.starts_with("Studio, ")),
+            "the device row: {read:?}"
+        );
+        // The project added, the phone lands on its new chat, as the Mac does.
+        shell.update(cx, |shell, cx| {
+            shell.add_space = None;
+            shell.state.update(cx, |state, _| {
+                state.spaces = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "app", "deviceId": "local", "path": "/work/app",
+                        "createdAt": chrono::Utc::now(),
+                    }))
+                    .unwrap(),
+                ];
+            });
+            shell.land_in_space("app".into(), cx);
+            assert!(!shell.compact_sessions_up(cx), "on the new chat's page");
+            Shell::set_compact_sessions(true, cx);
+        });
+        assert_eq!(offers(cx), ["New chat"], "back on Chats, a chat can start");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.spaces.clear();
+                state.no_project = true;
+            });
+        });
+        assert_eq!(offers(cx), ["New chat"], "and outside any project");
+        FORCE_COMPACT.with(|force| force.set(false));
+    }
+
     // slopty: on a touch screen, an iPad's as much as a phone's, opening or landing on a chat
     // leaves the composer unfocused, so no software keyboard rises over it; a Mac's window
     // still lands in the composer.
@@ -1550,7 +1634,8 @@ mod tests {
                 };
                 (
                     find(gpui::Role::Status, "Link copied"),
-                    find(gpui::Role::Button, "New chat"),
+                    // The capsule: before any device, it offers to add one.
+                    find(gpui::Role::Button, "New chat").or_else(|| find(gpui::Role::Button, "Add a ")),
                     find(gpui::Role::TabList, "Tabs"),
                     f32::from(window.viewport_size().height),
                 )

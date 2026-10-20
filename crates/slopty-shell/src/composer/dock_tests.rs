@@ -456,8 +456,7 @@ fn the_tray_opens_over_the_chat_without_moving_it(cx: &mut TestAppContext) {
     let root = cx.debug_bounds("composer-root").expect("the composer");
     let closed = cx.debug_bounds("background-tray").expect("the tray");
     cx.update(|_, cx| crate::transcript::reveal_work("chat", "task:c", cx));
-    draw(cx);
-    // The card's rise is measured as it lays out; the frame after places the stack on it.
+    // One frame opens the card and places the stack over it: none after is needed.
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Collapse background work").is_some());
     let opened = cx.debug_bounds("background-tray").expect("the tray");
@@ -471,6 +470,37 @@ fn the_tray_opens_over_the_chat_without_moving_it(cx: &mut TestAppContext) {
         .find(|node| node.role == Role::Button && node.label.contains("Which one?"))
         .unwrap_or_else(|| panic!("the folded question: {:?}", labels(&nodes, Role::Button)));
     assert!(strip.y + strip.h <= f32::from(opened.top()) + 0.5, "the Answer strip stays clear of the card");
+}
+
+/// slopty: an open tray's running time reads at the dock's moment, which its tick turns, never
+/// the frame's: the composer drawn again from its last frame between ticks then says what one
+/// drawn afresh says. Read at the frame's moment, a row shown at "0s" read "1s" from scratch as
+/// its second turned before the tick (`the_background_tray_lists_work_and_stops_a_command`).
+#[gpui::test]
+fn an_open_trays_time_reads_at_the_docks_tick(cx: &mut TestAppContext) {
+    let (composer, _state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    // Started 700 ms before the work arrives, on the frames' own clock.
+    let started = cx.update(|_, cx| crate::clock::utc(cx).timestamp_millis()) - 700;
+    let tray = WorkTray {
+        main: MainRow::default(),
+        rows: vec![WorkRow { started_at: started, ..work_row("task:a", WorkRow::COMMAND, true) }],
+        counts: WorkCounts { commands: 1, ..WorkCounts::default() },
+        summary: "1 command".into(),
+        can_stop_all: true,
+    };
+    composer.update(cx, |composer, cx| composer.apply_tray("chat", tray, cx));
+    cx.update(|_, cx| crate::transcript::reveal_work("chat", "task:a", cx));
+    let time = |cx: &mut VisualTestContext| {
+        let nodes = draw(cx);
+        let row = nodes.iter().find(|node| node.label.contains("task:a")).expect("the row").label.clone();
+        row.rsplit(" · ").next().unwrap_or_default().to_owned()
+    };
+    assert_eq!(time(cx), "0s");
+    // Its second turns 300 ms on; the tick is 1 s after the work came.
+    cx.executor().advance_clock(Duration::from_millis(600));
+    assert_eq!(time(cx), "0s", "a frame drawn afresh before the tick says what the one shown says");
+    cx.executor().advance_clock(Duration::from_millis(500));
+    assert_eq!(time(cx), "1s", "the tick turns it");
 }
 
 /// The footer says the mode and the goal (the tray above it counts the background work); a
@@ -591,6 +621,30 @@ fn a_question_shows_its_options_meaning_and_folds(cx: &mut TestAppContext) {
     assert!(find(&nodes, Role::Button, "Asks: reviewer · Database: Which one?").is_some());
     assert!(nodes.iter().all(|n| n.label != "Postgres"), "the panel folded away");
     assert!(composer.read_with(cx, |composer, _| !composer.wizard_open()));
+}
+
+/// slopty: a command's approval, folded, says its command, which its words only describe
+/// (#2).
+#[gpui::test]
+fn a_folded_approval_says_its_command(cx: &mut TestAppContext) {
+    let (composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    ask(
+        cx,
+        &state,
+        UserInputQuestion {
+            id: "0".into(),
+            header: "Bash command".into(),
+            question: "Clear the build".into(),
+            command: Some("rm -rf build".into()),
+            options: vec!["Allow".into(), "Deny".into()],
+            kind: "approval".into(),
+            ..UserInputQuestion::default()
+        },
+    );
+    draw(cx);
+    composer.update(cx, |composer, cx| composer.fold_question(cx));
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Button, "Asks: Bash command: rm -rf build").is_some());
 }
 
 /// A form is drawn from its schema; sent with a required field empty, it says so and stays.
@@ -819,6 +873,22 @@ fn an_approvals_digits_show_where_they_pick(cx: &mut TestAppContext) {
     });
     cx.simulate_input("3");
     assert!(composer.read_with(cx, |composer, _| !composer.wizard_open()), "3 picked, as its badge said");
+}
+
+/// slopty: the answer an approval recommends wears the primary fill, on its own row.
+#[gpui::test]
+fn an_approval_fills_the_answer_it_recommends(cx: &mut TestAppContext) {
+    let (_composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    let mut asked = approval("Read src/main.rs", false);
+    asked.options.push("Deny and stop".into());
+    asked.primary_option = Some(0);
+    asked.stop_options = vec![3];
+    ask(cx, &state, asked);
+    let nodes = draw(cx);
+    let allow = find(&nodes, Role::Button, "Allow").expect("Allow");
+    let filled = cx.debug_bounds("wizard-option-primary").expect("a primary");
+    assert!((f32::from(filled.top()) - allow.y).abs() < 1.0, "Allow is filled: {filled:?} vs {allow:?}");
+    assert!(find(&nodes, Role::Button, "Deny and stop").is_some(), "the stop stands as a choice");
 }
 
 /// A digit shows only where a key can press it: with no hardware keyboard (an iPhone or iPad
@@ -1409,31 +1479,52 @@ fn a_cards_body_has_a_title_and_a_risky_approval_marks_its_deny(cx: &mut TestApp
     });
     crate::shell::force_touch(true);
     let mut risky = approval("Run rm -rf build", false);
-    risky.question = "rm -rf build\n\nRun a command".into();
+    risky.question = "Run a command".into();
+    risky.command = Some("rm -rf build".into());
     risky.deny_first = true;
+    risky.risky = true;
     state.update(cx, |state, _| state.transcript.clear());
     ask(cx, &state, risky);
     let nodes = draw(cx);
     crate::shell::force_touch(false);
     assert!(find(&nodes, Role::Note, "Risky").is_some(), "{:?}", labels(&nodes, Role::Note));
     assert!(find(&nodes, Role::Note, "Run a command").is_some(), "the description under the command");
-    assert!(find(&nodes, Role::Code, "rm -rf build").is_none(), "words, until it says it is a command");
+    assert!(find(&nodes, Role::Code, "rm -rf build").is_some(), "{:?}", labels(&nodes, Role::Code));
     let deny = find(&nodes, Role::Button, "Deny").expect("the deny");
     let marked = cx.debug_bounds("wizard-option-keyed").expect("the default is marked");
     assert!((f32::from(marked.top()) - deny.y).abs() < 1.0, "the deny wears the mark: {marked:?} vs {}", deny.y);
 
-    // A command's approval sets it as code, on its plate (#4).
+    // Starting on its deny for being long is not a warning, and a heredoc's blank line stays
+    // inside its command's plate (#1, #4).
     composer.update(cx, |composer, cx| {
         composer.wizard = None;
         cx.notify();
     });
-    let mut command = approval("Run rm -rf build", false);
-    command.question = "rm -rf build\n\nRun a command".into();
-    command.code = true;
+    let commit = "git commit -m \"$(cat <<'EOF'\nSubject\n\nBody line\nEOF\n)\"";
+    let mut long = approval("Run git commit", false);
+    long.question = "Commit the change".into();
+    long.command = Some(commit.into());
+    long.deny_first = true;
     state.update(cx, |state, _| state.transcript.clear());
-    ask(cx, &state, command);
+    crate::shell::force_touch(true);
+    ask(cx, &state, long);
     let nodes = draw(cx);
-    assert!(find(&nodes, Role::Code, "rm -rf build").is_some(), "{:?}", labels(&nodes, Role::Code));
+    crate::shell::force_touch(false);
+    assert!(find(&nodes, Role::Note, "Risky").is_none(), "long is not risky");
+    assert!(find(&nodes, Role::Code, commit).is_some(), "the whole command: {:?}", labels(&nodes, Role::Code));
+    assert!(find(&nodes, Role::Note, "Commit the change").is_some(), "{:?}", labels(&nodes, Role::Note));
+
+    // An approval of no command keeps its words as words.
+    composer.update(cx, |composer, cx| {
+        composer.wizard = None;
+        cx.notify();
+    });
+    let mut plain = approval("Edit file", false);
+    plain.question = "Do you want to make this edit to main.rs?".into();
+    state.update(cx, |state, _| state.transcript.clear());
+    ask(cx, &state, plain);
+    let nodes = draw(cx);
+    assert!(labels(&nodes, Role::Code).is_empty(), "no plate: {:?}", labels(&nodes, Role::Code));
 }
 
 /// slopty: the footer stays under a request's card: the mode stays in reach and the stack's
@@ -1511,10 +1602,40 @@ fn send_shows_a_clock_while_it_queues(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("composer-send-queued").is_some(), "a clock while it queues");
 }
 
+/// slopty: while a draft would queue, the queue's words and key stand beside Send, and a click on
+/// them queues it; sending now, they are gone.
+#[gpui::test]
+fn the_queue_says_its_key_beside_send(cx: &mut TestAppContext) {
+    let (composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    // Two lines, so the composer is the full one, whose footer has the room for the words.
+    composer.update(cx, |composer, cx| composer.input.update(cx, |input, cx| input.set_text("next\nstep", cx)));
+    draw(cx);
+    let words = |nodes: &[Node]| nodes.iter().find(|n| n.role == Role::Button && n.label.starts_with("Queue message ")).cloned();
+    assert!(words(&draw(cx)).is_none(), "nothing beside Send while it sends now");
+    state.update(cx, |state, cx| {
+        let now = crate::clock::utc(cx);
+        state.begin_pending_send("chat", "m1", now);
+    });
+    let nodes = draw(cx);
+    let queue = words(&nodes).expect("the queue's words");
+    let key = crate::keys::combo_text("enter");
+    assert_eq!(queue.label, format!("Queue message {key}"));
+    let send = find(&nodes, Role::Button, "Queue message").expect("Send, queueing");
+    assert!(queue.x + queue.w <= send.x + 0.5 && queue.w > 20.0, "beside Send, on its left: {queue:?} {send:?}");
+    cx.simulate_click(gpui::point(px(queue.x + queue.w / 2.0), px(queue.y + queue.h / 2.0)), gpui::Modifiers::default());
+    cx.run_until_parked();
+    // With no engine here the send stops at its offline note, which says the click sent it.
+    assert!(
+        composer.read_with(cx, |composer, _| composer.failure.as_deref() == Some(super::ENGINE_OFFLINE)),
+        "a click sends the draft to its queue"
+    );
+}
+
 /// slopty: a form's field is named by its title, and its two ways out say how they differ.
 #[gpui::test]
 fn a_forms_field_is_named_and_its_ways_out_differ(cx: &mut TestAppContext) {
-    let (_, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
+    let (composer, state, cx) = open(cx, ChatDock { can: can(), ..ChatDock::default() }, None);
     ask(
         cx,
         &state,
@@ -1533,6 +1654,11 @@ fn a_forms_field_is_named_and_its_ways_out_differ(cx: &mut TestAppContext) {
     );
     let nodes = draw(cx);
     assert!(nodes.iter().any(|n| n.label == "Ticket" && n.role != Role::Group), "{nodes:?}");
+    // Its label shows above it: nothing faint in it says "Ticket" again (#19).
+    let faint = composer.read_with(cx, |composer, cx| {
+        composer.card.inputs.get("ticket").map(|input| input.read(cx).shown_placeholder())
+    });
+    assert_eq!(faint.as_deref(), Some(""), "no placeholder repeating its label");
     assert_eq!(find(&nodes, Role::Button, "Decline").map(|n| n.description.as_str()), Some("Tell the server no"));
     assert_eq!(find(&nodes, Role::Button, "Cancel").map(|n| n.description.as_str()), Some("Close without answering"));
 }
@@ -1681,4 +1807,27 @@ fn a_dismissed_note_stays_away_until_a_newer_one(cx: &mut TestAppContext) {
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Status, "Index ready").is_some(), "a newer note shows");
     assert!(find(&nodes, Role::Status, "Indexing the repository").is_none(), "the older stays away");
+    // The keyboard reaches its ✕ and Enter dismisses it (#19).
+    let focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let tree = window.a11y_tree()?;
+            tree.nodes.iter().find(|(id, _)| *id == tree.focus).and_then(|(_, node)| node.label().map(str::to_owned))
+        })
+    };
+    let mut reached = false;
+    for _ in 0..40 {
+        cx.update(|window, cx| window.focus_next(cx));
+        if focused(cx).as_deref() == Some("Dismiss note") {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "a tab stop");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_event(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse("enter").unwrap() });
+    let nodes = draw(cx);
+    assert!(find(&nodes, Role::Status, "Index ready").is_none(), "Enter dismisses it");
 }

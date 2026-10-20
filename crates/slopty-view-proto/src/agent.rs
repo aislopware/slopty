@@ -579,10 +579,33 @@ pub struct UserInputQuestion {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_presence: bool,
     // slopty: a shell command's approval leads with the command, set as code.
-    /// The first paragraph of `question` is a command the agent would run: the card draws it in
-    /// the code face.
+    /// The command an approval would run, whole, which the card draws in the code face ahead of
+    /// `question` (then only the agent's words about it); none for any other request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// The call can destroy work or reach past it (deleting, forcing, rewriting history, raising
+    /// privileges): the card warns before anything else. Unlike `deny_first`, which only picks
+    /// the careful default, it never marks a call for being long or unknown.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub code: bool,
+    pub risky: bool,
+    // slopty: an approval's answers have a hierarchy (opencode's permission dock).
+    /// Which of `options` the card recommends and draws as its primary: an approval's
+    /// once-allow, none where the card starts on its deny (a risky, long or unknown call).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_option: Option<usize>,
+    /// Which of `options` also stop the agent's turn ("Deny and stop"), drawn in danger ink.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_options: Vec<usize>,
+}
+
+// slopty: one wording for a request only the person at its card answers.
+impl UserInputQuestion {
+    /// What the card of a question that `needs_presence` says (`slopty_proto`'s
+    /// `Request::NEEDS_PRESENCE`, the words an answer from elsewhere is refused with).
+    pub const NEEDS_PRESENCE: &'static str = "Answer in Slopty";
+    /// Why, in the card's tooltip and to a screen reader (the rest of `slopty_proto`'s
+    /// `Request::NEEDS_PRESENCE_REFUSED`).
+    pub const NEEDS_PRESENCE_WHY: &'static str = "The agent takes this answer only from its card";
 }
 
 // slopty: "Allow with rule" (`slopty.AllowWithRule`).

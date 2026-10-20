@@ -1,30 +1,29 @@
-//! The sidebar's pins and sections: this client's own, as the person arranges them, kept in
+//! The sidebar's pins: this client's own, as the person arranges them, kept in
 //! `interface/sidebar.json` under Slopty's data directory and said to the shell's watch.
 //!
-//! Each change is applied as the shell's own projection applies it (`SidebarPinChange::project`
-//! and `project_sections`), so what the shell drew while it waited is what is kept; an import
-//! adds the sections not here yet.
+//! Each change is applied as the shell's own projection applies it (`SidebarPinChange::project`),
+//! so what the shell drew while it waited is what is kept.
 
 use std::cell::OnceCell;
 use std::path::PathBuf;
 
 use gpui::{AppContext as _, Context};
-use slopty_view_proto::{SidebarPinChange, SidebarPreferencesState, SidebarSectionChange};
+use slopty_view_proto::{SidebarPinChange, SidebarPreferencesState};
 use slopty_view_rpc::RpcError;
 
 use crate::workspace::WorkspaceView;
 
-/// The pins and sections, read from their file the first time they are asked of.
+/// The pins, read from their file the first time they are asked of.
 #[derive(Debug, Default)]
 pub(in crate::workspace) struct Sidebar(OnceCell<SidebarPreferencesState>);
 
-/// Where the pins and sections are kept.
+/// Where the pins are kept.
 fn sidebar_path() -> PathBuf {
     slopty_platform::dirs::data_dir().join("interface").join("sidebar.json")
 }
 
 impl Sidebar {
-    /// The pins and sections, read from their file the first time.
+    /// The pins, read from their file the first time.
     pub(in crate::workspace) fn state(&self) -> &SidebarPreferencesState {
         self.0.get_or_init(|| {
             let path = sidebar_path();
@@ -44,23 +43,13 @@ impl Sidebar {
         self.state();
         let Some(state) = self.0.get_mut() else { return SidebarPreferencesState::default() };
         change.project(&mut state.pinned_session_ids);
-        change.project_sections(&mut state.sections);
-        if let SidebarPinChange::Section { change: SidebarSectionChange::Import { sections } } =
-            change
-        {
-            for section in sections {
-                if !state.sections.iter().any(|kept| kept.id == section.id) {
-                    state.sections.push(section.clone());
-                }
-            }
-        }
         state.revision = state.revision.saturating_add(1);
         state.clone()
     }
 }
 
 impl WorkspaceView {
-    /// `changeSidebarPin`: a pin or a section changed, kept and answered with the state after it;
+    /// `changeSidebarPin`: a pin changed, kept and answered with the state after it;
     /// `None` for every other operation.
     pub(in crate::workspace) fn sidebar_mutate(
         &mut self,
@@ -95,7 +84,7 @@ impl WorkspaceView {
         Some(Ok(serde_json::json!({ "sidebarPreferences": state })))
     }
 
-    /// The pins and sections as they stand.
+    /// The pins as they stand.
     pub(in crate::workspace) fn sidebar_state(&self) -> SidebarPreferencesState {
         self.view_model.surfaces.sidebar.state().clone()
     }
@@ -106,7 +95,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_pin_and_a_section_are_applied_as_the_shell_draws_them() {
+    fn a_pin_is_applied_as_the_shell_draws_it() {
         let mut sidebar = Sidebar(OnceCell::from(SidebarPreferencesState {
             synced: true,
             initialized: true,
@@ -121,53 +110,21 @@ mod tests {
         let state = sidebar.apply(&pin("b"));
         assert_eq!(state.pinned_session_ids, ["a", "b"]);
         assert_eq!(state.revision, 2);
-        let create = SidebarSectionChange::Create { id: "s".to_owned(), name: "Work".to_owned() };
-        sidebar.apply(&SidebarPinChange::Section { change: create });
-        let assign = SidebarSectionChange::Assign {
-            session_id: "c".to_owned(),
-            section_id: Some("s".to_owned()),
-            after: None,
-            before: None,
-        };
-        let state = sidebar.apply(&SidebarPinChange::Section { change: assign });
-        assert_eq!(state.sections.first().map(|s| s.session_ids.clone()), Some(vec!["c".into()]));
         let state = sidebar.apply(&SidebarPinChange::Unpin { session_id: "a".to_owned() });
         assert_eq!(state.pinned_session_ids, ["b"]);
     }
 
-    /// A section dragged by its header lands between its anchors and keeps its members; one
-    /// deleted meanwhile moves nowhere.
+    /// A file kept while the sidebar had sections of its own still reads, its pins kept.
     #[test]
-    fn a_dragged_section_keeps_its_place() {
-        let mut sidebar = Sidebar(OnceCell::from(SidebarPreferencesState::default()));
-        for id in ["a", "b", "c"] {
-            let create = SidebarSectionChange::Create { id: id.to_owned(), name: id.to_owned() };
-            sidebar.apply(&SidebarPinChange::Section { change: create });
-        }
-        let assign = SidebarSectionChange::Assign {
-            session_id: "t".to_owned(),
-            section_id: Some("c".to_owned()),
-            after: None,
-            before: None,
-        };
-        sidebar.apply(&SidebarPinChange::Section { change: assign });
-        let order = |state: &SidebarPreferencesState| {
-            state.sections.iter().map(|s| s.id.clone()).collect::<Vec<_>>()
-        };
-        let moved =
-            |id: &str, after: Option<&str>, before: Option<&str>| SidebarPinChange::Section {
-                change: SidebarSectionChange::Move {
-                    id: id.to_owned(),
-                    after: after.map(str::to_owned),
-                    before: before.map(str::to_owned),
-                },
-            };
-        let state = sidebar.apply(&moved("c", None, Some("a")));
-        assert_eq!(order(&state), ["c", "a", "b"]);
-        assert_eq!(state.sections.first().map(|s| s.session_ids.clone()), Some(vec!["t".into()]));
-        let state = sidebar.apply(&moved("a", Some("b"), None));
-        assert_eq!(order(&state), ["c", "b", "a"]);
-        let state = sidebar.apply(&moved("gone", None, Some("c")));
-        assert_eq!(order(&state), ["c", "b", "a"], "a section no longer here moves nowhere");
+    fn a_file_with_the_deleted_sections_still_reads() {
+        let kept = serde_json::json!({
+            "revision": 4,
+            "synced": true,
+            "initialized": true,
+            "pinnedSessionIds": ["a"],
+            "sections": [{"id": "s", "name": "Work", "session_ids": ["b"], "collapsed": false}],
+        });
+        let state: SidebarPreferencesState = serde_json::from_value(kept).expect("it reads");
+        assert_eq!(state.pinned_session_ids, ["a"]);
     }
 }

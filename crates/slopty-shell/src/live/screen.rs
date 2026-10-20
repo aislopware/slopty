@@ -5,7 +5,7 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Entity, Focusable as _, IntoElement, Render, ScrollHandle, SharedString,
+    AnyElement, App, Context, Entity, Focusable as _, IntoElement, Render, ScrollHandle, SharedString,
     Subscription, Task, Window, div, px,
 };
 use serde::Deserialize;
@@ -118,6 +118,8 @@ pub struct ScreenSurface {
     // no fade, and the fades let an unread key go as an element gone; the row the pointer is
     // still over says so again before it is read (`motion::hover_known`), as a page card does.
     hovered: Option<SharedString>,
+    // slopty: what the wait said last, said on while its loader's hold runs out.
+    waiting_caption: &'static str,
     scroll: ScrollHandle,
     // slopty: the list's floating rail, as every scrolling list has (M26).
     rail: popover::MenuScrollbarState,
@@ -191,6 +193,7 @@ impl ScreenSurface {
             query: String::new(),
             active: None,
             hovered: None,
+            waiting_caption: "Connecting…",
             scroll: ScrollHandle::new(),
             rail: popover::MenuScrollbarState::default(),
             _search_events: events,
@@ -214,19 +217,33 @@ impl ScreenSurface {
         extra
     }
 
+    // slopty: a failure names the machine (the house "Couldn't …" grammar).
+    /// The chat's machine by its name: the target's, or this one's for a local chat.
+    fn host(&self, cx: &App) -> String {
+        let state = self.state.read(cx);
+        self.target
+            .clone()
+            .or_else(|| state.local_device_id.clone())
+            .and_then(|device| state.device_name(&device).map(str::to_owned))
+            .unwrap_or_else(|| "its machine".to_owned())
+    }
+
     /// Ask the machine again what it can show.
     fn list(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.stage = Stage::Failed("Not connected".into());
+            self.stage = Stage::Failed(format!("Couldn't reach {}", self.host(cx)).into());
             return;
         };
+        let host = self.host(cx);
         self.stage = Stage::Listing;
         let params = self.params(serde_json::json!({}));
         self._task = Some(cx.spawn(async move |this, cx| {
             let listed = engine.client().call_as::<Vec<Choice>>(calls::LIST, params).await;
             let _ = this.update(cx, |this, cx| {
                 this.stage = match listed {
-                    Ok(choices) if choices.is_empty() => Stage::Failed("No windows to show".into()),
+                    Ok(choices) if choices.is_empty() => {
+                        Stage::Failed(format!("No windows open on {host}").into())
+                    }
                     Ok(choices) => Stage::Choices(choices),
                     Err(err) => Stage::Failed(err.to_string().into()),
                 };
@@ -241,7 +258,7 @@ impl ScreenSurface {
 
     fn choose(&mut self, choice: Choice, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.stage = Stage::Failed("Not connected".into());
+            self.stage = Stage::Failed(format!("Couldn't reach {}", self.host(cx)).into());
             return;
         };
         let title: SharedString = choice.title.clone().into();
@@ -259,7 +276,7 @@ impl ScreenSurface {
                         value
                             .get("id")
                             .and_then(|id| id.as_str().map(str::to_owned))
-                            .ok_or_else(|| SharedString::from("The window could not be shown"))
+                            .ok_or_else(|| SharedString::from("Couldn't show this window"))
                     });
                 match opened {
                     Ok(id) => this.show(id, title, cx),
@@ -512,16 +529,22 @@ impl ScreenSurface {
     }
 
     /// While the machine answers: zeron's loading anatomy, the same as the picture's own wait,
-    /// so the place never changes size or tone.
-    fn loading(&self, caption: &'static str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let view = cx.entity_id();
+    /// so the place never changes size or tone; blank while the wait is too short to say so
+    /// (`caption` none).
+    fn loading(caption: Option<&'static str>) -> AnyElement {
+        let Some(caption) = caption else {
+            return div().id("screen-loading").size_full().into_any_element();
+        };
         div()
             .id("screen-loading")
             .debug_selector(|| "screen-loading".to_owned())
             .role(gpui::Role::Status)
             .aria_label(caption)
             .size_full()
-            .child(super::chrome::loading(caption, theme, view, cx))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(crate::loaders::pending(format!("live-loading-{caption}"), caption).at_once())
             .into_any_element()
     }
 }
@@ -539,13 +562,28 @@ impl popover::ScrollRailHost for ScreenSurface {
 impl Render for ScreenSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        // slopty: the wait's loader shows only past 150 ms and, once shown, stays 400 ms
+        // (`loaders::delayed`), saying what it said last while it stays.
+        let waiting = match &self.stage {
+            Stage::Listing => Some("Looking for windows…"),
+            Stage::Opening(_) => Some("Connecting…"),
+            Stage::Showing { id, .. } => super::screen(id, cx).is_none().then_some("Connecting…"),
+            Stage::Choices(_) | Stage::Failed(_) => None,
+        };
+        if let Some(caption) = waiting {
+            self.waiting_caption = caption;
+        }
+        match crate::loaders::delayed("screen-loading", waiting.is_some(), window, cx) {
+            crate::loaders::Delayed::Waiting => return Self::loading(None),
+            crate::loaders::Delayed::Shown => return Self::loading(Some(self.waiting_caption)),
+            crate::loaders::Delayed::Done => {}
+        }
         match &self.stage {
-            Stage::Listing => self.loading("Looking for windows…", &theme, cx),
+            Stage::Listing | Stage::Opening(_) => gpui::Empty.into_any_element(),
             Stage::Failed(why) => {
                 let why = why.clone();
                 self.failed(&why, &theme, cx)
             }
-            Stage::Opening(_) => self.loading("Connecting…", &theme, cx),
             Stage::Choices(choices) => {
                 if std::mem::take(&mut self.focus_pending) {
                     let focus = self.search.read(cx).focus_handle(cx);
@@ -563,7 +601,7 @@ impl Render for ScreenSurface {
                         }
                         div().size_full().child(hosted.view).into_any_element()
                     }
-                    None => self.loading("Connecting…", &theme, cx),
+                    None => gpui::Empty.into_any_element(),
                 }
             }
         }

@@ -5,9 +5,10 @@ one: coding agents (Claude Code, Codex, pi, any ACP agent), terminals, remote wi
 desktops at Parsec quality or better, clipboard and files, in tabs and a side pane. Pure Rust on
 GPUI, over Tailscale or a VPN. The person directs and reviews agents, so the GUI leads: what
 needs them at a glance, fast review, everything else quiet, every surface feeling local. The
-terminal is one action away and the editor stays light, with no LSP. Its interface is zeron's UI
-(MIT), copied and made Slopty's own; `cargo xtask upstream adopt` keeps taking zeron's interface
-improvements. The person hands over whole goals and reviews only results; frontier models get
+terminal is one action away and the editor stays light, with no LSP. Its interface starts from zeron's UI
+(MIT), copied and made Slopty's own, and takes the best of the premium references (Claude Code
+desktop, T3 Code, opencode, Amp) wherever they are more elegant; `cargo xtask upstream adopt`
+keeps taking zeron's interface improvements. The person hands over whole goals and reviews only results; frontier models get
 open tools to orchestrate with, never a prescribed workflow.
 
 Maps: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/MEASUREMENTS.md`, `docs/DEV.md`,
