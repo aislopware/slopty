@@ -694,7 +694,11 @@ fn inputs(command: &Command) -> Option<Result<Vec<Input>, String>> {
 /// deferred work to run after that input's handlers, where a person's never does.
 fn dispatch(
     window: AnyWindowHandle,
-    #[cfg_attr(not(target_os = "macos"), expect(unused_variables))] command: &Command,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(unused_variables, reason = "only macOS tracks the pointer a command drives")
+    )]
+    command: &Command,
     inputs: Vec<Input>,
     cx: &mut gpui::AsyncApp,
 ) {
