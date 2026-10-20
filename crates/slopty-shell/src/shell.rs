@@ -5143,8 +5143,8 @@ impl Shell {
                 }
                 match &self.shortcuts_page {
                     Some(page) => {
-                        page.update(cx, |page, _| {
-                            page.show_section(section == SettingsSection::General) // slopty: appshots removed.
+                        page.update(cx, |page, cx| {
+                            page.show_section(section == SettingsSection::General, cx) // slopty: appshots removed.
                         });
                         page.clone().into_any_element()
                     }

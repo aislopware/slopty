@@ -100,8 +100,9 @@ impl ShortcutsPage {
 
     // slopty: dictation and appshots removed.
 
-    pub fn show_section(&mut self, general: bool) { // slopty: appshots removed.
+    pub fn show_section(&mut self, general: bool, cx: &mut Context<Self>) { // slopty: appshots removed; a section change redraws the page.
         if self.general_page != general {
+            cx.notify();
             self.stop_recording();
             self.conflict_notice = None;
             self.general_page = general;
@@ -695,7 +696,7 @@ mod tests {
                 // slopty: appshots removed.
                 cx,
             );
-            page.show_section(true);
+            page.show_section(true, cx);
             page
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -717,9 +718,9 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("composer-send-behavior-option-1").is_none());
-        page.update(cx, |page, _| {
+        page.update(cx, |page, cx| {
             assert_eq!(page.composer_send_behavior, ComposerSendBehavior::ModEnter);
-            page.show_section(false); // slopty: appshots removed.
+            page.show_section(false, cx); // slopty: appshots removed.
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("composer-send-behavior").is_none());
