@@ -80,6 +80,7 @@ phf_shared-582f2526e08bb6a0 = { package = "phf_shared", version = "0.14", defaul
 phf_shared-594e8ee84c453af0 = { package = "phf_shared", version = "0.13" }
 potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
 profiling = { version = "1" }
+proptest = { version = "1", features = ["attr-macro"] }
 rand = { version = "0.10" }
 raw-window-handle = { version = "0.6", default-features = false, features = ["std"] }
 regex-automata = { version = "0.4" }

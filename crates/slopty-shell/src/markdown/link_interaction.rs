@@ -8,7 +8,7 @@ use crate::{icons, popover, theme::Theme};
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ClickEvent, DispatchPhase, Element, ElementId,
     FocusHandle, GlobalElementId, InspectorElementId, LayoutId, MouseButton, Pixels, Point, Role,
-    ScrollWheelEvent, SharedString, TextLayout, Window, div, prelude::*, px,
+    ScrollEvent, SharedString, TextLayout, Window, div, prelude::*, px,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -568,7 +568,7 @@ impl Element for LinkRanges {
         let epoch = paint.2.clone();
         let dismissed = paint.3.clone();
         let tooltip_bounds = paint.4.clone();
-        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, _| {
+        window.on_mouse_event(move |event: &ScrollEvent, phase, window, _| {
             if phase == DispatchPhase::Capture
                 && !tooltip_bounds
                     .get()

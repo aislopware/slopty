@@ -12187,7 +12187,7 @@ impl Render for Transcript {
             // slopty: a right-click on selected text opens its menu.
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_click))
             // slopty: the list's wheel step, before its deferred scroll decision.
-            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, _| {
+            .on_scroll(cx.listener(|this, event: &gpui::ScrollEvent, _, _| {
                 this.wheel_travel += f32::from(event.delta.pixel_delta(px(20.0)).y);
             }))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
@@ -13936,7 +13936,7 @@ mod tests {
             );
 
             // The person's wheel down sinks into the slack and stays there.
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: gpui::point(px(500.0), px(400.0)),
                 delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-40.0))),
                 ..Default::default()
@@ -15860,7 +15860,7 @@ mod tests {
         fn wheel(window: gpui::WindowHandle<CachedTranscript>, delta: f32, cx: &mut gpui::App) {
             cx.update_window(window.into(), |_, window, cx| {
                 window.dispatch_event(
-                    gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                    gpui::PlatformInput::Scroll(gpui::ScrollEvent {
                         position: gpui::point(px(500.0), px(400.0)),
                         delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(delta))),
                         ..Default::default()

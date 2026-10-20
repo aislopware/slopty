@@ -544,7 +544,7 @@ mod tests {
                         window.refresh();
                         let _ = window.draw(cx);
                         window.dispatch_event(
-                            gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                            gpui::PlatformInput::Scroll(gpui::ScrollEvent {
                                 position,
                                 delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(100.0))),
                                 modifiers: gpui::Modifiers {

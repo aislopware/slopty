@@ -982,7 +982,7 @@ fn a_card_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppCon
     };
     plain(cx);
     for dy in [-30.0, 30.0, -30.0, 30.0, -30.0, 30.0] {
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: point(px(500.0), px(400.0)),
             delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(dy))),
             ..Default::default()

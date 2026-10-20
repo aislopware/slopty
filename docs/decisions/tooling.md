@@ -2216,6 +2216,55 @@ more full-window layer.
     which noq's port lacks and the deque's defragment is written without.
   - Claude Code 2.1.302 is pinned and the fixtures are recorded on it. Its control and stream
     subtypes are the same 155 as 2.1.301's.
+- ✅ **Upstream sync of 2026-10-20: gpui-fast `a309f585`, gpui-kit `6356eda5`, ghostty
+  `65c41da6`, libghostty-rs `64a2e11b`.** The gpui-fast fork merges longbridge `b836dd97` and
+  imports zed `a4a3a968`, on top of its #61.
+  - zed #65805 renames `ScrollWheelEvent` to `ScrollEvent` and adds `source: ScrollSource`
+    (`Pointer` or `Touch`). `on_scroll_wheel` becomes `on_scroll`, and
+    `PlatformInput::ScrollWheel` becomes `PlatformInput::Scroll`. Slopty takes the new names,
+    and its full literals say `Pointer`. Our `gpui_ios` marks its own pans and their momentum
+    `Touch`.
+  - zed #65806 adds `WindowInsets::corner_radii`. It is ported to our `gpui_ios`: a
+    container-concentric corner configuration on the Metal view, and the radius UIKit resolved
+    for each corner.
+  - Not taken from zed:
+    - #65806's `on_back_gesture`: no edge-pan recognizer in our backend yet.
+    - #65858 Universal Links: Slopty registers no associated domains.
+    - #65814's sprite field reorder: the fork already sorted sprites by its own drawing order.
+  - Kept from the fork: longbridge's sync had brought zed's `gpui_ios` into the branch. The
+    fork keeps its own backend, and zed's copy stays in the vendor import.
+  - Replaced by longbridge's hooks: the fork's input-handler restore gives way to longbridge's
+    `note_installed_input_handler` and `note_restored_input_handler`.
+  - gpui-kit v0.8.0 asks for gpui-fast 0.1.10, so the compat stand-ins move to 0.1.10, and
+    proptest moves to 1.12.
+
+  gpui-kit is rebased onto `77ff6f79` (11 upstream commits):
+  - #3589 (Copy reads the selection as drawn) is ported into the fork's selection adapter.
+  - #3583 (caret rows stay visible in a constrained viewport) is ported into its
+    scroll-request design.
+
+  ghostty merges `b58ef1d6`. Upstream's formatter now restores VT blanks and erased
+  backgrounds as they were made:
+  - CUF over the empty cells of a gap.
+  - ECH then CUF over a run of one background.
+  - Background-only rows are kept.
+  - Trailing blank rows are kept whenever VT output is not trimmed.
+
+  The fork's `trailing_rows` option, and libghostty-rs's `with_trailing_rows`, are deleted for
+  it, since `trim = false` (as the engine formats checkpoints) now does the same. Two rules
+  fold CUF and ECH into the fork's semantic replay:
+  - A replay that has yet to wrap into a row stays on the row before until a cell is written,
+    so that row's first blank is still a space.
+  - A background run never steps over the last column of a row the replay wraps from.
+
+  A restored checkpoint so keeps a gap's cells empty, not spaces in the pen of the text before
+  them. Other changes in the merge:
+  - CUB and BS stop at the left margin.
+  - CHA, VPA, HPR and VPR are origin-relative.
+  - Kitty shared-memory names may lack the leading slash.
+
+  `zig build test-lib-vt`: 6968 passed. The sync's runner checks (forks build and test)
+  passed. The notes are in `.research/upstream-sync-2026-10-20.md`.
 - ✅ **Upstream sync of 2026-10-19 (second): gpui-fast `3276d4c7`, gpui-kit `90d1ffa6`.** The
   gpui-fast fork takes #53: the retained check compares a sprite's transform on the 1/64 pixel
   grid (rotation and scale to 1/4096). A rotated sprite's translation comes from where its

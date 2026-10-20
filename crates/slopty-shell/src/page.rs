@@ -1310,7 +1310,7 @@ mod tests {
             "the page is live where the wheel turns"
         );
         cx.simulate_mouse_move(over, None, gpui::Modifiers::default());
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: over,
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-144.0))),
             ..Default::default()

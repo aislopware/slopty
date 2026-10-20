@@ -1318,7 +1318,7 @@ pub(crate) fn lightbox_with_size(
                             on_close(window, cx);
                         }
                     })
-                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .on_scroll(|_, _, cx| cx.stop_propagation())
                     .child(
                         div()
                             .id("attachment-lightbox-image")

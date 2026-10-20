@@ -13,7 +13,7 @@ use gpui::{
     EventEmitter, ExternalPaths, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     KeyDownEvent, KeyUpEvent, Keystroke, LongPressEvent, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, TextInputAction,
+    ScrollEvent, SharedString, StatefulInteractiveElement as _, Styled as _, TextInputAction,
     TextInputConfiguration, TouchPhase, UTF16Selection, Window, div, point, px, size,
 };
 use slopty_client::clip::{ClipFiles, ClipSync, ShellPaste};
@@ -3304,12 +3304,7 @@ impl TerminalView {
         cx.stop_propagation();
     }
 
-    fn scroll_wheel(
-        &mut self,
-        event: &ScrollWheelEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn scroll_wheel(&mut self, event: &ScrollEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let lines = match event.delta {
             ScrollDelta::Lines(p) => p.y,
             ScrollDelta::Pixels(p) => {
@@ -4287,7 +4282,7 @@ impl Render for TerminalView {
             .on_drag_move::<ExternalPaths>(cx.listener(|this, event, _window, cx| {
                 this.files_dragged(event, cx);
             }))
-            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            .on_scroll(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
@@ -6671,12 +6666,13 @@ mod tests {
         });
         cx.run_until_parked();
         let at = cell_center(&view, cx, 2.0, 1.0);
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: at,
             delta: ScrollDelta::Lines(point(0.0, 1.0)),
             modifiers: gpui::Modifiers::default(),
             touch_phase: TouchPhase::Started,
             momentum_phase: None,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 1);
@@ -6782,12 +6778,13 @@ mod tests {
         while rx.try_recv().is_ok() {}
         let at = cell_center(&view, cx, 2.0, 1.0);
         let wheel = |cx: &mut VisualTestContext, lines: f32, modifiers, phase| {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: at,
                 delta: ScrollDelta::Lines(point(0.0, lines)),
                 modifiers,
                 touch_phase: phase,
                 momentum_phase: None,
+                source: gpui::ScrollSource::Pointer,
             });
             cx.run_until_parked();
         };
@@ -6816,12 +6813,13 @@ mod tests {
         // the first of them keeps the rest, momentum included.
         let pan = |cx: &mut VisualTestContext, lines: f32, phase| {
             let h = view.read_with(cx, |v, _| v.metrics.map_or(20.0, |m| f32::from(m.line_height)));
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: at,
                 delta: ScrollDelta::Pixels(point(px(0.0), px(lines * h))),
                 modifiers: mods,
                 touch_phase: phase,
                 momentum_phase: None,
+                source: gpui::ScrollSource::Pointer,
             });
             cx.run_until_parked();
         };
@@ -6938,12 +6936,13 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(thumbs(cx), Vec::<f32>::new(), "output under a view following it");
 
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: cell_center(&view, cx, 1.0, 1.0),
             delta: ScrollDelta::Lines(point(0.0, 1.0)),
             modifiers: gpui::Modifiers::default(),
             touch_phase: TouchPhase::Started,
             momentum_phase: None,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, |v, _| v.state.view_offset()), 1);
@@ -7059,12 +7058,13 @@ mod tests {
         let rows = ["hello wor", "second", "third row"];
         view.update(cx, |view, cx| view.apply(history_frame(30, &rows), cx));
         cx.run_until_parked();
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: cell_center(&view, cx, 1.0, 1.0),
             delta: ScrollDelta::Lines(point(0.0, 1.0)),
             modifiers: gpui::Modifiers::default(),
             touch_phase: TouchPhase::Started,
             momentum_phase: None,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
         // The scroll's own frames (the jump pill comes in), well inside the linger.

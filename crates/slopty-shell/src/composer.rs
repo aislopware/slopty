@@ -19,7 +19,7 @@ use gpui::{
     DispatchPhase, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, GlobalElementId, KeyBinding, KeyDownEvent, LayoutId, // slopty: dictation removed.
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PaintQuad, PathPromptOptions, Pixels, Point, Role, ScrollWheelEvent, SharedString, Style,
+    PaintQuad, PathPromptOptions, Pixels, Point, Role, ScrollEvent, SharedString, Style,
     StyledImage as _, Subscription, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
     Window, WrappedLine, actions, div, fill, img, point, prelude::*, px, quad, relative, size,
 };
@@ -4032,9 +4032,9 @@ impl ComposerInput {
         true
     }
 
-    fn on_scroll_wheel(
+    fn on_scroll(
         &mut self,
-        event: &ScrollWheelEvent,
+        event: &ScrollEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -5239,7 +5239,7 @@ impl Render for ComposerInput {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_scroll(cx.listener(Self::on_scroll))
             .w_full()
             .text_size(crate::typography::ui_rems(self.text_size))
             .line_height(crate::typography::ui_rems(self.configured_line_height))
@@ -10166,7 +10166,7 @@ impl Composer {
                                     .max_h(px(approval::GATED_BODY_MAX_HEIGHT))
                                     .overflow_y_scroll()
                                     .track_scroll(&self.extras.wizard_scroll)
-                                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                    .on_scroll(cx.listener(|this, _, _, cx| {
                                         this.recheck_read_through(cx);
                                         cx.notify();
                                     }))

@@ -7220,7 +7220,7 @@ impl Shell {
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| this.dismiss_session_card(cx)),
                 )
-                .on_scroll_wheel(cx.listener(|this, _, _, cx| this.dismiss_session_card(cx)))
+                .on_scroll(cx.listener(|this, _, _, cx| this.dismiss_session_card(cx)))
                 .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                     // The palette's copy of the row only opens; the sidebar's
                     // double-click edits the title in place.
@@ -14764,12 +14764,13 @@ mod right_tab_mouse_regressions {
         let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
         cx.update(|window, cx| {
             window.dispatch_event(
-                gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                gpui::PlatformInput::Scroll(gpui::ScrollEvent {
                     position: start,
                     delta: gpui::ScrollDelta::Pixels(gpui::point(px(-100.), px(0.))),
                     modifiers: gpui::Modifiers::default(),
                     touch_phase: gpui::TouchPhase::Moved,
                     momentum_phase: None, // slopty: gpui-fast
+                    source: gpui::ScrollSource::Pointer,
                 }),
                 cx,
             );

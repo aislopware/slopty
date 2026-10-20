@@ -19,9 +19,9 @@ fork = "https://github.com/aislopware/gpui-fast.git"
 branch = "main"
 checkout = ".research/gpui-fast"
 strategy = "merge"
-base = "37f3959732d13404989e58e89c4e37ec9489e3f5"
-base_date = "2026-10-18"
-checked = "2026-10-18"
+base = "b836dd970b26830f2124b7cf91b0e19018fd12da"
+base_date = "2026-10-19"
+checked = "2026-10-20"
 check_every_days = 0
 
 # zed is not forked: the gpui-fast fork imports it (its `UPSTREAM` file and
@@ -31,9 +31,9 @@ check_every_days = 0
 upstream = "https://github.com/zed-industries/zed.git"
 upstream_branch = "main"
 checkout = ".research/zed-main"
-base = "56934ec0560bce8929025497411de7f5322fb6ca"
-base_date = "2026-10-17"
-checked = "2026-10-18"
+base = "a4a3a968d14c00d71dba1ed4ef8ef9ab0a320b66"
+base_date = "2026-10-20"
+checked = "2026-10-20"
 check_every_days = 7
 
 [gpui-kit]
@@ -43,9 +43,9 @@ fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
 strategy = "rebase"
-base = "af456ddb2fe7bc57f040bb94064135cf353488d6"
-base_date = "2026-10-19"
-checked = "2026-10-19"
+base = "77ff6f794dca3bcee2e90977cedf12a64aed17e4"
+base_date = "2026-10-20"
+checked = "2026-10-20"
 # It lands several changes a day, so every gate asks.
 check_every_days = 0
 
@@ -66,9 +66,9 @@ fork = "https://github.com/aislopware/ghostty.git"
 branch = "main"
 checkout = "vendor/ghostty"
 strategy = "merge"
-base = "189af86eac5e91e1b282bdaf371f369c3863591f"
-base_date = "2026-10-18"
-checked = "2026-10-18"
+base = "b58ef1d678be2747c830bc1b1e6c0a086afecf9a"
+base_date = "2026-10-20"
+checked = "2026-10-20"
 check_every_days = 1
 paths = [
     "src/terminal/",
@@ -88,9 +88,9 @@ fork = "https://github.com/aislopware/libghostty-rs.git"
 branch = "master"
 checkout = ".research/libghostty-rs"
 strategy = "rebase"
-base = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54"
-base_date = "2026-10-09"
-checked = "2026-10-18"
+base = "0ef80413de1326685743378efbfa06d849e041a7"
+base_date = "2026-10-19"
+checked = "2026-10-20"
 check_every_days = 7
 
 # noq is vendored, not forked: `vendor/noq-proto` is the published noq-proto 1.3.0 (tag

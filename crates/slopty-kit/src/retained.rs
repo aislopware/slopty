@@ -346,17 +346,18 @@ mod tests {
     /// compared, not the tile.
     #[gpui::test]
     fn a_frame_composited_from_a_layer_agrees_with_one_from_scratch(cx: &mut TestAppContext) {
-        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point};
+        use gpui::{Modifiers, ScrollDelta, ScrollEvent, TouchPhase, point};
         cx.update(|cx| cx.set_reduce_motion(true));
         let (_rows, cx) = cx.add_window_view(|_, _| Rows);
         cx.run_until_parked();
         let wheel = |cx: &mut gpui::VisualTestContext| {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: point(px(40.0), px(40.0)),
                 delta: ScrollDelta::Pixels(point(px(0.0), px(-15.0))),
                 modifiers: Modifiers::default(),
                 touch_phase: TouchPhase::Moved,
                 momentum_phase: None,
+                source: gpui::ScrollSource::Pointer,
             });
             cx.run_until_parked();
         };

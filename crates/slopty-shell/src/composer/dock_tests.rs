@@ -189,7 +189,7 @@ impl Render for Layered {
                     .absolute()
                     .inset_0()
                     .on_hover(move |on, _, _| hovered.set(*on))
-                    .on_scroll_wheel(move |_, _, _| wheeled.set(wheeled.get() + 1)),
+                    .on_scroll(move |_, _, _| wheeled.set(wheeled.get() + 1)),
             )
             .child(div().absolute().inset_0().flex().flex_col().justify_end().child(self.composer.clone()))
     }
@@ -241,7 +241,7 @@ fn the_composer_takes_the_pointer_from_the_row_under_it(cx: &mut TestAppContext)
         draw(cx);
         assert!(!hovered.get(), "no hover through the composer at {at:?}");
     }
-    cx.simulate_event(gpui::ScrollWheelEvent {
+    cx.simulate_event(gpui::ScrollEvent {
         position: pill.center(),
         delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-40.0))),
         ..Default::default()

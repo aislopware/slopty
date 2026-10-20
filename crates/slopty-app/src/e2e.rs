@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Entity, Focusable as _, Keystroke, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta,
-    ScrollWheelEvent, TouchPhase, Window, point, px, size,
+    ScrollEvent, TouchPhase, Window, point, px, size,
 };
 use slopty_core::{ItemId, SessionId, WorkerId};
 use slopty_e2e::{
@@ -771,12 +771,13 @@ fn apply(
         }
         Command::Scroll { x, y, dx, dy } => {
             let _scrolled = window.dispatch_event(
-                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                PlatformInput::Scroll(ScrollEvent {
                     position: point(px(x), px(y)),
                     delta: ScrollDelta::Lines(point(dx, dy)),
                     modifiers: Modifiers::default(),
                     touch_phase: TouchPhase::Moved,
                     momentum_phase: None,
+                    source: gpui::ScrollSource::Pointer,
                 }),
                 cx,
             );

@@ -1562,8 +1562,8 @@ impl AppearancePage {
             } else {
                 gpui::CursorStyle::OpenHand
             })
-            .on_scroll_wheel(
-                cx.listener(|this, event: &gpui::ScrollWheelEvent, window, cx| {
+            .on_scroll(
+                cx.listener(|this, event: &gpui::ScrollEvent, window, cx| {
                     let delta = match event.delta {
                         ScrollDelta::Pixels(delta) => f32::from(delta.y),
                         ScrollDelta::Lines(delta) => delta.y * 40.0,

@@ -479,7 +479,7 @@ impl Composer {
         let panel = queue_panel_surface(&theme, cx.has_active_drag())
             .debug_selector(|| "message-queue-panel".into())
             .children(paused)
-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+            .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
             // The complete glass surface is a drop target, including its
             // padding.
             .on_drag_move::<QueueDragPayload>(cx.listener(
@@ -2591,7 +2591,7 @@ mod scroll_tests {
         let (queue, transcript) =
             view.read_with(cx, |view, _| (view.queue.clone(), view.transcript.clone()));
         for delta in [-80.0, -10_000.0, -80.0, 10_000.0, 80.0] {
-            cx.simulate_event(gpui::ScrollWheelEvent {
+            cx.simulate_event(gpui::ScrollEvent {
                 position: point(px(200.0), px(300.0)),
                 delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(delta))),
                 ..Default::default()
@@ -2611,7 +2611,7 @@ mod scroll_tests {
             cx.notify();
         });
         cx.run_until_parked();
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position: point(px(200.0), px(370.0)),
             delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-80.0))),
             ..Default::default()

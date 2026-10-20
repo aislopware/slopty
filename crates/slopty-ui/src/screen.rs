@@ -36,10 +36,9 @@ use gpui::{
     EventEmitter, FocusHandle, Focusable, Global, InteractiveElement as _, IntoElement, Keystroke,
     LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, Path, PathBuilder, PinchEvent, Pixels, Point, Render,
-    RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Size,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextInputAction,
-    TextInputConfiguration, TouchDragEvent, TouchPhase, UTF16Selection, Window, canvas, div, point,
-    px, size,
+    RenderImage, ScrollDelta, ScrollEvent, SharedString, Size, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, TextInputAction, TextInputConfiguration, TouchDragEvent,
+    TouchPhase, UTF16Selection, Window, canvas, div, point, px, size,
 };
 use slopty_client::pacing::{PacingStats, PaintRate, Spread};
 use slopty_client::{CursorState, ScreenHandle, ScreenStats};
@@ -302,7 +301,7 @@ fn moved(path: &Path<Pixels>, by: Point<Pixels>) -> Path<Pixels> {
 const LOCAL_HOLD: Duration = Duration::from_millis(200);
 
 /// How long a fling may go quiet before the worker is told its momentum ended. Both platforms say
-/// so themselves (`ScrollWheelEvent::momentum_phase`), so this is the backstop for a lost or
+/// so themselves (`ScrollEvent::momentum_phase`), so this is the backstop for a lost or
 /// dropped close. Momentum events arrive about a frame apart, which makes this several frames of
 /// silence.
 const MOMENTUM_GAP: Duration = Duration::from_millis(120);
@@ -2493,7 +2492,7 @@ impl ScreenView {
         mapped
     }
 
-    fn scroll_wheel(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
+    fn scroll_wheel(&mut self, ev: &ScrollEvent, _w: &mut Window, cx: &mut Context<Self>) {
         let (dx, dy, precise) = match ev.delta {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y), true),
             ScrollDelta::Lines(l) => (l.x, l.y, false),
@@ -2531,7 +2530,7 @@ impl ScreenView {
     /// halfway leaves neither the pan nor the remote app's scroll without its end; a wheel's
     /// notch decides on its own (`docs/decisions/input.md`, "A zoomed picture pans when the
     /// pointer pushes at the edge").
-    fn scroll_pans(&mut self, precise: bool, ev: &ScrollWheelEvent) -> bool {
+    fn scroll_pans(&mut self, precise: bool, ev: &ScrollEvent) -> bool {
         let asks = ev.modifiers.alt && !self.zoom.is_fit() && !self.touch;
         if !precise {
             return asks;
@@ -3472,7 +3471,7 @@ impl Render for ScreenView {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Right, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
-            .on_scroll_wheel(cx.listener(Self::scroll_wheel))
+            .on_scroll(cx.listener(Self::scroll_wheel))
             .on_pinch(cx.listener(Self::pinch))
             .on_action(cx.listener(|this, _: &ToggleTrackpad, _window, cx| {
                 this.toggle_trackpad(cx);
@@ -4820,12 +4819,13 @@ mod tests {
         let bounds = view.read_with(cx, |v, _| v.bounds);
         let at = bounds.center();
         let wheel = |cx: &mut gpui::VisualTestContext, dy: f32, touch_phase, momentum_phase| {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: at,
                 delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
                 modifiers: Modifiers::default(),
                 touch_phase,
                 momentum_phase,
+                source: gpui::ScrollSource::Pointer,
             });
             cx.run_until_parked();
         };
@@ -4959,26 +4959,29 @@ mod tests {
             Modifiers { shift: true, ..Modifiers::default() },
         );
         cx.simulate_mouse_up(at(0.5, 0.25), MouseButton::Left, Modifiers::default());
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: at(0.5, 0.5),
             delta: ScrollDelta::Pixels(point(px(3.0), px(-12.0))),
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
             momentum_phase: None,
+            source: gpui::ScrollSource::Pointer,
         });
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: at(0.5, 0.5),
             delta: ScrollDelta::Lines(point(0.0, 2.0)),
             modifiers: Modifiers { alt: true, ..Modifiers::default() },
             touch_phase: TouchPhase::Started,
             momentum_phase: None,
+            source: gpui::ScrollSource::Pointer,
         });
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
             position: at(0.5, 0.5),
             delta: ScrollDelta::Lines(point(0.0, 1.0)),
             modifiers: Modifiers { platform: true, ..Modifiers::default() },
             touch_phase: TouchPhase::Moved,
             momentum_phase: None,
+            source: gpui::ScrollSource::Pointer,
         });
         cx.run_until_parked();
 
@@ -5527,12 +5530,13 @@ mod tests {
         let steps = [Duration::ZERO, Duration::from_micros(8_333), Duration::from_millis(40)];
         for (k, step) in steps.iter().enumerate() {
             cx.executor().advance_clock(*step);
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: at,
                 delta: ScrollDelta::Pixels(point(px(-10.0), px(0.0))),
                 modifiers: Modifiers::default(),
                 touch_phase: if k == 0 { TouchPhase::Started } else { TouchPhase::Moved },
                 momentum_phase: None,
+                source: gpui::ScrollSource::Pointer,
             });
             cx.run_until_parked();
         }
@@ -6002,12 +6006,13 @@ mod tests {
         drop(inputs(&mut rx));
         let before = origin(cx);
         let scroll = |cx: &mut gpui::VisualTestContext, dx: f32, alt: bool, phase| {
-            cx.simulate_event(ScrollWheelEvent {
+            cx.simulate_event(ScrollEvent {
                 position: point(px(200.0), px(150.0)),
                 delta: ScrollDelta::Pixels(point(px(dx), px(0.0))),
                 modifiers: Modifiers { alt, ..Modifiers::default() },
                 touch_phase: phase,
                 momentum_phase: None,
+                source: gpui::ScrollSource::Pointer,
             });
             cx.run_until_parked();
         };

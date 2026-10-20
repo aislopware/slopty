@@ -15,7 +15,7 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, Context, Global, IntoElement, LongPressEvent, Pixels, ScrollWheelEvent,
+    AnyElement, App, Context, Global, IntoElement, LongPressEvent, Pixels, ScrollEvent,
     SharedString, TouchPhase, Window, div, prelude::*, px,
 };
 
@@ -989,7 +989,7 @@ impl Shell {
             .rounded(px(8.0))
             .children(reveal)
             .child(div().relative().left(px(offset)).child(row))
-            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, window, cx| {
+            .on_scroll(cx.listener(move |this, event: &ScrollEvent, window, cx| {
                 let delta = event.delta.pixel_delta(px(16.0));
                 let step = swipe_step(
                     &mut cx.default_global::<Swipes>().active,

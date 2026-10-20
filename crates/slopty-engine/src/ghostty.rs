@@ -764,7 +764,6 @@ impl GhosttyEngine {
             .with_format(Format::Vt)
             .with_unwrap(true)
             .with_trim(false)
-            .with_trailing_rows(true)
             // Not the palette: the formatter writes all 256 entries as OSC 4 sets, which would
             // come back as the program's changes over whatever the next driver paints with.
             // The program's own colour changes are written below.

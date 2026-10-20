@@ -373,7 +373,7 @@ fn a_chat_at_its_end_stays_there_when_the_phones_floor_rises(cx: &mut TestAppCon
     assert!(risen <= 0.5, "with the keyboard up the chat stays at its end: {risen}px above it");
 
     // Scrolled up by the person, the chat stays where they left it when the keyboard falls.
-    cx.simulate_event(gpui::ScrollWheelEvent {
+    cx.simulate_event(gpui::ScrollEvent {
         position: gpui::point(px(200.0), px(300.0)),
         delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(900.0))),
         ..Default::default()
