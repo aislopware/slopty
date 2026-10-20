@@ -635,10 +635,8 @@ impl Served {
     ) {
         let mut driven = driven;
         let (native, cwd) = (driven.meta().native.clone(), driven.meta().cwd.clone());
-        let seated = self.host.seated_of(thread);
-        let env = seated
-            .map(|seated| seat_env(self.host.env_of(&seated), seated.relay.as_deref()))
-            .unwrap_or_default();
+        let seat = self.host.seated_of(thread).map(|seated| self.host.env_of(&seated));
+        let env = with_tools(seat.unwrap_or_default(), self.host.tools_cli().as_deref());
         match start_pi(launch, &native, &cwd, args, &env) {
             Ok((stdin, pi)) => {
                 let (tx, rx) = mpsc::unbounded_channel();
@@ -736,12 +734,13 @@ async fn ends(path: &Path, size: u64) -> std::io::Result<(String, String)> {
     Ok((String::from_utf8_lossy(&head).into_owned(), String::from_utf8_lossy(&tail).into_owned()))
 }
 
-/// What a seated thread's pi runs with: the seat's variables (`env`), and Slopty's tools for the
-/// gate to register ([`slopty_agent::pi::TOOLS_ENV`]) where Slopty's CLI is found.
-fn seat_env(env: Vec<(String, String)>, relay: Option<&str>) -> Vec<(String, String)> {
+/// What a thread's pi runs with: its seat's variables (`env`, none for the person's own), and
+/// Slopty's tools for the gate to register ([`slopty_agent::pi::TOOLS_ENV`]) where Slopty's CLI
+/// (`cli`) is found.
+fn with_tools(env: Vec<(String, String)>, cli: Option<&str>) -> Vec<(String, String)> {
     let mut env = env;
-    if let Some(relay) = relay {
-        let tools = slopty_agent::pi::tools(relay, &env);
+    if let Some(cli) = cli {
+        let tools = slopty_agent::pi::tools(cli, &env);
         env.push((slopty_agent::pi::TOOLS_ENV.to_owned(), tools.to_string()));
     }
     env
@@ -751,17 +750,20 @@ fn seat_env(env: Vec<(String, String)>, relay: Option<&str>) -> Vec<(String, Str
 mod tests {
     use super::*;
 
-    /// A seated pi runs with the seat's variables, and with Slopty's tools for the gate only
-    /// where Slopty's CLI was found.
+    /// A pi runs with its seat's variables, and with Slopty's tools for the gate wherever
+    /// Slopty's CLI was found, the person's own pi too.
     #[test]
-    fn a_seated_pi_runs_with_the_seat_and_its_tools() {
+    fn a_pi_runs_with_its_seat_and_slopty_tools() {
         let seat = vec![("SLOPTY_SESSION".to_owned(), slopty_core::SessionId::new().to_string())];
-        assert_eq!(seat_env(seat.clone(), None), seat, "no tools without the CLI");
-        let env = seat_env(seat.clone(), Some("/bin/slopty"));
+        assert_eq!(with_tools(seat.clone(), None), seat, "no tools without the CLI");
+        let env = with_tools(seat.clone(), Some("/bin/slopty"));
         assert_eq!(env[..1], seat);
         let (name, tools) = &env[1];
         assert_eq!(name, slopty_agent::pi::TOOLS_ENV);
         let tools: serde_json::Value = serde_json::from_str(tools).unwrap_or_default();
+        assert_eq!(tools, slopty_agent::pi::tools("/bin/slopty", &seat));
+        let own = with_tools(Vec::new(), Some("/bin/slopty"));
+        assert_eq!(own.len(), 1, "the person's own pi gets the tools: {own:?}");
         assert_eq!(tools, slopty_agent::pi::tools("/bin/slopty", &seat));
     }
 }

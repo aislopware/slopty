@@ -123,6 +123,8 @@ struct Inner {
     heard: Heard,
     /// What the worker adds to a seat's variables, once the daemon says.
     seat_env: Option<EnvOf>,
+    /// Slopty's CLI, whose `mcp` serves Slopty's tools, once the daemon found it.
+    tools_cli: Option<String>,
     /// Told whenever a scheduled message is added or changed ([`Host::schedule_changed`]).
     scheduling: Arc<tokio::sync::Notify>,
     /// The starts under way, as kept ([`Host::start_under_way`]).
@@ -433,6 +435,7 @@ impl Host {
                     tools: broadcast::Sender::new(TOOLS),
                 },
                 seat_env: None,
+                tools_cli: None,
                 scheduling: Arc::default(),
                 under_way,
                 lease_every: LEASE_EVERY,
@@ -717,6 +720,18 @@ impl Host {
     /// Give the worker's own variables for a seat to every seated agent from now on.
     pub fn set_seat_env(&self, env: SeatEnv) {
         self.inner.lock().seat_env = Some(EnvOf(env));
+    }
+
+    /// Serve Slopty's tools through `cli mcp` to every agent started from now on, the person's
+    /// own and seated ones alike.
+    pub fn set_tools_cli(&self, cli: Option<String>) {
+        self.inner.lock().tools_cli = cli;
+    }
+
+    /// Slopty's CLI whose `mcp` serves every agent Slopty's tools ([`Self::set_tools_cli`]).
+    #[must_use]
+    pub fn tools_cli(&self) -> Option<String> {
+        self.inner.lock().tools_cli.clone()
     }
 
     /// Every variable `seated`'s agent and its Slopty tools run with: the worker's own for the

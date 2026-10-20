@@ -135,7 +135,22 @@ mod claude {
 
         /// [`Self::serve`], each Claude Code given `init_wait` to answer `initialize`.
         fn serve_waiting(&self, init_wait: Duration) -> (Claude, tokio::task::JoinHandle<()>) {
+            self.serve_as(init_wait, None)
+        }
+
+        /// [`Self::serve`], every thread the person starts given Slopty's tools from `tools`.
+        fn serve_with_tools(&self, tools: &Path) -> (Claude, tokio::task::JoinHandle<()>) {
+            let tools = Some(tools.to_string_lossy().into_owned());
+            self.serve_as(slopty_agent::claude::driven::INIT_WAIT, tools)
+        }
+
+        fn serve_as(
+            &self,
+            init_wait: Duration,
+            tools: Option<String>,
+        ) -> (Claude, tokio::task::JoinHandle<()>) {
             let (claude, asks) = Claude::channel();
+            self.host.set_tools_cli(tools);
             let place = Place {
                 data_dir: self.data.clone(),
                 ptyd: self.socket.clone(),
@@ -1652,12 +1667,13 @@ case "$line" in
 esac
 "#;
 
-    /// Slopty's own `show_visual` called by Claude Code is the thread's visual once the call
-    /// came back checked; one the check turned down stays a call, with why. The stand-in calls
-    /// it through the folder's `slopty` server (`STUB_TURNS`), here a script that checks a
-    /// visual as `slopty mcp` does and turns down a script that says `broken`.
+    /// A chat the person starts gets Slopty's own tools, and its `show_visual` is the thread's
+    /// visual once the call came back checked; one the check turned down stays a call, with
+    /// why. The stand-in calls it through the `slopty` server on its `--mcp-config`
+    /// (`STUB_TURNS`), here a script that checks a visual as `slopty mcp` does and turns down a
+    /// script that says `broken`.
     #[tokio::test]
-    async fn a_visual_claude_code_shows_is_the_threads_once_checked() {
+    async fn a_persons_chat_shows_a_visual_once_slopty_checked_it() {
         let script = r#"ui.text("hello")"#;
         let turns = serde_json::json!({
             "show it": [{ "name": "show_visual", "arguments": { "title": "Hello", "script": script } }],
@@ -1669,10 +1685,7 @@ esac
         std::fs::write(&server, CHECKER).unwrap();
         std::fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        let config =
-            serde_json::json!({ "mcpServers": { "slopty": { "command": server, "args": [] } } });
-        std::fs::write(rig.work.join(".mcp.json"), config.to_string()).unwrap();
-        let (claude, _served) = rig.serve();
+        let (claude, _served) = rig.serve_with_tools(&server);
         let thread = rig.started(&claude, "show it").await;
         let state = rig.until(thread, "the visual", turn_ended(1, TurnState::Complete)).await;
         let visual = state.items.iter().find_map(|i| match &i.body {

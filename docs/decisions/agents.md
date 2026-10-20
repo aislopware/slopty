@@ -2095,28 +2095,23 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`slopty-worker/tests/pi.rs`); the Codex start test
     (`a_start_asks_the_persons_codex_for_a_thread_and_sends_its_first_turn`) asks no spend.
 
-- ✅ **Only a project's agents get Slopty's tools; the others get a pointer to the CLI**
-  (2026-10-04, prune §5.1 #3). A Claude Code Slopty wires (a tile opened on `claude`, ⌘⇧T, a
-  `claude` typed in a Slopty shell) gets `--mcp-config` serving `slopty mcp` only when its
-  session names a project (`SLOPTY_PROJECT`). Any other gets one paragraph on
-  `--append-system-prompt` (`slopty_agent::hooks::POINTER`): Slopty reaches the person's other
-  machines, and `slopty --help` says how. A system prompt the person appends keeps its place
-  and gets the paragraph after it. The resume keeps it as it keeps a project agent's role.
-  - Why: the tool block cost every agent its descriptions and schemas in context whether it
-    reached another machine or not, and the CLI already does everything the tools did. The
-    paragraph is the agent's lazy door: it reads the help when the work calls for it.
-  - Driven Codex, pi and ACP threads already got Slopty's tools only when seated by a project.
-    They get no pointer yet. Codex's `developerInstructions` would stand in for the person's
-    own `developer_instructions` rather than add to them, pi's `--append-system-prompt` is not
-    yet checked against its `APPEND_SYSTEM.md`, and ACP has no door for it.
-  - Still open: a `codex` opened in a tile on a worker with a server gets Slopty's tools
-    (`Worker::as_agent`, `codex_with_mcp`), and every `SpawnAgent` gets them
-    (`orchestrate.rs`), project or not.
-  - Tests: `a_persons_claude_is_wired_once` and
-    `the_pointer_joins_the_persons_own_appended_prompt` (`slopty-agent`);
-    `claude_opened_in_a_tile_is_started_as_slopty_starts_its_agents`
-    (`slopty-worker/tests/agent_open.rs`); `a_typed_claude_is_wired_as_one_slopty_starts`
-    (`slopty-cli/tests/claude_wire.rs`).
+- ✅ **Every agent Slopty starts gets Slopty's tools** (2026-10-20; replaces 2026-10-04's
+  "only a project's agents"). Each Claude Code run, the person's chats as well as an agent
+  another started, gets `--mcp-config` serving `slopty mcp`, as far as managed settings let it
+  in. The flag is added at each run, never kept with the thread's flags, so a chat taken up again
+  after an update runs the CLI installed now. Codex threads get it in their `thread/start`,
+  `thread/resume` and `thread/fork` config, pi through its gate's variable, and ACP in
+  `session/new`. The worker finds the CLI once beside its own binary (`Host::set_tools_cli`).
+  - Why: `show_visual` and `show_page` reach the person only through these tools, and the
+    person's own chats are where they are wanted most. A test drive on 2026-10-20 found a chat
+    started from the composer had neither. The old reason, context spent on tool schemas, is
+    gone: Claude Code defers MCP tools behind its tool search and loads a schema only when the
+    model asks for it.
+  - A seated thread adds only its seat: the variables its tools speak as, and its system text.
+  - Tests: `a_persons_chat_shows_a_visual_once_slopty_checked_it`
+    (`slopty-worker/tests/claude.rs`, through `--mcp-config`),
+    `a_pi_runs_with_its_seat_and_slopty_tools`, and the seated Codex and ACP tests, which set
+    the CLI on the host.
 
 - ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
   (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its

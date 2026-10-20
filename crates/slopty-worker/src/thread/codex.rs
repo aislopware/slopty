@@ -945,9 +945,11 @@ struct Session {
     retries: HashMap<String, (u8, Instant)>,
 }
 
-/// What a server task's thread is loaded with: the seat's variables and Slopty's tools.
-fn tools(host: &Host, seated: &Seated) -> std::collections::BTreeMap<String, Value> {
-    slopty_agent::codex::shared::seated(&host.env_of(seated), seated.relay.as_deref())
+/// What a thread is loaded with: its seat's variables (none for the person's own) and Slopty's
+/// tools.
+fn tools(host: &Host, seated: Option<&Seated>) -> std::collections::BTreeMap<String, Value> {
+    let env = seated.map(|seated| host.env_of(seated)).unwrap_or_default();
+    slopty_agent::codex::shared::seated(&env, host.tools_cli().as_deref())
 }
 
 impl Session {
@@ -1566,11 +1568,7 @@ impl Session {
         let seated = self.host.seated_of(thread);
         let params = p::ThreadResumeParams {
             thread_id: native.clone(),
-            config: Some(
-                seated
-                    .as_ref()
-                    .map_or_else(slopty_agent::codex::shared::unclaimed, |s| tools(&self.host, s)),
-            ),
+            config: Some(tools(&self.host, seated.as_ref())),
             developer_instructions: seated.and_then(|s| s.system),
             ..p::ThreadResumeParams::default()
         };
@@ -2038,7 +2036,7 @@ impl Session {
                     waiting.push(reply);
                     return Ok(());
                 }
-                let params = match self.followed(thread).map(|f| f.shared.fork(after)) {
+                let mut params = match self.followed(thread).map(|f| f.shared.fork(after)) {
                     Some(Ok(params)) => params,
                     Some(Err(why)) => {
                         let _gone = reply.send(once(&self.host, thread, id, refused(why)));
@@ -2050,6 +2048,7 @@ impl Session {
                         return Ok(());
                     }
                 };
+                params.config.get_or_insert_default().extend(tools(&self.host, None));
                 self.forking.insert(id, (thread, vec![reply]));
                 // A fork of the whole thread shares every turn it has now.
                 let turn = after.or_else(|| {
@@ -2112,8 +2111,9 @@ impl Session {
                 self.starting.insert(id, vec![reply]);
                 match checked(&start) {
                     Ok(Begin::New(mut params)) => {
+                        let config = params.config.get_or_insert_default();
+                        config.extend(tools(&self.host, seated.as_deref()));
                         if let Some(seated) = seated.as_deref() {
-                            params.config = Some(tools(&self.host, seated));
                             params.developer_instructions.clone_from(&seated.system);
                             // A server task writes only in its workspace, at every level.
                             params.sandbox = Some(p::SandboxMode::WorkspaceWrite);

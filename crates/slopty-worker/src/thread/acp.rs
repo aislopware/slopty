@@ -682,8 +682,8 @@ impl Served {
         let cwd = session.meta().cwd.clone();
         let seated = self.host.seated_of(thread);
         let env = seated.as_ref().map(|seated| self.host.env_of(seated)).unwrap_or_default();
-        if let Some(relay) = seated.as_ref().and_then(|s| s.relay.as_deref()) {
-            session.serve_tools(relay, &env);
+        if let Some(cli) = self.host.tools_cli() {
+            session.serve_tools(&cli, &env);
         }
         match start_agent(launch, &cwd, thread.to_string(), &env) {
             Ok((stdin, agent)) => {

@@ -125,7 +125,7 @@ function(x, y) end }: 2D drawing in pixels, origin top-left, w = the reply colum
 g:line(x1, y1, x2, y2, { color, width, dash }), g:polyline(pts, { color, width }), g:polygon(pts, \
 { fill, stroke, width }), g:rect(x, y, w, h, { fill, stroke, radius }), g:circle(x, y, r, { fill, \
 stroke }), g:arc(x, y, r, a0, a1, { color } or { fill, inner = radius } for pie and donut sectors; \
-radians clockwise from 3 o'clock), g:text(x, y, str, { size, color, weight, align = \
+radians clockwise from 3 o'clock), g:text(x, y, str, { size = \"xs|sm|body|lg|xl|2xl\", color, weight, align = \
 \"start|center|end\", baseline = \"top|middle|bottom\", mono }). pts are { x1, y1, x2, y2, ... } or \
 { { x, y }, ... }. g.pointer is { x, y, down } while the pointer is over the canvas (draw hover \
 effects with it); t is seconds, and animate = true redraws every frame while visible.\n\
@@ -144,6 +144,9 @@ color }, s:line(a, b, { color, width }), s:path(points, { color, width }), s:poi
 color, hint = \"shown on hover\" }), s:label(at, text, { color, size }), s:grid { size = 10, step = 1 }, \
 s:axes { size = 1, labels = { \"x\", \"y\", \"z\" } }. Physical colors may be \"#rrggbb\" in scenes \
 (a material's own color: gold, glass, wood), and only there.\n\
+- A picture shown as it is (a photo, a screenshot, a rendered PNG) needs no visual: write \
+![alt](path) in your reply, the path inside your working directory. Assets are for what a visual \
+builds with.\n\
 - Assets: pass real files in show_visual's assets (name -> path) and scripts use them by name. \
 s:model { asset = \"prism.glb\", at, rotate = { x, y, z } degrees, scale, fit = 2 (center it and size \
 its longest side), color and material props override the model's own } draws a glTF model with its \

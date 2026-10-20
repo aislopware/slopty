@@ -433,12 +433,7 @@ mod pi {
         let rig = Rig::new();
         let (pi, _served) = rig.serve();
         let seat = SessionId::new();
-        let seated = Seated {
-            seat,
-            facts: Vec::new(),
-            system: Some("You review.".to_owned()),
-            relay: Some("/opt/slopty/bin/slopty".to_owned()),
-        };
+        let seated = Seated { seat, facts: Vec::new(), system: Some("You review.".to_owned()) };
         let outcome = pi.start_seated(rig.start("Say hello."), seated.clone()).await;
         let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
         assert_eq!(pi.start_seated(rig.start("Say hello."), seated).await, outcome, "once");

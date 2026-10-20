@@ -1178,7 +1178,13 @@ impl Served {
         };
         let meta = driven.meta().clone();
         let mut command = vec![launch.program.to_string_lossy().into_owned()];
-        command.extend(agent::args(&session, &kept_args(&meta)));
+        // Slopty's tools come with every run, given afresh: never kept with the thread's flags,
+        // so a thread taken up again after an update runs the CLI installed now.
+        let kept = match self.host.tools_cli() {
+            Some(cli) => slopty_agent::mcp::with_mcp(kept_args(&meta), &cli),
+            None => kept_args(&meta),
+        };
+        command.extend(agent::args(&session, &kept));
         let mut env = vec![("PATH".to_owned(), launch.path.to_string_lossy().into_owned())];
         env.extend(agent::ENV.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())));
         if let Some(seated) = self.host.seated_of(thread) {
@@ -1414,17 +1420,13 @@ fn resumed_of(args: &[String]) -> Result<Option<&str>, String> {
     }
 }
 
-/// `kept` with a seat's own: its system text as the system prompt's addition, and Slopty's
-/// tools where Slopty's CLI is found.
+/// `kept` with a seat's own: its system text as the system prompt's addition.
 fn seat_args(kept: Vec<String>, seated: &Seated) -> Vec<String> {
     let mut kept = kept;
     if let Some(system) = seated.system.as_deref().filter(|s| !s.trim().is_empty()) {
         kept.push(format!("--append-system-prompt={system}"));
     }
-    match seated.relay.as_deref() {
-        Some(relay) => slopty_agent::mcp::with_mcp(kept, relay),
-        None => kept,
-    }
+    kept
 }
 
 /// The flags `meta`'s Claude Code was started with, as its thread keeps them.

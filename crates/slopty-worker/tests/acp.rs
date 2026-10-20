@@ -739,18 +739,14 @@ mod acp {
         let (acp, _served) = rig.serve();
         let seat = SessionId::new();
         let relay = "/opt/slopty/bin/slopty";
+        rig.host.set_tools_cli(Some(relay.to_owned()));
         rig.host.set_seat_env(Arc::new(|seat| {
             vec![
                 ("SLOPTY_SESSION".to_owned(), seat.to_string()),
                 ("SLOPTY_SERVER".to_owned(), "studio:7171".to_owned()),
             ]
         }));
-        let seated = Seated {
-            seat,
-            facts: Vec::new(),
-            system: Some("You review.".to_owned()),
-            relay: Some(relay.to_owned()),
-        };
+        let seated = Seated { seat, facts: Vec::new(), system: Some("You review.".to_owned()) };
         let outcome =
             acp.start_seated(rig.start("acp:opencode", "Say hello."), seated.clone()).await;
         let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };

@@ -68,6 +68,8 @@ pub fn open(dir: &Path, snapshots: &Path, worker: Worker) -> Option<(Threads, Ad
         Ok(host) => {
             let seats = worker.clone();
             host.set_seat_env(Arc::new(move |seat| seats.seat_env(seat)));
+            let cli = slopty_agent::mcp::cli_beside_this_binary();
+            host.set_tools_cli(cli.map(|cli| cli.to_string_lossy().into_owned()));
             let (claude, claude_asks) = Claude::channel();
             let (codex, codex_asks) = Codex::channel();
             let (pi, pi_asks) = Pi::channel();
@@ -1327,9 +1329,7 @@ impl orchestrate::SeatedThreads for Threads {
     ) -> orchestrate::BoxFuture<'_, Result<ThreadId, Failure>> {
         Box::pin(async move {
             let orchestrate::SeatedThread { start, seat, facts, system } = thread;
-            let relay = slopty_agent::mcp::cli_beside_this_binary()
-                .map(|relay| relay.to_string_lossy().into_owned());
-            let seated = Seated { seat, facts, system, relay };
+            let seated = Seated { seat, facts, system };
             let agent = start.agent.clone();
             tracing::info!(%seat, agent = %agent.0, cwd = start.cwd, "start a seated thread");
             let outcome = if agent.is(AgentId::PI) {

@@ -334,12 +334,8 @@ mod codex {
         let given = env.clone();
         host.set_seat_env(std::sync::Arc::new(move |_| given.clone()));
         let relay = "/opt/slopty/bin/slopty";
-        let seated = Seated {
-            seat,
-            facts: Vec::new(),
-            system: Some("You review.".to_owned()),
-            relay: Some(relay.to_owned()),
-        };
+        host.set_tools_cli(Some(relay.to_owned()));
+        let seated = Seated { seat, facts: Vec::new(), system: Some("You review.".to_owned()) };
         let held = Start { mode: Some("on-request".to_owned()), ..start(&work, "Say hello.") };
         let outcome = handle.start_seated(held.clone(), seated.clone()).await;
         let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };

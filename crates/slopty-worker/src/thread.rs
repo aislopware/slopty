@@ -53,8 +53,6 @@ pub struct Seated {
     pub facts: Vec<(String, String)>,
     /// Extra system text: what Slopty's tools reach.
     pub system: Option<String>,
-    /// Slopty's CLI, whose `mcp` serves the tools; `None` where it is not found.
-    pub relay: Option<String>,
 }
 
 /// What the worker gives a seat's agent and tools to find in their environment.

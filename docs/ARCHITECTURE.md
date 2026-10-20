@@ -442,10 +442,10 @@ task, plan or outcome of its own. The hub answers the agents' verbs itself
 - `BranchBring` has the source worker bundle the branch (`Verb::BundleBranch`), reads it in
   4 MiB parts, uploads it to the target worker and has it fetched there (`Verb::FetchBundle`).
 
-The worker's seated starts add `--mcp-config=` naming `slopty mcp` (`slopty_agent::mcp`),
-which serves the eight tools (`slopty_tools::tools`: `machines`, `agent_start`, `agent_tell`,
-`agent_read`, `agent_wait`, `agent_stop`, `agents`, `branch_bring`), each also a `slopty`
-command. Every session gets `SLOPTY_SERVER`, so `slopty mcp` and the CLI inside it find the
+Every Claude Code run the worker starts adds `--mcp-config=` naming `slopty mcp`
+(`slopty_agent::mcp`, the CLI from `Host::tools_cli`), which serves the eight tools
+(`slopty_tools::tools`: `machines`, `agent_start`, `agent_tell`, `agent_read`, `agent_wait`,
+`agent_stop`, `agents`, `branch_bring`), each also a `slopty` command. Every session gets `SLOPTY_SERVER`, so `slopty mcp` and the CLI inside it find the
 server. The attention ladder rolls up by thread, tree, space and fleet
 (`slopty-server::hub::ladder`). Tests start `slopty-stub-claude`, never `claude`.
 

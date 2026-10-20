@@ -681,7 +681,6 @@ mod threads {
             seat,
             facts: vec![(PARENT_FACT.to_owned(), parent.to_string())],
             system: Some("You review.".to_owned()),
-            relay: Some("/opt/slopty/bin/slopty".to_owned()),
         };
         host.seated(thread, &seated);
         let kept = |host: &Host| {
