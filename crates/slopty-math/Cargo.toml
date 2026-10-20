@@ -12,7 +12,8 @@ description = "Fast, low-memory LaTeX math layout over any OpenType math font"
 ttf-parser.workspace = true
 
 [features]
-# Six math faces compiled in (`slopty_math::bundled`), ~4 MB of read-only data;
+# Two math faces compiled in (`slopty_math::bundled`: Fira, backed by STIX Two), ~1 MB of read-only
+# data;
 # a face is only parsed (and its pages touched) once something uses it.
 bundled = [  ]
 

@@ -40,9 +40,6 @@ Button │ Terminal font size: 13 px
 Button │ Code & diff font: Geist Mono
 Button │ Code & diff font size: 12.5 px
 Button │ Conversation width: Default
-Switch │ Render math
-Button │ Math font: Fira Math
-Button │ Math size: 100%
 MenuItemRadio │ Slopty Light
 MenuItemRadio │ High Contrast Light
 MenuItemRadio │ Rosé Pine Dawn

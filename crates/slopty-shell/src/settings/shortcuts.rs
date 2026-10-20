@@ -44,8 +44,6 @@ pub fn record_key(key: &str, ctrl: bool, alt: bool, shift: bool, cmd: bool) -> R
 pub enum ShortcutsEvent {
     /// The keymap changed — persist + re-apply.
     KeymapChanged(KeymapConfig),
-    /// The Escape fallback changed — persist it locally.
-    EscapeStopsActiveAgentChanged(bool),
     /// The composer send behavior changed — persist + re-apply.
     ComposerSendBehaviorChanged(ComposerSendBehavior),
     // slopty: appshots removed.
@@ -57,7 +55,6 @@ pub struct ShortcutsPage {
     scroll: crate::settings::widgets::PageScroll,
     /// Working copy (kept in sync with the shell via change events).
     keymap: KeymapConfig,
-    escape_stops_active_agent: bool,
     composer_send_behavior: ComposerSendBehavior,
     recording: Option<ShortcutId>,
     recording_blur: Option<gpui::Subscription>,
@@ -79,7 +76,6 @@ impl ShortcutsPage {
     pub fn new(
         state: Entity<AppState>,
         keymap: KeymapConfig,
-        escape_stops_active_agent: bool,
         composer_send_behavior: ComposerSendBehavior,
         // slopty: appshots removed.
         cx: &mut Context<Self>,
@@ -88,7 +84,6 @@ impl ShortcutsPage {
             general_page: false,
             scroll: crate::settings::widgets::PageScroll::default(),
             keymap,
-            escape_stops_active_agent,
             composer_send_behavior,
             recording: None,
             recording_blur: None,
@@ -148,14 +143,6 @@ impl ShortcutsPage {
     fn commit(&mut self, cx: &mut Context<Self>) {
         cx.emit(ShortcutsEvent::KeymapChanged(self.keymap.clone()));
         cx.notify();
-    }
-
-    fn set_escape_stops_active_agent(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.escape_stops_active_agent != enabled {
-            self.escape_stops_active_agent = enabled;
-            cx.emit(ShortcutsEvent::EscapeStopsActiveAgentChanged(enabled));
-            cx.notify();
-        }
     }
 
     fn set_composer_send_behavior(
@@ -437,9 +424,6 @@ pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Opt
         .find(|&other| other != id && keymap.get(other) == combo) // slopty: appshots removed.
 }
 
-/// slopty: compact mode's default: off.
-const COMPACT_MODE_DEFAULT: bool = false;
-
 pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {
     combo == "mod-enter"
 }
@@ -499,14 +483,10 @@ impl Render for ShortcutsPage {
         // slopty: appshots removed.
         let theme = Theme::of(cx).for_settings_surface();
         let recording = self.recording;
-        let escape_stops_active_agent = self.escape_stops_active_agent;
         let send_behavior = self.composer_send_behavior;
-        let compact_mode = crate::settings::transcript_compact_mode(cx);
         // slopty: every choice these pages hold counts, each against its default.
         let customized = self.keymap != KeymapConfig::default()
-            || escape_stops_active_agent
-            || send_behavior != ComposerSendBehavior::default()
-            || compact_mode != COMPACT_MODE_DEFAULT;
+            || send_behavior != ComposerSendBehavior::default();
         let mac = crate::keys::MOD_IS_COMMAND; // slopty: an iPad's ⌘ too
         let send_behaviors = [
             (ComposerSendBehavior::Enter, SharedString::from(crate::keys::combo_text_on(mac, "enter"))),
@@ -546,30 +526,6 @@ impl Render for ShortcutsPage {
                 this.set_composer_send_behavior(ComposerSendBehavior::default(), cx);
             }))
         });
-        let compact_mode_reset = widgets::reset_action(
-            &theme,
-            "transcript-compact-mode-reset",
-            "Compact mode",
-            compact_mode == COMPACT_MODE_DEFAULT,
-        )
-        .map(|reset| {
-            reset.on_click(cx.listener(|_, _, _, cx| {
-                crate::settings::set_transcript_compact_mode(COMPACT_MODE_DEFAULT, cx);
-                cx.notify();
-            }))
-        });
-        let escape_reset = widgets::reset_action(
-            &theme,
-            "escape-stops-active-agent-reset",
-            "Stop agent with Escape",
-            !escape_stops_active_agent,
-        )
-        .map(|reset| {
-            reset.on_click(cx.listener(|this, _, _, cx| {
-                this.set_escape_stops_active_agent(false, cx);
-            }))
-        });
-
         let send_behavior_row = widgets::card_row(&theme, true)
             .child(
                 div()
@@ -579,78 +535,7 @@ impl Render for ShortcutsPage {
             )
             .children(send_reset)
             .child(send_behavior_control);
-        let compact_mode_row = widgets::card_row(&theme, false)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(widgets::row_title(&theme, "Compact mode"))
-                    .child(widgets::meta_line(
-                        &theme,
-                        vec![
-                            div()
-                                .child("Collapse thinking and tools.")
-                                .into_any_element(),
-                        ],
-                    )),
-            )
-            .children(compact_mode_reset)
-            .child(
-                widgets::toggle_switch(&theme, compact_mode, "transcript-compact-mode")
-                    .id("transcript-compact-mode-toggle")
-                    .tab_index(0)
-                    .role(gpui::Role::Switch)
-                    .aria_label("Compact mode")
-                    .aria_toggled(if compact_mode {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
-                    .map(|el| crate::surface_chrome::focus_ring(el, &theme))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        crate::settings::set_transcript_compact_mode(!compact_mode, cx);
-                        cx.notify();
-                    })),
-            );
-        let escape_behavior_row = widgets::card_row(&theme, false)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(160.0))
-                    .child(widgets::row_title(&theme, "Stop agent with Escape"))
-                    .child(widgets::meta_line(
-                        &theme,
-                        vec![
-                            div()
-                                .child("When no dialog or menu is open.")
-                                .into_any_element(),
-                        ],
-                    )),
-            )
-            .children(escape_reset)
-            .child(
-                widgets::toggle_switch(
-                    &theme,
-                    escape_stops_active_agent,
-                    "escape-stops-active-agent",
-                )
-                .id("escape-stops-active-agent-toggle")
-                .debug_selector(|| "escape-stops-active-agent-toggle".into())
-                .tab_index(0)
-                .role(gpui::Role::Switch)
-                .aria_label("Stop active agent with Escape")
-                .aria_toggled(if escape_stops_active_agent {
-                    gpui::Toggled::True
-                } else {
-                    gpui::Toggled::False
-                })
-                .map(|el| crate::surface_chrome::focus_ring(el, &theme))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_escape_stops_active_agent(!escape_stops_active_agent, cx);
-                })),
-            );
+        // slopty: Compact mode and Esc-to-stop are no longer settings.
         if self.general_page {
             // slopty: no pull-request pages, so no choice of where a pull request opens.
             let scrollbar = self.render_scrollbar(&theme, cx);
@@ -676,14 +561,12 @@ impl Render for ShortcutsPage {
                                         &theme,
                                         "General",
                                         None,
-                                        "How messages send and agents stop.",
+                                        "How messages send.",
                                         None,
                                     ))
                                     .child(
                                         widgets::section_card(&theme)
-                                            .child(send_behavior_row)
-                                            .child(compact_mode_row)
-                                            .child(escape_behavior_row),
+                                            .child(send_behavior_row),
                                     ), // slopty: no thread naming.
                             ),
                     )
@@ -756,13 +639,8 @@ impl Render for ShortcutsPage {
                                                 this.stop_recording();
                                                 this.conflict_notice = None;
                                                 this.commit(cx);
-                                                this.set_escape_stops_active_agent(false, cx);
                                                 this.set_composer_send_behavior(
                                                     ComposerSendBehavior::default(),
-                                                    cx,
-                                                );
-                                                crate::settings::set_transcript_compact_mode(
-                                                    COMPACT_MODE_DEFAULT,
                                                     cx,
                                                 );
                                             }))
@@ -813,7 +691,6 @@ mod tests {
             let mut page = ShortcutsPage::new(
                 state,
                 KeymapConfig::default(),
-                false,
                 ComposerSendBehavior::Enter,
                 // slopty: appshots removed.
                 cx,
@@ -840,19 +717,12 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("composer-send-behavior-option-1").is_none());
-        let escape = cx.debug_bounds("escape-stops-active-agent-toggle").unwrap();
-        cx.simulate_click(escape.center(), gpui::Modifiers::default());
         page.update(cx, |page, _| {
             assert_eq!(page.composer_send_behavior, ComposerSendBehavior::ModEnter);
-            assert!(page.escape_stops_active_agent);
             page.show_section(false); // slopty: appshots removed.
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("composer-send-behavior").is_none());
-        assert!(
-            cx.debug_bounds("escape-stops-active-agent-toggle")
-                .is_none()
-        );
     }
 
     // slopty: dictation and appshots removed.
@@ -877,7 +747,6 @@ mod tests {
             ShortcutsPage::new(
                 state,
                 KeymapConfig::default(),
-                false,
                 ComposerSendBehavior::default(),
                 // slopty: appshots removed.
                 cx,
@@ -1014,12 +883,6 @@ mod tests {
     fn modifier_send_labels_are_platform_specific() {
         assert_eq!(modifier_send_label(true), "⌘⏎");
         assert_eq!(modifier_send_label(false), "Ctrl+Enter");
-    }
-
-    #[test]
-    fn the_general_rows_reset_to_the_settings_defaults() {
-        let defaults = crate::settings::UiSettings::default();
-        assert_eq!(defaults.transcript_compact_mode, COMPACT_MODE_DEFAULT);
     }
 
     #[test]

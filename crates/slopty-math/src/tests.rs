@@ -3,19 +3,15 @@ use crate::{ErrorKind, Formula, Item, MathFont, Options, layout};
 use std::sync::{Arc, OnceLock};
 
 const STIX: &[u8] = include_bytes!("../fonts/STIXTwoMath-Regular.otf");
-const LIBERTINUS: &[u8] = include_bytes!("../fonts/LibertinusMath-Regular.otf");
 const FIRA: &[u8] = include_bytes!("../fonts/FiraMath-Regular.otf");
 
-/// STIX Two Math alone; Libertinus Math and Fira Math falling back to it.
+/// STIX Two Math alone, and Fira Math falling back to it.
 pub(crate) fn fonts() -> &'static [MathFont] {
     static FONTS: OnceLock<Vec<MathFont>> = OnceLock::new();
     FONTS.get_or_init(|| {
         let stix = Arc::new(MathFont::new(STIX).unwrap());
         vec![
             MathFont::new(STIX).unwrap(),
-            MathFont::new(LIBERTINUS)
-                .unwrap()
-                .with_fallback(stix.clone()),
             MathFont::new(FIRA).unwrap().with_fallback(stix),
         ]
     })
@@ -131,10 +127,9 @@ fn corpus_lays_out_in_every_font() {
 #[test]
 fn fonts_load_with_names() {
     let names: Vec<_> = fonts().iter().map(|f| f.name().unwrap()).collect();
-    assert_eq!(names.len(), 3);
+    assert_eq!(names.len(), 2);
     assert!(names[0].contains("STIX"), "{names:?}");
-    assert!(names[1].contains("Libertinus"), "{names:?}");
-    assert!(names[2].contains("Fira"), "{names:?}");
+    assert!(names[1].contains("Fira"), "{names:?}");
 }
 
 #[test]
@@ -152,7 +147,7 @@ fn fonts_change_the_layout() {
         .map(|f| layout(src, f, &Options::inline(16.0)).unwrap().width)
         .collect();
     assert!(
-        (widths[0] - widths[1]).abs() > 0.1 && (widths[0] - widths[2]).abs() > 0.1,
+        (widths[0] - widths[1]).abs() > 0.1,
         "{widths:?}"
     );
 }
@@ -450,10 +445,10 @@ fn alphabets_come_from_the_fallback_when_missing() {
         }
     }
     // Fira has no script letters: they come from STIX, font 1 of its chain.
-    let f = layout(r"\mathcal{L}", &fonts()[2], &Options::inline(16.0)).unwrap();
+    let f = layout(r"\mathcal{L}", &fonts()[1], &Options::inline(16.0)).unwrap();
     assert!(matches!(f.items[0], Item::Glyph { font: 1, .. }));
     // Its own letters stay its own.
-    let f = layout("x", &fonts()[2], &Options::inline(16.0)).unwrap();
+    let f = layout("x", &fonts()[1], &Options::inline(16.0)).unwrap();
     assert!(matches!(f.items[0], Item::Glyph { font: 0, .. }));
 }
 

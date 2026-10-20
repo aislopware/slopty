@@ -14171,6 +14171,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       (`a_finished_or_dismissed_list_stays_gone_until_the_list_changes`).
     - The compact model picker, the width presets and the skill keys landed with lane H (P6,
       P9, P11).
+    - The Compact mode, Stop-agent-with-Escape and code-fence-fit settings are deleted with
+      their Shortcuts rows, shell wiring and tests, since nothing read them: the transcript
+      folds every turn, Escape always stops on a second press, and fences have one layout. The
+      maths settings (Render math, Math font, Math size) went the same way, with their
+      Appearance rows, since every formula is set in Fira Math at the text's own size
+      (`markdown::math::MATH_FACE`). `slopty-math` keeps only Fira Math and STIX Two Math, which
+      backs Fira's script letters (`\mathcal`, `\mathfrak`); New Computer Modern, Libertinus,
+      Pagella and Euler are deleted, about 3.0 MB of bundled font data less. An old settings
+      file's keys for any of these are ignored.
   - **One status mark** (design #1) for a subagent card and a Todo step: its ring turns while
     the run works and draws its tick as it finishes, where a spinner and a check cut. A Todo step
     in progress but idle keeps its ring, a pending one its empty circle.

@@ -64,17 +64,12 @@ Authors (github.com/vercel/geist-font). SIL Open Font License 1.1; the full text
 
 The math typesetter (`crates/slopty-math`, which draws on zeron's zatex) bundles unmodified math
 fonts for rendering LaTeX (its `bundled` feature). Each font's licence and copyright notice is
-kept beside it in `crates/slopty-math/fonts/`: the SIL Open Font License 1.1 (`OFL-*.txt`) or the
-GUST Font License (`GUST-FONT-LICENSE.txt`, LPPL 1.3c).
+kept beside it in `crates/slopty-math/fonts/`: the SIL Open Font License 1.1 (`OFL-*.txt`).
 
 | Font | Version | Licence | Source |
 | --- | --- | --- | --- |
 | Fira Math | 0.3.4 | OFL-1.1 | https://github.com/firamath/firamath |
 | STIX Two Math | 2.13 | OFL-1.1 | https://github.com/stipub/stixfonts |
-| New Computer Modern Math (Book) | 8.1.1 | GUST Font License | https://ctan.org/pkg/newcomputermodern |
-| Libertinus Math | 7.051 | OFL-1.1 | https://github.com/alerque/libertinus |
-| TeX Gyre Pagella Math | 1.632 | GUST Font License | https://ctan.org/pkg/tex-gyre-math |
-| Euler Math | 0.75 | OFL-1.1 | https://ctan.org/pkg/euler-math |
 
 ## Solar Icons
 

@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! Math fonts compiled into the binary (feature `bundled`): six faces, each
+//! Math fonts compiled into the binary (feature `bundled`): two faces, each
 //! falling back to STIX Two Math for what it lacks. A face loads on first use
 //! and is shared, so every host and thread uses the same parsed font and
 //! caches; faces nobody picks are never parsed (their bytes stay untouched
@@ -21,27 +21,13 @@ pub enum Face {
     Fira,
     /// STIX Two Math: Times-like; covers everything, so it backs every face.
     StixTwo,
-    /// New Computer Modern Math, Book weight: the LaTeX look, a little
-    /// heavier than Latin Modern so it holds up at UI sizes.
-    ComputerModern,
-    /// Libertinus Math: Linux Libertine's warm book serif.
-    Libertinus,
-    /// TeX Gyre Pagella Math: Palatino.
-    Pagella,
-    /// Euler Math: Zapf's upright, handwritten math (AMS Euler).
-    Euler,
+    // slopty: New Computer Modern, Libertinus, Pagella and Euler are not bundled: nothing
+    // picks a face but Fira, and STIX Two backs it.
 }
 
 impl Face {
     /// Every face, in table order.
-    pub const ALL: [Face; 6] = [
-        Face::Fira,
-        Face::StixTwo,
-        Face::ComputerModern,
-        Face::Libertinus,
-        Face::Pagella,
-        Face::Euler,
-    ];
+    pub const ALL: [Face; 2] = [Face::Fira, Face::StixTwo];
 
     /// The face's own font in the [`font_at`] table. Append-only, so an
     /// index a host stored or sent across FFI never changes meaning.
@@ -53,10 +39,6 @@ impl Face {
         match self {
             Face::Fira => include_bytes!("../fonts/FiraMath-Regular.otf"),
             Face::StixTwo => include_bytes!("../fonts/STIXTwoMath-Regular.otf"),
-            Face::ComputerModern => include_bytes!("../fonts/NewCMMath-Book.otf"),
-            Face::Libertinus => include_bytes!("../fonts/LibertinusMath-Regular.otf"),
-            Face::Pagella => include_bytes!("../fonts/texgyrepagella-math.otf"),
-            Face::Euler => include_bytes!("../fonts/Euler-Math.otf"),
         }
     }
 }
@@ -73,7 +55,7 @@ fn stix_arc() -> &'static Arc<MathFont> {
 
 /// The font for `face` (with its fallback chain), loaded on first use.
 pub fn font(face: Face) -> &'static MathFont {
-    static FONTS: [OnceLock<MathFont>; Face::ALL.len()] = [const { OnceLock::new() }; 6];
+    static FONTS: [OnceLock<MathFont>; Face::ALL.len()] = [const { OnceLock::new() }; Face::ALL.len()];
     if face == Face::StixTwo {
         return stix_arc();
     }
@@ -121,19 +103,8 @@ mod tests {
             .iter()
             .map(|&f| font_at(f.index()).name().unwrap())
             .collect();
-        for (name, part) in names.iter().zip([
-            "Fira",
-            "STIX",
-            "Computer Modern",
-            "Libertinus",
-            "Pagella",
-            "Euler",
-        ]) {
-            assert!(
-                name.replace("ComputerModern", "Computer Modern")
-                    .contains(part),
-                "{names:?}"
-            );
+        for (name, part) in names.iter().zip(["Fira", "STIX"]) {
+            assert!(name.contains(part), "{names:?}");
         }
         let src = r"\mathcal{L} = \frac{x}{y} + \mathfrak{g}";
         let opts = Options::inline(16.0);
@@ -163,8 +134,8 @@ mod tests {
         let f = layout(r"\mathcal{L}", Face::Fira, &opts).unwrap();
         assert!(matches!(f.items[0], Item::Glyph { font: 1, .. }));
         // Its own letters stay its own.
-        let f = layout("x", Face::Euler, &opts).unwrap();
-        assert!(matches!(f.items[0], Item::Glyph { font, .. } if font == Face::Euler.index()));
+        let f = layout("x", Face::Fira, &opts).unwrap();
+        assert!(matches!(f.items[0], Item::Glyph { font, .. } if font == Face::Fira.index()));
     }
 
     #[test]

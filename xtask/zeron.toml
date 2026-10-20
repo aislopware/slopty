@@ -235,6 +235,15 @@ paths = [
     "crates/ui/build.rs",
     # zatex's benchmark and font-sheet examples (its numbers: docs/MEASUREMENTS.md).
     "crates/zatex/examples/",
+    # zatex's four math faces nothing picks (Fira, backed by STIX Two, is the only face set:
+    # docs/decisions/ui.md, 2026-10-20) with their licences.
+    "crates/zatex/fonts/Euler-Math.otf",
+    "crates/zatex/fonts/LibertinusMath-Regular.otf",
+    "crates/zatex/fonts/NewCMMath-Book.otf",
+    "crates/zatex/fonts/texgyrepagella-math.otf",
+    "crates/zatex/fonts/OFL-EulerMath.txt",
+    "crates/zatex/fonts/OFL-LibertinusMath.txt",
+    "crates/zatex/fonts/GUST-FONT-LICENSE.txt",
     # Pruned from Appearance and the agents' settings (docs/decisions/ui.md, "The sidebar, settings
     # and themes take Amp's details and prunes"): theme import with its library, the per-agent
     # completion preferences, and the wallpaper folder with its shuffle.

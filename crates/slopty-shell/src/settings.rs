@@ -122,125 +122,6 @@ impl Default for NewThreadBackgroundAdjustment {
     }
 }
 
-/// The face Markdown math is set in. Every face is bundled, so the choice
-/// never depends on what the device has installed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum MathFont {
-    #[default]
-    Fira,
-    StixTwo,
-    ComputerModern,
-    Libertinus,
-    Pagella,
-    Euler,
-}
-
-impl MathFont {
-    pub const ALL: [Self; 6] = [
-        Self::Fira,
-        Self::StixTwo,
-        Self::ComputerModern,
-        Self::Libertinus,
-        Self::Pagella,
-        Self::Euler,
-    ];
-
-    /// The name stored in the settings file.
-    const fn key(self) -> &'static str {
-        match self {
-            Self::Fira => "fira",
-            Self::StixTwo => "stixTwo",
-            Self::ComputerModern => "computerModern",
-            Self::Libertinus => "libertinus",
-            Self::Pagella => "pagella",
-            Self::Euler => "euler",
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Fira => "Fira Math",
-            Self::StixTwo => "STIX Two",
-            Self::ComputerModern => "Computer Modern",
-            Self::Libertinus => "Libertinus",
-            Self::Pagella => "Palatino",
-            Self::Euler => "Euler",
-        }
-    }
-
-    /// The short note beside the label in the menu.
-    pub const fn style(self) -> &'static str {
-        match self {
-            Self::Fira => "Sans",
-            Self::StixTwo | Self::Libertinus | Self::Pagella => "Serif",
-            Self::ComputerModern => "LaTeX",
-            Self::Euler => "Upright",
-        }
-    }
-
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::Fira => "A sans face that sits beside the interface font.",
-            Self::StixTwo => "A Times-like serif face with the TeX look.",
-            Self::ComputerModern => "A serif face with the classic LaTeX look.",
-            Self::Libertinus => "A warm serif book face.",
-            Self::Pagella => "A Palatino serif face, from TeX Gyre Pagella.",
-            Self::Euler => "Zapf's upright, hand-drawn math.",
-        }
-    }
-
-    pub const fn face(self) -> slopty_math::bundled::Face {
-        match self {
-            Self::Fira => slopty_math::bundled::Face::Fira,
-            Self::StixTwo => slopty_math::bundled::Face::StixTwo,
-            Self::ComputerModern => slopty_math::bundled::Face::ComputerModern,
-            Self::Libertinus => slopty_math::bundled::Face::Libertinus,
-            Self::Pagella => slopty_math::bundled::Face::Pagella,
-            Self::Euler => slopty_math::bundled::Face::Euler,
-        }
-    }
-}
-
-impl Serialize for MathFont {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.key())
-    }
-}
-
-/// A face this build doesn't know (written by a newer one) reads as the
-/// default rather than failing the whole settings file.
-impl<'de> Deserialize<'de> for MathFont {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let stored = serde_json::Value::deserialize(deserializer)?;
-        Ok(Self::ALL
-            .into_iter()
-            .find(|font| stored == font.key())
-            .unwrap_or_default())
-    }
-}
-
-/// Markdown math size as a percent of the text around it.
-pub const MATH_SIZE_DEFAULT: u16 = 100;
-pub const MATH_SIZE_MIN: u16 = 75;
-pub const MATH_SIZE_MAX: u16 = 200;
-
-/// A stored math size: any number rounds and clamps into range; anything
-/// else (`"big"`, `null`, an object) reads as the default. Like an unknown
-/// [`MathFont`], a bad value never fails the rest of the settings file.
-fn deserialize_math_size<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<u16, D::Error> {
-    let stored = serde_json::Value::deserialize(deserializer)?;
-    Ok(stored
-        .as_f64()
-        .filter(|size| size.is_finite())
-        .map_or(MATH_SIZE_DEFAULT, |size| {
-            // In range, the cast is exact.
-            size.round()
-                .clamp(f64::from(MATH_SIZE_MIN), f64::from(MATH_SIZE_MAX)) as u16
-        }))
-}
-
 // slopty: no History surface (ruled out).
 
 /// slopty: how wide a conversation reads, as one of Amp's three presets in place of a pixel
@@ -328,13 +209,6 @@ pub struct SettingsStore {
     data_dir: PathBuf,
     revision: u64,
     saved_revision: u64,
-    /// In-process invalidation token for transcript code-fence layout. Unlike
-    /// the persisted revision, this advances only when the global Fit choice
-    /// changes, including a change back to its previous value.
-    code_fences_generation: u64,
-    /// The same token for how Markdown math renders (on or off, face and
-    /// size).
-    math_generation: u64,
     save_task: Option<Task<()>>,
     // slopty: a file [`UiSettings::load`] moved aside, until [`announce_set_aside`] says so.
     set_aside: Option<Option<PathBuf>>,
@@ -359,15 +233,6 @@ impl SettingsStore {
         if self.current == before {
             return false;
         }
-        if self.current.code_fences_fit_content != before.code_fences_fit_content {
-            self.code_fences_generation = self.code_fences_generation.wrapping_add(1);
-        }
-        if self.current.render_math != before.render_math
-            || self.current.math_font != before.math_font
-            || self.current.math_size != before.math_size
-        {
-            self.math_generation = self.math_generation.wrapping_add(1);
-        }
         self.revision = self.revision.wrapping_add(1);
         true
     }
@@ -382,8 +247,6 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
         data_dir,
         revision: 0,
         saved_revision: 0,
-        code_fences_generation: 0,
-        math_generation: 0,
         save_task: None,
         set_aside,
     });
@@ -552,66 +415,6 @@ fn remove_managed_new_thread_background(
     // directly into the directory owned by this setting are disposable.
     if path.parent() == Some(backgrounds_dir) {
         let _ = std::fs::remove_file(path);
-    }
-}
-
-/// Monotonic id of the global code-fence layout choice. Every transcript
-/// compares this during render so inactive subagent tabs can observe all mode
-/// transitions when they next become visible.
-pub fn code_fences_generation(cx: &App) -> u64 {
-    cx.try_global::<SettingsStore>()
-        .map(|store| store.code_fences_generation)
-        .unwrap_or_default()
-}
-
-/// Compact transcript mode: each turn's work folds into one collapsed
-/// accordion, leaving only the reply text. Transcripts poll this during
-/// render and rebuild their row split on a flip — cheap by design (a bool
-/// field read, not a `current()` clone).
-pub fn transcript_compact_mode(cx: &App) -> bool {
-    cx.try_global::<SettingsStore>()
-        .map(|store| store.current.transcript_compact_mode)
-        .unwrap_or_default()
-}
-
-pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
-    if update(SavePolicy::Immediate, cx, |settings| {
-        settings.transcript_compact_mode = enabled;
-    }) {
-        cx.refresh_windows();
-    }
-}
-
-// slopty: math has one look now (`markdown::math::MATH_FACE`, the Amp study's P8); what reads
-// the math settings goes with them.
-/// Monotonic id of the math settings.
-pub fn math_generation(cx: &App) -> u64 {
-    cx.try_global::<SettingsStore>()
-        .map(|store| store.math_generation)
-        .unwrap_or_default()
-}
-
-pub fn set_render_math(enabled: bool, cx: &mut App) {
-    if update(SavePolicy::Immediate, cx, |settings| {
-        settings.render_math = enabled;
-    }) {
-        cx.refresh_windows();
-    }
-}
-
-pub fn set_math_font(font: MathFont, cx: &mut App) {
-    if update(SavePolicy::Immediate, cx, |settings| {
-        settings.math_font = font;
-    }) {
-        cx.refresh_windows();
-    }
-}
-
-pub fn set_math_size(size: u16, cx: &mut App) {
-    if update(SavePolicy::Immediate, cx, |settings| {
-        settings.math_size = size;
-    }) {
-        cx.refresh_windows();
     }
 }
 
@@ -869,9 +672,7 @@ pub struct UiSettings {
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
     // slopty: appshots removed.
-    /// Whether bare Escape stops the active agent after contextual consumers
-    /// decline it. Device-local and opt-in.
-    pub escape_stops_active_agent: bool,
+    // slopty: no Compact-mode, Esc-to-stop, code-fence-fit or maths settings: each has one behaviour.
     /// The Settings section last viewed. ⌘, / Ctrl+,, the footer gear and the
     /// palette reopen it; links naming a section replace it. Files without
     /// it, or with a name this build does not know, open on General.
@@ -901,27 +702,12 @@ pub struct UiSettings {
     pub diff_ignore_whitespace: bool,
     /// Changes pane: the changed files' tree beside the diff.
     pub diff_show_tree: bool,
-    /// Agent-sent Markdown fences: wrap long lines to the chat width instead
-    /// of exposing their horizontal scroll plane.
-    pub code_fences_fit_content: bool,
-    /// Typeset LaTeX math in Markdown. Off shows its source as code.
-    pub render_math: bool,
-    /// The bundled face typeset math is set in.
-    pub math_font: MathFont,
-    /// Typeset math size, as a percent of the text around it. Read
-    /// tolerantly ([`deserialize_math_size`]).
-    #[serde(deserialize_with = "deserialize_math_size")]
-    pub math_size: u16,
     /// How wide messages and the docked composer go ([`ConversationWidth`]).
     /// The centered new-chat composer keeps its own width.
     pub conversation_width: ConversationWidth,
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
     pub open_web_links_in_slopty: bool,
-    /// Compact transcript: a turn's working steps (thinking, tool calls, and
-    /// the narration between them) fold into one collapsed accordion, so only
-    /// the reply text stays visible.
-    pub transcript_compact_mode: bool,
     // slopty: no pull-request pages.
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
@@ -976,7 +762,6 @@ impl Default for UiSettings {
             session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
             session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
             keymap: KeymapConfig::default(),
-            escape_stops_active_agent: false,
             settings_section: crate::shell::SettingsSection::default(),
             composer_send_behavior: ComposerSendBehavior::default(),
             // slopty: appshots removed.
@@ -993,13 +778,8 @@ impl Default for UiSettings {
             diff_wrap: false,
             diff_ignore_whitespace: false, // slopty
             diff_show_tree: false,         // slopty
-            code_fences_fit_content: false,
-            render_math: true,
-            math_font: MathFont::Fira,
-            math_size: MATH_SIZE_DEFAULT,
             conversation_width: ConversationWidth::Default,
             open_web_links_in_slopty: true,
-            transcript_compact_mode: false,
             // slopty: no pull-request pages.
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
@@ -1558,7 +1338,6 @@ impl UiSettings {
             session_tabs, // slopty: kept panes
             keymap,
             // slopty: appshots removed.
-            escape_stops_active_agent,
             settings_section,
             appearance,
             // slopty: no History surface (ruled out).
@@ -1573,13 +1352,8 @@ impl UiSettings {
             diff_wrap,
             diff_ignore_whitespace, // slopty
             diff_show_tree,         // slopty
-            code_fences_fit_content,
-            render_math,
-            math_font,
-            math_size,
             conversation_width,
             open_web_links_in_slopty,
-            transcript_compact_mode,
             files_autosave_enabled,
             files_autosave_delay_ms,
             files_word_wrap,
@@ -1624,7 +1398,6 @@ impl UiSettings {
         self.files_autosave_delay_ms = self
             .files_autosave_delay_ms
             .clamp(FILES_AUTOSAVE_DELAY_MIN_MS, FILES_AUTOSAVE_DELAY_MAX_MS);
-        self.math_size = self.math_size.clamp(MATH_SIZE_MIN, MATH_SIZE_MAX);
         self.terminal_font_size = clamp_or(
             self.terminal_font_size,
             crate::typography::FONT_SIZE_MIN,
@@ -2149,9 +1922,6 @@ mod tests {
             loaded.code_font_size,
             crate::typography::CODE_FONT_SIZE_DEFAULT
         );
-        assert!(loaded.render_math);
-        assert_eq!(loaded.math_font, MathFont::Fira);
-        assert_eq!(loaded.math_size, MATH_SIZE_DEFAULT);
     }
 
     // slopty: appshots removed.
@@ -2444,7 +2214,6 @@ mod tests {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()
             },
-            escape_stops_active_agent: true,
             settings_section: crate::shell::SettingsSection::Shortcuts,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
             // slopty: appshots removed.
@@ -2460,13 +2229,8 @@ mod tests {
             diff_wrap: true,
             diff_ignore_whitespace: true, // slopty
             diff_show_tree: true,         // slopty
-            code_fences_fit_content: true,
-            render_math: false,
-            math_font: MathFont::StixTwo,
-            math_size: 135,
             conversation_width: ConversationWidth::Wide,
             open_web_links_in_slopty: false,
-            transcript_compact_mode: true,
             // slopty: no pull-request pages.
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
@@ -2496,10 +2260,6 @@ mod tests {
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
-        assert!(json.contains(r#""codeFencesFitContent": true"#));
-        assert!(json.contains(r#""renderMath": false"#));
-        assert!(json.contains(r#""mathFont": "stixTwo""#));
-        assert!(json.contains(r#""mathSize": 135"#));
         assert!(json.contains(r#""openWebLinksInSlopty": false"#));
         assert!(json.contains(r#""focalX": 0.25"#));
         assert!(json.contains(r#""focalY": 0.75"#));
@@ -2520,8 +2280,6 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             revision: 0,
             saved_revision: 0,
-            code_fences_generation: 0,
-            math_generation: 0,
             save_task: None,
             set_aside: None,
         };
@@ -2568,190 +2326,6 @@ mod tests {
         assert_eq!(UiSettings::load(dir.path()).conversation_width, Full);
     }
 
-    #[test]
-    fn code_fence_generation_tracks_every_mode_transition_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = SettingsStore {
-            current: UiSettings::default(),
-            data_dir: dir.path().to_path_buf(),
-            revision: 0,
-            saved_revision: 0,
-            code_fences_generation: 0,
-            math_generation: 0,
-            save_task: None,
-            set_aside: None,
-        };
-
-        assert!(store.update_current(|settings| settings.sidebar_width = 300.0));
-        assert_eq!(store.code_fences_generation, 0);
-
-        assert!(store.update_current(|settings| settings.code_fences_fit_content = true));
-        assert_eq!(store.code_fences_generation, 1);
-        assert!(store.update_current(|settings| settings.code_fences_fit_content = false));
-        assert_eq!(store.code_fences_generation, 2);
-
-        assert!(!store.update_current(|settings| settings.code_fences_fit_content = false));
-        assert_eq!(store.code_fences_generation, 2);
-    }
-
-    #[test]
-    fn math_generation_tracks_every_math_change_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = SettingsStore {
-            current: UiSettings::default(),
-            data_dir: dir.path().to_path_buf(),
-            revision: 0,
-            saved_revision: 0,
-            code_fences_generation: 0,
-            math_generation: 0,
-            save_task: None,
-            set_aside: None, // slopty
-        };
-
-        assert!(store.update_current(|settings| settings.code_fences_fit_content = true));
-        assert_eq!(store.math_generation, 0);
-
-        assert!(store.update_current(|settings| settings.render_math = false));
-        assert_eq!(store.math_generation, 1);
-        assert!(store.update_current(|settings| settings.math_font = MathFont::StixTwo));
-        assert_eq!(store.math_generation, 2);
-        assert!(store.update_current(|settings| settings.render_math = true));
-        assert_eq!(store.math_generation, 3);
-
-        assert!(!store.update_current(|settings| settings.math_font = MathFont::StixTwo));
-        assert_eq!(store.math_generation, 3);
-
-        assert!(store.update_current(|settings| settings.math_size = 120));
-        assert_eq!(store.math_generation, 4);
-        assert!(!store.update_current(|settings| settings.math_size = 120));
-        assert_eq!(store.math_generation, 4);
-        // A value the clamp heals back to the current size changes nothing.
-        assert!(store.update_current(|settings| settings.math_size = MATH_SIZE_MAX));
-        assert_eq!(store.math_generation, 5);
-        assert!(!store.update_current(|settings| settings.math_size = 500));
-        assert_eq!(store.math_generation, 5);
-    }
-
-    #[test]
-    fn math_settings_default_to_typeset_fira() {
-        let settings = UiSettings::default();
-        assert!(settings.render_math);
-        assert_eq!(settings.math_font, MathFont::Fira);
-        assert_eq!(settings.math_font.face(), slopty_math::bundled::Face::Fira);
-        assert_eq!(MathFont::StixTwo.face(), slopty_math::bundled::Face::StixTwo);
-        let json = serde_json::to_value(&settings).unwrap();
-        assert_eq!(json["renderMath"], true);
-        assert_eq!(json["mathFont"], "fira");
-        assert_eq!(settings.math_size, 100);
-        assert_eq!(json["mathSize"], 100);
-    }
-
-    #[test]
-    fn every_math_font_round_trips_through_the_settings_file() {
-        let stored = [
-            "fira",
-            "stixTwo",
-            "computerModern",
-            "libertinus",
-            "pagella",
-            "euler",
-        ];
-        assert_eq!(MathFont::ALL.len(), slopty_math::bundled::Face::ALL.len());
-        for ((font, key), face) in MathFont::ALL
-            .into_iter()
-            .zip(stored)
-            .zip(slopty_math::bundled::Face::ALL)
-        {
-            assert_eq!(font.face(), face);
-            let settings = UiSettings {
-                math_font: font,
-                ..Default::default()
-            };
-            let json = serde_json::to_value(&settings).unwrap();
-            assert_eq!(json["mathFont"], key);
-            let decoded: UiSettings = serde_json::from_value(json).unwrap();
-            assert_eq!(decoded.math_font, font);
-        }
-    }
-
-    #[test]
-    fn an_unknown_math_font_reads_as_the_default() {
-        let dir = tempfile::tempdir().unwrap();
-        for stored in [r#""someFutureFace""#, "3", "null"] {
-            std::fs::write(
-                UiSettings::path(dir.path()),
-                format!(r#"{{"sidebarWidth":300.0,"mathFont":{stored},"mathSize":150}}"#),
-            )
-            .unwrap();
-            let loaded = UiSettings::load(dir.path());
-            assert_eq!(loaded.math_font, MathFont::Fira, "{stored}");
-            // The rest of the file survives.
-            assert_eq!(loaded.sidebar_width, 300.0);
-            assert_eq!(loaded.math_size, 150);
-        }
-    }
-
-    #[test]
-    fn math_size_heals_out_of_range_values() {
-        for (value, expected) in [
-            (10, MATH_SIZE_MIN),
-            (0, MATH_SIZE_MIN),
-            (500, MATH_SIZE_MAX),
-            (75, 75),
-            (135, 135),
-            (200, 200),
-        ] {
-            let settings = UiSettings {
-                math_size: value,
-                ..Default::default()
-            }
-            .clamped();
-            assert_eq!(settings.math_size, expected, "{value}");
-        }
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"mathSize":10}"#).unwrap();
-        assert_eq!(UiSettings::load(dir.path()).math_size, MATH_SIZE_MIN);
-    }
-
-    #[test]
-    fn a_malformed_math_size_never_fails_the_settings_file() {
-        let dir = tempfile::tempdir().unwrap();
-        for (stored, expected) in [
-            // Numbers round, then clamp.
-            ("1.5", MATH_SIZE_MIN),
-            ("134.6", 135),
-            ("134.4", 134),
-            ("-1", MATH_SIZE_MIN),
-            ("1e300", MATH_SIZE_MAX),
-            ("99999999999999999999999", MATH_SIZE_MAX),
-            ("150", 150),
-            // Anything else is the default.
-            (r#""big""#, MATH_SIZE_DEFAULT),
-            (r#""150""#, MATH_SIZE_DEFAULT),
-            ("null", MATH_SIZE_DEFAULT),
-            ("true", MATH_SIZE_DEFAULT),
-            ("[150]", MATH_SIZE_DEFAULT),
-            (r#"{"size":150}"#, MATH_SIZE_DEFAULT),
-        ] {
-            std::fs::write(
-                UiSettings::path(dir.path()),
-                format!(
-                    r#"{{"sidebarWidth":300.0,"mathSize":{stored},"mathFont":"stixTwo","renderMath":false}}"#
-                ),
-            )
-            .unwrap();
-            let loaded = UiSettings::load(dir.path());
-            assert_eq!(loaded.math_size, expected, "{stored}");
-            // The rest of the file survives.
-            assert_eq!(loaded.sidebar_width, 300.0, "{stored}");
-            assert_eq!(loaded.math_font, MathFont::StixTwo, "{stored}");
-            assert!(!loaded.render_math, "{stored}");
-        }
-        // Absent, it's the default.
-        let settings: UiSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(settings.math_size, MATH_SIZE_DEFAULT);
-    }
-
     /// A settings file written before light mode existed has no `appearance`
     /// key; it must load as "follow the OS" rather than failing the whole parse
     /// and resetting every other preference to defaults.
@@ -2795,10 +2369,6 @@ mod tests {
         assert!(
             loaded.notifications_background_only,
             "pre-banner files default background-only on"
-        );
-        assert!(
-            !loaded.escape_stops_active_agent,
-            "preference files default Escape stopping off"
         );
         // slopty: no History surface (ruled out).
     }
@@ -3042,7 +2612,6 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.sidebar_width, SIDEBAR_MAX);
         assert_eq!(loaded.right_pane_width, RIGHT_PANE_MIN);
-        assert!(!loaded.code_fences_fit_content);
         assert_eq!(
             UiSettings {
                 sidebar_width: 1.0,
@@ -3135,7 +2704,6 @@ mod tests {
         assert_eq!(d.right_pane_width, 520.0);
         assert_eq!(d.terminal_height, 280.0);
         assert!(!d.sidebar_collapsed);
-        assert!(!d.escape_stops_active_agent);
     }
 
     // slopty: settings a pre-release build stopped keeping are deleted outright; a file that
@@ -3445,22 +3013,6 @@ mod tests {
         std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth": 300}"#).unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.keymap, KeymapConfig::default());
-        assert!(!loaded.escape_stops_active_agent);
-    }
-
-    #[test]
-    fn escape_stopping_is_opt_in_for_old_and_partial_settings() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
-        )
-        .unwrap();
-
-        let loaded = UiSettings::load(dir.path());
-        assert!(!loaded.escape_stops_active_agent);
-        assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled);
     }
 
     #[test]

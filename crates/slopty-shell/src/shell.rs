@@ -5106,14 +5106,12 @@ impl Shell {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
                     let keymap = self.settings.keymap.clone();
-                    let escape_stops_active_agent = self.settings.escape_stops_active_agent;
                     let composer_send_behavior = self.settings.composer_send_behavior;
                     // slopty: appshots removed.
                     let page = cx.new(|cx| {
                         ShortcutsPage::new(
                             state,
                             keymap,
-                            escape_stops_active_agent,
                             composer_send_behavior,
                             // slopty: appshots removed.
                             cx,
@@ -5126,14 +5124,6 @@ impl Shell {
                             match event {
                                 ShortcutsEvent::KeymapChanged(keymap) => {
                                     this.settings.keymap = keymap.clone();
-                                }
-                                ShortcutsEvent::EscapeStopsActiveAgentChanged(enabled) => {
-                                    this.settings.escape_stops_active_agent = *enabled;
-                                    // slopty: the working line says Esc stops it as the switch flips.
-                                    let enabled = *enabled;
-                                    settings::update(SavePolicy::Debounced, cx, |s| {
-                                        s.escape_stops_active_agent = enabled;
-                                    });
                                 }
                                 ShortcutsEvent::ComposerSendBehaviorChanged(behavior) => {
                                     this.settings.composer_send_behavior = *behavior;

@@ -1027,9 +1027,10 @@ mod tests {
             "untouched faces stay unregistered"
         );
         // A face that fails verification paints outlines and isn't retried.
-        let euler = Face::Euler.index();
-        assert_eq!(fonts.id(euler, |_| None), None);
-        assert_eq!(fonts.id(euler, |_| unreachable!()), None);
+        let mut fresh = MathFonts::default();
+        let stix = Face::StixTwo.index();
+        assert_eq!(fresh.id(stix, |_| None), None);
+        assert_eq!(fresh.id(stix, |_| unreachable!()), None);
         // Past the table there's nothing to register.
         assert_eq!(fonts.id(slopty_math::bundled::FONTS, |_| unreachable!()), None);
     }
@@ -1420,10 +1421,6 @@ mod tests {
             [
                 "Fira Math",
                 "STIX Two Math",
-                "NewComputerModern Math",
-                "Libertinus Math",
-                "TeX Gyre Pagella Math",
-                "Euler Math",
             ]
         );
     }
