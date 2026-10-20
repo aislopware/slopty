@@ -352,8 +352,8 @@ async fn the_files_and_changes_keep_up_with_a_person() {
 
 /// The dock's shell across a dropped link: the path dies with nothing said, the system's wake
 /// hands the app its resume, and the same shell takes what the person types next, with what it
-/// showed before still there. Then the app quits and comes back: the dock opens on the same
-/// shell.
+/// showed before still there. Then the app quits and comes back: the dock, open when it quit,
+/// opens again on a shell that takes the keyboard, though it asked for it ahead of its link.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_dock_s_shell_comes_back_after_a_dropped_link_and_a_relaunch() {
@@ -380,6 +380,7 @@ async fn the_dock_s_shell_comes_back_after_a_dropped_link_and_a_relaunch() {
         "what it showed before is still there"
     );
 
+    stack.kill_app().await.unwrap();
     stack.relaunch_app().await.unwrap();
     let drv = &mut stack.driver;
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
@@ -398,8 +399,9 @@ async fn the_dock_s_shell_comes_back_after_a_dropped_link_and_a_relaunch() {
         let (x, y) = tabs(&reopened).first().map(|t| middle(t)).unwrap_or_default();
         drv.click(x, y).await.unwrap();
     }
+    // The home dock is not kept across launches: a working shell, whichever, with the keyboard.
     let again = run(drv, "echo again-$((9+9))", "again-18").await;
-    assert_eq!(focused_terminal(&again), Some(session.as_str()), "the same shell after a relaunch");
+    assert!(focused_terminal(&again).is_some(), "a shell with the keyboard after a relaunch");
     println!("WALK relaunched\n{}", slopty_e2e::frame_text(&again.a11y));
     stack.shutdown().await;
 }

@@ -239,6 +239,8 @@ pub struct TerminalPanel {
     fitted: Option<(Size<Pixels>, TerminalLook, (u16, u16))>,
     /// slopty: sessions waiting for the body's first draw to open at its grid.
     awaiting_fit: Vec<oneshot::Sender<(u16, u16)>>,
+    /// slopty: when this panel first saw the engine attached, for [`OPEN_GRACE`].
+    engine_at: Option<std::time::Instant>,
     _observe: Subscription,
 }
 
@@ -248,6 +250,15 @@ const UNFITTED: (u16, u16) = (80, 24);
 
 /// slopty: how long an open waits for the body's first draw before it opens at [`UNFITTED`].
 const FIT_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// slopty: how long after the engine attaches a refused open is tried again. The app's links to
+/// its machines come up after it does, so a tab opened at launch (the dock left open when the
+/// app quit) asks ahead of its link and is refused as out of reach; the workspace waits as long
+/// for a terminal asked for again by its id.
+const OPEN_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// slopty: how long a refused open waits before it is tried again, within [`OPEN_GRACE`].
+const OPEN_BEAT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// slopty: a terminal tab's right-click menu: which tab, where.
 #[derive(Clone)]
@@ -276,6 +287,7 @@ impl TerminalPanel {
             tab_menu: popover::Popup::default(),
             fitted: None,
             awaiting_fit: Vec::new(),
+            engine_at: None,
             _observe: observe,
         }
     }
@@ -510,6 +522,7 @@ impl TerminalPanel {
     }
 
     fn on_state_changed(&mut self, cx: &mut Context<Self>) {
+        self.note_engine(cx);
         let selected_key = self.selected_chat(cx);
         let prev = self.last_selected.clone();
         let switched = Some(selected_key.clone()) != prev;
@@ -543,6 +556,23 @@ impl TerminalPanel {
 
     fn engine(&self, cx: &App) -> Option<EngineHandle> {
         self.state.read(cx).engine().cloned()
+    }
+
+    /// slopty: note when the engine attached (again), or that it is gone.
+    fn note_engine(&mut self, cx: &App) {
+        match (self.state.read(cx).engine().is_some(), self.engine_at) {
+            (true, None) => self.engine_at = Some(cx.background_executor().now()),
+            (false, Some(_)) => self.engine_at = None,
+            _ => {}
+        }
+    }
+
+    /// slopty: whether the app is still coming up: its engine attached less than
+    /// [`OPEN_GRACE`] ago, its links to its machines maybe not yet.
+    fn coming_up(&mut self, cx: &App) -> bool {
+        self.note_engine(cx);
+        let now = cx.background_executor().now();
+        self.engine_at.is_some_and(|at| now.saturating_duration_since(at) < OPEN_GRACE)
     }
 
     /// The chat's host device when it differs from the connected engine's own —
@@ -600,6 +630,7 @@ impl TerminalPanel {
         let Some(engine) = self.engine(cx) else {
             return;
         };
+        self.note_engine(cx);
         let tab_no = self
             .chats
             .get(&chat)
@@ -659,7 +690,7 @@ impl TerminalPanel {
     fn spawn_session(
         chat: String,
         key: u64,
-        engine: EngineHandle,
+        mut engine: EngineHandle,
         target: Option<String>,
         existing_session: Option<TerminalSession>,
         cwd: Option<String>,
@@ -686,17 +717,23 @@ impl TerminalPanel {
                         }
                         _ => false,
                     };
-                    match engine
-                        .client()
-                        .call_as::<TerminalSession>(
-                            methods::OPEN_TERMINAL,
-                            with_target(params, &target),
-                        )
-                        .await
-                    {
-                        Ok(session) => session,
+                    // slopty: an open refused while the app comes up is tried again until its
+                    // link to the machine is there ([`OPEN_GRACE`]); the tab says it is
+                    // connecting meanwhile, never the refusal.
+                    loop {
+                        let err = match engine
+                            .client()
+                            .call_as::<TerminalSession>(
+                                methods::OPEN_TERMINAL,
+                                with_target(params.clone(), &target),
+                            )
+                            .await
+                        {
+                            Ok(session) => break session,
+                            Err(err) => err,
+                        };
                         // slopty: a terminal shown before that has ended goes with its tab.
-                        Err(_) if again => {
+                        if again {
                             let _ = this.update(cx, |panel, cx| {
                                 if let Some(tabs) = panel.chats.get_mut(&chat) {
                                     tabs.tabs.retain(|tab| tab.key != key);
@@ -706,18 +743,28 @@ impl TerminalPanel {
                             });
                             return;
                         }
-                        Err(err) => {
-                            tracing::warn!(error = %err, "OpenTerminal failed");
-                            let _ = this.update(cx, |panel, cx| {
-                                if let Some(tab) = panel.tab_mut(&chat, key) {
-                                    tab.failure =
-                                        Some(format!("failed to open terminal: {err}").into());
-                                    tab.exited = Some(-1);
-                                    cx.notify();
-                                }
-                            });
-                            return;
+                        let retry = this
+                            .update(cx, |panel, cx| {
+                                let shown = panel.tab_mut(&chat, key).is_some();
+                                (shown && panel.coming_up(cx)).then(|| panel.engine(cx)).flatten()
+                            })
+                            .ok()
+                            .flatten();
+                        if let Some(now) = retry {
+                            engine = now;
+                            cx.background_executor().timer(OPEN_BEAT).await;
+                            continue;
                         }
+                        tracing::warn!(error = %err, "OpenTerminal failed");
+                        let _ = this.update(cx, |panel, cx| {
+                            if let Some(tab) = panel.tab_mut(&chat, key) {
+                                tab.failure =
+                                    Some(format!("failed to open terminal: {err}").into());
+                                tab.exited = Some(-1);
+                                cx.notify();
+                            }
+                        });
+                        return;
                     }
                 }
             };
@@ -1631,6 +1678,120 @@ mod progress_tests {
         *reported.borrow_mut() = None;
         cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
         settle(cx, &|cx| tab(cx).is_some_and(|(_, _, progress)| progress.is_none()));
+    }
+
+    /// A machine whose link comes up after the app does: until `linked` is set it answers each
+    /// open as one out of reach, as the workspace does before its first link, then terminal 7.
+    struct Linking {
+        linked: Arc<std::sync::atomic::AtomicBool>,
+        opens: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl slopty_view_rpc::RpcService for Linking {
+        async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+            if method == methods::OPEN_TERMINAL {
+                self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if !self.linked.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(RpcError::Failed("studio is out of reach".to_owned()));
+                }
+            }
+            Machine.handle(method, params).await
+        }
+    }
+
+    /// The dock open when the app quit comes back open at launch, and opens its tab as soon as
+    /// the engine is there, ahead of the link to the machine. That open is refused (the machine
+    /// is out of reach) and the tab still ends on a working shell once the link is up, not on
+    /// the refusal. A machine that never answers gets its refusal shown once the app's wait
+    /// for its links is over.
+    #[gpui::test]
+    fn a_dock_opened_ahead_of_its_link_gets_its_shell(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+            crate::live::install(
+                cx,
+                |id, _, cx| {
+                    (id == "7").then(|| Hosted {
+                        view: cx.new(|_| Blank).into(),
+                        focus: cx.focus_handle(),
+                        title: None,
+                        ended: false,
+                        exit: None,
+                        progress: None,
+                        drop: None,
+                    })
+                },
+                |_, _| None,
+                |_, _, _| None,
+            );
+        });
+        let machine = |linked: &Arc<std::sync::atomic::AtomicBool>,
+                       opens: &Arc<std::sync::atomic::AtomicUsize>| {
+            let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
+                Arc::new(Linking { linked: Arc::clone(linked), opens: Arc::clone(opens) })
+                    as Arc<dyn slopty_view_rpc::RpcService>,
+            ));
+            move |cx: &mut gpui::App| {
+                cx.new(|_| {
+                    let mut app = crate::state::AppState::new();
+                    app.set_test_engine(engine);
+                    app
+                })
+            }
+        };
+        let (linked, opens) = (Arc::default(), Arc::default());
+        let never = (Arc::default(), Arc::default());
+        let state = cx.update(machine(&linked, &opens));
+        let unreached = cx.update(machine(&never.0, &never.1));
+        let (panel, cx) = cx.add_window_view(|_, cx| TerminalPanel::new(state, cx));
+        let lonely = cx.update(|_, cx| cx.new(|cx| TerminalPanel::new(unreached, cx)));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..20 {
+                cx.run_until_parked();
+                runtime.block_on(async {
+                    for _ in 0..20 {
+                        tokio::task::yield_now().await;
+                    }
+                });
+            }
+            cx.run_until_parked();
+        };
+        let tab = |panel: &gpui::Entity<TerminalPanel>, cx: &mut gpui::VisualTestContext| {
+            panel.update(cx, |panel, cx| {
+                let chat = panel.selected_chat(cx);
+                let tab = panel.chats.get(&chat)?.tabs.first()?;
+                Some((tab.terminal_id.clone(), tab.failure.as_ref().map(ToString::to_string)))
+            })
+        };
+        panel.update(cx, |panel, cx| panel.set_open(true, cx));
+        lonely.update(cx, |panel, cx| panel.set_open(true, cx));
+        settle(cx);
+        cx.executor().advance_clock(super::FIT_WAIT + super::OPEN_BEAT);
+        settle(cx);
+        assert!(opens.load(std::sync::atomic::Ordering::SeqCst) >= 1, "the tab asked at once");
+        assert_eq!(tab(&panel, cx), Some((None, None)), "still connecting, not refused");
+
+        // The link comes up: the tab's next try opens its shell.
+        linked.store(true, std::sync::atomic::Ordering::SeqCst);
+        cx.executor().advance_clock(super::OPEN_BEAT);
+        settle(cx);
+        assert_eq!(tab(&panel, cx), Some((Some("7".to_owned()), None)), "a working shell");
+
+        // The machine that never answers: refused once the wait for the links is over.
+        cx.executor().advance_clock(super::OPEN_GRACE);
+        settle(cx);
+        let refused = tab(&lonely, cx).and_then(|(_, failure)| failure).unwrap_or_default();
+        assert!(refused.contains("out of reach"), "says why: {refused}");
+        let tries = never.1.load(std::sync::atomic::Ordering::SeqCst);
+        cx.executor().advance_clock(super::OPEN_GRACE);
+        settle(cx);
+        assert_eq!(never.1.load(std::sync::atomic::Ordering::SeqCst), tries, "and asks no more");
     }
 
     /// A machine that opens terminal 7 and keeps what each open asked.
