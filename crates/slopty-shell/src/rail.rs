@@ -456,19 +456,20 @@ impl Transcript {
         if !self.rail_enabled() {
             return gpui::Empty.into_any_element();
         }
-        let (entries, echoes) = {
+        // slopty: read the transcript in place; cloning it each frame cost a busy chat's
+        // every animation frame a deep copy of all its messages.
+        let ticks = {
             let state = self.state_entity().read(cx);
-            (state.transcript.clone(), state.pending_echoes().to_vec())
+            rail_ticks(&state.transcript, state.pending_echoes())
         };
-        let ticks = rail_ticks(&entries, &echoes);
-        // Map each tick to its transcript row (user rows share the entry id).
+        // Map each tick to its transcript row (user rows share the entry id), the first row of an
+        // id winning as the reversed walk inserts it last.
+        let row_of: std::collections::HashMap<&str, usize> =
+            self.rows().iter().enumerate().rev().map(|(ix, r)| (r.id.as_ref(), ix)).collect();
         let pairs: Vec<(RailTick, usize)> = ticks
             .into_iter()
             .filter_map(|tick| {
-                let row = self
-                    .rows()
-                    .iter()
-                    .position(|r| r.id.as_ref() == tick.message_id.as_str())?;
+                let row = *row_of.get(tick.message_id.as_str())?;
                 Some((tick, row))
             })
             .collect();

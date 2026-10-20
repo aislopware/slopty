@@ -17864,3 +17864,17 @@ reduced motion, it asks for none from the first (`next_frame` is `None`; the tes
 ```sh
 cargo test -p slopty-shell --release --lib wind_frame_cost -- --ignored --nocapture
 ```
+
+## 2026-10-20 — the prompt rail stops copying the transcript
+
+The installed app held 38 % of a core with a long chat open while its agent worked. A 3 s
+`sample` of the app (release, mac-studio, load average 90 to 120 from other builds) put
+240 of the main thread's 1197 samples in the transcript's render. 146 of those 240 were
+`render_rail` deep-copying every message of the transcript, plus the pending echoes, only to
+read the user prompts out of them. It now reads them in place. It also finds each prompt's row
+through one map instead of a scan of every row per prompt. That takes about 12 % of the main
+thread's samples off each of the chat's animation frames.
+
+```sh
+sample $(pgrep -x slopty-app) 3 -mayDie
+```
