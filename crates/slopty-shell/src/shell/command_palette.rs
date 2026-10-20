@@ -1362,6 +1362,7 @@ impl Shell {
                 self.render_chat_row(
                     id.clone(),
                     transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).into(),
+                    None,
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), crate::clock::utc(cx))
                         .into(),
                     folder.into(),

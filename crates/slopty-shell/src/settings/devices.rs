@@ -52,6 +52,28 @@ pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
     }
 }
 
+/// slopty: when a machine last seen at `last_seen`, read at `now`, next reads differently: its
+/// "Online" ends past the window, and "Last seen" moves on by the minute, the hour or the day
+/// it says. `None` for a machine never seen.
+pub fn presence_changes(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let at = last_seen?;
+    if device_online(last_seen, now) {
+        return at.checked_add_signed(chrono::Duration::seconds(DEVICE_ONLINE_WINDOW_SECS + 1));
+    }
+    let age = now.signed_duration_since(at).num_seconds();
+    let step = if age < HOUR {
+        MINUTE
+    } else if age < DAY {
+        HOUR
+    } else {
+        DAY
+    };
+    at.checked_add_signed(chrono::Duration::seconds((age / step + 1) * step))
+}
+
 /// Scope-aware copy: a local registry describes only the active local
 /// workspace and must not imply that account device metadata is already live.
 pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
@@ -82,6 +104,12 @@ pub struct DevicesPage {
     inviting: bool,
     // slopty: the code's dialog holds the keyboard while it shows.
     invite_focus: crate::surface_chrome::ModalFocus,
+    /// slopty: the moment presence is read at: taken as the state moves and on
+    /// [`Self::clock_tick`], never as the page is built, so a machine that stops answering
+    /// turns from Online to Last seen without anything else moving.
+    clock: DateTime<Utc>,
+    /// slopty: the clock taken again when the soonest machine's presence next reads differently.
+    clock_tick: Option<Task<()>>,
     _observe: Subscription,
 }
 
@@ -92,8 +120,11 @@ fn copied_key(device_id: &str) -> String {
 
 impl DevicesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let observe = cx.observe(&state, |_, _, cx| cx.notify());
-        Self {
+        let observe = cx.observe(&state, |page, _, cx| {
+            page.take_clock(cx);
+            cx.notify();
+        });
+        let mut page = Self {
             state,
             scroll: widgets::PageScroll::default(),
             add: None,
@@ -103,8 +134,38 @@ impl DevicesPage {
             action_task: None,
             inviting: false,
             invite_focus: crate::surface_chrome::ModalFocus::new(cx),
+            clock: crate::clock::utc(cx),
+            clock_tick: None,
             _observe: observe,
-        }
+        };
+        page.take_clock(cx);
+        page
+    }
+
+    /// slopty: take the clock now, and again when the soonest other machine's presence next
+    /// reads differently ([`presence_changes`]), drawing the page then.
+    fn take_clock(&mut self, cx: &mut Context<Self>) {
+        self.clock = crate::clock::utc(cx);
+        let now = self.clock;
+        let state = self.state.read(cx);
+        let next = state
+            .devices
+            .iter()
+            .filter(|device| state.local_device_id.as_deref() != Some(device.id.as_str()))
+            .filter_map(|device| presence_changes(device.last_seen_at, now))
+            .min();
+        self.clock_tick = next.map(|at| {
+            // A hair past the change, so the clock taken then reads it.
+            let wait = (at - now).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
+            cx.spawn(async move |page, cx| {
+                cx.background_executor().timer(wait).await;
+                page.update(cx, |page, cx| {
+                    page.take_clock(cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
     }
 
     // slopty: Add device in place of Rename.
@@ -257,7 +318,7 @@ impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
-        let now = crate::clock::utc(cx);
+        let now = self.clock; // slopty: the page's clock
         // slopty: every machine is listed, whatever the scope; Add device in place of Rename.
         let (devices, local_id) = {
             let state = self.state.read(cx);
@@ -723,6 +784,67 @@ mod tests {
         assert!(!device_online(None, now));
         // Clock skew (future) counts as online.
         assert!(device_online(Some(now + TimeDelta::seconds(30)), now));
+    }
+
+    // slopty: a machine that stops answering turns from Online to "Last seen" past the window,
+    // by the page's own clock, which then moves on as the words do.
+    #[gpui::test]
+    fn a_silent_machine_goes_offline_by_the_page_s_own_clock(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let now = cx.update(|cx| crate::clock::utc(cx));
+        let seen = now - TimeDelta::seconds(60);
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("here".into());
+            state.devices = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "here", "name": "Studio", "platform": "macos", "lastSeenAt": now - TimeDelta::days(3),
+                }))
+                .unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "id": "box", "name": "Box", "platform": "linux", "lastSeenAt": seen,
+                }))
+                .unwrap(),
+            ];
+            state
+        });
+        let page = cx.new(|cx| DevicesPage::new(state, cx));
+        let drawn = std::rc::Rc::new(std::cell::Cell::new(0));
+        let _drawn = cx.update(|cx| {
+            let drawn = drawn.clone();
+            cx.observe(&page, move |_, _| drawn.set(drawn.get() + 1))
+        });
+        let says = |cx: &mut gpui::TestAppContext| {
+            page.read_with(cx, |page, _| {
+                if device_online(Some(seen), page.clock) {
+                    "Online".to_owned()
+                } else {
+                    format_last_seen(Some(seen), page.clock)
+                }
+            })
+        };
+        assert_eq!(says(cx), "Online");
+        cx.executor().advance_clock(std::time::Duration::from_secs(10));
+        assert_eq!((says(cx), drawn.get()), ("Online".to_owned(), 0), "nothing moves inside the window");
+        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        assert_eq!((says(cx), drawn.get()), ("1m ago".to_owned(), 1), "past the window, and the page drew");
+        cx.executor().advance_clock(std::time::Duration::from_secs(60));
+        assert_eq!((says(cx), drawn.get()), ("2m ago".to_owned(), 2), "the minute turned; this machine's own time never ticks");
+    }
+
+    #[test]
+    fn presence_changes_when_its_words_do() {
+        let now = Utc::now();
+        assert_eq!(presence_changes(None, now), None);
+        let seen = now - TimeDelta::seconds(10);
+        assert_eq!(presence_changes(Some(seen), now), Some(seen + TimeDelta::seconds(71)));
+        for age in [71, 90, 59 * 60 + 59, 3600, 5 * 3600 + 1, 86_400, 3 * 86_400 + 7] {
+            let seen = now - TimeDelta::seconds(age);
+            let next = presence_changes(Some(seen), now).unwrap();
+            let shown = format_last_seen(Some(seen), now);
+            assert_eq!(format_last_seen(Some(seen), next - TimeDelta::seconds(1)), shown, "{age}s: the same until then");
+            assert_ne!(format_last_seen(Some(seen), next), shown, "{age}s: different from then");
+        }
     }
 
     #[test]

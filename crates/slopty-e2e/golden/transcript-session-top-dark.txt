@@ -1,0 +1,50 @@
+Window
+Button │ Filter projects: All projects
+Button │ Done, 1
+Button │ Survey the files
+Button │ Inactive, 0
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Splitter │ Resize sidebar
+Article │ You
+Paragraph │ Survey the files
+Button │ Copy message
+Button │ Rewind…
+Button │ Background command "Sleep briefly then echo a completion marker" completed (exit code 0) │ completed
+Paragraph │ done
+Group │ notes.md +2 −0
+Button │ Open diff
+Button │ Copy message
+Article │ You
+Paragraph │ What did you find?
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Paragraph │ Here's what the survey turned up:
+Paragraph │ main.rs is the only source file: three lines, and it prints hello.⏎ls missing-file failed as planned; nothing else did.⏎The background check finished cleanly, exit 0.
+Paragraph │ The notes I wrote are in notes.md:
+Paragraph │ # Notes⏎main.rs prints hello
+Button │ Copy code
+Paragraph │ Next I'd add a test for the greeting, then run cargo test in CI.
+Article │ You
+Paragraph │ Make beta loud in notes.txt
+Button │ Copy message
+Button │ Rewind…
+Paragraph │ done
+Group │ notes.txt +2 −1
+Button │ Open diff
+Button │ Copy message
+Button │ Attach images
+MultilineTextInput │ Do anything… (focused)
+Button │ Model: Opus 5.5, High
+Button │ Send message
+Button │ Mode: Auto
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat

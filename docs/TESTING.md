@@ -76,6 +76,16 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    `a_checked_window_draws_every_frame_as_an_unchecked_one` holds a checked window to an
    unchecked one through the oracle's random histories, finding nothing.
    `retained::tests::a_view_changed_untold_is_named_by_the_frame_check` covers the same in Slopty.
+   **With the tree kept on.** The oracle draws its frames from scratch into the window, and a
+   dump turns the accessibility tree on and off, each a full build: every view is built again
+   before the next input, so a view that acts on what it was last built with (a listener, a key
+   context, a hitbox) never misbehaves under a dump. A Mac with an assistive app running (a
+   launcher, a window manager, a screen reader) asks for the tree from the first frame and
+   keeps it, and GPUI then keeps view retention but not element retention.
+   `SLOPTY_E2E_A11Y=always` on `cargo xtask remote … --e2e app` runs the app so: the tree is on
+   from the first frame, and a dump or render reads it and the per-frame check's findings
+   without drawing anything from scratch. `walk::*` walks a person's inputs one after another
+   in either mode.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`):
    launches a server, ptyd, the worker registered with the server, and the app (built with
    `--features slopty/e2e`) following the server, in a temp dir, so the app reaches the worker

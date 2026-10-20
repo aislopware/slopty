@@ -2,8 +2,9 @@
 //!
 //! Listens on `$SLOPTY_TEST_SOCKET` (only when set; a bundle launched from Finder never
 //! has it) and answers `slopty_e2e::Command`s. Keys go through `Window::dispatch_keystroke`
-//! and pointer events through `Window::dispatch_event`, exactly the path a real keyboard and
-//! mouse take once AppKit has translated them; state comes back as a `Dump` read straight
+//! and pointer events through `Window::dispatch_event`, each after `gpui::prepare_input` in an
+//! update of its own, exactly the path a real keyboard and mouse take once AppKit has
+//! translated them; state comes back as a `Dump` read straight
 //! from the entities; a `Render` asks GPUI's own Metal renderer for the frame (built with
 //! the `e2e` feature). No system event is posted and no screen is captured, so the whole
 //! client is testable on a machine that has granted nothing.
@@ -69,6 +70,12 @@ pub(crate) fn serve(
         let _pointer = cx.update_window(window, |_root, window, cx| {
             workspace.update(cx, |_ws, cx| pointer::keep(window, cx));
         });
+        // A Mac with an assistive app running (a launcher, a window manager, a screen reader)
+        // asks for the tree from the first frame and keeps it: every frame is drawn so.
+        #[cfg(feature = "e2e")]
+        if tree_kept() {
+            let _kept = cx.update_window(window, |_root, window, _cx| window.set_a11y_active(true));
+        }
         while let Some((command, reply)) = rx.recv().await {
             let answer = match command {
                 Command::Render { path, scale } => {
@@ -138,6 +145,13 @@ pub(crate) fn serve(
                 // Input settles on the next frame: focus moved by a click is only in the
                 // dispatch tree once it has been drawn, so a keystroke sent before that would
                 // go nowhere. Reply after the frame, and the driver never races the app.
+                other if let Some(inputs) = inputs(&other) => match inputs {
+                    Ok(inputs) => {
+                        dispatch(window, &other, inputs, cx);
+                        after_frame(window, Reply::Ok, cx).await
+                    }
+                    Err(message) => Reply::Error { message },
+                },
                 other => {
                     let mut answer = None;
                     let applied = cx.update_window(window, |_root, window, cx| {
@@ -568,6 +582,143 @@ async fn listen(socket: PathBuf, tx: mpsc::Sender<Request>) {
     }
 }
 
+/// One input of a driver's command: a keystroke, which goes through the window's keystroke
+/// path (key down, then the text it types), or any other platform event.
+enum Input {
+    Key(Keystroke),
+    Event(PlatformInput),
+}
+
+/// The events `command` sends, in order, or why it cannot send them; `None` when it is not
+/// input the person's keyboard, pointer or a drop would send.
+fn inputs(command: &Command) -> Option<Result<Vec<Input>, String>> {
+    let left = MouseButton::Left;
+    let none = Modifiers::default();
+    let mouse_move = |position, pressed_button, modifiers| {
+        Input::Event(PlatformInput::MouseMove(MouseMoveEvent {
+            position,
+            pressed_button,
+            modifiers,
+        }))
+    };
+    let mouse_down = |button, position, modifiers, click_count| {
+        Input::Event(PlatformInput::MouseDown(MouseDownEvent {
+            button,
+            position,
+            modifiers,
+            click_count,
+            first_mouse: false,
+        }))
+    };
+    let mouse_up = |button, position, modifiers, click_count| {
+        Input::Event(PlatformInput::MouseUp(MouseUpEvent {
+            button,
+            position,
+            modifiers,
+            click_count,
+        }))
+    };
+    Some(Ok(match command {
+        Command::Keys { keys } => {
+            return Some(
+                keys.split_whitespace()
+                    .map(|text| {
+                        Keystroke::parse(text).map(Input::Key).map_err(|e| format!("{text:?}: {e}"))
+                    })
+                    .collect(),
+            );
+        }
+        Command::Type { text } => text
+            .chars()
+            .map(|ch| {
+                Input::Key(Keystroke {
+                    modifiers: Modifiers { shift: ch.is_uppercase(), ..Modifiers::default() },
+                    key: ch.to_lowercase().to_string(),
+                    key_char: Some(ch.to_string()),
+                })
+            })
+            .collect(),
+        Command::DropFiles { paths, x, y } => {
+            let position = point(px(*x), px(*y));
+            let paths = gpui::ExternalPaths(paths.iter().map(PathBuf::from).collect());
+            [
+                gpui::FileDropEvent::Entered { position, paths },
+                gpui::FileDropEvent::Pending { position },
+                gpui::FileDropEvent::Submit { position },
+            ]
+            .into_iter()
+            .map(|event| Input::Event(PlatformInput::FileDrop(event)))
+            .collect()
+        }
+        Command::Click { x, y, button, count } => {
+            let position = point(px(*x), px(*y));
+            let button = mouse_button(*button);
+            let clicks = usize::try_from(*count).unwrap_or(1).max(1);
+            vec![
+                mouse_move(position, None, none),
+                mouse_down(button, position, none, clicks),
+                mouse_up(button, position, none, clicks),
+            ]
+        }
+        Command::Drag { x, y, to_x, to_y, command } => {
+            let (from, to) = (point(px(*x), px(*y)), point(px(*to_x), px(*to_y)));
+            let modifiers = Modifiers { platform: *command, ..Modifiers::default() };
+            vec![
+                mouse_down(left, from, modifiers, 1),
+                mouse_move(to, Some(left), modifiers),
+                mouse_up(left, to, modifiers, 1),
+            ]
+        }
+        Command::Move { x, y } => vec![mouse_move(point(px(*x), px(*y)), None, none)],
+        Command::DragTo { x, y } => vec![mouse_move(point(px(*x), px(*y)), Some(left), none)],
+        Command::Press { x, y } => vec![mouse_down(left, point(px(*x), px(*y)), none, 1)],
+        Command::Release { x, y } => vec![mouse_up(left, point(px(*x), px(*y)), none, 1)],
+        Command::Scroll { x, y, dx, dy } => {
+            vec![Input::Event(PlatformInput::Scroll(ScrollEvent {
+                position: point(px(*x), px(*y)),
+                delta: ScrollDelta::Lines(point(*dx, *dy)),
+                modifiers: none,
+                touch_phase: TouchPhase::Moved,
+                momentum_phase: None,
+                source: gpui::ScrollSource::Pointer,
+            }))]
+        }
+        _ => return None,
+    }))
+}
+
+/// Send `command`'s inputs as the platform sends a person's: one by one, each first through
+/// `gpui::prepare_input`, which draws the frame the input needs in an update of its own so the
+/// work that frame defers runs before the input's handlers, and then dispatched in an update
+/// of its own. Sent together in one update, a frame drawn for the second input would leave its
+/// deferred work to run after that input's handlers, where a person's never does.
+fn dispatch(
+    window: AnyWindowHandle,
+    #[cfg_attr(not(target_os = "macos"), expect(unused_variables))] command: &Command,
+    inputs: Vec<Input>,
+    cx: &mut gpui::AsyncApp,
+) {
+    #[cfg(target_os = "macos")]
+    cx.update(|cx| pointer::driven(command, cx));
+    for input in inputs {
+        match input {
+            Input::Key(keystroke) => {
+                gpui::prepare_keystroke(window, &keystroke, cx);
+                let _sent = cx.update_window(window, |_root, window, cx| {
+                    let handled = window.dispatch_keystroke(keystroke.clone(), cx);
+                    tracing::debug!(%keystroke, handled, "keys");
+                });
+            }
+            Input::Event(event) => {
+                gpui::prepare_input(window, &event, cx);
+                let _sent = cx.update_window(window, |_root, window, cx| {
+                    let _handled = window.dispatch_event(event, cx);
+                });
+            }
+        }
+    }
+}
+
 /// Apply a synchronous command inside the window.
 fn apply(
     workspace: &Entity<Workspace>,
@@ -575,8 +726,6 @@ fn apply(
     window: &mut Window,
     cx: &mut App,
 ) -> Reply {
-    #[cfg(target_os = "macos")]
-    pointer::driven(&command, cx);
     match command {
         Command::Ping => Reply::Ok,
         Command::OpenLink { url } => {
@@ -590,18 +739,6 @@ fn apply(
             }
             None => Reply::Error { message: format!("no resume is called {what}") },
         },
-        Command::Keys { keys } => {
-            for text in keys.split_whitespace() {
-                match Keystroke::parse(text) {
-                    Ok(keystroke) => {
-                        let handled = window.dispatch_keystroke(keystroke, cx);
-                        tracing::debug!(keystroke = text, handled, "keys");
-                    }
-                    Err(e) => return Reply::Error { message: format!("{text:?}: {e}") },
-                }
-            }
-            Reply::Ok
-        }
         #[cfg(target_os = "macos")]
         Command::Clipboard { .. } => Reply::Error {
             message: "clipboard: the Mac app shares a named pasteboard; write that".into(),
@@ -627,160 +764,21 @@ fn apply(
             }));
             Reply::Ok
         }
-        Command::DropFiles { paths, x, y } => {
-            let position = point(px(x), px(y));
-            let paths = gpui::ExternalPaths(paths.into_iter().map(PathBuf::from).collect());
-            for event in [
-                gpui::FileDropEvent::Entered { position, paths },
-                gpui::FileDropEvent::Pending { position },
-                gpui::FileDropEvent::Submit { position },
-            ] {
-                let _handled = window.dispatch_event(PlatformInput::FileDrop(event), cx);
-            }
-            Reply::Ok
-        }
-        Command::Type { text } => {
-            for ch in text.chars() {
-                let keystroke = Keystroke {
-                    modifiers: Modifiers { shift: ch.is_uppercase(), ..Modifiers::default() },
-                    key: ch.to_lowercase().to_string(),
-                    key_char: Some(ch.to_string()),
-                };
-                let _handled = window.dispatch_keystroke(keystroke, cx);
-            }
-            Reply::Ok
-        }
-        Command::Click { x, y, button, count } => {
-            let position = point(px(x), px(y));
-            let button = mouse_button(button);
-            let click_count = usize::try_from(count).unwrap_or(1).max(1);
-            let _moved = window.dispatch_event(
-                PlatformInput::MouseMove(MouseMoveEvent {
-                    position,
-                    pressed_button: None,
-                    modifiers: Modifiers::default(),
-                }),
-                cx,
-            );
-            let _down = window.dispatch_event(
-                PlatformInput::MouseDown(MouseDownEvent {
-                    button,
-                    position,
-                    modifiers: Modifiers::default(),
-                    click_count,
-                    first_mouse: false,
-                }),
-                cx,
-            );
-            let _up = window.dispatch_event(
-                PlatformInput::MouseUp(MouseUpEvent {
-                    button,
-                    position,
-                    modifiers: Modifiers::default(),
-                    click_count,
-                }),
-                cx,
-            );
-            Reply::Ok
-        }
-        Command::Drag { x, y, to_x, to_y, command } => {
-            let (from, to) = (point(px(x), px(y)), point(px(to_x), px(to_y)));
-            let button = MouseButton::Left;
-            let modifiers = Modifiers { platform: command, ..Modifiers::default() };
-            let _down = window.dispatch_event(
-                PlatformInput::MouseDown(MouseDownEvent {
-                    button,
-                    position: from,
-                    modifiers,
-                    click_count: 1,
-                    first_mouse: false,
-                }),
-                cx,
-            );
-            let _moved = window.dispatch_event(
-                PlatformInput::MouseMove(MouseMoveEvent {
-                    position: to,
-                    pressed_button: Some(button),
-                    modifiers,
-                }),
-                cx,
-            );
-            let _up = window.dispatch_event(
-                PlatformInput::MouseUp(MouseUpEvent {
-                    button,
-                    position: to,
-                    modifiers,
-                    click_count: 1,
-                }),
-                cx,
-            );
-            Reply::Ok
-        }
-        Command::Move { x, y } => {
-            let _moved = window.dispatch_event(
-                PlatformInput::MouseMove(MouseMoveEvent {
-                    position: point(px(x), px(y)),
-                    pressed_button: None,
-                    modifiers: Modifiers::default(),
-                }),
-                cx,
-            );
-            Reply::Ok
-        }
-        Command::DragTo { x, y } => {
-            let _moved = window.dispatch_event(
-                PlatformInput::MouseMove(MouseMoveEvent {
-                    position: point(px(x), px(y)),
-                    pressed_button: Some(MouseButton::Left),
-                    modifiers: Modifiers::default(),
-                }),
-                cx,
-            );
-            Reply::Ok
-        }
-        Command::Press { x, y } => {
-            let _down = window.dispatch_event(
-                PlatformInput::MouseDown(MouseDownEvent {
-                    button: MouseButton::Left,
-                    position: point(px(x), px(y)),
-                    modifiers: Modifiers::default(),
-                    click_count: 1,
-                    first_mouse: false,
-                }),
-                cx,
-            );
-            Reply::Ok
-        }
-        Command::Release { x, y } => {
-            let _up = window.dispatch_event(
-                PlatformInput::MouseUp(MouseUpEvent {
-                    button: MouseButton::Left,
-                    position: point(px(x), px(y)),
-                    modifiers: Modifiers::default(),
-                    click_count: 1,
-                }),
-                cx,
-            );
-            Reply::Ok
-        }
+        // Dispatched event by event, each in an update of its own (`dispatch`).
+        Command::Keys { .. }
+        | Command::Type { .. }
+        | Command::DropFiles { .. }
+        | Command::Click { .. }
+        | Command::Drag { .. }
+        | Command::Move { .. }
+        | Command::DragTo { .. }
+        | Command::Press { .. }
+        | Command::Release { .. }
+        | Command::Scroll { .. } => Reply::Error { message: "input goes through dispatch".into() },
         Command::PinClock { at_ms } => {
             slopty_kit::clock::pin(at_ms.map(slopty_core::WallMs::from_millis), cx);
             // Nothing that showed a time was told: every view is built again.
             window.refresh();
-            Reply::Ok
-        }
-        Command::Scroll { x, y, dx, dy } => {
-            let _scrolled = window.dispatch_event(
-                PlatformInput::Scroll(ScrollEvent {
-                    position: point(px(x), px(y)),
-                    delta: ScrollDelta::Lines(point(dx, dy)),
-                    modifiers: Modifiers::default(),
-                    touch_phase: TouchPhase::Moved,
-                    momentum_phase: None,
-                    source: gpui::ScrollSource::Pointer,
-                }),
-                cx,
-            );
             Reply::Ok
         }
         Command::FramesReset => {
@@ -899,6 +897,24 @@ fn stale(window: &mut Window, cx: &mut App) -> Option<String> {
 #[cfg(feature = "e2e")]
 const STALE_LINES: usize = 12;
 
+/// Whether the accessibility tree stays on for the whole run (`SLOPTY_E2E_A11Y=always`), as on
+/// a Mac where an assistive app asked for it once: every frame then builds the tree with the
+/// views it draws again, and a dump reads it without drawing anything from scratch. A dump that
+/// drew the window from scratch would build every view again before the next input, which a
+/// person's window never does, and hide a view that acts on what it was last built with.
+#[cfg(feature = "e2e")]
+fn tree_kept() -> bool {
+    std::env::var_os("SLOPTY_E2E_A11Y").is_some_and(|mode| mode == "always")
+}
+
+/// What GPUI's check of every frame (`GPUI_CHECK_RETAINED=record`) found stale since it was
+/// last asked, without drawing a frame from scratch into the window as [`stale`] does.
+#[cfg(feature = "e2e")]
+fn kept_stale(window: &mut Window) -> Option<String> {
+    let found = window.take_retained_check_reports();
+    (!found.is_empty()).then(|| found.join("\n"))
+}
+
 /// The frame the app draws now, saved to `path`, and checked against the same state drawn from
 /// scratch: a difference is an error, and the frame from scratch is saved beside it
 /// (`<path>.scratch.png`) for the review.
@@ -916,12 +932,17 @@ fn render(window: &mut Window, cx: &mut App, path: &str, scale: Option<f32>) -> 
         Err(e) => return Reply::Error { message: format!("render: {e:#}") },
     };
     over_backdrop(&mut image);
-    let stale = stale(window, cx);
+    let stale = if tree_kept() { kept_stale(window) } else { stale(window, cx) };
     let (width, height) = image.dimensions();
     if let Err(e) = image.save(path) {
         return Reply::Error { message: format!("write {path}: {e}") };
     }
     match stale {
+        // The tree is on and the frame was drawn with it: read it as it is.
+        None if tree_kept() => {
+            let scale = scale.unwrap_or_else(|| window.scale_factor());
+            Reply::Rendered { width, height, a11y: a11y_nodes(window), scale }
+        }
         None => {
             // What the frame says, from the same state drawn once more with the tree asked for:
             // the tree is built only while it is, and the frame drawn for the picture is a
@@ -982,6 +1003,13 @@ fn render(_window: &mut Window, _cx: &mut App, _path: &str, _scale: Option<f32>)
 fn dump(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Dump {
     let frames = frame_info(cx);
     window.draw(cx).clear(cx);
+    if tree_kept() {
+        // Nothing is drawn from scratch: the next input lands on the frame a person's would.
+        let mut dump = workspace.read(cx).dump(window, cx);
+        dump.frames = frames;
+        dump.stale = kept_stale(window).map(|stale| format!("{stale} (focus {})", dump.focused));
+        return dump;
+    }
     let stale = stale(window, cx);
     window.set_a11y_active(true);
     window.draw(cx).clear(cx);

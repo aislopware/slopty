@@ -147,6 +147,10 @@ impl Shell {
         window.focus(&self.navigation_focus.right, cx);
         self.set_right_active(surface, cx);
         self.focus_right_file_editor(surface, window, cx);
+        // slopty: a diff picked by its tab takes the keyboard, as a file's editor does.
+        if let RightSurface::Diff(id) = surface {
+            self.focus_diff(id, cx);
+        }
     }
 
     pub(super) fn restore_right_focus_after_close(

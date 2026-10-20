@@ -2415,11 +2415,42 @@ impl Changes {
         cx.notify();
     }
 
+    /// slopty: the person brought the pane to the front: the keyboard goes to it on its next
+    /// frame (once a menu that opened it has let go), so ⌘F finds in the diff.
+    pub(crate) fn take_keyboard(&mut self, cx: &mut Context<Self>) {
+        self.refocus = true;
+        cx.notify();
+    }
+
     /// Everything the pane needs kicked when (re)shown: the watch plus the
     /// scope-specific loads (branches, scoped/commit capture, history) — the
     /// shell's hook for freshly-mounted surface tabs.
     pub fn ensure_content(&mut self, cx: &mut Context<Self>) {
         self.sync(cx);
+    }
+
+    /// slopty: tests: the working tree of the chat in `cwd` reads `patch`.
+    #[cfg(test)]
+    pub(crate) fn show_patch(&mut self, cwd: &str, patch: &str, cx: &mut Context<Self>) {
+        self.diffs = vec![CheckoutDiff {
+            checkout_id: "checkout".into(),
+            device_id: "local".into(),
+            cwd: cwd.into(),
+            patch: patch.into(),
+            files: Vec::new(),
+            additions: 0,
+            deletions: 0,
+            truncated: false,
+            checksum: format!("sum-{}", patch.len()),
+            updated_at: chrono::Utc::now(),
+        }];
+        self.sync(cx);
+    }
+
+    /// slopty: tests: whether the find is open with the keyboard in it.
+    #[cfg(test)]
+    pub(crate) fn find_has_keyboard(&self, window: &Window, cx: &App) -> bool {
+        self.find.as_ref().is_some_and(|find| find.input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     /// Reconcile parsed content with the currently-active diff.

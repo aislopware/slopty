@@ -80,13 +80,28 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         match offer {
-            PaneOffer::Changes => self.add_diff_surface(window, cx),
+            PaneOffer::Changes => self.open_diff_surface(window, cx),
             PaneOffer::Files => self.add_files_surface(window, cx),
             PaneOffer::Terminal => {
                 self.add_terminal_surface(cx);
             }
             PaneOffer::Browser => self.add_browser_surface(None, window, cx),
             PaneOffer::Screen => self.add_screen_surface(cx),
+        }
+    }
+
+    /// [`Self::add_diff_surface`] for the person, who then has the diff's keyboard (its find,
+    /// its keys); a tab restored or an agent's opening leaves the keyboard where it is.
+    pub(super) fn open_diff_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_diff_surface(window, cx);
+        self.focus_diff(self.diff_seq, cx);
+    }
+
+    /// The diff `id` takes the keyboard on its next frame, so ⌘F finds in it.
+    pub(super) fn focus_diff(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.navigation_focus.right_was_focused = true;
+        if let Some(changes) = self.diffs.get(&id).cloned() {
+            changes.update(cx, |changes, cx| changes.take_keyboard(cx));
         }
     }
 

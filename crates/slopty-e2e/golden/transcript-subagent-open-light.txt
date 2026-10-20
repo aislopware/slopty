@@ -46,4 +46,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Wrote 2 notes, ran 3 commands (1 failed), edited 1 file (+2 −0), searched 2 times, delegated to 1 subagent, updated todos

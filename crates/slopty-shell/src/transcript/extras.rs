@@ -368,6 +368,25 @@ fn shown_path(path: &str, root: Option<&str>) -> String {
         .to_owned()
 }
 
+/// slopty: a file the card names alone, as a file list names one: its name, then its folder
+/// (under the chat's folder when it lies there, else from the home folder as `~`), so a file
+/// written outside the checkout reads "index.html  /tmp/slopty-viz", never a full path run
+/// together (2026-10-20).
+pub(crate) fn named_file(path: &str, root: Option<&str>) -> (String, Option<String>) {
+    let shown = shown_path(path, root);
+    let name = file_name(&shown).to_owned();
+    let folder = shown.trim_end_matches('/').rsplit_once('/').map(|(dir, _)| dir).filter(|dir| !dir.is_empty());
+    let folder = folder.map(|dir| {
+        let home = ["/Users/", "/home/"].iter().find_map(|base| {
+            let rest = dir.strip_prefix(base)?;
+            let (_, under) = rest.split_once('/').unwrap_or((rest, ""));
+            Some(if under.is_empty() { "~".to_owned() } else { format!("~/{under}") })
+        });
+        home.unwrap_or_else(|| dir.to_owned())
+    });
+    (name, folder)
+}
+
 /// A path's last component.
 fn file_name(path: &str) -> &str {
     path.trim_end_matches('/')
@@ -1098,15 +1117,18 @@ impl Transcript {
                 )
                 .child(crate::changes::diffstat_blocks(square(additions), square(deletions), theme)))
         };
-        let label = match files.first().filter(|_| single) {
-            Some(file) => shown_path(&file.path, root.as_deref()),
-            None => turn_changes_label(files),
+        let (label, folder) = match files.first().filter(|_| single) {
+            Some(file) => named_file(&file.path, root.as_deref()),
+            None => (turn_changes_label(files), None),
         };
         let toggle_id = row.id.clone();
         let entry_id = row.entry_id.clone();
         let header = div()
             .id(SharedString::from(format!("{}-toggle", row.id)))
-            .aria_label(SharedString::from(format!("{label}{}", counted(additions, deletions))))
+            .aria_label(SharedString::from(match &folder {
+                Some(folder) => format!("{label} in {folder}{}", counted(additions, deletions)),
+                None => format!("{label}{}", counted(additions, deletions)),
+            }))
             .w_full()
             // slopty: a finger's row on a touch screen (#23).
             .h(px(crate::surface_chrome::touch_row_height(32.0)))
@@ -1149,12 +1171,22 @@ impl Transcript {
             )
             .child(
                 div()
-                    .min_w_0()
+                    .flex_none()
+                    .max_w(px(320.0))
                     .truncate()
                     .text_size(crate::typography::ui_rems(12.5))
                     .text_color(theme.text)
                     .child(SharedString::from(label)),
             )
+            .children(folder.map(|folder| {
+                div()
+                    .min_w_0()
+                    .flex_shrink_1()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(folder))
+            }))
             .children(counts(additions, deletions).map(|counts| counts.flex_none()))
             .child(div().flex_1())
             .child(
@@ -1547,6 +1579,19 @@ mod tests {
         // slopty: an uncounted file says no "+0 −0".
         assert_eq!(counted(0, 0), "");
         assert_eq!(counted(3, 0), " +3 −0");
+    }
+
+    /// slopty: a lone changed file is named by its name, then its folder: under the chat's
+    /// folder when it lies there, from home as `~`, else as it is; never a full path run on.
+    #[test]
+    fn a_lone_file_reads_name_then_folder() {
+        let named = |path: &str| named_file(path, Some("/w/app"));
+        assert_eq!(named("/w/app/notes.md"), ("notes.md".into(), None));
+        assert_eq!(named("/w/app/src/ui/a.rs"), ("a.rs".into(), Some("src/ui".into())));
+        assert_eq!(named("/tmp/slopty-viz/index.html"), ("index.html".into(), Some("/tmp/slopty-viz".into())));
+        assert_eq!(named("/Users/cong/notes/a.md"), ("a.md".into(), Some("~/notes".into())));
+        assert_eq!(named("/home/cong/a.md"), ("a.md".into(), Some("~".into())));
+        assert_eq!(named("a.md"), ("a.md".into(), None));
     }
 
     #[test]

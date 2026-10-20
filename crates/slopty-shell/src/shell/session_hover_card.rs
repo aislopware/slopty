@@ -490,6 +490,7 @@ mod tests {
                 div().w(px(280.0)).h(px(200.0)).child(shell.render_chat_row(
                     "hover-test".into(),
                     "Hover test".into(),
+                    None,
                     "now".into(),
                     "Project".into(),
                     None,

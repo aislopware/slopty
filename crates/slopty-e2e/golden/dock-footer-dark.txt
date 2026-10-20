@@ -3,6 +3,7 @@ Button │ Filter projects: All projects
 Button │ Working, 1
 Button │ background sleep 600
 Status │ Background work
+Label │ Background work
 Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected

@@ -490,188 +490,6 @@ fn a_subagent_run_open_in_its_card_is_as_tall_as_its_rows(cx: &mut gpui::TestApp
     assert!((run.height - cap).abs() <= 1.5, "the card's room, {cap}: {run:?}");
 }
 
-/// One held prompt at most: a subagent's run open in its card, scrolled past its task so the
-/// task would hold, holds none; the conversation's own prompt holds above it, alone.
-#[gpui::test]
-fn a_subagents_run_holds_no_prompt_of_its_own(cx: &mut gpui::TestAppContext) {
-    let progress = SubagentProgress {
-        running: false,
-        state: SubagentProgress::DONE.into(),
-        chat_id: Some("child-chat".into()),
-        ..SubagentProgress::default()
-    };
-    // The card, then more of the answer, so the conversation scrolls past its prompt.
-    let parts = std::iter::once(spawn(progress))
-        .chain((0..40).map(|n| text(&format!("Paragraph {n} after the run."))))
-        .collect();
-    let (transcript, cx) = open_turn(cx, entry(MessageStatus::Complete, parts));
-    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
-    let prompt = SessionMessageEntry {
-        id: "prompt".into(),
-        role: MessageRole::User,
-        parts: vec![text("Survey the files")],
-        ..entry(MessageStatus::Complete, Vec::new())
-    };
-    let task = SessionMessageEntry {
-        id: "child:task".into(),
-        role: MessageRole::User,
-        parts: vec![MessagePart::Text { id: "child:task:t".into(), text: "You are lane C".into() }],
-        ..entry(MessageStatus::Complete, Vec::new())
-    };
-    let said = |n: usize| SessionMessageEntry {
-        id: format!("child:{n}"),
-        parts: vec![MessagePart::Text { id: format!("child:{n}:t"), text: format!("Line {n} of the run.") }],
-        ..entry(MessageStatus::Complete, Vec::new())
-    };
-    state.update(cx, |state, cx| {
-        state.transcript.insert(0, prompt);
-        state.transcript_revision += 1;
-        let run = std::iter::once(task).chain((0..60).map(said)).collect();
-        state.set_subagent_snapshot("child-chat".into(), run);
-        cx.notify();
-    });
-    transcript.update(cx, |this, cx| {
-        this.sync(cx);
-        this.pinned = false;
-        this.list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
-        cx.notify();
-    });
-    let nodes = draw(cx);
-    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
-    cx.simulate_click(card.center, gpui::Modifiers::default());
-    for _ in 0..4 {
-        draw(cx);
-    }
-    // The card fills the view, the person's prompt scrolled away above it; the run scrolled on
-    // past its task.
-    transcript.update(cx, |this, cx| {
-        this.list.scroll_to(gpui::ListOffset { item_ix: 1, offset_in_item: px(10.0) });
-        cx.notify();
-    });
-    let child = transcript
-        .read_with(cx, |transcript, _| transcript.subagents.child("child-chat"))
-        .expect("open in place");
-    child.update(cx, |this, cx| {
-        this.list.scroll_to(gpui::ListOffset { item_ix: 20, offset_in_item: px(0.0) });
-        cx.notify();
-    });
-    let nodes = (0..4).map(|_| draw(cx)).last().unwrap_or_default();
-    assert_eq!(child.read_with(cx, |this, _| this.sticky_prompt()), Some(0), "its task would hold");
-    assert_eq!(child.read_with(cx, |this, _| this.held_prompt()), None, "but its run holds none");
-    let held: Vec<&str> = nodes
-        .values()
-        .filter(|node| node.label.starts_with("Back to your prompt"))
-        .map(|node| node.label.as_str())
-        .collect();
-    assert_eq!(held, ["Back to your prompt: Survey the files"], "the person's prompt, alone");
-}
-
-/// A held prompt is a band across the transcript's top, flush under the titlebar: as wide as the
-/// transcript, so nothing scrolling under it is cut but by one straight edge, and one line high.
-#[gpui::test]
-fn a_held_prompt_spans_the_top_as_part_of_the_page(cx: &mut gpui::TestAppContext) {
-    let said = |n: usize| text(&format!("Paragraph {n} of the long answer."));
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, (0..80).map(said).collect()));
-    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
-    let prompt = SessionMessageEntry {
-        id: "prompt".into(),
-        role: MessageRole::User,
-        parts: vec![text("Explain the upload path\nin detail")],
-        ..entry(MessageStatus::Complete, Vec::new())
-    };
-    state.update(cx, |state, cx| {
-        state.transcript.insert(0, prompt);
-        state.transcript_revision += 1;
-        cx.notify();
-    });
-    transcript.update(cx, |this, cx| this.sync(cx));
-    draw(cx);
-    transcript.update(cx, |this, cx| {
-        this.list.scroll_to(gpui::ListOffset { item_ix: 1, offset_in_item: px(300.0) });
-        cx.notify();
-    });
-    let nodes = (0..3).map(|_| draw(cx)).last().unwrap_or_default();
-    let band = find(&nodes, Role::Button, "Back to your prompt: Explain the upload path in detail")
-        .expect("the prompt held");
-    assert!((band.width - 1000.0).abs() <= 1.0, "as wide as the transcript: {band:?}");
-    let top = f32::from(band.center.y) - band.height / 2.0;
-    assert!((top - Theme::TITLEBAR_HEIGHT).abs() <= 0.5, "flush under the titlebar: {band:?}");
-    assert!(band.height <= Transcript::sticky_height() + 0.5, "one line: {band:?}");
-}
-
-/// #11: on a phone the band stands under the navigation bar, whose title and subtitle reach
-/// lower than a Mac's titlebar, never over them.
-#[gpui::test]
-fn a_phones_held_prompt_stands_under_its_navigation_bar(cx: &mut gpui::TestAppContext) {
-    let said = |n: usize| text(&format!("Paragraph {n} of the long answer."));
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, (0..80).map(said).collect()));
-    crate::shell::force_touch(true);
-    cx.simulate_resize(gpui::size(px(402.0), px(874.0)));
-    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
-    let prompt = SessionMessageEntry {
-        id: "prompt".into(),
-        role: MessageRole::User,
-        parts: vec![text("Explain the upload path")],
-        ..entry(MessageStatus::Complete, Vec::new())
-    };
-    state.update(cx, |state, cx| {
-        state.transcript.insert(0, prompt);
-        state.transcript_revision += 1;
-        cx.notify();
-    });
-    transcript.update(cx, |this, cx| this.sync(cx));
-    draw(cx);
-    transcript.update(cx, |this, cx| {
-        this.list.scroll_to(gpui::ListOffset { item_ix: 1, offset_in_item: px(300.0) });
-        cx.notify();
-    });
-    let nodes = (0..3).map(|_| draw(cx)).last().unwrap_or_default();
-    crate::shell::force_touch(false);
-    let band = find(&nodes, Role::Button, "Back to your prompt: Explain the upload path")
-        .expect("the prompt held");
-    let top = f32::from(band.center.y) - band.height / 2.0;
-    let bar = Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD;
-    assert!((top - bar).abs() <= 0.5, "under the phone's bar ({bar}): {band:?}");
-}
-
-/// slopty: a list held at its end, as a finished turn rests, holds its prompt once the prompt
-/// is above the band: the list keeps no top row there, and the band reads where its rows stand
-/// all the same (#18). Short enough to fit, it holds none.
-#[gpui::test]
-fn a_list_held_at_its_end_holds_the_prompt_it_scrolled_past(cx: &mut gpui::TestAppContext) {
-    let said = |n: usize| text(&format!("Paragraph {n} of the long answer."));
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, (0..80).map(said).collect()));
-    cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
-    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
-    let prompt = SessionMessageEntry {
-        id: "prompt".into(),
-        role: MessageRole::User,
-        parts: vec![text("Survey the files")],
-        ..entry(MessageStatus::Complete, Vec::new())
-    };
-    state.update(cx, |state, cx| {
-        state.transcript.insert(0, prompt.clone());
-        state.transcript_revision += 1;
-        cx.notify();
-    });
-    transcript.update(cx, |this, cx| this.sync(cx));
-    let nodes = (0..3).map(|_| draw(cx)).last().unwrap_or_default();
-    assert!(
-        transcript.read_with(cx, |this, _| this.is_glued()),
-        "the list rests at its end, with no top row"
-    );
-    assert!(find(&nodes, Role::Button, "Back to your prompt: Survey the files").is_some(), "the prompt held");
-    // One short answer under it fits, and nothing is held.
-    state.update(cx, |state, cx| {
-        state.transcript = vec![prompt, entry(MessageStatus::Complete, vec![text("Done.")])];
-        state.transcript_revision += 1;
-        cx.notify();
-    });
-    transcript.update(cx, |this, cx| this.sync(cx));
-    let nodes = (0..3).map(|_| draw(cx)).last().unwrap_or_default();
-    assert!(!nodes.values().any(|node| node.label.starts_with("Back to your prompt")), "all of it fits");
-}
-
 /// The rewind menu hangs from the person's bubble's left edge, under it, not from wherever the
 /// press landed (flush with its right edge under a narrower bubble); its note says what its first row does, then what the row under the pointer
 /// does (#20).
@@ -1089,7 +907,7 @@ fn the_controls_of_a_reply_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
         let nodes = draw(cx);
         let buttons = || nodes.values().filter(|node| node.role == Role::Button);
         let names: Vec<_> = buttons().map(|node| node.label.clone()).collect();
-        let group = buttons().find(|node| node.label.starts_with("Ran")).unwrap_or_else(|| panic!("{names:?}")).clone();
+        let group = buttons().find(|node| node.label.starts_with("Show work")).unwrap_or_else(|| panic!("{names:?}")).clone();
         let copy = find(&nodes, Role::Button, "Copy message").unwrap_or_else(|| panic!("{names:?}")).clone();
         (group.height, copy.height, copy.width)
     };
@@ -1297,7 +1115,8 @@ fn a_summary_says_what_runs_now(cx: &mut gpui::TestAppContext) {
     );
     let nodes = draw(cx);
     assert!(
-        find(&nodes, Role::Button, "Ran 1 command and running 1 command").is_some(),
+        // slopty: the shut divider says its two words; a screen reader hears the sentence.
+        find(&nodes, Role::Button, "Show work, ran 1 command and running 1 command").is_some(),
         "{:?}",
         nodes.values().map(|n| n.label.clone()).collect::<Vec<_>>()
     );
@@ -1322,7 +1141,7 @@ fn a_summary_says_what_runs_now(cx: &mut gpui::TestAppContext) {
     );
     let labels: Vec<String> = nodes.values().map(|n| n.label.clone()).collect();
     assert!(
-        find(&nodes, Role::Button, "Ran 1 command and waiting for approval (run touch refused.txt)")
+        find(&nodes, Role::Button, "Show work, ran 1 command and waiting for approval (run touch refused.txt)")
             .is_some(),
         "{labels:?}"
     );
@@ -1452,7 +1271,7 @@ fn a_drilled_run_reads_from_the_top(cx: &mut gpui::TestAppContext) {
 }
 
 /// #17: a subagent's run drilled into before the chat list lists it (a note tapped at launch)
-/// holds no prompt while it is unknown, and reads from the top once it is listed.
+/// lays out as a chat while it is unknown, and reads from the top once it is listed.
 #[gpui::test]
 fn a_run_listed_after_it_opened_reads_as_one(cx: &mut gpui::TestAppContext) {
     let (transcript, cx) = open(cx, answer("a1", "Main answer."));
@@ -1465,8 +1284,8 @@ fn a_run_listed_after_it_opened_reads_as_one(cx: &mut gpui::TestAppContext) {
         this.sync(cx);
     });
     draw(cx);
-    let (top, holds) = transcript.read_with(cx, |this, _| (this.list_top, this.holds_prompts));
-    assert!(!top && !holds, "unknown: no band from its task, laid as a chat");
+    let top = transcript.read_with(cx, |this, _| this.list_top);
+    assert!(!top, "unknown: laid as a chat");
     transcript.update(cx, |this, cx| {
         this.state.update(cx, |state, cx| {
             state.chats.push(
@@ -1481,8 +1300,8 @@ fn a_run_listed_after_it_opened_reads_as_one(cx: &mut gpui::TestAppContext) {
         });
     });
     let nodes = draw(cx);
-    let (top, holds) = transcript.read_with(cx, |this, _| (this.list_top, this.holds_prompts));
-    assert!(top && !holds, "listed as a run: from the top, holding none");
+    let top = transcript.read_with(cx, |this, _| this.list_top);
+    assert!(top, "listed as a run: from the top");
     let said = find(&nodes, Role::Paragraph, "It has 4.").expect("the run's answer").clone();
     assert!(f32::from(said.center.y) < 300.0, "near the top: {said:?}");
 }
@@ -1597,16 +1416,17 @@ fn the_keyboard_reaches_the_controls_of_a_reply(cx: &mut gpui::TestAppContext) {
     };
     // The settled turn's divider stands for its work, then what it changed and its strip.
     let reached = reach(cx);
-    for want in ["Wrote 2 notes, ran 2 commands", "2 files changed", "Open diff", "Copy message"] {
+    for want in ["Show work, ran 2 commands", "2 files changed", "Open diff", "Copy message"] {
         assert!(reached.iter().any(|label| label.starts_with(want)), "{want}: {reached:?}");
     }
     // Enter opens the divider, as a click does, and its work's controls join the order.
-    while !focused(cx).starts_with("Wrote 2 notes") {
+    while !focused(cx).starts_with("Show work") {
         tab(cx);
     }
     press_enter(cx);
     let nodes = draw(cx);
-    let divider = nodes.values().find(|n| n.label.starts_with("Wrote 2 notes")).expect("the divider");
+    // Open, it offers to hide the work again.
+    let divider = nodes.values().find(|n| n.label.starts_with("Hide work, ran 2")).expect("the divider");
     assert_eq!(divider.expanded, Some(true));
     let reached = reach(cx);
     for want in ["Ran 2 commands", "Subagent Count lines"] {
@@ -1638,7 +1458,7 @@ fn a_reply_opens_at_its_first_row(cx: &mut gpui::TestAppContext) {
     let article = find(&nodes, Role::Article, "Agent").expect("the reply's article").clone();
     let buttons = descendants(&nodes, &article, Role::Button);
     assert!(
-        buttons.iter().any(|button| button.label.starts_with("Ran 2 commands")),
+        buttons.iter().any(|button| button.label.starts_with("Show work, ran 2 commands")),
         "the first group is the reply's: {buttons:?}"
     );
 }

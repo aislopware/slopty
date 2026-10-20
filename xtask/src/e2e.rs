@@ -466,6 +466,15 @@ pub fn app_env(data_dir: &str, bin_dir: &str, accept: Option<&str>) -> Vec<(Stri
     if let Some(accept) = accept {
         env.push(("SLOPTY_E2E_ACCEPT".to_owned(), accept.to_owned()));
     }
+    // `SLOPTY_E2E_A11Y=always` keeps the app's accessibility tree on for the whole run, as an
+    // assistive app does, and `GPUI_VIEW_RETENTION=0` builds every view in every frame: the two
+    // sort a view acting on its last build from a fault of its own (`docs/TESTING.md`, "Retained
+    // frames").
+    for key in ["SLOPTY_E2E_A11Y", "GPUI_VIEW_RETENTION"] {
+        if let Ok(mode) = std::env::var(key) {
+            env.push((key.to_owned(), mode));
+        }
+    }
     env
 }
 

@@ -3,6 +3,7 @@ Button │ Filter projects: All projects
 Button │ Needs you, 1
 Button │ Touch three files
 Status │ Needs you
+Label │ Needs your approval · Run touch refused.txt
 Button │ Done, 1
 Button │ Survey the files
 Button │ Inactive, 0
@@ -15,7 +16,7 @@ Paragraph │ Touch three files
 Button │ Copy message
 Button │ Rewind…
 Article │ Claude Code
-Button │ Waiting for approval (run touch refused.txt)
+Button │ Show work, waiting for approval (run touch refused.txt)
 Status │ Needs your approval: touch refused.txt
 Group │ touch refused.txt (focused)
 Code │ touch refused.txt

@@ -266,6 +266,55 @@ pub use slopty_view_proto::view::{
     parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
 
+/// slopty: when `format_time_ago(then, …)`, read at `now`, next says something else: the next
+/// whole minute, hour, day, week, month or year of its age. `None` past what it can say.
+pub fn time_ago_changes(
+    then: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let age = now.signed_duration_since(then).num_seconds().max(0);
+    let next = if age < HOUR {
+        (age / MINUTE + 1) * MINUTE
+    } else if age < DAY {
+        (age / HOUR + 1) * HOUR
+    } else if age < 7 * DAY {
+        (age / DAY + 1) * DAY
+    } else if age < 35 * DAY {
+        (age / (7 * DAY) + 1) * 7 * DAY
+    } else if age < 360 * DAY {
+        ((age / (30 * DAY) + 1) * 30 * DAY).min(360 * DAY)
+    } else {
+        (age / (365 * DAY) + 1) * 365 * DAY
+    };
+    then.checked_add_signed(chrono::Duration::seconds(next))
+}
+
+// slopty: a row's time reads the same up to its next change and differently from it on.
+#[cfg(test)]
+mod time_ago_tests {
+    use super::{format_time_ago, time_ago_changes};
+
+    #[test]
+    fn a_rows_time_changes_exactly_when_the_clock_says() {
+        let then = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap_or_default();
+        let ages = [0, 1, 59, 60, 61, 3_599, 3_600, 86_399, 86_400, 604_799, 604_800, 3_023_999]
+            .into_iter()
+            .chain([3_024_000, 31_103_999, 31_104_000, 31_535_999, 31_536_000, 100_000_000]);
+        for age in ages {
+            let now = then + chrono::Duration::seconds(age);
+            let shown = format_time_ago(then, now);
+            let changes = time_ago_changes(then, now).expect("a time that changes");
+            assert!(changes > now, "{age}s: {changes} after {now}");
+            let before = changes - chrono::Duration::seconds(1);
+            assert_eq!(format_time_ago(then, before), shown, "{age}s: the same until then");
+            assert_ne!(format_time_ago(then, changes), shown, "{age}s: different from then");
+        }
+    }
+}
+
 /// What a session row shows that ticks with the clock rather than with its
 /// content: the staleness-checked indicator and running-subagent count. A
 /// change in either must repaint even when the row itself is untouched.

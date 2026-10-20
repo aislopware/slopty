@@ -14,11 +14,14 @@ impl Render for NavigationHost {
             shell
                 .navigation_focus
                 .remember(&shell.shortcut_focus, window, cx);
-            let root = shell.shortcut_focus.clone();
             let (preferred, neutral) = shell.navigation_focus_fallback(cx);
-            window.defer(cx, move |window, cx| {
-                restore_mounted_focus(&root, &preferred, &neutral, window, cx);
-            });
+            defer_mounted_focus_restore(
+                shell.shortcut_focus.clone(),
+                preferred,
+                neutral,
+                window,
+                cx,
+            );
             let main = shell.render_main(window, 400., 400., cx);
             let right = shell.render_right_pane(window, cx);
             div()
@@ -694,3 +697,104 @@ fn a_drilled_in_subagent_leads_back_to_its_parent(cx: &mut TestAppContext) {
     let edges = |b: gpui::Bounds<gpui::Pixels>| (f32::from(b.left()).round(), f32::from(b.right()).round());
     assert_eq!(edges(bar), edges(pill), "bar {bar:?}, composer {pill:?}");
 }
+
+/// slopty: whether the keyboard is in a Changes surface, whose context the diff's find keys are
+/// bound in.
+fn keyboard_in_changes(cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        window.draw(cx).clear(cx);
+        window.context_stack().iter().any(|context| context.contains("Changes"))
+    })
+}
+
+/// slopty: a diff the person brings to the front takes the keyboard, so ⌘F finds in the diff
+/// and not in the chat: one opened from the pane's offers, and one picked by its tab. Diffs
+/// opened for no one (a restored tab, an agent's) leave the keyboard where it was.
+#[gpui::test]
+fn a_diff_brought_to_the_front_takes_the_keyboard(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    let composer = cx.update(|_, cx| shell.read(cx).composer.focus_handle(cx));
+    cx.update(|window, cx| window.focus(&composer, cx));
+    assert!(!keyboard_in_changes(cx), "diffs opened for no one leave the keyboard");
+
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_pane_offer(super::pane_offers::PaneOffer::Changes, window, cx);
+        });
+    });
+    assert!(keyboard_in_changes(cx), "the diff opened from the offers has the keyboard");
+
+    cx.update(|window, cx| window.focus(&composer, cx));
+    assert!(!keyboard_in_changes(cx), "the composer has it back");
+    let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
+    cx.simulate_click(tab, gpui::Modifiers::default());
+    assert!(keyboard_in_changes(cx), "the diff picked by its tab has the keyboard");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).resolved_right_active(cx)), RightSurface::Diff(1));
+
+    // With a diff to read, ⌘F puts the keyboard in the diff's find, and it stays there.
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "parent") {
+                    chat.cwd = Some("/work".into());
+                }
+            });
+            let changes = shell.diffs.get(&1).cloned().unwrap();
+            changes.update(cx, |changes, cx| changes.show_patch("/work", DIFF, cx));
+        });
+    });
+    cx.run_until_parked();
+    assert!(keyboard_in_changes(cx));
+    cx.simulate_keystrokes(&crate::settings::platform_combo("mod-f"));
+    cx.run_until_parked();
+    let changes = cx.update(|_, cx| shell.read(cx).diffs.get(&1).cloned().unwrap());
+    assert!(
+        cx.update(|window, cx| changes.read(cx).find_has_keyboard(window, cx)),
+        "the diff's find has the keyboard"
+    );
+}
+
+/// slopty: a frame drawn while a key is dispatched, before its handlers (a key draws a dirty
+/// window first), and the handler opening the diff's find: the shell's restore, deferred from
+/// that frame, leaves the find the keyboard the frame never saw it take.
+#[gpui::test]
+fn a_find_opened_after_a_frame_in_its_key_s_dispatch_keeps_the_keyboard(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    let changes = cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "parent") {
+                    chat.cwd = Some("/work".into());
+                }
+            });
+            shell.open_pane_offer(super::pane_offers::PaneOffer::Changes, window, cx);
+            let changes = shell.diffs.get(&shell.diff_seq).cloned().expect("the diff opened");
+            changes.update(cx, |changes, cx| changes.show_patch("/work", DIFF, cx));
+            changes
+        })
+    });
+    cx.run_until_parked();
+    assert!(keyboard_in_changes(cx));
+    // One update, as a key's dispatch: the frame first, then the handler.
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+        changes.update(cx, |changes, cx| changes.open_find(window, cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.update(|window, cx| changes.read(cx).find_has_keyboard(window, cx)),
+        "the diff's find has the keyboard"
+    );
+}
+
+const DIFF: &str = "\
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,2 @@
+ fn main() {
+-    old();
++    new();
+";

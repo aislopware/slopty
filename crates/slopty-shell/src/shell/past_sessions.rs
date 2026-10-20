@@ -37,7 +37,6 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
 use crate::popover;
 use crate::settings::ShortcutId;
-use crate::state::format_time_ago;
 use crate::theme::Theme;
 
 /// What the shell asks the view model.
@@ -83,10 +82,12 @@ const ROW_BRANCH_HEIGHT: f32 = 45.0;
 const GAP: f32 = 2.0;
 /// The space above History's first row.
 const BODY_INSET: f32 = 2.0;
-/// A row's leading slots, as a chat row's: its status (empty: a past session has none here)
-/// and the agent's mark, each 13 wide, 4 apart, before its words.
-const ROW_SLOT: f32 = 13.0;
-const ROW_SLOT_GAP: f32 = 4.0;
+/// A row's one leading slot, as a chat row's (`SIDEBAR_LEADING_SLOT`): the agent's mark, a past
+/// session having no state to say, then the air before its words.
+const ROW_SLOT: f32 = super::SIDEBAR_LEADING_SLOT;
+const ROW_SLOT_GAP: f32 = super::SIDEBAR_LEADING_GAP;
+/// The agent's mark in the slot, as a chat row's.
+const ROW_MARK: f32 = 13.0;
 
 /// A prompt as the machine found it: its words, where the asked words are in it, and whether
 /// it was cut.
@@ -139,10 +140,9 @@ impl PastRow {
         })
     }
 
-    /// How long ago it last changed.
-    fn ago(&self, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
-        let at = chrono::DateTime::from_timestamp_millis(self.updated_at?)?;
-        Some(format_time_ago(at, now))
+    /// When it last changed, where known.
+    fn updated(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::from_timestamp_millis(self.updated_at?)
     }
 
     /// What its time slot says while a live Claude Code elsewhere holds it.
@@ -397,6 +397,8 @@ impl Shell {
         history.open = !history.open;
         history.shown = FIRST_PAGE;
         if history.open {
+            // The rows listed before show at once: by the clock now, not the sidebar's last.
+            self.sidebar_clock = crate::clock::utc(cx);
             self.load_history(cx);
         } else {
             history.task = None;
@@ -431,6 +433,8 @@ impl Shell {
         history.task = Some(cx.spawn(async move |this, cx| {
             let listed = engine.client().call_as::<Listed>(calls::LIST, params).await;
             let _gone = this.update(cx, |this, cx| {
+                // The rows that come show by the clock now, not the sidebar's last.
+                this.sidebar_clock = crate::clock::utc(cx);
                 let history = &mut this.past_sessions.history;
                 if history.asked != asked {
                     return;
@@ -486,7 +490,6 @@ impl Shell {
 
     /// History's rows, or the line that says where it stands.
     fn render_history_body(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let now = crate::clock::utc(cx);
         let view = cx.entity_id();
         let history = &self.past_sessions.history;
         let mut body = div().w_full().flex().flex_col().pt(px(BODY_INSET)).gap(px(GAP));
@@ -516,7 +519,7 @@ impl Shell {
             body = body.child(line);
         }
         for row in rows {
-            let element = self.render_history_row(&row, now, theme, cx);
+            let element = self.render_history_row(&row, theme, cx);
             body = body.child(element);
         }
         if let Some(words) = partial {
@@ -566,7 +569,6 @@ impl Shell {
     fn render_history_row(
         &mut self,
         row: &PastRow,
-        now: chrono::DateTime<chrono::Utc>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -577,7 +579,8 @@ impl Shell {
         } else if let Some(words) = row.running_words() {
             words.into()
         } else {
-            row.ago(now).unwrap_or_default().into()
+            // slopty: the sidebar's clock, which ticks when this next reads differently.
+            row.updated().map(|at| self.sidebar_time_ago(at)).unwrap_or_default()
         };
         let running = row.running.is_some();
         let tooltip = match row.held_elsewhere() {
@@ -585,8 +588,8 @@ impl Shell {
             None => format!("{label}\nOpen and continue this Claude Code session"),
         };
         let target = row.clone();
-        // slopty: a chat row's grid (its empty status slot, the agent's mark, its words fading at
-        // the edge), quieter: the words muted, as a session not yet a chat; the mark keeps its
+        // slopty: a chat row's grid (its one leading slot holding the agent's mark, its words
+        // fading at the edge), quieter: the words muted, as a session not yet a chat; the mark keeps its
         // full clay, as opencode never dims an agent's colour.
         let (mark, tint) = crate::pickers::harness_brand_icon(slopty_view_proto::HarnessId::CLAUDE_CODE);
         let fade = SharedString::from(format!("history-row-{}-hover", row.key));
@@ -594,12 +597,13 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(ROW_SLOT_GAP))
-            .child(div().flex_none().size(px(ROW_SLOT)))
             .child(
-                icon(mark)
-                    .size(px(ROW_SLOT))
-                    .flex_none()
-                    .text_color(tint.unwrap_or(theme.text_muted)),
+                div().flex_none().size(px(ROW_SLOT)).flex().items_center().justify_center().child(
+                    icon(mark)
+                        .size(px(ROW_MARK))
+                        .flex_none()
+                        .text_color(tint.unwrap_or(theme.text_muted)),
+                ),
             )
             .child(
                 div()
@@ -625,7 +629,8 @@ impl Shell {
                         move || format!("history-time-{key}")
                     })
                     .flex_none()
-                    .ml(px(4.0))
+                    // slopty: 8 from the words, past the row's gap.
+                    .ml(px(8.0 - ROW_SLOT_GAP))
                     .text_size(crate::typography::ui_rems(11.0))
                     .font_features(crate::typography::tabular())
                     .text_color(if running { theme.warning } else { theme.text_faint })
@@ -638,7 +643,7 @@ impl Shell {
                 .items_center()
                 .gap(px(4.0))
                 // Under the words, past the two slots.
-                .pl(px(2.0 * (ROW_SLOT + ROW_SLOT_GAP)))
+                .pl(px(ROW_SLOT + ROW_SLOT_GAP))
                 .text_size(crate::typography::ui_rems(11.0))
                 .line_height(px(14.0))
                 .text_color(theme.text_faint)
@@ -811,6 +816,7 @@ impl Shell {
             }
         });
         let every = scope.space_id.is_none();
+        self.sidebar_clock = crate::clock::utc(cx);
         self.past_sessions.picker = Some(Picker {
             search,
             focus: cx.focus_handle(),
@@ -867,6 +873,7 @@ impl Shell {
             }
             let listed = engine.client().call_as::<Listed>(calls::LIST, params).await;
             let _gone = this.update(cx, |this, cx| {
+                this.sidebar_clock = crate::clock::utc(cx);
                 let Some(picker) = this.past_sessions.picker.as_mut() else { return };
                 if picker.asked != asked {
                     return;
@@ -941,7 +948,6 @@ impl Shell {
         let theme = Theme::of(cx).for_popup();
         // slopty: a key reads as everywhere else (`keys::combo_text`).
         let shortcut = crate::keys::combo_text(self.settings.keymap.get(ShortcutId::ResumeSession));
-        let now = crate::clock::utc(cx);
         let view = cx.entity_id();
         let opening = self.past_sessions.opening.as_ref().map(|(key, _)| key.clone());
         let picker = self.past_sessions.picker.as_mut()?;
@@ -959,11 +965,16 @@ impl Shell {
         let load = picker.load.clone();
         let mut children: Vec<AnyElement> = Vec::new();
         let rows = load.listed().map(|l| l.sessions.clone()).unwrap_or_default();
+        // slopty: the sidebar's clock, which ticks when the soonest of these next reads
+        // differently.
+        let ago: Vec<SharedString> =
+            rows.iter().map(|row| row.updated().map(|at| self.sidebar_time_ago(at)).unwrap_or_default()).collect();
+        self.tick_sidebar_clock(cx);
         for (ix, row) in rows.iter().enumerate() {
             let target = row.clone();
             let opening = opening.as_deref() == Some(row.key.as_str());
             let refusal = refused.as_ref().filter(|(key, _)| *key == row.key).map(|(_, why)| why.clone());
-            let element = picker_row(row, ix, ix == active, opening, refusal, every, &words, now, &theme)
+            let element = picker_row(row, ix, ix == active, opening, refusal, every, &words, ago[ix].clone(), &theme)
                 .on_click(cx.listener(move |this, _, _, cx| this.open_past_session(target.clone(), cx)))
                 .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
                     if let Some(picker) = this.past_sessions.picker.as_mut()
@@ -1119,7 +1130,7 @@ fn picker_row(
     refused: Option<String>,
     every: bool,
     words: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    ago: SharedString,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let label = row.label();
@@ -1138,7 +1149,7 @@ fn picker_row(
     } else if let Some(words) = row.running_words() {
         words.into()
     } else {
-        row.ago(now).unwrap_or_default().into()
+        ago
     };
     let second: Option<AnyElement> = match (&refused, prompt_line) {
         (Some(why), _) => Some(
@@ -1444,14 +1455,77 @@ mod tests {
         let gap = f32::from(time.left() - title.right());
         assert!((gap - 8.0).abs() < 0.5, "the title runs up to the time: {title:?} {time:?}");
         assert!(f32::from(time.size.width) < 24.0, "\"1d\" is as wide as its words: {time:?}");
-        // slopty: on a chat row's grid: its words past the status slot and the agent's mark, as
-        // a chat row's, a chat row tall.
+        // slopty: on a chat row's grid: its words past the one leading slot, as a chat row's, a
+        // chat row tall.
         let row = cx.debug_bounds("history-row-d:lexer").expect("the row");
         let inset = f32::from(title.left() - row.left());
         assert!(
-            (inset - (Theme::SPACE_SM + 2.0 * (ROW_SLOT + ROW_SLOT_GAP))).abs() < 0.5,
+            (inset - (Theme::SPACE_SM + ROW_SLOT + ROW_SLOT_GAP)).abs() < 0.5,
             "the words start where a chat row's do: {inset}"
         );
         assert_eq!(f32::from(row.size.height), super::super::sidebar_row_height(false));
+    }
+
+    // slopty: History's times read the sidebar's clock, taken as History opens, and the clock
+    // ticks when a time shown next reads differently, so a row's "now" turns into "1m" with
+    // nothing else moving.
+    #[gpui::test]
+    fn history_s_times_move_on_by_the_sidebar_s_clock(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let path = tempfile::tempdir().unwrap().keep();
+        let (shell, cx) = cx.add_window_view(move |_, cx| {
+            let shell = Shell::new(
+                cx.new(|_| crate::state::AppState::new()),
+                crate::state::EngineBootConfig {
+                    data_dir: path.clone(),
+                    default_harness: slopty_view_proto::HarnessId::MOCK,
+                },
+                cx,
+            );
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.spaces = vec![serde_json::from_value(serde_json::json!({
+                    "id": "local:/work", "deviceId": "local", "path": "/work",
+                    "gitDetected": true, "createdAt": "2026-09-20T00:00:00Z",
+                }))
+                .unwrap()];
+            });
+            shell
+        });
+        let now = cx.update(|_, cx| crate::clock::utc(cx));
+        // As the machine says it: to the millisecond.
+        let updated = chrono::DateTime::from_timestamp_millis((now - chrono::Duration::seconds(30)).timestamp_millis())
+            .expect("a moment");
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(crate::state::GatePhase::Ready);
+            shell.splash = super::super::SplashPhase::Gone;
+            crate::motion::set_reduced_motion(cx, true);
+            shell.sidebar_clock = now - chrono::Duration::hours(1);
+            shell.toggle_history(cx);
+            assert_eq!(shell.sidebar_clock, now, "taken as History opens, not the sidebar's last");
+            let mut past = row("lexer");
+            past.updated_at = Some(updated.timestamp_millis());
+            shell.past_sessions.history.load =
+                Load::Listed(Listed { sessions: vec![past], ..Listed::default() });
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.sidebar_time_ago(updated).as_ref(), "now");
+            let due = shell.sidebar_clock_tick.as_ref().map(|(due, _)| *due);
+            assert_eq!(due, Some(updated + chrono::Duration::seconds(60)), "ticks when it reads 1m");
+        });
+        cx.executor().advance_clock(std::time::Duration::from_secs(31));
+        cx.run_until_parked();
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.sidebar_time_ago(updated).as_ref(), "1m", "the minute turned");
+        });
     }
 }

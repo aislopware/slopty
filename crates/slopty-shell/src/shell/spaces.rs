@@ -16,6 +16,7 @@ use crate::pickers::{
 };
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
+use crate::state::time_ago_changes;
 use slopty_view_proto::{
     ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
@@ -81,55 +82,6 @@ pub(super) fn retain_known_pins(
 // slopty: a pin or the filter is let go only while every machine is reached: a chat or project
 // on one out of reach is missing from the lists, not gone.
 /// Whether every device the workspace knows is reached now, so what the lists leave out is gone.
-/// slopty: when `format_time_ago(then, …)`, read at `now`, next says something else: the next
-/// whole minute, hour, day, week, month or year of its age. `None` past what it can say.
-pub(super) fn time_ago_changes(
-    then: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<chrono::DateTime<chrono::Utc>> {
-    const MINUTE: i64 = 60;
-    const HOUR: i64 = 60 * MINUTE;
-    const DAY: i64 = 24 * HOUR;
-    let age = now.signed_duration_since(then).num_seconds().max(0);
-    let next = if age < HOUR {
-        (age / MINUTE + 1) * MINUTE
-    } else if age < DAY {
-        (age / HOUR + 1) * HOUR
-    } else if age < 7 * DAY {
-        (age / DAY + 1) * DAY
-    } else if age < 35 * DAY {
-        (age / (7 * DAY) + 1) * 7 * DAY
-    } else if age < 360 * DAY {
-        ((age / (30 * DAY) + 1) * 30 * DAY).min(360 * DAY)
-    } else {
-        (age / (365 * DAY) + 1) * 365 * DAY
-    };
-    then.checked_add_signed(chrono::Duration::seconds(next))
-}
-
-// slopty: a row's time reads the same up to its next change and differently from it on.
-#[cfg(test)]
-mod time_ago_tests {
-    use super::{format_time_ago, time_ago_changes};
-
-    #[test]
-    fn a_rows_time_changes_exactly_when_the_clock_says() {
-        let then = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap_or_default();
-        let ages = [0, 1, 59, 60, 61, 3_599, 3_600, 86_399, 86_400, 604_799, 604_800, 3_023_999]
-            .into_iter()
-            .chain([3_024_000, 31_103_999, 31_104_000, 31_535_999, 31_536_000, 100_000_000]);
-        for age in ages {
-            let now = then + chrono::Duration::seconds(age);
-            let shown = format_time_ago(then, now);
-            let changes = time_ago_changes(then, now).expect("a time that changes");
-            assert!(changes > now, "{age}s: {changes} after {now}");
-            let before = changes - chrono::Duration::seconds(1);
-            assert_eq!(format_time_ago(then, before), shown, "{age}s: the same until then");
-            assert_ne!(format_time_ago(then, changes), shown, "{age}s: different from then");
-        }
-    }
-}
-
 pub(super) fn every_device_reached(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> bool {
     !state.devices.is_empty()
         && state.devices.iter().all(|device| state.device_online(&device.id, now))
@@ -2013,8 +1965,10 @@ pub(super) struct SpacesMenu {
 // handoff from its header without leaving dead space while collapsed.
 const SIDEBAR_SECTION_GAP: f32 = 12.0;
 pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
-/// slopty: a group heading's words and count: 13 regular (Amp's `text-base font-normal`).
-pub(super) const SIDEBAR_HEADER_TEXT: f32 = 13.0;
+/// slopty: a group heading's words and count: 12 medium (Claude desktop's compact heading),
+/// a step under the rows' 13 regular titles, so a heading reads as the list's label and not as
+/// one more row.
+pub(super) const SIDEBAR_HEADER_TEXT: f32 = 12.0;
 /// slopty: a heading's chevron turns over Amp's 200 ms ease-out.
 const SIDEBAR_CHEVRON_TURN: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
@@ -2035,13 +1989,15 @@ pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
 /// groups and custom sections): a muted label, `count` as a muted badge
 /// beside it while the section is collapsed, then any action and the
 /// disclosure chevron.
-// slopty: the label reads at the full muted tone, 13 regular as Amp's group headings, and
-// brightens to the text's under the pointer over the house's hover fade, as Claude desktop's do;
-// the group's count fades in beside it then (Amp), so the header rests quiet. The header is a
-// button a screen reader names, with its count, and hears open or shut, and a keyboard stop
-// Enter or Space toggles. `id` is its element's; `key` names its fade among the sidebar's;
-// `hovered` is the caller's own hover listener, which the header calls beside its fade (an
-// element takes one).
+// slopty: the label reads at the full muted tone, 12 medium as Claude desktop's compact group
+// headings, and brightens to the text's under the pointer over the house's hover fade, as
+// Claude desktop's do; the group's count fades in beside it then (Amp), and the chevron follows
+// the words: an open group's shows only under the pointer (Claude desktop's caret), a shut
+// group's always, since its rows are not there to say it holds any. So the header rests quiet.
+// The header is a button a screen reader names, with its count, and hears open or shut, and a
+// keyboard stop Enter or Space toggles. `id` is its element's; `key` names its fade among the
+// sidebar's; `hovered` is the caller's own hover listener, which the header calls beside its
+// fade (an element takes one).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sidebar_disclosure_header(
     theme: &Theme,
@@ -2085,7 +2041,7 @@ pub(super) fn sidebar_disclosure_header(
             false,
             div()
                 .text_size(crate::typography::ui_rems(SIDEBAR_HEADER_TEXT))
-                .font_weight(gpui::FontWeight::NORMAL)
+                .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(sidebar_hover_blend(&fade_key, theme.text_muted, theme.text))
                 .child(label),
         ))
@@ -2103,9 +2059,17 @@ pub(super) fn sidebar_disclosure_header(
                 ))
                 .child(SharedString::from(count.to_string()))
         }))
+        .child({
+            let shown = if open { sidebar_hover_reveal(&fade_key) } else { 1.0 };
+            let key = key.to_owned();
+            div()
+                .debug_selector(move || format!("sidebar-header-chevron-{key}"))
+                .flex_none()
+                .opacity(shown)
+                .child(chevron)
+        })
         .child(div().flex_1())
         .children(action)
-        .child(chevron)
         .child(motion::fade_driver(fade_key))
         .on_hover(hover);
     crate::surface_chrome::focus_ring_inset(header.tab_index(0), theme)
@@ -2135,6 +2099,16 @@ pub(super) fn sidebar_hover(key: SharedString) -> impl Fn(&bool, &mut Window, &m
     }
 }
 
+/// slopty: how far a sidebar fade `key` set by [`sidebar_hover`] reveals what it shows only
+/// under the pointer: wholly on a touch screen, where nothing hovers.
+pub(super) fn sidebar_hover_reveal(key: &str) -> f32 {
+    if super::compact::touch_screen() {
+        return 1.0;
+    }
+    let clear = gpui::Hsla { h: 0.0, s: 0.0, l: 0.0, a: 0.0 };
+    sidebar_hover_blend(key, clear, gpui::Hsla { a: 1.0, ..clear }).a
+}
+
 /// [`motion::hover_blend`] of a sidebar fade `key` set by [`sidebar_hover`].
 pub(super) fn sidebar_hover_blend(key: &str, rest: gpui::Hsla, hover: gpui::Hsla) -> gpui::Hsla {
     let over = SIDEBAR_POINTER.with(|pointer| pointer.borrow().as_deref() == Some(key));
@@ -2142,27 +2116,6 @@ pub(super) fn sidebar_hover_blend(key: &str, rest: gpui::Hsla, hover: gpui::Hsla
         motion::set_hover(key, true, true);
     }
     motion::hover_blend(key, rest, hover)
-}
-
-// slopty: opencode marks a session nobody has read with a 7 px accent dot on its avatar's
-// corner; here the agent's mark is the avatar. Ringed in the sidebar's own tone where that is
-// one colour; over glass, which has none, the dot stands alone.
-/// The unread dot on the corner of a sidebar row's agent mark.
-pub(super) fn unread_corner(chat: &str, theme: &Theme) -> gpui::Div {
-    let chat = chat.to_owned();
-    div()
-        .debug_selector(move || format!("chat-unread-{chat}"))
-        .absolute()
-        .top(px(-2.0))
-        .right(px(-2.0))
-        .size(px(6.0))
-        .rounded_full()
-        .bg(theme.accent)
-        .when(!theme.is_glass(), |dot| {
-            let wash = crate::theme::wash(0.05);
-            let tone = motion::mix(theme.glass(), gpui::Hsla { a: 1.0, ..wash }, wash.a);
-            dot.size(px(8.0)).top(px(-3.0)).right(px(-3.0)).border_1().border_color(tone)
-        })
 }
 
 /// Section header glyphs (chevron, `+`, `…`) share the label's muted tone.
@@ -4336,12 +4289,18 @@ impl Shell {
     pub(super) fn sidebar_time_ago(&self, then: chrono::DateTime<Utc>) -> SharedString {
         let now = self.sidebar_clock;
         if let Some(changes) = time_ago_changes(then, now) {
-            let next = self.sidebar_clock_next.get();
-            if next.is_none_or(|next| changes < next) {
-                self.sidebar_clock_next.set(Some(changes));
-            }
+            self.note_sidebar_change(changes);
         }
         format_time_ago(then, now).into()
+    }
+
+    /// slopty: something read by the sidebar's clock next reads differently at `at`; its tick
+    /// comes no later.
+    pub(super) fn note_sidebar_change(&self, at: chrono::DateTime<Utc>) {
+        let next = self.sidebar_clock_next.get();
+        if next.is_none_or(|next| at < next) {
+            self.sidebar_clock_next.set(Some(at));
+        }
     }
 
     /// slopty: take the clock again when the soonest time the last sidebar showed next reads
@@ -4402,6 +4361,8 @@ impl Shell {
                 .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
                 .collect()
         };
+        // slopty: rows of one title say what tells them apart (`sidebar_status::title_hints`).
+        let title_hints = super::sidebar_status::title_hints(self.state.read(cx), rows.iter().map(|row| &row.chat));
         let pinned_order = frozen_pinned
             .as_ref()
             .map_or(saved_pins.as_slice(), |ids| ids.as_slice());
@@ -4620,7 +4581,16 @@ impl Shell {
                     group: _,
                     reason,
                 } = row;
-                let time_ago = self.sidebar_time_ago(chat.last_message_at.unwrap_or(chat.created_at));
+                // slopty: how long the row has stood as it is (`sidebar_status::row_since`).
+                let time_ago = {
+                    let since = super::sidebar_status::row_since(
+                        status,
+                        &chat,
+                        self.state.read(cx).session_for(&chat.id),
+                        now,
+                    );
+                    self.sidebar_time_ago(since)
+                };
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = chat.config.as_ref().map(|c| c.harness);
                 let height = sidebar_row_height(reason);
@@ -4673,6 +4643,7 @@ impl Shell {
                         &chat.title.clone().unwrap_or_else(|| "New chat".into()),
                     )
                     .into(),
+                    title_hints.get(&chat.id).cloned(),
                     time_ago,
                     SharedString::default(),
                     None,
@@ -5033,6 +5004,8 @@ impl Shell {
                 .flex_col()
                 .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
                 .gap(px(SIDEBAR_LIST_GAP));
+            let title_hints =
+                super::sidebar_status::title_hints(self.state.read(cx), rows.iter().map(|row| &row.chat));
             for row in rows.into_iter().take(shown) {
                 let chat = row.chat;
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
@@ -5043,6 +5016,7 @@ impl Shell {
                         &chat.title.clone().unwrap_or_else(|| "New chat".into()),
                     )
                     .into(),
+                    title_hints.get(&chat.id).cloned(),
                     self.sidebar_time_ago(chat.last_message_at.unwrap_or(chat.created_at)),
                     SharedString::default(),
                     None,
@@ -6835,7 +6809,7 @@ impl Shell {
 
     // ---- space context menu / rename / delete overlays ----
 
-    fn close_space_menu(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn close_space_menu(&mut self, cx: &mut Context<Self>) {
         if self.space_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.space_menu);
             cx.notify();

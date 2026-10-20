@@ -101,7 +101,9 @@ fn composer(dump: &Dump) -> (String, bool) {
 /// An agent's tools drive the window: the stand-in's `ui_region` hides the sidebar (the toggle
 /// then offers to show it), and in its next turn `ui_region` expands it again, `ui_terminal`
 /// opens a terminal tab in its folder in the drawer, `ui_open` shows its README in the side pane,
-/// each change marked with a notice, and `ui_state` reports that layout: the sidebar, the pane
+/// each change shown in place with no notice over it, since the agent's chat is the one on screen
+/// (a chat off screen is marked with one, `shell::agent_ui::tests`), and `ui_state` reports that
+/// layout: the sidebar, the pane
 /// and the terminal shown, the README's tab and the terminal's, with its session, and nobody
 /// typing.
 #[tokio::test]
@@ -147,11 +149,8 @@ async fn an_agents_tools_lay_out_the_window() {
     assert_eq!(region(&hid[0]["window"], "sidebar")["shown"], false, "{hid:?}");
     assert!(node(&hidden, "Button", "Hide sidebar").is_none());
 
-    // Then it lays the window out; each change is marked as it lands.
+    // Then it lays the window out.
     tell(&mut stack, ARRANGE).await;
-    // The mark names the file by its path: "<who>: opened <repo>/README.md".
-    let readme_mark = format!(": opened {}", repo.join("README.md").display());
-    seen(&mut stack.driver, "the README's mark", STEP, |d| says_anywhere(d, &readme_mark)).await;
     thread_until(&stack, &agent, "arranged the window", |r| says(r, "Done: Arrange the window"))
         .await;
     let laid = seen(&mut stack.driver, "the sidebar, a terminal tab and the README", STEP, |d| {
@@ -170,6 +169,9 @@ async fn an_agents_tools_lay_out_the_window() {
         "a terminal tab in the drawer:\n{}",
         slopty_e2e::frame_text(&laid.a11y)
     );
+    // The chat on screen shows what its agent did; no notice says it again over the pane.
+    let readme_mark = format!(": opened {}", repo.join("README.md").display());
+    assert!(!says_anywhere(&laid, &readme_mark), "no notice over the README");
 
     let said = answers(&record);
     assert_eq!(said.len(), 5, "five calls: {said:?}");

@@ -14216,3 +14216,150 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `claude` that replays a recording now streams a recorded background task's end as Claude
     Code does (`task_notification`), so the tray no longer kept a finished command running
     after the turn ended; the worker's replay test holds that nothing runs on.
+- ✅ **The sidebar says each row's state once (2026-10-20).** The person found the sidebar not
+  premium and parts of it wrong: a working row said "16h", a finished row crowded three marks, a
+  subagent pill ate a title, two "hello" rows could not be told apart, and the headers read
+  heavy (`.research/audit-sidebar-2026-10-20.md`). This supersedes the unread corner dot of "The
+  chrome takes opencode's palette anchor…" and the 13 pt header of "The sidebar, settings and
+  themes take Amp's details".
+  - **One leading slot** (opencode's avatar slot): the morphing status mark while a row works,
+    waits, failed or finished unseen; the clock while it works on its own; the agent's mark, in
+    its full colour, at rest. The title starts 16 + 6 pt in, at one edge for every row, and the
+    heavier weight alone says a result is unread
+    (`sidebar_status::tests::a_row_draws_one_mark_before_its_title`).
+  - **A row's time is how long it has stood as it is** (`sidebar_status::row_since`): a turn
+    since it began (T3's working timer), a wait since it started, a rest since the last answer;
+    the reason line no longer repeats it ("Background work")
+    (`a_rows_time_is_how_long_it_has_stood_as_it_is`). Rows draw on the sidebar's clock, the one
+    their slots are measured on.
+  - **No subagent pill** (Amp's prune). A subagent its agent left running reads as the agent's
+    own work: Working, the clock, "1 subagent running"; the hover card counts them
+    (`a_subagent_left_running_keeps_its_row_at_work`).
+  - **Rows of one title say what tells them apart**, quiet after the title: the project when
+    theirs differ, else the machine, and a screen reader hears it
+    (`rows_of_one_title_say_what_tells_them_apart`).
+  - **Headers are 12 medium in the muted ink** (Claude desktop's compact heading), a step under
+    the rows; the chevron follows the words, an open group's shown only under the pointer and a
+    shut group's always, every one on touch
+    (`a_sidebar_headers_count_shows_under_the_pointer`).
+  - **The machine glyph shows only across kinds of machine**: two Macs wore the same laptop on
+    every row (`the_machine_glyph_shows_only_across_machines`).
+  - The reason line is a label a screen reader reads, and the hover archive a named button.
+    Escape puts a row's, a project's or the account's menu away; the shell took the key and
+    left the menu up (`escape_puts_a_context_menu_away`).
+  - **Nothing changes the state while a frame draws.** The open chat's result was marked seen
+    from the shell's render, and a change made while a frame draws reaches none of the views
+    watching the state, so under view retention the sidebar went on drawing "Done" for a chat
+    being read. A result arriving in the open chat is marked as it arrives, in the shell's
+    state observer, and the window coming back to the front marks it after its frame
+    (`a_finished_chat_opened_reads_seen_with_the_tree_kept`, which also holds the sidebar's
+    tree and paint against a frame from scratch with the tree kept on).
+  - E2e: `sidebar_paging::every_state_reads_at_a_glance` starts ten stand-in agents in two
+    projects (answered, read, unread, a long title, two "hello"s, a failed turn, a plan, a
+    question, an approval, a background command, a held subagent), holds the groups, statuses,
+    reasons and hints, renders `sidebar-states-{light,dark}`, then opens a row's menu and
+    archives it from the hover control.
+- ✅ **The chat says each turn once, in the words the best references use (2026-10-20).** The
+  person found the chat busy and in places wrong: a divider ran a truncated log sentence in
+  lavender verbs, the working line was faint and crowded, subagent notices were bare dots, a
+  toast covered the pane beside the chat, a prompt band held at the top, a file card printed a
+  full `/tmp` path and the footer named the obvious (`.research/audit-chat-2026-10-20.md`).
+  - **A turn's divider says "Worked for …" settled and nothing else** (Amp's `dividerLabel`,
+    Claude desktop). While its turn runs it stays shut, as "The transcript takes Amp's settled
+    turn…" ruled, but it no longer says what runs now in a shimmering sentence: it reads Amp's
+    "Show work" (or "Hide work" when opened), since the working line under it already says what
+    runs and for how long. The counted sentence moves to its tooltip and its screen-reader label
+    ("Show work, ran 1 command and running 1 command"), and the agent's own words between calls
+    are no longer counted as work ("wrote 8 notes" read as files)
+    (`a_summary_says_what_runs_now`, `a_turns_work_folds_behind_one_divider`).
+  - **The working line is 13 pt for what it does and 12 pt muted for its figures** (Claude
+    Code's status line), and the past "thought for" figure is dropped: thinking shows while it
+    lasts.
+  - **A subagent's notice says who and what became of it** in the TUI's words, `Agent "Count
+    lines" finished` (`a_subagents_bare_notice_says_who_and_what_became_of_it`).
+  - **An agent's act on the chat on screen raises no toast** (Claude desktop, T3): the change
+    shows in place (`an_agent_on_screen_is_not_toasted_over_its_own_change`).
+  - **No prompt is held at the top** (Amp, T3 and opencode hold none; Claude desktop hides it
+    behind a flag): the rail leads back to prompts; an open work group's header still holds.
+  - **A lone file reads its name, then its folder** in faint ink, home as `~`
+    (`a_lone_file_reads_name_then_folder`).
+  - **The footer says only the exception**: "Worktree" in one, nothing for a local checkout,
+    and the plan ring from 70 % or while its card is open
+    (`the_plan_ring_shows_only_as_the_plan_fills`).
+  - **A frame the chat asked for and lost is asked for again.** After the first send the chat
+    froze in e2e: the send's glide, the pin and the jump pill all wait on a frame the
+    transcript asks for, and GPUI's retained check draws the window again from scratch and drops
+    the callbacks that draw asked for, while the transcript kept its "asked" flag for good. Each
+    driver now keeps a token and when it asked (`FrameAsk`); a draw past 100 ms asks again and
+    the late answer to an older ask is ignored, so a driver still steps once a frame
+    (`a_glide_whose_frame_was_lost_asks_again_and_lands`,
+    `a_frame_ask_waits_its_patience_then_asks_again`). gpui-fast could keep a view's asks
+    across its check's scratch draw; until then no view may hold such a flag without patience.
+  - **A replayed turn repeats no id of the turns before it**: the stand-in tags each replay's
+    message, request and tool ids by how many records the session already holds, so a session
+    of several recordings no longer merges or drops turns, and its hooks find their calls by
+    the ids as rewritten, so a request still follows its call
+    (`a_second_replay_in_a_session_repeats_no_id_of_the_first`,
+    `a_permission_request_holds_the_turn_until_it_is_answered`).
+  - E2e: `transcript::a_long_session_reads_calm_from_its_top_to_its_end` plays five turns (the
+    `tools` survey, a markdown answer, an edit, a background command, a summary) and renders
+    `transcript-session` and `transcript-session-top`, light and dark.
+- ✅ **A diff the person brings to the front has the keyboard (2026-10-20).** The side pane's
+  Changes, opened from its `+` or its empty list, the chat details' diffstat or a transcript's
+  Open diff, or picked by its tab, takes the keyboard on its next frame, as a
+  file's editor does, so ⌘F finds in the diff and not in the chat. A tab restored at launch or
+  a diff an agent opens leaves the keyboard where it is
+  (`navigation_tests::a_diff_brought_to_the_front_takes_the_keyboard`,
+  `walk::the_files_and_changes_keep_up_with_a_person`).
+- ✅ **A field opened by a press or a key keeps the keyboard (2026-10-20).** GPUI draws a frame
+  inside an input's dispatch in two cases: for a press, or a key inside a scrolled layer, that
+  needs a layer painted again; and for a key that finds the window dirty, which the first key
+  after mouse use always does. The work that frame's views defer then ran after the input's
+  handlers. The shell's render-time focus restore then found the focus on a field that a
+  handler had just focused and no frame had mounted yet, and moved it to the pane or the
+  window. On the MacBook, the person's ⌘F, rename and menu searches lost the keyboard about
+  140 ms after they opened. The first fix is in gpui-fast
+  (aislopware/gpui-fast#60, `fast::input_frame`). The platform's input first draws the frame
+  it needs in an update of its own, so that frame's deferred work runs before the handlers.
+  A window that is still dirty when the key arrives, for example while something animates,
+  is drawn inside the dispatch all the same, because a key needs a current frame to find its
+  contexts. So the shell's restore (`shell::defer_mounted_focus_restore`) judges the focus by
+  its own frame only while the focus is where that frame found it. A handler that moves it, as ⌘F does, leaves the judgement to the
+  next frame, which mounts the field. Test mode hid this case, because its effect loop draws
+  a dirty window until nothing is dirty. Settling the frame before the key
+  (aislopware/gpui-fast#62) did not cover it and was closed.
+  `TestAppContext::dispatch_keystroke` does the same, and so does the e2e driver
+  (`slopty-app`'s `e2e::dispatch`). The driver used to send a command's events together in
+  one update, outside the platform's path; it now sends each the way the platform does, in an
+  update of its own after `gpui::prepare_input`.
+  - Proof: gpui-fast's `a_frame_drawn_for_a_press_runs_its_deferred_work_first`,
+    `a_frame_drawn_for_a_key_runs_its_deferred_work_first` and, on a platform's frames,
+    `a_frame_a_key_draws_is_settled_before_the_key`. The e2e
+    `walk::the_files_and_changes_keep_up_with_a_person` presses ⌘F in a diff with the tree kept
+    on, as on the person's Mac. In Slopty,
+    `navigation_tests::a_diff_brought_to_the_front_takes_the_keyboard` clicks and then presses
+    ⌘F; the diff's find keeps the keyboard. In
+    `navigation_tests::a_find_opened_after_a_frame_in_its_key_s_dispatch_keeps_the_keyboard`, a
+    frame is drawn in the find's own update, before it opens, and the find keeps the keyboard.
+- ✅ **Archived chats' times move on by the page's own clock (2026-10-20).** Settings' Archived
+  page read the clock as it was built. Under view retention, nothing redrew it, so "now" stood
+  past the minute. The page now takes its moment as the state moves, and from a timer set for
+  the next label change (`state::time_ago_changes`, which the sidebar's spaces share). The
+  timer notifies the page
+  (`archived::tests::the_rows_times_move_on_by_the_page_s_own_clock`).
+- ✅ **Past sessions' times read the sidebar's clock (2026-10-20).** The sidebar's History and
+  the resume picker read the wall clock as they were built, so under view retention a
+  session's "now" stood past its minute while nothing else moved the shell. They now say their
+  times by the sidebar's clock, as the sidebar's rows do. The clock is taken as History or the
+  picker opens and as their sessions arrive. It ticks when the soonest time shown next reads
+  differently, so a session and a chat updated at the same moment read alike
+  (`past_sessions::tests::history_s_times_move_on_by_the_sidebar_s_clock`).
+- ✅ **A machine that stops answering reads offline in Settings → Devices (2026-10-20).** The
+  page read the clock as it was built, and presence moves with time alone: a machine whose
+  heartbeats stopped changes nothing in the state, so under view retention it read "Online"
+  for as long as nothing else redrew the page. The page now takes its moment as the state
+  moves, and from a timer set for the soonest other machine's next change
+  (`devices::presence_changes`): its "Online" ending 71 s after it was last seen, then its
+  "Last seen" moving on by the minute, the hour or the day it says
+  (`a_silent_machine_goes_offline_by_the_page_s_own_clock`,
+  `presence_changes_when_its_words_do`).

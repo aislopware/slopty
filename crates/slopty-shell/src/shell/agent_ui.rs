@@ -340,6 +340,11 @@ const fn surface_kind(surface: RightSurface) -> Option<(&'static str, u64)> {
 }
 
 impl Shell {
+    /// slopty: whether the chat `asker` is on screen, read before its ask moves anything.
+    fn asker_on_screen(&self, asker: Option<&str>) -> bool {
+        asker.is_some_and(|chat| chat == self.active_chat && matches!(self.route, Route::Chat))
+    }
+
     /// Do `ask` in this window and hand `answered` the outcome, at once or once a terminal is up.
     fn agent_act(
         &mut self,
@@ -350,6 +355,9 @@ impl Shell {
     ) {
         let keyboard = window.focused(cx);
         let Ask { act, chat, device, who } = ask;
+        // slopty: the asking agent's chat on screen already shows what it did (its call's row,
+        // and the change beside it), so no toast says it again over the pane it just filled.
+        let seen = self.asker_on_screen(chat.as_deref());
         let did = match act {
             Act::State => Ok(None),
             Act::Terminal { folder, command, region } => {
@@ -367,7 +375,7 @@ impl Shell {
             Ok(did) => did,
             Err(failure) => return answered(Err(failure), cx),
         };
-        if let Some(did) = &did {
+        if let Some(did) = did.as_ref().filter(|_| !seen) {
             crate::toast::info(cx, format!("{who}: {did}"));
         }
         cx.notify();
@@ -966,6 +974,23 @@ mod tests {
         let names: Vec<&str> = done.window.regions.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, REGIONS);
         assert!(!done.window.typing);
+    }
+
+    /// slopty: what an agent does in the window is toasted only when its chat is not the one
+    /// on screen, which already shows the call and the change beside it.
+    #[gpui::test]
+    fn an_agent_on_screen_is_not_toasted_over_its_own_change(cx: &mut TestAppContext) {
+        let (_dir, _shell, cx) = setup(cx);
+        let hide = |chat: &str| Ask {
+            chat: Some(chat.into()),
+            ..ask(Act::Region { region: "sidebar".into(), change: Change::Toggle })
+        };
+        assert!(asked(cx, hide("a1")).unwrap().did.is_some());
+        assert_eq!(cx.update(|_, cx| crate::toast::said(cx)), Vec::<gpui::SharedString>::new(), "a1 is on screen");
+        assert!(asked(cx, hide("b2")).unwrap().did.is_some());
+        let said = cx.update(|_, cx| crate::toast::said(cx));
+        assert_eq!(said.len(), 1, "b2 is not: {said:?}");
+        assert!(said[0].starts_with("Agent: "), "{said:?}");
     }
 
     /// Each region shows, hides, toggles, expands and collapses by its name or the window's own

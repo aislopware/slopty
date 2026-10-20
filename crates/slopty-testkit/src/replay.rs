@@ -60,6 +60,11 @@ pub struct Session {
     pub prompt: String,
     /// Now, in ms since the epoch: when the replayed turn starts.
     pub now_ms: u64,
+    /// How many records its file held before this replay. A recording's ids are a counter
+    /// (`msg_01`, `toolu_01`, its record ids), so a second recording played into the same
+    /// session would repeat the first's: a session that played before tells its ids apart by
+    /// this, as Claude Code's own never repeat. 0 keeps them as recorded.
+    pub earlier: usize,
 }
 
 /// One thing the stand-in does in a replayed turn.
@@ -125,7 +130,8 @@ impl Recording {
         for hook in &self.hooks {
             let event = hook.get("hook_event_name").and_then(Value::as_str).unwrap_or_default();
             let mut payload = rewrite.value(hook);
-            let tool = hook.get("tool_use_id").and_then(Value::as_str);
+            // The call's id as the session's: its transcript's lines are rewritten too.
+            let tool = payload.get("tool_use_id").and_then(Value::as_str).map(str::to_owned);
             match event {
                 "SessionStart" => continue,
                 "UserPromptSubmit" => {
@@ -143,7 +149,7 @@ impl Recording {
                         let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
                         called.push((input, id.clone()));
                     }
-                    if let Some(id) = tool
+                    if let Some(id) = tool.as_deref()
                         && let Some(stream) = streams.iter_mut().find(|s| s.calls(id))
                     {
                         stream.through(&mut steps, |line| calls(line, id));
@@ -283,8 +289,12 @@ struct Rewrite {
     cwd: Option<(String, String)>,
     /// The recorded prompt, and the session's.
     prompt: Option<(String, String)>,
-    /// The record ids' prefix in the session: its own id's first 24 characters.
+    /// The record ids' prefix in the session: its own id's first 24 characters, then the
+    /// replay's tag.
     ids: String,
+    /// What tells this replay's ids from an earlier one's in the session ([`Session::earlier`]),
+    /// four hex digits; none for the session's first.
+    tag: Option<String>,
     /// How far the recorded times move, in ms, so the turn starts now.
     shift: i128,
 }
@@ -309,13 +319,19 @@ impl Rewrite {
             rec.lines.iter().find_map(|l| l.get("timestamp")?.as_str().and_then(parse_stamp));
         let shift =
             first.map_or(0, |first| i128::from(to.now_ms).saturating_sub(i128::from(first)));
-        let ids = to.id.get(..FIXTURE_ID_PREFIX.len()).unwrap_or(FIXTURE_ID_PREFIX).to_owned();
+        let tag = (to.earlier > 0).then(|| format!("{:04x}", to.earlier.min(0xffff)));
+        let ids = format!(
+            "{}{}",
+            to.id.get(..FIXTURE_ID_PREFIX.len()).unwrap_or(FIXTURE_ID_PREFIX),
+            tag.as_deref().unwrap_or("0000"),
+        );
         Self {
             stem,
             session: recorded_session.map(|s| (s, to.id.clone())),
             cwd: field("cwd").map(|cwd| (cwd, to.cwd.clone())),
             prompt: prompt.map(|p| (p, to.prompt.clone())),
             ids,
+            tag,
             shift,
         }
     }
@@ -376,7 +392,19 @@ impl Rewrite {
                 s = s.replace(&format!("{old}/"), &format!("{new}/"));
             }
         }
-        s.replace(FIXTURE_ID_PREFIX, &self.ids)
+        // A record id is the prefix and a 12-digit counter, whose first four are the tag's.
+        let s = s.replace(&format!("{FIXTURE_ID_PREFIX}0000"), &self.ids);
+        let prefix = self.ids.get(..FIXTURE_ID_PREFIX.len()).unwrap_or(FIXTURE_ID_PREFIX);
+        let s = s.replace(FIXTURE_ID_PREFIX, prefix);
+        // A message, request or call id is its kind and a counter: `msg_01` → `msg_0002_01`.
+        match (&self.tag, s.split_once('_')) {
+            (Some(tag), Some((kind @ ("msg" | "req" | "toolu"), n)))
+                if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                format!("{kind}_{tag}_{n}")
+            }
+            _ => s,
+        }
     }
 }
 
@@ -460,7 +488,45 @@ mod tests {
             cwd: "/repo".to_owned(),
             prompt: prompt.to_owned(),
             now_ms: parse_stamp("2026-10-16T09:00:00.000Z").unwrap(),
+            earlier: 0,
         }
+    }
+
+    /// A second recording played into a session that already holds one tells its ids apart:
+    /// no record, message, request or call id of the first is written again.
+    #[test]
+    fn a_second_replay_in_a_session_repeats_no_id_of_the_first() {
+        let ids = |steps: &[Step]| -> std::collections::BTreeSet<String> {
+            let mut ids = std::collections::BTreeSet::new();
+            let mut take = |v: &Value, key: &str| {
+                if let Some(id) = v.get(key).and_then(Value::as_str) {
+                    ids.insert(id.to_owned());
+                }
+            };
+            for step in steps {
+                let Step::Write { lines, .. } = step else { continue };
+                for line in lines {
+                    let line: Value = serde_json::from_str(line).unwrap();
+                    take(&line, "uuid");
+                    take(&line, "requestId");
+                    take(&line["message"], "id");
+                    for part in line["message"]["content"].as_array().into_iter().flatten() {
+                        take(part, "id");
+                        take(part, "tool_use_id");
+                    }
+                }
+            }
+            ids
+        };
+        let first = Recording::load(&fixture("tools")).unwrap().schedule(&session("Survey"));
+        let first = ids(&first);
+        let second = Recording::load(&fixture("edit")).unwrap();
+        let again = ids(&second.schedule(&session("Edit")));
+        assert!(!first.is_disjoint(&again), "as recorded, the two repeat ids");
+        let later = Session { earlier: 77, ..session("Edit") };
+        let later = ids(&second.schedule(&later));
+        assert!(first.is_disjoint(&later), "{:?}", first.intersection(&later).collect::<Vec<_>>());
+        assert!(later.iter().any(|id| id.starts_with("msg_004d_")), "{later:?}");
     }
 
     fn played(name: &str) -> (Recording, Vec<Step>) {
@@ -624,10 +690,17 @@ mod tests {
     }
 
     /// A permission request is a step that waits, after its call's `PreToolUse` and before its
-    /// call runs; nothing of what follows is written before it.
+    /// call runs; nothing of what follows is written before it. So in a session that played
+    /// before, whose ids the replay tells apart.
     #[test]
     fn a_permission_request_holds_the_turn_until_it_is_answered() {
-        let (_, steps) = played("permission");
+        let rec = Recording::load(&fixture("permission")).unwrap();
+        for earlier in [0, 77] {
+            holds_the_turn(&rec.schedule(&Session { earlier, ..session("Touch three files") }));
+        }
+    }
+
+    fn holds_the_turn(steps: &[Step]) {
         let at = steps
             .iter()
             .position(|s| matches!(s, Step::Hook { waits: true, .. }))
@@ -650,7 +723,9 @@ mod tests {
             })
             .collect();
         assert!(before.contains("touch refused.txt"), "the call is in the transcript");
-        assert!(!before.contains("\"tool_use_id\":\"toolu_01\""), "its result is not");
+        let id = id.as_str().unwrap_or_default();
+        assert!(before.contains(&format!("\"id\":\"{id}\"")), "the call {id} is written before");
+        assert!(!before.contains(&format!("\"tool_use_id\":\"{id}\"")), "its result is not");
         assert_eq!(steps.iter().filter(|s| matches!(s, Step::Hook { waits: true, .. })).count(), 3);
     }
 

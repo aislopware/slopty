@@ -3949,22 +3949,21 @@ impl Pickers {
                 return None;
             };
             let is_worktree = chat.cwd.as_deref().is_some_and(|cwd| cwd != space.path);
-            let (icon_path, label) = if is_worktree {
-                (crate::icons::WORKTREE, "Worktree")
-            } else {
-                (crate::icons::FOLDER, "Local checkout")
-            };
-            // Keep the same reading order and leading edge as the draft.
+            // slopty: the plain checkout is what every chat works in unless said otherwise, so the
+            // footer names only a worktree; "Local checkout" under every chat said nothing (Amp's
+            // prune bar, 2026-10-20).
             let left = div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .min_w_0()
-                .child(Self::footer_label(
-                    icon_path,
-                    SharedString::from(label),
-                    &theme,
-                ));
+                .when(is_worktree, |left| {
+                    left.child(Self::footer_label(
+                        crate::icons::WORKTREE,
+                        SharedString::from("Worktree"),
+                        &theme,
+                    ))
+                });
             let right = div()
                 .flex()
                 .flex_row()

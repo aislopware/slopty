@@ -2793,11 +2793,8 @@ fn past_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
         (1, None) => clauses.push(Clause::new("thought once")),
         (n, None) => clauses.push(Clause::new(format!("thought {n} times"))),
     }
-    match tools.iter().filter(|t| t.kind == ToolItemKind::Note).count() {
-        0 => {}
-        1 => clauses.push(Clause::new("wrote a note")),
-        n => clauses.push(Clause::new(format!("wrote {n} notes"))),
-    }
+    // slopty: the agent's words between its calls are no work done ("wrote 8 notes" read as
+    // files written): they read in place once the divider opens.
     let commands = of(CallKind::Command);
     if !commands.is_empty() {
         clauses.push(
@@ -3148,15 +3145,18 @@ fn phase_swap(ms: f32) -> (f32, f32, f32) {
     (out, arrived, PHASE_RISE * (1.0 - arrived))
 }
 
-/// The turn divider's words: the live tool summary swaps into "Worked for" ([`phase_swap`]),
-/// `ms` into the swap.
-fn divider_title(
-    summary: &Sentence,
-    worked: SharedString,
-    ms: f32,
-    shimmer_phase: Option<f32>,
-    theme: &Theme,
-) -> AnyElement {
+/// slopty: what a turn's divider says while its turn runs (shut, one live line across many
+/// agents) or when no one knows how long it worked: Amp's two words for the fold, by whether it
+/// stands open. What the work was is the divider's tooltip and what a screen reader hears; the
+/// words stay short and still, since the working line under the turn already says what runs,
+/// and for how long.
+fn divider_words(open: bool) -> &'static str {
+    if open { "Hide work" } else { "Show work" }
+}
+
+/// The turn divider's words: the live words swap into "Worked for" ([`phase_swap`]), `ms` into
+/// the swap.
+fn divider_title(live: SharedString, worked: SharedString, ms: f32, theme: &Theme) -> AnyElement {
     let (out, arrived, below) = phase_swap(ms);
     if arrived >= 1.0 {
         return tool_group_title(worked, &[], None, theme);
@@ -3177,7 +3177,7 @@ fn divider_title(
                 .items_center()
                 .overflow_hidden()
                 .opacity(out)
-                .child(tool_group_title(summary.text.clone(), &summary.marks, shimmer_phase.filter(|_| out > 0.0), theme)),
+                .child(tool_group_title(live, &[], None, theme)),
         )
         .child(
             div()
@@ -3733,6 +3733,51 @@ struct UserCollapseScroll {
     target_top: f32,
 }
 
+/// slopty: a step asked for on the window's next frame, one in flight at a time. A view keeps
+/// its note that it asked, but the callback it asked for can be lost: GPUI's check of a retained
+/// frame draws the window again from scratch and drops the callbacks that draw asked for, while
+/// the view keeps the note. A note that waited past [`FRAME_ASK_PATIENCE`] is asked again rather
+/// than waited on for good (a send that never glided, a pin that never followed); the late
+/// answer to an older ask is ignored, so a driver still steps once a frame.
+#[derive(Clone, Copy, Debug, Default)]
+struct FrameAsk {
+    /// The latest ask's token.
+    token: u64,
+    /// When the latest ask still waiting was made.
+    since: Option<Instant>,
+}
+
+/// How long an ask waits for its frame before it is asked again: a few frames, even at an
+/// inactive window's 30 a second.
+const FRAME_ASK_PATIENCE: Duration = Duration::from_millis(100);
+
+impl FrameAsk {
+    /// A new ask's token at `now`, unless one made within the patience still waits.
+    fn ask(&mut self, now: Instant) -> Option<u64> {
+        if self.since.is_some_and(|since| now.saturating_duration_since(since) < FRAME_ASK_PATIENCE) {
+            return None;
+        }
+        self.token = self.token.wrapping_add(1);
+        self.since = Some(now);
+        Some(self.token)
+    }
+
+    /// Whether the frame answering `token` answers the latest ask, which is then over.
+    fn answered(&mut self, token: u64) -> bool {
+        let latest = token == self.token && self.since.is_some();
+        if latest {
+            self.since = None;
+        }
+        latest
+    }
+
+    /// Whether an ask waits for its frame.
+    #[cfg(test)]
+    const fn waiting(&self) -> bool {
+        self.since.is_some()
+    }
+}
+
 /// A locally-sent turn reserves the viewport below its prompt. The last row
 /// has a minimum height, so streaming content and the working trailer consume
 /// or release space in the same layout pass. Only changes to the preceding
@@ -4021,9 +4066,6 @@ pub struct Transcript {
     /// slopty: whether `list` aligns its rows to its top: a subagent's run, in a doc of its own
     /// or drilled into as a chat, reads like a fresh notes page (#5).
     list_top: bool,
-    /// slopty: whether this transcript holds the person's prompts at its top (`sticky.rs`):
-    /// its chat is listed and is no subagent's run; read once a sync, never a frame (#13, #17).
-    holds_prompts: bool,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
     chat_id: Option<String>,
@@ -4056,7 +4098,7 @@ pub struct Transcript {
     /// A restored item anchor needs one post-layout refresh of distance-based
     /// UI state; programmatic list scrolling never invokes `handle_scroll`.
     viewport_finalize_pending: bool,
-    viewport_finalize_scheduled: bool,
+    viewport_finalize_scheduled: FrameAsk,
     /// Bumped whenever sync or own-turn logic invalidates measured rows. The
     /// post-restore finalizer waits until one layout completes without another
     /// invalidation, avoiding a stale jump-button decision.
@@ -4101,7 +4143,7 @@ pub struct Transcript {
     user_collapse_scroll: Option<UserCollapseScroll>,
     /// Tracks the queued frame, even when its animation is canceled/replaced.
     /// Only that callback clears it, so rapid input cannot fork frame drivers.
-    user_collapse_scroll_scheduled: bool,
+    user_collapse_scroll_scheduled: FrameAsk,
     /// Streaming fade veils, one per live markdown row (dropped on completion).
     veils: HashMap<SharedString, Rc<RefCell<RowVeil>>>,
     /// Live rows present in the transcript's REPLAY after (re)attaching to a
@@ -4193,7 +4235,7 @@ pub struct Transcript {
     /// A layout-affecting change needs one post-layout own-turn measurement.
     own_turn_kick: bool,
     /// One own-turn `on_next_frame` callback in flight at most.
-    own_turn_scheduled: bool,
+    own_turn_scheduled: FrameAsk,
     /// Wall-clock of the previous entry-glide tick (`None` = not gliding).
     own_turn_last_tick: Option<Instant>,
     spring: StickSpring,
@@ -4205,11 +4247,11 @@ pub struct Transcript {
     /// one spring tick even though the pre-layout distance still reads 0.
     spring_kick: bool,
     /// One `on_next_frame` callback in flight at most.
-    spring_scheduled: bool,
+    spring_scheduled: FrameAsk,
     /// slopty: a jump's glide under way, stepped once a frame (`rail.rs`, #13), and whether
     /// its next frame is asked for.
     glide: Option<crate::rail::Glide>,
-    glide_scheduled: bool,
+    glide_scheduled: FrameAsk,
     /// slopty: the row a jump landed on, when, and which landing it was: it flashes (#13).
     landed: Option<(SharedString, Instant, u64)>,
     /// Last pointer sample while markdown selection owns a left-button drag.
@@ -4562,7 +4604,6 @@ impl Transcript {
             state,
             list,
             list_top,
-            holds_prompts: false,
             rows: Vec::new(),
             last_source: None,
             // Pre-set so `sync` never sees an attach edge — an override
@@ -4577,7 +4618,7 @@ impl Transcript {
             pending_viewport: None,
             viewport_generation: 0,
             viewport_finalize_pending: false,
-            viewport_finalize_scheduled: false,
+            viewport_finalize_scheduled: FrameAsk::default(),
             viewport_layout_revision: 0,
             row_cache: HashMap::new(),
             live_parsers: HashMap::new(),
@@ -4592,7 +4633,7 @@ impl Transcript {
             user_hold_task: None,
             user_hold_token: 0,
             user_collapse_scroll: None,
-            user_collapse_scroll_scheduled: false,
+            user_collapse_scroll_scheduled: FrameAsk::default(),
             veils: HashMap::new(),
             veil_baseline: std::collections::HashSet::new(),
             veil_attach_pending: true,
@@ -4622,15 +4663,15 @@ impl Transcript {
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
             own_turn_kick: false,
-            own_turn_scheduled: false,
+            own_turn_scheduled: FrameAsk::default(),
             own_turn_last_tick: None,
             spring: StickSpring::new(),
             spring_last_tick: None,
             spring_settled_at: None,
             spring_kick: false,
-            spring_scheduled: false,
+            spring_scheduled: FrameAsk::default(),
             glide: None,
-            glide_scheduled: false,
+            glide_scheduled: FrameAsk::default(),
             landed: None,
             selection_drag_position: None,
             selection_scroll_task: None,
@@ -5877,15 +5918,14 @@ impl Transcript {
 
         // slopty: what the selected chat is, read each time the state moves: a chat drilled
         // into before the list lists it (a note tapped at launch) takes a subagent run's
-        // alignment and band rule once it is listed, not only as it opens (#17).
-        let (listed, run) = {
+        // alignment once it is listed, not only as it opens (#17).
+        let run = {
             let state = self.state.read(cx);
             selected
                 .as_deref()
                 .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
-                .map_or((false, false), |chat| (true, chat.subagent))
+                .is_some_and(|chat| chat.subagent)
         };
-        self.holds_prompts = listed && !run;
         let top = self.doc_override.is_some() || run;
         if top != self.list_top {
             // slopty: a drilled subagent's run reads from the top, as one in its own doc does;
@@ -8460,7 +8500,7 @@ impl Transcript {
                 // slopty: the row lane's anatomy (`ROW_LANE_HEIGHT`).
                 .pt(px(Theme::SPACE_SM))
                 .h(px(ROW_LANE_HEIGHT))
-                .text_size(crate::typography::ui_rems(11.0))
+                .text_size(crate::typography::ui_rems(crate::composer::WORKING_FIGURES_SIZE))
                 // slopty: a queued send waits under the clock glyph, in zeron's queued amber.
                 .child(if queued {
                     crate::icons::icon(crate::icons::CLOCK_CIRCLE)
@@ -8483,7 +8523,7 @@ impl Transcript {
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_size(crate::typography::ui_rems(crate::composer::WORKING_LEAD_SIZE))
                         .text_color(if queued {
                             theme.warning
                         } else {
@@ -8508,7 +8548,7 @@ impl Transcript {
                             .flex_none()
                             .relative()
                             .top(px(1.0))
-                            .text_color(theme.text_faint)
+                            .text_color(theme.text_muted)
                             .font_features(crate::typography::tabular())
                             .child(crate::roll_text::roll_text(
                                 format!("working-timer-{}-{turn}", cx.entity_id()),
@@ -9553,7 +9593,9 @@ impl Transcript {
         // A settled collapsed group has no visible body. Do not construct or
         // format thousands of hidden chips merely to clip them to zero height.
         // Keep the body during closing so the existing fold animation survives.
-        let body_visible = open || tool_fold(open, fold.toggled_at, frame_now, cx.reduce_motion()).moving;
+        // slopty: a turn's divider draws none of its calls: its rows are the turn's own.
+        let body_visible =
+            !compact_shell && (open || tool_fold(open, fold.toggled_at, frame_now, cx.reduce_motion()).moving);
         let tools = if body_visible {
             tools.as_slice()
         } else {
@@ -9791,7 +9833,8 @@ impl Transcript {
         let target = if open { viewport_height } else { 0.0 };
         // slopty: a running call's row sweeps in phase with its group's title (#14).
         let running_call = auto_open && tools.iter().any(sweeps);
-        let shimmer_phase = if (active || running_call) && !reduce_motion {
+        // slopty: a turn's divider stays still; only a group's title and its running row sweep.
+        let shimmer_phase = if (active || running_call) && !reduce_motion && !compact_shell {
             motion::pulse_lease(cx.entity_id(), cx);
             // slopty: the pulse's tick, which drew it, on the shimmer's one clock.
             Some(shimmer_ms(motion::pulse_moment(cx.entity_id(), cx)))
@@ -9825,29 +9868,31 @@ impl Transcript {
                 motion_active = true;
             }
             // slopty: a screen reader hears what the work was as well as how long it took,
-            // which the eye finds by opening it: "Worked for 6s, ran 2 commands".
+            // which the eye finds by opening it: "Worked for 6s, ran 2 commands". Its words stay
+            // short and still (Amp): "Worked for 4m 13s" once known, else "Hide work" or "Show
+            // work"; the sentence is the tooltip of a turn still running (#1).
+            let live = SharedString::from(divider_words(open));
             let label = match worked_secs {
                 Some(secs) => SharedString::from(spoken_divider(&worked_for_label(secs), &summary.text)),
-                None => summary.text.clone(),
+                None => SharedString::from(spoken_divider(&live, &summary.text)),
             };
             let title = match worked_secs {
                 Some(secs) => divider_title(
-                    summary,
+                    live.clone(),
                     SharedString::from(worked_for_label(secs)),
                     worked_fade_ms,
-                    shimmer_phase,
                     theme,
                 ),
-                None => rolled_summary
-                    .unwrap_or_else(|| tool_group_title(summary.text.clone(), &summary.marks, shimmer_phase, theme)),
+                None => tool_group_title(live, &[], None, theme),
             };
+            let tip = done.or_else(|| (!summary.text.is_empty()).then(|| summary.text.clone()));
             let divider = turn_divider(
                 row_id,
                 label,
                 title,
                 open,
                 disclosure_progress,
-                done,
+                tip,
                 theme,
                 cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
@@ -12042,17 +12087,18 @@ impl Render for Transcript {
         // frame while an anchor is live (not just on kicks) so viewport
         // resizes and streaming growth re-derive the reservation; the step
         // only notifies on change, so a settled hold schedules no next frame.
+        let frame_asked_at = crate::clock::now(cx);
         if !self.route_exit_pending(cx)
             && (self.own_turn.is_some() || self.own_turn_kick)
-            && !self.own_turn_scheduled
+            && let Some(ask) = self.own_turn_scheduled.ask(frame_asked_at)
         {
-            self.own_turn_scheduled = true;
             let entity = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
                 entity
                     .update(cx, |this: &mut Transcript, cx| {
-                        this.own_turn_scheduled = false;
-                        this.step_own_turn(cx);
+                        if this.own_turn_scheduled.answered(ask) {
+                            this.step_own_turn(cx);
+                        }
                     })
                     .ok();
             });
@@ -12061,14 +12107,16 @@ impl Render for Transcript {
         // not this list's.
         self.wheel_travel = 0.0;
         // slopty: a jump's glide steps once a frame, as the spring does (#13).
-        if self.glide.is_some() && !self.glide_scheduled {
-            self.glide_scheduled = true;
+        if self.glide.is_some()
+            && let Some(ask) = self.glide_scheduled.ask(frame_asked_at)
+        {
             let entity = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
                 entity
                     .update(cx, |this: &mut Transcript, cx| {
-                        this.glide_scheduled = false;
-                        this.step_glide(cx);
+                        if this.glide_scheduled.answered(ask) {
+                            this.step_glide(cx);
+                        }
                     })
                     .ok();
             });
@@ -12079,16 +12127,16 @@ impl Render for Transcript {
         if !self.route_exit_pending(cx)
             && self.pinned
             && !motion::reduced_motion(cx)
-            && !self.spring_scheduled
             && self.spring_should_run()
+            && let Some(ask) = self.spring_scheduled.ask(frame_asked_at)
         {
-            self.spring_scheduled = true;
             let entity = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
                 entity
                     .update(cx, |this: &mut Transcript, cx| {
-                        this.spring_scheduled = false;
-                        this.step_spring(cx);
+                        if this.spring_scheduled.answered(ask) {
+                            this.step_spring(cx);
+                        }
                     })
                     .ok();
             });
@@ -12096,8 +12144,9 @@ impl Render for Transcript {
         // Programmatic `scroll_to` does not invoke the list's user-scroll
         // handler. Refresh distance-derived state once layout has measured the
         // replay, guarded so a stale A callback cannot mutate B (or a newer A).
-        if self.viewport_finalize_pending && !self.viewport_finalize_scheduled {
-            self.viewport_finalize_scheduled = true;
+        if self.viewport_finalize_pending
+            && let Some(ask) = self.viewport_finalize_scheduled.ask(frame_asked_at)
+        {
             let token = ViewportFinalizeToken {
                 generation: self.viewport_generation,
                 layout_revision: self.viewport_layout_revision,
@@ -12106,7 +12155,9 @@ impl Render for Transcript {
             window.on_next_frame(move |_, cx| {
                 entity
                     .update(cx, |this: &mut Transcript, cx| {
-                        this.viewport_finalize_scheduled = false;
+                        if !this.viewport_finalize_scheduled.answered(ask) {
+                            return;
+                        }
                         if !token.still_current(this.viewport_generation) {
                             if this.viewport_finalize_pending {
                                 cx.notify();
@@ -12130,14 +12181,16 @@ impl Render for Transcript {
         // duration of its height tween. Advance the matching upward scroll once
         // per frame so the bubble stays visible instead of shrinking above the
         // fixed viewport while the bottom content remains on screen.
-        if self.user_collapse_scroll.is_some() && !self.user_collapse_scroll_scheduled {
-            self.user_collapse_scroll_scheduled = true;
+        if self.user_collapse_scroll.is_some()
+            && let Some(ask) = self.user_collapse_scroll_scheduled.ask(frame_asked_at)
+        {
             let entity = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
                 entity
                     .update(cx, |this: &mut Transcript, cx| {
-                        this.user_collapse_scroll_scheduled = false;
-                        this.step_user_collapse_scroll(cx);
+                        if this.user_collapse_scroll_scheduled.answered(ask) {
+                            this.step_user_collapse_scroll(cx);
+                        }
                     })
                     .ok();
             });
@@ -12203,9 +12256,9 @@ impl Render for Transcript {
             .child(content)
             .child(rail)
             .children(self.fit.clone().map(|fit| fit.measure(self.list.clone()))); // slopty
-        // slopty: the held prompt's card defers its paint above the top fade; added before the
+        // slopty: the held group's band defers its paint above the top fade; added before the
         // menus, which defer theirs too, so they open over it.
-        let root = root.children(self.render_sticky_prompt(window, cx));
+        let root = root.children(self.render_sticky_group(window, cx));
         let root = root.children(self.render_image_menu(cx));
         let root = root.children(self.render_rewind_menu(cx)); // slopty
         let root = root.children(self.render_context_menu(cx)); // slopty
@@ -14075,6 +14128,93 @@ mod tests {
         });
     }
 
+    /// slopty: a frame the view asked for can be lost (GPUI's retained check draws the window
+    /// again and drops the callbacks that draw asked for) while the view keeps its note that it
+    /// asked. The next draw past the patience asks again, so the glide still lands; a note that
+    /// waited for good froze the chat after a send.
+    #[gpui::test]
+    fn a_glide_whose_frame_was_lost_asks_again_and_lands(cx: &mut gpui::TestAppContext) {
+        struct Fixture(Entity<Transcript>);
+        impl Render for Fixture {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.set_reduce_motion(false);
+        });
+        let state = cx.new(|_| AppState::new());
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        transcript.update(cx, |this, cx| {
+            this.rows =
+                (0..60).map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}"))).collect();
+            this.list.reset(60);
+            this.pinned = false;
+            this.rail_enabled = false;
+            cx.notify();
+        });
+        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
+        cx.run_until_parked();
+        transcript.update(cx, |this, cx| this.scroll_to_row(30, cx));
+        cx.run_until_parked();
+        // The frame the draw asked for is lost: its answer no longer matches the view's note,
+        // which still says it waits.
+        let top = |cx: &mut gpui::VisualTestContext| {
+            transcript.read_with(cx, |this, _| {
+                let top = this.list.logical_scroll_top();
+                (top.item_ix, f32::from(top.offset_in_item))
+            })
+        };
+        transcript.update(cx, |this, cx| {
+            assert!(this.glide.is_some() && this.glide_scheduled.waiting(), "the glide asked for a frame");
+            this.glide_scheduled = FrameAsk { token: this.glide_scheduled.token.wrapping_add(7), since: Some(crate::clock::now(cx)) };
+        });
+        let stuck = top(cx);
+        cx.executor().advance_clock(Duration::from_millis(8));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        assert_eq!(top(cx), stuck, "the lost frame stepped nothing");
+        assert!(transcript.read_with(cx, |this, _| this.glide.is_some()));
+        // Anything that draws the chat past the patience asks again; the glide lands.
+        cx.executor().advance_clock(FRAME_ASK_PATIENCE);
+        transcript.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let mut frames = 0;
+        while transcript.read_with(cx, |this, _| this.glide.is_some()) {
+            assert!(frames < 120, "the glide never landed: its frame was waited on for good");
+            cx.executor().advance_clock(Duration::from_millis(8));
+            assert!(cx.update(|window, cx| window.simulate_next_frame(cx)) > 0, "a frame asked for");
+            cx.run_until_parked();
+            frames += 1;
+        }
+        transcript.read_with(cx, |this, _| {
+            let row = this.list.bounds_for_item(30).expect("the row is drawn");
+            let below = f32::from(row.top() - this.list.viewport_bounds().top());
+            assert!((below - OWN_SEND_TOP_INSET_PX).abs() <= 0.5, "landed {below}px down");
+        });
+    }
+
+    /// slopty: one ask waits at a time; past the patience it is asked again, and only the
+    /// latest ask's frame answers it.
+    #[test]
+    fn a_frame_ask_waits_its_patience_then_asks_again() {
+        let t0 = Instant::now();
+        let mut ask = FrameAsk::default();
+        let first = ask.ask(t0).expect("nothing waits yet");
+        assert_eq!(ask.ask(t0 + Duration::from_millis(16)), None, "one ask waits at a time");
+        let second = ask.ask(t0 + FRAME_ASK_PATIENCE).expect("past the patience it asks again");
+        assert!(!ask.answered(first), "the older frame's late answer is ignored");
+        assert!(ask.waiting(), "and the newer ask still waits");
+        assert!(ask.answered(second));
+        assert!(!ask.waiting());
+        assert!(!ask.answered(second), "an ask is answered once");
+        assert!(ask.ask(t0 + FRAME_ASK_PATIENCE).is_some(), "an answered ask asks again at once");
+    }
+
     #[gpui::test]
     fn generated_image_click_opens_lightbox_and_escape_restores_focus(
         cx: &mut gpui::TestAppContext,
@@ -14423,7 +14563,8 @@ mod tests {
         assert_eq!(tools[3].kind, ToolItemKind::Call);
         assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
         let summary = tool_group_summary(tools);
-        assert!(summary.contains("wrote a note"), "{summary}");
+        // slopty: the agent's own words between calls are no work to count (Amp counts tools).
+        assert!(!summary.contains("note"), "{summary}");
         assert!(summary.contains("ran 2 commands"), "{summary}");
         assert!(summary.contains("Thought once"), "{summary}");
 
@@ -17112,7 +17253,7 @@ mod tests {
                     seen_prompt: true,
                     scrolled: false,
                 });
-                this.own_turn_scheduled = true;
+                this.own_turn_scheduled.ask(Instant::now());
                 // A downward scroll into output received while no layout/frame
                 // callbacks were running. No preceding upward gesture.
                 this.list.scroll_to(ListOffset {
@@ -17281,7 +17422,7 @@ mod tests {
                         initial_top: -1000.0,
                         target_top: 80.0,
                     });
-                    transcript.user_collapse_scroll_scheduled = true;
+                    let asked = transcript.user_collapse_scroll_scheduled.ask(Instant::now());
                     let hold_token = transcript.user_hold_token;
                     match navigation {
                         "wheel" => transcript.handle_scroll(
@@ -17304,14 +17445,14 @@ mod tests {
                         "cancel stale long presses"
                     );
                     assert!(
-                        transcript.user_collapse_scroll_scheduled,
+                        transcript.user_collapse_scroll_scheduled.waiting(),
                         "keep the queued-frame guard"
                     );
 
                     // A frame queued before the input must neither move the
                     // viewport nor resurrect the canceled compensation.
                     let offset = transcript.list.logical_scroll_top();
-                    transcript.user_collapse_scroll_scheduled = false;
+                    assert!(transcript.user_collapse_scroll_scheduled.answered(asked.unwrap()));
                     transcript.step_user_collapse_scroll(cx);
                     let after = transcript.list.logical_scroll_top();
                     assert_eq!(after.item_ix, offset.item_ix);

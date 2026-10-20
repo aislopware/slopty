@@ -42,13 +42,22 @@ pub struct ArchivedPage {
     delete_all_task: Option<Task<()>>,
     page: usize,
     task: Option<Task<()>>,
+    /// slopty: the moment the rows say how long ago they moved by: taken as the state moves and
+    /// on [`Self::clock_tick`], never as the page is built, so a page built again (from scratch,
+    /// or for a hover) says what the one shown says.
+    clock: chrono::DateTime<chrono::Utc>,
+    /// slopty: the clock taken again when the soonest row's time next reads differently.
+    clock_tick: Option<Task<()>>,
     _observe: Subscription,
 }
 
 impl ArchivedPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let observe = cx.observe(&state, |_, _, cx| cx.notify());
-        Self {
+        let observe = cx.observe(&state, |page, _, cx| {
+            page.take_clock(cx);
+            cx.notify();
+        });
+        let mut page = Self {
             state,
             scroll: widgets::PageScroll::default(),
             error: None,
@@ -58,8 +67,35 @@ impl ArchivedPage {
             delete_all_task: None,
             page: 0,
             task: None,
+            clock: crate::clock::utc(cx),
+            clock_tick: None,
             _observe: observe,
-        }
+        };
+        page.take_clock(cx);
+        page
+    }
+
+    /// slopty: take the clock now, and again when the soonest archived chat's time next reads
+    /// differently ([`crate::state::time_ago_changes`]), drawing the page then.
+    fn take_clock(&mut self, cx: &mut Context<Self>) {
+        self.clock = crate::clock::utc(cx);
+        let now = self.clock;
+        let next = archived_chats(&self.state.read(cx).chats)
+            .into_iter()
+            .filter_map(|chat| crate::state::time_ago_changes(chat.last_message_at.unwrap_or(chat.created_at), now))
+            .min();
+        self.clock_tick = next.map(|at| {
+            // A hair past the change, so the clock taken then reads it.
+            let wait = (at - now).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
+            cx.spawn(async move |page, cx| {
+                cx.background_executor().timer(wait).await;
+                page.update(cx, |page, cx| {
+                    page.take_clock(cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+        });
     }
 
     fn unarchive(&mut self, chat_id: String, cx: &mut Context<Self>) {
@@ -242,7 +278,8 @@ impl Render for ArchivedPage {
             .sync(self.delete_all_confirm.is_some(), window, cx);
         let dialog = self.render_delete_all_dialog(window.viewport_size(), cx);
         let theme = Theme::of(cx).for_settings_surface();
-        let now = crate::clock::utc(cx);
+        // slopty: the page's own clock, which a tick moves and draws ([`Self::take_clock`]).
+        let now = self.clock;
         let (rows, device_names, count): (
             Vec<Chat>,
             std::collections::HashMap<String, String>,
@@ -580,6 +617,35 @@ mod tests {
             room_gen: None,
             draft: None, // slopty: new field.
         }
+    }
+
+    // slopty: a row's "now" becomes "1m" as its minute turns, by the page's own clock, which
+    // stands still between its ticks however often the page is built.
+    #[gpui::test]
+    fn the_rows_times_move_on_by_the_page_s_own_clock(cx: &mut gpui::TestAppContext) {
+        let now = cx.update(|cx| crate::clock::utc(cx));
+        let mut archived = chat("a", true);
+        archived.created_at = now - chrono::Duration::seconds(30);
+        let at = archived.created_at;
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.chats = vec![archived];
+            state
+        });
+        let page = cx.new(|cx| ArchivedPage::new(state, cx));
+        let drawn = std::rc::Rc::new(std::cell::Cell::new(0));
+        let _drawn = cx.update(|cx| {
+            let drawn = drawn.clone();
+            cx.observe(&page, move |_, _| drawn.set(drawn.get() + 1))
+        });
+        let says = |cx: &mut gpui::TestAppContext| {
+            page.read_with(cx, |page, _| crate::state::format_time_ago(at, page.clock))
+        };
+        assert_eq!(says(cx), "now");
+        cx.executor().advance_clock(std::time::Duration::from_secs(29));
+        assert_eq!((says(cx), drawn.get()), ("now".to_owned(), 0), "nothing moves before the minute");
+        cx.executor().advance_clock(std::time::Duration::from_secs(2));
+        assert_eq!((says(cx), drawn.get()), ("1m".to_owned(), 1), "the minute turned, and the page drew");
     }
 
     // slopty: an archived chat says where it ran as the sidebar and the palette do, "project @

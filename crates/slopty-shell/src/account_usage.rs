@@ -530,7 +530,12 @@ impl Render for AccountUsage {
         let urgent = self.breakdown.as_ref().is_some_and(|b| b.urgent);
         // slopty: the plan-usage ring reads the agent's own windows; no accounts.
         let windows = self.state.read(cx).usage_limits.clone();
-        let usage = used_fraction(&windows).map(|fraction| {
+        // slopty: the plan's ring keeps out of the way as the context's does: "0%" under every
+        // chat said nothing. It shows as the plan fills, and while `/usage` holds its card.
+        let usage_card_up = self.popup.get() == Some(&FooterCard::Usage);
+        let usage = used_fraction(&windows)
+            .filter(|fraction| ring_shows(Some(f64::from(*fraction)), false, usage_card_up))
+            .map(|fraction| {
             let level = usage_level(fraction);
             let chip = crate::context_usage::ring_chip(
                 "account-usage",
@@ -611,6 +616,19 @@ mod tests {
         assert!(ring_shows(Some(0.7), false, false), "filling");
         assert!(ring_shows(Some(0.1), true, false), "compacting");
         assert!(ring_shows(None, false, true), "its card is open");
+    }
+
+    /// slopty: the plan's ring follows the context's rule: hidden while the plan has room, shown
+    /// as it fills or while `/usage` holds its card open.
+    #[test]
+    fn the_plan_ring_shows_only_as_the_plan_fills() {
+        let shown = |used: f32, card: bool| {
+            used_fraction(&[window("5h", used)]).is_some_and(|f| ring_shows(Some(f64::from(f)), false, card))
+        };
+        assert!(!shown(0.0, false), "0% says nothing");
+        assert!(!shown(0.5, false));
+        assert!(shown(0.8, false), "filling");
+        assert!(shown(0.0, true), "its card is open");
     }
 
     #[test]

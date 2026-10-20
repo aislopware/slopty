@@ -180,6 +180,26 @@ pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
     cx.notify();
 }
 
+/// Run [`restore_mounted_focus`] after this frame, judged against it only while the focus is
+/// where the frame found it. A frame drawn while an input is dispatched (a key draws a dirty
+/// window first) runs its deferred work after the input's handlers; a handler that focused a
+/// field this frame never built (⌘F's find) leaves the judgement to the next frame, which
+/// builds it.
+pub(crate) fn defer_mounted_focus_restore(
+    root: FocusHandle,
+    preferred: FocusHandle,
+    unfocused: FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let focused = window.focused(cx);
+    window.defer(cx, move |window, cx| {
+        if window.focused(cx) == focused {
+            restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
+        }
+    });
+}
+
 /// Check the completed dispatch tree, not just the lifetime of the focused
 /// handle: a hidden editor can stay alive after its element has unmounted.
 pub(crate) fn restore_mounted_focus(
@@ -1117,6 +1137,10 @@ const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
 /// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
+/// slopty: a sidebar row's one leading slot (its state, else its agent's mark), and the air
+/// between it and the title (opencode's 16 px avatar slot).
+pub(super) const SIDEBAR_LEADING_SLOT: f32 = 16.0;
+pub(super) const SIDEBAR_LEADING_GAP: f32 = 6.0;
 /// Compact-row time slot while a text jump hint ("Ctrl+9") stands in for the
 /// time: wide enough for the widest of them at 11px on one line. In
 /// default-size pixels; scaled with the UI font via `ui_rems`.
@@ -2109,6 +2133,11 @@ impl Shell {
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
             this.sidebar_clock = crate::clock::utc(cx); // slopty: the rows' times move with the state
             this.on_state_changed(&state, cx);
+            // slopty: a result arriving in the chat being looked at is seen as it arrives, here
+            // where every view watching the state hears it, before the frame that shows it.
+            if this.was_window_active {
+                this.mark_open_chat_seen(cx);
+            }
             cx.notify();
         });
         // slopty: a settings file that could not be read was moved aside; say so once.
@@ -4392,6 +4421,15 @@ impl Shell {
     }
 
     /// Close the user menu through the exit animation (no-op when closed).
+    /// slopty: the open chat's unseen result marked seen. Never from a render: a change to
+    /// the state while a frame draws reaches none of the views that watch it.
+    fn mark_open_chat_seen(&mut self, cx: &mut Context<Self>) {
+        let unseen = self.state.read(cx).selected_chat_row().filter(|chat| chat.unseen()).map(|chat| chat.id.clone());
+        if let Some(chat_id) = unseen {
+            self.state.update(cx, |state, cx| state.mark_chat_seen(&chat_id, cx));
+        }
+    }
+
     fn close_user_menu(&mut self, cx: &mut Context<Self>) {
         if self.user_menu.begin_close(crate::clock::now(cx)) {
             popover::reap_popup(cx, |shell: &mut Self| &mut shell.user_menu);
@@ -6751,6 +6789,9 @@ impl Shell {
         &self,
         id: String,
         title: SharedString,
+        // slopty: what tells this row's title from another row's the same
+        // (`sidebar_status::title_hints`), quiet after it.
+        title_hint: Option<SharedString>,
         time_ago: SharedString,
         space_name: SharedString,
         branch: Option<SharedString>,
@@ -6830,8 +6871,11 @@ impl Shell {
         // FAILED (explicit, with the transcript's retry affordance); a send
         // whose delivery path is degraded is QUEUED, not Working — the
         // pending pill tells the truth instead of faking a spinner.
+        // slopty: the sidebar's rows read the sidebar's clock, as its groups and row heights do
+        // (`spaces::Shell::sidebar_chat_data`), so a row never draws a reason line its slot was
+        // not measured for; the palette's copy reads the shell's.
+        let now = if search_query.is_none() { self.sidebar_clock } else { crate::clock::utc(cx) };
         let (queued, undelivered) = {
-            let now = crate::clock::utc(cx);
             let state = self.state.read(cx);
             (
                 state.send_queued(&id, now),
@@ -6864,7 +6908,6 @@ impl Shell {
         // slopty: why it stands as it does (`sidebar_status`): what a waiting agent waits on,
         // an agent waiting on its own work, a finished result nobody has seen.
         let (reason, waiting_self) = {
-            let now = crate::clock::utc(cx);
             let state = self.state.read(cx);
             let session = state.session_for(&id);
             let settled = !queued && !undelivered && !archived && search_query.is_none();
@@ -6884,29 +6927,20 @@ impl Shell {
         };
         let unread = sidebar_status::unread(status) && !archived && !queued && !undelivered;
         // slopty: an agent waiting on its own background command, never read as waiting on you.
-        let status_label = if waiting_self && status_label.is_none() {
+        // slopty: a finished turn whose agent still works on its own reads as that work, not
+        // as done.
+        let status_label = if waiting_self && matches!(status_label, None | Some("Done")) {
             Some("Background work")
         } else {
             status_label
         };
-        // Subagents running under this chat show as a "● N" pill beside the
-        // row's own activity indicator, never in place of it: the pill takes
-        // the time stamp's spot (compact) or leads the status (regular), and
-        // keeps showing after the parent's own turn has settled.
-        let running_subagents = self.state.read(cx).running_subagents_for(&id, crate::clock::utc(cx));
-        let subagent_pill = |suffix: &str| {
-            (running_subagents > 0).then(|| {
-                crate::running_pill::running_pill(
-                    format!("{row_id}-subagents-{suffix}"),
-                    running_subagents,
-                    theme,
-                )
-            })
-        };
+        // slopty: no "● N" pill on the row (Amp's prune): a subagent left at work reads as the
+        // agent's own work (`sidebar_status::waiting_on_itself`), and the hover card counts them.
         // slopty: one mark morphs between working, waiting, done and failed
         // (`loaders::status_mark`), where a spinner, a check and a dot cut; the tick is cut
         // through its disc in the row's own ground.
-        let mark_state = sidebar_mark_state(status, queued, undelivered);
+        let mark_state = sidebar_mark_state(status, queued, undelivered)
+            .filter(|state| !(waiting_self && *state == crate::loaders::status_mark::MarkState::Done));
         let mark_ground = if selected {
             crate::theme::flatten(crate::theme::glass_selected_bg(), theme.bg)
         } else {
@@ -6927,20 +6961,38 @@ impl Shell {
                 )
                 .into_any_element()
         };
+        // slopty: one leading slot says the row's state (opencode's avatar slot): the status
+        // mark while it works, waits, failed or finished unseen, the clock while it works on its
+        // own, and the agent's mark at rest, where a status slot, the agent's mark and an unread
+        // dot crowded three marks before the title. The agent's mark keeps its full colour; only
+        // an archived row dims it, with the rest of the row.
+        let subline = if search_query.is_some() {
+            theme.text_muted
+        } else {
+            theme.text_muted.opacity(0.5)
+        };
+        let brand = harness.map(crate::pickers::harness_brand_icon);
+        let agent_mark = |(path, tint): (&'static str, Option<gpui::Hsla>)| {
+            icon(path)
+                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                .flex_none()
+                .text_color(match tint {
+                    Some(tint) if !archived_muted => tint,
+                    Some(tint) => tint.opacity(0.4),
+                    None if archived_muted => subline.opacity(0.4),
+                    None => subline.opacity(0.8),
+                })
+        };
         let compact_status = compact.then(|| {
             let glyph = if let Some(state) = mark_state {
                 status_mark(state)
             } else if waiting_self {
                 // slopty: at rest on its own work: a calm clock, not a live state.
                 icon(icons::CLOCK_CIRCLE)
-                    .size(px(11.0))
+                    .size(px(12.0))
                     .text_color(theme.text_muted)
                     .into_any_element()
-            } else if status_label.is_none() {
-                // slopty: a row at rest says nothing, as Claude desktop's and T3's: its slot stays
-                // so the titles keep one edge.
-                div().into_any_element()
-            } else {
+            } else if status_label.is_some() {
                 div()
                     .debug_selector({
                         let id = id.clone();
@@ -6950,6 +7002,16 @@ impl Shell {
                     .rounded_full()
                     .bg(status_color)
                     .into_any_element()
+            } else if let Some(brand) = brand {
+                div()
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("chat-agent-{id}") // slopty: for the tests
+                    })
+                    .child(agent_mark(brand))
+                    .into_any_element()
+            } else {
+                div().into_any_element()
             };
             div()
                 .id(SharedString::from(format!("{row_id}-status")))
@@ -6957,7 +7019,7 @@ impl Shell {
                     let id = id.clone();
                     move || format!("chat-status-{id}")
                 })
-                .size(px(13.0))
+                .size(px(SIDEBAR_LEADING_SLOT))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -7001,7 +7063,6 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .children(subagent_pill("label"))
                         .child(
                             div()
                                 // slopty: the status says itself to a screen reader, as the
@@ -7047,7 +7108,6 @@ impl Shell {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     // slopty: tabular figures, so "1m" and "11m" keep the column.
                     .font_features(crate::typography::tabular())
-                    .children(subagent_pill("idle"))
                     .child(time_ago.clone())
                     .into_any_element(),
             }
@@ -7076,14 +7136,14 @@ impl Shell {
         let mut corner = Some(corner);
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
-        let subline = if search_query.is_some() {
-            theme.text_muted
-        } else {
-            theme.text_muted.opacity(0.5)
-        };
         let select_id = id.clone();
         let menu_id = id.clone();
-        let row_label = title.clone(); // slopty: the row as a screen reader names it
+        // slopty: the row as a screen reader names it, with what tells it from a row of the same
+        // title.
+        let row_label = match &title_hint {
+            Some(hint) => SharedString::from(format!("{title}, {hint}")),
+            None => title.clone(),
+        };
         let search_query_none = search_query.is_none();
         let rename_input = (search_query_none && !preview)
             .then(|| self.rename_input_for(&id, ChatRenameSurface::Sidebar))
@@ -7384,36 +7444,14 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(if compact {
-                        4.0
+                        SIDEBAR_LEADING_GAP
                     } else {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
                     .children(compact_status)
-                    .when_some(
-                        harness.map(crate::pickers::harness_brand_icon),
-                        |el, (path, tint)| {
-                            // slopty: the agent's mark at its full colour (only an archived row
-                            // dims it, with the rest of the row), and a result nobody has seen
-                            // as a small accent dot on its corner, beside the heavier title
-                            // (opencode's unread mark).
-                            el.child(
-                                div()
-                                    .relative()
-                                    .flex_none()
-                                    .child(
-                                        icon(path)
-                                            .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                                            .text_color(match tint {
-                                                Some(tint) if !archived_muted => tint,
-                                                Some(tint) => tint.opacity(0.4),
-                                                None if archived_muted => subline.opacity(0.4),
-                                                None => subline.opacity(0.8),
-                                            }),
-                                    )
-                                    .when(unread, |el| el.child(spaces::unread_corner(&id, theme))),
-                            )
-                        },
-                    )
+                    // slopty: the palette's copy keeps the agent's mark beside its title; the
+                    // sidebar's is in the leading slot.
+                    .when_some(brand.filter(|_| !compact), |el, brand| el.child(agent_mark(brand)))
                     .child(match rename_input {
                         Some(input) => chat_title_editor(
                             format!("chat-title-editor-{content_id}").into(),
@@ -7424,15 +7462,34 @@ impl Shell {
                             format!("chat-title-{content_id}").into(),
                             true,
                             div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(6.0))
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .line_height(px(17.0))
-                                // slopty: the heavier weight marks a result nobody has seen.
-                                .when(unread, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
-                                // slopty: a title the agent gives rises in over the old (Amp's),
-                                // on the house's roll.
-                                .child(rolling_title.unwrap_or_else(|| {
-                                    popover::search_highlight(title, search_query, theme)
-                                })),
+                                .child(
+                                    div()
+                                        // slopty: the heavier weight marks a result nobody has
+                                        // seen.
+                                        .when(unread, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
+                                        // slopty: a title the agent gives rises in over the old
+                                        // (Amp's), on the house's roll.
+                                        .child(rolling_title.unwrap_or_else(|| {
+                                            popover::search_highlight(title, search_query, theme)
+                                        })),
+                                )
+                                // slopty: two rows of one title say what tells them apart, quiet
+                                // after it, as an editor's tabs of one file name do.
+                                .when_some(title_hint, |el, hint| {
+                                    let hint_id = format!("chat-hint-{content_id}");
+                                    el.child(
+                                        div()
+                                            .debug_selector(move || hint_id)
+                                            .flex_none()
+                                            .text_color(theme.text_muted)
+                                            .child(hint),
+                                    )
+                                }),
                         )
                         .into_any_element(),
                     })
@@ -7453,11 +7510,6 @@ impl Shell {
                         let text_hint = compact_jump_label
                             .as_ref()
                             .is_some_and(|label| label.chars().count() > 3);
-                        // Running subagents take the time stamp's place; the
-                        // legend and the hover archive still win.
-                        let pill = (!show_legend && !show_archive)
-                            .then(|| subagent_pill("compact"))
-                            .flatten();
                         let archive_id = id.clone();
                         // slopty: the machine's kind, before the time; the pull request is the
                         // hover card's.
@@ -7472,7 +7524,6 @@ impl Shell {
                                 .when(text_hint, |el| {
                                     el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
                                 })
-                                // A running-subagents pill can be wider than the plain time.
                                 .when(!text_hint, |el| el.min_w(px(30.0)))
                                 // Fixed height so swapping the time text for the
                                 // archive glyph never resizes the slot.
@@ -7487,7 +7538,9 @@ impl Shell {
                                     "Chat time"
                                 })
                                 .when(show_archive, |el| {
-                                    el.cursor_pointer()
+                                    // slopty: a button a screen reader names while it shows.
+                                    el.role(gpui::Role::Button)
+                                        .cursor_pointer()
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, _, _, cx| {
@@ -7520,8 +7573,6 @@ impl Shell {
                                     .flex_none()
                                     .text_color(theme.text_muted)
                                     .into_any_element()
-                                } else if let Some(pill) = pill {
-                                    pill
                                 } else {
                                     div()
                                         .when(show_legend, |el| {
@@ -7550,8 +7601,12 @@ impl Shell {
                             let id = id.clone();
                             move || format!("chat-reason-{id}")
                         })
+                        // slopty: why it waits, said to a screen reader too.
+                        .role(gpui::Role::Label)
+                        .aria_label(reason.clone())
                         .w_full()
-                        .pl(px(17.0))
+                        // slopty: under the title, past the leading slot.
+                        .pl(px(SIDEBAR_LEADING_SLOT + SIDEBAR_LEADING_GAP))
                         .child(sidebar_faded_label(
                             format!("chat-reason-label-{content_id}").into(),
                             true,
@@ -8512,7 +8567,24 @@ impl Shell {
         // path close here; the others remain explicit blockers.
         if self.delete_confirm.is_some() // slopty: no accounts, sync or sign-in.
             || self.delete_space_confirm.is_some()
-            || self.chat_menu.get().is_some()
+        {
+            return true;
+        }
+        // slopty: Escape puts an open context menu away, as every system menu does, instead of
+        // taking the key and leaving the menu up; one still fading out keeps the key.
+        if self.chat_menu.is_open() {
+            self.close_chat_menu(cx);
+            return true;
+        }
+        if self.space_menu.is_open() {
+            self.close_space_menu(cx);
+            return true;
+        }
+        if self.user_menu.is_open() {
+            self.close_user_menu(cx);
+            return true;
+        }
+        if self.chat_menu.get().is_some()
             || self.space_menu.get().is_some()
             || self.user_menu.get().is_some()
         {
@@ -11098,9 +11170,7 @@ impl Render for Shell {
         }
         let shortcut_focus = self.shortcut_focus.clone();
         let (preferred_focus, unfocused) = self.navigation_focus_fallback(cx);
-        window.defer(cx, move |window, cx| {
-            restore_mounted_focus(&shortcut_focus, &preferred_focus, &unfocused, window, cx);
-        });
+        defer_mounted_focus_restore(shortcut_focus, preferred_focus, unfocused, window, cx);
 
         // Modifier events follow focus too. Reconcile from the window's input
         // snapshot so a missed release (or pointer event after it) heals hints.
@@ -11305,17 +11375,15 @@ impl Render for Shell {
                 // badge "completed" until you leave and return — mark it seen
                 // live while the window is active (idempotent guard inside;
                 // one extra frame settles it).
-                if window_active {
-                    let unseen_selected = {
-                        let s = self.state.read(cx);
-                        s.selected_chat_row()
-                            .filter(|c| c.unseen())
-                            .map(|c| c.id.clone())
-                    };
-                    if let Some(chat_id) = unseen_selected {
-                        self.state
-                            .update(cx, |s, cx| s.mark_chat_seen(&chat_id, cx));
-                    }
+                // slopty: marked after this frame, never while it draws: a change to the state
+                // while a frame draws reaches none of the views watching it (the sidebar went
+                // on drawing "Done" from its last build); a result arriving while the window
+                // is active is marked as it arrives (`Shell::new`'s state observer), so this
+                // is the window coming back to the front.
+                if window_active
+                    && self.state.read(cx).selected_chat_row().is_some_and(|chat| chat.unseen())
+                {
+                    cx.defer_in(window, |this, _, cx| this.mark_open_chat_seen(cx));
                 }
                 // Capture knob: `SLOPTY_OPEN_DIALOG=model` pops the combined
                 // harness/model menu (needs `window`, so it fires here rather
@@ -14882,12 +14950,13 @@ mod shortcut_focus_regressions {
 
     impl Render for ShortcutHost {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let root = self.root.clone();
-            let unfocused = self.unfocused.clone();
-            let preferred = self.editor.clone();
-            window.defer(cx, move |window, cx| {
-                restore_mounted_focus(&root, &preferred, &unfocused, window, cx);
-            });
+            defer_mounted_focus_restore(
+                self.root.clone(),
+                self.editor.clone(),
+                self.unfocused.clone(),
+                window,
+                cx,
+            );
             div()
                 .size_full()
                 .track_focus(&self.root)

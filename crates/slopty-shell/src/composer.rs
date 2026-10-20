@@ -58,7 +58,7 @@ mod side; // slopty: side questions (`/btw`).
 mod surfaces;
 mod request_card; // slopty: a request's card by its kind.
 pub use activity::working_line;
-pub(crate) use activity::{ARMED_SPOKEN, armed_element, armed_hint, escape_stops};
+pub(crate) use activity::{ARMED_SPOKEN, FIGURES_SIZE as WORKING_FIGURES_SIZE, LEAD_SIZE as WORKING_LEAD_SIZE, armed_element, armed_hint, escape_stops};
 pub(crate) use footer::ansi_color; // slopty: a code fence's terminal colours.
 pub use dock::{DockCache, chat_dock};
 pub use surfaces::{ModPane, PaneAsk};

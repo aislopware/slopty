@@ -231,8 +231,13 @@ impl Shell {
             .get(&key)
             .and_then(|tabs| tabs.iter().find(|tab| matches!(tab, RightSurface::Diff(_))).copied());
         match shown {
-            Some(diff) => self.set_right_active(diff, cx),
-            None => self.add_diff_surface(window, cx),
+            Some(diff) => {
+                self.set_right_active(diff, cx);
+                if let RightSurface::Diff(id) = diff {
+                    self.focus_diff(id, cx);
+                }
+            }
+            None => self.open_diff_surface(window, cx),
         }
         cx.notify();
     }

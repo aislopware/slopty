@@ -347,7 +347,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let now = crate::clock::utc(cx);
+        let now = self.sidebar_clock; // slopty: the sidebar's clock, which ticks itself
         self.session_lanes.follow(&chat.id);
         let (side_chats, subagents) = {
             let state = self.state.read(cx);
@@ -356,6 +356,9 @@ impl Shell {
                 SubagentLane::new(subagent_rows(state, &chat.id)),
             )
         };
+        for row in &side_chats {
+            self.sidebar_time_ago(row.activity); // slopty: notes when its time next reads differently
+        }
         // Subagents run on the session's own harness.
         let harness = chat.config.as_ref().map(|config| config.harness);
         // ── The two ways to start a side chat: rows while the lane is empty,
@@ -493,6 +496,7 @@ impl Shell {
                 ));
             }
         }
+        self.tick_sidebar_clock(cx); // slopty: the rows' times move on by the sidebar's clock
 
         let body = div()
             .id("session-lanes-body")
@@ -623,7 +627,7 @@ impl Shell {
     ) -> gpui::Stateful<gpui::Div> {
         let key = format!("session-lanes-subagent-{}", row.doc_id);
         let mark = status_mark(key.clone(), row.indicator(), theme);
-        let time = slopty_view_proto::view::format_time_ago(row.spawned_at, crate::clock::utc(cx));
+        let time = self.sidebar_time_ago(row.spawned_at); // slopty: the sidebar's clock
         let title = row_title(format!("{key}-title"), row.title.clone());
         popover::picker_row(theme, false, false, key.clone())
             .id(SharedString::from(key))
@@ -639,7 +643,7 @@ impl Shell {
             .child(popover::picker_icon_slot(mark))
             .children(harness.map(|harness| harness_mark(harness, theme)))
             .child(title)
-            .child(time_label(time.into(), theme))
+            .child(time_label(time, theme))
     }
 
     /// The settled subagents' fold, with their count.

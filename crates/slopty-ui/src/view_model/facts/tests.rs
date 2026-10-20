@@ -341,12 +341,46 @@ fn a_task_notification_is_a_row_linking_its_call() {
     assert_eq!(row.kind, "subagent");
     // slopty: a run under a second says so as its tray row does, never "0s" (#16).
     let quick = TaskNote {
+        kind: BackgroundTask::MONITOR.into(),
         summary: "Monitor \"Watch the build log\" stream ended".into(),
         usage: Some(TaskUsage { tokens: 0, tool_uses: 0, duration_ms: 300 }),
         ..note
     };
     let row = task_part(&quick, &fixtures::empty(), &words, &|t| t.to_string());
     assert_eq!(row.text, "Monitor \"Watch the build log\" stream ended · <1s");
+}
+
+/// slopty: a subagent's notice that carried only its task, or the agent's own words, reads as
+/// the TUI says it: who, and what became of it; the agent's words open under it.
+#[test]
+fn a_subagents_bare_notice_says_who_and_what_became_of_it() {
+    let note = TaskNote {
+        task: "a2".into(),
+        kind: BackgroundTask::AGENT.into(),
+        status: TaskNote::COMPLETED.into(),
+        title: "Read the input schema".into(),
+        summary: "Read the input schema".into(),
+        body: None,
+        call: None,
+        usage: None,
+        exit_code: None,
+        links: Vec::new(),
+    };
+    let words = |text: &Clipped| text.text.clone();
+    let row = task_part(&note, &fixtures::empty(), &words, &|t| t.to_string());
+    assert_eq!(row.text, "Agent \"Read the input schema\" finished");
+    assert_eq!(row.body, None, "its task said once");
+    let reported = TaskNote {
+        summary: "Found three workers.".into(),
+        status: TaskNote::KILLED.into(),
+        ..note.clone()
+    };
+    let row = task_part(&reported, &fixtures::empty(), &words, &|t| t.to_string());
+    assert_eq!(row.text, "Agent \"Read the input schema\" was stopped");
+    assert_eq!(row.body.as_deref(), Some("Found three workers."));
+    let worded = TaskNote { summary: "Agent \"Read\" finished".into(), ..note };
+    let row = task_part(&worded, &fixtures::empty(), &words, &|t| t.to_string());
+    assert_eq!(row.text, "Agent \"Read\" finished", "the TUI's own line stands");
 }
 
 /// A request tried again counts down while it is the turn's last word, reads as recovered once

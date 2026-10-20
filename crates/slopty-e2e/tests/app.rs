@@ -85,3 +85,7 @@ mod surfaces_live;
 #[cfg(test)]
 #[path = "app/transcript.rs"]
 mod transcript;
+
+#[cfg(test)]
+#[path = "app/walk.rs"]
+mod walk;

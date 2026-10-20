@@ -46,3 +46,179 @@ async fn a_long_group_shows_more_on_request() {
     drv.click(x, y).await.unwrap();
     seen(drv, "every row, and no Show more", STEP, |d| show_more(d).is_none()).await;
 }
+
+// A sidebar watching many agents at once, on a real stack: every state a row can stand in, long
+// and repeated titles, two projects. Judged by the accessibility tree, and drawn in light and
+// dark against `golden/sidebar-states-*` (`docs/decisions/ui.md`, "The sidebar says each row's
+// state once").
+
+/// The worker's name for the states' run.
+const STATES: &str = "states";
+
+/// A title longer than the sidebar is wide.
+const LONG: &str = "Refactor the pairing handshake so a phone that scans an expired code learns why instead of waiting";
+
+/// What the stand-in is asked, and in which project: each prompt's first word picks its turn
+/// (`slopty_testkit::claude_stream`). Started oldest first.
+const AT_REST: [(&str, &str); 4] = [
+    ("slopty", "Tidy the README's install section"),
+    ("better-update", "hello"),
+    ("slopty", "hello"),
+    ("slopty", LONG),
+];
+const LIVE: [&str; 6] = [
+    // A rate limit: the turn fails.
+    "limit the sidebar to ten rows per group",
+    // A command left in the background: at work on its own.
+    "background cargo build --release",
+    // A plan, a question and an approval: each waits on the person.
+    "plan the settings split into pages",
+    "ask which accent reads best on glass",
+    "bash cargo test --workspace",
+    // A subagent that holds: at work.
+    "agent survey the crates for dead code",
+];
+
+/// The masks over every sidebar row's time, which says the run's own moment ("now", "1m"):
+/// the right end of each row's first line, at the frame's `scale`.
+fn row_times(
+    dump_a11y: &[slopty_e2e::A11yNode],
+    scale: f32,
+) -> Vec<slopty_e2e::snapshot::PixelRect> {
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
+    let px = |v: f32| (v * scale).max(0.0).round() as u32;
+    dump_a11y
+        .iter()
+        .filter(|n| {
+            n.role == "Button" && n.bounds[0] < 40.0 && n.bounds[3] >= 28.0 && n.bounds[3] <= 48.0
+        })
+        .map(|n| {
+            let [x, y, w, _] = n.bounds;
+            let left = x + w - 52.0;
+            [px(left), px(y), px(52.0), px(30.0)]
+        })
+        .collect()
+}
+
+/// Every state at once: Needs you holds the failed turn and the three that wait on the person,
+/// each saying why; Working holds the agent at work and the one at work on its own; Done holds
+/// the rest, the two "hello" rows told apart by their projects; the open chat is read.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn every_state_reads_at_a_glance() {
+    let mut stack = ServedApp::launch_with(
+        STATES,
+        &[],
+        &[("STUB_AGENT_HOLD_MS", "900000"), ("STUB_LIMIT_RESET_S", "1")],
+    )
+    .await
+    .unwrap();
+    let project = |name: &str| {
+        let path = stack.path(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::canonicalize(path).unwrap()
+    };
+    let (slopty, other) = (project("slopty"), project("better-update"));
+    let folder = |name: &str| if name == "slopty" { slopty.clone() } else { other.clone() };
+    for (name, prompt) in AT_REST {
+        let agent = start(&stack, STATES, &folder(name), prompt).await;
+        thread_until(&stack, &agent, "answered", |read| read.to_string().contains("Done:")).await;
+    }
+    for prompt in LIVE {
+        start(&stack, STATES, &slopty, prompt).await;
+    }
+    let drv = &mut stack.driver;
+    drv.ok(&slopty_e2e::Command::Resize { width: 1320.0, height: 880.0 }).await.unwrap();
+    let header = |d: &Dump, words: &str| {
+        d.a11y.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some(words))
+    };
+    let grouped = seen(drv, "every group", TURN, |d| {
+        header(d, "Needs you, 4") && header(d, "Working, 2") && header(d, "Done, 4")
+    })
+    .await;
+    // The read chat: open it.
+    let read = grouped
+        .a11y
+        .iter()
+        .find(|n| n.role == "Button" && n.label.as_deref() == Some(AT_REST[0].1))
+        .expect("the README's row");
+    let (x, y) = middle(read);
+    drv.click(x, y).await.unwrap();
+    let dump = seen(drv, "the open chat read", STEP, |d| {
+        !crate::served::unread(d, AT_REST[0].1) && d.a11y_node("Button", Some("Open in…")).is_some()
+    })
+    .await;
+    let text = slopty_e2e::frame_text(&dump.a11y);
+    for words in ["hello, slopty", "hello, better-update"] {
+        assert!(header(&dump, words), "the two hello rows told apart ({words}):\n{text}");
+    }
+    let said = |role: &str, words: &str| {
+        dump.a11y
+            .iter()
+            .any(|n| n.role == role && n.label.as_deref().is_some_and(|l| l.starts_with(words)))
+    };
+    for status in ["Needs you", "Failed", "Working", "Background work"] {
+        assert!(said("Status", status), "a row says {status}:\n{text}");
+    }
+    for why in [
+        "Waiting for your answer",
+        "Needs your approval · Run cargo",
+        "Needs your approval · Wants to leave plan mode",
+        "Background work",
+    ] {
+        assert!(said("Label", why), "a row says why: {why}:\n{text}");
+    }
+    assert!(crate::served::unread(&dump, "hello, slopty"), "an answer nobody read:\n{text}");
+    // The pointer off the sidebar, so no row is lit and no hover card floats.
+    drv.ok(&slopty_e2e::Command::Move { x: 800.0, y: 400.0 }).await.unwrap();
+    seen(drv, "no row under the pointer", STEP, |d| {
+        d.a11y_node("Button", Some("Archive")).is_none()
+    })
+    .await;
+    // Light and dark, the rows' times and the open turn's end left out.
+    let renders = slopty_e2e::harness::artifacts_dir();
+    for (dark, appearance) in [(false, "light"), (true, "dark")] {
+        drv.ok(&slopty_e2e::Command::Appearance { dark }).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let golden = format!("sidebar-states-{appearance}");
+        let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
+        println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
+        let mut masks = crate::served::always_moving(&frame.a11y, frame.scale);
+        masks.extend(row_times(&frame.a11y, frame.scale));
+        slopty_e2e::snapshot::assert_matches_masked(
+            &golden,
+            &frame,
+            slopty_e2e::snapshot::MAC_TOLERANCE,
+            &renders,
+            &masks,
+        )
+        .unwrap();
+    }
+    drv.ok(&slopty_e2e::Command::Appearance { dark: false }).await.unwrap();
+    // A row's menu: a press of the secondary button opens it with the row's actions; Escape puts
+    // it away.
+    let row = |d: &Dump| d.a11y_node("Button", Some("hello, better-update")).map(middle);
+    let (x, y) = row(&dump).expect("the other hello");
+    drv.ok(&slopty_e2e::Command::Click { x, y, button: slopty_e2e::Button::Right, count: 1 })
+        .await
+        .unwrap();
+    let menu =
+        seen(drv, "the row's menu", STEP, |d| d.a11y_node("MenuItem", Some("Rename")).is_some())
+            .await;
+    for item in ["Rename", "Pin", "Archive"] {
+        assert!(menu.a11y_node("MenuItem", Some(item)).is_some(), "the menu offers {item}");
+    }
+    drv.keys("escape").await.unwrap();
+    seen(drv, "the menu put away", STEP, |d| d.a11y_node("MenuItem", Some("Rename")).is_none())
+        .await;
+    // Under the pointer the row offers Archive in its time's place; pressed, the row leaves Done
+    // for the Archived shelf.
+    drv.ok(&slopty_e2e::Command::Move { x, y }).await.unwrap();
+    let hovered =
+        seen(drv, "the row's archive", STEP, |d| d.a11y_node("Button", Some("Archive")).is_some())
+            .await;
+    let (ax, ay) = middle(hovered.a11y_node("Button", Some("Archive")).unwrap());
+    drv.click(ax, ay).await.unwrap();
+    seen(drv, "the row archived", STEP, |d| header(d, "Done, 3") && row(d).is_none()).await;
+    stack.shutdown().await;
+}

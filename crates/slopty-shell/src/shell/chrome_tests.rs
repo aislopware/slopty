@@ -101,8 +101,8 @@ fn a_sidebar_header_is_a_named_button_that_says_it_is_open(cx: &mut TestAppConte
     assert_eq!(working.expanded, Some(false), "a press folds it: {working:?}");
 }
 
-/// slopty: a group heading reads 13 regular in the muted ink, its count drawn only under the
-/// pointer (Amp's sidebar).
+/// slopty: a group heading reads 12 medium in the muted ink, its count (Amp's) and an open
+/// group's chevron (Claude desktop's caret) drawn only under the pointer.
 #[gpui::test]
 fn a_sidebar_headers_count_shows_under_the_pointer(cx: &mut TestAppContext) {
     let (_shell, cx) = launch(cx, DESKTOP);
@@ -120,6 +120,8 @@ fn a_sidebar_headers_count_shows_under_the_pointer(cx: &mut TestAppContext) {
         spaces::sidebar_hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
     });
     assert_eq!(rest.a, 0.0, "unseen at rest");
+    let chevron = |cx: &mut VisualTestContext| cx.update(|_, _| spaces::sidebar_hover_reveal(&header_key));
+    assert_eq!(chevron(cx), 0.0, "an open group's chevron rests unseen with it");
     // Settled at once, so the frame read is the faded-in one.
     cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
     cx.simulate_mouse_move(working.bounds.center(), None, gpui::Modifiers::default());
@@ -130,6 +132,7 @@ fn a_sidebar_headers_count_shows_under_the_pointer(cx: &mut TestAppContext) {
         spaces::sidebar_hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
     });
     assert!(shown.a > 0.9, "shown under the pointer: {shown:?}");
+    assert!(chevron(cx) > 0.9, "and its chevron");
 }
 
 /// slopty: a finished chat untouched for 72 hours folds into Inactive, the last group and shut
@@ -383,6 +386,39 @@ fn the_chat_menu_names_its_rows(cx: &mut TestAppContext) {
     let copy = find(&nodes, Role::MenuItem, "Copy").expect("Copy");
     assert_eq!(copy.expanded, Some(false), "its submenu shut: {copy:?}");
     assert!(nodes.values().all(|node| node.role != Role::MenuItem || !node.label.is_empty()), "no row unnamed");
+}
+
+/// Escape puts away whichever context menu is up, a chat's, a project's or the account's, as a
+/// system menu does.
+#[gpui::test]
+fn escape_puts_a_context_menu_away(cx: &mut TestAppContext) {
+    let (shell, cx) = launch(cx, DESKTOP);
+    let at = gpui::point(px(40.0), px(120.0));
+    let open: [fn(&mut Shell, Point<Pixels>); 3] = [
+        |shell, at| {
+            shell.chat_menu.open(ChatMenuState {
+                tab: None,
+                chat_id: "b".into(),
+                position: at,
+                page: ChatMenuPage::Root,
+            });
+        },
+        |shell, at| shell.space_menu.open(("p".into(), at)),
+        |shell, _| shell.user_menu.open(()),
+    ];
+    for (which, open) in open.into_iter().enumerate() {
+        shell.update(cx, |shell, cx| {
+            open(shell, at);
+            cx.notify();
+        });
+        draw(cx);
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+        let up = shell.read_with(cx, |shell, _| {
+            [shell.chat_menu.is_open(), shell.space_menu.is_open(), shell.user_menu.is_open()]
+        });
+        assert_eq!(up, [false; 3], "menu {which} put away");
+    }
 }
 
 /// Back and Forward, with no history to walk, say they are off as well as look it.

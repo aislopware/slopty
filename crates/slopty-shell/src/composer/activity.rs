@@ -18,6 +18,13 @@ use crate::theme::Theme;
 /// slopty: Escape stops the agent on its second press (Amp): the first arms it, and the working
 /// line ends "Esc again to stop" in warning ink while it is armed, then lets it go.
 pub(crate) const ESCAPE_ARMED: std::time::Duration = std::time::Duration::from_millis(1_500);
+/// slopty: the working line's words and figures, one size under the transcript's 14 pt prose and
+/// in its muted ink: read at a glance beside the reply, never a whisper under it (Claude
+/// desktop's 14 px status line; 2026-10-20).
+pub(crate) const LEAD_SIZE: f32 = 13.0;
+/// The figures after the words: the timer and the tokens, a step smaller.
+pub(crate) const FIGURES_SIZE: f32 = 12.0;
+
 /// What a screen reader hears of the armed stop.
 pub(crate) const ARMED_SPOKEN: &str = "Press Escape again to stop the agent";
 /// How long the armed hint takes to go at the end of [`ESCAPE_ARMED`].
@@ -93,6 +100,8 @@ pub fn activity_words(line: &ActivityLine, word: &str, elapsed_secs: i64, now: i
     if line.tokens > 0 {
         figures.push(format!("↓ {} tokens", tokens_short(line.tokens)));
     }
+    // slopty: thinking is said while it lasts; how long a past thought took is the work's own
+    // row, not the live line's, which says only what is under way (2026-10-20).
     if let Some(since) = line.thinking_since {
         let thinking = u64::try_from(now.saturating_sub(since)).unwrap_or(0);
         let words = ActivityLine::thinking_words(thinking);
@@ -100,8 +109,6 @@ pub fn activity_words(line: &ActivityLine, word: &str, elapsed_secs: i64, now: i
             Some(effort) if words == "thinking" => format!("thinking with {effort} effort"),
             _ => words.to_owned(),
         });
-    } else if let Some(ms) = line.thought_ms {
-        figures.push(format!("thought for {}", duration_words(ms.max(1_000))));
     }
     // slopty: a reply silent past the TUI's patience says the API has not answered.
     let quiet = line.quiet_since.and_then(|since| u64::try_from(now.saturating_sub(since)).ok());
@@ -155,7 +162,7 @@ pub fn working_line(
                     .flex_row()
                     .items_center()
                     .gap(px(Theme::SPACE_SM))
-                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_size(crate::typography::ui_rems(FIGURES_SIZE))
                     .child(if words.retrying {
                         div().flex_none().size(px(6.0)).mx(px(3.0)).rounded_full().bg(theme.warning).into_any_element()
                     } else {
@@ -165,7 +172,7 @@ pub fn working_line(
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_size(crate::typography::ui_rems(LEAD_SIZE))
                             // slopty: a silent reply warms the words, as the TUI's spinner; a
                             // slow model is no failure, so amber at most.
                             .text_color(if words.retrying {
@@ -189,8 +196,8 @@ pub fn working_line(
                 el.child(
                     div()
                         .pl(px(Theme::SPACE_SM + 15.0))
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_faint)
+                        .text_size(crate::typography::ui_rems(FIGURES_SIZE))
+                        .text_color(theme.text_muted)
                         .truncate()
                         .child(SharedString::from(below)),
                 )
@@ -263,7 +270,7 @@ fn figures_element(
             .top(px(1.0))
             .flex()
             .flex_row()
-            .text_color(theme.text_faint)
+            .text_color(theme.text_muted)
             .font_features(crate::typography::tabular())
             .children(timer.map(|timer| {
                 crate::roll_text::roll_text(
@@ -355,7 +362,7 @@ mod tests {
         let quiet = ActivityLine { thought_ms: Some(4_200), ..ActivityLine::default() };
         let words = activity_words(&quiet, "Cogitating", 7, 0);
         assert_eq!(words.lead, "Cogitating");
-        assert_eq!(words.figures, ["7s", "thought for 4s"]);
+        assert_eq!(words.figures, ["7s"], "a thought gone by is its row's, not the live line's");
     }
 
     /// A reply silent past 10 s warms the line, fully at 20 s; past 30 s it says the API

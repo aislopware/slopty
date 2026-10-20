@@ -1,0 +1,32 @@
+Window
+Button │ Filter projects: All projects
+Button │ Done, 1
+Button │ Survey the files
+Button │ Inactive, 0
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Splitter │ Resize sidebar
+Paragraph │ It finished.
+Button │ Copy message
+Article │ You
+Paragraph │ Sum it up for the PR
+Button │ Copy message
+Button │ Rewind…
+Article │ Claude Code
+Paragraph │ Ready for review. The PR:
+Paragraph │ Surveys the crate and records what it found in notes.md.⏎Makes beta loud in notes.txt (BETA), one line changed.⏎Runs the slow check in the background; it woke and passed.
+Paragraph │ Nothing is left open.
+Button │ Attach images
+MultilineTextInput │ Do anything… (focused)
+Button │ Model: Opus 5.5, High
+Button │ Send message
+Button │ Mode: Auto
+Button │ Open in…
+Button │ Show chat details
+Button │ Show files panel
+Button │ Show side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New chat

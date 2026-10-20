@@ -900,8 +900,15 @@ pub fn task_part(
         (BackgroundTask::TEAMMATE, TaskNote::COMPLETED) if !note.title.trim().is_empty() => {
             format!("Teammate @{} shut down gracefully", note.title.trim().trim_start_matches('@'))
         }
-        _ => note.summary.clone(),
+        _ => agent_words(note).unwrap_or_else(|| note.summary.clone()),
     };
+    // slopty: an agent's own words, when its notice carried them in place of the TUI's line,
+    // open under the row instead of standing for it.
+    let said = Some(note.summary.trim())
+        .filter(|said| {
+            !said.is_empty() && agent_words(note).is_some() && *said != note.title.trim()
+        })
+        .map(str::to_owned);
     let text = match duration {
         // slopty: in the tray's words, "<1s" for a run under a second (#16).
         Some(ms) if !summary.contains(" · ") => {
@@ -924,7 +931,7 @@ pub fn task_part(
         text,
         title: note.title.clone(),
         tone: tone.to_owned(),
-        body: note.body.as_ref().map(words).filter(|body| !body.trim().is_empty()),
+        body: note.body.as_ref().map(words).filter(|body| !body.trim().is_empty()).or(said),
         call_part_id: note.call.as_ref().map(|item| item.0.clone()),
         figures: figures(usage.map(|u| u.tool_uses), usage.map(|u| u.tokens)),
         tokens: usage.map(|u| u.tokens).filter(|n| *n > 0),
@@ -942,6 +949,26 @@ pub fn task_part(
             })
             .collect(),
     }
+}
+
+/// slopty: a subagent's notice in the TUI's words (`● Agent "{task}" finished`), when Claude
+/// Code's notice carried only the task or the agent's own words: a bare "Read the schema" beside a
+/// green dot said neither who nor what became of it (2026-10-20).
+fn agent_words(note: &TaskNote) -> Option<String> {
+    if note.kind != BackgroundTask::AGENT || note.summary.trim_start().starts_with("Agent ") {
+        return None;
+    }
+    let name =
+        Some(note.title.trim()).filter(|t| !t.is_empty()).unwrap_or_else(|| note.summary.trim());
+    let what = match note.status.as_str() {
+        TaskNote::COMPLETED => "finished",
+        TaskNote::FAILED => "failed",
+        TaskNote::KILLED => "was stopped",
+        TaskNote::WAITING => "is waiting on its own background work",
+        TaskNote::EXPIRED => "ran out of time",
+        _ => return None,
+    };
+    Some(if name.is_empty() { format!("Agent {what}") } else { format!("Agent \"{name}\" {what}") })
 }
 
 /// Whether the notice `item` of turn `turn` was followed by more of its turn than requests tried

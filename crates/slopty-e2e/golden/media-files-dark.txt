@@ -54,4 +54,3 @@ Button │ Hide sidebar
 Button │ Back
 Button │ Forward
 Button │ New chat
-Button │ Back to your prompt: Show the files

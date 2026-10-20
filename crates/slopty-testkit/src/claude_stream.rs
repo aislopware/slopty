@@ -956,6 +956,9 @@ impl Stub {
             cwd: self.cwd.clone(),
             prompt: prompt.to_owned(),
             now_ms: epoch_s().saturating_mul(1000),
+            // The records the turns before wrote, so this one's ids repeat none of theirs.
+            earlier: std::fs::read_to_string(&self.transcript)
+                .map_or(0, |text| text.lines().filter(|l| !l.trim().is_empty()).count()),
         };
         let gap = millis("STUB_REPLAY_GAP_MS", 20);
         // The `Agent` call each subagent's file answers, found by the prompt it was given.

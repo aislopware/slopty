@@ -8,7 +8,10 @@
 //!   first (Amp's "Inactive last 72h"), so Done holds the work of the last days.
 //! - **Reasons.** A row that waits says why, from what the agent holds open: "Waiting for your
 //!   answer", "Plan ready for review", "Needs your approval · run cargo test"; an agent waiting
-//!   on its own work says "Background work · 4m"; one summarising its context says so.
+//!   on its own work says "Background work", or "1 subagent running" for a subagent it left at
+//!   work; one summarising its context says so.
+//! - **Times.** A row's time says how long it has stood as it is ([`row_since`]): at work since
+//!   its turn began, waiting since it started to, at rest since its last answer.
 //! - **Unread weight.** A finished result nobody has seen sets its title in the heavier weight.
 //! - **The hover card's facts.** zeron's session hover card (`session_hover_card`) also says
 //!   where a row runs (project @ machine), which agent and model, how long it has stood as it is,
@@ -22,7 +25,7 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px};
 use slopty_view_proto::{Chat, ChatIndicator, Session, SessionStatus, SessionWait};
 
 use crate::icons::{self, icon};
-use crate::state::{AppState, SESSION_STALE_MS, format_time_ago};
+use crate::state::{AppState, SESSION_STALE_MS, format_time_ago, running_subagents};
 use crate::theme::Theme;
 
 /// An agent as the hover card names it.
@@ -73,7 +76,7 @@ impl StatusGroup {
             ChatIndicator::AwaitingInput | ChatIndicator::Errored => Self::NeedsYou,
             ChatIndicator::Working => Self::Working,
             ChatIndicator::Completed | ChatIndicator::Idle => {
-                if live(session, now).is_some_and(|s| s.status == SessionStatus::Waiting) {
+                if waiting_on_itself(session, now) {
                     Self::Working
                 } else {
                     Self::Done
@@ -164,16 +167,25 @@ pub(super) fn show_more_row(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(10.0))
+        // slopty: its words at the rows' title edge, past the one leading slot.
+        .gap(px(super::SIDEBAR_LEADING_GAP))
         .px(px(Theme::SPACE_SM))
-        .rounded(px(6.0))
+        .rounded(px(8.0))
         .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text_muted.opacity(0.55))
         .cursor_pointer()
         .role(gpui::Role::Button)
         .aria_label(words.clone())
         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-        .child(icon(icons::PLUS).size(px(14.0)).flex_none())
+        .child(
+            div()
+                .size(px(super::SIDEBAR_LEADING_SLOT))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(icons::PLUS).size(px(14.0)).flex_none()),
+        )
         .child(words)
 }
 
@@ -194,7 +206,9 @@ pub(super) fn empty_group_row(
         .flex_none()
         .flex()
         .items_center()
-        .px(px(Theme::SPACE_SM))
+        // slopty: at the rows' title edge.
+        .pl(px(Theme::SPACE_SM + super::SIDEBAR_LEADING_SLOT + super::SIDEBAR_LEADING_GAP))
+        .pr(px(Theme::SPACE_SM))
         .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text_muted.opacity(0.55))
         .when(open, |line| line.role(gpui::Role::Status).aria_label(NO_INACTIVE))
@@ -265,12 +279,76 @@ pub(super) fn needing_you(state: &AppState, now: DateTime<Utc>) -> Vec<String> {
     needs.chain(unseen).map(|(_, chat)| chat.id.clone()).collect()
 }
 
-/// Whether the visible chats run on more than one machine, so a row's machine glyph tells them
-/// apart.
+/// Whether the visible chats run on machines of more than one kind, so a row's machine glyph
+/// tells them apart. slopty: two Macs would wear the one laptop on every row, which tells
+/// nothing apart; the hover card names the machine.
 pub(super) fn span_machines(state: &AppState) -> bool {
-    let mut devices = state.visible_chats().map(|chat| chat.device_id.as_str());
-    let first = devices.next();
-    devices.any(|device| Some(device) != first)
+    let kind = |device: &str| {
+        state.devices.iter().find(|known| known.id == device).map(|known| super::spaces::device_glyph(&known.platform))
+    };
+    let mut kinds = state.visible_chats().filter_map(|chat| kind(&chat.device_id));
+    let first = kinds.next();
+    kinds.any(|glyph| Some(glyph) != first)
+}
+
+/// slopty: what tells apart the rows of `chats` that share a title, by chat id: the project,
+/// when the rows of one title are not all in one, else the machine, when they are not all on
+/// one; a title no other row has, or rows nothing tells apart, have none. Two "hello" rows
+/// otherwise read as one chat twice.
+pub(super) fn title_hints<'a>(
+    state: &AppState,
+    chats: impl IntoIterator<Item = &'a Chat>,
+) -> std::collections::HashMap<String, SharedString> {
+    let rows = chats.into_iter().map(|chat| TitledRow {
+        id: chat.id.clone(),
+        title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).trim().to_lowercase(),
+        project: state.space_for_chat(chat).map(|space| space.display_name().to_owned()),
+        machine: state.device_name(&chat.device_id).map(str::to_owned),
+    });
+    hints(&rows.collect::<Vec<_>>())
+}
+
+/// A sidebar row as [`title_hints`] reads it.
+struct TitledRow {
+    id: String,
+    title: String,
+    project: Option<String>,
+    machine: Option<String>,
+}
+
+impl TitledRow {
+    fn project(&self) -> Option<&str> {
+        self.project.as_deref()
+    }
+
+    fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
+    }
+}
+
+/// [`title_hints`] over rows already read.
+fn hints(rows: &[TitledRow]) -> std::collections::HashMap<String, SharedString> {
+    let mut by_title: std::collections::HashMap<&str, Vec<&TitledRow>> = std::collections::HashMap::new();
+    for row in rows {
+        by_title.entry(row.title.as_str()).or_default().push(row);
+    }
+    let mut hints = std::collections::HashMap::new();
+    for same in by_title.values().filter(|same| same.len() > 1) {
+        let differ = |of: fn(&TitledRow) -> Option<&str>| same.iter().any(|row| of(row) != of(same[0]));
+        let pick: fn(&TitledRow) -> Option<&str> = if differ(TitledRow::project) {
+            TitledRow::project
+        } else if differ(TitledRow::machine) {
+            TitledRow::machine
+        } else {
+            continue;
+        };
+        for row in same {
+            if let Some(hint) = pick(row) {
+                hints.insert(row.id.clone(), SharedString::from(hint.to_owned()));
+            }
+        }
+    }
+    hints
 }
 
 impl super::Shell {
@@ -303,14 +381,39 @@ pub(super) fn reason(status: ChatIndicator, session: Option<&Session>, now: Date
             .filter(|wait| wait.kind == SessionWait::COMPACTING)
             .map(|_| "Compacting its context".to_owned()),
         ChatIndicator::Errored => None,
+        // slopty: the row's time says for how long (`row_since`), so the line says only what.
         ChatIndicator::Completed | ChatIndicator::Idle => {
-            let session = session.filter(|s| s.status == SessionStatus::Waiting)?;
-            Some(match session.status_since.map(|since| format_time_ago(since, now)) {
-                Some(age) if age != "now" => format!("Background work \u{b7} {age}"),
-                _ => "Background work".to_owned(),
+            let session = session.filter(|_| waiting_on_itself(session, now))?;
+            Some(match (session.status, running_subagents(Some(session), now)) {
+                (SessionStatus::Waiting, _) | (_, 0) => "Background work".to_owned(),
+                (_, 1) => "1 subagent running".to_owned(),
+                (_, n) => format!("{n} subagents running"),
             })
         }
     }
+}
+
+/// slopty: since when a row has stood as it is, which its time says: a turn at work since it
+/// began, an agent waiting (on the person or on its own work) since it started to, and a row at
+/// rest since its last answer. A turn's time is the agent's, never the last answer's: a chat at
+/// work again after a day said "1d".
+pub(super) fn row_since(
+    status: ChatIndicator,
+    chat: &Chat,
+    session: Option<&Session>,
+    now: DateTime<Utc>,
+) -> DateTime<Utc> {
+    let at_rest = chat.last_message_at.unwrap_or(chat.created_at);
+    let session = live(session, now);
+    let since = match status {
+        ChatIndicator::Working => session.and_then(|s| s.started_at.or(s.status_since)),
+        ChatIndicator::AwaitingInput => session.and_then(|s| s.status_since),
+        ChatIndicator::Completed | ChatIndicator::Idle if waiting_on_itself(session, now) => {
+            session.and_then(|s| s.status_since)
+        }
+        ChatIndicator::Completed | ChatIndicator::Idle | ChatIndicator::Errored => None,
+    };
+    since.unwrap_or(at_rest)
 }
 
 /// What an agent waiting on the person waits for, in its words.
@@ -337,9 +440,15 @@ pub(super) fn unread(status: ChatIndicator) -> bool {
     status == ChatIndicator::Completed
 }
 
-/// The agent at rest waiting on its own work (a background task, a wakeup), not on the person.
+/// The agent at rest waiting on its own work (a background task, a wakeup, a subagent it left
+/// running), not on the person.
 pub(super) fn waiting_on_itself(session: Option<&Session>, now: DateTime<Utc>) -> bool {
-    live(session, now).is_some_and(|s| s.status == SessionStatus::Waiting)
+    live(session, now).is_some_and(|s| {
+        s.status == SessionStatus::Waiting
+            || (s.status != SessionStatus::Working
+                && s.status != SessionStatus::AwaitingInput
+                && running_subagents(Some(s), now) > 0)
+    })
 }
 
 /// What a row's hover card says beyond zeron's, line by line.
@@ -535,12 +644,89 @@ mod tests {
         busy.waiting_on = wait(SessionWait::COMPACTING, None);
         assert_eq!(reason(ChatIndicator::Working, Some(&busy), now).as_deref(), Some("Compacting its context"));
         let resting = session("a", SessionStatus::Waiting, now);
-        assert_eq!(reason(ChatIndicator::Idle, Some(&resting), now).as_deref(), Some("Background work \u{b7} 4m"));
+        assert_eq!(reason(ChatIndicator::Idle, Some(&resting), now).as_deref(), Some("Background work"));
         let done = session("a", SessionStatus::Done, now);
         assert_eq!(reason(ChatIndicator::Completed, Some(&done), now), None);
         let mut stale = resting.clone();
         stale.updated_at = now - TimeDelta::minutes(2);
         assert_eq!(reason(ChatIndicator::Idle, Some(&stale), now), None, "its machine went quiet");
+    }
+
+    // A row's time says how long it has stood as it is: a row at work since its turn began, not
+    // since its last answer a day before; a waiting row since it started to wait; a row at rest
+    // since its last answer.
+    #[test]
+    fn a_rows_time_is_how_long_it_has_stood_as_it_is() {
+        let now = Utc::now();
+        let chat: Chat = serde_json::from_value(serde_json::json!({
+            "id": "a", "deviceId": "local", "archived": false, "createdAt": now - TimeDelta::days(2),
+            "lastMessageAt": now - TimeDelta::hours(16),
+        }))
+        .unwrap();
+        let since = |status, session: &Session| row_since(status, &chat, Some(session), now);
+        let busy = session("a", SessionStatus::Working, now);
+        assert_eq!(since(ChatIndicator::Working, &busy), now - TimeDelta::minutes(5), "its turn's time");
+        let held = session("a", SessionStatus::AwaitingInput, now);
+        assert_eq!(since(ChatIndicator::AwaitingInput, &held), now - TimeDelta::minutes(4));
+        let resting = session("a", SessionStatus::Waiting, now);
+        assert_eq!(since(ChatIndicator::Idle, &resting), now - TimeDelta::minutes(4));
+        let done = session("a", SessionStatus::Done, now);
+        assert_eq!(since(ChatIndicator::Completed, &done), now - TimeDelta::hours(16), "its last answer");
+        assert_eq!(row_since(ChatIndicator::Errored, &chat, None, now), now - TimeDelta::hours(16));
+    }
+
+    // A subagent its agent left at work keeps the row at work on its own: in Working, saying so;
+    // a row at work or waiting on the person says what it does itself, and a machine gone quiet
+    // says nothing.
+    #[test]
+    fn a_subagent_left_running_keeps_its_row_at_work() {
+        let now = Utc::now();
+        let chat: Chat = serde_json::from_value(serde_json::json!({
+            "id": "a", "deviceId": "local", "archived": false, "createdAt": now - TimeDelta::hours(1),
+        }))
+        .unwrap();
+        let mut done = session("a", SessionStatus::Done, now);
+        done.running_subagents = 2;
+        assert!(waiting_on_itself(Some(&done), now));
+        assert_eq!(StatusGroup::of(ChatIndicator::Completed, &chat, Some(&done), now), StatusGroup::Working);
+        assert_eq!(reason(ChatIndicator::Completed, Some(&done), now).as_deref(), Some("2 subagents running"));
+        done.running_subagents = 1;
+        assert_eq!(reason(ChatIndicator::Idle, Some(&done), now).as_deref(), Some("1 subagent running"));
+        let mut busy = session("a", SessionStatus::Working, now);
+        busy.running_subagents = 1;
+        assert!(!waiting_on_itself(Some(&busy), now), "at work itself");
+        assert_eq!(reason(ChatIndicator::Working, Some(&busy), now), None);
+        let mut stale = done.clone();
+        stale.updated_at = now - TimeDelta::minutes(2);
+        assert!(!waiting_on_itself(Some(&stale), now));
+        assert_eq!(reason(ChatIndicator::Completed, Some(&stale), now), None, "its machine went quiet");
+    }
+
+    // Rows of one title say what tells them apart: the project when theirs differ, else the
+    // machine; a title of its own, or rows nothing tells apart, say nothing more.
+    #[test]
+    fn rows_of_one_title_say_what_tells_them_apart() {
+        let row = |id: &str, title: &str, project: Option<&str>, machine: &str| TitledRow {
+            id: id.into(),
+            title: title.into(),
+            project: project.map(str::to_owned),
+            machine: Some(machine.into()),
+        };
+        let hinted = hints(&[
+            row("a", "hello", Some("slopty"), "studio"),
+            row("b", "hello", Some("better-update"), "studio"),
+            row("c", "fix the lexer", Some("slopty"), "studio"),
+            row("d", "tidy", Some("slopty"), "studio"),
+            row("e", "tidy", Some("slopty"), "laptop"),
+            row("f", "again", Some("slopty"), "studio"),
+            row("g", "again", Some("slopty"), "studio"),
+        ]);
+        assert_eq!(hinted.get("a").map(SharedString::as_ref), Some("slopty"));
+        assert_eq!(hinted.get("b").map(SharedString::as_ref), Some("better-update"));
+        assert_eq!(hinted.get("c"), None, "a title of its own");
+        assert_eq!(hinted.get("d").map(SharedString::as_ref), Some("studio"), "one project, two machines");
+        assert_eq!(hinted.get("e").map(SharedString::as_ref), Some("laptop"));
+        assert!(!hinted.contains_key("f") && !hinted.contains_key("g"), "nothing tells them apart");
     }
 
     // Rows sit in Needs you, Working, Done; a waiting-on-itself agent is still at work; a
@@ -677,7 +863,8 @@ mod tests {
         });
     }
 
-    /// A row draws its machine's glyph only while the visible chats span more than one machine.
+    /// A row draws its machine's glyph only while the visible chats span more than one kind of
+    /// machine.
     #[gpui::test]
     fn the_machine_glyph_shows_only_across_machines(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = sidebar(cx);
@@ -692,6 +879,17 @@ mod tests {
         });
         redraw(cx);
         assert!(cx.debug_bounds("chat-question-machine").is_none(), "one machine: nothing to tell apart");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.devices.push(device("laptop", "macos"));
+                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "working") {
+                    chat.device_id = "laptop".into();
+                }
+                cx.notify();
+            });
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("chat-question-machine").is_none(), "two Macs: the same glyph on every row");
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
                 if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "working") {
@@ -759,10 +957,12 @@ mod tests {
         }
     }
 
-    // slopty: a result nobody has read wears an accent dot on its agent's mark (opencode's
-    // unread mark), beside its heavier title; a row read, waiting or at work wears none.
+    // slopty: a row draws one mark before its title (opencode's avatar slot): a result nobody
+    // has read its done mark, with no agent's mark beside it and no dot on a corner; a row at
+    // work or waiting its own; a row read and at rest its agent's mark. Every title starts at one
+    // edge.
     #[gpui::test]
-    fn an_unread_result_marks_its_agents_corner(cx: &mut gpui::TestAppContext) {
+    fn a_row_draws_one_mark_before_its_title(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = sidebar(cx);
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
@@ -778,12 +978,120 @@ mod tests {
             });
         });
         redraw(cx);
-        let finished = cx.debug_bounds("chat-unread-finished").expect("the unread dot");
-        assert!(finished.size.width > gpui::px(0.0));
-        for id in ["working", "approval", "question"] {
-            let selector: &'static str = Box::leak(format!("chat-unread-{id}").into_boxed_str());
-            assert!(cx.debug_bounds(selector).is_none(), "{id} has been read");
+        let ids = ["working", "approval", "question", "finished"];
+        for id in ids {
+            let mark: &'static str = Box::leak(format!("chat-mark-{id}").into_boxed_str());
+            let agent: &'static str = Box::leak(format!("chat-agent-{id}").into_boxed_str());
+            assert!(cx.debug_bounds(mark).is_some(), "{id} says its state");
+            assert!(cx.debug_bounds(agent).is_none(), "{id}: one mark, not the agent's beside it");
         }
+        let left = |cx: &mut gpui::VisualTestContext, id: &str| {
+            let title: &'static str = Box::leak(format!("chat-title-{id}").into_boxed_str());
+            cx.debug_bounds(title).unwrap_or_else(|| panic!("{id}'s title")).left()
+        };
+        let edge = left(cx, "working");
+        assert!(ids.iter().all(|id| left(cx, id) == edge), "every title at one edge");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "finished") {
+                    chat.last_seen_at = chat.last_message_at;
+                }
+                cx.notify();
+            });
+        });
+        redraw(cx);
+        assert!(cx.debug_bounds("chat-mark-finished").is_none(), "read, at rest: no state to say");
+        assert!(cx.debug_bounds("chat-agent-finished").is_some(), "its agent's mark");
+        assert_eq!(left(cx, "finished"), edge, "in the same slot");
+    }
+
+    // A finished chat opened with its jump key stops saying "Done" on the next frames the window
+    // shows, with the accessibility tree built on every frame (a Mac with an assistant running,
+    // where view retention replays what was not redrawn): the row's tree and paint are what a
+    // frame from scratch draws.
+    #[gpui::test]
+    fn a_finished_chat_opened_reads_seen_with_the_tree_kept(cx: &mut gpui::TestAppContext) {
+        use super::super::retention_tests::{DESKTOP, frames, launch, stale};
+        let (shell, cx) = launch(cx, DESKTOP);
+        cx.update(|window, _| {
+            window.activate_window();
+            window.set_a11y_active(true);
+        });
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "b") {
+                    chat.last_seen_at = None;
+                }
+                cx.notify();
+            });
+        });
+        let tick = std::time::Duration::from_millis(16);
+        frames(cx, tick, 120);
+        let says_done = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| {
+                let tree = window.a11y_tree().expect("the tree built");
+                tree.nodes.iter().any(|(_, node)| {
+                    node.role() == gpui::accesskit::Role::Status && node.label() == Some("Done")
+                })
+            })
+        };
+        assert!(says_done(cx), "unseen, it says so");
+        assert_eq!(stale(cx), None, "before it opens");
+        frames(cx, tick, 120);
+        cx.simulate_keystrokes("cmd-2");
+        frames(cx, tick, 120);
+        let opened = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
+        assert_eq!(opened.as_deref(), Some("b"), "the jump key opened it");
+        assert!(!says_done(cx), "seen, the row's tree says so on the frames shown");
+        assert_eq!(stale(cx), None, "and paints it");
+        // Every view watching the state hears the open chat seen, as the sidebar's pane does
+        // through the shell: a mark made while a frame drew reached none of them.
+        let heard = std::rc::Rc::new(std::cell::Cell::new(None::<bool>));
+        let state = shell.read_with(cx, |shell, _| shell.state.clone());
+        let _watch = cx.update(|_, cx| {
+            let heard = heard.clone();
+            cx.observe(&state, move |state, cx| {
+                heard.set(Some(state.read(cx).chats.iter().any(|chat| chat.id == "b" && chat.unseen())));
+            })
+        });
+        let answer = |cx: &mut gpui::VisualTestContext, round: i64| {
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, cx| {
+                    if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "b") {
+                        chat.last_message_at = Some(Utc::now() + TimeDelta::seconds(round));
+                        chat.last_seen_at = None;
+                    }
+                    cx.notify();
+                });
+            });
+        };
+        let seen = |cx: &mut gpui::VisualTestContext| {
+            shell.read_with(cx, |shell, cx| shell.state.read(cx).chats.iter().any(|chat| chat.id == "b" && !chat.unseen()))
+        };
+        // The chat open, a new answer arrives in it (or its server sends the row back before
+        // its seen mark is round): seen as it arrives.
+        for round in 1..=3 {
+            answer(cx, round);
+            frames(cx, tick, 120);
+            assert!(seen(cx), "round {round}: the open chat seen again");
+            assert_eq!(heard.get(), Some(false), "round {round}: every watcher heard it seen");
+            assert!(!says_done(cx), "round {round}: the row's tree says so");
+            assert_eq!(stale(cx), None, "round {round}: and paints it");
+        }
+        // An answer arriving while the window is behind another stays unseen, and the row says
+        // so; the window back in front, it is seen.
+        cx.deactivate_window();
+        frames(cx, tick, 120);
+        answer(cx, 4);
+        frames(cx, tick, 120);
+        assert!(!seen(cx), "nobody looked");
+        assert!(says_done(cx), "the row says it");
+        cx.update(|window, _| window.activate_window());
+        frames(cx, tick, 120);
+        assert!(seen(cx), "looked at again");
+        assert_eq!(heard.get(), Some(false), "every watcher heard it seen");
+        assert!(!says_done(cx), "the row's tree says so");
+        assert_eq!(stale(cx), None, "and paints it");
     }
 
     // The server menu offers what to do about servers and machines, Connect a phone only while

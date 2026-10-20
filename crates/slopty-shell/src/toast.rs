@@ -261,6 +261,12 @@ pub fn error_with_detail(
     }
 }
 
+// slopty: what the toaster says now, for the tests.
+#[cfg(test)]
+pub(crate) fn said(cx: &App) -> Vec<SharedString> {
+    cx.try_global::<ToastStore>().map(|store| store.toasts.iter().map(|toast| toast.message.clone()).collect()).unwrap_or_default()
+}
+
 /// A confirmation toast ("Link copied").
 pub fn success(cx: &mut App, message: impl Into<SharedString>) {
     push(cx, ToastKind::Success, message.into());

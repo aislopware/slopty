@@ -2123,5 +2123,6 @@ fn a_subagents_end_in_its_own_turn_is_said_by_its_card() {
             _ => None,
         })
         .collect();
-    assert_eq!(said, ["finished 2", "finished 3"]);
+    // slopty: a subagent's bare notice says who, and what became of it, as the TUI does.
+    assert_eq!(said, ["finished 2", "Agent \"Look\" finished"]);
 }

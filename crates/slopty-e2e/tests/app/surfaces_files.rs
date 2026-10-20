@@ -131,8 +131,14 @@ async fn changes_files_and_settings_show_the_threads_work() {
     drv.wait_for("the diff surface", STEP, |d| node(d, "Button", "Changes").is_none())
         .await
         .unwrap();
-    // The worker's first diff of the tree.
+    // The worker's first diff of the tree. The diff opened under the pointer, which rests on a
+    // line and shows its Add comment: the pointer goes to the chat above the composer, so the
+    // render is the surface alone.
     tokio::time::sleep(SETTLE).await;
+    let shown = drv.dump().await.unwrap();
+    let [x, y, w, _] =
+        node(&shown, "MultilineTextInput", "Do anything\u{2026}").expect("the composer").bounds;
+    drv.ok(&Command::Move { x: w.mul_add(0.5, x), y: y - 48.0 }).await.unwrap();
     goldens(drv, &renders, "surface-files-changes").await;
 
     // The files column on the thread's folder, beside the diff.

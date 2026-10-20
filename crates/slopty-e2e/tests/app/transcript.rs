@@ -389,3 +389,177 @@ async fn a_recorded_turn_reads_as_zeron_draws_it() {
 
     stack.shutdown().await;
 }
+
+/// The follow-ups of [`a_long_session_reads_calm_from_its_top_to_its_end`], each the prompt the
+/// person types, what plays for it (a recording of `slopty-agent`'s by name, or an answer in
+/// words alone written for the session: `None`, its own folder under the stack's root), and the
+/// words its last turn ends on: the background command's end is a turn of its own.
+const SESSION: [(&str, Option<&str>, &str); 4] = [
+    ("What did you find?", None, "run `cargo test` in CI."),
+    ("Make beta loud in notes.txt", Some("edit"), "done"),
+    ("Run the slow check in the background", Some("background"), "It finished."),
+    ("Sum it up for the PR", None, "Nothing is left open."),
+];
+
+/// What the agent answers, in words alone, to [`SESSION`]'s prompts that play no recording: the
+/// markdown a real answer holds (bold, inline code, a list, a fenced block, a numbered list).
+fn session_answer(prompt: &str) -> &'static str {
+    if prompt.starts_with("What") {
+        "Here's what the survey turned up:\n\n\
+         - **`main.rs`** is the only source file: three lines, and it prints `hello`.\n\
+         - `ls missing-file` failed as planned; nothing else did.\n\
+         - The background check finished cleanly, exit 0.\n\n\
+         The notes I wrote are in `notes.md`:\n\n\
+         ```markdown\n# Notes\nmain.rs prints hello\n```\n\n\
+         Next I'd add a test for the greeting, then run `cargo test` in CI."
+    } else {
+        "Ready for review. The PR:\n\n\
+         1. Surveys the crate and records what it found in `notes.md`.\n\
+         2. Makes `beta` loud in `notes.txt` (`BETA`), one line changed.\n\
+         3. Runs the slow check in the background; it woke and passed.\n\n\
+         Nothing is left open."
+    }
+}
+
+/// A recorded turn of words alone in `folder`, as `STUB_REPLAY` reads it: `prompt`, then
+/// `answer`, as Claude Code writes them.
+fn answered_turn(folder: &Path, prompt: &str, answer: &str) {
+    const ID: &str = "00000000-0000-4000-8000-0000000000";
+    const SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
+    let record = |n: u32, parent: Option<u32>, kind: &str, message: Value| {
+        let mut line = serde_json::json!({
+            "cwd": "/work", "entrypoint": "sdk-cli", "gitBranch": "HEAD", "isSidechain": false,
+            "message": message, "parentUuid": parent.map(|p| format!("{ID}{p:02}")),
+            "promptId": format!("{ID}02"), "sessionId": SESSION_ID,
+            "timestamp": format!("2026-10-20T06:00:{n:02}.000Z"), "type": kind,
+            "userType": "external", "uuid": format!("{ID}{n:02}"), "version": "2.1.301",
+        });
+        if kind == "assistant" {
+            line["requestId"] = serde_json::json!(format!("req_{n:02}"));
+        }
+        line
+    };
+    let said = serde_json::json!({
+        "content": [{ "type": "text", "text": answer }], "id": "msg_01",
+        "model": "claude-haiku-5-5", "role": "assistant", "stop_reason": "end_turn",
+        "type": "message", "usage": { "input_tokens": 2, "output_tokens": 120 },
+    });
+    let lines = [
+        record(3, None, "user", serde_json::json!({ "role": "user", "content": prompt })),
+        record(4, Some(3), "assistant", said),
+    ];
+    std::fs::create_dir_all(folder).unwrap();
+    let transcript = lines.iter().fold(String::new(), |mut text, line| {
+        use std::fmt::Write as _;
+        writeln!(text, "{line}").unwrap();
+        text
+    });
+    std::fs::write(folder.join("transcript.jsonl"), transcript).unwrap();
+    std::fs::write(folder.join("hooks.jsonl"), "").unwrap();
+}
+
+/// Whether the thread, as read, rests with the turn `prompt` began and every turn after it ended,
+/// the last agent's words `last`.
+fn rests_after(read: &Value, prompt: &str, last: &str) -> bool {
+    let Some(turns) = read["turns"].as_array() else { return false };
+    let asked = turns.iter().position(|turn| {
+        turn["entries"].as_array().is_some_and(|entries| {
+            entries.iter().any(|e| e["type"] == "user" && e["text"].as_str() == Some(prompt))
+        })
+    });
+    let said = turns.iter().rev().find_map(|turn| {
+        turn["entries"].as_array()?.iter().rev().find(|e| e["type"] == "agent")?["text"].as_str()
+    });
+    asked.is_some_and(|at| turns[at..].iter().all(|turn| !turn["ended_ms"].is_null()))
+        && said.is_some_and(|said| said.trim_end().ends_with(last))
+        && read["phase"] == "done"
+}
+
+/// A long session reads calm from its top to its end, the way a real one goes: the `tools`
+/// survey (tasks, searches, commands, a subagent, a file written), the agent's findings in
+/// markdown, an edit, a command run in the background, and a summary for the PR. Each settled
+/// turn is its prompt, one "Worked for" divider and its answer, so the page reads as a
+/// conversation, not a log; its end and its top are goldens in light and in dark.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_long_session_reads_calm_from_its_top_to_its_end() {
+    let mut stack = ServedApp::launch_rooted(MACHINE, &[], |root| {
+        let mut replays = serde_json::Map::new();
+        replays.insert(TOOLS.to_owned(), Value::from("tools"));
+        for (n, (prompt, recording, _)) in SESSION.iter().enumerate() {
+            let played = recording.map_or_else(
+                || root.join(format!("answer-{n}")).to_string_lossy().into_owned(),
+                str::to_owned,
+            );
+            replays.insert((*prompt).to_owned(), Value::from(played));
+        }
+        vec![("STUB_REPLAY".to_owned(), Value::Object(replays).to_string())]
+    })
+    .await
+    .unwrap();
+    for (n, (prompt, recording, _)) in SESSION.iter().enumerate() {
+        if recording.is_none() {
+            answered_turn(&stack.path(&format!("answer-{n}")), prompt, session_answer(prompt));
+        }
+    }
+    let work = stack.path("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("main.rs"), MAIN_RS).unwrap();
+    std::fs::write(work.join("notes.txt"), "alpha\nbeta\ngamma\ndelta\n").unwrap();
+    let renders = stack.path("");
+    let folder = work.to_string_lossy().into_owned();
+
+    let agent = start(&stack, &folder, TOOLS).await;
+    thread_until(&stack, &agent, "surveyed", |read| rests_after(read, TOOLS, "done")).await;
+    for (prompt, _, last) in SESSION {
+        crate::served::tell(&mut stack, prompt).await;
+        thread_until(&stack, &agent, prompt, |read| rests_after(read, prompt, last)).await;
+    }
+
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    drv.keys("cmd-1").await.unwrap();
+    // The last turn's history arrives and its divider folds; nothing moves after.
+    tokio::time::sleep(SETTLE.saturating_mul(2)).await;
+    let end = goldens(drv, &renders, "transcript-session").await;
+    let mut missing: Vec<String> = Vec::new();
+    if !end.contains("Nothing is left open.") {
+        missing.push("the session's end shows its last answer".to_owned());
+    }
+    // The last turn did no work: it ends on its done line, and no turn's work stays open.
+    if labelled(&drv.dump().await.unwrap(), "Button", "Hide work").is_some() {
+        missing.push("no settled turn's work stays open by itself at the end".to_owned());
+    }
+
+    // Its top: the survey's prompt, its folded work and the findings under it.
+    // The wheel over the transcript's column, rolled up past the session's top.
+    for _ in 0..30 {
+        drv.scroll(WINDOW.0 * 0.6, WINDOW.1 / 2.0, 0.0, 400.0).await.unwrap();
+    }
+    tokio::time::sleep(SETTLE).await;
+    let top = goldens(drv, &renders, "transcript-session-top").await;
+    if !top.contains(TOOLS) {
+        missing.push(format!("the session's top shows its first prompt, {TOOLS:?}"));
+    }
+    // Every settled turn folds its work behind one "Worked for" divider: the page reads as a
+    // conversation, not a log.
+    let shown = drv.dump().await.unwrap();
+    let dividers: Vec<&str> = shown
+        .a11y
+        .iter()
+        .filter(|n| n.role == "Button")
+        .filter_map(|n| n.label.as_deref())
+        .filter(|l| {
+            l.starts_with("Worked for ") || l.starts_with("Show work") || l.starts_with("Hide work")
+        })
+        .collect();
+    if !dividers.first().is_some_and(|l| l.starts_with("Worked for ")) {
+        missing.push(format!("the survey folds its work behind \"Worked for\", not {dividers:?}"));
+    }
+    if !dividers.iter().all(|l| l.starts_with("Worked for ")) {
+        missing.push(format!("every settled turn's divider says how long it worked: {dividers:?}"));
+    }
+    assert!(missing.is_empty(), "the frames do not say:\n- {}", missing.join("\n- "));
+
+    stack.shutdown().await;
+}

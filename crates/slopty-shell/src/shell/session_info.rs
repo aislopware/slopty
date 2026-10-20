@@ -267,7 +267,7 @@ impl Shell {
             return None;
         }
         let theme = Theme::of(cx).for_popup();
-        let now = crate::clock::utc(cx);
+        let now = self.sidebar_clock; // slopty: the sidebar's clock, which ticks as presence turns
         let (chat, device, local, online, project, branch) = {
             let state = self.state.read(cx);
             let chat = state.selected_chat_row()?.clone();
@@ -278,6 +278,10 @@ impl Shell {
                 .into();
             let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
             let online = state.device_online(&chat.device_id, now);
+            let last_seen = state.devices.iter().find(|d| d.id == chat.device_id).and_then(|d| d.last_seen_at);
+            if let Some(turns) = crate::settings::devices::presence_changes(last_seen, now) {
+                self.note_sidebar_change(turns);
+            }
             let project = chat
                 .space_id
                 .as_deref()
@@ -294,6 +298,7 @@ impl Shell {
                 .map(|branch| SharedString::from(branch.to_owned()));
             (chat, device, local, online, project, branch)
         };
+        self.tick_sidebar_clock(cx);
 
         // ── Where it runs.
         // slopty: a long machine name shows whole in its tooltip.
@@ -376,7 +381,7 @@ impl Shell {
                     .on_click(cx.listener(|this, _, window, cx| {
                         cx.stop_propagation();
                         this.close_session_info_overlay(cx);
-                        this.add_diff_surface(window, cx);
+                        this.open_diff_surface(window, cx);
                     }))
                     .child(stat(format!("+{adds}"), crate::changes::add_color(&theme)))
                     .child(stat(format!("−{dels}"), crate::changes::del_color(&theme)))
