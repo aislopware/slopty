@@ -334,44 +334,85 @@ resolves its own and builds its own copies (add `-p workspace-hack` to share).
 
 ### Warm runners
 With the repository variable `SLOPTY_RUNNERS` at `warm`, a push to `gate` or a `v*` tag runs the
-gate on this Mac's two warm runners instead of the hosted matrix: `ci.yml`'s `warm` job, once
-per host, `cargo xtask gate --warm`. `slopty-warm-mac` runs the tools, host and iOS clippy,
-rustdoc and every Mac test in one nextest run (`warm` profile), the lints building beside the
-test binaries once those are built; `slopty-warm-linux` runs the Linux tests and clippy of the
-three Linux triples. Each keeps its checkout (`clean: false`), toolchains, tools and one
-incremental target dir between runs, which `prune` keeps under its budget after each run.
-Pull requests keep the hosted matrix whatever the variable says; `gh variable set
-SLOPTY_RUNNERS --body hosted` sends every push back to it at once. A check takes the warm
-runners with `check.yml`'s `warm` input (`yes`, `mac` or `linux`): `gh workflow run check.yml
---ref check/<name> -f name=<name> -f sha=<sha> -f warm=yes`.
+gate on this Mac's two warm runners instead of the hosted matrix: `ci.yml`'s `warm` job, once per
+host, `cargo xtask gate --warm`. `slopty-warm-mac` runs the tools, host and iOS clippy, rustdoc and
+every Mac test in one nextest run (`warm` profile), the lints building beside the test binaries once
+those are built; `slopty-warm-linux` runs the Linux tests and clippy of the three Linux triples.
+Each keeps its checkout (`clean: false`), toolchains, tools and one incremental target dir between
+runs, which `prune` keeps under its budget after each run. Pull requests keep the hosted matrix
+whatever the variable says; `gh variable set SLOPTY_RUNNERS --body hosted` sends every push back to
+it at once, as suits a night of many lanes: the warm runners share this Mac with them, and under the
+heaviest load the gate slows and its timed tests fail (`docs/decisions/tooling.md`, "The gate runs
+on warm runners here"). A check takes the warm runners with `check.yml`'s `warm` input (`yes`, `mac`
+or `linux`, which also starts an empty job on the Mac runner, whose start wakes the VM): `gh
+workflow run check.yml --ref check/<name> -f name=<name> -f sha=<sha> -f warm=yes -f
+test_runner=none`.
 
-Both runners refuse every other job before its first step: their job-started hook runs `xtask
-warm guard`, which lets through only a push to `gate` or a `v*` tag running `ci.yml` and a
-`check.yml` dispatch, by an actor with push access, from this repository and never a fork or a
-pull request (`xtask/src/warm/guard.rs`). Neither holds a credential of the person's. The Mac
-runner is a launchd daemon under the hidden user `slopty-ci`, inside a sandbox that denies it
-every path under `/Volumes` and `/Users` but its own, the person's files in `/tmp` and the
-loopback ports the person served when it was installed. The Linux runner is the actions runner
-in an arm64 Ubuntu VM under tart, sharing no directory of the Mac's. Both run at `Nice 10`,
-the VM's own process included, and take eight of the ten cores.
+Both runners refuse every other job before its first step: their job-started hook runs `xtask warm
+guard`, which lets through only a push to `gate` or a `v*` tag running `ci.yml` and a `check.yml`
+dispatch, by an actor with push access, from this repository and never a fork or a pull request
+(`xtask/src/warm/guard.rs`); each is registered under its own name alone, without the `self-hosted`
+label any workflow could ask for, and the repository holds every run of an outside contributor's
+pull request for a maintainer's approval. Neither holds a credential of the person's, and the hook
+proves it before every job, by exit codes alone, failing the job otherwise: no `SSH_AUTH_SOCK`, no
+SSH agent answering on any login session's launchd socket, no person's login keychain answering
+`security`, and no person's `~/.ssh`, `~/.config/gh` or `~/Library/Keychains` readable. The Mac
+runner is a launchd daemon under the hidden user `slopty-ci`, started from an environment of its own
+alone (`env -i`, since launchd hands a job its session's SSH agent), inside a sandbox
+(`xtask/src/warm/mac.rs`) that denies it every path under `/Volumes` and `/Users` but its own, the
+person's files and sockets in `/tmp` (the e2e harness's `slopty-e2e-` roots excepted), every socket
+in `/var/run` but the resolver's and the system log's, the Mach names of the data-protection
+keychain and the other credential services (certificate trust and securityd's older service, which
+the .NET runner's TLS needs, stay), and the loopback ports the person served when it was installed;
+no job may change the guard, the profiles or the runner's `.env`. Its home and `TMPDIR` are on the
+startup disk (`/Users/slopty-ci`), whose FSEvents keep the history the file-watching tests replay.
+Its pasteboard is its own, served by a daemon of macOS's `pboard` as `slopty-ci`. A process in the
+sandbox may not apply one of its own, so the three tests that start a real `sshd` skip on the Mac
+runner and run on the Linux one; the hardware tests the hosted Macs skip run there. The Linux runner
+is the actions runner in an arm64 Ubuntu VM under tart, sharing no directory of the Mac's. Both run
+at `Nice 10`, the VM's own process included, and take eight of the ten cores. The VM runs only while
+a gate needs it: the Mac runner's hook wakes it as each job with a Linux half starts
+(`/Volumes/slopty-ci/mac/linux.wanted`), and its supervisor (`xtask warm linux run`, which the VM's
+daemon runs) boots it and stops it two minutes after its last job, so that between gates it holds
+none of this Mac's memory. A run stops before it writes while the disk under the volume is under the
+floor (`SLOPTY_DISK_FLOOR_GB`), since the image grows into it.
 
-Everything they keep is in `slopty-ci/` at the root of the checkout's volume, never in the
-checkout. Setting them up, once:
-- `cargo xtask warm mac install` unpacks the runner and rustup and writes the guard (a copy of
-  this xtask and `warm.toml`, the repository and its actors), the sandbox profile, the runner's
-  environment and both daemons' property lists, then prints what an administrator runs: the
-  user, the log directory (`/Library/Logs/slopty-warm/`) and the two daemons.
+Everything they keep is on a volume of their own, `/Volumes/slopty-ci`: a sparse APFS image of
+up to 180 GB at the root of the checkout's volume (`slopty-ci.sparsebundle`, or
+`SLOPTY_WARM_IMAGE`), never in the checkout. A launchd job may not open a file on an external
+disk, but may use an image attached from one; ownership is off on it as on the disk.
+`hdiutil compact` gives back what the runners deleted, with the image detached. Setting them
+up, once:
+- `cargo xtask warm mac install` makes and attaches the volume, unpacks the runner and rustup
+  and writes the sandbox profile, the runner's environment and the guard (a copy of this xtask
+  and `warm.toml`, the repository and its actors), then prints what an administrator runs:
+  `target/warm/admin.sh`, which holds the daemons' property lists itself and makes the user,
+  its home and the log directory (`/Library/Logs/slopty-warm/`), and loads the daemon that
+  attaches the volume at every start, then the user's own pasteboard server (macOS starts one
+  only in a login session, which the user never has) and the two runners'.
 - `cargo xtask warm mac register` registers the Mac runner with a token it asks `gh` for and
-  holds in memory only.
+  holds in memory only, again over an earlier registration. `cargo xtask warm mac try` runs it as
+  you, through an agent of your session, until `--stop` or the administrator's script, in the same
+  sandbox less your sockets in your own temporary and cache directories (`try.sb`), with a home
+  and a temporary directory of its own there; the tests that write into your home's own folders
+  (the Trash, WebKit's rule lists) fail there, out of its reach. It shares your pasteboard and may
+  read those directories' files, so it is for trying the runner, and the daemon for keeping it.
 - `cargo xtask warm linux install [--rev <commit>]` clones the VM from the pinned image,
   provisions it, builds the guard from `rev` in it and registers its runner as a systemd
-  service. It starts the VM from the person's session; `cargo xtask warm linux stop` before the
-  VM's daemon takes it (`xtask warm linux run`, which the daemon runs, keeps it at `Nice 10`).
+  service. `cargo xtask warm linux start` wakes the VM and, unless one runs, starts its
+  supervisor from your session; `cargo xtask warm linux stop` ends that one and the VM, before
+  the VM's daemon takes over.
 - `cargo xtask warm status` lists both runners as GitHub has them, and each one's side here.
+- `cargo xtask warm uninstall [--image]` takes it all away: both registrations on GitHub,
+  `SLOPTY_RUNNERS` when it is `warm` (the gate goes back to the hosted matrix), `try`, the VM,
+  then through `sudo` the administrator's part (`target/warm/uninstall.sh`: the daemons, the log
+  directory, the user and its home), and detaches the volume; `--image` deletes the image too,
+  and `--dry-run` prints the steps and only writes that script.
 Run `install` again when the guard's code changes, when a collaborator is added, or when the
-person starts a new service on a loopback port. `cargo xtask warm linux exec <command>` runs a
-command in the VM. A runner's target dir is deleted to start it cold (`_work/slopty/slopty/target`
-on the Mac, `/home/admin/actions-runner/_work/slopty/slopty/target` in the VM).
+person starts a new service on a loopback port, then the administrator's script if it says so.
+`cargo xtask warm linux exec <command>` runs a command in the VM. A runner's target dir is
+deleted to start it cold (`/Volumes/slopty-ci/mac/runner/_work/slopty/slopty/target` on the
+Mac, `/home/admin/actions-runner/_work/slopty/slopty/target` in the VM).
 
 ## Disk
 `target/` would grow without end: cargo never deletes a unit, and every `cargo update`, fork

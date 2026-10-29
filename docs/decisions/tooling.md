@@ -2859,3 +2859,138 @@ more full-window layer.
       no need.
   - **`vt_write_until(data, boundaries)`** replaces `vt_write_until_ground`, after ghostty's
     `ghostty_terminal_vt_write_until`. Slopty calls only `vt_write`.
+
+- ✅ **The gate runs on warm runners here** (2026-10-30). Build and lint, with the setup that
+  only serves them, took about 85 % of a hosted gate: a median 9.8 minutes of wall time and
+  50.6 runner-minutes, because every job starts cold (`.research/build-speed-2026-10-29.md`).
+  Two self-hosted runners on this Mac keep their checkout, toolchains, tools and one incremental
+  target dir between runs instead: `slopty-warm-mac` runs every Mac lane in one job and
+  `slopty-warm-linux`, an arm64 Ubuntu VM under tart, the Linux lanes (`xtask warm`,
+  `xtask gate --warm`). Every lint, triple and test is kept; what got cheaper is the starting.
+  A leaf change's gate took 259–313 s (the Mac's half; the Linux half took 97–104 s beside it)
+  against a hosted median of 586 s, and 356–417 runner-seconds against 3,036, none of them a
+  hosted Mac's. A core change's took 1,438–1,786 s, longer than hosted, as it waits on this
+  Mac's cores and disk under the lanes' work (below; `docs/MEASUREMENTS.md`, 2026-10-30).
+  - **Only the gate runs there.** The repository is public, so a pull request could name the
+    runners. Their job-started hook (`xtask warm guard`) fails every job before its first step
+    but a push to `gate` or a `v*` tag running `ci.yml`, or a `check.yml` dispatch, by an actor
+    with push access, from this repository. The repository variable `SLOPTY_RUNNERS` chooses:
+    `warm` sends pushes to them, anything else (or a pull request) to the hosted matrix, so
+    falling back is one `gh variable set`.
+  - **The Mac runner holds nothing of the person's.** It is a launchd daemon under the hidden
+    account `slopty-ci` (outside `staff`, no password, no shell). The external disk ignores
+    ownership, so any local account may read and write the person's checkouts and the binaries
+    they run; the daemon runs in a sandbox (`sandbox-exec`, `xtask/src/warm/mac.rs`) that denies
+    every path under `/Volumes` and `/Users` but its own, the person's files and sockets in
+    `/tmp` (their agents' among them), and the loopback ports the person serves. No job may
+    change the guard, the profile or the runner's `.env`, nor move their directories away to
+    remake them; a hard link to them is refused too. Root never runs anything the jobs can
+    write: the administrator's script holds the daemons' property lists itself and is written
+    into the checkout.
+  - **No credential reaches a job, and every job proves it.** launchd hands each job of a login
+    session that session's environment, its SSH agent's socket among it
+    (`/var/run/com.apple.launchd.*/Listeners`), and a property list's `EnvironmentVariables` adds to
+    it without taking anything away: the runner starts under `env -i`, from its home, temporary
+    directory, `PATH` and account alone, and its `.env` unsets `SSH_AUTH_SOCK` too. The sandbox
+    denies every socket in `/var/run` but the resolver's and the system log's (launchd's per-session
+    ones, Docker's, the iPhone multiplexer's, which hands out pairing records, the system keychain's
+    check), and the Mach services of the keychains and of every other credential: the
+    data-protection keychain's securityd and the agents that unlock and sync keychains,
+    authorization, smart cards and tokens, the Apple account and the other accounts, saved passwords
+    and passkeys, Kerberos, Touch ID, the recovery services. Certificate trust (`trustd`) and the
+    checks of programs stay, and in the sandbox ad-hoc code signing, TLS through curl, Python and
+    the system's URL loading, and DNS all still work. So does securityd's older service
+    (`com.apple.SecurityServer`): the runner is .NET, whose TLS reads each certificate through it,
+    and with it denied every connection to GitHub failed ("bad certificate format"). It serves
+    keychains that are files, which the sandbox denies in every home (`security show-keychain-info`
+    on the person's login keychain: 0 outside, 182 inside), and a System keychain item's secret
+    needs an administrator's authorization, whose services are denied. Before this, `try`'s jobs
+    reached the person's SSH agent through both their session's launchd socket and their shell's
+    (`ssh-add -l` exited 0). The guard probes before every job, by exit codes alone, and fails the
+    job when anything answers: `ssh-add -l` must find no agent (2) on any login session's socket,
+    `security show-keychain-info` must fail on every person's login keychain, and no person's
+    `~/.ssh`, `~/.config/gh` or `~/Library/Keychains` may be readable. `security
+    find-generic-password` proves nothing: it finds no item (44) inside and outside alike, since
+    inside it sees no keychain at all. Each runner is registered under its own name alone, without
+    the `self-hosted` and system labels a self-hosted runner otherwise takes, and the repository
+    holds every run of an outside contributor's pull request for a maintainer's approval
+    (`all_external_contributors`, which was `first_time_contributors`), which the guard refuses here
+    even once approved. `xtask warm uninstall` takes it all away again: the registrations, the
+    variable when it is `warm`, `try`, the VM, the daemons, the account, and the volume detached.
+  - **Its pasteboard is its own.** The pasteboard tests (the input and drag crates', the worker's
+    clipboard) need macOS's pasteboard server, which launchd starts only in a login session; the
+    runner's account never has one. On a hosted Mac (check run 40938918645) a system daemon as
+    that account found no server, and launchd refused to load one into the account's own domain
+    (error 5). A daemon of macOS's own `pboard`, as the account, serving its service in the
+    system domain gave the runner's processes a pasteboard, named and general, of their own: the
+    console user's clipboard read the same before and after, the runner's read none of it, and
+    the console user's processes outside their window session (`launchctl asuser`, `sudo -u`)
+    still found theirs. Its first developer tool takes a while too: the account's first
+    `/usr/bin/git` took 15 s, the next 0.2 s.
+  - **Its files are on a disk image.** A launchd job may not open a file on an external disk
+    (macOS's removable-volume protection), but may use an image attached from one. The runners
+    keep everything on a sparse APFS image at the disk's root, attached at `/Volumes/slopty-ci`
+    (ownership, set-user-ID and devices off) by a root daemon at every start and mount. It costs
+    nothing measurable: 3 GB written in 1.1–1.8 s against 1.6–1.9 s straight onto the disk, and
+    30,000 small files made in 2.7–3.8 s against 2.3–2.7 s. The external disk logs no FSEvents
+    (`.fseventsd/no_log`), so the runner's home and `TMPDIR` are on the startup disk, where the
+    file-watching tests find the history they replay.
+  - **What the sandbox costs.** A sandboxed process may not start a set-user-ID program, so
+    `ps` and `login`, which tests start, run outside it by name. Nor may it apply a sandbox of
+    its own, so `sshd`, which sandboxes its pre-authentication child, cannot run: the three
+    tests that start one skip on the Mac runner (`.config/nextest.toml`, `warm`) and run on the
+    Linux one, which installs `openssh-server`.
+  - **It runs below the person's work, on every core.** Both runners run at `Nice 10` with
+    low-priority I/O, the VM's own process included, eight jobs on the ten cores. Under a load
+    of 24 to 46, a nice-10 job ran a CPU probe in 0.9–1.7 s, as at nice 0; launchd's `Background`
+    process type confines a job to the two efficiency cores (the probe took 2.6–54 s, a build
+    5.3 times as long), and `Utility` was erratic (0.9–14 s), so the type stays `Standard`.
+  - **The VM runs only while a gate needs it.** Running, it holds its 8 GB of this Mac's memory
+    whether it uses them or not: idle between gates, its footprint was 8.2 GB, nearly all of it
+    swapped out, on a Mac of 32 GB with 12.2 of its 13.3 GB of swap in use under the lanes'
+    work. So the Mac runner's job-started hook, once the guard allows a job with a Linux half (a
+    gate's push, a check asking for the Linux runner), touches a file in its own directory
+    (`xtask warm guard --wake`), and the VM's supervisor (`xtask warm linux run`, the VM's
+    daemon) boots the VM for a touch newer than its last stop. It stops the VM two minutes after
+    its last job ends (never sooner after a wake, as a later gate's Linux half is queued as its
+    Mac half starts), 15 minutes after a wake that brought none, and an hour after one whose job
+    never ends; and it boots it for 15 minutes a day anyway, as GitHub removes a runner that has
+    not connected for 14 days. The gate's Linux half waits in GitHub's queue while the VM boots:
+    from a stopped VM, its job started 60 s after the Mac's, whose hook woke it (run
+    40948533653). It is the shorter half, so the boot is off the gate's critical path, and the
+    Mac's half builds with the VM's memory free once the Linux half is done. A Mac job can do no
+    more with that file than wake the VM; a Linux-only check (`check.yml`'s `warm: linux`)
+    starts an empty Mac job for its wake.
+  - **Under the lanes' heaviest load, the gate slows and its timed tests fail.** The runners
+    share this Mac's ten cores and 32 GB with the lanes. A core change's run at a load of 55 to
+    68, swap full, four lanes' checks, a lane's e2e guest and Docker beside it (run 40939846845),
+    took 921 s in the Mac's gate step, rustdoc alone 626 s, and seven of the tests that time
+    themselves failed (the worker's file following, its session actor's progress and state,
+    its screen loop) and one timed out (a dropped search's walk). The lanes' own checks at that
+    load passed: they run nextest's `land` profile, which leaves such tests out. What it waits
+    for is cores: the core build as the runner's launchd job runs it took 1,091 s for 283 s of
+    CPU at a load of 21 to 39, against 50 s by hand at a lighter load, and the static checks
+    that read many files took 540 s in one run and 24 s in another. Low-priority I/O costs
+    nothing measurable: side by side under one load, the core build at nice 10 took 183 s
+    throttled and 184 s not, 750 s of CPU each. What `Nice 10` itself costs beyond the lanes'
+    share is unmeasured: a short CPU probe at nice 10 under a load of 24 to 46 ran as fast as at
+    nice 0, and a build at nice 0 would take the cores `Nice 10` leaves the lanes. For a night
+    of many lanes, `SLOPTY_RUNNERS=hosted` sends the gate to machines of its own; the timed
+    tests hold their bounds only on a machine with room.
+  - **Before the administrator's step**, `xtask warm mac try` runs the same runner as the person
+    through an agent of their session, with a home and a temporary directory of its own in
+    theirs, in the same sandbox and one more rule: no socket in the person's own temporary and
+    cache directories (`/var/folders`), where their browser's and their terminal tools' servers
+    listen and the daemon's account cannot reach. The administrator's script ends it. As the
+    person, it is kept off their files, sockets, ports and credentials, not off every service of
+    their session (it shares their pasteboard, and may read the files of those directories), so
+    it serves for a trial only, and the tests that write into the home macOS gives a user (the
+    Finder's Trash, WebKit's compiled rule lists) fail there: that home is the person's.
+  - **What stays open.** A gate run's own code could change the runner's binaries or, in the VM,
+    anything (its jobs have `sudo`), and so outlast the run: the guard stops anyone else's jobs,
+    not the gate's own code. The VM reaches what the Mac serves to its network, as any machine
+    on the LAN does, and nothing on its loopback.
+  - **Rejected:** `ProcessType Background` (above); keeping the runners' files straight on the
+    external disk (launchd's jobs cannot open them); a separate APFS volume (needs the disk's
+    container and an administrator, where an image needs neither); and the person's own account
+    for the daemon (its jobs would run with every credential the person holds).

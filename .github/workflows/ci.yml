@@ -46,6 +46,8 @@ jobs:
   # arm runner with zig compiling the C build scripts compile (`tools::apple_cargo`;
   # docs/decisions/tooling.md, "Apple targets are linted on Linux").
   gate:
+    # The hosted matrix gates a pull request always, and a push unless the warm runners take it.
+    if: vars.SLOPTY_RUNNERS != 'warm' || github.event_name == 'pull_request'
     name: gate (${{ matrix.lane }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
     # The longest lane takes about 20 min; a hung one held the queue for an hour (run
@@ -286,6 +288,7 @@ jobs:
   # a free Linux runner, so the run takes no longer. `promote` needs it as it needs the gate. Its
   # compile cache is on R2 with the others' (docs/decisions/tooling.md, "sccache lives on R2").
   linux:
+    if: vars.SLOPTY_RUNNERS != 'warm' || github.event_name == 'pull_request'
     name: gate (linux)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -409,11 +412,82 @@ jobs:
             gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
           fi
 
+  # The gate on the two warm runners on the Mac Studio, once the repository variable
+  # `SLOPTY_RUNNERS` is `warm` (`cargo xtask warm`; docs/decisions/tooling.md, "The gate runs on
+  # warm runners here"): each keeps its checkout, toolchains, tools and target dir between runs
+  # and builds incrementally, so a push compiles what it changed. The Mac runs the tools, clippy
+  # for the Apple triples, rustdoc and every Mac test in one job; the Linux VM clippy for the
+  # Linux triples and the Linux tests. Only pushes come here, and each runner's job-started hook
+  # refuses any job but the gate's (`xtask warm guard`), so a pull request that names these
+  # runners still never runs on them. Any other value of the variable sends every job back to the
+  # hosted matrix above at once.
+  warm:
+    if: vars.SLOPTY_RUNNERS == 'warm' && github.event_name == 'push'
+    name: gate (warm ${{ matrix.host }})
+    runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [mac, linux]
+    # Incremental builds on the target dir the last run left, which is the compile cache: no
+    # sccache (an empty `RUSTC_WRAPPER` is cargo's none; the runner's `.env` drops an empty
+    # value). The Mac's own Xcode, the one it selects (27.1, as on GitHub's image): an empty
+    # `DEVELOPER_DIR` is xcrun's unset, and the image's path is missing here.
+    env:
+      CARGO_INCREMENTAL: 1
+      DEVELOPER_DIR: ""
+      RUSTC_WRAPPER: ""
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The tree updated in place: unchanged files keep their times, so cargo's fingerprints of
+      # them hold. The whole history, for `committed`, fetched as what is new.
+      - uses: actions/checkout@v7
+        with:
+          clean: false
+          submodules: recursive
+          fetch-depth: 0
+      # The toolchain, unless the runner has it; the gate adds the targets its lanes need.
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+      # The zig the vendored ghostty names, as the hosted jobs have it; the runner keeps it in
+      # its tool cache.
+      - uses: ./.github/actions/zig
+      - working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      - run: cargo xtask gate --warm
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: timings-warm-${{ matrix.host }}
+          path: |
+            target/nextest/warm/junit.xml
+            target/nextest/warm/ptys.log
+          if-no-files-found: ignore
+      # As the hosted jobs: a red run cancels itself once a newer push waits behind it.
+      - if: failure() && github.ref == 'refs/heads/gate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newest=$(git ls-remote origin refs/heads/gate | cut -f1)
+          if [ -n "$newest" ] && [ "$newest" != "$GITHUB_SHA" ]; then
+            gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          fi
+
   # main moves to the commit every lane passed on, only forward: a push without force is
   # refused unless main is an ancestor of it, and the check before says why in the summary.
   promote:
-    needs: [gate, linux]
-    if: github.ref == 'refs/heads/gate'
+    needs: [gate, linux, warm]
+    # Every lane passed: on the hosted matrix and the linux job, or on both warm runners.
+    if: >-
+      github.ref == 'refs/heads/gate' && !cancelled()
+      && (needs.warm.result == 'success'
+      || (needs.gate.result == 'success' && needs.linux.result == 'success'))
     runs-on: ubuntu-24.04
     # `actions: write` starts the app's e2e on the new main, and the Deep checks when overdue.
     permissions:
@@ -481,8 +555,10 @@ jobs:
   # docs/decisions/tooling.md, "A release signs and notarises from the Better Update vault").
   release:
     name: release ${{ github.ref_name }}
-    needs: gate
-    if: github.ref_type == 'tag'
+    needs: [gate, warm]
+    if: >-
+      github.ref_type == 'tag' && !cancelled()
+      && (needs.warm.result == 'success' || needs.gate.result == 'success')
     runs-on: xcode-27
     # `bash` named, so a step runs with pipefail: GitHub's default shell runs without it, and
     # `dist … | tee` or `curl … | sh` would pass with the command before the pipe failed.

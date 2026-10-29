@@ -1,12 +1,18 @@
 //! `xtask warm linux`: the warm Linux runner, the actions runner in an arm64 Ubuntu VM under
 //! tart, headless at `Nice 10`: tart's process and Virtualization's, which runs the VM's cores
-//! and which launchd starts, so that it inherits nothing of tart's ([`run`]).
+//! and which launchd starts, so that it inherits nothing of tart's ([`boot`]).
+//!
+//! The VM runs only while a gate needs it ([`run`]): the Mac runner wakes it as each job with a
+//! Linux half starts, and it stops [`AFTER_JOB`] after its last job ends. Running, it holds its
+//! 8 GB of this Mac's memory whether used or swapped out; stopped, none. It boots in well under
+//! the time of the Mac's half of the gate, which is the longer, so the boot is off the gate's
+//! critical path, and the Mac's half builds with the VM's memory free.
 //!
 //! The VM is the runner's isolation: no directory of the Mac's is shared into it and no
 //! credential of the person's is in it, and its jobs run as its own `admin`. It keeps its
-//! checkout, toolchains, tools and target dir on its own disk, an image on the build volume. Its
-//! Linux tests run on aarch64, where GitHub's Linux job ran them on `x86_64`; clippy still lints
-//! all three Linux triples.
+//! checkout, toolchains, tools and target dir on its own disk, an image on the warm runners'
+//! volume. Its Linux tests run on aarch64, where GitHub's Linux job ran them on `x86_64`; clippy
+//! still lints all three Linux triples.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -31,9 +37,11 @@ const DISK_GB: &str = "120";
 /// The guest's account, which the image makes with passwordless sudo, and its home.
 const GUEST_HOME: &str = "/home/admin";
 
-/// What the runner's jobs need beyond the image: a C toolchain for build scripts, and the
-/// shells and tmux the PTY tests check.
-const PACKAGES: [&str; 6] = ["build-essential", "pkg-config", "zsh", "fish", "tmux", "unzip"];
+/// What the runner's jobs need beyond the image: a C toolchain for build scripts, the shells and
+/// tmux the PTY tests check, and the `sshd` the deploy and askpass tests start, which the Mac
+/// runner's sandbox cannot run (`.config/nextest.toml`, `warm`).
+const PACKAGES: [&str; 7] =
+    ["build-essential", "pkg-config", "zsh", "fish", "tmux", "unzip", "openssh-server"];
 
 /// Longest the VM may take from `tart run` to a command running in it.
 const BOOT: Duration = Duration::from_mins(3);
@@ -41,6 +49,30 @@ const BOOT: Duration = Duration::from_mins(3);
 /// The niceness of the VM's processes: below the person's work, which runs at 0, and on every
 /// core (`docs/decisions/tooling.md`, "The gate runs on warm runners here").
 const NICE: i32 = 10;
+
+/// How long the VM stays up after its last job ends, and at least after a wake: the next job
+/// queued for it, a later gate's Linux half, is its runner's within seconds, and a gate's Linux
+/// half is queued as its Mac half starts, which wakes the VM.
+const AFTER_JOB: Duration = Duration::from_mins(2);
+
+/// How long the VM stays up after the later of the Mac runner's last wake and its own boot when
+/// it runs no job: time for its runner to connect and take the queued job, which took 60 s from
+/// a stopped VM (run 40948533653).
+const IDLE: Duration = Duration::from_mins(15);
+
+/// The longest a job of its own keeps the VM up after the later of its last wake and its boot:
+/// the warm jobs' `timeout-minutes` (`ci.yml`, 45) and a quarter of an hour more, past which the
+/// job is over whatever the VM says.
+const LONGEST_JOB: Duration = Duration::from_mins(60);
+
+/// How long a VM nothing wakes stays stopped before it is booted for [`IDLE`] anyway: GitHub
+/// removes a runner that has not connected for 14 days.
+const KEEP_REGISTERED: Duration = Duration::from_hours(24);
+
+/// How often the supervisor looks at the wake file while the VM is stopped, and at the VM while
+/// it runs.
+const POLL_STOPPED: Duration = Duration::from_secs(2);
+const POLL_RUNNING: Duration = Duration::from_secs(15);
 
 /// Where tart keeps the VM and the images it was cloned from: under the warm runners' home.
 pub fn tart_home(home: &Utf8Path) -> Utf8PathBuf {
@@ -226,7 +258,9 @@ fn guard(sh: &Shell, home: &Utf8Path, rev: &str) -> Result<()> {
     let source = format!("{GUEST_HOME}/guard-src");
     let built = format!("{GUEST_HOME}/guard-target");
     let dir = format!("{GUEST_HOME}/guard");
-    let tree = cmd!(sh, "git archive --format=tar {rev}").quiet().output()?.stdout;
+    // From the repository's top: in a directory below it, `git archive` takes only that one.
+    let top = cmd!(sh, "git rev-parse --show-toplevel").quiet().read()?;
+    let tree = cmd!(sh, "git -C {top} archive --format=tar {rev}").quiet().output()?.stdout;
     run_in(home, "clean the guard's source", &["rm", "-rf", &source], None)?;
     run_in(home, "mkdir", &["mkdir", "-p", &source, &dir], None)?;
     run_in(home, "unpack the guard's source", &["tar", "-x", "-C", &source], Some(&tree))?;
@@ -272,7 +306,7 @@ fn guard(sh: &Shell, home: &Utf8Path, rev: &str) -> Result<()> {
     let config_file = format!("{dir}/{GUARD_CONFIG}");
     put(home, &config_file, toml::to_string(&config)?.as_bytes())?;
     let hook = format!("{dir}/{GUARD_HOOK}");
-    let script = super::hook_script(Utf8Path::new(&binary), Utf8Path::new(&config_file));
+    let script = super::hook_script(Utf8Path::new(&binary), Utf8Path::new(&config_file), None);
     put(home, &hook, script.as_bytes())?;
     run_in(home, "chmod", &["chmod", "755", &hook], None)?;
     Ok(())
@@ -292,26 +326,38 @@ fn environment() -> Vec<(&'static str, String)> {
     ]
 }
 
-/// The actions runner in the VM, registered as [`LINUX_LABEL`] (the token on its standard input
-/// and into `config.sh`'s environment, never on a command line) and run by systemd as `admin`.
+/// The actions runner in the VM, registered as [`LINUX_LABEL`] with that label alone (the token
+/// on its standard input and into `config.sh`'s environment, never on a command line) and run by
+/// systemd as `admin`. One registered with the default labels too is registered again.
 fn runner(sh: &Shell, home: &Utf8Path) -> Result<()> {
     let dir = format!("{GUEST_HOME}/actions-runner");
     let configured = run_in(home, "the runner", &["test", "-f", &format!("{dir}/.runner")], None);
-    if configured.is_err() {
+    let fresh = configured.is_err();
+    if fresh {
         let downloads = home.join("linux").join("downloads");
         let tarball = super::runner_tarball(sh, &downloads, "linux-arm64")?;
         let bytes = std::fs::read(&tarball).with_context(|| format!("read {tarball}"))?;
         run_in(home, "mkdir", &["mkdir", "-p", &dir], None)?;
         run_in(home, "unpack the runner", &["tar", "-xz", "-C", &dir], Some(&bytes))?;
     }
-    if configured.is_err() {
-        let config = super::repository(sh)?;
+    let service = ["sudo", "env", "-C", dir.as_str(), "./svc.sh"];
+    let config = super::repository(sh)?;
+    let relabel = !fresh && super::default_labelled(sh, &config.repository, LINUX_LABEL)?;
+    if relabel {
+        // `config.sh` refuses a runner that holds a registration.
+        let _stopped = run_in(home, "stop the service", &[&service[..], &["stop"]].concat(), None);
+        let files = super::REGISTRATION.map(|file| format!("{dir}/{file}"));
+        let rm =
+            [&["rm", "-f"][..], &files.iter().map(String::as_str).collect::<Vec<_>>()].concat();
+        run_in(home, "drop the old registration", &rm, None)?;
+    }
+    if fresh || relabel {
         let token = super::registration_token(sh, &config.repository)?;
         let url = format!("https://github.com/{}", config.repository);
         let register = format!(
             "IFS= read -r token; ACTIONS_RUNNER_INPUT_TOKEN=\"$token\" exec ./config.sh \
              --unattended --replace --url {url} --name {LINUX_LABEL} --labels {LINUX_LABEL} \
-             --work _work"
+             --no-default-labels --work _work"
         );
         run_in(
             home,
@@ -319,11 +365,9 @@ fn runner(sh: &Shell, home: &Utf8Path) -> Result<()> {
             &["env", "-C", &dir, "sh", "-c", &register],
             Some(format!("{token}\n").as_bytes()),
         )?;
-        step(
-            home,
-            "the runner's service",
-            &["sudo", "env", "-C", &dir, "./svc.sh", "install", "admin"],
-        )?;
+    }
+    if fresh {
+        step(home, "the runner's service", &[&service[..], &["install", "admin"]].concat())?;
     }
     // After `config.sh`, which writes both from its own environment; the runner reads them as it
     // starts, so the service starts again.
@@ -332,21 +376,182 @@ fn runner(sh: &Shell, home: &Utf8Path) -> Result<()> {
         "{GUEST_HOME}/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
     );
     put(home, &format!("{dir}/.path"), path.as_bytes())?;
-    let service = ["sudo", "env", "-C", dir.as_str(), "./svc.sh"];
     let _stopped = run_in(home, "stop the service", &[&service[..], &["stop"]].concat(), None);
     run_in(home, "start the service", &[&service[..], &["start"]].concat(), None)?;
     println!("  ✓ {LINUX_LABEL} runs its runner");
     Ok(())
 }
 
-/// `xtask warm linux run`: the VM in the foreground until it stops, as its daemon runs it. Tart
-/// runs at [`NICE`], and so does the process of Virtualization's that holds the VM's disk once
-/// it does: launchd starts that one, at the person's priority whatever tart's, and its threads
-/// are the VM's cores. A VM whose process never shows in [`BOOT`] is stopped rather than left
-/// to run at that priority.
+/// `xtask warm linux run`: the VM's supervisor, in the foreground until it is ended, as the VM's
+/// daemon runs it. It boots the VM while it is [`wanted`] and stops it once [`finished`], and
+/// holds its lock ([`hold`]) so that no second one does; a VM it finds running, which no
+/// supervisor holds, it stops first. A VM that fails to boot is tried again a minute later,
+/// while it is still wanted.
 #[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling a VM")]
 pub fn run(home: &Utf8Path) -> Result<()> {
     lower(None)?;
+    let _held = hold(home)?;
+    let wake = super::wake_file(home);
+    let up = up_file(home);
+    println!("▶ {LINUX_LABEL}'s supervisor: woken by {wake}, stopped {AFTER_JOB:?} after its job");
+    if state(home)?.as_deref() == Some("running") {
+        println!("  {LINUX_LABEL} runs with no supervisor: stopping it");
+        let _stopped = tart(home).args(["stop", LINUX_LABEL, "--timeout", "60"]).status();
+    }
+    let seen = |up: &Utf8Path| {
+        if let Err(error) = super::touch(up) {
+            println!("  ✘ {error:#}");
+        }
+    };
+    let mut stopped: Option<Instant> = None;
+    loop {
+        if !wanted(super::age(&wake), stopped.map(|at| at.elapsed()), super::age(&up)) {
+            std::thread::sleep(POLL_STOPPED);
+            continue;
+        }
+        let booted = Instant::now();
+        let mut vm = match boot(home) {
+            Ok(vm) => vm,
+            Err(error) => {
+                println!("  ✘ {error:#}; trying again in a minute");
+                std::thread::sleep(Duration::from_mins(1));
+                continue;
+            }
+        };
+        seen(&up);
+        println!("  ✓ {LINUX_LABEL} booted at nice {NICE} ({:.1?})", booted.elapsed());
+        let mut last_job: Option<Instant> = None;
+        loop {
+            std::thread::sleep(POLL_RUNNING);
+            if let Some(status) = vm.try_wait()? {
+                println!("  ✘ {LINUX_LABEL} ended by itself ({status})");
+                std::thread::sleep(Duration::from_secs(30));
+                break;
+            }
+            seen(&up);
+            let since =
+                super::age(&wake).map_or_else(|| booted.elapsed(), |w| w.min(booted.elapsed()));
+            let working = busy(home);
+            if working {
+                last_job = Some(Instant::now());
+            }
+            if finished(since, last_job.map(|at| at.elapsed()), working) {
+                let _stopped = tart(home).args(["stop", LINUX_LABEL, "--timeout", "60"]).status();
+                let status = vm.wait().context("tart run")?;
+                let after = last_job.map_or_else(
+                    || format!("no job in {since:.0?}"),
+                    |at| format!("{:.0?} after its last job", at.elapsed()),
+                );
+                println!("  ✓ {LINUX_LABEL} stopped, {after} ({status})");
+                stopped = Some(Instant::now());
+                break;
+            }
+        }
+    }
+}
+
+/// Whether the stopped VM should boot: the Mac runner woke it (`woken`, how long ago) within
+/// [`IDLE`] and since the supervisor last stopped it (`stopped`), or it last ran ([`up_file`],
+/// `up`) [`KEEP_REGISTERED`] ago or never. A VM that ended by itself is booted again for the
+/// wake it had.
+fn wanted(woken: Option<Duration>, stopped: Option<Duration>, up: Option<Duration>) -> bool {
+    let fresh = woken.is_some_and(|woken| woken < IDLE && stopped.is_none_or(|s| woken < s));
+    fresh || up.is_none_or(|up| up >= KEEP_REGISTERED)
+}
+
+/// Whether the running VM may stop, `since` the later of its last wake and its boot: running no
+/// job (`busy`), at least [`AFTER_JOB`] after the wake and after its last job ended (`job_ended`,
+/// how long ago, `None` while it has run none), or [`IDLE`] after the wake when it has run none;
+/// and in any case once [`LONGEST_JOB`] has passed.
+fn finished(since: Duration, job_ended: Option<Duration>, busy: bool) -> bool {
+    if since >= LONGEST_JOB {
+        return true;
+    }
+    if busy || since < AFTER_JOB {
+        return false;
+    }
+    job_ended.map_or(since >= IDLE, |ended| ended >= AFTER_JOB)
+}
+
+/// Whether the VM's runner is running a job: a `Runner.Worker` in it, which the runner starts for
+/// each job. A VM that cannot be asked, or does not answer in half a minute, counts as busy,
+/// which [`LONGEST_JOB`] bounds.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling a guest")]
+fn busy(home: &Utf8Path) -> bool {
+    let asked = guest(home, &["pgrep", "-x", "Runner.Worker"], false)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut asked) = asked else { return true };
+    let started = Instant::now();
+    loop {
+        match asked.try_wait() {
+            Ok(Some(status)) => return status.code() != Some(1),
+            Ok(None) if started.elapsed() < Duration::from_secs(30) => {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            _ => {
+                let _killed: std::io::Result<()> = asked.kill();
+                let _reaped: std::io::Result<std::process::ExitStatus> = asked.wait();
+                return true;
+            }
+        }
+    }
+}
+
+/// The file whose time is the last the VM was seen running.
+fn up_file(home: &Utf8Path) -> Utf8PathBuf {
+    home.join("linux").join("up")
+}
+
+/// The supervisor's lock, which it holds while it runs, its process ID in it.
+fn lock_file(home: &Utf8Path) -> Utf8PathBuf {
+    home.join("linux").join("supervisor.lock")
+}
+
+/// The supervisor's lock taken, or an error naming the one that holds it.
+fn hold(home: &Utf8Path) -> Result<std::fs::File> {
+    use std::io::Write as _;
+
+    let path = lock_file(home);
+    let mut file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {path}"))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            bail!("another supervisor of {LINUX_LABEL} runs: {:?} holds {path}", supervisor(home))
+        }
+        Err(std::fs::TryLockError::Error(error)) => {
+            return Err(error).with_context(|| format!("lock {path}"));
+        }
+    }
+    file.set_len(0).and_then(|()| write!(file, "{}", std::process::id())).context(path)?;
+    Ok(file)
+}
+
+/// The process ID of the supervisor that holds the lock, or `None` when none does.
+fn supervisor(home: &Utf8Path) -> Option<rustix::process::Pid> {
+    let path = lock_file(home);
+    let file = std::fs::File::open(&path).ok()?;
+    if file.try_lock().is_ok() {
+        return None;
+    }
+    let pid = std::fs::read_to_string(&path).ok()?.trim().parse().ok()?;
+    rustix::process::Pid::from_raw(pid)
+}
+
+/// The VM run headless, once Virtualization's process holds its disk and has been lowered to
+/// [`NICE`] with tart: launchd starts that process, at the person's priority whatever tart's,
+/// and its threads are the VM's cores. A VM whose process never shows in [`BOOT`] is stopped
+/// rather than left to run at that priority.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling a VM")]
+fn boot(home: &Utf8Path) -> Result<std::process::Child> {
     let mut vm =
         tart(home).args(["run", "--no-graphics", LINUX_LABEL]).stdin(Stdio::null()).spawn()?;
     let disk = tart_home(home).join("vms").join(LINUX_LABEL).join("disk.img");
@@ -360,8 +565,7 @@ pub fn run(home: &Utf8Path) -> Result<()> {
             for pid in holders {
                 lower(Some(pid)).with_context(|| format!("lower the VM's process {pid:?}"))?;
             }
-            println!("  ✓ {LINUX_LABEL} runs at nice {NICE}");
-            break;
+            return Ok(vm);
         }
         if started.elapsed() >= BOOT {
             let _stopped = tart(home).args(["stop", LINUX_LABEL, "--timeout", "10"]).status();
@@ -370,9 +574,6 @@ pub fn run(home: &Utf8Path) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    let status = vm.wait().context("tart run")?;
-    anyhow::ensure!(status.success(), "tart run {LINUX_LABEL}: {status}");
-    Ok(())
 }
 
 /// The processes that have `path` open.
@@ -394,53 +595,92 @@ fn lower(pid: Option<rustix::process::Pid>) -> Result<()> {
     Ok(())
 }
 
-/// `xtask warm linux start`: [`run`] in the background, its output in `linux/vm.log`, once a
-/// command runs in the VM. The VM keeps running after this process ends; one that does not come
-/// up in [`BOOT`] is stopped.
+/// `xtask warm linux start`: the VM woken, its supervisor ([`run`]) started as you in the
+/// background unless one runs (the daemon's or an earlier `start`'s), its output in
+/// `linux/vm.log`, and back once a command runs in the VM; under the daemon's supervisor,
+/// another user's VM, once tart lists it running.
 #[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling a guest")]
 pub fn start(_sh: &Shell, home: &Utf8Path) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
 
-    if state(home)?.as_deref() == Some("running") {
-        return Ok(());
-    }
-    let log = home.join("linux").join("vm.log");
-    let file = std::fs::File::create(&log).with_context(|| format!("create {log}"))?;
+    super::touch(&super::wake_file(home))?;
     let started = Instant::now();
-    let mut vm = Command::new(std::env::current_exe().context("this xtask's path")?);
-    vm.args(["warm", "linux", "run"])
-        .env("SLOPTY_WARM_HOME", home)
-        .stdin(Stdio::null())
-        .stdout(file.try_clone()?)
-        .stderr(file)
-        .process_group(0);
-    let mut vm = vm.spawn().context("tart run")?;
-    loop {
-        if let Some(status) = vm.try_wait()? {
-            bail!("the VM exited with {status}; see {log}");
+    let mut spawned = if supervisor(home).is_none() {
+        let log = home.join("linux").join("vm.log");
+        let file = std::fs::File::create(&log).with_context(|| format!("create {log}"))?;
+        let mut child = Command::new(std::env::current_exe().context("this xtask's path")?);
+        // Nothing of the caller's environment but where tart and its home are: no SSH agent.
+        child.env_clear();
+        for key in ["HOME", "PATH", "LANG"] {
+            if let Some(value) = std::env::var_os(key) {
+                child.env(key, value);
+            }
         }
-        let up = guest(home, &["true"], false)
+        child
+            .args(["warm", "linux", "run"])
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
+            .stdout(file.try_clone()?)
+            .stderr(file)
+            .process_group(0);
+        Some((child.spawn().context("the VM's supervisor")?, log))
+    } else {
+        None
+    };
+    loop {
+        if let Some((child, log)) = &mut spawned
+            && let Some(status) = child.try_wait()?
+            && supervisor(home).is_none()
+        {
+            bail!("the VM's supervisor exited with {status}; see {log}");
+        }
+        let theirs = spawned.is_none()
+            && supervisor(home).is_some_and(|pid| {
+                rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::PERM)
+            });
+        let up = if theirs {
+            state(home)?.as_deref() == Some("running")
+        } else {
+            guest(home, &["true"], false)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
         if up {
             println!("  ✓ {LINUX_LABEL} up ({:.1?})", started.elapsed());
             return Ok(());
         }
         if started.elapsed() >= BOOT {
-            let _stopped = tart(home).args(["stop", LINUX_LABEL, "--timeout", "10"]).status();
-            let _killed: std::io::Result<()> = vm.kill();
-            let _reaped: std::io::Result<std::process::ExitStatus> = vm.wait();
-            bail!("{LINUX_LABEL} did not come up in {BOOT:?} and was stopped; see {log}");
+            bail!("{LINUX_LABEL} did not come up in {BOOT:?}; see {}/vm.log", home.join("linux"));
         }
         std::thread::sleep(Duration::from_secs(1));
     }
 }
 
-/// `xtask warm linux stop`.
+/// `xtask warm linux stop`: the supervisor `start` started ended, and the VM stopped. The
+/// daemon's supervisor is another user's, which launchd stops (`launchctl bootout`).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "xtask is a script, not a library; polling a process"
+)]
 pub fn stop(_sh: &Shell, home: &Utf8Path) -> Result<()> {
+    if let Some(pid) = supervisor(home) {
+        match rustix::process::kill_process_group(pid, rustix::process::Signal::TERM) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::PERM) => bail!(
+                "{LINUX_LABEL}'s supervisor ({pid:?}) is the daemon's: `sudo launchctl bootout \
+                 system/{}` stops it",
+                super::mac::VM_DAEMON
+            ),
+            Err(error) => return Err(error).context(format!("end the supervisor {pid:?}")),
+        }
+        let asked = Instant::now();
+        while supervisor(home).is_some() && asked.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        println!("  ✓ {LINUX_LABEL}'s supervisor ({pid:?}) ended");
+    }
     if state(home)?.as_deref() == Some("running") {
         let status = tart(home).args(["stop", LINUX_LABEL, "--timeout", "60"]).status()?;
         anyhow::ensure!(status.success(), "tart stop: {status}");
@@ -469,6 +709,17 @@ pub fn status(_sh: &Shell, home: &Utf8Path) {
         })
         .collect();
     println!("  VM: {} {}", vm.as_deref().unwrap_or("none"), nice.join(", "));
+    let ago = |path: &Utf8Path| {
+        super::age(path).map_or_else(|| "never".to_owned(), |age| format!("{age:.0?} ago"))
+    };
+    match supervisor(home) {
+        Some(pid) => println!(
+            "  supervisor: {pid:?}; woken {}, last up {}",
+            ago(&super::wake_file(home)),
+            ago(&up_file(home))
+        ),
+        None => println!("  supervisor: none, so nothing boots the VM"),
+    }
     if vm.as_deref() == Some("running") {
         let unit = run_in(
             home,
@@ -485,7 +736,39 @@ pub fn status(_sh: &Shell, home: &Utf8Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::environment;
+    use std::time::Duration;
+
+    use super::{AFTER_JOB, IDLE, KEEP_REGISTERED, LONGEST_JOB, environment, finished, wanted};
+
+    /// The VM boots when the Mac runner woke it within [`IDLE`], or nothing has run it for
+    /// [`KEEP_REGISTERED`]. It stops [`AFTER_JOB`] after its last job ends, never that soon after
+    /// a wake, [`IDLE`] after a wake that brought no job, and [`LONGEST_JOB`] after one whose job
+    /// never ends.
+    #[test]
+    fn the_vm_runs_while_the_mac_runner_wants_it() {
+        let min = Duration::from_mins;
+        let just = Duration::from_secs(1);
+        let inside = |limit: Duration| limit.checked_sub(just).expect("a limit over a second");
+        assert!(wanted(Some(just), None, Some(min(30))), "a fresh wake boots it");
+        assert!(wanted(Some(inside(IDLE)), None, Some(just)), "one just inside the idle time too");
+        assert!(!wanted(Some(IDLE), None, Some(just)), "a stale wake does not");
+        assert!(!wanted(Some(min(3)), Some(min(1)), Some(just)), "nor one served before a stop");
+        assert!(wanted(Some(just), Some(min(1)), Some(just)), "a wake since the stop does");
+        assert!(!wanted(None, None, Some(min(60))), "no wake does not");
+        assert!(wanted(None, None, None), "a VM never run boots");
+        assert!(wanted(Some(min(600)), None, Some(KEEP_REGISTERED)), "and one unrun for a day");
+        assert!(!finished(min(5), None, true), "a job keeps it up");
+        assert!(!finished(min(5), Some(inside(AFTER_JOB)), false), "the next job may come");
+        assert!(finished(min(5), Some(AFTER_JOB), false), "after the last job it stops");
+        assert!(!finished(inside(AFTER_JOB), Some(min(10)), false), "not just after a wake");
+        assert!(!finished(inside(IDLE), None, false), "a wake that brought no job yet waits");
+        assert!(finished(IDLE, None, false), "and then stops");
+        assert!(!finished(inside(LONGEST_JOB), Some(Duration::ZERO), true));
+        assert!(
+            finished(LONGEST_JOB, Some(Duration::ZERO), true),
+            "a job past the longest is over"
+        );
+    }
 
     /// The VM's runner builds with its eight cores, incrementally, keeps a floor its own disk can
     /// hold, and runs the guard first.

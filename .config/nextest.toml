@@ -61,14 +61,48 @@ report-name = "slopty"
 store-success-output = false
 store-failure-output = true
 
-# The warm Mac runner (`xtask gate --warm`): every Mac test in one run, the VideoToolbox group
-# among them, since its encoder is real and does not wedge as a virtual Mac's does. `ci`'s
-# filters and timeouts: the runner shares this Mac with the person and the lanes at `Nice 10`,
-# and each hardware skip comes off once it is proven there. Eight threads of the ten cores, as
-# its builds take eight jobs (`docs/decisions/tooling.md`, "The gate runs on warm runners here").
+# The warm runners (`xtask gate --warm`): on the Mac, every Mac test in one run, the VideoToolbox
+# group among them, since its encoder is real and does not wedge as a virtual Mac's does. `ci`'s
+# timeouts: the runners share this Mac with the person and the lanes at `Nice 10`. Eight threads
+# of the ten cores, as their builds take eight jobs (`docs/decisions/tooling.md`, "The gate runs
+# on warm runners here").
 [profile.warm]
 inherits = "ci"
 test-threads = 8
+
+# On the Mac, whose hardware is real, `ci`'s hardware skips run, as in every local gate; the
+# Linux VM keeps them. Skipped there instead: the three tests that start a real `sshd`. The
+# runner runs in a sandbox (`xtask/src/warm/mac.rs`), macOS lets no process in one apply a
+# sandbox of its own, and `sshd` sandboxes its pre-authentication child, which dies at once. The
+# Linux runner runs all three against its own `sshd`, as a pull request's hosted Mac does.
+[[profile.warm.overrides]]
+platform = 'cfg(target_os = "macos")'
+default-filter = '''
+not (
+    (package(slopty-cli) & binary(=askpass) & (
+        test(=askpass_helper::a_password_only_host_installs_on_one_password_and_then_takes_the_key)
+        | test(=askpass_helper::a_wrong_password_says_so_and_asks_again)))
+    | (package(slopty-deploy)
+        & test(=tests::an_unknown_host_key_is_offered_by_its_fingerprint_and_trusted_as_shown))
+)
+'''
+
+# The tests that time themselves against the machine's load, retried on the warm runners as the
+# gate's are (`profile.gate`, whose own named ones `warm` inherits): a warm runner shares this
+# Mac with the person and the lanes at `Nice 10`, and its lints build beside its tests. In its
+# first run (40930812923, cold, the lanes building beside it) the two linear-time parses took
+# 3.2 s and 3.9 s against bounds of 2 s and 3 s, and a key after a pause waited 7.6 ms (p50)
+# against 3. A pass on a retry shows as FLAKY; failing every try fails the gate. Named, never a
+# pattern.
+[[profile.warm.overrides]]
+filter = '''
+(package(slopty-markdown) & (
+    test(=parser::math_tests::hostile_dollars_cost_a_bounded_number_of_parses)
+    | test(=parser::math_tests::delimiter_rewrites_stay_linear)))
+| (package(slopty-worker) & binary(session_actor)
+    & test(=actor::a_key_after_a_pause_does_not_wait_for_the_checkpoint))
+'''
+retries = { backoff = "fixed", count = 2, delay = "1s" }
 
 # The icon test compiles with `actool` and renders with `ictool`, whose services start cold on a
 # fresh runner: 124 s there against 7 s here (run 36765252672). Started last, as its binary

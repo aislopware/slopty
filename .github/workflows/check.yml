@@ -45,6 +45,9 @@ on:
       probe:
         description: A shell command to run after setup, for trying a step on a runner
         default: ""
+      warm:
+        description: "The gate's warm jobs (ci.yml's `warm`) on the commit: yes (both runners), mac, linux or no"
+        default: "no"
 
 run-name: check ${{ inputs.name }} ${{ inputs.sha }}
 
@@ -166,8 +169,7 @@ jobs:
       - run: |
           echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
           echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
-      # The lints run shear and typos of the tools lane's six: taplo has no build for arm Linux
-      # and compiled for 84 s (run 38115014839).
+      # Of the tools lane's six, the lints run the two `xtask check` runs: shear and typos.
       - run: >-
           xtask setup --lane clippy-host --lane clippy-ios --lane clippy-linux --lane rustdoc
           --tool cargo-shear --tool typos-cli
@@ -324,6 +326,64 @@ jobs:
           path: target/remote
           if-no-files-found: ignore
           retention-days: 3
+
+  # The gate as the warm runners run it on a push to `gate` (ci.yml's `warm`), on the commit
+  # `remote` pushed: every lane, before it lands. The runners' guard lets a dispatch of this
+  # workflow by one of the repository's own actors run there, and nothing else but the gate.
+  warm:
+    if: inputs.warm == 'yes' || inputs.warm == 'mac' || inputs.warm == 'linux'
+    name: warm ${{ matrix.host }} (${{ inputs.name }})
+    runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(inputs.warm == 'yes' && '["mac", "linux"]' || format('["{0}"]', inputs.warm)) }}
+    env:
+      CARGO_INCREMENTAL: 1
+      DEVELOPER_DIR: ""
+      RUSTC_WRAPPER: ""
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha }}
+          clean: false
+          submodules: recursive
+          fetch-depth: 0
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+      - uses: ./.github/actions/zig
+      - working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      - run: mkdir -p target/remote
+      - run: cargo xtask gate --warm 2>&1 | tee target/remote/warm.log
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-warm-${{ matrix.host }}
+          path: |
+            target/remote
+            target/nextest/warm/junit.xml
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # A Linux-only warm check's wake: the Linux runner's VM boots when a job starts on the Mac
+  # runner, whose job-started hook wakes it (`xtask warm guard --wake`), so a check that runs no
+  # warm Mac job runs this one, which does nothing else. Its runner is named as the warm job
+  # names its own.
+  wake:
+    if: inputs.warm == 'linux'
+    name: wake the Linux runner (${{ inputs.name }})
+    runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        host: [mac]
+    steps:
+      - run: echo "this job's start woke the Linux runner's VM"
 
   # A probe (a shell command tried on a runner) or an `xtask e2e` case, on the runner named.
   run:

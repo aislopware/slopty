@@ -1947,9 +1947,9 @@ fn lint_linux_xtask(sh: &Shell) -> Result<()> {
 /// Clippy on the host with every target (tests, benches, examples) in one pass, the live
 /// `slopty-e2e` targets the tests lane leaves out among them, `--locked` as CI fetches, so a
 /// lock written from a manifest left out of the index fails here and not on the `gate` branch;
-/// then on the fuzz crate, a
-/// workspace of its own that no other lane builds, in its own target dir (`fuzz/target`, where
-/// `cargo xtask fuzz --replay` builds it too).
+/// then on the fuzz crate, a workspace of its own that no other lane builds, and its regression
+/// inputs and committed corpora replayed through their targets (`cargo xtask fuzz --replay`,
+/// built in `target/fuzz/test`, or in the lane's `CARGO_TARGET_DIR` when one is set).
 pub fn lint_host(sh: &Shell) -> Result<()> {
     let host = TRIPLES[0];
     let live = crate::e2e::LIVE;
@@ -1961,19 +1961,15 @@ pub fn lint_host(sh: &Shell) -> Result<()> {
             "{cargo} clippy --locked --keep-going --workspace --all-targets --features {live} --target {host} -- -D warnings"
         ),
     );
-    // No fuzz target calls Apple code, so off a Mac the fuzz crate is linted for the host, with
-    // the host's own C++ compiler for libFuzzer: zig's Darwin headers lack the `sys/syscall.h`
-    // it includes (run 38110275409).
-    let (fuzz_cargo, fuzz_target): (&str, &[&str]) =
-        if cfg!(target_os = "macos") { (cargo, &["--target", host]) } else { ("cargo", &[]) };
     let fuzz = if sh.path_exists("fuzz/Cargo.toml") {
-        quiet_step(
+        let fuzz = quiet_step(
             "clippy (fuzz)",
             cmd!(
                 sh,
-                "{fuzz_cargo} clippy --manifest-path fuzz/Cargo.toml --locked --all-targets {fuzz_target...} -- -D warnings"
+                "{cargo} clippy --manifest-path fuzz/Cargo.toml --locked --all-targets --target {host} -- -D warnings"
             ),
-        )
+        );
+        fuzz.and_then(|()| crate::fuzz::replay(sh))
     } else {
         Ok(())
     };
@@ -2361,7 +2357,7 @@ let windows = cfg!(windows);
         let workflow = std::fs::read_to_string(&path).expect("ci.yml");
         assert!(workflow.contains("run: xtask gate --ci --lane linux"), "ci.yml runs it");
         assert!(workflow.contains("run: xtask setup --lane linux"), "with its tools");
-        assert!(workflow.contains("needs: [gate, linux]"), "and main waits for it");
+        assert!(workflow.contains("needs: [gate, linux, warm]"), "and main waits for it");
         assert!(
             workflow.contains("lane: clippy-linux\n            os: ubuntu-24.04"),
             "clippy for Linux takes a Linux runner, not one of the five Macs"
@@ -2397,6 +2393,55 @@ let windows = cfg!(windows);
         for worker in ["slopty-worker", "slopty-workerd"] {
             assert!(tested.contains(&worker), "{worker}'s tests run on Linux, where it ships too");
         }
+    }
+
+    /// A push to `gate` or a tag runs on the warm runners once `SLOPTY_RUNNERS` is `warm`, as one
+    /// job per runner that updates its tree in place and runs `gate --warm`; a pull request and
+    /// any other value take the hosted matrix; main moves once either passed whole; and a remote
+    /// check can run the warm jobs on its commit, a Linux-only one with a Mac job that wakes the
+    /// VM.
+    #[test]
+    fn the_gate_runs_on_the_warm_runners_when_the_variable_says_so() {
+        let workflows = repo_root().expect("repo root").join(".github/workflows");
+        let ci = std::fs::read_to_string(workflows.join("ci.yml")).expect("ci.yml");
+        let hosted = "if: vars.SLOPTY_RUNNERS != 'warm' || github.event_name == 'pull_request'";
+        assert_eq!(ci.matches(hosted).count(), 2, "the hosted matrix and its linux job");
+        let warm = ci.split("\n  warm:\n").nth(1).expect("the warm job");
+        let (warm, _) = warm.split_once("\n  promote:\n").expect("before promote");
+        for needle in [
+            "if: vars.SLOPTY_RUNNERS == 'warm' && github.event_name == 'push'",
+            "runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}",
+            "host: [mac, linux]",
+            "CARGO_INCREMENTAL: 1",
+            "RUSTC_WRAPPER: \"\"",
+            "DEVELOPER_DIR: \"\"",
+            "clean: false",
+            "fetch-depth: 0",
+            "run: cargo xtask gate --warm",
+        ] {
+            assert!(warm.contains(needle), "the warm job has `{needle}`");
+        }
+        for host in ["mac", "linux"] {
+            let label = format!("slopty-warm-{host}");
+            assert!([crate::warm::MAC_LABEL, crate::warm::LINUX_LABEL].contains(&label.as_str()));
+        }
+        for cache in ["uses: ./.github/actions/sccache", "uses: actions/cache", "rust-toolchain@"] {
+            assert!(!warm.contains(cache), "the runner keeps its own: no `{cache}`");
+        }
+        assert!(ci.contains("needs: [gate, linux, warm]") && ci.contains("needs: [gate, warm]"));
+        assert!(
+            ci.contains("(needs.gate.result == 'success' && needs.linux.result == 'success'))")
+        );
+        let check = std::fs::read_to_string(workflows.join("check.yml")).expect("check.yml");
+        assert!(check.contains("run: cargo xtask gate --warm 2>&1 | tee target/remote/warm.log"));
+        let wake = check.split("\n  wake:\n").nth(1).expect("the wake job");
+        let (wake, _) = wake.split_once("\n\n").expect("one block");
+        assert!(
+            wake.contains("if: inputs.warm == 'linux'")
+                && wake.contains("runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}")
+                && wake.contains("host: [mac]"),
+            "a Linux-only check starts a Mac job, whose hook wakes the VM"
+        );
     }
 
     /// Every job that builds, in the gate, the checks, the e2e and the Deep checks, reads the one

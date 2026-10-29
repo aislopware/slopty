@@ -18052,3 +18052,90 @@ cargo xtask fuzz --cmin                        # every target's committed corpus
 cargo xtask fuzz --replay                      # the gate's replay
 cargo xtask deep noq
 ```
+
+
+## 2026-10-30 — the gate on warm runners here: wall time and where it goes
+
+The gate's lanes on this Mac's two warm runners (`xtask gate --warm`; `docs/decisions/tooling.md`,
+"The gate runs on warm runners here"), against the hosted matrix's ten green runs before them
+(`.research/build-speed-2026-10-29.md`). The Mac is an M1 Max of ten cores and 32 GB. The runners
+ran at `Nice 10` beside the lanes' own checks, the Mac one as the person through
+`xtask warm mac try`, so its twelve tests that write into the user's home (the Trash, WebKit's
+rule lists) failed there and nowhere else. Each run is a `check.yml` dispatch with `-f warm=yes`,
+which runs `ci.yml`'s warm job.
+
+Before, the hosted matrix: a median **586 s** of wall time (545–912) and **3,036
+runner-seconds** a run, of which building test binaries took 36 %, the lint jobs 29 %, the setup
+that serves them 20 %, the tests 13 % and the static checks 0.4 %: build and lint with their
+setup about 85 %.
+
+After, per change (job = the runner's whole job; the Mac's lints and static checks run beside its
+tests, so none of their time is on its critical path; load = this Mac's during the Mac's tests):
+
+| change | run | load | Mac job | Mac: build, tests | Mac lints beside | Linux job | Linux: build, lints, tests |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| first run, empty target dir | 40930812923 | 16 | 1,696 s | 760 s, 369 s | 538 s (clippy 378, iOS 134, rustdoc 43) | | |
+| the Zig 0.17 and ghostty sync, three commits | 40937241869 | 13–22 | 689 s | 246 s, 176 s | 171 s | 161 s | 39 s, 25 s, 88 s |
+| a log line in `slopty-shell` | 40939076863 | 13–22 | 259 s | 72 s, 135 s | 57 s | 97 s | 3 s, 10 s, 69 s |
+| a line in `slopty-proto`'s codec, failing clippy as meant | 40939846845 | 55–68 | 1,101 s | 220 s, 692 s (7 timed tests failed, 1 timed out) | 626 s (rustdoc) | 135 s | 37 s, failed, 70 s |
+| back from that codec line (a core change again) with the runners' code, the VM woken from stopped; xtask itself rebuilt (474 s) | 40948533653 | 14–73 | 1,786 s | 709 s, 254 s (1 timed test failed) | 368 s (clippy 168, iOS 72, rustdoc 128) | 246 s | 72 s, 125 s, 107 s |
+| an edit of xtask's supervisor | 40953820869 | 12–16 | 313 s | 42 s, 187 s | 17 s | 104 s | 4 s, 9 s, 70 s |
+| that codec line again, a core change, the VM woken | 40954681043 | — | 1,438 s | 611 s, 324 s (13 failed: 12 of `try`'s home, 1 timed) | 309 s (clippy) beside the tests, after 540 s of static checks (fetch 42 s, hakari 96 s, shear 136 s, the fuzz crate's fetch 108 s, deny 156 s) | 162 s | 52 s, 63 s, 80 s |
+| four commits of other lanes' (the fuzz crate's replay among them) with the runners' isolation; the Linux half a run of its own (40965865358) | 40965724750 | about 20 | 1,346 s | 806 s, 145 s (13 failed: 12 of `try`'s home, 1 a tmux socket's path too long for `try`'s temporary directory) | 51 s clippy, the fuzz crate's 49 s and its replay 78 s, iOS 25 s, rustdoc 178 s; static checks 24 s in all | 212 s | 51 s, 112 s, 91 s |
+
+- Wall time, both jobs side by side, is the Mac job's: 259–313 s for a leaf change and
+  1,438–1,786 s for a core one, against 586 s hosted. The runners' time is the two jobs' sum,
+  356–417 s for a leaf change and 1,600–2,032 s for a core one, against 3,036 hosted
+  runner-seconds, and holds no hosted Mac.
+- Where a leaf's Mac job goes: 43 s of setup outside the gate step (the job's set-up, checkout,
+  toolchain and zig checks, the artifact), 7 s for `cargo xtask` to check itself, 72 s building
+  the tests, 135 s running them. Build and setup are 47 % of it and the lints none, so the tests
+  are now the largest part, 52 %; on Linux the tests are 71 % of the job.
+- The round's Mac job spent 50 s installing Zig 0.17 and 134 s fetching the new ghostty's
+  packages, once; the second run of a version finds both in place (13 s and 0 s).
+- A cold Mac target dir costs one 28-minute run (751 s of test build alone at load 16), once.
+- The static checks that read many files (the two fetches, hakari, shear, deny) took 540 s in
+  the core run of 40954681043 and 24 s in 40965724750 on the same runner and the same policy:
+  they wait on the disk while the lanes write to it, not on their own work.
+- The core build alone, as the runner's launchd job builds it (`Nice 10`, low-priority I/O,
+  `Standard`, the sandbox), took 1,091 s of wall time for 283 s of CPU at a load of 21–39; the
+  same build by hand minutes before, at a load of about 15–21, took 50 s at nice 0 (266 s of CPU),
+  68 s at nice 10 with throttled I/O and 64 s in the sandbox. Side by side under one load (6
+  rising to 31, the two builds' sixteen jobs among it), each in an APFS clone of the runner's
+  tree, the core build at nice 10 took 183 s with throttled I/O and 184 s without, 750 s of CPU
+  each: low-priority I/O costs nothing measurable, and what the gate waits for under the lanes'
+  heaviest work is cores.
+- The runners' isolation, by exit codes alone (`xtask warm guard`'s probes, and a probe of
+  each in `try`'s own sandbox and environment): `ssh-add -l` on each of the four login
+  sessions' launchd sockets and on the person's shell's agent exited 2 (none reached; before
+  the change, the person's session socket and shell agent exited 0); `security
+  show-keychain-info` on the person's login keychain 182 (0 outside); reading their `~/.ssh`,
+  `~/.config/gh` and `~/Library/Keychains` 1 (denied); connecting to their browser's singleton
+  socket, Docker's, the iPhone multiplexer's and the nix daemon's 1; ad-hoc `codesign`, curl,
+  `nscurl` and Python TLS to github.com and DNS 0. With securityd's older service denied too,
+  the .NET runner's every TLS connection failed ("bad certificate format"), so it stays.
+- Under the lanes' heaviest load (55–68, swap full, four lanes' checks, an e2e guest and Docker
+  beside it) the codec edit's Mac job took 1,101 s, rustdoc 626 s beside the tests, and seven
+  tests that time themselves failed and one timed out; the lanes' own checks at that load leave
+  such tests out (nextest's `land` profile).
+- The Linux VM between gates: footprint 8.2 GB (`footprint`, nearly all swapped out) with 12.2 of
+  13.3 GB of swap in use; stopped, none. Woken, a command ran in it in 6.7–10 s; from a stopped
+  VM, the gate's Linux job started 60 s after the Mac's, whose hook woke it (40948533653).
+
+```sh
+# the isolation: every warm job's log has the guard's verdict; by hand, exit codes only, in
+# try's sandbox from an environment of its own (run from a directory the sandbox allows)
+in_try() { env -i PATH=/usr/bin:/bin "SSH_AUTH_SOCK=${AGENT:-}" \
+  sandbox-exec -f /Volumes/slopty-ci/mac/try.sb "$@" >/dev/null 2>&1; echo "$*: $?"; }
+for s in /private/var/run/com.apple.launchd.*; do AGENT=$s/Listeners in_try ssh-add -l; done
+in_try security show-keychain-info ~/Library/Keychains/login.keychain-db
+in_try ls ~/.ssh; in_try codesign -v /bin/ls; in_try curl -fsS -o /dev/null https://github.com
+# a commit on check/<name>, then the warm jobs on it; the job and step times
+gh workflow run check.yml --ref check/<name> -f name=<name> -f sha=<commit> -f warm=yes \
+  -f test_runner=none
+gh run view <run> --json jobs --jq '.jobs[] | select(.name|test("warm")) | .steps[]'
+# the gate's own step times: target/remote/warm.log in the job's artifact (logs-warm-*)
+# the A/B: two clones of the runner's tree (cp -c -R), the codec line edited in each, then side
+# by side: nice -n 10 [taskpolicy -d throttle] cargo nextest run --workspace --no-run
+footprint <pid of the VM's com.apple.Virtualization.VirtualMachine>; sysctl vm.swapusage
+```
