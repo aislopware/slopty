@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 46d4e42), see THIRD_PARTY_NOTICES.md
 //! Block-level markdown over pulldown-cmark, shared by every frontend.
 //!
 //! - [`parser`] builds a [`BlockTree`] of top-level blocks with source ranges;
@@ -10,4 +10,7 @@
 pub mod mend;
 pub mod parser;
 
-pub use parser::{Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, TopBlock, parse_full};
+pub use parser::{
+    Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, TopBlock, parse_full,
+    parse_message,
+};

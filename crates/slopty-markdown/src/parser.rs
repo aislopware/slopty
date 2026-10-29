@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 46d4e42), see THIRD_PARTY_NOTICES.md
 //! Block-level markdown parsing over pulldown-cmark.
 //!
 //! Full parses build a [`BlockTree`] — a list of top-level blocks with their
@@ -152,16 +152,27 @@ pub fn parse_full(source: &str) -> BlockTree {
     parse_at(source, 0)
 }
 
+/// Parse a message a person typed: like [`parse_full`], but every newline
+/// inside a paragraph is a line break (GFM comments' `breaks`), so a prompt
+/// keeps the lines it was written in.
+pub fn parse_message(source: &str) -> BlockTree {
+    parse_breaking(source, 0, options(), true)
+}
+
 fn parse_at(source: &str, offset: usize) -> BlockTree {
     parse_with(source, offset, options())
 }
 
 fn parse_with(source: &str, offset: usize, options: Options) -> BlockTree {
+    parse_breaking(source, offset, options, false)
+}
+
+fn parse_breaking(source: &str, offset: usize, options: Options, breaks: bool) -> BlockTree {
     // pulldown-cmark 0.12 can panic on some malformed input (a slice index
     // in its first pass); a message must never take the app down with it.
     // Such a source renders as its plain text.
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        parse_rewritten(source, offset, options)
+        parse_rewritten(source, offset, options, breaks)
     }))
     .unwrap_or_else(|_| BlockTree {
         blocks: vec![Arc::new(TopBlock {
@@ -200,7 +211,7 @@ impl Skip {
 /// text, placed the way the innermost kept container takes children.
 const MAX_NESTING: usize = 32;
 
-fn parse_rewritten(source: &str, offset: usize, options: Options) -> BlockTree {
+fn parse_rewritten(source: &str, offset: usize, options: Options, breaks: bool) -> BlockTree {
     let mut skip = Skip::default();
     // Every rewrite is checked against the parse it produced: a dollar pair
     // or a `\(…\)` pair must come out as exactly one formula, a destination
@@ -257,7 +268,10 @@ fn parse_rewritten(source: &str, offset: usize, options: Options) -> BlockTree {
         }
         let events: Vec<(Event, Range<usize>)> = Parser::new_ext(&text, options)
             .into_offset_iter()
-            .map(|(event, range)| (event, to_source(&maps, range)))
+            .map(|(event, range)| match event {
+                Event::SoftBreak if breaks => (Event::HardBreak, to_source(&maps, range)),
+                event => (event, to_source(&maps, range)),
+            })
             .collect();
         let failed = if skip.all {
             Vec::new()
@@ -1994,6 +2008,9 @@ fn heading_level(level: HeadingLevel) -> u8 {
 // Incremental parse
 // ---------------------------------------------------------------------------
 
+/// What ends a line in CommonMark: `\n`, `\r\n`, or a `\r` alone.
+const LINE_ENDS: [char; 2] = ['\n', '\r'];
+
 /// Streaming parser: appends reparse only from the last stable top-level block
 /// boundary (snapped back to a line start so indentation context survives).
 #[derive(Debug, Default)]
@@ -2091,8 +2108,9 @@ impl IncrementalParser {
             return;
         }
         // The delta may complete a line begun earlier — rescan from that line's
-        // start when checking for definitions.
-        let scan_from = self.source.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        // start when checking for definitions. A line ends at `\n`, `\r\n` or a
+        // lone `\r`, as CommonMark (and pulldown-cmark) end one.
+        let scan_from = self.source.rfind(LINE_ENDS).map(|i| i + 1).unwrap_or(0);
         self.source.push_str(delta);
         if !self.full_only && has_link_defs(&self.source[scan_from..]) {
             self.full_only = true;
@@ -2150,8 +2168,12 @@ impl IncrementalParser {
                 boundary = above;
             }
         }
+        // Snapped to the start of its line by any line ending: by `\n` alone, a
+        // block after a lone `\r` snapped into the block before it, and the
+        // tail's reparse added that block's last lines again as a block of
+        // their own.
         let boundary = self.source[..boundary]
-            .rfind('\n')
+            .rfind(LINE_ENDS)
             .map(|i| i + 1)
             .unwrap_or(0);
 
@@ -2269,7 +2291,7 @@ fn formulas(blocks: &[Arc<TopBlock>]) -> usize {
 /// (`[label]: destination`), at top level or inside block quotes and list
 /// items (`> [label]: …`, `- [label]: …`).
 fn has_link_defs(text: &str) -> bool {
-    text.lines().any(|line| {
+    text.split(LINE_ENDS).any(|line| {
         let line = strip_container_markers(line);
         // `[label]: …`, or the end of a label begun on an earlier line
         // (`[a\nb]: /u`).
@@ -2463,6 +2485,28 @@ mod tests {
             "{} diverged: {failures:#?}",
             failures.len()
         );
+    }
+
+    /// A line ends at `\r` alone and at `\r\n` too: streamed in any delta, a
+    /// text with those endings is the one-shot parse, a block after a lone
+    /// `\r` included, and a link definition on such a line sends the parser to
+    /// full parses (fuzz target `markdown`).
+    #[test]
+    fn streamed_carriage_returns_match_full_parse() {
+        for source in [
+            "p\nb\r\r\u{fffd}\r\r\u{fffd}\u{fffd}\u{fffd}",
+            "$\n/\r\r\u{fffd}\n>t",
+            ".e\nt\u{fffd}\r\ru\n\n\0e\0",
+            "one\r\ntwo\r\n\r\nthree\r\n\r\n- a\r\n- b\r\n\r\nfour\r\n",
+            "a [r] b\r\rc\r[r]: /u\r\rd\r",
+            "x\r\r    code\r\r> q\r> r\r\rtail",
+        ] {
+            let full = parse_full(source);
+            for chunk in 1..=17 {
+                assert_eq!(stream(chunk, source).tree(), &full, "chunk {chunk}: {source:?}");
+            }
+        }
+        assert!(has_link_defs("x\r[r]: /u"), "a definition after a lone \\r");
     }
 
     #[test]
@@ -3095,6 +3139,32 @@ mod math_tests {
 
     fn paragraph(runs: Vec<InlineRun>) -> Block {
         Block::Paragraph { runs }
+    }
+
+    #[test]
+    fn message_newlines_are_line_breaks() {
+        let blocks = |tree: BlockTree| -> Vec<Block> {
+            tree.blocks.iter().map(|top| top.block.clone()).collect()
+        };
+        assert_eq!(
+            blocks(parse_message("one\ntwo\n\nthree")),
+            [
+                paragraph(vec![plain("one\ntwo")]),
+                paragraph(vec![plain("three")]),
+            ]
+        );
+        assert_eq!(
+            blocks(parse_full("one\ntwo")),
+            [paragraph(vec![plain("one two")])]
+        );
+        // Fences keep their own newlines either way.
+        assert_eq!(
+            blocks(parse_message("```\na\nb\n```")),
+            [Block::CodeBlock {
+                language: None,
+                code: "a\nb".into(),
+            }]
+        );
     }
 
     #[test]
