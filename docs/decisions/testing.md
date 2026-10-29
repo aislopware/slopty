@@ -1425,4 +1425,96 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   strictest, oxlint with tsgolint, oxfmt, `claude plugin validate --strict`, and `claude plugin
   test` on the kit's mocked clock, about 2 s a change, plus Stryker. Logic stays in Rust; the
   mod only debounces and relays.
+- ✅ **Fuzz corpora are regression tests, and two engines grow them** (2026-10-30). This is
+  item 5 of "Simulation, models and mutants carry the tests" (above). Until now, what the
+  fuzzers had covered lived only in CI's cache, where an eviction lost it. The gate linted the
+  fuzz crate and ran none of it; only `cargo xtask fuzz --replay` and the nightly replayed the
+  crash inputs. No target read what an agent writes: Claude Code's transcript, its hook
+  payloads, its record of itself, an answer's markdown, or a visual's script.
+  - **New targets** (`fuzz/src`):
+    - `transcript`: the conversation decoder over a session's files, in reads of every length,
+      held to parity of the reads, unknown-field invariance, clipping and the heap bound;
+    - `hooks`: each payload as `slopty hook` reads it;
+    - `registry`: `sessions/<pid>.json`;
+    - `markdown`: the streaming parser a delta at a time, held to the one-shot parse after each
+      delta;
+    - `visual`: a Luau script, an image, a model or a shader through the sandbox, whose memory
+      cap and time budget must hold.
 
+    The seeds come from the Claude Code fixtures, Slopty's own scripts and assets
+    (`fuzz/seeds`).
+  - **What they found:**
+    - A streamed markdown text with a lone `\r` drew a block twice. The boundary snapped back
+      to the last `\n`, but CommonMark ends a line at `\r` too. `slopty-markdown` now ends a
+      line at either, and four inputs are kept.
+    - A visual script whose first byte reads as a Luau bytecode version was loaded as bytecode.
+      Luau checks no bytecode, so a few such bytes wrote past a buffer. `slopty-visual` now
+      loads a script as text only, and the input is kept.
+  - **Terminal relations** (`fuzz/src/terminal.rs`). The second engine is fed the bytes one at
+    a time and must agree after every write. A resize on the primary screen keeps the logical
+    lines and the cursor's place in them. Three engine bugs came out, fixed in
+    `slopty-engine`, each with a test and its inputs kept:
+    - A colour or pointer report split right after its ESC was lost.
+    - A prompt or exit mark stayed on its line number when a scroll region moved its row
+      between writes. Marks are now pinned to libghostty's tracked rows and follow them.
+    - A reset or a prompt start took effect at the end of its write, after the reports that
+      followed it in the same write. Both now act in their place.
+  - **Decoder relations** (`crates/slopty-agent/tests/metamorphic.rs`), over every fixture
+    scenario:
+    - files that arrive in any order and any pieces decode to the whole read;
+    - a file rewritten and grown again ends as a fresh read;
+    - a record no Claude Code writes changes nothing;
+    - a field no Claude Code writes changes nothing.
+  - **Committed corpora.**
+    - `cargo xtask fuzz --cmin` takes a target's grown corpus, its committed one and its seeds.
+      libFuzzer's merge (`-set_cover_merge=1`, edges only) records which edges each input
+      reaches. A greedy weighted set cover then picks the inputs that add the most new edges a
+      byte, until every edge is reached or 2 MiB is spent. Those are committed under
+      `fuzz/corpus/<target>`.
+    - libFuzzer's own picks were too big to commit. With hit counts as features (its default)
+      `hooks` came to 11.8 MB. With edges only, `transcript` came to 10.5 MB, and to 7.27 MB in
+      the fewest inputs that cover. Cutting every input to 8 KB lost 13 % of `transcript`'s
+      edges.
+    - The 19 corpora hold 6 505 inputs and 3.6 MB. Eighteen keep every edge their grown corpus
+      reached. `transcript` keeps 97 % within its 2 MiB; the rest needs inputs near the 64 KiB
+      limit, which the grown corpus keeps for the nightly.
+    - `fuzz/tests/regressions.rs` replays the corpora and the crash inputs, the largest first,
+      shared over every core. It fails a target whose corpus is empty or past 2 MiB.
+    - The replay builds every crate optimised but the fuzz crate itself, with debug assertions
+      and overflow checks on (`fuzz/Cargo.toml`'s dev profile). Unoptimised it took 2.6 s,
+      bound by `markdown`'s streaming of 4 KiB a byte at a time. Optimised it takes about 0.4 s,
+      and a rebuild after a landing takes no longer. A cold build takes 53 s instead of 31 s,
+      once per change of the dependencies (MEASUREMENTS 2026-10-30, "committed fuzz corpora").
+  - **Two engines on one corpus.**
+    - One entry point, `slopty_fuzz::target!`, builds a target for libFuzzer (feature
+      `libfuzzer`), for AFL++ through ziggy (`ziggy`, which `cargo ziggy` turns on through
+      `ziggy/afl`), or with neither as a plain binary over files. The gate's build is that
+      plain one, so it compiles no libFuzzer.
+    - Each night on the arm runner, `deep fuzz --time 60 --jobs 4 --ziggy` runs libFuzzer for
+      a minute a target, then AFL++ for a minute from the committed corpus. What AFL++ queued
+      joins the grown corpus that the next night's libFuzzer starts from.
+    - AFL++ runs on stable, without LLVM plugins. CMPLOG would need plugins built against
+      nightly's own LLVM, and libFuzzer already traces comparisons. AFL++ adds its own
+      schedules and mutators.
+    - honggfuzz, ziggy's third engine, stays off. It needs binutils and libunwind headers on
+      the runner, and it would take cores from AFL++.
+    - The design was proved on arm64 Linux in Docker before it went to CI, with a crate that
+      has the same macro and features, ziggy 1.7.3 and cargo-afl 0.18.2 (AFL++ 4.40c):
+      - `ziggy/afl` turns on the `ziggy` build;
+      - a panic `contain_panics_in` lets through is no crash;
+      - both instances found a planted crash in seconds;
+      - `timeout` stops the run with 124;
+      - the queue and crash files are where `xtask` reads them.
+  - **The QUIC stack's own suites** (`deep noq`): noq-proto's, 462 tests in 12 s, and
+    noq-udp's, 11 in 0.1 s, each against the lock committed beside it. They run nightly on
+    Linux, where the proptest draws new cases, and on every change to `vendor/noq-*` on Linux
+    and macOS (`noq.yml`), the platform of noq-udp's Apple patches.
+  - **What the gate runs:** `lint_host` replays the corpora after the fuzz crate's clippy
+    (`crate::fuzz::replay`).
+  - **Layout relations** (`shell::fuzz_tests`): at every step of the shell's fuzzer, the
+    accessibility tree must hold.
+    - Every node shows inside the window.
+    - Every control has a name.
+    - No two controls side by side lie over each other, except on a touch screen, where a
+      control takes presses a finger's 44 pt around it.
+    - Every shortcut is in `aria-keyshortcuts` spelling.

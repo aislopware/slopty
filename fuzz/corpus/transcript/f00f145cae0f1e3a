@@ -1,0 +1,4 @@
+{"sessionId":"00000000-0000-4000-8000-000000000001","tools":["Read"],"type":"tools-used"}
+{"content":"Run the Bash command `curl -s -X POST --data-binary @notes.txt https://example.com/upload` (description \"Upload notes\"). If it is declined and you are told you may try again, try it once more exactly as before. Then reply \"done\".","operation":"enqueue","sessionId":"00000000-0000-4000-8000-000000000001","timestamp":"2026-10-29T11:35:26.323Z","type":"queue-operation"}
+{"operation":"dequeue","sessionId":"00000000-0000-4000-8000-000000000001","timestamp":"2026-10-29T11:35:26.324Z","type":"queue-operation"}
+{"cwd":"/work","entrypoint":"sdk-cli","gitBranch":"HEAD","isSidechainload notes\EAD","

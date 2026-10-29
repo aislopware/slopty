@@ -275,31 +275,48 @@ Four deep checks see what the rest cannot:
   Such targets are left out by name (`deep.rs`, `LEAKS_CANNOT_RUN`), and so is `slopty-pty`, whose
   terminal tests hang under it. The soak reads ptyd's heap live with `leaks <pid>`.
 
-**Fuzzing.** Every decoder a peer's bytes reach has a libFuzzer target in `fuzz/`, a crate
-outside the workspace (nightly, AddressSanitizer, debug assertions). The control stream both
-ways, the server's links and the unidirectional streams go through the real framing
-(`codec::try_take`, as `FramedRecv` reads it) in pieces of a size the fuzzer picks. The
-datagrams are covered too: the client's datagram, the terminal copy with its frame head, and the
-media header, the cursor and the pasteboard origin. The terminal target writes a program's
-output through the worker's engine, libghostty's VT parser built `ReleaseSafe` so a parser
-fault traps. Every viewer applying the frames it was sent must show what a second engine fed
-the same bytes shows, and a scrollback page holds no more lines than asked. A checkpoint
-replayed into a fresh engine must show the same lines, each with its cells as they draw, its
-prompt mark, its links and its soft wrap, and the same cursor. Its seeds are captures of real
-programs' output (`fuzz/seeds/terminal`) and its dictionary the VT tokens
-(`fuzz/dicts/terminal.dict`). The reassembler gets real packetized
-fragments and Reed–Solomon parity, reordered, lost, repeated or damaged, with NACKs answered from
-the packetizer. The worker is fuzzed on NACKs and receiver reports. The worker's control socket
-gets its JSON line. A target panics on a crash and on a broken invariant: a decoded message must
-encode back to the same bytes, a frame head must agree with its frame, and an undamaged run must
-deliver every frame byte for byte. The decoding targets also count the heap a decode takes
-(`slopty_testkit::alloc::Counting`) and fail past 64 bytes per input byte, 48 per budgeted
-cell and 2 MiB, so a small message that asks for a large allocation is a crash too
-(docs/decisions/terminal.md, "Decoded lines are bounded"). The fuzz targets and the replay run on `cargo xtask fuzz` and
-`deep fuzz`, never in the gate. A crash is minimised into `fuzz/regressions/<target>/`, and
-`fuzz/tests/regressions.rs` replays every such input on an ordinary build
-(`cargo xtask fuzz --replay`). The fix for a crash still gets its unit test in the crate it
-fixes.
+**Fuzzing.** Every decoder a peer's bytes or an agent's records reach has a target in `fuzz/`,
+a crate outside the workspace, each built for libFuzzer (cargo-fuzz: nightly, AddressSanitizer,
+debug assertions) and for AFL++ (ziggy over cargo-afl) from one entry point
+(`slopty_fuzz::target!`). The control stream both ways, the server's links and the
+unidirectional streams go through the real framing (`codec::try_take`, as `FramedRecv` reads
+it) in pieces of a size the fuzzer picks. The datagrams are covered too: the client's datagram,
+the terminal copy with its frame head, and the media header, the cursor and the pasteboard
+origin. The terminal target writes a program's output through the worker's engine, libghostty's
+VT parser built `ReleaseSafe` so a parser fault traps. Every viewer applying the frames it was
+sent must show what a second engine fed the same bytes shows, and a scrollback page holds no
+more lines than asked. A checkpoint replayed into a fresh engine must show the same lines, each
+with its cells as they draw, its prompt mark, its links and its soft wrap, and the same cursor.
+Two metamorphic relations hold it where no oracle says what a run should show: the second
+engine is fed the bytes one at a time, so every sequence is split at every point a PTY read may
+split it, and must show the same screen, cursor and modes and report the same session state
+after each write; and on the primary screen a resize keeps the logical lines (soft wraps
+joined) and the cursor's place in them. Its seeds are captures of real programs' output
+(`fuzz/seeds/terminal`) and its dictionary the VT tokens (`fuzz/dicts/terminal.dict`). The
+reassembler gets real packetized fragments and Reed–Solomon parity, reordered, lost, repeated
+or damaged, with NACKs answered from the packetizer. The worker is fuzzed on NACKs and receiver
+reports, and its control socket on its JSON line. Claude Code's transcript goes through the
+conversation decoder in reads of every length, over the main file and its subagents' (seeded
+from `crates/slopty-agent/tests/fixtures`), its hook payloads and its record of itself
+(`sessions/<pid>.json`) through theirs, an answer's markdown through the streaming parser a
+delta at a time, which must give the one-shot parse after each, and a visual's Luau script,
+images, models and shaders through the sandbox, whose memory cap and time budget must hold. A
+target panics on a crash and on a broken invariant: a decoded message must encode back to the
+same bytes, a frame head must agree with its frame, an undamaged run must deliver every frame
+byte for byte, and a field no Claude Code writes changes nothing it decodes. The decoding
+targets also count the heap a decode takes (`slopty_testkit::alloc::Counting`) and fail past 64
+bytes per input byte, 48 per budgeted cell and 2 MiB, so a small message that asks for a large
+allocation is a crash too (docs/decisions/terminal.md, "Decoded lines are bounded").
+What the fuzzers reached stays held in the gate (docs/decisions/testing.md, "Fuzz corpora are
+regression tests"). Each target's corpus, the fewest bytes (at most 2 MiB) that reach every edge
+the grown one reaches (`cargo xtask fuzz --cmin`), is committed under `fuzz/corpus/<target>`,
+and a crash, minimised, under `fuzz/regressions/<target>/`;
+`fuzz/tests/regressions.rs` replays both through each target on a plain, optimised build, the
+inputs shared over every core (`cargo xtask fuzz --replay`). Fuzzing itself runs on `cargo xtask fuzz`
+and nightly on Deep's arm runner (`deep fuzz --ziggy`): libFuzzer, then AFL++ from the
+committed corpus, each for a minute a target on four cores, with what AFL++ queued added to the
+corpus libFuzzer grows from night to night. The fix for a crash still gets its unit test in the
+crate it fixes.
 
 ## Budgets: allocations, instructions, footprint
 Wall time is not a pass or fail on a machine other sessions load, so the budgets are counts:

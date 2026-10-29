@@ -1,0 +1,5 @@
+setext candidate
+===
+
+next para
+---

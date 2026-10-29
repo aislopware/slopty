@@ -1,5 +1,5 @@
 //! The `nal` target: [`slopty_fuzz::nal::run`].
 
-#![no_main]
+#![cfg_attr(feature = "libfuzzer", no_main)]
 
-libfuzzer_sys::fuzz_target!(|data: &[u8]| slopty_fuzz::nal::run(data));
+slopty_fuzz::target!(|data| slopty_fuzz::nal::run(data));

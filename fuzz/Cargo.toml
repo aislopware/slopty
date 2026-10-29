@@ -1,7 +1,7 @@
-# The fuzz targets (`cargo xtask fuzz`, docs/TESTING.md "Beyond the layers"). Its own workspace,
-# outside the main one: libFuzzer's instrumented build is nightly-only and never belongs in the
-# gate. What each target does lives in the library, so `tests/regressions.rs` replays every
-# input under `regressions/` on a plain build.
+# The fuzz targets (`cargo xtask fuzz`, docs/TESTING.md "Fuzzing"). Its own workspace, outside
+# the main one: libFuzzer's instrumented build is nightly-only, and AFL++'s is cargo-afl's. What
+# each target does lives in the library, so `tests/regressions.rs` replays every input kept under
+# `regressions/` and every committed corpus under `corpus/` on a plain build, in the gate.
 [package]
 name = "slopty-fuzz"
 version = "0.0.0"
@@ -9,7 +9,7 @@ edition = "2024"
 rust-version = "1.99"
 license = "MIT"
 publish = false
-description = "libFuzzer targets for every decoder that faces a peer"
+description = "Fuzz targets for every decoder that faces a peer or an agent"
 
 [package.metadata]
 cargo-fuzz = true
@@ -20,16 +20,29 @@ members = [ "." ]
 [dependencies]
 arbitrary = { version = "1.4.2", features = [ "derive" ] }
 bytes = "1.12.1"
-libfuzzer-sys = "0.4.13"
+libfuzzer-sys = { version = "0.4.13", optional = true }
 serde = "1.0.229"
 serde_json = "1.0.151"
+slopty-agent = { path = "../crates/slopty-agent" }
 slopty-codec = { path = "../crates/slopty-codec" }
 slopty-core = { path = "../crates/slopty-core" }
 slopty-engine = { path = "../crates/slopty-engine" }
 slopty-grid = { path = "../crates/slopty-grid" }
+slopty-markdown = { path = "../crates/slopty-markdown" }
 slopty-media = { path = "../crates/slopty-media" }
 slopty-proto = { path = "../crates/slopty-proto" }
 slopty-testkit = { path = "../crates/slopty-testkit" }
+slopty-visual = { path = "../crates/slopty-visual" }
+ziggy = { version = "1.7.3", default-features = false, optional = true }
+
+# Which engine the targets' entry points are built for (`slopty_fuzz::target!`): libFuzzer's
+# (`cargo xtask fuzz` builds with it), or ziggy's, which `cargo ziggy` builds for AFL++ by
+# turning on `ziggy/afl` (`cargo xtask fuzz --ziggy`); with neither, each target is a plain
+# binary that runs the files it is given. `afl` names that feature so the lock holds AFL++'s
+# crate.
+[features]
+libfuzzer = [ "dep:libfuzzer-sys" ]
+afl = [ "ziggy/afl" ]
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -59,6 +72,17 @@ str_to_string = "warn"
 missing_assert_message = "warn"
 module_name_repetitions = "allow"
 missing_panics_doc = "allow"
+
+# The gate's replay (`cargo test`): every crate but this one optimised, Slopty's own too, since
+# none is a member here. The replay ran 2.6 s unoptimised and runs 0.4 s so, and a rebuild after
+# a landing takes no longer; debug assertions and overflow checks stay on (MEASUREMENTS
+# 2026-10-30, "committed fuzz corpora").
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
 
 [profile.release]
 debug = "line-tables-only"
@@ -158,6 +182,41 @@ bench = false
 [[bin]]
 name = "terminal"
 path = "fuzz_targets/terminal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transcript"
+path = "fuzz_targets/transcript.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hooks"
+path = "fuzz_targets/hooks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "registry"
+path = "fuzz_targets/registry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markdown"
+path = "fuzz_targets/markdown.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "visual"
+path = "fuzz_targets/visual.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,1 @@
+{"custom_instructions":"Summarize only the user's requests, in one sentence.","cwd":"/work","hook_event_name":"PreCompact","prompt_id":"00000000-0000-4000-8000-000000000021","session_id":"00000000-0000-4000-8000-000000000001","transcript_path":"/home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl","trigger":"manual"}

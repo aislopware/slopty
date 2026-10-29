@@ -1,0 +1,2 @@
+void mainImage(out vec4 fragCo, in vec2 fragCoord0);
+}

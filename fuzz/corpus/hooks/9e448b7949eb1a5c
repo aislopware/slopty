@@ -1,0 +1,4 @@
+{"cwd":"/work","hook_event_name":"SessionStart","session_id":"00000000-0000-4000-8000-000000000001","source":"startup","transcript_path":"/home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl00-000000000001.jsonl"}
+{"cwd":"/work","duration_ms":2,"effort":{"l^evel":"high"},"hook_event_name":"PostToolUse","permission_mode":"default","prompt_id":"00000000-0000-4000-80000000000001.jsonl"}
+{"cwd":"/work","duration_ms":3,"effort":{"level":"high"},"hook_event_name":"PostToolUse","permission_mode":"default"or\": 5\n}"},"tool_use_id":"toolu_04","transcript_{"cwd":"/work","hook_event_name":"SessionStart","session_id":"00000000-0000-4000-8000-000000000001","source"path":"/home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl"}
+{"background_tasks":[],"cwd":"/work","effort":{"level":"high"},"hook_event_name":

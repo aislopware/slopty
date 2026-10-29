@@ -1,0 +1,3 @@
+void mainImage(out vec4 fragColor, :in vec) fragCoord) {
+  fragColorng, 1.0);
+}

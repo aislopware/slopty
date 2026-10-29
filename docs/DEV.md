@@ -466,28 +466,43 @@ under `target/deep/`:
 - `mutants -p <crate> [--timeout s] [--shard k/n] [--jobs n]` — `cargo mutants` on one crate,
   or its `k`th of `n` shares counting from 0, into `target/deep/mutants/<crate>[-<k>of<n>]`; the
   missed mutants (`mutants.out/missed.txt`) are the lines no test would notice changing.
-- `fuzz [--time s]` — every fuzz target for 30 s, or `--time` (`cargo xtask fuzz` below).
+- `fuzz [--time s] [--jobs n] [--ziggy]` — every fuzz target for 30 s, or `--time`, on `n`
+  processes, and with `--ziggy` under AFL++ for as long again (`cargo xtask fuzz` below).
+- `noq` — the vendored QUIC stack's own suites, `vendor/noq-proto`'s and `vendor/noq-udp`'s,
+  each against the lock committed beside it (`noq.yml` runs it on every change to them).
 - `loom` — the audio ring on loom's atomics (`--cfg slopty_loom`), every interleaving of its
   scenarios checked.
 - `leaks` — the daemon and wire test binaries under `leaks --atExit`: a leaked allocation fails.
 - `metal [--filter …]` — the app self-test with Metal API and shader validation on.
 
 `cargo xtask fuzz [<target>] [--time s] [--jobs n]` builds `fuzz/` with cargo-fuzz (nightly,
-AddressSanitizer, debug assertions; `cargo binstall cargo-fuzz`) and runs each target, or the one
-named, for `--time` seconds (60 by default) under `nice`, in libFuzzer's fork mode so a crash is
-written and the run goes on. libghostty is built `ReleaseSafe` for it, a target's dictionary in
-`fuzz/dicts/` is passed when there is one, and the terminal target may hold 8 GiB, since under
-AddressSanitizer its resident memory grows with every run. It replays the kept regression inputs first. The corpus of each
-target grows under `target/fuzz/corpus/<target>`. Beside it, seeds are rewritten every run from
-the wire goldens in `crates/slopty-proto/tests/snapshots`, and the terminal target's from the
-captures in `fuzz/seeds/terminal`. Anything found lands under
-`target/fuzz/artifacts/<target>/`, with the log in `target/fuzz/logs/`, and fails the run.
-`--keep <artifact>` minimises one into `fuzz/regressions/<target>/`, which the fuzz crate's
-`tests/regressions.rs` replays on a plain build: `cargo xtask fuzz --replay`, no nightly needed.
-A new target is a function in `fuzz/src`, an entry in its `TARGETS`, a file in
-`fuzz/fuzz_targets` and a `[[bin]]`; that test fails when the three disagree. The crate has its
-own `Cargo.lock`, so `cargo update --manifest-path fuzz/Cargo.toml` moves its dependencies, and
-the gate checks its formatting.
+AddressSanitizer, debug assertions, the crate's `libfuzzer` feature; `cargo binstall
+cargo-fuzz`) and runs each target, or the one named, for `--time` seconds (60 by default) under
+`nice`, in libFuzzer's fork mode so a crash is written and the run goes on. libghostty is built
+`ReleaseSafe` for it, a target's dictionary in `fuzz/dicts/` is passed when there is one, and
+the terminal target may hold 8 GiB, since under AddressSanitizer its resident memory grows with
+every run. It replays the kept regression inputs and the committed corpora first. The corpus of
+each target grows under `target/fuzz/corpus/<target>`, from its committed corpus
+(`fuzz/corpus/<target>`) and seeds rewritten every run: the wire goldens in
+`crates/slopty-proto/tests/snapshots`, Claude Code's records in
+`crates/slopty-agent/tests/fixtures`, and the files under `fuzz/seeds/<target>` (the terminal
+target's captures made scripts). Anything found lands under `target/fuzz/artifacts/<target>/`,
+with the log in `target/fuzz/logs/`, and fails the run. `--ziggy` then runs AFL++ on each target
+for as long again, `--jobs` instances, through ziggy (Linux; `cargo binstall ziggy cargo-afl`,
+then `cargo afl config --build`), from the committed corpus and the seeds: what it queued joins
+the grown corpus and what crashed lands beside libFuzzer's artifacts. `--keep <artifact>`
+minimises one into `fuzz/regressions/<target>/`. `--cmin` makes a target's committed corpus the
+fewest bytes, at most 2 MiB, that reach every edge its grown corpus, its committed one and its
+seeds reach together (libFuzzer's merge records each input's edges, and a byte-weighted set
+cover picks), which a lane lands; it prints how many of the edges the budget kept. The fuzz
+crate's `tests/regressions.rs` replays every kept input and every corpus on a plain, optimised
+build, in the gate (`cargo xtask fuzz --replay`, no nightly needed), and fails a target whose
+corpus is empty or past 2 MiB. On a plain build each target is also a binary that runs the files it is given
+(`cargo run --manifest-path fuzz/Cargo.toml --bin <target> -- <file>…`). A new target is a
+function in `fuzz/src`, an entry in its `TARGETS`, a file in `fuzz/fuzz_targets` and a
+`[[bin]]`; that test fails when the three disagree. The crate has its own `Cargo.lock`, so
+`cargo update --manifest-path fuzz/Cargo.toml` moves its dependencies, and the gate checks its
+formatting and lints it.
 
 `cargo xtask profile -- <command…>` records a CPU profile of any command with samply into
 `target/profile/<epoch>.json.gz`; `samply load <file>` opens it in the Firefox Profiler.

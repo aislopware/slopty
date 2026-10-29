@@ -1,5 +1,5 @@
 //! The `media_header` target: [`slopty_fuzz::datagram::media_header`].
 
-#![no_main]
+#![cfg_attr(feature = "libfuzzer", no_main)]
 
-libfuzzer_sys::fuzz_target!(|data: &[u8]| slopty_fuzz::datagram::media_header(data));
+slopty_fuzz::target!(|data| slopty_fuzz::datagram::media_header(data));

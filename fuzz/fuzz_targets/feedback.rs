@@ -1,5 +1,5 @@
 //! The `feedback` target: [`slopty_fuzz::feedback::run`].
 
-#![no_main]
+#![cfg_attr(feature = "libfuzzer", no_main)]
 
-libfuzzer_sys::fuzz_target!(|data: &[u8]| slopty_fuzz::feedback::run(data));
+slopty_fuzz::target!(|data| slopty_fuzz::feedback::run(data));

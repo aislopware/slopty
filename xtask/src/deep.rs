@@ -1,6 +1,7 @@
 //! `cargo xtask deep` — the checks that are too slow for every commit and run on a schedule
 //! (or before a release): Miri on the pure crates, a sanitizer build of the daemons, the
-//! feature powerset, coverage, mutation testing, and a short fuzz of every peer-facing decoder.
+//! feature powerset, coverage, mutation testing, a short fuzz of every peer-facing decoder, and
+//! the vendored QUIC stack's own suite.
 //!
 //! `cargo gate` is the bar every commit meets; these find what the gate cannot — undefined
 //! behaviour a test only trips under Miri, a data race a sanitizer sees, a feature set that
@@ -141,12 +142,22 @@ pub enum DeepCmd {
         html: bool,
     },
     /// A short run of every fuzz target (`cargo xtask fuzz` with `--time`), after replaying the
-    /// kept regression inputs.
+    /// kept regression inputs and the committed corpora.
     Fuzz {
-        /// Seconds each target runs.
+        /// Seconds each target runs, under each engine.
         #[arg(long, default_value_t = 30)]
         time: u64,
+        /// Fuzzing processes per target.
+        #[arg(long, default_value_t = 1)]
+        jobs: u32,
+        /// AFL++ too, through ziggy, after libFuzzer (Linux).
+        #[arg(long)]
+        ziggy: bool,
     },
+    /// The vendored QUIC stack's own suites (`vendor/noq-proto` and `vendor/noq-udp`, outside
+    /// the workspace): the protocol's tests over two endpoints in memory and its
+    /// random-interaction proptest, and the socket's sends and receives over loopback.
+    Noq,
     /// The loom models of the lock-free structures (`--cfg slopty_loom`): the audio ring between
     /// the decoder's thread and the device's render callback, over every interleaving.
     Loom,
@@ -202,14 +213,17 @@ pub fn run(sh: &Shell, cmd: &DeepCmd) -> Result<()> {
         }
         DeepCmd::Metal { filter, no_build } => metal(sh, filter.as_deref(), *no_build),
         DeepCmd::Loom => loom(sh),
+        DeepCmd::Noq => noq(sh),
         DeepCmd::Leaks { package, stacks } => leaks(sh, package, *stacks),
-        DeepCmd::Fuzz { time } => crate::fuzz::run(
+        DeepCmd::Fuzz { time, jobs, ziggy } => crate::fuzz::run(
             sh,
             &crate::fuzz::FuzzOpts {
                 target: None,
                 time: *time,
-                jobs: 1,
+                jobs: *jobs,
                 replay: false,
+                cmin: false,
+                ziggy: *ziggy,
                 keep: None,
             },
         ),
@@ -459,6 +473,25 @@ fn loom(sh: &Shell) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// The vendored QUIC stack's own tests, which nothing else runs: `vendor/noq-proto`'s and
+/// `vendor/noq-udp`'s, each outside the workspace. Their patches (`SLOPTY.md` beside each) are
+/// otherwise held only by what Slopty's own tests reach of them, and noq-udp's on the platform
+/// it runs on (Apple's batched send path on a Mac). Each lock is committed beside its crate, so
+/// a run builds what the last did; the proptest draws new cases every run.
+fn noq(sh: &Shell) -> Result<()> {
+    let target = deep_dir("noq")?;
+    ["noq-proto", "noq-udp"].into_iter().try_for_each(|name| {
+        let manifest = format!("vendor/{name}/Cargo.toml");
+        step(
+            &format!("{name}'s suite"),
+            &cmd!(
+                sh,
+                "nice -n 10 cargo test --manifest-path {manifest} --locked --target-dir {target}"
+            ),
+        )
+    })
 }
 
 /// Crates whose tests run under `leaks --atExit`: the daemons' and the wire's, where memory left

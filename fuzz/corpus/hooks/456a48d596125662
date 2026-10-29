@@ -1,0 +1,28 @@
+{"cwd":"/work","hook_event_name":"SessionStart","session_id":"00000000-0000-4000-8000-000000000001","source":"startup","laude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl"~
+{"cwd":"/work","effort":{"level":"high"},"hook_event_name":"PreToolUse","permission_mode"nt_name":"Po02","session_id":"00000000-0000-4000-8000-000000000001","tool_input":{"description":"Write notes.md with the two notes lines","subject":"Write notes"},"tool_name":"TaskCreate","tool_response":{"task":{"id":"2","subject":"Write notes"}},"tool_use_id":"toolu_03","transcript_path":"/home/user/.claude/jects/-work/00000000-0000-4000-8000-000000000001.jsonl"}
+{"cwd":"/work","hook_event_name":"UserProm0000000-0000-4000-8000-000000000002","session_id":"00000000-0000-4000-8000-000000000001","tool_input":{ptSubmit","permission_mode":"default","ˇ
+ompt":"Use the NotebookEdit tool on nb.ipynb twice: first replace the source of the c("command":"slee"/wo2)`, then insert a new code cell after cell a1 with source `print(3)`. Theith source `print(3)`. Then reply \"done\".","prompt{"c0d":{"agen00~0_id":"00000000-0000-40000-8000-000000000002","session_id":"rk","hook_event_napm00000000-00ter cell a1 with source `print(3)`. Then reply \"done\".","prompt_id":"00000000-0000-4000-8000-000000000002","session_id":"09551615-0000-4000-8000-000000000001","transcript_path":	/home/user/.cla/ueprdojects/-work/00000000-0000-4000-8000-000000000001.jsonl"}
+{"cwd":"/work","effort":{"level":"high"},"hook_event_name":"PreToolUse","permisscla/ueprdojects/ffort":{"level":"high"},"hook_event_name":"PreToolUse","permission_mode":"default","prompt_id":"00000000-0000-4000-8000-000000000002"00-,"session_id":"00000000-0000-4000-8000-0008+0000001","tool_input":è›íûá†çöstuls":1,"query":"select:Notebook"UserPromptSubmit","permission_m
+
+odeEdit"},"too
+
+e 1;
+
+
+
+
+
+
+
+
+
+
+
+l_n"max_results":1,"query":"select:
+ 
+
+
+
+NotebookE":"ddi
+t
+o"e}

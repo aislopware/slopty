@@ -1,6 +1,6 @@
 # What `cargo fuzz` writes when run by hand here; `cargo xtask fuzz` keeps all of it under the
-# root `target/fuzz/`.
+# root `target/fuzz/`. `corpus/` is not among them: it holds the committed corpora (`cargo xtask
+# fuzz --cmin`), which a hand run of `cargo fuzz run` grows in place.
 /target
-/corpus
 /artifacts
 /coverage

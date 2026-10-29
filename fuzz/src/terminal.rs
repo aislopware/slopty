@@ -27,6 +27,15 @@
 //! (OSC 133), its hyperlinks (OSC 8) and its soft wrap. Only what draws nothing may differ: a
 //! cell never written comes back as a space, and a space's pen can differ where it shows
 //! nothing (a foreground colour, bold or blink).
+//!
+//! Two metamorphic relations hold the engine where no oracle says what a run should show:
+//! - **byte chunking:** the second engine is fed the same bytes a byte at a time (after its first
+//!   write, which a fresh engine reads whole for a checkpoint it may carry), so every sequence,
+//!   character and string is split at every point a read from a PTY may split it; after each write
+//!   it must show the same screen, cursor and modes, and report the same session state;
+//! - **resize round trip:** on the primary screen, a resize keeps the logical lines (soft wraps
+//!   joined) and the cursor's place in them, when nothing is evicted past the scrollback and no
+//!   prompt is on screen (whose redraw the shell owns, and the engine clears for it).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -72,7 +81,9 @@ pub fn run(data: &[u8]) {
     let mut viewers = vec![first];
     let _first = mirror.full_frame(0).expect("the mirror's first frame");
     let mut session = Session::default();
+    let mut mirrored = Session::default();
     let mut replica: Option<GhosttyEngine> = None;
+    let mut written = false;
     while let Some((&op, rest)) = script.split_first() {
         script = rest;
         match op {
@@ -81,9 +92,16 @@ pub fn run(data: &[u8]) {
                 let (bytes, rest) = script.split_at(len);
                 script = rest;
                 subject.write(bytes);
-                mirror.write(bytes);
+                // A byte at a time, but the first write: a fresh engine reads a checkpoint it
+                // carries from its first write whole.
+                if std::mem::replace(&mut written, true) {
+                    bytes.chunks(1).for_each(|byte| mirror.write(byte));
+                } else {
+                    mirror.write(bytes);
+                }
                 session.fold(subject.drain_events());
-                let _events = mirror.drain_events();
+                mirrored.fold(mirror.drain_events());
+                assert_eq!(mirrored, session, "the bytes a byte at a time told another state");
                 if let Some(replica) = &mut replica {
                     replica.write(bytes);
                     let _events = replica.drain_events();
@@ -97,18 +115,27 @@ pub fn run(data: &[u8]) {
                 // A synchronized update (mode 2026) holds the screen the program left until it
                 // ends: what the viewers show then is that screen, not the one being drawn.
                 if subject.hold_remaining().is_none() {
-                    let truth = truth(&mirror.full_frame(0).expect("the mirror's frame"));
+                    let mirror_frame = mirror.full_frame(0).expect("the mirror's frame");
+                    let truth = truth(&mirror_frame);
                     for (n, viewer) in viewers.iter().enumerate() {
                         assert_eq!(viewer.screen(&frame), truth, "viewer {n}");
                     }
+                    assert_eq!(frame.cursor, mirror_frame.cursor, "the cursor a byte at a time");
+                    assert_eq!(frame.modes, mirror_frame.modes, "the modes a byte at a time");
                 }
             }
             0xf0..=0xf3 => {
                 let Some((&[cols, rows], rest)) = script.split_first_chunk::<2>() else { return };
                 script = rest;
                 let size = pick_size(cols, rows);
+                let before = Logical::of(&mut mirror);
                 subject.resize(size).expect("a resize");
                 mirror.resize(size).expect("the mirror's resize");
+                if let Some(before) = before
+                    && let Some(after) = Logical::of(&mut mirror)
+                {
+                    before.holds_through(&after, size);
+                }
                 // A replay writes a blank cell as a space, which draws the same but reflows
                 // differently, so a replay that went through a resize is no longer compared.
                 replica = None;
@@ -146,6 +173,96 @@ pub fn run(data: &[u8]) {
                 replayed(&mut subject, &mut mirror, &mut replica, &session, size);
             }
         }
+    }
+}
+
+/// The most rows a primary screen's history may take, before or after a resize, for the resize
+/// round trip to be held: well inside [`SCROLLBACK`], so a narrower reflow evicts nothing.
+const ROUND_TRIP_ROWS: usize = 40;
+
+/// An engine's primary screen and scrollback as logical lines: the text of each run of rows
+/// joined by soft wraps, and where in them the cursor is.
+#[derive(Debug, PartialEq)]
+struct Logical {
+    /// Each logical line's text, its trailing blanks off, the blank lines at the end left out.
+    lines: Vec<String>,
+    /// The cursor's logical line, and its column counted from that line's start.
+    cursor: (usize, usize),
+}
+
+impl Logical {
+    /// `engine`'s logical lines, when the resize round trip holds them: on the primary screen,
+    /// outside a synchronized update, with no prompt mark on any line and few enough rows.
+    fn of(engine: &mut GhosttyEngine) -> Option<Self> {
+        if engine.hold_remaining().is_some() {
+            return None;
+        }
+        let frame = engine.full_frame(0).expect("a frame");
+        if frame.modes.contains(slopty_grid::TermModes::ALT_SCREEN) {
+            return None;
+        }
+        let (first, rows) = engine.lines(slopty_grid::LineIndex(0), u32::MAX).expect("the history");
+        if rows.len() > ROUND_TRIP_ROWS || rows.iter().any(|l| l.mark != SemanticMark::Unknown) {
+            return None;
+        }
+        let cols = usize::from(frame.cols);
+        let at = frame.first_visible_line.0.saturating_add(u64::from(frame.cursor.row));
+        let cursor_row = usize::try_from(at.checked_sub(first.0)?).ok()?;
+        let mut lines: Vec<String> = Vec::new();
+        let mut cursor = None;
+        // The columns the logical line took before this row.
+        let mut before = 0_usize;
+        for (y, row) in rows.iter().enumerate() {
+            if !row.flags.contains(LineFlags::WRAPPED) || lines.is_empty() {
+                lines.push(String::new());
+                before = 0;
+            }
+            if y == cursor_row {
+                let line_at = lines.len().saturating_sub(1);
+                cursor = Some((line_at, before.saturating_add(usize::from(frame.cursor.col))));
+            }
+            let line = lines.last_mut().expect("a line begun");
+            let mut used = 0_usize;
+            for cell in &row.cells {
+                if matches!(cell.width, CellWidth::Narrow | CellWidth::Wide) {
+                    let text = cell.text.as_str();
+                    line.push_str(if text.is_empty() { " " } else { text });
+                    used = used.saturating_add(usize::from(cell.width.columns()));
+                }
+            }
+            // A row the next one continues is full to its edge, but for the column a wide
+            // character that did not fit left blank (a spacer head), which a reflow drops.
+            let wraps =
+                rows.get(y.saturating_add(1)).is_some_and(|n| n.flags.contains(LineFlags::WRAPPED));
+            if wraps {
+                let head = row.cells.last().is_some_and(|c| c.width == CellWidth::SpacerHead);
+                let edge = cols.saturating_sub(usize::from(head));
+                line.extend(std::iter::repeat_n(' ', edge.saturating_sub(used)));
+                used = used.max(edge);
+            }
+            before = before.saturating_add(used);
+        }
+        for line in &mut lines {
+            line.truncate(line.trim_end_matches(' ').len());
+        }
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        Some(Self { lines, cursor: cursor? })
+    }
+
+    /// `after`, the lines once resized to `size`, are these.
+    fn holds_through(&self, after: &Self, size: TermSize) {
+        assert_eq!(
+            after.lines, self.lines,
+            "a resize to {}×{} changed the lines",
+            size.cols, size.rows
+        );
+        assert_eq!(
+            after.cursor, self.cursor,
+            "a resize to {}×{} moved the cursor",
+            size.cols, size.rows
+        );
     }
 }
 

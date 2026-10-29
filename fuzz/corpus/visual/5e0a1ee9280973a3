@@ -1,0 +1,3 @@
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  fragColor = vciOs7emsing, 1.0);
+}

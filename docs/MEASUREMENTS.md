@@ -7555,6 +7555,8 @@ cargo test -p slopty-net --test sim -- --ignored --nocapture         # 200 seeds
   were seeded, the flood's echo p50/p99 for seed 3 came out 46/139 ms in one run and 44/124 ms
   in the next.
 - The gate's six tests take 0.6 s of real time together.
+- Since 2026-10-30 the simulated network sends in batches of 32, as the sockets do, and two of
+  these numbers moved ("the simulated network sends in batches", that day).
 
 ## 2026-09-29 — the first soak: ptyd keeps a descriptor and ~145 KiB per closed session
 
@@ -17203,6 +17205,8 @@ Simulated times on tokio's paused clock, so the machine does not move them.
   that ship change no simulated timing here. The black-hole fix (patch 28) keeps the narrow path's
   fall back to `MIN_MTU` after one black hole; the bulk-transfer case it fixes (an ACK revealing
   older holes after full-size packets got through) is not one of these scenarios.
+- These are one datagram a send; the batched sends since 2026-10-30 move the flooded echo's
+  per-seed numbers by a millisecond or a few ("the simulated network sends in batches", that day).
 
 ```sh
 SLOPTY_SIM_SEEDS=50 cargo test --release -p slopty-net --test sim -- --include-ignored \
@@ -17901,4 +17905,122 @@ PATH=/opt/homebrew/opt/zig@0.16/bin:$PATH GHOSTTY_SOURCE_DIR=<ghostty at 65c41da
   LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast cargo build -q -p libghostty-vt-sys --target-dir /tmp/t-old
 PATH=/opt/homebrew/opt/zig/bin:$PATH GHOSTTY_SOURCE_DIR=$PWD/../../vendor/ghostty \
   LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast cargo build -q -p libghostty-vt-sys --target-dir /tmp/t-new
+```
+
+## 2026-10-30 — the simulated network sends in batches
+
+`slopty_shape::sim` now hands the endpoint up to 32 datagrams a send, as macOS's `sendmsg_x`
+and Linux's GSO do, so a resend can be cut where the sockets cut it. That is how a lone
+`NEW_CONNECTION_ID` ended a packet and read as a stateless reset (`docs/decisions/transport.md`,
+"A lone `NEW_CONNECTION_ID` is no stateless reset"; noq-proto patch 33). The nightly sweep, 200
+seeds of each scenario, simulated times on tokio's paused clock, one datagram a send before:
+
+| scenario | before (one a send) | batches of 32 |
+| --- | --- | --- |
+| dial, hop, 20 % lost each way: p99 / max | 780 ms / 1.832 s | 831 ms / 949 ms |
+| echo beside a flood, p99 per seed, at its p99 | 235 ms | 243 ms |
+| echo beside a flood, p50 per seed: p50 / p99 / max | 48 / 62 / 63 ms | 49 / 62 / 64 ms |
+
+The outages, the dial after one, the NAT rebinding, the narrow path (136 ms, MTU 1200, one black
+hole) and the doubled dial read the same. The split-ID scenario (the e2e's typing: 150 keys 4 ms
+apart, a fifth lost each way, 2 ms jitter) failed on 1 seed of 3000 without patch 33 (seed 172,
+now a gate case) and on none with it. The gate's sim tests take 1.2 s of real time together.
+
+```sh
+cargo test -p slopty-net --test sim                                  # the gate
+cargo test -p slopty-net --test sim -- --ignored --nocapture         # the 200-seed sweep
+```
+
+## 2026-10-30 — committed fuzz corpora, their replay, and the agent targets' first runs
+
+Mac Studio M1 Max, macOS 27.0, beside four other lanes' builds and gates (load 8–28), so the wall
+times are upper bounds (docs/decisions/testing.md, "Fuzz corpora are regression tests").
+
+The agent-facing targets' first runs, ten minutes each under `nice`, libFuzzer in fork mode with
+AddressSanitizer, seeded from Claude Code's fixtures and Slopty's own scripts and assets:
+
+| target | executions/s | coverage | features | corpus grown | found |
+| --- | --- | --- | --- | --- | --- |
+| `hooks` | 1 474 | 3 516 | 17 115 | 1 865 | nothing |
+| `markdown` | 139 | 6 945 | 45 155 | 5 226 | a block drawn twice after a lone `\r` |
+| `registry` | 1 275 | 1 111 | 3 672 | 754 | nothing |
+| `transcript` | 62 | 10 566 | 42 205 | 1 976 | nothing |
+| `visual` | 940 | 24 432 | 45 088 | 2 307 | a script read as Luau bytecode |
+
+`terminal`, with its two relations on (the bytes one at a time, a resize round trip), ran at 12
+executions/s for 420 s and reached 6 563 edges. The three engine bugs it found are in the
+decision.
+
+What `cargo xtask fuzz --cmin` committed, from each target's grown corpus (the night's runs and
+the earlier ones), its seeds and what was committed before. Edges are libFuzzer's features with
+hit counts off (`-use_counters=0`):
+
+| target | inputs | bytes | edges kept |
+| --- | --- | --- | --- |
+| `client_datagram` | 673 | 13 783 | all 2 326 |
+| `client_msg` | 883 | 61 667 | all 4 668 |
+| `ctl` | 149 | 8 479 | all 3 092 |
+| `cursor` | 3 | 37 | all 43 |
+| `feedback` | 209 | 7 764 | all 2 320 |
+| `hooks` | 297 | 921 624 | all 2 158 |
+| `markdown` | 351 | 27 554 | all 6 983 |
+| `media_header` | 4 | 60 | all 49 |
+| `nal` | 60 | 2 433 | all 638 |
+| `origin` | 36 | 436 | all 170 |
+| `reassemble` | 62 | 2 047 | all 2 988 |
+| `registry` | 126 | 14 034 | all 1 117 |
+| `server_msg` | 708 | 50 752 | all 4 411 |
+| `term_datagram` | 494 | 14 555 | all 2 351 |
+| `terminal` | 140 | 35 965 | all 6 564 |
+| `transcript` | 156 | 2 091 172 | 10 048 of 10 357 (97.0 %) |
+| `uni_stream` | 485 | 65 822 | all 2 486 |
+| `visual` | 544 | 170 327 | all 15 625 |
+| `worker_msg` | 1 125 | 121 034 | all 7 518 |
+| all 19 | 6 505 | 3 609 545 | |
+
+One `visual` input (2 bytes) waits in `target/lanes/T/slopty-visual.patch` with the fix it
+needs. Run on the same inputs, libFuzzer's own pick (`-set_cover_merge=1`) took about as many
+inputs for the wire targets (670 for `client_datagram`, 875 for `client_msg`). It took fewer
+for `hooks` (180), whose bytes it does not weigh, and 226 for all of `transcript`'s edges.
+
+How `transcript`'s was picked, on an earlier merge of the same grown corpus (10 343 edges):
+- libFuzzer's merge with hit counts as features (its default) kept 1 680 inputs and 11.8 MB for
+  `hooks`; with edges only, 418 and 1.14 MB for `hooks`, and 521 and 10.5 MB for `transcript`.
+- libFuzzer's set cover, the fewest inputs that reach every edge: 219 inputs, 7.27 MB.
+- The fewest bytes that reach every edge, with no budget: 7.2 MB. A few edges are reached only by
+  inputs near the 64 KiB limit.
+- Every input cut to 8 KB before the merge: 87 % of the edges.
+- The fewest bytes within 2 MiB (`--cmin`): 155 inputs, 2 092 578 bytes, 97.3 % of the edges.
+
+The replay in the gate, `cargo test --manifest-path fuzz/Cargo.toml --locked --tests`, warm,
+its six tests at once:
+
+| replay | run |
+| --- | --- |
+| unoptimised, a thread per target | 3.0–3.1 s, bound by the corpus test's `terminal` (2.9 s) |
+| unoptimised, the inputs shared over the cores | 2.6 s and 8.6 s of CPU, bound by the seed shapes' `markdown` on 4 KiB in 1-byte deltas (2.0 s) |
+| optimised, shared over the cores (as landed) | 0.37–0.43 s at load 9–14, 0.55–0.74 s at load 20; 2.3 s of CPU |
+
+| build of the replay | cold | after a touched `slopty-core` |
+| --- | --- | --- |
+| unoptimised | 30.5 s, 73 s of CPU | 9.2 s |
+| optimised (as landed) | 53 s, 237 s of CPU | 5.5–7.0 s |
+
+Optimised is `fuzz/Cargo.toml`'s dev profile: every crate but `slopty-fuzz` at opt-level 3,
+Slopty's own too, since none of them is a member of the fuzz workspace. Debug assertions and
+overflow checks stay on. A touched `slopty-agent`, `slopty-engine` or `slopty-markdown` rebuilds
+in 3.2–3.9 s. The target dir is 1.4 GB, against 2.1 GB unoptimised, since the dependencies carry
+no debug info. On CI the cold build is sccache's. `markdown`'s 2 s is the parser's
+`IncrementalParser::append`: 4 095 one-byte appends to one paragraph take 1.4 s unoptimised and
+90 ms in release, each a linear rescan of the paragraph. That is 22 µs a delta at 2 KiB, which a
+stream's frames never notice.
+
+The QUIC stack's own suites (`cargo xtask deep noq`), each against the lock beside it, on a
+warm build: noq-proto, 462 tests in 12 s; noq-udp, 11 in 0.1 s.
+
+```sh
+cargo xtask fuzz hooks --time 600              # a first run (each target alike)
+cargo xtask fuzz --cmin                        # every target's committed corpus
+cargo xtask fuzz --replay                      # the gate's replay
+cargo xtask deep noq
 ```

@@ -40,6 +40,9 @@ extend-exclude = [
     ".research/",
     "**/*.metal",
     "**/fixtures/",
+    # Fuzzers' inputs, byte for byte: the gate's `typos -w` must not rewrite one.
+    "fuzz/corpus/",
+    "fuzz/regressions/",
     # Upstream's minified chart libraries, vendored byte for byte (`web::page::libs`).
     "crates/slopty-platform/assets/page-libs/",
     # The copied UI crates keep their text as written, so a sync's merge sees only real edits

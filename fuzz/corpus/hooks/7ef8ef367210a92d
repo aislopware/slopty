@@ -1,0 +1,4 @@
+{"cwd":"/work","hook_event_name":"SessionStart","session_id":"00000000-0000-4000-8000-000000000001","source":"startup","transcript_path":"/home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl"}
+{"cwd":"/work","hook_event_name":"UserPromptS0000001","source":"startup","transcript_path":"/home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl"}
+{"cwd":"/work","hook_event_name":"UserPromptSubmit","permission_mode":"de"}
+{"cwd":"/work","hook_event_name":"UserPromptSubmit","permission_mode":"default","prompt":"Use theÿÿÿÿÿÿÿ NotebookEdit tool on nb.ipynb twice: first replace the source of the cell with id a2 witthen insert a new codoolUse","perm:ssion_mode":"default","prompt_id":"00000000-0000-4000-8000-000000000002","se/snoi_id":"00000000-0000-4000-8000-000000000001","tool_{"cwd":"/workinput":{"max_results":0,"query":"select:Note","hook_event_bookEdit"},"t)))))))))))))))))))name":))"Sessi))onS)t
