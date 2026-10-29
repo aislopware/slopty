@@ -359,7 +359,6 @@ mod tests {
             (&shared.kind, &shared.default),
             (&Kind::Map(Box::new(Kind::Switch)), &Value::Map(Vec::new()))
         );
-        assert_eq!(field("worker", "acp").kind, Kind::Map(Box::new(Kind::List)));
         assert!(fields().iter().all(|f| f.table != "keys"), "a map of maps is not a row");
         let server = field("network", "server");
         assert_eq!((&server.kind, &server.default), (&Kind::Text, &Value::Str(String::new())));
@@ -375,7 +374,6 @@ mod tests {
         field("network", "server").check("\"studio:45560\"").unwrap();
         field("clipboard", "workers").check_entry("my mac", "false").unwrap();
         assert!(field("clipboard", "workers").check_entry("studio", "\"no\"").is_err());
-        field("worker", "acp").check_entry("mine", "[\"/opt/mine\", \"--acp\"]").unwrap();
         assert!(field("network", "server").check("\"studio:x\"").is_err());
         assert!(field("terminal", "minimum_contrast").check("\"big\"").is_err());
     }

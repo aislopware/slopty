@@ -101,10 +101,6 @@ url = "2.5.8"
 rmcp = { version = "3.5.1", default-features = false, features = [ "server", "macros" ] }
 # The MCP tools' input schemas; the major rmcp builds on.
 schemars = { version = "1.2.3", features = [ "uuid1" ] }
-# ACP's wire types (protocol v1), for the generic ACP adapter (`slopty_agent::acp`). The types
-# alone: the SDK (`agent-client-protocol`) brings its own async runtime beside tokio and pins an
-# older schema, and the adapter is a sans-IO codec over the worker's own pipes.
-agent-client-protocol-schema = { version = "1.12.0", default-features = false }
 # The server's MCP listener (HTTP/1.1 connections served one task each, admitted by peer address)
 # and the LocalAPI client (`slopty_tailnet`), which adds `client`.
 hyper = { version = "1.12.0", features = [ "server", "http1" ] }
@@ -155,11 +151,8 @@ tokio = { version = "1.53.3", features = [
     "process",
     "fs",
 ] }
-# Codex's app-server control socket speaks WebSocket over a Unix socket; only the handshake and
-# framing are wanted, never a TCP or TLS connector.
-tokio-tungstenite = { version = "0.30.0", default-features = false, features = [ "handshake" ] }
-# A WebSocket is a `Stream` and a `Sink`, read and written through `StreamExt` and `SinkExt`.
-futures-util = { version = "0.3.34", default-features = false, features = [ "sink" ] }
+# Many futures awaited together on one task, borrowing what they share (`join_all`).
+futures-util = { version = "0.3.34", default-features = false, features = [ "alloc" ] }
 
 # observability
 tracing = "0.1.44"

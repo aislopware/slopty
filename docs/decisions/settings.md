@@ -386,7 +386,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `settings-about`.
 - ✅ **A map setting is edited entry by entry, in the form the file already gives it**
   (2026-10-06, readiness G20). Two keys are maps by name: `clipboard.workers` (a machine's
-  own clipboard setting) and `worker.acp` (ACP agents beyond the known ones). The form had
+  own clipboard setting) and `worker.acp` (ACP agents beyond the known ones; deleted
+  2026-10-29, below). The form had
   no row for them, and the clipboard's per-machine toggle quoted its key by hand.
   - **The form.** The schema reads a map from its JSON Schema (`"object"` with
     `additionalProperties`) as `Kind::Map(inner)`, for a switch, text, list or number inner
@@ -483,10 +484,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The whole file must still read** after the edits, or nothing is written.
   - **How the file is written.** It is replaced whole through a file beside it. The daemon
     already follows its file (`follow_settings`), so an edit takes effect the way a hand edit
-    does. On a worker, an ACP agent added is probed and told to the server in its capabilities.
+    does. On a worker, an ACP agent added was probed and told to the server in its
+    capabilities, until `[worker.acp]` went (2026-10-29, below).
   - Tests:
-    - `an_acp_agent_added_from_afar_lands_in_the_file_and_is_probed` (slopty-workerd
-      `tests/server_link.rs`, a real worker with a stub ACP program);
     - `the_person_edits_the_server_s_own_settings` (slopty-server);
     - `daemon::tests` (slopty-settings): edits in place, refusals that write nothing, a missing
       file made, problems said.
@@ -657,3 +657,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `[theme]` line would now be an unknown key in a toast, inside every golden.
   - Tests: settings `the_look_is_the_shell_s`; app settings
     `terminal_settings_ride_on_the_theme`.
+
+- ✅ **`[worker.acp]` is deleted (2026-10-29, with "TUI-first" in `agents.md`).** It named ACP
+  agents beyond the ones Slopty knew, by name and command line, for the ACP adapter to drive.
+  The adapter went with TUI-first: an agent's own CLI now runs in a terminal like any other
+  program, so nothing read the table. Its field, its line in the default file, its open-table
+  exception (an unknown name under it no longer goes unwarned) and its tests went with it. No
+  daemon table holds a map now, so an edit to a map entry from afar is refused like an entry of
+  any other key; the form still edits `[clipboard.workers]` entry by entry. `[agents] autonomy`
+  stays: the server still turns it into Claude Code's permission mode and Codex's approval
+  policy for a start an agent asks for; pi's gate and the ACP default it also named are gone.
+  - Tests: settings `daemon::tests::a_daemon_s_own_keys_are_edited_in_place` (no map entry),
+    `edit::tests` (map entries on `[clipboard.workers]` alone).

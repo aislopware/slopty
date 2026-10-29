@@ -9,12 +9,6 @@
 //!
 //! The address is the one the device reaches: the server's own, or, for a server on this Mac
 //! (which this app reaches over loopback), this Mac's name on the tailnet.
-//!
-//! A second link starts work from elsewhere (a note, a script, a page):
-//! `slopty://new?prompt=<words>&machine=<name>&folder=<path>` opens the new-session canvas with
-//! the words in the composer, on the project the folder names on the machine when one is known.
-//! It sends nothing: any page or app may open such a link, so sending stays the person's press
-//! (`docs/decisions/ui.md`, "A link starts a session, never sends it").
 
 use std::cell::RefCell;
 
@@ -27,53 +21,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 const PREFIX: &str = "slopty://connect?";
 /// The query key that holds the server's address.
 const SERVER_KEY: &str = "server";
-
-/// The new-session link's scheme and what it asks.
-const NEW_PREFIX: &str = "slopty://new?";
-/// The most words a new-session link carries, in bytes once decoded.
-const PROMPT_MAX: usize = 64 * 1024;
-
-/// What a `slopty://new` link asks for: the words for the composer, and where.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NewSession {
-    pub prompt: String,
-    pub machine: Option<String>,
-    pub folder: Option<String>,
-}
-
-/// The session a link asks for: only `slopty://new?` with a `prompt` that says something, and
-/// at most one each of `prompt`, `machine` and `folder`, nothing else; `+` is a space. Anything
-/// else asks for none, logged at debug.
-pub(crate) fn new_session_in(url: &str) -> Option<NewSession> {
-    let asked = new_session_strict(url);
-    if asked.is_none() && url.starts_with(NEW_PREFIX) {
-        tracing::debug!(url, "not a link to a new session");
-    }
-    asked
-}
-
-fn new_session_strict(url: &str) -> Option<NewSession> {
-    let query = url.strip_prefix(NEW_PREFIX)?;
-    let (mut prompt, mut machine, mut folder) = (None, None, None);
-    for pair in query.split('&') {
-        let (key, value) = pair.split_once('=')?;
-        let value = decode(&value.replace('+', " "))?;
-        let slot = match key {
-            "prompt" => &mut prompt,
-            "machine" => &mut machine,
-            "folder" => &mut folder,
-            _ => return None,
-        };
-        if slot.replace(value).is_some() {
-            return None;
-        }
-    }
-    let prompt = prompt.filter(|p: &String| !p.trim().is_empty() && p.len() <= PROMPT_MAX)?;
-    let place = |value: Option<String>| {
-        value.filter(|v| !v.trim().is_empty() && !v.chars().any(char::is_control))
-    };
-    Some(NewSession { prompt, machine: place(machine), folder: place(folder) })
-}
 
 /// What the dialog says under the code.
 const HOW: &str =
@@ -219,21 +166,9 @@ pub(crate) fn links() -> UnboundedReceiver<String> {
 }
 
 /// A link opened Slopty: one naming a server opens Settings → Devices' Add device on "A server"
-/// with its address in the field, in `shell`'s window, and connecting stays the person's press;
-/// one asking for a new session opens its canvas with the words in the composer, and sending
-/// stays the person's press too. Any other is ignored.
+/// with its address in the field, in `shell`'s window, and connecting stays the person's press.
+/// Any other is ignored.
 pub(crate) fn open_in(url: &str, shell: AnyWindowHandle, cx: &mut App) {
-    if let Some(asked) = new_session_in(url) {
-        let Some(shell) = shell.downcast::<slopty_shell::shell::Shell>() else { return };
-        let opened = shell.update(cx, |shell, window, cx| {
-            window.activate_window();
-            shell.open_new_session_with_prompt(asked.prompt, asked.machine, asked.folder, cx);
-        });
-        if opened.is_err() {
-            tracing::debug!("the shell's window is gone");
-        }
-        return;
-    }
     let Some(server) = server_in(url) else { return };
     tracing::debug!(%server, "a link names a server");
     let Some(shell) = shell.downcast::<slopty_shell::shell::Shell>() else { return };
@@ -276,45 +211,6 @@ mod tests {
         assert_eq!(shown.address.as_deref(), Some("m:45560"));
         let none = invite(&here, None);
         assert_eq!((none.link, none.note.as_str()), (None, NO_NAME));
-    }
-
-    /// A new-session link carries its words, `+` and escapes decoded, and where; anything that
-    /// is not exactly that form asks for nothing.
-    #[test]
-    fn a_new_session_link_carries_its_words_and_place() {
-        let asked = new_session_in(
-            "slopty://new?prompt=Fix+the%20flaky%20test%0Aplease&machine=studio&folder=%2Fw%2Fslopty",
-        );
-        assert_eq!(
-            asked,
-            Some(NewSession {
-                prompt: "Fix the flaky test\nplease".to_owned(),
-                machine: Some("studio".to_owned()),
-                folder: Some("/w/slopty".to_owned()),
-            })
-        );
-        let bare = new_session_in("slopty://new?prompt=hi").expect("words alone");
-        assert_eq!((bare.machine, bare.folder), (None, None));
-        let long = format!("slopty://new?prompt={}", "a".repeat(PROMPT_MAX + 1));
-        for other in [
-            "slopty://new?",
-            "slopty://new?prompt=",
-            "slopty://new?prompt=+%20",
-            "slopty://new?machine=studio",
-            "slopty://new?prompt=a&prompt=b",
-            "slopty://new?prompt=a&send=1",
-            "slopty://new?prompt=a&folder",
-            "slopty://new?prompt=%zz",
-            "slopty://new/?prompt=a",
-            "SLOPTY://new?prompt=a",
-            "slopty://connect?prompt=a",
-            long.as_str(),
-        ] {
-            assert_eq!(new_session_in(other), None, "{other:?}");
-        }
-        let placeless = new_session_in("slopty://new?prompt=a&machine=%0A").expect("words");
-        assert_eq!(placeless.machine, None, "a control character names no machine");
-        assert_eq!(server_in("slopty://new?prompt=a"), None, "names no server");
     }
 
     /// Only the exact form names a server: no other scheme, path, key, extra pair or fragment,

@@ -1,20 +1,9 @@
-//! slopty: a transcript's Run, on the person's click, types its line into the chat's own shell
-//! terminal, the bottom drawer's tab the shell opened for runs, never a terminal that runs an
-//! agent or a project action. A plain one-line command runs at once. A line of several lines,
-//! or one that asks for root or destroys (`sudo`, `rm`, a forced push…), is left at the prompt
-//! for the person to read and run with Enter.
+//! slopty: a line an orchestrating agent asks to run in a terminal it opened (`ui_terminal`),
+//! typed into that terminal, never one that runs an agent or a project action. A plain one-line
+//! command runs at once. A line of several lines, or one that asks for root or destroys (`sudo`,
+//! `rm`, a forced push…), is left at the prompt for the person to read and run with Enter.
 
-use std::time::Duration;
-
-use gpui::{App, Context, Window};
-
-use super::Shell;
-
-/// How long a fresh terminal is waited for before the run gives up and says so.
-const OPENS_WITHIN: Duration = Duration::from_secs(10);
-
-/// How often a terminal still opening is asked again.
-const ASK_EVERY: Duration = Duration::from_millis(50);
+use gpui::App;
 
 /// Programs a line is read before it runs with: they act as root or undo work.
 const READ_FIRST: &[&str] = &[
@@ -73,70 +62,6 @@ fn destroys_in_git(args: &[&str]) -> bool {
 pub(super) fn send_line(id: &str, line: &str, cx: &mut App) -> bool {
     let line = line.trim_end_matches('\n');
     crate::live::run_line(id, line, !read_first(line), cx)
-}
-
-impl Shell {
-    /// A transcript's Run for chat `chat`: its line typed into the chat's run terminal, opened
-    /// first when it has none. Whether the shell took it: only for the chat on screen.
-    pub(crate) fn run_in_terminal(
-        &mut self,
-        chat: &str,
-        line: &str,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if line.trim().is_empty() || chat != self.active_chat {
-            return false;
-        }
-        let panel = self.terminal_panel(cx);
-        let kept = self.run_tabs.get(chat).copied().filter(|key| {
-            panel.read(cx).tab_summaries(cx).iter().any(|(tab, _, exited)| tab == key && !exited)
-        });
-        let key = match kept {
-            Some(key) => key,
-            None => {
-                let Some(key) = panel.update(cx, |panel, cx| panel.open_tab_for_selected(cx))
-                else {
-                    return false;
-                };
-                self.run_tabs.insert(chat.to_owned(), key);
-                key
-            }
-        };
-        self.panels.update(chat, |panels| panels.terminal_open = true);
-        self.terminal_tween = None;
-        self.terminal_tween_task = None;
-        panel.update(cx, |panel, cx| {
-            panel.set_open(true, cx);
-            panel.select_tab_by_key(key, cx);
-        });
-        cx.notify();
-        // A fresh terminal takes the line once its shell is up.
-        let (chat, line) = (chat.to_owned(), line.to_owned());
-        cx.spawn(async move |this, cx| {
-            let since = cx.background_executor().now();
-            loop {
-                let sent = panel
-                    .update(cx, |panel, cx| {
-                        let id = panel.terminal_id(&chat, key)?.to_owned();
-                        send_line(&id, &line, cx).then_some(())
-                    })
-                    .is_some();
-                if sent {
-                    return;
-                }
-                if cx.background_executor().now().saturating_duration_since(since) > OPENS_WITHIN {
-                    let _gone = this.update(cx, |_, cx| {
-                        crate::toast::error(cx, "Couldn\u{2019}t open the terminal, so nothing ran. Try again.");
-                    });
-                    return;
-                }
-                cx.background_executor().timer(ASK_EVERY).await;
-            }
-        })
-        .detach();
-        true
-    }
 }
 
 #[cfg(test)]

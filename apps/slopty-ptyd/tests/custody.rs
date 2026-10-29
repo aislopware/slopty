@@ -57,7 +57,6 @@ mod golden {
             PtydRequest::Adopt { .. } => "request_adopt",
             // An older ptyd reads it from a newer build: it is the handover's.
             PtydRequest::Succeed { .. } => "succession_request",
-            PtydRequest::SpawnPiped { .. } => "request_spawn_piped",
         }
     }
 
@@ -90,12 +89,6 @@ mod golden {
             env: vec![("TERM_PROGRAM".to_owned(), "slopty".to_owned())],
             size: size(),
         };
-        let piped = SpawnSpec {
-            command: vec!["claude".to_owned(), "-p".to_owned()],
-            cwd: Some(PathBuf::from("/Users/me/src")),
-            env: vec![("CLAUDE_CODE_EAGER_FLUSH".to_owned(), "1".to_owned())],
-            size: TermSize::default(),
-        };
         vec![
             PtydRequest::Spawn { id: id(), spec },
             PtydRequest::Attach { id: id() },
@@ -112,14 +105,8 @@ mod golden {
                 size: size(),
                 started_ms: WallMs::from_millis(1_759_000_000_000),
                 term: "xterm-ghostty".to_owned(),
-                piped: false,
             },
             PtydRequest::Succeed { program: PathBuf::from("/Users/me/.slopty/bin/slopty-ptyd") },
-            PtydRequest::SpawnPiped {
-                id: id(),
-                spec: piped,
-                stderr: Some(PathBuf::from("/Users/me/.slopty/agent.err")),
-            },
         ]
     }
 
@@ -142,7 +129,6 @@ mod golden {
             exited: Some(Exit::with(-9)),
             backlog: 1024,
             checkpoint: 2048,
-            piped: true,
         };
         vec![
             PtydEvent::Spawned { id: id(), pid: 4242 },
@@ -212,7 +198,6 @@ mod golden {
             attached: true,
             orphan: true,
             orphan_mark: Some(1_759_000_000_123_456),
-            piped: false,
         };
         insta::assert_snapshot!("succession_heir", hex(&codec::encode(&heir).expect("encodes")));
     }

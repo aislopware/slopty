@@ -879,8 +879,6 @@ async fn spawn_simulator_app(
         .env(format!("SIMCTL_CHILD_{}", crate::SOCKET_ENV), &app_sock)
         .env("SIMCTL_CHILD_SLOPTY_PREDICT", "never")
         .env(format!("SIMCTL_CHILD_{}", crate::WORKER_GRANTS_ENV), ALL_GRANTED)
-        // Glass only: the key bar stays in the frame whatever the simulator has attached.
-        .env("SIMCTL_CHILD_SLOPTY_HARDWARE_KEYBOARD", "0")
         .env(format!("SIMCTL_CHILD_{CHECK_RETAINED}"), "record")
         .env(format!("SIMCTL_CHILD_{INVARIANTS}"), "panic")
         .envs(env.iter().map(|(k, v)| (format!("SIMCTL_CHILD_{k}"), *v)))
@@ -1142,36 +1140,6 @@ impl Stack {
         self.app_ix = Some(self.children.len());
         self.children.push(app);
         driver.ok(&crate::Command::Ping).await?;
-        self.driver = driver;
-        Ok(())
-    }
-
-    /// End the app in the simulator, as the system ends one it suspended, then launch it again
-    /// on the same data directory with `env` beside what it was launched with: a cold launch,
-    /// as a press of a note's button makes one ([`crate::LAUNCH_TAP_ENV`]). Waits for its test
-    /// socket, not for a link.
-    ///
-    /// # Errors
-    ///
-    /// When the app runs in no simulator, or does not come back in time.
-    pub async fn relaunch_on_simulator(&mut self, env: &[(&str, &str)]) -> Result<()> {
-        let simulator = self.simulator.clone().context("the app runs in no simulator")?;
-        let ended = Command::new("xcrun")
-            .args(["simctl", "terminate", &simulator.udid, &simulator.bundle_id])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .context("xcrun simctl terminate")?;
-        anyhow::ensure!(ended.success(), "simctl terminate failed: {ended}");
-        // The ended app left its socket file; the new one binds afresh.
-        let _removed = std::fs::remove_file(self.dir.path().join("app.sock"));
-        let mut all: Vec<(&str, &str)> =
-            self.app_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        all.extend_from_slice(env);
-        let driver =
-            spawn_simulator_app(self.dir.path(), "app", &self.log, &simulator, &all).await?;
         self.driver = driver;
         Ok(())
     }

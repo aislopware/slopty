@@ -4,12 +4,16 @@
 //! `<config>/projects/<escaped working directory>/<session id>.jsonl`, each subagent's beside it
 //! (`<session id>/subagents/agent-<id>.jsonl`), where the escaping replaces every character that
 //! is not an ASCII letter or digit with a `-` (so `/Users/x/.config` becomes `-Users-x--config`).
-//! The driven Claude Code is given its session id, so its record is found by that id and its
+//! A Claude Code Slopty starts is given its session id, so its record is found by that id and its
 //! folder, never guessed.
 //!
 //! Each live Claude Code also records itself in `<config>/sessions/<pid>.json` ([`live`]): its
 //! pid, the session it holds, its folder, how it runs (`kind`) and its process's start
 //! (`procStart`, `ps -o lstart=` in UTC), which tells a pid used again from the one that wrote.
+//! It says there too what it does now (`status`: `idle`, `busy`, `waiting`), what a wait is for
+//! (`waitingFor`, `needs`) and since when (`statusUpdatedAt`), rewriting the record as that
+//! changes: what tells a session whose hooks are not heard waiting on the person
+//! ([`Live::waiting`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -21,7 +25,7 @@ use slopty_core::WallMs;
 use slopty_proto::thread::wire::{
     EXPANDED_CHARS, Expanded, PROMPT_HIT_BYTES, PastSession, PromptHit,
 };
-use slopty_proto::thread::{AgentId, ContentRef};
+use slopty_proto::thread::{AgentId, ContentRef, Wait};
 
 use crate::conversation::Part;
 
@@ -366,7 +370,7 @@ impl Glance {
             .into_iter()
             .flatten()
             .map(|t| t.trim().to_owned())
-            .chain(self.first.as_deref().map(crate::driven::title_of))
+            .chain(self.first.as_deref().map(crate::title::title_of))
             .find(|t| !t.is_empty())
     }
 
@@ -504,7 +508,8 @@ fn glance(path: &Path) -> std::io::Result<Glance> {
 pub struct Live {
     /// Its process.
     pub pid: u32,
-    /// The session it holds: the one whose transcript it writes.
+    /// The session it holds: the one whose transcript it writes. A `/clear` or `/resume` in its
+    /// TUI moves it to another, and its record says so.
     pub session: String,
     /// The folder it runs in.
     pub cwd: Option<String>,
@@ -513,6 +518,61 @@ pub struct Live {
     pub kind: String,
     /// Its process's start as `ps -o lstart=` says it in UTC, when it said.
     pub started: Option<String>,
+    /// Its version, when it said.
+    pub version: Option<String>,
+    /// The session's name as its TUI shows it (Claude Code's title, or the person's), when it
+    /// has one.
+    pub name: Option<String>,
+    /// What it says it does, when it says: `idle` at rest, `busy` at work, `waiting` on the
+    /// person at a dialog.
+    pub status: Option<String>,
+    /// What a wait is for, in its words: `permission prompt` (a tool's permission, a plan's
+    /// approval, and any dialog that says nothing else), `input needed` (a question),
+    /// `sandbox request`, `goal proposal`, `dialog open` (another dialog of its own that holds
+    /// the session: a fallback model, a usage limit, a notice).
+    pub waiting_for: Option<String>,
+    /// What the person is to do at that dialog, where it says ("choose: allow or deny the
+    /// computer-use action").
+    pub needs: Option<String>,
+    /// When its status last changed.
+    pub status_at: Option<WallMs>,
+}
+
+/// The status a live Claude Code records while it waits on the person.
+const WAITING: &str = "waiting";
+
+/// What a wait is for when the record says nothing else: Claude Code's own default.
+const PERMISSION_PROMPT: &str = "permission prompt";
+
+impl Live {
+    /// What it waits on the person for while its record says it waits: a wait of
+    /// [`Wait`]'s kinds (`permission`, `question`, else `input`), in its own words. The record
+    /// names no call, so a caller that knows the call the dialog is about words it better.
+    #[must_use]
+    pub fn waiting(&self) -> Option<Wait> {
+        if self.status.as_deref() != Some(WAITING) {
+            return None;
+        }
+        let what = self.waiting_for.as_deref().map(str::trim).filter(|w| !w.is_empty());
+        let what = what.unwrap_or(PERMISSION_PROMPT);
+        let (kind, said) = match what {
+            PERMISSION_PROMPT => (crate::hooks::PERMISSION, "Wants permission".to_owned()),
+            "sandbox request" => (crate::hooks::PERMISSION, "Wants network access".to_owned()),
+            "input needed" => (crate::hooks::QUESTION, "Has a question".to_owned()),
+            "goal proposal" => (crate::hooks::INPUT, "Proposes a goal".to_owned()),
+            "dialog open" => (crate::hooks::INPUT, "Has a dialog open".to_owned()),
+            other => (crate::hooks::INPUT, capitalised(other)),
+        };
+        let needs = self.needs.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let text = needs.map_or(said, capitalised);
+        Some(Wait { kind: kind.to_owned(), text })
+    }
+}
+
+/// `text` with its first letter a capital.
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
 /// The directory, under Claude Code's, each live Claude Code records itself in.
@@ -528,37 +588,50 @@ const LIVE_BYTES: u64 = 64 * 1024;
 /// over.
 #[must_use]
 pub fn live(home: &Path) -> Vec<Live> {
-    use std::io::Read as _;
     let Ok(entries) = std::fs::read_dir(config_dir(home).join(LIVE_DIR)) else {
         return Vec::new();
     };
     let mut found: Vec<Live> = entries
         .flatten()
         .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
-        .filter_map(|entry| {
-            let mut bytes = Vec::new();
-            std::fs::File::open(entry.path())
-                .ok()?
-                .take(LIVE_BYTES)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-            let text = |key: &str| record.get(key).and_then(|v| v.as_str()).map(str::to_owned);
-            let pid = u32::try_from(record.get("pid")?.as_u64()?).ok().filter(|p| *p > 0)?;
-            let session = text("sessionId").filter(|s| super::is_session_id(s))?;
-            Some(Live {
-                pid,
-                session,
-                cwd: text("cwd"),
-                kind: text("kind")
-                    .filter(|k| !k.is_empty())
-                    .unwrap_or_else(|| "interactive".to_owned()),
-                started: text("procStart"),
-            })
-        })
+        .filter_map(|entry| live_at(&entry.path()))
         .collect();
     found.sort_by_key(|live| live.pid);
     found
+}
+
+/// The record process `pid` keeps of itself under `home`, if it keeps one ([`live`]).
+#[must_use]
+pub fn live_of(home: &Path, pid: u32) -> Option<Live> {
+    live_at(&config_dir(home).join(LIVE_DIR).join(format!("{pid}.json")))
+        .filter(|live| live.pid == pid)
+}
+
+/// The record in the file at `path`.
+fn live_at(path: &Path) -> Option<Live> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).ok()?.take(LIVE_BYTES).read_to_end(&mut bytes).ok()?;
+    let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let text = |key: &str| record.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+    let pid = u32::try_from(record.get("pid")?.as_u64()?).ok().filter(|p| *p > 0)?;
+    let session = text("sessionId").filter(|s| super::is_session_id(s))?;
+    Some(Live {
+        pid,
+        session,
+        cwd: text("cwd"),
+        kind: text("kind").filter(|k| !k.is_empty()).unwrap_or_else(|| "interactive".to_owned()),
+        started: text("procStart"),
+        version: text("version").filter(|v| !v.trim().is_empty()),
+        name: text("name").filter(|n| !n.trim().is_empty()),
+        status: text("status").filter(|s| !s.trim().is_empty()),
+        waiting_for: text("waitingFor"),
+        needs: text("needs"),
+        status_at: record
+            .get("statusUpdatedAt")
+            .and_then(serde_json::Value::as_u64)
+            .map(WallMs::from_millis),
+    })
 }
 
 #[cfg(test)]
@@ -749,6 +822,58 @@ mod tests {
         assert_eq!(live[1].session, "9d2e7a10-5c4b");
         assert_eq!(live[1].started.as_deref(), Some("Fri Oct 16 16:35:24 2026"));
         assert_eq!(live[1].cwd.as_deref(), Some("/w"));
+    }
+
+    /// What Claude Code 2.1.312 records of itself at rest, at work and at its two dialogs (its
+    /// own records, scrubbed): waiting on the person at a dialog alone, for a permission or a
+    /// question as it says, since when it says. A dialog that says what it needs is said in
+    /// those words, another dialog is input, and a record of a Claude Code from before it said
+    /// any of this waits on nothing.
+    #[test]
+    fn a_live_claude_code_says_when_it_waits_on_the_person() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let dir = config_dir(home.path()).join(LIVE_DIR);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let read = |record: &str| {
+            std::fs::write(dir.join("4242.json"), record).expect("live");
+            live_of(home.path(), 4242).expect("read")
+        };
+        let permission = include_str!("../../tests/fixtures/registry/waiting-permission.json");
+        let samples = [
+            (include_str!("../../tests/fixtures/registry/idle.json"), "idle", None),
+            (include_str!("../../tests/fixtures/registry/busy.json"), "busy", None),
+            (permission, "waiting", Some(("permission", "Wants permission"))),
+            (
+                include_str!("../../tests/fixtures/registry/waiting-question.json"),
+                "waiting",
+                Some(("question", "Has a question")),
+            ),
+        ];
+        for (record, status, waits) in samples {
+            let live = read(record);
+            assert_eq!(live.status.as_deref(), Some(status), "{live:?}");
+            assert!(live.status_at.is_some_and(|at| at > WallMs::ZERO), "{live:?}");
+            let wait = live.waiting();
+            let said = wait.as_ref().map(|w| (w.kind.as_str(), w.text.as_str()));
+            assert_eq!(said, waits, "{live:?}");
+        }
+
+        let mut record: serde_json::Value = serde_json::from_str(permission).expect("json");
+        record["needs"] = "choose: allow or deny the computer-use action".into();
+        let wait = read(&record.to_string()).waiting().expect("waits");
+        assert_eq!(
+            (wait.kind.as_str(), wait.text.as_str()),
+            ("permission", "Choose: allow or deny the computer-use action")
+        );
+        record["waitingFor"] = "dialog open".into();
+        record.as_object_mut().expect("object").remove("needs");
+        let wait = read(&record.to_string()).waiting().expect("waits");
+        assert_eq!((wait.kind.as_str(), wait.text.as_str()), ("input", "Has a dialog open"));
+        for key in ["status", "waitingFor", "statusUpdatedAt"] {
+            record.as_object_mut().expect("object").remove(key);
+        }
+        let live = read(&record.to_string());
+        assert_eq!((live.status.as_deref(), live.waiting(), live.status_at), (None, None, None));
     }
 
     /// A past session's time is its last record's, as Claude Code stamped it, never its file's:

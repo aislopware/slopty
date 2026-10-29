@@ -322,18 +322,22 @@ mod mac {
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        // Each connection on its own thread: WebKit may open one it sends nothing on, and a
+        // server waiting on that one would never take the next load's.
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
-                let mut asked = [0_u8; 4096];
-                let _read = stream.read(&mut asked);
-                let page = "<html><head><title>a page</title></head><body>here</body></html>";
-                let said = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
-                     Set-Cookie: seen=1\r\nConnection: close\r\n\r\n{page}",
-                    page.len()
-                );
-                let _wrote = stream.write_all(said.as_bytes());
+                std::thread::spawn(move || {
+                    let mut asked = [0_u8; 4096];
+                    let _read = stream.read(&mut asked);
+                    let page = "<html><head><title>a page</title></head><body>here</body></html>";
+                    let said = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\
+                         Set-Cookie: seen=1\r\nConnection: close\r\n\r\n{page}",
+                        page.len()
+                    );
+                    let _wrote = stream.write_all(said.as_bytes());
+                });
             }
         });
         let mtm = MainThreadMarker::new().unwrap();
@@ -636,15 +640,21 @@ mod mac {
             let port = listener.local_addr().unwrap().port();
             let hits = Arc::new(AtomicUsize::new(0));
             let served = Arc::clone(&hits);
+            // Each connection on its own thread, and a hit is a connection that asked: WebKit may
+            // open one it sends nothing on.
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(mut stream) = stream else { return };
-                    served.fetch_add(1, Ordering::Relaxed);
-                    let mut asked = [0_u8; 4096];
-                    let _read = stream.read(&mut asked);
-                    let said = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
-                        Access-Control-Allow-Origin: *\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi";
-                    let _wrote = stream.write_all(said.as_bytes());
+                    let served = Arc::clone(&served);
+                    std::thread::spawn(move || {
+                        let mut asked = [0_u8; 4096];
+                        if stream.read(&mut asked).is_ok_and(|n| n > 0) {
+                            served.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let said = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\
+                            Access-Control-Allow-Origin: *\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi";
+                        let _wrote = stream.write_all(said.as_bytes());
+                    });
                 }
             });
             let events: Events = Rc::default();

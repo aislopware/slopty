@@ -1,7 +1,7 @@
 //! slopty: the right pane's surface tabs kept across launches. Each chat's pane comes back as it
 //! was when the app quit, its tabs in their order and the one in front: its terminals on the
-//! same sessions (they live on in their machine), its files, pages, diffs,
-//! side chats and remote windows. A chat's tabs come back the first time it is shown, once the
+//! same sessions (they live on in their machine), its inspector, files, pages, diffs and
+//! remote windows. A chat's tabs come back the first time it is shown, once the
 //! app is connected; a terminal that ended meanwhile does not.
 
 use gpui::{App, Context, Window};
@@ -25,7 +25,9 @@ impl Shell {
                 saved.tabs.push(kept);
             }
         }
-        (!saved.tabs.is_empty()).then_some(saved)
+        // slopty: a pane given its inspector is kept even with no tab left, so the inspector
+        // the person closed is not given again.
+        (!saved.tabs.is_empty() || self.inspector_given.contains(key)).then_some(saved)
     }
 
     /// What opens `surface` of the pane `key` again; `None` for one that is not kept.
@@ -49,16 +51,13 @@ impl Shell {
                 self.diffs.get(&id)?;
                 SavedSurface::Diff
             }
-            RightSurface::SideChat(id) => {
-                let chat = self.side_chats.get(&id)?.state.read(cx).selected_chat.clone()?;
-                SavedSurface::SideChat { chat }
-            }
             RightSurface::Screen(id) => {
                 let (screen, title) = self.screen_surface_chosen(id, cx)?;
                 SavedSurface::Screen { screen, title }
             }
-            // slopty: a mod's pane lives while its mod keeps it, not across launches.
-            RightSurface::ModPane(_) | RightSurface::Page(_) | RightSurface::Picker => return None,
+            RightSurface::Inspector => SavedSurface::Inspector,
+            // slopty: an agent's page lives while it shows it.
+            RightSurface::Page(_) | RightSurface::Picker => return None,
         })
     }
 
@@ -165,16 +164,15 @@ impl Shell {
                 self.add_diff_surface(window, cx);
                 Some(RightSurface::Diff(self.diff_seq))
             }
-            SavedSurface::SideChat { chat } => {
-                let row = self.state.read(cx).chats.iter().find(|row| row.id == chat).cloned()?;
-                self.open_side_chat(row, key.to_owned(), cx);
-                self.side_chats.iter().find_map(|(id, side)| {
-                    (side.state.read(cx).selected_chat.as_deref() == Some(chat.as_str()))
-                        .then_some(RightSurface::SideChat(*id))
-                })
-            }
             SavedSurface::Screen { screen, title } => {
                 Some(self.reopen_screen_surface(screen, title, cx))
+            }
+            SavedSurface::Inspector => {
+                let tabs = self.right_tabs.entry(key.to_owned()).or_default();
+                if !tabs.contains(&RightSurface::Inspector) {
+                    tabs.push(RightSurface::Inspector);
+                }
+                Some(RightSurface::Inspector)
             }
         }
     }

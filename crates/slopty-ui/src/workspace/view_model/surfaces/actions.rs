@@ -12,7 +12,7 @@
 //! (`TakeProjectActionSetup`).
 
 use std::cell::OnceCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use gpui::{AppContext as _, Context, Task};
@@ -47,21 +47,11 @@ struct Own {
     hidden: BTreeSet<String>,
 }
 
-/// Where a chat's worktree action stands, by chat.
-#[derive(Debug)]
-enum Setup {
-    /// To run once its thread started.
-    Waiting(ProjectAction),
-    /// Opening its terminal.
-    Opening,
-}
-
 /// The person's actions, by machine and folder, read from their file the first time they are
-/// asked of, and the worktree actions waiting for their chats.
+/// asked of.
 #[derive(Debug, Default)]
 pub(super) struct Actions {
     own: OnceCell<BTreeMap<String, Own>>,
-    setups: HashMap<String, Setup>,
 }
 
 /// Where the person's actions are kept.
@@ -386,86 +376,6 @@ impl WorkspaceView {
             let (name, opened) = opened;
             let terminal = terminal_of(opened.await?)?;
             value(&ProjectActionRun { action_id: id, action_name: name, terminal })
-        })
-    }
-
-    /// A chat starting in a new worktree of the folder `path` on `key`: the project's worktree
-    /// action, if it has one, waits to run there once the chat's thread started.
-    pub(in crate::workspace) fn project_setup_for(
-        &mut self,
-        chat: &str,
-        key: WorkerKey,
-        path: &str,
-    ) {
-        let actions = &mut self.view_model.surfaces.actions;
-        let setup = actions
-            .of(&project_key(key, path))
-            .actions
-            .into_iter()
-            .find(|a| a.run_on_worktree_create);
-        if let Some(action) = setup {
-            actions.setups.insert(chat.to_owned(), Setup::Waiting(action));
-        }
-    }
-
-    /// `TakeProjectActionSetup`: the chat's worktree action, run once its thread started there.
-    /// Not ready while it starts; ready with none where the project has none.
-    pub(super) fn take_project_action_setup(
-        &mut self,
-        params: &serde_json::Value,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<RpcReply, RpcError>> {
-        let chat = param(params, "chatId").unwrap_or_default().to_owned();
-        let not_yet = || Task::ready(value(&serde_json::json!({ "ready": false })));
-        let none = |error: Option<&str>| {
-            let answer =
-                serde_json::json!({ "ready": true, "setupAction": null, "setupError": error });
-            Task::ready(value(&answer))
-        };
-        match self.view_model.surfaces.actions.setups.get(&chat) {
-            None => return none(None),
-            Some(Setup::Opening) => return not_yet(),
-            Some(Setup::Waiting(_)) => {}
-        }
-        let place = self.chat_thread(&chat, cx).and_then(|(key, thread)| {
-            let hub = self.held_hub(key)?.read(cx);
-            let cwd = hub.threads().rows().rows.get(&thread)?.cwd.clone()?;
-            Some((key, cwd))
-        });
-        let Some((key, cwd)) = place else {
-            if self.view_model.minted.contains_key(&chat) {
-                return not_yet();
-            }
-            self.view_model.surfaces.actions.setups.remove(&chat);
-            return none(Some("The chat did not start, so its worktree action did not run"));
-        };
-        let Some(Setup::Waiting(action)) =
-            self.view_model.surfaces.actions.setups.insert(chat.clone(), Setup::Opening)
-        else {
-            return not_yet();
-        };
-        let script = own_script(&action, cwd);
-        let opened = self.live_open_session(params, Some((key, script)), cx);
-        cx.spawn(async move |this, cx| {
-            let opened = opened.await;
-            this.update(cx, |view, _| view.view_model.surfaces.actions.setups.remove(&chat))
-                .map_err(super::gone)?;
-            let answer = match opened.and_then(terminal_of) {
-                Ok(terminal) => {
-                    let run = ProjectActionRun {
-                        action_id: action.id,
-                        action_name: action.name,
-                        terminal,
-                    };
-                    serde_json::json!({ "ready": true, "setupAction": run, "setupError": null })
-                }
-                Err(e) => serde_json::json!({
-                    "ready": true,
-                    "setupAction": null,
-                    "setupError": format!("{} did not start: {e}", action.name),
-                }),
-            };
-            value(&answer)
         })
     }
 }

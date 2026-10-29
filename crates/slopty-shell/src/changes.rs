@@ -19,18 +19,16 @@
 //!   time-sliced on the background executor and applied as paint-only run
 //!   colors (layout never changes);
 //! - scopes (t3code parity): *Working tree* rides the watch stream; *Branch
-//!   changes* (vs a selectable base ref, default branch preselected) and
-//!   *Latest turn* fetch one-shot `GetCheckoutDiff` captures, refreshed when
-//!   the watch checksum says the tree moved;
+//!   changes* (vs a selectable base ref, default branch preselected) fetches
+//!   one-shot `GetCheckoutDiff` captures, refreshed when the watch checksum
+//!   says the tree moved (slopty: no *Latest turn*);
 //! - two layouts ([`DiffMode`], toolbar toggle, persisted): *unified* stacks
 //!   old and new; *split* pairs each hunk's deletions against its additions
 //!   into one row with two columns. Split is a pure re-flatten of the same
 //!   parse — the row model, virtualization, folds, and highlights are shared.
-//!   Its left column is inert: notes are cited against the post-change file,
-//!   so only the right column takes a `+` (already-staged old-side notes
-//!   still show their cards).
+//!   slopty: no notes on lines; the pane is read-only toward the agent.
 //! - long-line wrapping is a persisted toolbar choice. It only changes the
-//!   code plane: gutters, comment affordances, and sticky headers stay fixed,
+//!   code plane: gutters and sticky headers stay fixed,
 //!   while the virtual list measures each logical row's resulting height.
 
 use std::collections::HashMap;
@@ -47,7 +45,6 @@ use unicode_width::UnicodeWidthChar as _;
 use slopty_view_proto::{Chat, CheckoutDiff}; // slopty: no History surface (ruled out)
 use slopty_view_rpc::methods;
 
-use crate::comments::{self, CommentSide, ReviewComment};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 
 use crate::markdown::render;
@@ -59,19 +56,15 @@ use crate::theme::Theme;
 use slopty_syntax::LanguageId as Lang;
 use crate::motion::HoverFade as _;
 
-// slopty: find in the diff, the whitespace filter, the changed files' tree and any turn's diff.
+// slopty: find in the diff, the whitespace filter and the changed files' tree.
 mod aids;
 mod review;
 mod words;
-pub use review::{DiffMatch, TreeRow, TurnChoice, diff_tree, find_matches, turn_choices};
+pub use review::{DiffMatch, TreeRow, diff_tree, find_matches};
 use review::scoped_params;
 
-// slopty: the diff's find, and a transcript's "Open diff" landing on a turn. The shell binds the
-// keys, and on `ShowTurnDiff` reveals a diff tab, which takes the turn [`show_turn`] asked for.
-gpui::actions!(
-    changes,
-    [FindInDiff, FindNextInDiff, FindPreviousInDiff, ShowTurnDiff, ToggleDiffTree]
-);
+// slopty: the diff's find, whose keys the shell binds.
+gpui::actions!(changes, [FindInDiff, FindNextInDiff, FindPreviousInDiff, ToggleDiffTree]);
 
 // slopty: ⇧⌘Y shows or hides the changed files' tree (Claude desktop's `toggleDiffFileList`).
 /// Binds the pane's own keys that the shell's keymap does not.
@@ -83,17 +76,22 @@ pub(crate) fn bind_keys(cx: &mut App) {
     )]);
 }
 
-// slopty: the turn a transcript asked to see the diff of, until a diff tab takes it.
+// slopty: the file the inspector asked to see, until a diff tab shows it.
 #[derive(Default)]
-struct RequestedTurn(Option<String>);
+struct RequestedFile(Option<String>);
 
-impl gpui::Global for RequestedTurn {}
+impl gpui::Global for RequestedFile {}
 
-/// Open the diff at the turn of entry `turn` (the person's message that began it, or any entry of
-/// its answer): a diff tab takes it, and the shell is asked to show one ([`ShowTurnDiff`]).
-pub(crate) fn show_turn(turn: &str, window: &mut Window, cx: &mut App) {
-    cx.set_global(RequestedTurn(Some(turn.to_owned())));
-    window.dispatch_action(Box::new(ShowTurnDiff), cx);
+/// Bring `path`'s diff to the top of the diff tab that takes it: the inspector's changed file,
+/// by its path as the agent wrote it (absolute, or relative to the session's folder).
+pub(crate) fn show_file(path: &str, cx: &mut App) {
+    cx.set_global(RequestedFile(Some(path.to_owned())));
+}
+
+/// Whether the diff's `file` (relative to its repository) is the file `wanted` names.
+fn names_file(wanted: &str, file: &str) -> bool {
+    !file.is_empty()
+        && (wanted == file || wanted.strip_suffix(file).is_some_and(|head| head.ends_with('/')))
 }
 
 // ---------------------------------------------------------------------------
@@ -798,20 +796,11 @@ pub fn held_back(files: &[FileDiff]) -> Vec<bool> {
 /// Analytic expanded-body height — drives the 180 ms fold tween without
 /// measurement.
 pub fn body_height(file: &FileDiff) -> f32 {
-    body_height_with(file, &[], None, DiffMode::Unified, DIFF_LINE_HEIGHT)
+    body_height_with(file, DiffMode::Unified, DIFF_LINE_HEIGHT)
 }
 
-pub fn body_height_with(
-    file: &FileDiff,
-    comments: &[ReviewComment],
-    draft: Option<(CommentSide, u32)>,
-    mode: DiffMode,
-    line_h: f32,
-) -> f32 {
-    body_rows(0, file, comments, draft, mode)
-        .iter()
-        .map(|row| row.height(comments, line_h))
-        .sum()
+pub fn body_height_with(file: &FileDiff, mode: DiffMode, line_h: f32) -> f32 {
+    body_rows(0, file, mode).iter().map(|row| row.height(line_h)).sum()
 }
 
 /// One split row: indices into the hunk's lines for the left (old) and right
@@ -941,38 +930,6 @@ pub fn split_pairs_upto(lines: &[DiffLine], max_rows: usize) -> Vec<LinePair> {
     pairs
 }
 
-/// Every anchor a split row can *display* a card for, left column first.
-///
-/// Wider than what the row lets you write: only the right column takes a `+`
-/// (see the `SplitLine` render arm), but an old-side note staged from the
-/// unified layout must still show its card here, or toggling layouts would
-/// look like it dropped one. A context row names the same anchor on both
-/// sides, so the duplicate is dropped — the caller flattens, and two
-/// identical anchors would stage the card twice. A fixed array, not a `Vec`:
-/// this runs per row of every re-flatten.
-fn pair_anchors(lines: &[DiffLine], pair: LinePair) -> [Option<(CommentSide, u32)>; 2] {
-    let anchor = |ix: Option<u32>| {
-        ix.and_then(|ix| lines.get(ix as usize))
-            .and_then(line_anchor)
-    };
-    let (left, right) = (anchor(pair.0), anchor(pair.1));
-    if left == right {
-        [left, None]
-    } else {
-        [left, right]
-    }
-}
-
-/// A deletion only exists in the pre-change file; everything else is cited
-/// against the post-change file, which is what the agent edits.
-pub fn line_anchor(line: &DiffLine) -> Option<(CommentSide, u32)> {
-    match line.kind {
-        LineKind::Meta => None,
-        LineKind::Del => line.old_no.map(|no| (CommentSide::Old, no)),
-        _ => line.new_no.map(|no| (CommentSide::New, no)),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Resolution + states (pure)
 // ---------------------------------------------------------------------------
@@ -1088,25 +1045,19 @@ pub enum DiffScope {
     /// Everything this branch adds over `merge-base(base_ref, HEAD)`,
     /// working tree included.
     Branch,
-    /// Changes since the current chat's last turn started.
-    LatestTurn,
-    // slopty: any turn's, picked beside the scope menu (the turn is the pane's `turn`).
-    /// The changes one earlier turn made.
-    Turn,
-    // slopty: no History surface (ruled out)
+    // slopty: no Latest turn (the worker keeps no turn's snapshots of a TUI's session) and no
+    // History surface (ruled out).
 }
 
 impl DiffScope {
     /// Scopes available from a Diff tab. History is selected from the surface
     /// picker instead, so it can keep its own tab and toolbar state.
-    pub const ALL: [DiffScope; 3] = [Self::WorkingTree, Self::Branch, Self::LatestTurn];
+    pub const ALL: [DiffScope; 2] = [Self::WorkingTree, Self::Branch];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::WorkingTree => "Working tree",
             Self::Branch => "Branch changes",
-            Self::LatestTurn => "Latest turn",
-            Self::Turn => "Turn", // slopty: any turn's.
         }
     }
 
@@ -1115,7 +1066,6 @@ impl DiffScope {
         match self {
             Self::WorkingTree => "workingTree",
             Self::Branch => "branch",
-            Self::LatestTurn | Self::Turn => "turn", // slopty: any turn's.
         }
     }
 }
@@ -1129,8 +1079,6 @@ pub fn scope_label(scope: DiffScope, count: usize, base: Option<&str>) -> String
             Some(base) => format!("{count} changed {files} vs {base}"),
             None => format!("{count} changed {files}"),
         },
-        DiffScope::LatestTurn => format!("{count} changed {files} this turn"),
-        DiffScope::Turn => format!("{count} changed {files} in this turn"), // slopty: any turn's.
     }
 }
 
@@ -1161,7 +1109,6 @@ pub fn clean_line(scope: DiffScope) -> &'static str {
     match scope {
         DiffScope::WorkingTree => "Edits in this folder show here.",
         DiffScope::Branch => "Commits on this branch show here.",
-        DiffScope::LatestTurn | DiffScope::Turn => "This turn didn't change any files.",
     }
 }
 
@@ -1190,8 +1137,6 @@ pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {
             Some(base) => format!("No changes vs {base}"),
             None => "No branch changes".to_string(),
         },
-        DiffScope::LatestTurn => "No changes this turn".to_string(),
-        DiffScope::Turn => "No changes in this turn".to_string(), // slopty: any turn's.
     }
 }
 
@@ -1224,21 +1169,6 @@ pub fn apply_diff_frame(diffs: &mut Vec<CheckoutDiff>, value: serde_json::Value)
             false
         }
     }
-}
-
-fn comment_state_key(
-    comments: &[ReviewComment],
-    draft: Option<&(String, CommentSide, u32)>,
-) -> u64 {
-    let mut parts: Vec<String> = comments
-        .iter()
-        .flat_map(|comment| [comment.id.clone(), comment.body.clone()])
-        .collect();
-    if let Some((path, side, line)) = draft {
-        parts.push(format!("draft:{path}:{}:{line}", side.tag()));
-    }
-    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-    hash64(&refs)
 }
 
 fn hash64(parts: &[&str]) -> u64 {
@@ -1536,14 +1466,6 @@ pub enum DiffRow {
         left: Option<u32>,
         right: Option<u32>,
     },
-    /// `card` indexes the file's own staged-comment slice, in staged order.
-    CommentCard {
-        file: u32,
-        card: u32,
-    },
-    CommentDraft {
-        file: u32,
-    },
     /// Trailing pad closing an expanded body ([`BODY_BOTTOM_PAD`]).
     BodyPad {
         file: u32,
@@ -1564,8 +1486,6 @@ impl DiffRow {
             | Self::Unchanged { file, .. }
             | Self::Line { file, .. }
             | Self::SplitLine { file, .. }
-            | Self::CommentCard { file, .. }
-            | Self::CommentDraft { file }
             | Self::BodyPad { file }
             | Self::FoldingBody { file } => file as usize,
         }
@@ -1573,24 +1493,19 @@ impl DiffRow {
 
     /// `FoldingBody` is height-animated, so it reports 0 and never lands in a
     /// height sum.
-    fn height(self, comments: &[ReviewComment], line_h: f32) -> f32 {
+    fn height(self, line_h: f32) -> f32 {
         match self {
             DiffRow::FileHeader { .. } => FILE_HEADER_HEIGHT,
             DiffRow::Notice { .. } => NOTICE_HEIGHT,
             DiffRow::Unchanged { .. } => UNCHANGED_HEIGHT,
             DiffRow::Line { .. } | DiffRow::SplitLine { .. } => line_h,
-            DiffRow::CommentCard { card, .. } => comments
-                .get(card as usize)
-                .map(|comment| comments::card_height(&comment.body))
-                .unwrap_or(0.0),
-            DiffRow::CommentDraft { .. } => comments::DRAFT_CARD_HEIGHT,
             DiffRow::BodyPad { .. } => BODY_BOTTOM_PAD,
             DiffRow::FoldingBody { .. } => 0.0,
         }
     }
 }
 
-/// Capacity hint only — comment cards are not counted. Split pairs can only
+/// Capacity hint only. Split pairs can only
 /// shrink the line count, so the unified count is a safe hint for both.
 pub fn body_row_count(file: &FileDiff) -> usize {
     let lines: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
@@ -1599,35 +1514,7 @@ pub fn body_row_count(file: &FileDiff) -> usize {
     file_notices(file).len() + gaps + lines + 1
 }
 
-pub fn body_rows(
-    file_ix: u32,
-    file: &FileDiff,
-    comments: &[ReviewComment],
-    draft: Option<(CommentSide, u32)>,
-    mode: DiffMode,
-) -> Vec<DiffRow> {
-    fn push_cards(
-        rows: &mut Vec<DiffRow>,
-        file_ix: u32,
-        comments: &[ReviewComment],
-        draft: Option<(CommentSide, u32)>,
-        anchors: &[Option<(CommentSide, u32)>],
-    ) {
-        for anchor in anchors.iter().flatten() {
-            for (ix, comment) in comments.iter().enumerate() {
-                if comment.diff_anchor() == Some(*anchor) {
-                    rows.push(DiffRow::CommentCard {
-                        file: file_ix,
-                        card: ix as u32,
-                    });
-                }
-            }
-            if draft == Some(*anchor) {
-                rows.push(DiffRow::CommentDraft { file: file_ix });
-            }
-        }
-    }
-
+pub fn body_rows(file_ix: u32, file: &FileDiff, mode: DiffMode) -> Vec<DiffRow> {
     let mut rows = Vec::with_capacity(body_row_count(file));
     for notice in 0..file_notices(file).len() {
         rows.push(DiffRow::Notice {
@@ -1645,14 +1532,13 @@ pub fn body_rows(
         }
         match mode {
             DiffMode::Unified => {
-                for (line_ix, line) in hunk.lines.iter().enumerate() {
+                for line_ix in 0..hunk.lines.len() {
                     rows.push(DiffRow::Line {
                         file: file_ix,
                         hunk: hunk_ix as u32,
                         line: line_ix as u32,
                         flat: hunk_flat + line_ix as u32,
                     });
-                    push_cards(&mut rows, file_ix, comments, draft, &[line_anchor(line)]);
                 }
             }
             DiffMode::Split => {
@@ -1663,8 +1549,6 @@ pub fn body_rows(
                         left,
                         right,
                     });
-                    let anchors = pair_anchors(&hunk.lines, (left, right));
-                    push_cards(&mut rows, file_ix, comments, draft, &anchors);
                 }
             }
         }
@@ -1676,12 +1560,9 @@ pub fn body_rows(
 
 /// Flatten all files into rows + each file's row span (header at
 /// `range.start`, body rows after it). `collapsed(ix)` folds a file to just
-/// its header. `comments` is the whole staged set; each file takes its own
-/// path's slice.
+/// its header.
 pub fn flatten_rows(
     files: &[FileDiff],
-    comments: &[ReviewComment],
-    draft: Option<(&str, CommentSide, u32)>,
     mode: DiffMode,
     mut collapsed: impl FnMut(usize) -> bool,
 ) -> (Vec<DiffRow>, Vec<std::ops::Range<usize>>) {
@@ -1691,15 +1572,7 @@ pub fn flatten_rows(
         let start = rows.len();
         rows.push(DiffRow::FileHeader { file: ix as u32 });
         if !collapsed(ix) {
-            let file_comments: Vec<ReviewComment> = comments
-                .iter()
-                .filter(|comment| !comment.is_file() && comment.path == file.path)
-                .cloned()
-                .collect();
-            let file_draft = draft
-                .filter(|(path, _, _)| *path == file.path)
-                .map(|(_, side, line)| (side, line));
-            rows.extend(body_rows(ix as u32, file, &file_comments, file_draft, mode));
+            rows.extend(body_rows(ix as u32, file, mode));
         }
         ranges.push(start..rows.len());
     }
@@ -1862,32 +1735,6 @@ struct RefMenu {
     _search_events: Subscription,
 }
 
-/// The line the pointer is on. Only one element per anchor ever takes the
-/// hover — the unified row, or a split row's right column — so the anchor
-/// alone identifies it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HoverRow {
-    path: String,
-    side: CommentSide,
-    line: u32,
-}
-
-struct CommentDraft {
-    editing_id: Option<String>,
-    /// Composer the note will stage onto, captured when the card opened. A
-    /// draft belongs to the checkout it was written over, so it must not
-    /// follow the user onto whatever chat is selected by commit time.
-    key: String,
-    path: String,
-    /// The file's pre-rename path, when it moved — carried onto the comment so
-    /// an `Old`-side citation names the file that line lives in.
-    old_path: Option<String>,
-    side: CommentSide,
-    line: u32,
-    input: Entity<ComposerInput>,
-    _events: Subscription,
-}
-
 // slopty: the find bar over the diff: its field, and the card holding the keyboard while the
 // field has it (↑↓ and ⏎ bubble to it).
 struct DiffFind {
@@ -1941,7 +1788,7 @@ pub struct Changes {
     /// `device:cwd` the branch list was fetched for.
     branches_for: Option<String>,
     branches_task: Option<Task<()>>,
-    /// One-shot scoped capture (Branch / Latest turn) + its fetch key.
+    /// One-shot scoped capture (Branch) + its fetch key.
     scoped: Option<CheckoutDiff>,
     scoped_for: Option<String>,
     scoped_error: Option<SharedString>,
@@ -1952,15 +1799,7 @@ pub struct Changes {
     /// The ref menu's list scroll and rail. Lives outside [`RefMenu`] so the
     /// rail can reach it mutably while the card plays its exit.
     ref_menu_scroll: crate::settings::widgets::PageScroll,
-    /// Only ever one: a second `+` moves the card rather than stacking two
-    /// half-written notes.
-    draft: Option<CommentDraft>,
-    hover: Option<HoverRow>,
-    comment_key: u64,
-    // slopty: any turn's diff, find in the diff, whitespace and the changed files' tree.
-    /// The turn [`DiffScope::Turn`] shows, by the id of the person's message that began it.
-    turn: Option<String>,
-    turn_menu: Popup<()>,
+    // slopty: find in the diff, whitespace and the changed files' tree.
     ignore_whitespace: bool,
     show_tree: bool,
     find: Option<DiffFind>,
@@ -1973,13 +1812,13 @@ pub struct Changes {
     /// The keyboard goes back to the pane on the next frame (the find was put away).
     refocus: bool,
     tree_scroll: gpui::ScrollHandle,
-    // slopty: the turn list's scroll, and the one rail the review aids share: on the turn menu
-    // while it is open, else on the tree (M26).
-    turn_list_scroll: gpui::ScrollHandle,
+    // slopty: the rail the review aids share, on the tree (M26).
     aid_rail: popover::MenuScrollbarState,
     /// The file last picked in the tree.
     tree_selected: Option<usize>,
-    _requested: Subscription,
+    /// slopty: the file asked for ([`show_file`]) until the diff lists it.
+    wanted_file: Option<String>,
+    _requested_file: Subscription,
     // slopty: no History surface (ruled out)
     _observe: Subscription,
 }
@@ -2001,10 +1840,9 @@ impl Changes {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         let settings = crate::settings::current(cx);
         let mode = DiffMode::from_split(settings.diff_split);
-        // slopty: a turn a transcript asks for while the tab is up, and the review aids' last
-        // choices.
-        let requested =
-            cx.observe_global::<RequestedTurn>(|this: &mut Self, cx| this.take_requested_turn(cx));
+        // slopty: a file the inspector asks for while the tab is up.
+        let requested_file =
+            cx.observe_global::<RequestedFile>(|this: &mut Self, cx| this.take_requested_file(cx));
         let mut this = Self {
             state,
             mode,
@@ -2040,11 +1878,6 @@ impl Changes {
             scope_menu: Popup::default(),
             ref_menu: Popup::default(),
             ref_menu_scroll: Default::default(),
-            draft: None,
-            hover: None,
-            comment_key: 0,
-            turn: None,
-            turn_menu: Popup::default(),
             // slopty: the review aids as the person last chose them, kept across launches.
             ignore_whitespace: settings.diff_ignore_whitespace,
             show_tree: settings.diff_show_tree,
@@ -2055,14 +1888,38 @@ impl Changes {
             focus: cx.focus_handle(),
             refocus: false,
             tree_scroll: gpui::ScrollHandle::new(),
-            turn_list_scroll: gpui::ScrollHandle::new(),
             aid_rail: popover::MenuScrollbarState::default(),
             tree_selected: None,
-            _requested: requested,
+            wanted_file: None,
+            _requested_file: requested_file,
             _observe: observe,
         };
-        this.take_requested_turn(cx); // slopty: a tab opened for a turn starts on it.
+        this.take_requested_file(cx); // slopty: a tab opened for a file starts on it.
         this
+    }
+
+    /// slopty: take the file the inspector asked for ([`show_file`]), and show it once listed.
+    fn take_requested_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = cx.try_global::<RequestedFile>().and_then(|asked| asked.0.clone()) else {
+            return;
+        };
+        cx.set_global(RequestedFile(None));
+        self.wanted_file = Some(path);
+        self.land_wanted_file(cx);
+    }
+
+    /// slopty: bring the file asked for to the top once the diff lists it.
+    fn land_wanted_file(&mut self, cx: &mut Context<Self>) {
+        let Some(wanted) = self.wanted_file.as_deref() else { return };
+        let Some(ix) = self
+            .parsed
+            .as_ref()
+            .and_then(|parsed| parsed.files.iter().position(|file| names_file(wanted, &file.path)))
+        else {
+            return;
+        };
+        self.wanted_file = None;
+        self.scroll_to_file(ix, cx);
     }
 
     // slopty: no History surface (ruled out)
@@ -2190,7 +2047,7 @@ impl Changes {
     fn active_diff(&self, cx: &App) -> Option<CheckoutDiff> {
         match self.scope {
             DiffScope::WorkingTree => self.resolved(cx),
-            DiffScope::Branch | DiffScope::LatestTurn | DiffScope::Turn => self.scoped.clone(), // slopty: no History surface (ruled out)
+            DiffScope::Branch => self.scoped.clone(), // slopty: no History surface (ruled out)
         }
     }
 
@@ -2202,8 +2059,6 @@ impl Changes {
         match self.scope {
             DiffScope::WorkingTree => "wt".to_string(),
             DiffScope::Branch => format!("br:{}", self.base_ref.as_deref().unwrap_or("")),
-            DiffScope::LatestTurn => "turn".to_string(),
-            DiffScope::Turn => format!("turn:{}", self.turn.as_deref().unwrap_or("")), // slopty: any turn's.
         }
     }
 
@@ -2309,17 +2164,15 @@ impl Changes {
             _ => None,
         };
         let target = self.desired_target(cx);
-        // slopty: the picked turn, and whether whitespace counts.
-        let turn = (self.scope == DiffScope::Turn).then(|| self.turn.clone()).flatten();
+        // slopty: whether whitespace counts.
         let ignore_whitespace = self.ignore_whitespace;
         let context = format!(
-            "{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}",
             target.as_deref().unwrap_or("local"),
             chat_id,
             cwd,
             self.scope.mode(),
             base.as_deref().unwrap_or(""), // slopty: no commit scope
-            turn.as_deref().unwrap_or(""),
             ignore_whitespace
         );
         let watch_sum = self.resolved(cx).map(|d| d.checksum).unwrap_or_default();
@@ -2350,8 +2203,8 @@ impl Changes {
             if let Some(base) = base {
                 params.insert("baseRef".into(), serde_json::Value::String(base));
             }
-            // slopty: which turn, and whitespace ignored (`git diff -w`).
-            scoped_params(&mut params, turn, ignore_whitespace);
+            // slopty: whitespace ignored (`git diff -w`).
+            scoped_params(&mut params, ignore_whitespace);
             if let Some(target) = target {
                 params.insert("targetDeviceId".into(), serde_json::Value::String(target));
             }
@@ -2455,7 +2308,6 @@ impl Changes {
 
     /// Reconcile parsed content with the currently-active diff.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        self.discard_stale_draft(cx);
         // The watch follows the selected chat's host device (idempotent when
         // the target is unchanged); a boot-deferred attempt retries here too.
         self.ensure_watch(cx);
@@ -2476,7 +2328,6 @@ impl Changes {
         };
         let key = self.parse_key(&diff);
         if self.parsed.as_ref().is_some_and(|p| p.key == key) {
-            self.sync_comment_rows(cx);
             return;
         }
         // Parse off the render path — patches run to megabytes.
@@ -2531,18 +2382,9 @@ impl Changes {
                         FileFold { collapsed: true, held: true, ..FileFold::default() },
                     );
                 }
-                let staged = changes.staged_comments(cx);
-                let draft = changes.draft_anchor();
-                let (rows, ranges) = flatten_rows(
-                    &files,
-                    &staged,
-                    draft
-                        .as_ref()
-                        .map(|(path, side, line)| (path.as_str(), *side, *line)),
-                    changes.mode,
-                    |ix| held.get(ix).copied().unwrap_or(false),
-                );
-                changes.comment_key = comment_state_key(&staged, draft.as_ref());
+                let (rows, ranges) = flatten_rows(&files, changes.mode, |ix| {
+                    held.get(ix).copied().unwrap_or(false)
+                });
                 // The uniform hint keeps offsets for never-rendered rows
                 // sane (most rows ARE lines); real heights land as rows
                 // render.
@@ -2627,13 +2469,7 @@ impl Changes {
             let body = if collapsed {
                 Vec::new()
             } else {
-                body_rows(
-                    file_ix as u32,
-                    file,
-                    &self.comments_for(&file.path, cx),
-                    self.draft_anchor_in(&file.path),
-                    self.mode,
-                )
+                body_rows(file_ix as u32, file, self.mode)
             };
             let fold = self.folds.entry(file.path.clone()).or_default();
             fold.collapsed = collapsed;
@@ -2643,13 +2479,7 @@ impl Changes {
             cx.notify();
             return;
         }
-        let expanded_height = body_height_with(
-            file,
-            &self.comments_for(&file.path, cx),
-            self.draft_anchor_in(&file.path),
-            self.mode,
-            diff_line_height(Theme::of(cx)),
-        );
+        let expanded_height = body_height_with(file, self.mode, diff_line_height(Theme::of(cx)));
         let fold = self.folds.entry(file.path.clone()).or_default();
         let currently_collapsed = fold.collapsed;
         fold.from = if currently_collapsed {
@@ -2727,13 +2557,7 @@ impl Changes {
             let body = if fold.collapsed {
                 Vec::new()
             } else {
-                body_rows(
-                    file_ix as u32,
-                    file,
-                    &self.comments_for(&file.path, cx),
-                    self.draft_anchor_in(&file.path),
-                    self.mode,
-                )
+                body_rows(file_ix as u32, file, self.mode)
             };
             self.replace_file_body(file_ix, body);
         }
@@ -2780,44 +2604,19 @@ impl Changes {
             fold.held &= collapse; // slopty: expanding all loads every file
             fold.toggled_at = None;
         }
-        let staged = self.staged_comments(cx);
-        let draft = self.draft_anchor();
         for file_ix in (0..self.row_ranges.len().min(files.len())).rev() {
             let range = &self.row_ranges[file_ix];
             let body = range.start + 1..range.end;
-            let new_len = if collapse {
-                0
-            } else {
-                let file = &files[file_ix];
-                let comments: Vec<ReviewComment> = staged
-                    .iter()
-                    .filter(|comment| !comment.is_file() && comment.path == file.path)
-                    .cloned()
-                    .collect();
-                body_rows(
-                    file_ix as u32,
-                    file,
-                    &comments,
-                    self.draft_anchor_in(&file.path),
-                    self.mode,
-                )
-                .len()
-            };
+            let new_len =
+                if collapse { 0 } else { body_rows(file_ix as u32, &files[file_ix], self.mode).len() };
             if body.len() != new_len {
                 self.list.splice(body, new_len);
             }
         }
-        let (rows, ranges) = flatten_rows(
-            &files,
-            &staged,
-            draft
-                .as_ref()
-                .map(|(path, side, line)| (path.as_str(), *side, *line)),
-            self.mode,
-            |_| collapse,
-        );
+        let (rows, ranges) = flatten_rows(&files, self.mode, |_| collapse);
         self.rows = rows;
         self.row_ranges = ranges;
+        self.land_wanted_file(cx); // slopty: a file asked for before it was listed
         cx.notify();
     }
 
@@ -2832,8 +2631,6 @@ impl Changes {
         crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
             settings.diff_split = split;
         });
-        // A draft's `+` sits in a column that may not exist after the swap.
-        self.hover = None;
         self.reflatten(cx);
     }
 
@@ -2883,17 +2680,8 @@ impl Changes {
                     .is_some_and(|fold| fold.collapsed)
             })
             .collect();
-        let staged = self.staged_comments(cx);
-        let draft = self.draft_anchor();
-        let (rows, ranges) = flatten_rows(
-            &files,
-            &staged,
-            draft
-                .as_ref()
-                .map(|(path, side, line)| (path.as_str(), *side, *line)),
-            self.mode,
-            |ix| collapsed.get(ix).copied().unwrap_or(false),
-        );
+        let (rows, ranges) =
+            flatten_rows(&files, self.mode, |ix| collapsed.get(ix).copied().unwrap_or(false));
         let row_height = px(diff_line_height(Theme::of(cx)));
         self.list.reset_with_uniform_height(rows.len(), row_height);
         self.rows = rows;
@@ -2904,250 +2692,7 @@ impl Changes {
         {
             self.list.scroll_to_reveal_item(start);
         }
-        cx.notify();
-    }
-
-    /// Cloned because rendering borrows `self` mutably a moment later.
-    fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
-        let state = self.state.read(cx);
-        state
-            .review_comments(&state.composer_key())
-            .iter()
-            .filter(|comment| {
-                self.draft
-                    .as_ref()
-                    .and_then(|draft| draft.editing_id.as_ref())
-                    != Some(&comment.id)
-            })
-            .cloned()
-            .collect()
-    }
-
-    fn comments_for(&self, path: &str, cx: &App) -> Vec<ReviewComment> {
-        self.staged_comments(cx)
-            .into_iter()
-            .filter(|comment| !comment.is_file() && comment.path == path)
-            .collect()
-    }
-
-    /// The parsed diff's pre-rename path for `path`, when the file moved.
-    fn old_path_of(&self, path: &str) -> Option<String> {
-        self.parsed
-            .as_ref()?
-            .files
-            .iter()
-            .find(|file| file.path == path)?
-            .old_path
-            .clone()
-    }
-
-    /// A draft belongs to the checkout it was opened over. Chat navigation
-    /// swaps both the diff under it and the composer it would stage onto, so
-    /// the half-written note is dropped rather than following the user across.
-    fn discard_stale_draft(&mut self, cx: &mut Context<Self>) {
-        let key = self.state.read(cx).composer_key();
-        if self.draft.as_ref().is_some_and(|draft| draft.key != key) {
-            self.draft = None;
-            self.sync_comment_rows(cx);
-            cx.notify();
-        }
-    }
-
-    fn draft_anchor(&self) -> Option<(String, CommentSide, u32)> {
-        self.draft
-            .as_ref()
-            .map(|draft| (draft.path.clone(), draft.side, draft.line))
-    }
-
-    fn draft_anchor_in(&self, path: &str) -> Option<(CommentSide, u32)> {
-        self.draft
-            .as_ref()
-            .filter(|draft| draft.path == path)
-            .map(|draft| (draft.side, draft.line))
-    }
-
-    fn sync_comment_rows(&mut self, cx: &mut Context<Self>) {
-        if self.parsed.is_none() {
-            return;
-        }
-        let staged = self.staged_comments(cx);
-        let draft = self.draft_anchor();
-        let key = comment_state_key(&staged, draft.as_ref());
-        if key == self.comment_key {
-            return;
-        }
-        self.comment_key = key;
-        let Some(parsed) = &self.parsed else {
-            return;
-        };
-        let files = parsed.files.clone();
-        for file_ix in (0..self.row_ranges.len().min(files.len())).rev() {
-            let file = &files[file_ix];
-            // A mid-tween stand-in is the settle sweep's to replace.
-            if self
-                .folds
-                .get(&file.path)
-                .is_some_and(|fold| fold.collapsed)
-            {
-                continue;
-            }
-            let range = &self.row_ranges[file_ix];
-            if self.rows.get(range.start + 1)
-                == Some(&DiffRow::FoldingBody {
-                    file: file_ix as u32,
-                })
-            {
-                continue;
-            }
-            let comments: Vec<ReviewComment> = staged
-                .iter()
-                .filter(|comment| !comment.is_file() && comment.path == file.path)
-                .cloned()
-                .collect();
-            let body = body_rows(
-                file_ix as u32,
-                file,
-                &comments,
-                self.draft_anchor_in(&file.path),
-                self.mode,
-            );
-            self.replace_file_body(file_ix, body);
-        }
-        cx.notify();
-    }
-
-    fn set_hover(
-        &mut self,
-        path: &str,
-        anchor: Option<(CommentSide, u32)>,
-        cx: &mut Context<Self>,
-    ) {
-        let next = anchor.map(|(side, line)| HoverRow {
-            path: path.to_string(),
-            side,
-            line,
-        });
-        if next != self.hover {
-            self.hover = next;
-            cx.notify();
-        }
-    }
-
-    fn hovering(&self, path: &str, anchor: (CommentSide, u32)) -> bool {
-        self.hover
-            .as_ref()
-            .is_some_and(|hover| hover.path == path && (hover.side, hover.line) == anchor)
-    }
-
-    fn clear_hover_at(&mut self, path: &str, anchor: (CommentSide, u32), cx: &mut Context<Self>) {
-        if self.hovering(path, anchor) {
-            self.hover = None;
-            cx.notify();
-        }
-    }
-
-    fn open_draft(
-        &mut self,
-        path: String,
-        side: CommentSide,
-        line: u32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let input = cx.new(|cx| ComposerInput::new("Request a change…", cx));
-        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
-            ComposerInputEvent::Submitted => this.commit_draft(cx),
-            ComposerInputEvent::Edited => cx.notify(),
-            _ => {}
-        });
-        let handle = input.read(cx).focus_handle(cx);
-        let key = self.state.read(cx).composer_key();
-        let old_path = self.old_path_of(&path);
-        self.draft = Some(CommentDraft {
-            editing_id: None,
-            key,
-            path,
-            old_path,
-            side,
-            line,
-            input,
-            _events: events,
-        });
-        window.focus(&handle, cx);
-        self.sync_comment_rows(cx);
-        cx.notify();
-    }
-
-    fn edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let state = self.state.read(cx);
-        let Some(comment) = state
-            .review_comments(&state.composer_key())
-            .iter()
-            .find(|comment| comment.id == id && !comment.is_file())
-            .cloned()
-        else {
-            return;
-        };
-        let Some((side, line)) = comment.diff_anchor() else {
-            return;
-        };
-        self.open_draft(comment.path.clone(), side, line, window, cx);
-        // slopty: no unwrap.
-        let Some(draft) = self.draft.as_mut() else {
-            return;
-        };
-        draft.editing_id = Some(comment.id);
-        if let comments::CommentSource::Diff { old_path, .. } = comment.source {
-            draft.old_path = old_path;
-        }
-        draft
-            .input
-            .update(cx, |input, cx| input.set_text(comment.body, cx));
-        self.sync_comment_rows(cx);
-        cx.notify();
-    }
-
-    fn cancel_draft(&mut self, cx: &mut Context<Self>) {
-        self.draft = None;
-        self.sync_comment_rows(cx);
-        cx.notify();
-    }
-
-    fn commit_draft(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = self.draft.take() else {
-            return;
-        };
-        let body = draft.input.read(cx).text().trim().to_string();
-        if body.is_empty() {
-            self.sync_comment_rows(cx);
-            cx.notify();
-            return;
-        }
-
-        // `draft.key`, not the live one: the note stages onto the composer it
-        // was written against even if the selection moved under it.
-        let key = draft.key;
-        self.state.update(cx, |state, cx| {
-            if let Some(id) = draft.editing_id {
-                state.update_review_comment_body(&key, &id, body);
-            } else {
-                let comment = ReviewComment::new(draft.path, draft.side, draft.line, body)
-                    .renamed_from(draft.old_path);
-                state.add_review_comment(&key, comment);
-            }
-            cx.notify();
-        });
-        self.sync_comment_rows(cx);
-        cx.notify();
-    }
-
-    fn remove_comment(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.state.update(cx, |state, cx| {
-            let key = state.composer_key();
-            state.remove_review_comment(&key, id);
-            cx.notify();
-        });
-        self.sync_comment_rows(cx);
+        self.land_wanted_file(cx); // slopty: a file asked for before it was listed
         cx.notify();
     }
 
@@ -3166,11 +2711,7 @@ impl Changes {
     /// Handle Escape before focused descendants such as a terminal receive it.
     /// A popup in its exit animation remains a blocker until it unmounts.
     pub(crate) fn handle_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        // slopty: the turn menu and the find bar close on Escape too.
-        if self.turn_menu.is_open() {
-            self.close_turn_menu(cx);
-            return true;
-        }
+        // slopty: the find bar closes on Escape too.
         if self.find.is_some() {
             self.close_find(cx);
             return true;
@@ -3183,9 +2724,7 @@ impl Changes {
             self.close_scope_menu(cx);
             return true;
         }
-        self.scope_menu.get().is_some()
-            || self.ref_menu.get().is_some()
-            || self.turn_menu.get().is_some() // slopty: the turn menu.
+        self.scope_menu.get().is_some() || self.ref_menu.get().is_some()
     }
 
     fn open_ref_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3389,13 +2928,7 @@ impl Changes {
         let tweening = self.row_ranges.get(file_ix).and_then(|range| self.rows.get(range.start + 1))
             == Some(&DiffRow::FoldingBody { file: file_ix as u32 });
         if !folded && !tweening {
-            let body = body_rows(
-                file_ix as u32,
-                &file,
-                &self.comments_for(&file.path, cx),
-                self.draft_anchor_in(&file.path),
-                self.mode,
-            );
+            let body = body_rows(file_ix as u32, &file, self.mode);
             self.replace_file_body(file_ix, body);
         }
         self.refresh_find(cx);
@@ -3659,7 +3192,7 @@ impl Changes {
                     .unwrap_or(&[]);
                 let gutter_px = gutter_width(file_diff);
                 let marks = self.line_marks(file, hunk, line_ix, &theme); // slopty: find, words.
-                let row = diff_line_row(
+                diff_line_row(
                     line,
                     spans,
                     &theme,
@@ -3667,34 +3200,7 @@ impl Changes {
                     code_width,
                     Some(code_scroll.slot("unified")),
                     &marks,
-                );
-                let Some((side, line_no)) = line_anchor(line) else {
-                    return row;
-                };
-                let path = file_diff.path.clone();
-                let hovered = self.hovering(&path, (side, line_no));
-                let move_path = path.clone();
-                let leave_path = path.clone();
-                div()
-                    .id(("diff-line", ix))
-                    .w_full()
-                    .relative()
-                    .child(row)
-                    .when(hovered, |el| {
-                        el.child(positioned_adder(
-                            comment_adder_left(side, gutter_px),
-                            render_comment_adder(&path, side, line_no, &theme, cx),
-                        ))
-                    })
-                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                        this.set_hover(&move_path, Some((side, line_no)), cx);
-                    }))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if !*hovered {
-                            this.clear_hover_at(&leave_path, (side, line_no), cx);
-                        }
-                    }))
-                    .into_any_element()
+                )
             }
             DiffRow::SplitLine {
                 file,
@@ -3732,10 +3238,6 @@ impl Changes {
                 {
                     return meta_line_row(&line.text, &theme, 2.0 * (ACCENT_BAR_WIDTH + gutter_px));
                 }
-                // Refcounted, not cloned per listener: a split row wires up to
-                // four of them, and this runs for every row in the viewport
-                // plus the list's overdraw, every frame.
-                let path: SharedString = file_diff.path.clone().into();
                 // A mirrored row's columns carry the same text and the same
                 // spans, so the runs are built once and shared — context is
                 // most of a diff, so this is most of the rows.
@@ -3762,83 +3264,13 @@ impl Changes {
                         )
                     })
                 };
-                // The left column is inert. It shows the pre-change file, and
-                // a deleted line is not there to be changed — a note on it
-                // would cite a line the agent cannot edit. Everything is cited
-                // against the new file, so only the right column takes a `+`.
-                // Cards for old-side notes still render (they are pushed by
-                // the row, not the column), so switching layouts never hides
-                // one that is already staged.
                 let left = cell(left, true)
                     .map(IntoElement::into_any_element)
                     .unwrap_or_else(|| split_filler().into_any_element());
-                let right = match (cell(right, false), right.and_then(line_anchor)) {
-                    (Some(cell), Some(anchor)) => {
-                        let (side, line_no) = anchor;
-                        let (move_path, leave_path) = (path.clone(), path.clone());
-                        cell.id(("split-new", ix))
-                            .when(self.hovering(&path, anchor), |el| {
-                                el.relative().child(positioned_adder(
-                                    split_adder_left(gutter_px),
-                                    render_comment_adder(&path, side, line_no, &theme, cx),
-                                ))
-                            })
-                            .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                                this.set_hover(&move_path, Some(anchor), cx);
-                            }))
-                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                                if !*hovered {
-                                    this.clear_hover_at(&leave_path, anchor, cx);
-                                }
-                            }))
-                            .into_any_element()
-                    }
-                    (Some(cell), None) => cell.into_any_element(),
-                    (None, _) => split_filler().into_any_element(),
-                };
+                let right = cell(right, false)
+                    .map(IntoElement::into_any_element)
+                    .unwrap_or_else(|| split_filler().into_any_element());
                 split_row(left, right, self.wrap_lines, &theme).into_any_element()
-            }
-            DiffRow::CommentCard { file, card } => {
-                let Some(file_diff) = files.get(file as usize) else {
-                    return gpui::Empty.into_any_element();
-                };
-                let comments = self.comments_for(&file_diff.path, cx);
-                match comments.get(card as usize) {
-                    Some(comment) => crate::comment_ui::render_comment_card(
-                        comment,
-                        &theme,
-                        cx,
-                        Self::edit_comment,
-                        Self::remove_comment,
-                        None,
-                    ),
-                    None => gpui::Empty.into_any_element(),
-                }
-            }
-            DiffRow::CommentDraft { file } => {
-                let Some(file_diff) = files.get(file as usize) else {
-                    return gpui::Empty.into_any_element();
-                };
-                match self
-                    .draft
-                    .as_ref()
-                    .filter(|draft| draft.path == file_diff.path)
-                {
-                    // Header cites the same path the staged card and the
-                    // prompt bullet will.
-                    Some(draft) => crate::comment_ui::render_comment_draft(
-                        draft_cite_path(draft),
-                        draft.line,
-                        draft.input.clone(),
-                        draft.editing_id.is_some(),
-                        &theme,
-                        cx,
-                        Self::cancel_draft,
-                        Self::commit_draft,
-                        None,
-                    ),
-                    None => gpui::Empty.into_any_element(),
-                }
             }
             DiffRow::BodyPad { .. } => div().w_full().h(px(BODY_BOTTOM_PAD)).into_any_element(),
             DiffRow::FoldingBody { file } => {
@@ -4308,7 +3740,6 @@ impl Changes {
             .gap(px(crate::surface_chrome::CONTROL_GAP))
             .child(trigger)
             .children(self.render_ref_selector(&theme, cx))
-            .children(self.render_turn_selector(&theme, cx)) // slopty: any turn's diff.
             .child(div().flex_1()) // slopty: no History surface (ruled out)
             .child(trailing)
             .into_any_element()
@@ -5113,61 +4544,6 @@ fn split_row(left: AnyElement, right: AnyElement, wrapped: bool, theme: &Theme) 
         .child(right)
 }
 
-pub const COMMENT_ADDER_SIZE: f32 = 16.0;
-
-/// A split row's `+` only ever appears in the right column, which carries one
-/// gutter — so the offset is the same for every line. It is measured from the
-/// column, not the row: the halves are fluid, so the right one has no
-/// absolute left edge to measure from.
-pub fn split_adder_left(gutter_px: f32) -> f32 {
-    ACCENT_BAR_WIDTH + (gutter_px - COMMENT_ADDER_SIZE) / 2.0
-}
-
-/// A unified row carries both gutters side by side, and a deletion numbers in
-/// the first.
-pub fn comment_adder_left(side: CommentSide, gutter_px: f32) -> f32 {
-    let column = match side {
-        CommentSide::Old => 0.0,
-        CommentSide::New => gutter_px,
-    };
-    ACCENT_BAR_WIDTH + column + (gutter_px - COMMENT_ADDER_SIZE) / 2.0
-}
-
-fn positioned_adder(left: f32, adder: AnyElement) -> gpui::Div {
-    div()
-        .absolute()
-        .left(px(left))
-        .top(px(0.0))
-        .h_full()
-        .flex()
-        .items_center()
-        .child(adder)
-}
-
-fn render_comment_adder(
-    path: &str,
-    side: CommentSide,
-    line: u32,
-    theme: &Theme,
-    cx: &Context<Changes>,
-) -> AnyElement {
-    let target = path.to_string();
-    crate::comment_ui::render_comment_adder(
-        format!("cmt-add-{path}-{}-{line}", side.tag()).into(),
-        theme,
-        cx,
-        move |this, window, cx| this.open_draft(target.clone(), side, line, window, cx),
-    )
-}
-
-/// Mirrors [`ReviewComment::cite_path`] for the not-yet-staged note.
-fn draft_cite_path(draft: &CommentDraft) -> &str {
-    match draft.side {
-        CommentSide::Old => draft.old_path.as_deref().unwrap_or(&draft.path),
-        CommentSide::New => &draft.path,
-    }
-}
-
 /// The expanded body of one file section: notices, unchanged-lines rows, +/-/context
 /// lines with a coloured accent bar, dual line-number gutters and
 /// paint-only syntax runs (slopty checkout-diff-sidebar).
@@ -5365,8 +4741,7 @@ impl Render for Changes {
             diff_phase(active.as_ref())
         };
         let error = self.error.clone();
-        // Scoped fetch failures replace the content area. "no turn recorded"
-        // is the expected pre-first-turn state, not an error; "unknown
+        // Scoped fetch failures replace the content area. "unknown
         // method" is version skew — the chat's host engine predates
         // GetCheckoutDiff (a still-running daemon after an app update, or a
         // remote device behind on releases) — say that instead of leaking
@@ -5385,16 +4760,10 @@ impl Render for Changes {
             .then(|| self.scoped_error.clone())
             .flatten()
             .map(|message| {
-                if message.contains("no turn recorded") {
-                    (
-                        "No turns yet".into(),
-                        Some("Send a message to see what it changes.".into()),
-                        false,
-                    )
-                } else if message.contains("unknown method") {
+                if message.contains("unknown method") {
                     (
                         format!("{host} runs an older Slopty").into(),
-                        Some("Update it to see branch and turn changes.".into()),
+                        Some("Update it to see the branch's changes.".into()),
                         false,
                     )
                 } else {
@@ -5617,74 +4986,6 @@ mod tests {
         changes.read_with(cx, |changes, _| assert!(changes.show_tree));
     }
 
-    #[gpui::test]
-    fn editing_staged_diff_comments_preserves_identity_and_cancellation(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Changes::new(state, cx)
-        });
-        window
-            .update(cx, |changes, window, cx| {
-                for side in [CommentSide::Old, CommentSide::New] {
-                    let original =
-                        ReviewComment::new("new.rs", side, 7, "Original 🦀\nSecond line")
-                            .renamed_from(Some("old.rs"));
-                    changes.state.update(cx, |state, _| {
-                        state.add_review_comment("", original.clone())
-                    });
-                    changes.edit_comment(&original.id, window, cx);
-                    let draft = changes.draft.as_ref().unwrap();
-                    assert_eq!(draft.input.read(cx).text(), original.body);
-                    assert_eq!(draft_cite_path(draft), original.cite_path());
-                    assert!(draft.input.read(cx).focus_handle(cx).is_focused(window));
-                    let input = draft.input.clone();
-                    input.update(cx, |input, cx| input.set_text("Cancelled", cx));
-                    assert_eq!(changes.state.read(cx).review_comments("")[0], original);
-                    changes.cancel_draft(cx);
-                    assert_eq!(
-                        changes.state.read(cx).review_comments(""),
-                        &[original.clone()]
-                    );
-
-                    changes.edit_comment(&original.id, window, cx);
-                    changes
-                        .draft
-                        .as_ref()
-                        .unwrap()
-                        .input
-                        .clone()
-                        .update(cx, |input, cx| {
-                            input.set_text("  Revised\nMore detail  ", cx)
-                        });
-                    changes.commit_draft(cx);
-                    let mut expected = original.clone();
-                    expected.body = "Revised\nMore detail".into();
-                    assert_eq!(
-                        changes.state.read(cx).review_comments(""),
-                        &[expected.clone()]
-                    );
-                    assert_ne!(
-                        comment_state_key(&[original], None),
-                        comment_state_key(&[expected.clone()], None)
-                    );
-                    changes.edit_comment(&expected.id, window, cx);
-                    let sent = changes
-                        .state
-                        .update(cx, |state, _| state.take_review_comments(""));
-                    assert!(comments::with_comments("", &sent).contains("Revised\n  More detail"));
-                    changes.commit_draft(cx);
-                    assert!(changes.state.read(cx).review_comments("").is_empty());
-                }
-            })
-            .unwrap();
-    }
-
     const PATCH: &str = "\
 diff --git a/src/main.rs b/src/main.rs
 index 111..222 100644
@@ -5819,7 +5120,7 @@ rename to new_name.rs
     #[test]
     fn rows_flatten_to_line_granularity() {
         let files = parse_patch(PATCH);
-        let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |_| false);
+        let (rows, ranges) = flatten_rows(&files, DiffMode::Unified, |_| false);
         assert_eq!(ranges.len(), files.len());
         // Every file's span starts with its header…
         for (ix, range) in ranges.iter().enumerate() {
@@ -5847,7 +5148,7 @@ rename to new_name.rs
         assert_eq!(*main_rows.last().unwrap(), DiffRow::BodyPad { file: 0 });
 
         // A collapsed file contributes its header row only.
-        let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |ix| ix == 0);
+        let (rows, ranges) = flatten_rows(&files, DiffMode::Unified, |ix| ix == 0);
         assert_eq!(ranges[0].len(), 1);
         assert_eq!(rows[ranges[1].start], DiffRow::FileHeader { file: 1 });
 
@@ -6074,7 +5375,7 @@ rename to new_name.rs
     #[test]
     fn split_flattening_pairs_rows_and_keeps_heights_analytic() {
         let files = parse_patch(PATCH);
-        let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Split, |_| false);
+        let (rows, ranges) = flatten_rows(&files, DiffMode::Split, |_| false);
         assert_eq!(ranges.len(), files.len());
         assert_eq!(ranges.last().unwrap().end, rows.len());
 
@@ -6107,7 +5408,7 @@ rename to new_name.rs
 
         // Heights stay analytic — the fold tween needs no measurement.
         assert_eq!(
-            body_height_with(&files[0], &[], None, DiffMode::Split, DIFF_LINE_HEIGHT),
+            body_height_with(&files[0], DiffMode::Split, DIFF_LINE_HEIGHT),
             UNCHANGED_HEIGHT + 6.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
         );
     }
@@ -6141,79 +5442,6 @@ rename to new_name.rs
         assert_eq!(capped[4], (Some(4), None));
     }
 
-    #[test]
-    fn a_split_row_offers_each_column_its_own_anchor() {
-        let files = parse_patch(PATCH);
-        let lines = &files[0].hunks[0].lines;
-        // The paired edit cites the old line on the left, the new on the right.
-        assert_eq!(
-            pair_anchors(lines, (Some(1), Some(2))),
-            [Some((CommentSide::Old, 2)), Some((CommentSide::New, 2))]
-        );
-        // A context row names one anchor, not the same one twice — otherwise
-        // its card would be pushed into the body in duplicate. The caller
-        // flattens, so the dropped duplicate reads as an empty slot.
-        assert_eq!(
-            pair_anchors(lines, (Some(0), Some(0))),
-            [Some((CommentSide::New, 1)), None]
-        );
-        // A stranded side contributes nothing.
-        assert_eq!(
-            pair_anchors(lines, (None, Some(3))),
-            [None, Some((CommentSide::New, 3))]
-        );
-    }
-
-    #[test]
-    fn split_rows_carry_the_comments_of_both_columns() {
-        let files = parse_patch(PATCH);
-        // A context row must not stack the same card twice.
-        let comment = ReviewComment::new("src/main.rs", CommentSide::New, 1, "why");
-        let rows = body_rows(0, &files[0], &[comment], None, DiffMode::Split);
-        assert_eq!(
-            rows.iter()
-                .filter(|row| matches!(row, DiffRow::CommentCard { .. }))
-                .count(),
-            1
-        );
-
-        // Both sides of one paired row hang off that row, in column order.
-        let staged = vec![
-            ReviewComment::new("src/main.rs", CommentSide::Old, 2, "left"),
-            ReviewComment::new("src/main.rs", CommentSide::New, 2, "right"),
-        ];
-        let rows = body_rows(0, &files[0], &staged, None, DiffMode::Split);
-        let edit = rows
-            .iter()
-            .position(|row| matches!(row, DiffRow::SplitLine { left: Some(1), .. }))
-            .unwrap();
-        assert_eq!(rows[edit + 1], DiffRow::CommentCard { file: 0, card: 0 });
-        assert_eq!(rows[edit + 2], DiffRow::CommentCard { file: 0, card: 1 });
-    }
-
-    #[test]
-    fn a_split_rows_right_column_is_never_a_deletion() {
-        // The invariant the `+` placement rests on: only the right column is
-        // hoverable, so every note a split row can start must cite the
-        // post-change file. Were a deletion ever to land on the right, that
-        // rule would quietly start filing notes against lines the agent
-        // cannot edit.
-        for file in parse_patch(PATCH) {
-            for hunk in &file.hunks {
-                for (_, right) in split_pairs(&hunk.lines) {
-                    let Some(line) = right.and_then(|ix| hunk.lines.get(ix as usize)) else {
-                        continue;
-                    };
-                    assert_ne!(line.kind, LineKind::Del, "{:?}", line);
-                    assert!(matches!(
-                        line_anchor(line),
-                        None | Some((CommentSide::New, _))
-                    ));
-                }
-            }
-        }
-    }
-
     // slopty: a large diff opens with a file past the file budget collapsed, and every file that
     // would take the open ones past the diff budget; each header then loads its own body alone.
     #[test]
@@ -6233,7 +5461,7 @@ rename to new_name.rs
         // Spent: 10; the large one held; 1 410; 2 810; 4 210 would pass the budget; 3 710 fits.
         let held = held_back(&files);
         assert_eq!(held, [false, true, false, false, true, false]);
-        let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |ix| held[ix]);
+        let (rows, ranges) = flatten_rows(&files, DiffMode::Unified, |ix| held[ix]);
         for (ix, range) in ranges.iter().enumerate() {
             assert_eq!(range.len() == 1, held[ix], "f{ix}: a held file is its header alone");
         }
@@ -6588,7 +5816,7 @@ rename to new_name.rs
         assert_eq!(unchanged_before(&file, 1), 0);
         assert!(!reveal_unchanged(&mut file, 1, u32::MAX, &source), "nothing left to show");
         assert!(
-            !body_rows(0, &file, &[], None, DiffMode::Unified)
+            !body_rows(0, &file, DiffMode::Unified)
                 .iter()
                 .any(|row| matches!(row, DiffRow::Unchanged { .. })),
             "a gap shown whole leaves no row"
@@ -6710,20 +5938,12 @@ rename to new_name.rs
         );
         assert_eq!(scope_label(DiffScope::Branch, 3, None), "3 changed files");
         assert_eq!(
-            scope_label(DiffScope::LatestTurn, 2, None),
-            "2 changed files this turn"
-        );
-        assert_eq!(
             clean_message(DiffScope::WorkingTree, None),
             "No uncommitted changes"
         );
         assert_eq!(
             clean_message(DiffScope::Branch, Some("develop")),
             "No changes vs develop"
-        );
-        assert_eq!(
-            clean_message(DiffScope::LatestTurn, None),
-            "No changes this turn"
         );
     }
 
@@ -6771,30 +5991,14 @@ rename to new_name.rs
         // `mode` is the GetCheckoutDiff wire contract — engine matches on it.
         assert_eq!(DiffScope::WorkingTree.mode(), "workingTree");
         assert_eq!(DiffScope::Branch.mode(), "branch");
-        assert_eq!(DiffScope::LatestTurn.mode(), "turn");
-        assert_eq!(DiffScope::Turn.mode(), "turn", "slopty: any turn's, named by `turn`");
         assert_eq!(DiffScope::default(), DiffScope::WorkingTree);
     }
 
-    // slopty: an earlier turn reads as one.
     #[test]
-    fn an_earlier_turn_has_its_own_words() {
-        assert_eq!(DiffScope::Turn.label(), "Turn");
-        assert_eq!(scope_label(DiffScope::Turn, 1, None), "1 changed file in this turn");
-        assert_eq!(clean_message(DiffScope::Turn, None), "No changes in this turn");
-    }
-
-    #[test]
-    // slopty: no History surface (ruled out)
-    fn diff_scope_menu_offers_three_scopes() {
-        assert_eq!(
-            DiffScope::ALL,
-            [
-                DiffScope::WorkingTree,
-                DiffScope::Branch,
-                DiffScope::LatestTurn,
-            ]
-        );
+    // slopty: no History surface (ruled out), no Latest turn (a TUI's session keeps no turn's
+    // snapshots).
+    fn diff_scope_menu_offers_two_scopes() {
+        assert_eq!(DiffScope::ALL, [DiffScope::WorkingTree, DiffScope::Branch]);
     }
 
     #[test]

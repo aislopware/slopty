@@ -19,25 +19,12 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use crate::motion::HoverFade as _;
 
 const MAX_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MEDIA_ENTRIES: usize = 32;
 const MAX_MARKDOWN_BYTES: usize = 2 * 1024 * 1024;
 const MAX_PREVIEW_CONTENT_WIDTH: f32 = 900.0;
 const PREVIEW_VERTICAL_PADDING: f32 = 16.0;
-
-/// A visual block cites its first source line. Notes on inner lines (for
-/// example list items or fenced code) remain attached to that containing block.
-fn block_source_lines(source: &str, tree: &BlockTree) -> Vec<u32> {
-    let starts: Vec<usize> = std::iter::once(0)
-        .chain(source.match_indices('\n').map(|(offset, _)| offset + 1))
-        .collect();
-    tree.blocks
-        .iter()
-        .map(|top| starts.partition_point(|start| *start <= top.range.start) as u32)
-        .collect()
-}
 
 /// A preview of a file beyond the workspace renders its local links as
 /// plain text: they would resolve against the linking chat's checkout, not
@@ -85,14 +72,6 @@ fn web_target(target: &str) -> bool {
             && url::Url::parse(target).is_ok_and(|url| url.scheme() == "mailto"))
 }
 
-fn comment_block(lines: &[u32], line: u32) -> Option<usize> {
-    (!lines.is_empty()).then(|| {
-        lines
-            .partition_point(|start| *start <= line)
-            .saturating_sub(1)
-    })
-}
-
 pub(super) fn is_markdown(path: &str) -> bool {
     path.rsplit_once('.')
         .is_some_and(|(_, ext)| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
@@ -113,9 +92,6 @@ fn preview_link_outcome(activation: &render::LinkActivation) -> render::LinkOutc
 
 /// URL path resolution is independent of the UI host's filesystem.
 pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, Option<String>)> {
-    if let Some(target) = target.strip_prefix("slopty-file:") {
-        return relative_target("", target);
-    }
     if target.starts_with('/') || target.contains(':') || target.contains('\\') {
         return None;
     }
@@ -168,10 +144,6 @@ pub(super) struct MarkdownPreview {
     scope: String,
     tree: BlockTree,
     parsed_source: Arc<str>,
-    block_lines: Vec<u32>,
-    comment_owner: Option<gpui::WeakEntity<super::FilesSurface>>,
-    comments: Vec<crate::comments::ReviewComment>,
-    comment_draft: Option<(u32, gpui::Entity<crate::composer::ComposerInput>, bool)>,
     pub editor: Option<gpui::WeakEntity<super::editor::FileEditorState>>,
     list: ListState,
     cache: Rc<RefCell<RenderCache>>,
@@ -295,101 +267,6 @@ impl MarkdownPreview {
             self.zoom_render = Some(next);
         }
     }
-    pub(super) fn set_comments(
-        &mut self,
-        owner: gpui::WeakEntity<super::FilesSurface>,
-        comments: Vec<crate::comments::ReviewComment>,
-        draft: Option<(u32, gpui::Entity<crate::composer::ComposerInput>, bool)>,
-        cx: &mut Context<Self>,
-    ) {
-        self.comment_owner = Some(owner);
-        if self.comments != comments || self.comment_draft != draft {
-            self.comments = comments;
-            self.comment_draft = draft;
-            self.list.remeasure_items(0..self.tree.len());
-            cx.notify();
-        }
-    }
-
-    fn open_comment(
-        &mut self,
-        line: u32,
-        source: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.truncated {
-            return;
-        }
-        if let Some(owner) = &self.comment_owner {
-            let _ = owner.update(cx, |owner, cx| {
-                owner.open_markdown_comment(self.path.clone(), line, source, window, cx)
-            });
-        }
-    }
-
-    fn cancel_comment(&mut self, cx: &mut Context<Self>) {
-        if let Some(owner) = &self.comment_owner {
-            let _ = owner.update(cx, |owner, cx| owner.cancel_editor_comment(cx));
-        }
-    }
-
-    fn commit_comment(&mut self, cx: &mut Context<Self>) {
-        if let Some(owner) = &self.comment_owner {
-            let _ = owner.update(cx, |owner, cx| owner.commit_editor_comment(cx));
-        }
-    }
-
-    fn edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(owner) = &self.comment_owner {
-            let _ = owner.update(cx, |owner, cx| owner.edit_editor_comment(id, window, cx));
-        }
-    }
-
-    fn remove_comment(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(owner) = &self.comment_owner {
-            let _ = owner.update(cx, |owner, cx| owner.remove_editor_comment(id, cx));
-        }
-    }
-
-    fn comment_elements(&self, ix: usize, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
-        let column = Some(crate::comment_ui::CommentContentColumn {
-            max_width: MAX_PREVIEW_CONTENT_WIDTH,
-            gutter: 24.0,
-        });
-        let mut elements: Vec<_> = self
-            .comments
-            .iter()
-            .filter(|comment| comment_block(&self.block_lines, comment.line) == Some(ix))
-            .map(|comment| {
-                crate::comment_ui::render_comment_card(
-                    comment,
-                    theme,
-                    cx,
-                    Self::edit_comment,
-                    Self::remove_comment,
-                    column,
-                )
-            })
-            .collect();
-        if let Some((line, input, editing)) = &self.comment_draft {
-            if comment_block(&self.block_lines, *line) == Some(ix) {
-                elements.push(crate::comment_ui::render_comment_draft(
-                    &self.path,
-                    *line,
-                    input.clone(),
-                    *editing,
-                    theme,
-                    cx,
-                    Self::cancel_comment,
-                    Self::commit_comment,
-                    column,
-                ));
-            }
-        }
-        elements
-    }
-
     pub fn new(
         path: String,
         open_file: Rc<dyn Fn(String, &mut gpui::App)>,
@@ -408,10 +285,6 @@ impl MarkdownPreview {
         .detach();
         Self {
             parsed_source: Arc::from(""),
-            block_lines: Vec::new(),
-            comment_owner: None,
-            comments: Vec::new(),
-            comment_draft: None,
             editor: None,
             image_generation: 0,
             media_dirty: true,
@@ -484,7 +357,7 @@ impl MarkdownPreview {
             cx.background_executor()
                 .timer(Duration::from_millis(120))
                 .await;
-            let (tree, highlights, anchors, block_lines) = cx
+            let (tree, highlights, anchors) = cx
                 .background_executor()
                 .spawn(async move {
                     let mut tree = parser::parse_full(&source);
@@ -493,7 +366,6 @@ impl MarkdownPreview {
                             strip_outside_links(&mut Arc::make_mut(top).block);
                         }
                     }
-                    let block_lines = block_source_lines(&source, &tree);
                     let mut highlights = HashMap::new();
                     let mut anchors = HashMap::new();
                     for (ix, top) in tree.blocks.iter().enumerate() {
@@ -525,7 +397,7 @@ impl MarkdownPreview {
                             anchors.insert(unique, ix);
                         }
                     }
-                    (tree, highlights, anchors, block_lines)
+                    (tree, highlights, anchors)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
@@ -557,7 +429,6 @@ impl MarkdownPreview {
                 view.code_fences
                     .retain(|key, _| active_code_fences.contains(key));
                 view.parsed_source = parsed_source;
-                view.block_lines = block_lines;
                 view.highlights = highlights;
                 view.anchors = anchors;
                 view.cache.borrow_mut().clear();
@@ -798,10 +669,6 @@ impl MarkdownPreview {
         self.version = None;
         self.tree = BlockTree::default();
         self.parsed_source = Arc::from("");
-        self.block_lines.clear();
-        self.comment_owner = None;
-        self.comments.clear();
-        self.comment_draft = None;
         self.editor = None;
         self.highlights.clear();
         self.anchors.clear();
@@ -1252,30 +1119,13 @@ impl MarkdownPreview {
                 });
                 opts.link = Some(link.clone());
                 opts.copy = Some(self.copy_ui_for(&opts.row_key, cx));
-                // slopty: the block's hover, faded; its comment adder fades in with it (M23).
-                let reveal: gpui::SharedString = format!("{}-comment-{ix}", self.scope).into();
-                let shown = crate::motion::hover_t(&reveal);
-                let comment_line = self.block_lines.get(ix).copied().filter(|_| {
-                    self.comment_owner.is_some()
-                        && !self.truncated
-                        && self
-                            .editor
-                            .as_ref()
-                            .and_then(|e| e.upgrade())
-                            .is_some_and(|e| e.read(cx).context_menu_capabilities().is_editable())
-                });
-                let comments = self.comment_elements(ix, &theme, cx);
-                let comment_source = self.parsed_source.clone();
+                // slopty: no notes on blocks; the preview is read-only toward the agent.
                 Some(
                     div()
-                        .id(reveal.clone())
                         .w_full()
                         .flex()
                         .flex_col()
                         .pb(px(render::MD_BLOCK_GAP))
-                        // Include the comment gutter so moving from the block to
-                        // its button never leaves the hover.
-                        .hover_fade(reveal)
                         .child(
                             div().w_full().flex().justify_center().px(px(24.0)).child(
                                 div()
@@ -1283,29 +1133,6 @@ impl MarkdownPreview {
                                     .max_w(px(MAX_PREVIEW_CONTENT_WIDTH))
                                     .min_w_0()
                                     .relative()
-                                    .when_some(comment_line, |el, line| {
-                                        el.child(
-                                            div()
-                                                .absolute()
-                                                .left(px(-20.0))
-                                                .top(px(3.0))
-                                                .opacity(shown)
-                                                .child(crate::comment_ui::render_comment_adder(
-                                                    format!("{}-comment-add-{ix}", self.scope)
-                                                        .into(),
-                                                    &theme,
-                                                    cx,
-                                                    move |this, window, cx| {
-                                                        this.open_comment(
-                                                            line,
-                                                            &comment_source,
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    },
-                                                )),
-                                        )
-                                    })
                                     .child(render::render_block(
                                         &top.block,
                                         ix,
@@ -1317,7 +1144,6 @@ impl MarkdownPreview {
                                     )),
                             ),
                         )
-                        .children(comments)
                         .into_any_element(),
                 )
             })
@@ -1450,17 +1276,6 @@ mod tests {
                 allowed
             );
         }
-    }
-    #[test]
-    fn comments_map_to_original_lines_and_containing_blocks() {
-        let source = "# Título 🦀\r\n\r\nPárrafo\r\nsegunda línea\r\n\r\n- uno\r\n- dos\r\n\r\n```mermaid\r\ngraph TD; A-->B\r\n```\r\n";
-        let lines = block_source_lines(source, &parser::parse_full(source));
-        assert_eq!(lines, [1, 3, 6, 9]);
-        assert_eq!(comment_block(&lines, 4), Some(1));
-        assert_eq!(comment_block(&lines, 7), Some(2));
-        assert_eq!(comment_block(&lines, 10), Some(3));
-        assert_eq!(comment_block(&lines, 11), Some(3));
-        assert_eq!(comment_block(&[], 1), None);
     }
     #[test]
     fn markdown_paths_and_links() {

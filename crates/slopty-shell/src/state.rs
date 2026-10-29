@@ -18,7 +18,7 @@
 //! Pure logic (sort order, staleness, gate phase) lives in free functions with
 //! unit tests; rendering reads them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,7 +28,6 @@ use gpui::{App, Context, Entity, Task};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
-use crate::comments::ReviewComment;
 mod slow_calls; // slopty: a call that runs long says so
 use slopty_view_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 // slopty: the embedded engine is cut; its service comes in through the boot config.
@@ -330,24 +329,6 @@ fn session_presence(session: &Session, now: DateTime<Utc>) -> (Indicator, u32) {
 // AppState entity
 // ---------------------------------------------------------------------------
 
-/// A composer send whose doc command is queued but not yet executed by the
-/// chat's host device — cleared when the host writes the user message back
-/// into the transcript (same client-minted id as the [`AppState::echoes`]
-/// dedup); past [`UNDELIVERED_GRACE_MS`] it surfaces as the explicit
-/// failed/retry state instead.
-#[derive(Debug, Clone)]
-struct PendingSend {
-    message_id: String,
-    started: DateTime<Utc>,
-}
-
-/// How long an unadopted send reads as Working/Sending (or Queued when the
-/// path is degraded) before flipping to the EXPLICIT failed state with a
-/// retry affordance. The old 30s overlay silently expired back to Idle with
-/// no visible trace of the send at all — the exact hole the 2026-08-19
-/// incident fell into.
-pub const UNDELIVERED_GRACE_MS: i64 = 120_000;
-
 /// The one-shot timer behind [`AppState::watch_clock_transitions`].
 #[derive(Default)]
 struct ClockTransitions {
@@ -399,16 +380,6 @@ impl Drop for TestClock {
     }
 }
 
-/// A send's attachment-upload leg in flight. `done` is bumped by the upload
-/// task per completed chunk (binary bytes); the working label reads it every
-/// paint (the spinner already animates each frame), so no notify plumbing is
-/// needed. A slow upload renders as "Uploading… N%" instead of a
-/// hang-indistinguishable "Sending…" (2026-08-18 user report).
-pub struct UploadProgress {
-    done: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    total: u64,
-}
-
 pub(crate) const CANVAS_PANEL_PREFIX: &str = "space-canvas:";
 
 /// Per-space key for new-session-canvas chrome (terminal tabs, panel flags).
@@ -441,8 +412,7 @@ pub struct AppState {
     // Presence ticks also retire stale remote session indicators. Remember
     // their last published appearance even when the device rows stay online.
     session_presence_presentation: Vec<(Indicator, u32)>,
-    /// Live edge posture (WatchConnectivity): drives the connection pill,
-    /// composer honesty ("will queue"), and the Queued send badges.
+    /// Live edge posture (WatchConnectivity): drives the connection pill.
     pub connectivity: slopty_view_proto::Connectivity,
     /// Whether this runtime's connectivity watch has delivered its first
     /// frame. The default `Disabled` value is only a placeholder and must not
@@ -452,12 +422,11 @@ pub struct AppState {
     pub spaces: Vec<Space>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
-    /// Fork RPC may arrive ahead of its registry row on a remote device.
-    pending_side_chat: Option<Chat>,
-    /// `pending_side_chat` was started by hand and nothing has minted it:
-    /// no registry row, no doc, until its first send.
-    unsaved_side_chat: bool,
     pub sessions: Vec<Session>,
+    /// slopty: the terminal each session is, by chat (`calls::WATCH_SESSION_TERMINALS`): an
+    /// agent's session by the one its TUI runs in now, a plain terminal by its own. A chat with
+    /// none has ended.
+    pub session_terminals: std::collections::BTreeMap<String, String>,
     /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
     /// this and continue reading their device-local settings entry.
     pub sidebar_preferences: SidebarPreferencesState,
@@ -491,10 +460,6 @@ pub struct AppState {
     deep_link_notice: Option<String>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
     pub transcript: Vec<SessionMessageEntry>,
-    /// The selected chat's pending-message queue — what was typed while the
-    /// agent was busy, in the order it will be sent. Device-agnostic: the
-    /// chat's doc holds them (every device sees the same queue).
-    pub queue: Vec<slopty_view_doc::QueuedMessage>,
     pub context_usage: Option<slopty_view_proto::ContextUsage>,
     // slopty: the plan's rate windows and the limit's reset, read-only, as the selected chat's
     // agent reports them (the usage ring, its card and the composer's limit notice).
@@ -503,7 +468,7 @@ pub struct AppState {
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
-    /// gap after selection, where optimistic echoes may already be visible.
+    /// gap after selection.
     pub transcript_replayed: bool,
     /// slopty: whether the shell's window is the active one, as the shell last drew it
     /// (`invariants`: an open chat reads unread only while nobody looks).
@@ -517,28 +482,10 @@ pub struct AppState {
     /// Changes whenever an input of [`Self::file_link_roots`] does — chat
     /// rows, projects, this device's id — so views can memoize the roots.
     pub(crate) link_roots_revision: u64,
-    /// Optimistic user echoes per chat id, shown until the doc frame carrying
-    /// the same message id arrives (client-minted ids make dedup exact).
-    echoes: HashMap<String, Vec<SessionMessageEntry>>,
-    /// Send-in-flight overlay per chat id: a queued doc command the host
-    /// hasn't executed yet (see [`Self::begin_pending_send`]).
-    pending_sends: HashMap<String, PendingSend>,
-    /// The in-flight send's attachment upload, when it has one.
-    upload_progress: Option<UploadProgress>,
-    /// Engine-side queued-attachment transfers by uploadId (`WatchTransfers`
-    /// snapshots): real relay-leg progress for the sending thumbnail's
-    /// percent ring, present exactly while bytes are moving.
-    transfers: HashMap<String, (u64, u64)>,
-    /// Written by the changes pane, read by the composer.
-    review_comments: HashMap<String, Vec<ReviewComment>>,
-    /// File surfaces whose editor-backed comments currently cite a buffer
-    /// revision that has not reached disk yet. A chat remains blocked until
-    /// every surface waiting on a workspace write has finished or cancelled.
-    review_comment_flushes: HashMap<String, HashSet<u64>>,
     /// This engine's device id (best-effort `LocalDevice` probe; `None` until
     /// the engine serves it — views degrade gracefully).
     pub local_device_id: Option<String>,
-    /// Data directory (`ui-settings.json`, `composer-defaults.json`); set at
+    /// Data directory (`ui-settings.json`); set at
     /// bootstrap so child views can persist small preference files.
     pub data_dir: Option<PathBuf>,
     /// Notifies at clock-driven transitions (see [`Self::watch_clock_transitions`]).
@@ -548,7 +495,6 @@ pub struct AppState {
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
     change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
-    queue_task: Option<Task<()>>,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
     /// feed must survive chat switches — the tab itself is what scopes it.
@@ -618,9 +564,8 @@ impl AppState {
             connectivity_observed: false,
             spaces: Vec::new(),
             chats: Vec::new(),
-            pending_side_chat: None,
-            unsaved_side_chat: false,
             sessions: Vec::new(),
+            session_terminals: std::collections::BTreeMap::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
             selected_space: None,
@@ -629,7 +574,6 @@ impl AppState {
             canvas_target: None,
             selected_chat: None,
             transcript: Vec::new(),
-            queue: Vec::new(),
             context_usage: None,
             usage_limits: Vec::new(),
             limit_resets_at: None,
@@ -640,12 +584,6 @@ impl AppState {
             prepared_transcripts: HashMap::new(),
             transcript_revision: 0,
             link_roots_revision: 0,
-            echoes: HashMap::new(),
-            pending_sends: HashMap::new(),
-            upload_progress: None,
-            transfers: HashMap::new(),
-            review_comments: HashMap::new(),
-            review_comment_flushes: HashMap::new(),
             local_device_id: None,
             data_dir: None,
             clock: ClockTransitions::default(),
@@ -654,7 +592,6 @@ impl AppState {
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
             change_request_tasks: HashMap::new(),
-            queue_task: None,
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
             auto_selected: false,
@@ -663,13 +600,6 @@ impl AppState {
             pending_deep_link: None,
             deep_link_notice: None,
         }
-    }
-
-    /// The selected chat, or `""` on the new-chat canvas. Identical to the
-    /// composer's own attachment/draft key, so a comment written before the
-    /// first send survives the chat being minted.
-    pub fn composer_key(&self) -> String {
-        self.selected_chat.clone().unwrap_or_default()
     }
 
     /// Per-session chrome key (terminal tabs, panel open flags). Real chats
@@ -754,97 +684,6 @@ impl AppState {
         (self.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
-    pub fn review_comments(&self, key: &str) -> &[ReviewComment] {
-        self.review_comments
-            .get(key)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
-    }
-
-    pub fn add_review_comment(&mut self, key: &str, comment: ReviewComment) {
-        self.review_comments
-            .entry(key.to_string())
-            .or_default()
-            .push(comment);
-    }
-
-    pub fn remove_review_comment(&mut self, key: &str, id: &str) {
-        if let Some(list) = self.review_comments.get_mut(key) {
-            list.retain(|c| c.id != id);
-            if list.is_empty() {
-                self.review_comments.remove(key);
-                self.review_comment_flushes.remove(key);
-            }
-        }
-    }
-
-    /// Update only a staged comment's body. A stale editor must never recreate
-    /// a comment that has already been removed or sent to the agent.
-    pub fn update_review_comment_body(&mut self, key: &str, id: &str, body: String) {
-        if let Some(comment) = self
-            .review_comments
-            .get_mut(key)
-            .and_then(|comments| comments.iter_mut().find(|comment| comment.id == id))
-        {
-            comment.body = body;
-        }
-    }
-
-    pub fn update_review_comment_line(&mut self, key: &str, id: &str, line: u32) {
-        if let Some(comment) = self
-            .review_comments
-            .get_mut(key)
-            .and_then(|comments| comments.iter_mut().find(|comment| comment.id == id))
-        {
-            comment.line = line;
-        }
-    }
-
-    pub fn rename_review_comment_path(&mut self, key: &str, old_path: &str, new_path: &str) {
-        if let Some(comments) = self.review_comments.get_mut(key) {
-            for comment in comments
-                .iter_mut()
-                .filter(|comment| comment.is_file() && comment.path == old_path)
-            {
-                comment.path = new_path.to_string();
-            }
-        }
-    }
-
-    pub fn take_review_comments(&mut self, key: &str) -> Vec<ReviewComment> {
-        self.review_comment_flushes.remove(key);
-        self.review_comments.remove(key).unwrap_or_default()
-    }
-
-    pub fn purge_review_comments(&mut self, key: &str) {
-        self.review_comment_flushes.remove(key);
-        self.review_comments.remove(key);
-    }
-
-    pub fn begin_review_comment_flush(&mut self, key: &str, source: u64) {
-        self.review_comment_flushes
-            .entry(key.to_string())
-            .or_default()
-            .insert(source);
-    }
-
-    pub fn finish_review_comment_flush(&mut self, key: &str, source: u64) {
-        let remove_key = self
-            .review_comment_flushes
-            .get_mut(key)
-            .is_some_and(|sources| {
-                sources.remove(&source);
-                sources.is_empty()
-            });
-        if remove_key {
-            self.review_comment_flushes.remove(key);
-        }
-    }
-
-    pub fn review_comment_flush_pending(&self, key: &str) -> bool {
-        self.review_comment_flushes.contains_key(key)
-    }
-
     // ---- reducers (pure) ----
 
     pub(crate) fn apply_sidebar_preferences(&mut self, value: SidebarPreferencesState) -> bool {
@@ -860,14 +699,6 @@ impl AppState {
     /// each notify re-renders the whole shell.
     pub fn apply_chats(&mut self, mut chats: Vec<Chat>) -> bool {
         let mut changed = false;
-        if let Some(pending) = &self.pending_side_chat {
-            if chats.iter().any(|chat| chat.id == pending.id) {
-                self.pending_side_chat = None;
-                changed = true;
-            } else {
-                chats.push(pending.clone());
-            }
-        }
         sort_chats(&mut chats);
         if !self.chats_synced || self.chats != chats {
             changed = true;
@@ -891,10 +722,26 @@ impl AppState {
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
             self.transcript_replayed = false;
             self.transcript_task = None;
-            self.queue.clear();
-            self.queue_task = None;
         }
         changed
+    }
+
+    /// slopty: the terminal each session is now.
+    pub fn apply_session_terminals(
+        &mut self,
+        terminals: std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        if self.session_terminals == terminals {
+            return false;
+        }
+        self.session_terminals = terminals;
+        true
+    }
+
+    /// slopty: the terminal session `chat` is now: its own agent's (a subagent's is its
+    /// agent's, `panel_owner`), or the plain terminal it is. `None` once it ended.
+    pub fn session_terminal(&self, chat: &str) -> Option<&str> {
+        self.session_terminals.get(&self.panel_owner(chat)).map(String::as_str)
     }
 
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
@@ -1037,24 +884,6 @@ impl AppState {
             })
     }
 
-    /// Optimistic local echo of a `setChatConfig` mutate: stamp the row now so
-    /// the chips update on click; the next chats watch frame carries the same
-    /// value once the engine applies the LWW write.
-    pub fn apply_chat_config(&mut self, chat_id: &str, config: slopty_view_proto::ChatConfig) {
-        // The pending side chat's copy is what `apply_chats` re-inserts and
-        // what an unsaved one is minted from.
-        if let Some(chat) = self
-            .pending_side_chat
-            .as_mut()
-            .filter(|chat| chat.id == chat_id)
-        {
-            chat.config = Some(config.clone());
-        }
-        if let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) {
-            chat.config = Some(config);
-        }
-    }
-
     /// Returns whether the posture changed. The first frame after attach always
     /// counts: it ends the bootstrap gap the shell's alert baseline waits on.
     pub fn apply_connectivity(&mut self, connectivity: slopty_view_proto::Connectivity) -> bool {
@@ -1062,54 +891,6 @@ impl AppState {
         self.connectivity = connectivity;
         self.connectivity_observed = true;
         changed
-    }
-
-    /// Is this chat's delivery path degraded — will a send QUEUE rather than
-    /// reach its executor promptly? Locally-hosted chats are never degraded
-    /// (a queued command executes on this device even fully offline). Remote
-    /// chats degrade when the OS is offline, when registry recovery is needed
-    /// to restore their delivery path, when an active room stays down, or when
-    /// the host device has gone presence-dark. A Local sync state is normal
-    /// dormancy while the global connection and remote host are healthy.
-    pub fn chat_delivery_degraded(&self, chat_id: &str) -> bool {
-        use slopty_view_proto::ConnectivityState as S;
-        if self.connectivity.state == S::Disabled {
-            return false;
-        }
-        let Some(chat) = self.chats.iter().find(|c| c.id == chat_id) else {
-            // Unknown chat (a just-minted canvas send): only the global
-            // state can speak.
-            return self.connectivity.state != S::Connected;
-        };
-        if Some(chat.device_id.as_str()) == self.local_device_id.as_deref() {
-            return false;
-        }
-        if self.connectivity.state == S::Offline
-            || !self.device_online(&chat.device_id, clock_now())
-        {
-            return true;
-        }
-        let net = self
-            .connectivity
-            .chats
-            .iter()
-            .find(|c| c.chat_id == chat_id);
-        if self.connectivity.state == S::Reconnecting {
-            // The registry can be down while this chat's room or HTTP fallback
-            // still delivers. A dormant or unknown chat has no such proof.
-            return !net.is_some_and(|net| net.delivery_live);
-        }
-        match net {
-            Some(net) if net.sync_state == slopty_view_proto::ChatSyncState::Local => false,
-            Some(net) => !net.connected,
-            None => false,
-        }
-    }
-
-    /// A send is queued: in flight AND its delivery path is degraded — the
-    /// honest badge is "Queued", not a Working spinner.
-    pub fn send_queued(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.send_pending(chat_id, now) && self.chat_delivery_degraded(chat_id)
     }
 
     pub fn apply_devices(&mut self, devices: Vec<Device>) -> bool {
@@ -1225,15 +1006,8 @@ impl AppState {
             self.prepared_transcripts.remove(id);
         }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        // Doc frames supersede optimistic echoes carrying the same id.
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            echoes.retain(|echo| !entries.iter().any(|e| e.id == echo.id));
-        }
         self.transcript = entries;
         self.transcript_replayed = true;
-        self.ack_pending_send_from_transcript();
     }
 
     /// Apply a `WatchDocMessages` delta frame in place. `Err` = this copy has
@@ -1251,13 +1025,6 @@ impl AppState {
         if is_reset {
             self.transcript_replayed = true;
         }
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            let transcript = &self.transcript;
-            echoes.retain(|echo| !transcript.iter().any(|e| e.id == echo.id));
-        }
-        self.ack_pending_send_from_transcript();
         Ok(())
     }
 
@@ -1270,11 +1037,7 @@ impl AppState {
         let text_doc = self
             .selected_chat
             .as_ref()
-            .filter(|id| {
-                is_text_append(&frame)
-                    && !self.pending_sends.contains_key(*id)
-                    && self.pending_echoes().is_empty()
-            })
+            .filter(|_| is_text_append(&frame))
             .cloned();
         let result = self.apply_transcript_frame(frame);
         if let Some(doc_id) = text_doc.filter(|_| result.is_ok()) {
@@ -1408,200 +1171,6 @@ impl AppState {
         self.sub_transcripts.insert(doc_id, entries);
     }
 
-    /// Add an optimistic user echo (composer send path).
-    pub fn push_echo(&mut self, chat_id: &str, entry: SessionMessageEntry) {
-        let echoes = self.echoes.entry(chat_id.to_string()).or_default();
-        if !echoes.iter().any(|e| e.id == entry.id) {
-            echoes.push(entry);
-            self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        }
-    }
-
-    /// Drop an echo (send failed — the prompt returns to the draft).
-    pub fn remove_echo(&mut self, chat_id: &str, message_id: &str) {
-        if let Some(echoes) = self.echoes.get_mut(chat_id) {
-            let previous_len = echoes.len();
-            echoes.retain(|e| e.id != message_id);
-            if echoes.len() != previous_len {
-                self.transcript_revision = self.transcript_revision.wrapping_add(1);
-            }
-        }
-    }
-
-    /// Composer send fired: overlay the chat as Working until the host writes
-    /// the user message back into the transcript (or the TTL lapses). A remote
-    /// send has no live session row until the host drains the queued command —
-    /// that gap read as "no live run" and flashed the Completed dot, and any
-    /// phantom Working→Idle edge in it rang the done-chime on send (user
-    /// report 2026-08-05).
-    pub fn begin_pending_send(&mut self, chat_id: &str, message_id: &str, now: DateTime<Utc>) {
-        self.pending_sends.insert(
-            chat_id.to_string(),
-            PendingSend {
-                message_id: message_id.to_string(),
-                started: now,
-            },
-        );
-    }
-
-    /// Send failed — drop the overlay so the dot tells the truth again. Only
-    /// removes the overlay this message started: a quick resend must not lose
-    /// its own overlay to the first send's failure cleanup.
-    pub fn end_pending_send(&mut self, chat_id: &str, message_id: &str) {
-        if self
-            .pending_sends
-            .get(chat_id)
-            .is_some_and(|p| p.message_id == message_id)
-        {
-            self.pending_sends.remove(chat_id);
-        }
-    }
-
-    /// Attachment upload starting: expose its progress to the working label.
-    pub fn begin_upload_progress(
-        &mut self,
-        total: u64,
-        done: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    ) {
-        self.upload_progress = Some(UploadProgress { done, total });
-    }
-
-    /// Upload leg over (success or failure) — the label goes back to plain
-    /// send/working wording.
-    pub fn end_upload_progress(&mut self) {
-        self.upload_progress = None;
-    }
-
-    /// Percent of the in-flight attachment upload, clamped to 99 — the last
-    /// point belongs to the commit + queue, so "100% but still spinning"
-    /// never shows. `None` when no upload is in flight (or it's empty).
-    pub fn upload_progress_percent(&self) -> Option<u8> {
-        let progress = self.upload_progress.as_ref()?;
-        if progress.total == 0 {
-            return None;
-        }
-        let done = progress
-            .done
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .min(progress.total);
-        Some(((done * 100) / progress.total).min(99) as u8)
-    }
-
-    /// A `WatchTransfers` snapshot: the engine-side relay leg's in-flight
-    /// queued-attachment transfers, replacing the whole set each frame.
-    pub fn apply_transfers(&mut self, transfers: Vec<slopty_view_proto::TransferProgress>) -> bool {
-        let transfers: HashMap<_, _> = transfers
-            .into_iter()
-            .map(|t| (t.upload_id, (t.done, t.total)))
-            .collect();
-        if self.transfers == transfers {
-            return false;
-        }
-        self.transfers = transfers;
-        true
-    }
-
-    /// Percent of one queued attachment's relay transfer, by the uploadId
-    /// its `pending://{uploadId}/…` ref names. Same 99-clamp as
-    /// [`Self::upload_progress_percent`]: the last point belongs to the
-    /// commit, so "100% but still spinning" never shows. `None` when no
-    /// bytes are moving for that upload (staged-but-waiting, retry backoff,
-    /// or done) — the thumbnail falls back to its indeterminate spinner.
-    pub fn transfer_percent(&self, upload_id: &str) -> Option<u8> {
-        let (done, total) = self.transfers.get(upload_id)?;
-        if *total == 0 {
-            return None;
-        }
-        Some(((done.min(total) * 100) / total).min(99) as u8)
-    }
-
-    /// Is a send still in flight for this chat (unacked)? Inside the grace
-    /// window normally; while the chat's delivery path is degraded the
-    /// overlay holds indefinitely — the truth IS "Queued", and silently
-    /// expiring back to Idle left a queued send with no visible trace at
-    /// all (the 30s→silence hole, 2026-08-19).
-    pub fn send_pending(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.pending_sends.get(chat_id).is_some_and(|p| {
-            now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
-                || self.chat_delivery_degraded(chat_id)
-        })
-    }
-
-    /// The send has sat unadopted past the grace window: surface the
-    /// EXPLICIT failed state ("Not delivered — retry") instead of either
-    /// faking progress or silently forgetting the send ever happened.
-    pub fn send_undelivered(&self, chat_id: &str, now: DateTime<Utc>) -> bool {
-        self.pending_sends.get(chat_id).is_some_and(|p| {
-            now.signed_duration_since(p.started).num_milliseconds() > UNDELIVERED_GRACE_MS
-        })
-    }
-
-    /// Retry pressed: restart the grace clock so the overlay returns to its
-    /// Sending/Queued phase while the re-kicked delivery runs.
-    pub fn retry_pending_send(&mut self, chat_id: &str, now: DateTime<Utc>) {
-        if let Some(p) = self.pending_sends.get_mut(chat_id) {
-            p.started = now;
-        }
-    }
-
-    /// When the in-flight send (if any, inside the TTL) was fired — the
-    /// elapsed-timer base while the overlay reads as Working. The session
-    /// row's `started_at` still belongs to the PREVIOUS turn during this
-    /// window, and showing it made a fresh send open at the old turn's
-    /// half-hour mark.
-    pub fn pending_send_started(&self, chat_id: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        self.pending_sends
-            .get(chat_id)
-            .filter(|p| {
-                now.signed_duration_since(p.started).num_milliseconds() <= UNDELIVERED_GRACE_MS
-                    || self.chat_delivery_degraded(chat_id)
-            })
-            .map(|p| p.started)
-    }
-
-    /// The host executed the queued command iff the sent message's id showed
-    /// up in the transcript (it writes the message before — causally with —
-    /// the Working status; sessions.rs dispatch paths).
-    fn ack_pending_send_from_transcript(&mut self) {
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(pending) = self.pending_sends.get(chat_id)
-            && self.transcript.iter().any(|e| e.id == pending.message_id)
-        {
-            self.pending_sends.remove(chat_id);
-        }
-    }
-
-    /// A send the host held for the next turn shows as its queue row, not
-    /// as an echo: drop echoes (and the pending-send overlay) for queued ids.
-    pub fn apply_queue(&mut self, items: Vec<slopty_view_doc::QueuedMessage>) {
-        if let Some(chat_id) = self.selected_chat.as_deref() {
-            if let Some(echoes) = self.echoes.get_mut(chat_id) {
-                let before = echoes.len();
-                echoes.retain(|echo| !items.iter().any(|q| q.id == echo.id));
-                if echoes.len() != before {
-                    self.transcript_revision = self.transcript_revision.wrapping_add(1);
-                }
-            }
-            if self
-                .pending_sends
-                .get(chat_id)
-                .is_some_and(|p| items.iter().any(|q| q.id == p.message_id))
-            {
-                self.pending_sends.remove(chat_id);
-            }
-        }
-        self.queue = items;
-    }
-
-    /// Unconfirmed echoes for the selected chat, in send order.
-    pub fn pending_echoes(&self) -> &[SessionMessageEntry] {
-        self.selected_chat
-            .as_deref()
-            .and_then(|id| self.echoes.get(id))
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
-    }
-
     // ---- queries ----
 
     /// Non-archived, top-level chats in sidebar order. Chats spawned by
@@ -1615,25 +1184,7 @@ impl AppState {
             .filter(|c| !c.archived && c.is_top_level())
     }
 
-    pub(crate) fn restore_composer_target(
-        &mut self,
-        defaults: &crate::settings::composer::ComposerDefaults,
-    ) {
-        if self.selected_chat.is_some() || self.no_project {
-            return;
-        }
-        if self.selected_device.is_none() {
-            self.selected_device = defaults.device.clone();
-        }
-        if self.selected_space.is_none() {
-            self.no_project = defaults.no_project;
-            self.selected_space = if defaults.no_project {
-                None
-            } else {
-                defaults.project.clone()
-            };
-        }
-    }
+    // slopty: no composer, so no remembered target of its to restore.
 
     fn current_canvas_target(&self) -> CanvasTarget {
         CanvasTarget {
@@ -1803,13 +1354,8 @@ impl AppState {
         self.selected_space_row().is_some_and(|s| s.git_detected)
     }
 
-    /// Full display status for a chat (tab dots, Active list). A send in
-    /// flight ([`Self::begin_pending_send`]) reads as Working — the queued
-    /// command is as good as running.
+    /// Full display status for a chat (tab dots, Active list).
     pub fn display_status_for(&self, chat: &Chat, now: DateTime<Utc>) -> ChatIndicator {
-        if self.send_pending(&chat.id, now) {
-            return ChatIndicator::Working;
-        }
         display_status(chat, self.session_for(&chat.id), now)
     }
 
@@ -1936,9 +1482,6 @@ impl AppState {
     /// Working (see [`Self::display_status_for`]).
     pub fn indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {
         let now = self.announced(now); // slopty: no flip before the state says it
-        if self.send_pending(chat_id, now) {
-            return Indicator::Working;
-        }
         effective_indicator(self.session_for(chat_id), now)
     }
 
@@ -1956,9 +1499,8 @@ impl AppState {
 
     /// The earliest moment after `now` at which a clock-derived value flips
     /// with no frame to announce it: a Working/AwaitingInput session going
-    /// stale ([`SESSION_STALE_MS`]), a remote device leaving its online window
-    /// (offline glyphs, degraded delivery, Queued badges), or a pending send's
-    /// grace expiring into "Not delivered". Each deadline is the first instant
+    /// stale ([`SESSION_STALE_MS`]), or a remote device leaving its online
+    /// window (offline glyphs). Each deadline is the first instant
     /// the predicate reads differently. Relative-time labels are excluded:
     /// they advance on the views' minute heartbeat. Pure.
     pub fn next_clock_transition(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -2001,15 +1543,12 @@ impl AppState {
                     crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1,
                 )
             });
-        let grace = self.pending_sends.values().map(|pending| {
-            pending.started + chrono::TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1)
-        });
-        stale.chain(offline).chain(grace)
+        stale.chain(offline)
     }
 
     /// Notify this entity at every clock-driven transition, so each state
-    /// observer (composer interrupts, session sounds, views) sees a session
-    /// go stale, a device go dark or a send's grace expire on time — no state
+    /// observer (session sounds, views) sees a session go stale or a device
+    /// go dark on time — no state
     /// frame announces those. Idempotent; every notify re-arms a single
     /// one-shot timer for the next deadline, so idle state never polls.
     pub fn watch_clock_transitions(&mut self, cx: &mut Context<Self>) {
@@ -2117,8 +1656,6 @@ impl AppState {
         self.session_presence_presentation.clear();
         self.spaces.clear();
         self.chats.clear();
-        self.pending_side_chat = None;
-        self.unsaved_side_chat = false;
         self.sessions.clear();
         self.sidebar_preferences = SidebarPreferencesState::default();
         self.session_presentation = None;
@@ -2137,111 +1674,16 @@ impl AppState {
         self.context_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
-        self.echoes.clear();
-        self.pending_sends.clear();
-        self.upload_progress = None;
-        self.transfers.clear();
         self.local_device_id = None;
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         cx.notify();
-    }
-
-    /// Independent selection and transcript subscriptions over the same engine.
-    /// An `unsaved` chat is a hand-started side chat nothing has written yet:
-    /// it opens no doc until its first send mints it (see
-    /// [`Self::unsaved_side_chat_create`]).
-    pub(crate) fn side_chat_state(
-        parent: &Entity<Self>,
-        chat: Chat,
-        unsaved: bool,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let source = parent.read(cx);
-        let engine = source.engine.clone();
-        let mut state = Self::new();
-        state.chats = source.chats.clone();
-        if !state.chats.iter().any(|c| c.id == chat.id) {
-            state.chats.push(chat.clone());
-        }
-        state.spaces = source.spaces.clone();
-        state.devices = source.devices.clone();
-        state.data_dir = source.data_dir.clone();
-        state.auto_selected = true;
-        state.pending_side_chat = Some(chat.clone());
-        state.unsaved_side_chat = unsaved;
-        if let Some(engine) = engine {
-            state.attach_engine(engine, cx);
-        }
-        state.select_chat(Some(chat.id), cx);
-        state.watch_clock_transitions(cx);
-        state
-    }
-
-    /// This is a side chat's state whose chat its first send has yet to mint.
-    pub(crate) fn side_chat_unsaved(&self) -> bool {
-        self.unsaved_side_chat
-    }
-
-    /// The harness can change until the first send snapshots it.
-    /// Keep the harness fixed while createChat is in flight, including uploads.
-    pub(crate) fn side_chat_harness_editable(&self) -> bool {
-        self.unsaved_side_chat
-            && self
-                .selected_chat
-                .as_ref()
-                .is_some_and(|id| !self.pending_sends.contains_key(id))
-    }
-
-    fn is_unsaved_side_chat(&self, chat_id: &str) -> bool {
-        self.unsaved_side_chat
-            && self
-                .pending_side_chat
-                .as_ref()
-                .is_some_and(|chat| chat.id == chat_id)
-    }
-
-    /// The `Mutate createChat` params that mint the unsaved side chat
-    /// `chat_id` on its first send; `None` once it exists.
-    pub(crate) fn unsaved_side_chat_create(&self, chat_id: &str) -> Option<serde_json::Value> {
-        if !self.is_unsaved_side_chat(chat_id) {
-            return None;
-        }
-        let chat = self.pending_side_chat.as_ref()?;
-        Some(serde_json::json!({
-            "op": "createChat",
-            "chatId": chat.id,
-            "deviceId": chat.device_id,
-            "spaceId": chat.space_id,
-            "config": chat.config,
-            "branch": chat.branch,
-            "cwd": chat.cwd,
-            "parentChatId": chat.parent_chat_id,
-        }))
-    }
-
-    /// The unsaved side chat now exists: attach the doc watches it deferred.
-    pub(crate) fn side_chat_saved(&mut self, chat_id: &str, cx: &mut Context<Self>) {
-        if !self.is_unsaved_side_chat(chat_id) {
-            return;
-        }
-        self.unsaved_side_chat = false;
-        if self.selected_chat.as_deref() == Some(chat_id) {
-            self.focus_chat_sync(chat_id, cx);
-            self.start_chat_watches(chat_id.to_owned(), cx);
-        }
     }
 
     fn start_chat_watches(&mut self, chat_id: String, cx: &mut Context<Self>) {
         let Some(handle) = self.engine.clone() else {
             return;
         };
-        self.transcript_task = Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
-        if handle
-            .engine_info()
-            .supports(slopty_view_proto::capabilities::MESSAGE_QUEUE_V1)
-        {
-            self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
-        }
+        self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
     }
 
     // ---- gpui glue ----
@@ -2319,6 +1761,13 @@ impl AppState {
                 AppState::apply_sessions,
             ),
             spawn_chats_watch(cx, handle.clone()),
+            // slopty: the terminal each session is.
+            spawn_watch(
+                cx,
+                handle.clone(),
+                slopty_view_doc::calls::WATCH_SESSION_TERMINALS,
+                AppState::apply_session_terminals,
+            ),
             spawn_watch(
                 cx,
                 handle.clone(),
@@ -2336,12 +1785,6 @@ impl AppState {
                 handle.clone(),
                 methods::WATCH_CONNECTIVITY,
                 AppState::apply_connectivity,
-            ),
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::WATCH_TRANSFERS,
-                AppState::apply_transfers,
             ),
             spawn_watch(
                 cx,
@@ -2365,14 +1808,7 @@ impl AppState {
         self.connection = ConnectionStatus::Ready;
         // Re-subscribe the transcript if a chat was already selected (reconnect path).
         if let Some(chat_id) = self.selected_chat.clone() {
-            self.transcript_task =
-                Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
-            if handle
-                .engine_info()
-                .supports(slopty_view_proto::capabilities::MESSAGE_QUEUE_V1)
-            {
-                self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
-            }
+            self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
         }
         cx.notify();
     }
@@ -2404,7 +1840,6 @@ impl AppState {
             self.change_request_tasks.insert(target, task);
         }
     }
-
 
     pub fn open_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
         match crate::links::parse_slopty_conversation_link(url) {
@@ -2457,9 +1892,7 @@ impl AppState {
     /// watch server-side. Selecting a chat also lands in its space and marks it
     /// seen (a global-list click must switch the tab strip too).
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
-        if let Some(id) = &chat_id
-            && !self.is_unsaved_side_chat(id)
-        {
+        if let Some(id) = &chat_id {
             self.focus_chat_sync(id, cx);
         }
         if self.selected_chat == chat_id {
@@ -2561,8 +1994,6 @@ impl AppState {
             self.transcript_replayed = true;
         }
         self.transcript_task = None;
-        self.queue.clear();
-        self.queue_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) restores the pick set aside above.
@@ -2582,32 +2013,9 @@ impl AppState {
             self.mark_chat_seen(id, cx);
         }
         if let Some(chat_id) = chat_id {
-            if self.is_unsaved_side_chat(&chat_id) {
-                // Nothing to watch yet, and opening its doc would start one.
-                self.transcript_replayed = true;
-            } else {
-                self.start_chat_watches(chat_id, cx);
-            }
+            self.start_chat_watches(chat_id, cx);
         }
         cx.notify();
-    }
-
-    /// Replace the selected chat's queue subscription without clearing its
-    /// current projection. This is used after an optimistic mutation fails:
-    /// the authoritative opening frame repairs the local list even though the
-    /// document itself did not change and therefore emitted no new frame.
-    pub(crate) fn refresh_selected_queue(&mut self, cx: &mut Context<Self>) {
-        self.queue_task = None;
-        let (Some(chat_id), Some(handle)) = (self.selected_chat.clone(), self.engine.clone())
-        else {
-            return;
-        };
-        if handle
-            .engine_info()
-            .supports(slopty_view_proto::capabilities::MESSAGE_QUEUE_V1)
-        {
-            self.queue_task = Some(spawn_queue_watch(cx, handle, chat_id));
-        }
     }
 
     /// Select a project; the caller (shell) decides which chat to land on.
@@ -3049,66 +2457,6 @@ fn spawn_transcript_watch(
     })
 }
 
-/// The selected chat's pending-message queue, straight off its doc. Whole-list
-/// frames (the queue is a handful of rows at most), retried like the transcript
-/// watch — a queue that silently stopped updating would show messages the host
-/// has already sent.
-fn spawn_queue_watch(
-    cx: &mut Context<AppState>,
-    handle: EngineHandle,
-    chat_id: String,
-) -> Task<()> {
-    #[derive(serde::Deserialize)]
-    struct QueueFrame {
-        #[serde(default)]
-        items: Vec<slopty_view_doc::QueuedMessage>,
-    }
-    cx.spawn(async move |this, cx| {
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
-        'resubscribe: loop {
-            let params = serde_json::json!({ "chatId": chat_id });
-            let mut rx = match handle
-                .client()
-                .subscribe_checked(methods::WATCH_QUEUE, params)
-                .await
-            {
-                Ok(rx) => rx,
-                Err(err) => {
-                    tracing::debug!(%chat_id, error = %err, "queue watch failed; retrying");
-                    if this.update(cx, |_, _| {}).is_err() {
-                        return;
-                    }
-                    cx.background_executor().timer(RETRY_DELAY).await;
-                    continue 'resubscribe;
-                }
-            };
-            while let Some(value) = rx.recv().await {
-                let frame: QueueFrame = match serde_json::from_value(value) {
-                    Ok(frame) => frame,
-                    Err(err) => {
-                        tracing::warn!(error = %err, "dropping malformed queue frame");
-                        continue;
-                    }
-                };
-                let alive = this.update(cx, |state, cx| {
-                    // Guard against a stale pump racing a newer selection.
-                    if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
-                        state.apply_queue(frame.items);
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    return;
-                }
-            }
-            if this.update(cx, |_, _| {}).is_err() {
-                return;
-            }
-            cx.background_executor().timer(RETRY_DELAY).await;
-        }
-    })
-}
-
 /// [`spawn_transcript_watch`]'s shape, writing into `sub_transcripts[doc_id]`
 /// instead of the selected chat's transcript. The apply guard is per key so a
 /// subagent tab can outlive chat switches.
@@ -3495,32 +2843,17 @@ mod tests {
     }
 
     #[test]
-    fn transcript_revision_tracks_replay_echoes_and_subagent_content() {
+    fn transcript_revision_tracks_replay_and_subagent_content() {
         let mut state = AppState::new();
         state.selected_chat = Some("c".into());
         let initial = state.transcript_revision;
-        state.apply_transfers(Vec::new());
         state.apply_auth(AuthState::SignedOut);
         assert_eq!(
             state.transcript_revision, initial,
             "unrelated notifications are inert"
         );
-
-        state.push_echo("c", user_entry("m1"));
-        let echo = state.transcript_revision;
-        assert_ne!(echo, initial);
-        state.push_echo("c", user_entry("m1"));
-        state.remove_echo("c", "absent");
-        assert_eq!(
-            state.transcript_revision, echo,
-            "unchanged echoes do not invalidate"
-        );
         state.apply_transcript(vec![user_entry("m1")]);
-        assert!(state.pending_echoes().is_empty());
-        assert_ne!(
-            state.transcript_revision, echo,
-            "echo-to-replay handoff invalidates"
-        );
+        assert_ne!(state.transcript_revision, initial, "a replay invalidates");
 
         let before_reset = state.transcript_revision;
         state
@@ -3683,110 +3016,6 @@ mod tests {
         upgraded.version = Some("0.2.3".into());
         state.apply_devices(vec![upgraded]);
         assert!(state.change_requests.is_supported("remote"));
-    }
-
-    #[test]
-    fn transfer_percent_tracks_snapshots_by_upload_id() {
-        let mut s = AppState::new();
-        assert_eq!(s.transfer_percent("u1"), None);
-
-        let frame = |id: &str, done, total| slopty_view_proto::TransferProgress {
-            upload_id: id.into(),
-            file_name: "a.png".into(),
-            done,
-            total,
-        };
-        s.apply_transfers(vec![frame("u1", 430, 1_000), frame("u2", 0, 400)]);
-        assert_eq!(s.transfer_percent("u1"), Some(43));
-        assert_eq!(s.transfer_percent("u2"), Some(0));
-        assert_eq!(s.transfer_percent("other"), None);
-
-        // The last point belongs to the commit — never a stuck 100%; b64
-        // padding overshoot stays clamped too.
-        s.apply_transfers(vec![frame("u1", 1_000, 1_000), frame("u3", 12, 0)]);
-        assert_eq!(s.transfer_percent("u1"), Some(99));
-        // Zero-total renders indeterminate, not a division blowup.
-        assert_eq!(s.transfer_percent("u3"), None);
-        // Snapshots REPLACE: u2's transfer retired with its entry.
-        assert_eq!(s.transfer_percent("u2"), None);
-
-        s.apply_transfers(Vec::new());
-        assert_eq!(s.transfer_percent("u1"), None);
-    }
-
-    #[test]
-    fn upload_progress_percent_clamps_and_clears() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        let mut s = AppState::new();
-        assert_eq!(s.upload_progress_percent(), None);
-
-        let done = Arc::new(AtomicU64::new(0));
-        s.begin_upload_progress(1_000, done.clone());
-        assert_eq!(s.upload_progress_percent(), Some(0));
-        done.store(430, Ordering::Relaxed);
-        assert_eq!(s.upload_progress_percent(), Some(43));
-        // The last point belongs to commit+queue — never show a stuck 100%.
-        done.store(1_000, Ordering::Relaxed);
-        assert_eq!(s.upload_progress_percent(), Some(99));
-        // Overshoot (b64 padding rounding) stays clamped.
-        done.store(1_002, Ordering::Relaxed);
-        assert_eq!(s.upload_progress_percent(), Some(99));
-
-        s.end_upload_progress();
-        assert_eq!(s.upload_progress_percent(), None);
-
-        // A zero-byte total renders as plain "Sending…", not a percent.
-        s.begin_upload_progress(0, Arc::new(AtomicU64::new(0)));
-        assert_eq!(s.upload_progress_percent(), None);
-    }
-
-    #[test]
-    fn send_pending_overlays_working_until_the_grace_window() {
-        let now = Utc::now();
-        let s_chat = chat("c", 0, Some(10)); // unseen, no session row
-        let mut s = AppState::new();
-        assert_eq!(s.display_status_for(&s_chat, now), ChatIndicator::Completed);
-        assert_eq!(s.indicator_for("c", now), Indicator::None);
-        s.begin_pending_send("c", "m1", now);
-        assert_eq!(s.display_status_for(&s_chat, now), ChatIndicator::Working);
-        assert_eq!(s.indicator_for("c", now), Indicator::Working);
-        // Time-bounded: an offline host must not leave an eternal spinner —
-        // past the grace the overlay yields (and `send_undelivered` takes
-        // over with the explicit failed state).
-        let later = now + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
-        assert_eq!(
-            s.display_status_for(&s_chat, later),
-            ChatIndicator::Completed
-        );
-        assert_eq!(s.indicator_for("c", later), Indicator::None);
-        assert!(s.send_undelivered("c", later));
-    }
-
-    #[test]
-    fn send_pending_acked_when_the_host_writes_the_message_back() {
-        let now = Utc::now();
-        let mut s = AppState::new();
-        s.selected_chat = Some("c".into());
-        s.begin_pending_send("c", "m1", now);
-        // A frame without the message keeps the overlay.
-        s.apply_transcript(vec![user_entry("other")]);
-        assert!(s.send_pending("c", now));
-        // The host executed the command: our id comes back in the doc.
-        s.apply_transcript(vec![user_entry("other"), user_entry("m1")]);
-        assert!(!s.send_pending("c", now));
-    }
-
-    #[test]
-    fn send_failure_cleanup_only_ends_its_own_overlay() {
-        let now = Utc::now();
-        let mut s = AppState::new();
-        s.begin_pending_send("c", "m1", now);
-        s.begin_pending_send("c", "m2", now); // quick resend superseded m1
-        s.end_pending_send("c", "m1"); // m1's failure cleanup arrives late
-        assert!(s.send_pending("c", now), "m2's overlay must survive");
-        s.end_pending_send("c", "m2");
-        assert!(!s.send_pending("c", now));
     }
 
     #[test]
@@ -4082,35 +3311,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn projectless_preference_survives_restart_and_space_refreshes() {
-        let dir = tempfile::tempdir().unwrap();
-        let defaults = crate::settings::composer::ComposerDefaults {
-            device: Some("remote".into()),
-            // Older versions kept a stale project alongside the opt-out.
-            project: Some("old-project".into()),
-            no_project: true,
-            ..Default::default()
-        };
-        defaults.save(dir.path()).unwrap();
-        let mut state = AppState::new();
-        state.restore_composer_target(&crate::settings::composer::ComposerDefaults::load(
-            dir.path(),
-        ));
-        for spaces in [
-            vec![],
-            vec![space("s1", "remote", "/a", 1)],
-            vec![],
-            vec![space("s2", "other", "/b", 2)],
-        ] {
-            state.apply_spaces(spaces);
-            assert!(state.no_project);
-            assert!(state.selected_space.is_none());
-            assert!(state.selected_space_row().is_none());
-            assert_eq!(state.effective_device_id().as_deref(), Some("remote"));
-        }
-    }
-
     #[gpui::test]
     fn projectless_selection_clears_project_and_survives_device_switch(
         cx: &mut gpui::TestAppContext,
@@ -4383,20 +3583,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pending_send_notifies_state_when_its_grace_expires(cx: &mut gpui::TestAppContext) {
-        let now = clock_epoch();
-        let started = now - TimeDelta::seconds(100);
-        let expiry = started + TimeDelta::milliseconds(UNDELIVERED_GRACE_MS + 1);
-        let mut probe = AppState::new();
-        probe.begin_pending_send("chat", "message", started);
-        assert!(!probe.send_undelivered("chat", expiry - TimeDelta::milliseconds(1)));
-        assert!(probe.send_undelivered("chat", expiry));
-        assert_state_notifies_at(cx, now, expiry, |state| {
-            state.begin_pending_send("chat", "message", started)
-        });
-    }
-
-    #[gpui::test]
     fn settled_state_arms_no_clock(cx: &mut gpui::TestAppContext) {
         let now = clock_epoch();
         let clock = TestClock::start(now);
@@ -4535,22 +3721,8 @@ mod tests {
     }
 
     #[test]
-    fn identical_transfer_and_auth_frames_report_no_change() {
-        use slopty_view_proto::TransferProgress;
+    fn identical_auth_frames_report_no_change() {
         let mut state = AppState::new();
-        assert!(!state.apply_transfers(vec![]));
-        let progress = |done| TransferProgress {
-            upload_id: "u1".into(),
-            file_name: "a.png".into(),
-            done,
-            total: 100,
-        };
-        assert!(state.apply_transfers(vec![progress(10)]));
-        assert!(!state.apply_transfers(vec![progress(10)]));
-        assert!(state.apply_transfers(vec![progress(20)]));
-        assert_eq!(state.transfer_percent("u1"), Some(20));
-        assert!(state.apply_transfers(vec![]));
-
         assert!(state.apply_auth(AuthState::SignedOut));
         assert!(!state.apply_auth_value(serde_json::json!({ "state": "signedOut" })));
         let user = UserProfile {
@@ -4561,44 +3733,6 @@ mod tests {
         assert!(state.apply_auth(AuthState::NeedsOrganization { user: user.clone() }));
         assert!(!state.apply_auth(AuthState::NeedsOrganization { user }));
         assert!(!state.apply_auth_value(serde_json::json!({ "bogus": true })));
-    }
-
-    #[test]
-    fn apply_chat_config_stamps_the_row() {
-        let mut state = AppState::new();
-        state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
-        let config = slopty_view_proto::ChatConfig {
-            harness: HarnessId::CLAUDE_CODE,
-            model: Some("claude-fable-5".into()),
-            reasoning: Some(slopty_view_proto::ReasoningLevel::XHigh),
-            model_options: serde_json::Map::new(),
-            sandbox: slopty_view_proto::SandboxLevel::WorkspaceWrite,
-        };
-        state.apply_chat_config("a", config.clone());
-        assert_eq!(
-            state.chats.iter().find(|c| c.id == "a").unwrap().config,
-            Some(config)
-        );
-        assert!(
-            state
-                .chats
-                .iter()
-                .find(|c| c.id == "b")
-                .unwrap()
-                .config
-                .is_none()
-        );
-        // Unknown chat: no-op, no panic.
-        state.apply_chat_config(
-            "missing",
-            slopty_view_proto::ChatConfig {
-                harness: HarnessId::CLAUDE_CODE,
-                model: None,
-                reasoning: None,
-                model_options: serde_json::Map::new(),
-                sandbox: slopty_view_proto::SandboxLevel::WorkspaceWrite,
-            },
-        );
     }
 
     #[test]
@@ -4653,21 +3787,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_fork_waits_for_registry_then_observes_deletion() {
-        let mut state = AppState::new();
-        let mut side = chat("side", 1, None);
-        side.parent_chat_id = Some("main".into());
-        state.selected_chat = Some(side.id.clone());
-        state.pending_side_chat = Some(side.clone());
-        state.apply_chats(vec![]);
-        assert_eq!(state.selected_chat.as_deref(), Some("side"));
-        state.apply_chats(vec![side]);
-        assert!(state.pending_side_chat.is_none());
-        state.apply_chats(vec![]);
-        assert_eq!(state.selected_chat, None);
-    }
-
-    #[test]
     fn jump_slots_count_the_rows_the_sidebar_draws() {
         let now = Utc::now();
         let mut state = AppState::new();
@@ -4716,92 +3835,6 @@ mod tests {
         // An already archived chat stays put — the shortcut never unarchives.
         state.selected_chat = Some("a".into());
         assert_eq!(state.archivable_selected_chat(), None);
-    }
-
-    #[test]
-    fn a_send_held_in_the_queue_drops_its_echo_and_pending_overlay() {
-        let mut state = AppState::new();
-        state.selected_chat = Some("c1".into());
-        let echo = |id: &str| SessionMessageEntry {
-            id: id.into(),
-            role: slopty_view_doc::MessageRole::User,
-            parts: vec![],
-            created_at: 0,
-            device_id: "local".into(),
-            status: None,
-            continuation_of: None,
-            duration_ms: None,
-        };
-        let row = |id: &str| slopty_view_doc::QueuedMessage {
-            id: id.into(),
-            text: "held".into(),
-            attachments: vec![],
-            hold_for_turn_end: false,
-            issued_by: "local".into(),
-            issued_at: 0,
-            edited_at: None,
-            delivery_gate: None,
-        };
-        state.push_echo("c1", echo("held"));
-        state.push_echo("c1", echo("sent"));
-        state.begin_pending_send("c1", "held", Utc::now());
-        state.apply_queue(vec![row("held")]);
-        let ids: Vec<_> = state
-            .pending_echoes()
-            .iter()
-            .map(|e| e.id.as_str())
-            .collect();
-        assert_eq!(ids, vec!["sent"]);
-        assert!(!state.pending_sends.contains_key("c1"));
-        assert_eq!(state.queue.len(), 1);
-    }
-
-    #[test]
-    fn echoes_show_until_doc_frame_confirms() {
-        let mut state = AppState::new();
-        state.selected_chat = Some("c1".into());
-        let echo = SessionMessageEntry {
-            id: "m1".into(),
-            role: slopty_view_doc::MessageRole::User,
-            parts: vec![],
-            created_at: 0,
-            device_id: "local".into(),
-            status: None,
-            continuation_of: None,
-            duration_ms: None,
-        };
-        state.push_echo("c1", echo.clone());
-        // Duplicate pushes dedupe.
-        state.push_echo("c1", echo.clone());
-        assert_eq!(state.pending_echoes().len(), 1);
-        // Frames without the id keep the echo.
-        state.apply_transcript(vec![]);
-        assert_eq!(state.pending_echoes().len(), 1);
-        // The confirming frame prunes it.
-        state.apply_transcript(vec![SessionMessageEntry {
-            id: "m1".into(),
-            ..echo.clone()
-        }]);
-        assert!(state.pending_echoes().is_empty());
-        // Failure path: explicit removal.
-        state.push_echo(
-            "c1",
-            SessionMessageEntry {
-                id: "m2".into(),
-                ..echo.clone()
-            },
-        );
-        state.remove_echo("c1", "m2");
-        assert!(state.pending_echoes().is_empty());
-        // Echoes are per chat.
-        state.push_echo(
-            "other",
-            SessionMessageEntry {
-                id: "m3".into(),
-                ..echo
-            },
-        );
-        assert!(state.pending_echoes().is_empty());
     }
 
     #[test]
@@ -4985,45 +4018,6 @@ mod tests {
     // slopty: no accounts, sync or sign-in.
 
     #[test]
-    fn review_comment_body_updates_are_scoped_and_keep_current_metadata() {
-        let mut state = AppState::new();
-        let original = ReviewComment::file("a.rs", 2, "Original");
-        state.add_review_comment("chat-1", original.clone());
-        state.add_review_comment("chat-2", original.clone());
-        state.begin_review_comment_flush("chat-1", 1);
-        state.update_review_comment_line("chat-1", &original.id, 9);
-        state.rename_review_comment_path("chat-1", "a.rs", "renamed.rs");
-        state.update_review_comment_body("chat-1", &original.id, "Revised".into());
-        let mut expected = original.clone();
-        expected.path = "renamed.rs".into();
-        expected.line = 9;
-        expected.body = "Revised".into();
-        assert_eq!(state.review_comments("chat-1"), &[expected]);
-        assert_eq!(state.review_comments("chat-2"), &[original.clone()]);
-        assert!(state.review_comment_flush_pending("chat-1"));
-        state.remove_review_comment("chat-1", &original.id);
-        state.update_review_comment_body("chat-1", &original.id, "Stale".into());
-        state.update_review_comment_body("missing-chat", &original.id, "Stale".into());
-        assert!(state.review_comments("chat-1").is_empty());
-        assert!(state.review_comments("missing-chat").is_empty());
-    }
-
-    #[test]
-    fn review_comment_flush_waits_for_every_file_surface() {
-        let mut state = AppState::new();
-
-        state.begin_review_comment_flush("chat-1", 1);
-        state.begin_review_comment_flush("chat-1", 2);
-        assert!(state.review_comment_flush_pending("chat-1"));
-
-        state.finish_review_comment_flush("chat-1", 1);
-        assert!(state.review_comment_flush_pending("chat-1"));
-
-        state.finish_review_comment_flush("chat-1", 2);
-        assert!(!state.review_comment_flush_pending("chat-1"));
-    }
-
-    #[test]
     fn version_triple_parses_and_gates_device_features() {
         assert_eq!(version_triple("0.2.12"), Some((0, 2, 12)));
         assert_eq!(version_triple("0.2.12-beta.1"), Some((0, 2, 12)));
@@ -5091,128 +4085,6 @@ mod tests {
         assert!(!state.device_supports("upstream", slopty_view_proto::capabilities::MESSAGE_QUEUE_V1));
     }
 
-    #[test]
-    fn delivery_degradation_and_queued_sends_tell_the_truth() {
-        use slopty_view_proto::{ChatConnectivity, ConnectivityState};
-        let now = Utc::now();
-        let mut s = AppState::default();
-        s.local_device_id = Some("local".into());
-        let mut remote = chat("c-remote", 0, None);
-        remote.device_id = "remote".into();
-        let mut local = chat("c-local", 0, None);
-        local.device_id = "local".into();
-        s.chats = vec![remote, local];
-        s.devices = vec![Device {
-            id: "remote".into(),
-            name: "vps".into(),
-            platform: "linux".into(),
-            last_seen_at: Some(now),
-            created_at: None,
-            version: None,
-            cursor_sdk_version: None,
-            capabilities: Vec::new(),
-            actions: Vec::new(),
-            ssh_host: None, // slopty: new field.
-        }];
-        s.connectivity.state = ConnectivityState::Connected;
-        s.connectivity.chats = vec![ChatConnectivity {
-            sync_state: slopty_view_proto::ChatSyncState::Unknown,
-            chat_id: "c-remote".into(),
-            connected: true,
-            delivery_live: false,
-            pending_pushes: 0,
-        }];
-
-        // Healthy: nothing degraded.
-        assert!(!s.chat_delivery_degraded("c-remote"));
-        assert!(!s.chat_delivery_degraded("c-local"));
-
-        // Idle chats can remain without a socket for longer than the engine's
-        // grace. A stale down sample during focus must not flash a warning.
-        s.connectivity.chats[0].sync_state = slopty_view_proto::ChatSyncState::Local;
-        s.connectivity.chats[0].connected = false;
-        assert!(!s.chat_delivery_degraded("c-remote"));
-
-        // A requested reconnect stays quiet inside its fresh grace window.
-        s.connectivity.chats[0].sync_state = slopty_view_proto::ChatSyncState::Waiting;
-        s.connectivity.chats[0].connected = true;
-        assert!(!s.chat_delivery_degraded("c-remote"));
-        s.connectivity.chats[0].sync_state = slopty_view_proto::ChatSyncState::Connecting;
-        assert!(!s.chat_delivery_degraded("c-remote"));
-
-        // A requested or active room down past grace degrades even while
-        // globally Connected.
-        s.connectivity.chats[0].sync_state = slopty_view_proto::ChatSyncState::Waiting;
-        s.connectivity.chats[0].connected = false;
-        assert!(s.chat_delivery_degraded("c-remote"));
-        s.connectivity.chats[0].sync_state = slopty_view_proto::ChatSyncState::Connecting;
-        assert!(s.chat_delivery_degraded("c-remote"));
-        s.connectivity.chats[0].connected = true;
-
-        // Global registry failure and host presence loss still warn for a
-        // dormant chat.
-        s.connectivity.chats[0].sync_state = slopty_view_proto::ChatSyncState::Local;
-        s.connectivity.state = ConnectivityState::Reconnecting;
-        assert!(s.chat_delivery_degraded("c-remote"));
-        s.connectivity.chats[0].sync_state = slopty_view_proto::ChatSyncState::Waiting;
-        assert!(s.chat_delivery_degraded("c-remote"));
-
-        // A live chat room can deliver while the registry reconnects. The
-        // graced `connected` bit alone is not proof, but delivery_live is.
-        s.connectivity.chats[0].sync_state = slopty_view_proto::ChatSyncState::Synced;
-        assert!(s.chat_delivery_degraded("c-remote"));
-        s.connectivity.chats[0].delivery_live = true;
-        assert!(!s.chat_delivery_degraded("c-remote"));
-        s.begin_pending_send("c-remote", "m-live", now);
-        assert!(!s.send_queued("c-remote", now));
-        s.connectivity.chats[0].sync_state = slopty_view_proto::ChatSyncState::Connecting;
-        s.connectivity.chats[0].connected = false; // HTTP delivery can outlive the socket.
-        assert!(!s.chat_delivery_degraded("c-remote"));
-        s.connectivity.chats[0].delivery_live = false;
-        assert!(s.chat_delivery_degraded("c-remote"));
-        assert!(s.send_queued("c-remote", now));
-        s.connectivity.chats[0].connected = true;
-        s.connectivity.state = ConnectivityState::Connected;
-
-        // Host gone presence-dark → degraded (a send would queue at best).
-        s.connectivity.chats[0].delivery_live = true;
-        s.devices[0].last_seen_at = Some(now - TimeDelta::minutes(10));
-        assert!(s.chat_delivery_degraded("c-remote"));
-        s.devices[0].last_seen_at = Some(now);
-
-        // OS offline: remote degrades; a locally-hosted chat NEVER does (the
-        // queued command executes on this device even fully offline).
-        s.connectivity.state = ConnectivityState::Offline;
-        assert!(s.chat_delivery_degraded("c-remote"));
-        assert!(!s.chat_delivery_degraded("c-local"));
-        s.connectivity.chats[0].delivery_live = false;
-
-        // Local profile (Disabled): nothing degrades.
-        s.connectivity.state = ConnectivityState::Disabled;
-        assert!(!s.chat_delivery_degraded("c-remote"));
-
-        // Queued = pending send + degraded path — and degradation HOLDS the
-        // overlay past the grace window instead of silently expiring (the
-        // no-trace hole).
-        s.connectivity.state = ConnectivityState::Offline;
-        s.begin_pending_send("c-remote", "m1", now - TimeDelta::seconds(200));
-        assert!(s.send_pending("c-remote", now));
-        assert!(s.send_queued("c-remote", now));
-        // Past the grace: the explicit failed state surfaces alongside.
-        assert!(s.send_undelivered("c-remote", now));
-        // Retry restarts the clock: back to Queued, no longer failed.
-        s.retry_pending_send("c-remote", now);
-        assert!(!s.send_undelivered("c-remote", now));
-        assert!(s.send_queued("c-remote", now));
-        // Path healed with a stale unacked send: the overlay expires after
-        // the grace rather than holding forever.
-        s.retry_pending_send("c-remote", now - TimeDelta::seconds(200));
-        s.connectivity.state = ConnectivityState::Connected;
-        assert!(!s.send_pending("c-remote", now));
-        assert!(!s.send_queued("c-remote", now));
-        // …but the explicit undelivered flag still tells the truth.
-        assert!(s.send_undelivered("c-remote", now));
-    }
 }
 
 // slopty: appshots and pull-request fixtures removed.

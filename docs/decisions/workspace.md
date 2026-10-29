@@ -1237,7 +1237,10 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `the_layout_is_saved_and_restored` (`tests.rs`),
     `a_failed_write_is_tried_again_without_another_edit` (`tests/unsaved.rs`).
 
-- ✅ **A yes or no is answered from wherever it is seen** (2026-10-04, readiness N6 and N14).
+- ❌ **A yes or no is answered from wherever it is seen** *Superseded 2026-10-29 by "TUI-first"
+  (`agents.md`): the TUI asks and is answered in its terminal; no row or note answers it
+  ("A session is its terminal, its inspector beside it", `ui.md`).* (2026-10-04, readiness N6
+  and N14).
   A thread agent's approval could be answered only inside its thread. The inbox and the
   notification offered Allow and Deny for terminal agents alone. On iOS, an answer tapped on
   the lock screen could be cut off when the app was suspended before it was sent.
@@ -2479,7 +2482,10 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   repository (`the_changed_files_come_first_then_the_newest`,
   `outside_a_repository_the_newest_files_alone`, `the_newest_folders_give_their_files`); app
   `interface::the_palette_lists_recent_files_at_once`.
-- ✅ **A turn's diff and whitespace that does not count, from the worker** (2026-10-16). The
+- ✅ **A turn's diff and whitespace that does not count, from the worker** (2026-10-16).
+  *The turn's half is superseded 2026-10-29 by "TUI-first" (`agents.md`): a TUI session takes no
+  tree at a turn's ends, so `GitOp::Turn` is refused in words, and a review compares the
+  repository's states. The whitespace half stands.* The
   Changes pane asks for one turn's changes (`"turn"`, the user entry that began it) and for a
   diff with whitespace not counting (`"ignoreWhitespace"`, as `git diff -w`). The worker
   already takes a turn's tree when it begins and ends (`Turn::before`, `Turn::after`, kept
@@ -2489,6 +2495,5 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   diff: lines are matched on their text with every space taken out and the context reads as
   the file is now, and a file changed only in its spaces leaves the review rather than show
   as a change with nothing in it. `GitOp::Changes` and `GitOp::FileDiff` take the same `ignore_whitespace`, so a clipped
-  file fetched whole reads the same way. Tests: worker `tests/turn_diff.rs` on a real
-  repository (`a_turn_shows_what_changed_between_its_snapshots`,
-  `whitespace_counts_only_when_asked`).
+  file fetched whole reads the same way. Tests: worker `tests/diff_whitespace.rs` on a real
+  repository (`whitespace_counts_only_when_asked`, `a_turn_s_diff_is_refused`).

@@ -20,9 +20,9 @@
 //! The checkouts live under the main checkout of this repository (shared by every worktree),
 //! cloned with `--filter=blob:none` on first use.
 //!
-//! `check` also names the newest Claude Code on npm beside the one Slopty's recordings and its
-//! stream-json stand-in are made with (`crate::claude::VERSION`): a newer one is moved to by
-//! pinning it there and recording again with `cargo xtask fixtures claude`.
+//! `check` also names the newest Claude Code on npm beside the one Slopty's recordings are made
+//! with (`crate::claude::VERSION`): a newer one is moved to by pinning it there and recording
+//! again with `cargo xtask fixtures claude`.
 
 mod ghostty;
 mod watch;
@@ -425,9 +425,8 @@ fn toolchain_check(sh: &Shell, root: &Utf8Path) {
     }
 }
 
-/// Print the newest Claude Code on npm beside the one the recordings and the stream-json
-/// stand-in are made with. A registry that does not answer is said, not failed on: the forks'
-/// report stands without it.
+/// Print the newest Claude Code on npm beside the one the recordings are made with. A registry
+/// that does not answer is said, not failed on: the forks' report stands without it.
 fn claude_check() {
     let pinned = crate::claude::VERSION;
     match crate::claude::latest() {

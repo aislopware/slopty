@@ -122,7 +122,7 @@ impl Shell {
         };
         if !self.sidebar_hover_card_row_visible(target, cx)
             || self
-                .rename_input_for(target, ChatRenameSurface::Sidebar)
+                .rename_input_for(target)
                 .is_some()
             || cx.has_active_drag()
         {
@@ -215,7 +215,7 @@ impl Shell {
                     .as_deref()
                     .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
                     .filter(|title| !title.is_empty())
-                    .unwrap_or_else(|| "New chat".to_owned()),
+                    .unwrap_or_else(|| "New session".to_owned()),
             );
             (
                 title,
@@ -657,7 +657,7 @@ mod tests {
                 assert_eq!(shell.session_hover_card.shown().is_some(), shown)
             });
             shell.update(cx, |shell, cx| {
-                shell.open_settings(SettingsSection::General, cx)
+                shell.open_settings(SettingsSection::Appearance, cx)
             });
             redraw(cx);
             wait_for_card(cx);

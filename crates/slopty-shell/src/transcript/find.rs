@@ -1,6 +1,6 @@
 //! slopty: find in the current thread (⌘F). A field on the transcript's own overlay card,
 //! under the titlebar: the tally ("2 of 5"), ↑ and ↓ to step, every match washed where it
-//! stands and the current one stronger, landed below the titlebar the way a rail jump lands.
+//! stands and the current one stronger, landed below the titlebar the way every jump lands.
 //! It looks through what the thread says: the person's prompts and the answers' text, plans
 //! included, in the order they read. The keys are the shell keymap's ([`FindInThread`],
 //! [`FindNext`], [`FindPrevious`]); with no binding of the shell's in the way the actions reach
@@ -159,12 +159,6 @@ impl Transcript {
         app.on_action(|_: &FindPrevious, cx| {
             with_target(cx, |this, window, cx| this.find_step(-1, window, cx))
         });
-        // slopty: ⌃B backgrounds the newest running call (bound with the composer's keys).
-        app.on_action(|_: &super::work::BackgroundRunningCall, cx| {
-            with_target(cx, |this, _, cx| {
-                this.background_latest(cx);
-            })
-        });
     }
 
     /// Whether find is open, and its tally.
@@ -193,7 +187,6 @@ impl Transcript {
                 ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
                     this.find_step(1, window, cx)
                 }
-                ComposerInputEvent::ModifiedSubmitted => this.find_step(-1, window, cx),
                 ComposerInputEvent::MentionNavigate(delta) => this.find_step(*delta, window, cx),
                 ComposerInputEvent::MentionDismiss => this.close_find(window, cx),
                 _ => {}

@@ -5,8 +5,11 @@ and agents) expose shells, agents, windows and displays. One **server** keeps th
 directory and the orchestration verbs, and is never on the data path. **Clients** (the macOS,
 iPhone and iPad app, and the `slopty` CLI that people and AI agents run) show every worker's
 agents, terminals, files and screens in one interface, several workers mixed: zeron's shell,
-copied as Slopty's own (`slopty-shell`), fed by Slopty's view model. Every agent (Claude Code, Codex, pi, any ACP agent) is one thread in
-one agent-neutral model. Everything is Rust. Floor: macOS 27.0 / iOS and iPadOS 27.0, Apple silicon.
+copied as Slopty's own (`slopty-shell`), fed by Slopty's view model. TUI-first: every agent
+(Claude Code, Codex, pi) runs as its own TUI in a worker terminal; a Claude Code session is also
+one read-only thread in the agent-neutral model, read from its hooks, its live registry and its
+transcript, which the inspector shows; the GUI types nothing into an agent
+(`docs/decisions/agents.md`, "TUI-first"). Everything is Rust. Floor: macOS 27.0 / iOS and iPadOS 27.0, Apple silicon.
 
 This file is the map. Rulings and their evidence live under [docs/decisions/](DECISIONS.md), one file per topic.
 
@@ -23,7 +26,7 @@ This file is the map. Rulings and their evidence live under [docs/decisions/](DE
                      │  ┌────────────┐  fd     ┌───────────────────────────────────────┐    │
    shells/agents ◀──▶│  │ PTY keeper │ ──────▶ │ sessions · VT engine (libghostty-vt)  │    │
                      │  │ (tiny,     │ SCM_    │ frame diff · replay · fan-out          │    │
-                     │  │  outlives  │ RIGHTS  │ agent threads (driven, one writer)     │    │
+                     │  │  outlives  │ RIGHTS  │ agent threads (observed, read-only)    │    │
                      │  │  worker)   │         │ screen: SCK → VT HEVC → FEC → datagrams│    │
                      │  └────────────┘         │ input: CGEvent injection               │    │
                      │                         └──────────────┬────────────────────────┘    │
@@ -305,25 +308,12 @@ it lost (20 ms doubling to 2 s), checks the custody file names the peer's pid, a
 every session it held: `Reclaim` where ptyd still lists it, else `Adopt` with a dup of the
 master it kept, whose child ptyd then watches by pid and the kernel's start mark.
 
-**Piped sessions.** A program driven over its standard streams rather than a terminal (Claude
-Code as `claude -p` speaking stream-json) is spawned with `PtydRequest::SpawnPiped`
-(`slopty_pty::pty::spawn_piped`): one end of a Unix stream socket pair is its standard input and
-output, its standard error goes to a file the worker names (`0600`, else `/dev/null`), it runs in
-a session and process group of its own with no terminal and none of a terminal's variables, and
-ptyd keeps the other end where a PTY's master would be. Everything above holds for it: the ring
-while nobody holds it, `Attach` handing the socket over with the backlog, the taps and
-checkpoints (bytes the driver chooses), the handover to a new build (`Heir.piped`) and `Adopt`.
-So the program and a turn it runs outlive the worker driving it. A resize does nothing, and
-`Close` sends the process group `SIGTERM`, then `SIGKILL` 5 s later. `SessionInfo.piped` marks
-one, and the worker's terminals leave it to whoever spawned it (`apps/slopty-ptyd/tests/piped.rs`).
-
 **After a reboot.** ptyd's end takes the shells with it, so the worker keeps each session on
 disk itself (`slopty_worker::restore::Keeper`: a recipe and the newest checkpoint under
 `<data dir>/sessions/`). A worker that finds a recipe ptyd no longer holds reopens the session
 under its old id: a new shell in the old directory, under the old screen and a divider, and
-nothing it ran started again. Agents are threads, not terminals: a driven Claude Code that ptyd
-no longer holds leaves its thread exited and resumable, and its next message starts it again
-with `--resume`.
+nothing it ran started again. An agent's thread is left exited and resumable: a
+start with `--resume` takes it up in a terminal again.
 
 **The shell's environment.** Every child gets `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM`,
 `TERM_PROGRAM_VERSION` and the shell integration's `ZDOTDIR`, on top of ptyd's own. `TERM` is
@@ -389,7 +379,7 @@ and the server's hub keeps each listed terminal's agent current from the `Agent`
 answers without asking each worker. `slopty-worker::orchestrate::Orchestrator`
 answers the verbs the server forwards. It opens terminals through the same path a client's
 `OpenSession` takes, types through the session's key and paste encoders (never into a terminal a
-coding agent runs in, `orchestrate::may_type`: an agent is driven as a thread), and reads text views
+coding agent runs in, `orchestrate::may_type`, but the one message `agent_tell` submits), and reads text views
 of the engine on the session's thread (`GhosttyEngine::screen_text`, `text_lines`,
 `text_since`, `commands`). `WaitFor` sleeps on the session's `Activity` watch channel and
 matches output from a per-session mark, as `expect` does. `slopty-worker::ports` finds the TCP
@@ -419,22 +409,20 @@ task, plan or outcome of its own. The hub answers the agents' verbs itself
   surface an agent, and the CLI inside a Slopty terminal (`Role::Shell`) an agent when an agent
   runs there, when an agent opened or typed into it, or when the server does not know it. A
   terminal's token (`SLOPTY_SESSION_TOKEN`) proves which terminal a program speaks from, and so
-  which agent is the parent of what it starts. Only the person answers a request, sends a
-  composer's message, restarts a worker or changes settings, and only the person's read of a
-  thread holds its prompts. An agent tells and stops only agents of its own tree.
+  which agent is the parent of what it starts. Only the person sends a composer's message,
+  restarts a worker or changes settings; a request is answered in its agent's terminal alone, so
+  the hub refuses `AnswerRequest` from anyone. An agent tells and stops only agents of its own
+  tree.
 - `AgentStart` picks the folder, or has the worker clone the repository named
   (`Verb::CloneRepo`), then forwards a `StartThread` at a seat derived from the caller and its
   idempotency key, so a repeat takes the same seat. The start's mode is the person's
   `[agents] autonomy` in each harness's words (`hub::agents::mode_for`); an agent names no
   harness arguments. The child's facts name its parent, and its system text is one line that
   says so.
-- What a child comes to (a rest after 10 s, a wait on the person after 30 s, an end at once)
-  and words told to an agent wait per recipient in `slopty-server::deliver`, kept in
-  `deliveries.json` across restarts. A batch goes to the recipient's worker
-  (`FromServer::Deliver`), which sends it to the thread at that seat as a message of its own;
-  the worker answers `AgentReport::Delivered`. Nothing is typed into a terminal. `AgentWait` watches the agents'
-  rows and answers once one (or each) rests, needs the person or ends; a parent that saw a
-  rest is not told it again.
+- The server delivers nothing to an agent. `AgentTell` is typed into the child's terminal as one
+  submitted message, framed as an agent's words; `AgentStop` presses Esc in each session at work
+  under the agent, the deepest first. A parent hears of its children by `AgentWait`, which
+  watches the agents' rows and answers once one (or each) rests, needs the person or ends.
 - Each worker reports open facts (`ToServer::Facts`: agents, toolchains, GPUs, power and its
   clones, from `slopty-worker::facts`), gathered the first time the hub asks and kept current
   from then on. The hub adds what it knows itself (os, cpus, memory, load, live agents, repos)
@@ -443,9 +431,10 @@ task, plan or outcome of its own. The hub answers the agents' verbs itself
   4 MiB parts, uploads it to the target worker and has it fetched there (`Verb::FetchBundle`).
 
 Every Claude Code run the worker starts adds `--mcp-config=` naming `slopty mcp`
-(`slopty_agent::mcp`, the CLI from `Host::tools_cli`), which serves the eight tools
+(`slopty_agent::mcp`, the CLI from `Host::tools_cli`), which serves Slopty's tools
 (`slopty_tools::tools`: `machines`, `agent_start`, `agent_tell`, `agent_read`, `agent_wait`,
-`agent_stop`, `agents`, `branch_bring`), each also a `slopty` command. Every session gets `SLOPTY_SERVER`, so `slopty mcp` and the CLI inside it find the
+`agent_stop`, `agents`, `branch_bring`, each also a `slopty` command, and `show_visual` and
+`show_page`); Codex and pi get the same server through their own config doors. Every session gets `SLOPTY_SERVER`, so `slopty mcp` and the CLI inside it find the
 server. The attention ladder rolls up by thread, tree, space and fleet
 (`slopty-server::hub::ladder`). Tests start `slopty-stub-claude`, never `claude`.
 
@@ -728,10 +717,6 @@ sent at −1: above files, below video.
   - `Resume` answers the durable length of a partial, so an interrupted upload continues.
   - A drop on a streamed window goes to staging, and the files go on the worker's pasteboard
     as file URLs.
-  - A picture pasted into a conversation face's composer, or a file dropped on the face, goes
-    up with `Dest::Attachment` to a fresh `~/.slopty/drop/<xfer>/`, with nothing put on the
-    pasteboard. A chip in the composer shows it until it lands, and then its path is typed at
-    the composer's cursor, where Claude Code reads it as an attached file.
   - Copied files paste the way a drop lands (`slopty_client::clip::ClipFiles`). ⌘V in a
     terminal with files copied here uploads them to the shell's directory and types their
     paths. ⌘V in a streamed window stages them, and the window's input, the chord first, waits
@@ -896,9 +881,9 @@ shell is the only interface").
   answer as one assistant entry of text, reasoning, tool calls and notices, followed while the
   shell holds a watch on it (`Ask::Follow`).
 
-A chat the shell mints before its first message is held by the bridge
-(`workspace::view_model::Bridge`) until that message starts its thread, and the thread then goes
-by the chat's id. The standing lists (devices, spaces, chats, sessions, the server's presence)
+A chat is its thread, by the thread's id: a new session starts on its project's machine
+(`slopty.StartSession`, an agent's TUI or a plain shell in a terminal of its own) and the sidebar
+lists it once that worker's table does. The standing lists (devices, spaces, chats, sessions, the server's presence)
 are gathered for a frame and published as watches (`Feed`); live sessions are said again every
 15 s, inside the shell's 45 s staleness window. Every other call is answered on the UI thread by
 the workspace (`Ask::Call`) or refused as an unknown method.
@@ -914,11 +899,14 @@ it changes, a refused one answered with a snapshot, a session's item made and re
 comes back is found again by the chat that asks (`surfaces::live::terminals`).
 
 **The right pane and the dock** (`workspace::view_model::surfaces`) answer the shell's calls
-through each worker's own verbs:
+through each worker's own verbs. Beside a session's terminal the inspector reads its tray
+(`slopty.WatchWork`) and its dock (`slopty.WatchDock`: the turn's live line, the mode, the
+context and the subagent kinds `@` lists), and neither asks the agent anything:
 
-- *Changes*: a thread's diff, the working tree's live and the branch's or the latest turn's on
+- *Changes*: a thread's diff, the working tree's live and the branch's against its base on
   asking, cut by the worker's review (`GitOp::Changes`) and written as the unified patch the
-  shell reads, with each file's two sides whole for its highlighting.
+  shell reads, with each file's two sides whole for its highlighting. The worker keeps no turn
+  snapshots, so there is no turn's diff.
 - *Files*: a space's tree, its search, a file read and saved (its version is its size and
   modification time, which the worker's save checks a conflict by), an entry moved or trashed,
   and the tree's and git's changes watched.
@@ -939,7 +927,9 @@ through each worker's own verbs:
   never by Slopty), the one autonomy setting, Devices with Add device (this Mac shared, a
   machine installed over ssh, a server joined or set up; `surfaces::adding`), a phone's code to
   join, and the threads the person archived (`interface/archived.json`, the person's own filing:
-  archiving stops nothing).
+  archiving stops nothing). Nothing deletes a session, whose record is its agent's own:
+  removing a project archives its sessions, and a folder is a project while an unarchived
+  session there, a plain terminal there or the person's adding keeps it.
 
 **Around the shell**, the workspace keeps what makes a worker feel local and what reaches the
 person away from it:
@@ -953,8 +943,8 @@ person away from it:
   (`workspace::remote`, `clipboard`), files dropped onto a terminal or a window, uploaded and
   typed or pasted there (`remote::transfers`), and the forwarded ports;
 - the notes posted while the app is not in front (`workspace::attention`: an agent that comes
-  to need the person, a program's `blocked` status, a long turn or command that ends), with
-  Allow and Deny answered from the note (`workspace::approvals`), the turns left unread
+  to need the person, a program's `blocked` status, a long turn or command that ends), each
+  opening its session, whose TUI the person answers in; the turns left unread
   (`workspace::turns`, the worker's word, so a turn read on the phone is read on the Mac), and
   where the person is (`workspace::presence`), which the server uses to send a notice only
   where it is wanted.
@@ -973,47 +963,34 @@ pending messages, plan, background tasks and meters are changed only by `Action`
 and on each client, which mirrors it. A followed thread streams a snapshot of its last turns
 and then actions numbered by a `Cursor { epoch, seq }`, so a client that comes back gets only
 what it missed. Every worker also keeps one small thread table (`ThreadRow`s, `TableFrame`) for
-the lists that follow nothing. Sends, answers and every other intent carry a client-made
-`IntentId` that the worker acts on once. Each agent's adapter maps its native session onto the
+the lists that follow nothing. A start and the intents left (`Seen`, `Name`) carry a
+client-made `IntentId` that the worker acts on once. Each agent's adapter maps its native session onto the
 model on the worker. What an agent is, what it can do (`Cap`), how it is reached (`Drive`) and
 what its tools are stay open strings. On the worker, `slopty_worker::thread::Host` holds every
 thread. Each thread has a log under `threads/<id>/` (a snapshot plus a tail of framed actions,
 compacted at turn ends), the last few thousand actions are kept in memory for followers coming
 back, and per-thread intent outcomes are deduplicated by id. A `Follower` turns a cursor into
 frames, gathering batches within the client's latency budget and merging runs of appends.
-Claude Code is driven as Claude's desktop app drives it, `claude -p` over stream-json with the
-control protocol: a sans-IO codec, `slopty_agent::claude::driven`, over the transcript decoder
-(`slopty_agent::claude::history`, which also reads a session again from its transcript), and
-its IO, `slopty_worker::thread::claude`, one task per running Claude Code, the session's one
-writer, with Claude Code itself in ptyd's custody as a piped session
-(`thread::claude::custody`), so a turn outlives the worker. One thread per session, named by
-the session's id, with a linked thread per subagent. Codex is mapped from its app-server, as
-one more client of the user's daemon:
-`slopty_agent::codex::protocol` holds the wire's types, generated by `cargo xtask codex schema`
-from the pinned build's JSON Schema, `codex::rpc` reads and writes its JSON-RPC frames, and
-`codex::shared` is the sans-IO codec from a Codex thread to Actions and from intents back to
-requests and answers. Its IO, `slopty_worker::thread::codex`, joins the daemon's control socket
-under `$CODEX_HOME` (else `~/.codex`), follows every thread the daemon holds or starts by
-`thread/resume`, and sends an approval's answer, a turn, a steer or an interrupt as the Codex
-TUI would. `cargo xtask codex fixtures` records the pinned build speaking to two clients
-against a canned model; the codec's tests map that recording, and the daemon's e2e replays it
-from a stand-in app-server. pi is driven over its RPC mode: `slopty_agent::pi` embeds the permission
-gate every driven pi loads (`assets/pi-gate/gate.ts`, which asks about each tool call through
-the RPC extension UI and fails closed), and `pi::rpc` reads and writes its LF-framed JSON
-records. `cargo xtask pi fixtures` records the pinned pi against a canned model. On the link, `ClientMsg::Thread`
+Every agent runs as its own TUI in a Slopty terminal (`docs/decisions/agents.md`, "TUI-first"):
+a start opens a terminal with the person's own `claude`, `codex` or `pi`
+(`slopty_worker::thread::start`), Claude Code on a session Slopty names, with Slopty's tools and
+its hooks relayed by `slopty hook`. Any Claude Code in any terminal is read
+(`slopty_worker::thread::claude`): the terminal's process names its session in Claude Code's
+registry (`slopty_agent::claude::sessions`), and its transcript, followed on the kernel's word,
+maps onto the thread model through the transcript decoder (`slopty_agent::claude::history`),
+with a linked thread per subagent. One thread per session, named by the session's id; a
+`/clear` or `/resume` moves the terminal to the next session's thread. The hooks give the status,
+and a session without them takes its phase from its transcript. Codex and pi rows name their terminals and have no inspector. On the link, `ClientMsg::Thread`
 carries the requests and the control stream carries the table (`WorkerMsg::Threads`) and each
 intent's outcome (`WorkerMsg::IntentDone`). A followed thread streams on a unidirectional
 stream of its own (`UniHead::Thread`), one task per thread on the worker
-(`apps/slopty-worker/src/threads.rs`), which also carries its pages and expansions. What is
-sent to an agent (a message, steered or queued, an answer, an interrupt, a model) goes through
-its adapter's own door, with each waiting message on the thread's pending list. While an
+(`apps/slopty-worker/src/threads.rs`), which also carries its pages and expansions. What the
+person or an agent sends an agent is typed into its terminal (`TermRequest::Submit`: a paste,
+then Enter 200 ms later, refused while it needs the person), and a stop is an Esc. While an
 agent's process lives, the worker stamps its thread alive (`Action::Lease`, every
-`LEASE_EVERY`), and stops the moment it is gone. Each
-turn's edges are snapshotted (`git add -A` through an index of the thread's own, into
-`refs/slopty/threads/<thread>/<turn>-{before,after}`, `slopty_worker::thread::review`), off
-the turn's path. A review is a diff between two snapshots, cut into hunks on the worker, and
-keep and revert act per file or hunk against the blobs the review showed. A thread whose tree
-differs from what the person kept is to review (`Action::ToReview`). Each worker publishes its
+`LEASE_EVERY`), and stops the moment it is gone. A review
+is a diff of the repository's states (the unstaged changes, a branch), cut into hunks on the
+worker. Each worker publishes its
 table to the server too (`ToServer::Threads`), and the server ranks the fleet on one
 attention ladder (`slopty_proto::thread::attention`, `slopty_server::hub`'s `ladder`): Needs
 you, Failed, To review, Working, Waiting, Idle, a subagent folded into its parent, rolled up
@@ -1025,20 +1002,10 @@ need them, fails or finishes is a `FromServer::Notice` to the clients they are a
 of an agent another started goes to that agent, not the person), none while
 its tile is on screen and no handheld while they are at a desk.
 
-Claude Code's drive (`docs/decisions/agents.md`, "Each agent's drive"): each message goes as a
-user message under its intent's id and is the person's once Claude Code echoes that id; one
-not acknowledged in 120 s goes again under the same id, then is held as one that may not have
-reached it. A stop is the `interrupt` control request, and one not acknowledged in 1.5 s ends
-the process. Approvals are `can_use_tool` requests answered by their own id, and the
-`initialize` a worker sends whenever it takes a session up names those still open, so nothing
-asked is lost across a restart. Model, permission mode, effort and fast mode apply live;
-slash commands and skills go as messages; compaction, the usage limit (messages held until it
-resets), a stop under way and a turn with no progress for 16 minutes (a wake from sleep never
-counts) are waits. A worker that goes leaves Claude Code running in ptyd; the next one takes
-the session back, reads the thread again from the transcript and then what Claude Code wrote
-meanwhile. A pull request is the thread's, read from the forge by the worker
-(`thread::pulls`). Tests drive `slopty-stub-claude` (`slopty_testkit::claude_stream`), which
-speaks the same protocol and fails on cue, never a signed-in `claude`.
+Tests drive `slopty-stub-claude` (`slopty_testkit::claude_tui`), a stand-in for Claude Code's
+TUI in a real terminal: it keeps the registry record and the transcript Claude Code keeps, runs
+the hooks it is given and records every read of its terminal,
+never a signed-in `claude`.
 
 Finding what needs the person: ⌘⇧A (the "Next Thing Needing You" menu item) reveals and
 focuses the next rung of the attention ladder on any worker, cycling from the active item: a
@@ -1309,8 +1276,8 @@ context runs its command, every other key still goes to the program.
 client endpoint, with its own reconnect loop and silence check) per worker
 (`slopty_app::workers`), all feeding the one `WorkspaceView` under the worker's `WorkerKey`
 (its `WorkerId`'s 128 bits). A dropped link, whatever dropped it, keeps the worker's tiles
-and what they show, set back under "reconnecting": a shell its rows, a window its last picture,
-a face its draft. The next link takes the same views up in place (a shell attaches again, a
+and what they show, set back under "reconnecting": a shell its rows, a window its last picture.
+The next link takes the same views up in place (a shell attaches again, a
 window's stream opens again behind its picture), and its snapshot reconciles the tiles. The system says when a link may have died under
 it (`slopty_platform::resume`: the Mac woke, its screens woke, the session came back or was
 unlocked, the app came to the front, and Network.framework's path monitor on a path change;
@@ -1377,11 +1344,11 @@ same deploy with `--update` runs from a wrong-build tile's "Update"
 | `slopty-capture` | the capture seam (`CaptureSource`); ScreenCaptureKit on macOS | worker |
 | `slopty-codec` | the encoder seam (`VideoEncoder`, `AudioEncoder`); VideoToolbox encode (worker) / decode (all) | split |
 | `slopty-input` | the input and clipboard seams (`InputSink`, `Board`); CGEvent injection for remote-window input (keymap, pointer/scroll/keys, owner activation, a thread per stream, held input let go at the end) and `NSPasteboard` on macOS | worker |
-| `slopty-agent` | each agent's drive as a sans-IO codec (Claude Code's stream-json, Codex's app-server, pi's RPC, ACP), the transcript decoder and the thread mapping, and what a terminal shows of an agent run by hand (`AgentTable`) | worker |
+| `slopty-agent` | each agent's TUI start, Claude Code's registry, transcript decoder and thread mapping, its hooks, and what a terminal shows of an agent (`AgentTable`) | worker |
 | `slopty-worker` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | worker |
 | `slopty-tailnet` | the local Tailscale daemon's `LocalAPI`: peers and paths, `whois` and grants, admission policy | all |
 | `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, and the agents' MCP tools | all |
-| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, the agents' verbs and their deliveries, the QUIC front end | server |
+| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, the agents' verbs, the attention ladder and its pushes, the QUIC front end | server |
 | `slopty-client` | client session state, the item registry mirror, the layout model, grouping tiles by their facts (`groups`) | client |
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |

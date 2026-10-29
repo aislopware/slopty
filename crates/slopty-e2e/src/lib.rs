@@ -60,14 +60,6 @@ pub const THIS_MAC_ENV: &str = "SLOPTY_THIS_MAC";
 /// sees the grants the test chose and a render is the same on every machine.
 pub const WORKER_GRANTS_ENV: &str = "SLOPTY_WORKER_GRANTS";
 
-/// The press of a note's button the iOS app is launched as having been woken by.
-///
-/// It is JSON (`{"id", "action", "info", "text"}`): a killed app's cold launch for a press,
-/// which only a finger on a delivered note makes. The app hands it on as its delegate hands on a
-/// launching response, before any scene connects (`slopty_platform::notify::deliver_launching`).
-/// Only the e2e build reads it.
-pub const LAUNCH_TAP_ENV: &str = "SLOPTY_E2E_LAUNCH_TAP";
-
 /// Screen Recording, in [`WORKER_GRANTS_ENV`].
 pub const SCREEN_RECORDING: &str = "screen-recording";
 
@@ -241,14 +233,6 @@ pub enum Command {
     },
     /// Start a fresh frame-time measurement window ([`FrameInfo`] in the next dumps).
     FramesReset,
-    /// Drive the app's system-notification response path with `tag` (a session UUID),
-    /// exactly as `cx.on_system_notification_response` would when the user activates an
-    /// agent banner: reveal the session in whichever project holds its tile. System
-    /// notifications are disabled outside a bundle, so this is the only way to test the path.
-    NotificationResponse {
-        /// The banner's tag, which is the session UUID.
-        tag: String,
-    },
     /// Hand the app a device token as the app delegate's `didRegisterForRemoteNotifications`
     /// would (iOS only), ask for notes with no prompt (provisional), and answer the public half
     /// of the phone's push key ([`Reply::PushKey`]). A simulator's own token is not what the
@@ -259,18 +243,6 @@ pub enum Command {
     },
     /// The notes the Notification Centre shows for the app ([`Reply::Delivered`]).
     Delivered,
-    /// Press `action` ("allow" or "deny") on an approval note carrying `info` (its `userInfo`,
-    /// keyed as `slopty_platform::notify::info` keys it), as a press nobody in the app listens
-    /// to is answered (`slopty_app::verdict::answer_alone`): the server the settings name is
-    /// reached over a link of the press's own, and the thread's request answered there. It
-    /// answers [`Reply::Ok`] once the server took the answer. A real press needs the person's
-    /// finger, or synthetic input into the simulator, which the tests never send.
-    PressNote {
-        /// The note's action identifier.
-        action: String,
-        /// What the note carries.
-        info: std::collections::BTreeMap<String, String>,
-    },
     /// Open a push whose APNs `payload` (its JSON) carries a sealed body, as the notification
     /// extension does, with the key and the token the app kept in the Keychain they share
     /// ([`Reply::Opened`]). `simctl push` hands a note straight to the system and never starts

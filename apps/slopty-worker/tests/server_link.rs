@@ -16,9 +16,7 @@ mod tests {
     use slopty_proto::orchestration::{
         ErrorCode, Input, Outcome, Size, TermRef, UploadPart, Verb, WaitUntil, Waited,
     };
-    use slopty_proto::server::{
-        FromServer, Os, Registration, ReportBlock, Reports, Role, ToServer,
-    };
+    use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer};
     use slopty_proto::terminal::{CloseReason, SessionState};
     use slopty_proto::thread::wire::{TableFrame, ThreadRow};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
@@ -28,18 +26,6 @@ mod tests {
     /// From `exit` typed to the worker announcing the exit: ptyd reaps the child and
     /// tells the worker at once, so this is slack for a loaded machine, not a wait.
     const EXIT_BOUND: Duration = Duration::from_secs(5);
-
-    /// Batch `batch` as the server sends it, `context` as the agent reads it: its first line
-    /// opens it, its last closes it, and the lines between are one report, numbered as the batch.
-    fn deliver(session: SessionId, batch: u64, context: &str) -> FromServer {
-        let lines: Vec<&str> = context.lines().collect();
-        let (open, rest) = lines.split_first().expect("an opening");
-        let (close, between) = rest.split_last().expect("a closing");
-        let block = ReportBlock { id: batch, text: between.join("\n") };
-        let reports =
-            Reports { open: (*open).to_owned(), blocks: vec![block], close: (*close).to_owned() };
-        FromServer::Deliver { session, batch, reports }
-    }
 
     /// A binary of this build (`slopty_testkit::bins`).
     fn bin(name: &str) -> PathBuf {
@@ -336,19 +322,13 @@ mod tests {
         );
     }
 
-    /// Another device edits this worker's `[worker]` through the server: an ACP agent added to
-    /// `worker.acp` lands in the worker's own settings file, and the worker takes the file up
-    /// again and probes its agents, so the server hears the new agent in its capabilities. An
-    /// edit outside `[worker]` is refused and writes nothing.
+    /// Another device edits this worker's `[worker]` through the server: the edit lands in the
+    /// worker's own settings file, which the worker reads as it reads its own. An edit outside
+    /// `[worker]` is refused and writes nothing.
     #[tokio::test]
-    async fn an_acp_agent_added_from_afar_lands_in_the_file_and_is_probed() {
-        use std::os::unix::fs::PermissionsExt as _;
-
+    async fn a_worker_setting_edited_from_afar_lands_in_the_file() {
         use slopty_proto::settings::SettingEdit;
         let dir = tempfile::tempdir().unwrap();
-        let stub = dir.path().join("stub-acp");
-        std::fs::write(&stub, "#!/bin/sh\necho 'stub-acp 4.5.6'\n").unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
         let server =
             ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
                 .unwrap();
@@ -367,15 +347,14 @@ mod tests {
         assert!(matches!(&refused, Outcome::Error { code: ErrorCode::Invalid, .. }), "{refused:?}");
         assert!(!file.exists(), "nothing written");
 
-        let literal = format!("[{:?}]", stub.to_string_lossy());
-        let add = SettingEdit {
+        let attached = SettingEdit {
             table: "worker".to_owned(),
-            key: "acp".to_owned(),
-            entry: Some("stub".to_owned()),
-            literal: Some(literal),
+            key: "keep_awake".to_owned(),
+            entry: None,
+            literal: Some("\"attached\"".to_owned()),
         };
         let Outcome::Settings(read) =
-            peer.ask(Verb::Settings { of: Some(reg.worker), edits: vec![add] }).await
+            peer.ask(Verb::Settings { of: Some(reg.worker), edits: vec![attached] }).await
         else {
             panic!("the settings are answered");
         };
@@ -383,15 +362,8 @@ mod tests {
         assert_eq!(read.tables, ["worker", "network"]);
         assert!(read.problems.is_empty(), "{:?}", read.problems);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), read.text);
-        let own = slopty_settings::Settings::load(&file).settings.worker.acp;
-        assert_eq!(own.get("stub"), Some(&vec![stub.to_string_lossy().into_owned()]));
-
-        peer.heard(|m| {
-            matches!(m, ToServer::Caps(caps) if caps.agents.iter().any(|a| {
-                a.agent.0 == "acp:stub" && a.version == "4.5.6"
-            }))
-        })
-        .await;
+        let own = slopty_settings::Settings::load(&file).settings.worker.keep_awake;
+        assert_eq!(own, slopty_settings::KeepAwake::Attached);
     }
 
     /// A worker no service manager keeps alive (one a test or a person started by hand) would
@@ -988,58 +960,11 @@ mod tests {
         );
     }
 
-    /// Reports the server sends a seated agent reach it as a message of their own, never
-    /// through a terminal, and the server is told which batch arrived; a batch for a seat no
-    /// thread holds is not said to have arrived.
-    #[tokio::test]
-    async fn reports_reach_a_seated_agent_as_a_message_of_their_own() {
-        use slopty_proto::server::AgentReport;
-
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let server =
-            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
-                .unwrap();
-        let (_daemons, record) = with_claude(&root, server.local_addr().unwrap()).await;
-        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
-        let (mut peer, reg) = Peer::welcome(link).await;
-        let seat = SessionId::new();
-        let _thread = seated_claude(&mut peer, reg.worker, &root, seat).await;
-
-        let context = "<slopty-reports>\nagent 2: needs input\n  Which crate owns the store?\n</slopty-reports>";
-        peer.tx.send(&deliver(SessionId::new(), 3, context)).await.unwrap();
-        peer.tx.send(&deliver(seat, 7, context)).await.unwrap();
-        peer.heard(|m| {
-            matches!(m, ToServer::Report(AgentReport::Delivered { session, batch: 7 }) if *session == seat)
-        })
-        .await;
-        let said = |r: &serde_json::Value| {
-            r["received"].as_array().into_iter().flatten().any(|line| {
-                line["type"] == "user"
-                    && line["message"].to_string().contains("Which crate owns the store?")
-            })
-        };
-        let heard = recorded(&record, said).await;
-        let users = heard["received"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|line| line["type"] == "user")
-            .count();
-        assert_eq!(users, 2, "the first message, then the reports once");
-        assert!(
-            !peer
-                .heard
-                .iter()
-                .any(|m| matches!(m, ToServer::Report(AgentReport::Delivered { batch: 3, .. }))),
-            "no thread is seated there"
-        );
-    }
-
     /// An agent the worker starts inherits nothing of the environment the test runs in: not
     /// the developer's Claude Code settings or credentials, not the Slopty terminal the test
     /// may run inside, not the build's own variables. The daemons start from a clean one
-    /// (`slopty_testkit::env::scrub`), and the agent from theirs.
+    /// (`slopty_testkit::env::scrub`), and the agent's terminal from theirs, with the Slopty
+    /// session it runs in.
     #[tokio::test]
     async fn an_agent_the_worker_starts_inherits_nothing_of_the_test_s_environment() {
         let dir = tempfile::tempdir().unwrap();
@@ -1051,10 +976,10 @@ mod tests {
         let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
         let (mut peer, reg) = Peer::welcome(link).await;
         let _thread = seated_claude(&mut peer, reg.worker, &root, SessionId::new()).await;
-        let started = recorded(&record, |r| r["inherited"].is_object()).await;
+        let started = recorded(&record, |r| r["env"].is_object()).await;
         let inherited: std::collections::BTreeMap<String, u64> =
-            serde_json::from_value(started["inherited"].clone()).unwrap();
-        assert!(inherited.contains_key("CLAUDE_CODE_EAGER_FLUSH"), "what the drive gave it");
+            serde_json::from_value(started["env"].clone()).unwrap();
+        assert!(inherited.contains_key(slopty_proto::ctl::SESSION_ENV), "its terminal's own");
         let leaked = slopty_testkit::env::leaked(&inherited);
         assert!(leaked.is_empty(), "the test's own environment leaked into the agent: {leaked:?}");
     }

@@ -560,10 +560,11 @@ pub enum Verb {
         /// What to change first; none only reads.
         edits: Vec<crate::settings::SettingEdit>,
     },
-    /// Send a thread a message as its composer would, to go when the agent next takes one
-    /// (what a phone's note replies with, with no window open). The person's alone; an agent
-    /// is [`ErrorCode::Forbidden`] (an agent speaks to another with [`Verb::AgentTell`]).
-    /// Answered with [`Outcome::Done`] once the thread took it.
+    /// Type a message into the terminal of a thread's agent and submit it, as the prompt box
+    /// does (what a phone's note replies with, with no window open); refused while the agent
+    /// waits on the person. The person's alone; an agent is [`ErrorCode::Forbidden`] (an
+    /// agent speaks to another with [`Verb::AgentTell`]). Answered with [`Outcome::Done`] once
+    /// it is typed.
     SendMessage {
         /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
         of: ThreadOf,
@@ -584,8 +585,9 @@ pub enum Verb {
     /// tools, and records the caller's agent as its parent. Answered with
     /// [`Outcome::ThreadStarted`] once it runs.
     AgentStart(Box<crate::agent::AgentStart>),
-    /// Words for an agent, marked as the caller's: they reach it as a message through its
-    /// thread, never typed into a terminal. Answered with [`Outcome::Done`].
+    /// Words for an agent, marked as the caller's, typed into its terminal and submitted as
+    /// [`Verb::SendMessage`] types the person's; refused while it waits on the person.
+    /// Answered with [`Outcome::Done`] once they are typed.
     AgentTell {
         /// Which agent.
         agent: ThreadId,
@@ -603,7 +605,8 @@ pub enum Verb {
         /// How long, in milliseconds.
         timeout_ms: u32,
     },
-    /// End an agent, its conversation kept. Answered with [`Outcome::Done`].
+    /// Interrupt an agent at work, and every agent at work under it, as Esc does in its
+    /// terminal; their terminals and conversations stay. Answered with [`Outcome::Done`].
     AgentStop {
         /// Which agent.
         agent: ThreadId,

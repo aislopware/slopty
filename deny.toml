@@ -19,10 +19,8 @@ yanked = "deny"
 # gpui-component and their font/svg/http stacks). Nothing in Slopty's own code uses them; they
 # leave when upstream drops them. Re-checked whenever the zed/gpui-kit pins move.
 ignore = [
-    { id = "RUSTSEC-2025-0141", reason = "bincode 1 via syntect (gpui-component)" },
     { id = "RUSTSEC-2024-0384", reason = "instant via gpui-base, gpui-component, notify" },
     { id = "RUSTSEC-2024-0436", reason = "paste via gpui-component, metal, pulp" },
-    { id = "RUSTSEC-2026-0206", reason = "rustybuzz via usvg (gpui)" },
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser via gpui, fontdb, rustybuzz" },
 ]
 
@@ -43,10 +41,7 @@ allow = [
     "Unlicense",
 ]
 confidence-threshold = 0.8
-exceptions = [
-    # BSD-style; pulled by gpui's http_client through async-compression.
-    { allow = [ "bzip2-1.0.6" ], crate = "libbz2-rs-sys" },
-]
+exceptions = [  ]
 
 [licenses.private]
 ignore = true
@@ -62,11 +57,10 @@ deny = [
     { crate = "audiopus", reason = "unmaintained; use `opus`" },
     { crate = "reed-solomon-erasure", reason = "unmaintained; use reed-solomon-simd" },
     # Slopty code uses objc2 only; the legacy crates are tolerated solely inside GPUI's macOS
-    # platform layer (gpui_apple/gpui_macos, metal) until upstream finishes its migration.
+    # platform layer (gpui_macos, metal) until upstream finishes its migration.
     { crate = "objc", reason = "use objc2", wrappers = [
         "cocoa",
         "cocoa-foundation",
-        "gpui_apple",
         "gpui_macos",
         "metal",
     ] },
@@ -82,8 +76,6 @@ allow-registry = [ "https://github.com/rust-lang/crates.io-index" ]
 allow-git = [
     "https://github.com/aislopware/gpui-kit",
     "https://github.com/zed-industries/font-kit",
-    # gpui's `test-support` (dev-dependency of slopty-ui) pins proptest to a git revision.
-    "https://github.com/proptest-rs/proptest",
     # wgpu and naga at the revision gpui-fast pins for `gpui_wgpu`, so slopty-visual(-gpu) share
     # one of each with it (`Cargo.toml`, "wgpu").
     "https://github.com/gfx-rs/wgpu",

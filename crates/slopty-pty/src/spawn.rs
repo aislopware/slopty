@@ -95,21 +95,14 @@ impl Launch {
         })
     }
 
-    /// Start it on `stdio` in a new session: on a tty (a PTY's slave) that becomes its
-    /// controlling terminal on fds 0, 1 and 2, or on a pipe with no terminal at all. Returns once
-    /// the program runs, or with the step that failed and why.
-    pub(crate) fn spawn(&self, stdio: Stdio<'_>) -> io::Result<Child> {
+    /// Start it on `tty` (a PTY's slave) in a new session, the tty its controlling terminal on
+    /// fds 0, 1 and 2. Returns once the program runs, or with the step that failed and why.
+    pub(crate) fn spawn(&self, tty: BorrowedFd<'_>) -> io::Result<Child> {
         let pointers = Pointers::new(self);
-        let (io, err, terminal) = match stdio {
-            Stdio::Tty(tty) => (tty, tty, true),
-            Stdio::Piped { io, err } => (io, err, false),
-        };
-        let moved_io = above_stdio(io)?;
-        let io = moved_io.as_ref().map_or(io, |moved| moved.as_fd());
-        let moved_err = above_stdio(err)?;
-        let err = moved_err.as_ref().map_or(err, |moved| moved.as_fd());
+        let moved = above_stdio(tty)?;
+        let tty = moved.as_ref().map_or(tty, |moved| moved.as_fd());
         let handshake = Handshake::new()?;
-        let fds = Fds { io: io.as_raw_fd(), err: err.as_raw_fd(), terminal };
+        let fds = Fds { tty: tty.as_raw_fd() };
         let pid = self.fork(&pointers, fds, handshake.child_end())?;
         match handshake.outcome(pid) {
             Ok(None) => Ok(Child { pid, status: None }),
@@ -171,8 +164,8 @@ impl Launch {
         forked
     }
 
-    /// The child's side of the fork: the working directory, a new session, `fds` on 0 to 2
-    /// (a tty as its controlling terminal), nothing else open, the descriptor limit and the
+    /// The child's side of the fork: the working directory, a new session, the tty on 0 to 2
+    /// as its controlling terminal, nothing else open, the descriptor limit and the
     /// signal state a new program expects, and `execve`, with `execvp`'s fallback to the shell
     /// for a file the kernel cannot run. System calls on memory built before the fork and
     /// nothing else. A step that fails is reported on `report` and ends the child with
@@ -191,25 +184,18 @@ impl Launch {
         if let Err(e) = rustix::process::setsid() {
             fail(report, Step::Session, e.raw_os_error());
         }
-        // `fds` are above 2, so each `dup2` makes a new descriptor, which `exec` keeps, and
-        // overwrites neither of them nor a report pipe.
-        let standard = [
-            (fds.io, libc::STDIN_FILENO),
-            (fds.io, libc::STDOUT_FILENO),
-            (fds.err, libc::STDERR_FILENO),
-        ];
-        for (from, fd) in standard {
-            // SAFETY: `dup2` on two descriptor numbers; `from` is open in this process.
-            if unsafe { libc::dup2(from, fd) } == -1 {
+        // The tty is above 2, so each `dup2` makes a new descriptor, which `exec` keeps, and
+        // overwrites neither it nor a report pipe.
+        for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            // SAFETY: `dup2` on two descriptor numbers; the tty is open in this process.
+            if unsafe { libc::dup2(fds.tty, fd) } == -1 {
                 fail(report, Step::Terminal, errno());
             }
         }
-        if fds.terminal {
-            // SAFETY: fd 0 is the tty now, open for the rest of this process.
-            let stdin = unsafe { BorrowedFd::borrow_raw(libc::STDIN_FILENO) };
-            if let Err(e) = rustix::process::ioctl_tiocsctty(stdin) {
-                fail(report, Step::Terminal, e.raw_os_error());
-            }
+        // SAFETY: fd 0 is the tty now, open for the rest of this process.
+        let stdin = unsafe { BorrowedFd::borrow_raw(libc::STDIN_FILENO) };
+        if let Err(e) = rustix::process::ioctl_tiocsctty(stdin) {
+            fail(report, Step::Terminal, e.raw_os_error());
         }
         close_inherited(report.descriptor());
         // SAFETY: `setrlimit` reads the limit, built before the fork, and changes this process's
@@ -232,26 +218,10 @@ impl Launch {
     }
 }
 
-/// What a program is started on.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum Stdio<'a> {
-    /// A PTY's slave, on fds 0 to 2 and as the controlling terminal.
-    Tty(BorrowedFd<'a>),
-    /// `io` on fds 0 and 1 (one end of a socket pair), `err` on fd 2, and no terminal.
-    Piped {
-        /// Standard input and output.
-        io: BorrowedFd<'a>,
-        /// Standard error.
-        err: BorrowedFd<'a>,
-    },
-}
-
-/// [`Stdio`] as the child takes it: descriptor numbers, every one above 2.
+/// What the child is started on, as it takes it: the tty's descriptor number, above 2.
 #[derive(Clone, Copy)]
 struct Fds {
-    io: c_int,
-    err: c_int,
-    terminal: bool,
+    tty: c_int,
 }
 
 /// `argv` and `envp` as `execve` takes them, null-terminated, pointing into a [`Launch`], and
@@ -875,7 +845,7 @@ mod tests {
             let handshake = Handshake::new().unwrap();
             let report = handshake.child_end();
             let slave = std::os::fd::AsRawFd::as_raw_fd(&pty.slave());
-            let fds = Fds { io: slave, err: slave, terminal: true };
+            let fds = Fds { tty: slave };
             let pid = launch.fork(&Pointers::new(&launch), fds, report).unwrap();
             drop(handshake);
             let status = reap(pid, WaitOptions::empty()).unwrap().unwrap();
@@ -897,7 +867,7 @@ mod tests {
                 wait_for_exit(pid);
             }
         });
-        let error = launch.spawn(Stdio::Tty(pty.slave())).unwrap_err();
+        let error = launch.spawn(pty.slave()).unwrap_err();
         assert!(error.to_string().starts_with("chdir "), "{error}");
         assert_eq!(hook::last(), Some(hook::CaughtUp::Gone));
     }
@@ -921,7 +891,7 @@ mod tests {
                     wait_for_exit(pid);
                 }
             });
-            let error = launch.spawn(Stdio::Tty(pty.slave())).unwrap_err();
+            let error = launch.spawn(pty.slave()).unwrap_err();
             assert!(error.to_string().starts_with("chdir "), "{error}");
             seen.push(hook::last());
         }
@@ -952,7 +922,7 @@ mod tests {
             });
             let launch =
                 Launch::new(Path::new("/usr/bin/login"), ["login"], [], Path::new("/")).unwrap();
-            let spawned = launch.spawn(Stdio::Tty(pty.slave()));
+            let spawned = launch.spawn(pty.slave());
             done.send((spawned, hook::last())).unwrap();
             pty
         });
@@ -1001,11 +971,11 @@ mod tests {
         let pty = Pty::open(TermSize::default()).unwrap();
         let missing = std::env::temp_dir().join("slopty-no-such-dir-for-spawn");
         let launch = Launch::new(Path::new("/bin/sh"), ["sh"], [], &missing).unwrap();
-        let error = launch.spawn(Stdio::Tty(pty.slave())).unwrap_err();
+        let error = launch.spawn(pty.slave()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
         assert!(error.to_string().starts_with("chdir "), "{error}");
         let launch = Launch::new(&missing, ["x"], [], Path::new("/")).unwrap();
-        let error = launch.spawn(Stdio::Tty(pty.slave())).unwrap_err();
+        let error = launch.spawn(pty.slave()).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
         assert!(error.to_string().starts_with("exec "), "{error}");
     }

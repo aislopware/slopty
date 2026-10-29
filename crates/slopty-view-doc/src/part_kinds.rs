@@ -97,9 +97,6 @@ pub struct SubagentProgress {
     /// Its kind (`general-purpose`, `Explore`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
-    /// The model its kind runs on, when the agent names one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
     /// It is still at work.
     pub running: bool,
     /// Where it stands: [`SubagentProgress::RUNNING`], [`SubagentProgress::WAITING`] (on its

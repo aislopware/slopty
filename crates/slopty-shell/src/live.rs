@@ -324,7 +324,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
 /// Bind the whole keymap again, Slopty's views' keys as [`keys`] now says them.
 fn rebind(cx: &mut App) {
     let settings = crate::settings::current(cx);
-    crate::shell::apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
+    crate::shell::apply_keymap(cx, &settings.keymap);
 }
 
 type OpenFileFn = dyn Fn(&str, &str, &mut App) -> bool;
@@ -366,6 +366,27 @@ pub fn serve_runs(cx: &mut App, run: impl Fn(&str, &str, bool, &mut App) -> bool
 pub fn run_line(id: &str, line: &str, enter: bool, cx: &mut App) -> bool {
     let Some(Runs(run)) = cx.try_global::<Runs>().cloned() else { return false };
     run(id, line, enter, cx)
+}
+
+type DraftingFn = dyn Fn(&AnyView, &App) -> bool;
+
+/// How the app tells whether the person has unsent words in a terminal's line.
+#[derive(Clone)]
+struct Drafting(Rc<DraftingFn>);
+
+impl Global for Drafting {}
+
+/// Serve [`drafting`] with `drafting`: whether a terminal's view holds words the person typed
+/// and has not sent.
+pub fn serve_drafting(cx: &mut App, drafting: impl Fn(&AnyView, &App) -> bool + 'static) {
+    cx.set_global(Drafting(Rc::new(drafting)));
+}
+
+/// Whether the terminal drawn as `view` holds words the person typed or pasted and has not sent:
+/// what an agent driving the window reads as the person typing. `false` with no host.
+#[must_use]
+pub fn drafting(view: &AnyView, cx: &App) -> bool {
+    cx.try_global::<Drafting>().is_some_and(|Drafting(drafting)| drafting(view, cx))
 }
 
 /// How a page an agent shows inline stands in the app's page host.
@@ -478,24 +499,6 @@ pub fn watch_page(
     host(key, changed, cx)
 }
 
-/// The shell's way into a chat's draft: Slopty's terminals hand it a block or a selection.
-#[derive(Clone)]
-struct Drafts(Rc<dyn Fn(&str, &str, &mut App) -> bool>);
-
-impl Global for Drafts {}
-
-/// Serve [`attach`] with `put`, which puts text in a chat's draft: whether it could.
-pub(crate) fn serve_drafts(cx: &mut App, put: impl Fn(&str, &str, &mut App) -> bool + 'static) {
-    cx.set_global(Drafts(Rc::new(put)));
-}
-
-/// Put `text` (a terminal's block or selection, fenced) in chat `chat`'s draft at the caret and
-/// give it the keyboard: whether the chat is open in this window to take it.
-pub fn attach(chat: &str, text: &str, cx: &mut App) -> bool {
-    let Some(Drafts(put)) = cx.try_global::<Drafts>().cloned() else { return false };
-    put(chat, text, cx)
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -522,10 +525,10 @@ mod tests {
             });
             assert_eq!(binds.get(), 0, "first installed: the shell's keymap binds them");
             let settings = crate::settings::current(cx);
-            crate::shell::apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
+            crate::shell::apply_keymap(cx, &settings.keymap);
             assert!(marked(cx));
             assert_eq!(binds.get(), 1);
-            crate::shell::apply_keymap(cx, &settings.keymap, settings.composer_send_behavior);
+            crate::shell::apply_keymap(cx, &settings.keymap);
             assert!(marked(cx), "bound again after the shell cleared its bindings");
             super::keys(cx, |_| {});
             assert!(!marked(cx), "installed again: the keymap bound anew without them");

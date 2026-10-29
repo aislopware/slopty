@@ -488,7 +488,7 @@ impl History {
                 let (resume, active) = match agent {
                     Agent::Claude => self.claude_resumes(native, session.cwd),
                     Agent::Codex if rollouts.contains_key(native) => {
-                        (slopty_agent::codex::shared::resume_args(native), None)
+                        (slopty_agent::codex::resume_args(native), None)
                     }
                     Agent::Codex => (Vec::new(), None),
                     Agent::Pi => (slopty_agent::pi::sessions::resume_args(native), None),
@@ -503,7 +503,7 @@ impl History {
                     agent: agent.id(),
                     native: native.to_owned(),
                     cwd: cwd.map(str::to_owned),
-                    title: first.map(|p| slopty_agent::driven::title_of(&p.text)),
+                    title: first.map(|p| slopty_agent::title::title_of(&p.text)),
                     updated_ms: active.or_else(|| last.and_then(|p| p.at_ms)),
                     thread: None,
                     resume,

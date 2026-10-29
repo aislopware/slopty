@@ -223,9 +223,7 @@ mod tests {
     }
     impl Render for DragHost {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let main = self
-                .shell
-                .update(cx, |shell, cx| shell.render_main(window, 600., 600., cx));
+            let main = self.shell.update(cx, |shell, cx| shell.render_main(window, cx));
             div()
                 .flex()
                 .w(px(900.))
@@ -254,6 +252,8 @@ mod tests {
                 let mut state = crate::files::test_support::state();
                 state.selected_chat = Some("chat".into());
                 state.no_project = true;
+                // slopty: the session runs in its terminal.
+                state.session_terminals = [("chat".to_owned(), "t1".to_owned())].into();
                 state
             });
             let files = cx.new(|cx| crate::files::test_support::explorer(state.clone(), cx));
@@ -286,9 +286,11 @@ mod tests {
         (shell, files, cx)
     }
 
+    /// slopty: a file dragged from the tree and let go over the session moves nothing (the session
+    /// takes no drop); one that visits the session and ends on a folder moves it.
     #[gpui::test]
-    fn tree_and_production_chat_dropzones_are_exclusive(cx: &mut TestAppContext) {
-        let (shell, files, cx) = setup(cx);
+    fn a_tree_drag_moves_only_onto_a_folder(cx: &mut TestAppContext) {
+        let (_shell, files, cx) = setup(cx);
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
@@ -296,13 +298,14 @@ mod tests {
                 recorded.borrow_mut().push(event.clone())
             })
         });
-        let input = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.clone());
-        input.update(cx, |input, cx| input.set_text("keep this ", cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let start = cx.debug_bounds("tree-entry:a.txt").unwrap().center();
         let folder = cx.debug_bounds("tree-entry:folder").unwrap().center();
-        let chat = cx.debug_bounds("chat-dropzone").unwrap().center();
-        // Visit the tree target, then finish over the actual conversation.
+        let session = cx.debug_bounds("session-terminal").unwrap().center();
+        let mutations = |events: &Rc<RefCell<Vec<FilesEvent>>>| {
+            events.borrow().iter().filter(|event| matches!(event, FilesEvent::Mutate(_))).count()
+        };
+        // Visit the tree target, then finish over the session.
         cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_move(
             start + gpui::point(px(9.), px(0.)),
@@ -310,90 +313,23 @@ mod tests {
             gpui::Modifiers::default(),
         );
         cx.simulate_mouse_move(folder, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_move(chat, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(chat, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(session, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(session, MouseButton::Left, gpui::Modifiers::default());
         cx.run_until_parked();
-        let text = input.read_with(cx, |input, _| input.text().to_string());
-        assert!(text.contains("keep this"));
-        assert!(text.contains("a.txt"));
-        assert!(
-            !events
-                .borrow()
-                .iter()
-                .any(|event| matches!(event, FilesEvent::Mutate(_)))
-        );
-        // Visit the chat, then finish over the tree target.
+        assert_eq!(mutations(&events), 0);
+        // Visit the session, then finish over the tree target.
         cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_move(
             start + gpui::point(px(9.), px(0.)),
             Some(MouseButton::Left),
             gpui::Modifiers::default(),
         );
-        cx.simulate_mouse_move(chat, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_move(session, Some(MouseButton::Left), gpui::Modifiers::default());
         cx.simulate_mouse_move(folder, Some(MouseButton::Left), gpui::Modifiers::default());
         cx.simulate_mouse_up(folder, MouseButton::Left, gpui::Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(
-            input.read_with(cx, |input, _| input.text().to_string()),
-            text
-        );
-        assert_eq!(
-            events
-                .borrow()
-                .iter()
-                .filter(|event| matches!(event, FilesEvent::Mutate(_)))
-                .count(),
-            1
-        );
+        assert_eq!(mutations(&events), 1);
         cx.update(|_, cx| assert!(!cx.has_active_drag()));
-    }
-
-    #[gpui::test]
-    fn stale_workspace_reference_cannot_attach_to_a_new_chat(cx: &mut TestAppContext) {
-        let (shell, files, cx) = setup(cx);
-        let origin = files
-            .read_with(cx, |files, cx| files.interaction_origin(cx))
-            .unwrap();
-        let payload = WorkspacePathDrag::new("a.txt".into(), false).with_origin(
-            Some(origin),
-            crate::files::WorkspacePathSource::Tree,
-            Some("rev".into()),
-        );
-        shell.update_in(cx, |shell, window, cx| {
-            shell.active_chat = "other".into();
-            let input = shell.composer.read(cx).input.clone();
-            let before = input.read(cx).text().to_string();
-            let composer = shell.composer.clone();
-            shell.attach_workspace_drag(&payload, &composer, window, cx);
-            assert_eq!(input.read(cx).text(), before);
-        });
-    }
-
-    #[gpui::test]
-    fn dropped_selection_adds_one_reference_per_entry(cx: &mut TestAppContext) {
-        let (shell, files, cx) = setup(cx);
-        let origin = files
-            .read_with(cx, |files, cx| files.interaction_origin(cx))
-            .unwrap();
-        let item = |path: &str, is_directory| crate::files::WorkspacePathItem {
-            path: path.into(),
-            is_directory,
-            revision: Some("rev".into()),
-        };
-        let payload = WorkspacePathDrag::new("a.txt".into(), false)
-            .with_origin(
-                Some(origin),
-                crate::files::WorkspacePathSource::Tree,
-                Some("rev".into()),
-            )
-            .with_selection(vec![item("folder", true), item("a.txt", false)]);
-        shell.update_in(cx, |shell, window, cx| {
-            let composer = shell.composer.clone();
-            shell.attach_workspace_drag(&payload, &composer, window, cx);
-            let text = composer.read(cx).input.read(cx).text().to_string();
-            assert!(text.contains("folder"));
-            assert!(text.contains("a.txt"));
-        });
     }
 
     #[gpui::test]

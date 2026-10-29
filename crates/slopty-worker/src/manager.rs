@@ -215,10 +215,8 @@ impl Worker {
         let existing = client.list().await?;
         let (keeper, mut recipes) = Keeper::open(kept)
             .map_err(|source| PtyError::Os { context: "open the kept sessions", source })?;
-        // A piped session is an agent's, not a terminal: whoever drives it attaches it.
         let held: Vec<(SessionInfo, Option<Recipe>)> = existing
             .into_iter()
-            .filter(|info| !info.piped)
             .map(|info| {
                 let recipe = recipes.remove(&info.id);
                 (info, recipe)
@@ -671,11 +669,7 @@ impl Worker {
     /// process trees `ListPorts` walks.
     pub async fn pids(&self) -> Result<Vec<(SessionId, u32)>, WorkerError> {
         let infos = self.inner.ptyd.lock().await.list().await?;
-        Ok(infos
-            .into_iter()
-            .filter(|i| i.exited.is_none() && !i.piped)
-            .map(|i| (i.id, i.pid))
-            .collect())
+        Ok(infos.into_iter().filter(|i| i.exited.is_none()).map(|i| (i.id, i.pid)).collect())
     }
 
     /// The exited sessions no client has watched for `after` by `now`: the ones to close.
@@ -888,13 +882,7 @@ impl Worker {
                 self.hand_back(
                     id,
                     &handle,
-                    slopty_pty::Adoptee {
-                        pid,
-                        size: TermSize::default(),
-                        started_ms,
-                        term,
-                        piped: false,
-                    },
+                    slopty_pty::Adoptee { pid, size: TermSize::default(), started_ms, term },
                 )
                 .await
             };

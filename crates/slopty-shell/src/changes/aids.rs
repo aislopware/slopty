@@ -1,7 +1,6 @@
-// slopty: Slopty's review aids on the copied pane, in zeron's components: any turn's diff
-// picked beside the scope menu, find in the diff, whitespace ignored, and the changed files as a
-// tree beside the diff.
-//! The Changes pane's turn picker, find bar, whitespace toggle and file tree.
+// slopty: Slopty's review aids on the copied pane, in zeron's components: find in the diff,
+// whitespace ignored, and the changed files as a tree beside the diff.
+//! The Changes pane's find bar, whitespace toggle and file tree.
 
 use std::ops::Range;
 
@@ -9,8 +8,8 @@ use gpui::{AnyElement, App, Context, Focusable as _, Hsla, SharedString, Window,
 
 use super::review::{self, DiffMatch};
 use super::{
-    Changes, DiffFind, DiffRow, DiffScope, FindInDiff, FindNextInDiff, FindPreviousInDiff,
-    RequestedTurn, ToggleDiffTree, add_color, body_rows, del_color,
+    Changes, DiffFind, DiffRow, FindInDiff, FindNextInDiff, FindPreviousInDiff,
+    ToggleDiffTree, add_color, body_rows, del_color,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
@@ -27,29 +26,6 @@ const TREE_INDENT: f32 = 14.0;
 const FIND_CONTEXT_ROWS: usize = 3;
 
 impl Changes {
-    /// Take the turn a transcript asked for ([`super::show_turn`]), if one waits.
-    pub(super) fn take_requested_turn(&mut self, cx: &mut Context<Self>) {
-        let Some(turn) = cx.try_global::<RequestedTurn>().and_then(|asked| asked.0.clone()) else {
-            return;
-        };
-        cx.set_global(RequestedTurn(None));
-        let turn = review::turn_of(&self.state.read(cx).transcript, &turn).unwrap_or(turn);
-        self.pick_turn(Some(turn), cx);
-    }
-
-    /// Read the diff at `turn` (a user entry's id), or the latest turn's with `None`.
-    pub fn pick_turn(&mut self, turn: Option<String>, cx: &mut Context<Self>) {
-        let scope = if turn.is_some() { DiffScope::Turn } else { DiffScope::LatestTurn };
-        let changed = self.scope != scope || self.turn != turn;
-        self.scope = scope;
-        self.turn = turn;
-        if changed {
-            self.reset_horizontal_scroll();
-            self.sync(cx);
-        }
-        cx.notify();
-    }
-
     /// Keep the review aids' choices for every diff tab, this run and the next.
     fn keep_prefs(&self, cx: &mut App) {
         let (ignore_whitespace, show_tree) = (self.ignore_whitespace, self.show_tree);
@@ -84,7 +60,7 @@ impl Changes {
         let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 this.refresh_find(cx);
-                this.reveal_match(cx);
+                this.reveal_match();
                 cx.notify();
             }
         });
@@ -137,17 +113,17 @@ impl Changes {
         }
         self.refresh_find(cx);
         self.found_active = review::step(self.found_active, self.found.len(), delta);
-        self.reveal_match(cx);
+        self.reveal_match();
         cx.notify();
     }
 
     /// Scroll the active match into view, opening its file when it is folded.
-    fn reveal_match(&mut self, cx: &mut Context<Self>) {
+    fn reveal_match(&mut self) {
         let Some(found) = self.found_active.and_then(|ix| self.found.get(ix)).cloned() else {
             return;
         };
         let file_ix = found.file as usize;
-        self.open_file_body(file_ix, cx);
+        self.open_file_body(file_ix);
         let Some(range) = self.row_ranges.get(file_ix).cloned() else { return };
         let hit = self.rows[range.clone()].iter().position(|row| match *row {
             DiffRow::Line { hunk, line, .. } => hunk == found.hunk && line == found.line,
@@ -164,7 +140,7 @@ impl Changes {
     }
 
     /// A file folded shut (or folding) opens at once, with no tween.
-    fn open_file_body(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+    fn open_file_body(&mut self, file_ix: usize) {
         let Some(file) = self.parsed.as_ref().and_then(|p| p.files.get(file_ix)).cloned() else {
             return;
         };
@@ -180,18 +156,12 @@ impl Changes {
         let fold = self.folds.entry(file.path.clone()).or_default();
         fold.collapsed = false;
         fold.toggled_at = None;
-        let body = body_rows(
-            file_ix as u32,
-            &file,
-            &self.comments_for(&file.path, cx),
-            self.draft_anchor_in(&file.path),
-            self.mode,
-        );
+        let body = body_rows(file_ix as u32, &file, self.mode);
         self.replace_file_body(file_ix, body);
     }
 
     /// Bring file `file_ix`'s header to the top of the diff.
-    fn scroll_to_file(&mut self, file_ix: usize, cx: &mut Context<Self>) {
+    pub(super) fn scroll_to_file(&mut self, file_ix: usize, cx: &mut Context<Self>) {
         self.tree_selected = Some(file_ix);
         if let Some(range) = self.row_ranges.get(file_ix) {
             self.list.scroll_to(gpui::ListOffset { item_ix: range.start, offset_in_item: px(0.0) });
@@ -232,185 +202,6 @@ impl Changes {
     }
 
     // ---- drawing ----
-
-    /// `Latest ⌄` / `<the prompt> ⌄` beside the scope menu while a turn's diff shows.
-    pub(super) fn render_turn_selector(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !matches!(self.scope, DiffScope::LatestTurn | DiffScope::Turn) {
-            return None;
-        }
-        let turns = review::turn_choices(&self.state.read(cx).transcript);
-        let label = match (&self.scope, &self.turn) {
-            (DiffScope::Turn, Some(id)) => turns
-                .iter()
-                .find(|turn| turn.entry_id == *id)
-                .map_or_else(|| "Earlier turn".to_owned(), |turn| turn.label.clone()),
-            _ => "Latest".to_owned(),
-        };
-        let trigger = div()
-            .id("changes-turn-trigger")
-            .role(gpui::Role::Button)
-            .aria_label(SharedString::from(format!("Turn: {label}")))
-            .h(px(crate::surface_chrome::CONTROL_SIZE))
-            .px(px(6.0))
-            .ml(px(crate::surface_chrome::CONTROL_GAP))
-            .min_w_0()
-            .max_w(px(220.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                "changes-turn-trigger",
-                crate::theme::wash(0.0),
-                crate::theme::control_hover(),
-            ))
-            .hover_fade("changes-turn-trigger")
-            // slopty: held selected while its menu is open (opencode's `[data-expanded]`).
-            .when(self.turn_menu.get().is_some(), |el| el.bg(crate::theme::selected_wash()))
-            .aria_expanded(self.turn_menu.get().is_some())
-            // slopty: a keyboard stop with the shell's ring (M8).
-            .tab_index(0)
-            .map(|el| crate::surface_chrome::focus_ring(el, theme))
-            .occlude()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, _| {
-                    window.prevent_default();
-                    this.turn_menu.note_trigger_press();
-                }),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                if this.turn_menu.take_press_was_open() {
-                    this.close_turn_menu(cx);
-                } else {
-                    this.turn_menu.open(());
-                }
-                cx.notify();
-            }))
-            .child(
-                crate::icons::icon(crate::icons::CLOCK_CIRCLE)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_faint),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text)
-                    .child(SharedString::from(label)),
-            )
-            .child(
-                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_muted.opacity(0.7)),
-            );
-        Some(if self.turn_menu.get().is_some() {
-            let closing = self.turn_menu.closing_at(crate::clock::now(cx));
-            let menu = self.render_turn_menu(theme, turns, cx);
-            trigger
-                .relative()
-                .child(popover::anchored_menu_below_gap("changes-turn-menu", menu, closing, 10.0))
-                .into_any_element()
-        } else {
-            trigger.into_any_element()
-        })
-    }
-
-    pub(super) fn close_turn_menu(&mut self, cx: &mut Context<Self>) {
-        if self.turn_menu.begin_close(crate::clock::now(cx)) {
-            popover::reap_popup(cx, |changes: &mut Self| &mut changes.turn_menu);
-        }
-    }
-
-    fn render_turn_menu(
-        &mut self,
-        theme: &Theme,
-        turns: Vec<review::TurnChoice>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = &theme.for_popup();
-        let picked = (self.scope == DiffScope::Turn).then(|| self.turn.clone()).flatten();
-        let latest = div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(
-                popover::picker_row(theme, picked.is_none(), false, "changes-turn-row-latest")
-                    .id("changes-turn-row-latest")
-                    .role(gpui::Role::MenuItem)
-                    // slopty: a keyboard stop with the shell's ring, inside the menu (M8).
-                    .map(|el| crate::surface_chrome::key_stop_inset(el, theme))
-                    .aria_label("Latest turn")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.pick_turn(None, cx);
-                        this.close_turn_menu(cx);
-                    }))
-                    .child(div().flex_1().child(SharedString::from("Latest turn"))),
-            );
-        let rows = turns.into_iter().enumerate().map(|(ix, turn)| {
-            let selected = picked.as_deref() == Some(turn.entry_id.as_str());
-            let id = turn.entry_id.clone();
-            let time = clock(turn.at);
-            popover::picker_row(theme, selected, false, format!("changes-turn-row-{ix}"))
-                .id(("changes-turn-row", ix))
-                .role(gpui::Role::MenuItem)
-                // slopty: a keyboard stop with the shell's ring, inside the menu (M8).
-                .map(|el| crate::surface_chrome::key_stop_inset(el, theme))
-                .aria_label(SharedString::from(turn.label.clone()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.pick_turn(Some(id.clone()), cx);
-                    this.close_turn_menu(cx);
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(SharedString::from(turn.label)),
-                )
-                .children(time.map(|time| {
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(time))
-                }))
-        });
-        popover::popover_card(theme)
-            .w(px(300.0))
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_turn_menu(cx)))
-            .child(latest)
-            .child(popover::menu_heading(theme, "Turns"))
-            .child(
-                div()
-                    .relative()
-                    .child(popover::faded_menu_list(
-                        &self.turn_list_scroll,
-                        div()
-                            .id("changes-turn-list")
-                            .max_h(px(280.0))
-                            .overflow_y_scroll()
-                            .track_scroll(&self.turn_list_scroll)
-                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                                if this.aid_rail.set_list_hovered(*hovered) {
-                                    cx.notify();
-                                }
-                            }))
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .children(rows),
-                    ))
-                    .children(popover::rail(self, "changes-turn-rail", theme, cx)),
-            )
-            .into_any_element()
-    }
 
     /// The trailing toolbar's review aids: find, the files' tree and whitespace.
     pub(super) fn render_aid_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> [AnyElement; 3] {
@@ -547,12 +338,7 @@ impl Changes {
         let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
         let rows = review::diff_tree(&paths);
         let selected = self.tree_selected;
-        // The turn menu holds the rail while it is open.
-        let rail = if self.turn_menu.get().is_none() {
-            popover::rail(self, "changes-tree-rail", theme, cx)
-        } else {
-            None
-        };
+        let rail = popover::rail(self, "changes-tree-rail", theme, cx);
         let list = div()
                 .id("changes-tree")
                 .role(gpui::Role::Tree)
@@ -660,13 +446,7 @@ impl popover::ScrollRailHost for Changes {
     }
 
     fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
-        if self.turn_menu.get().is_some() {
-            Some(self.turn_list_scroll.clone())
-        } else if self.show_tree {
-            Some(self.tree_scroll.clone())
-        } else {
-            None
-        }
+        self.show_tree.then(|| self.tree_scroll.clone())
     }
 }
 

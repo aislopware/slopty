@@ -16,7 +16,7 @@ mod golden {
     };
     use slopty_proto::terminal::{
         BlockEnd, BlockMark, Blocks, ColorOverrides, Frame, PixelRect, Placement, SearchMatch,
-        TermColors, TermEvent, TermRequest,
+        TermColors, TermError, TermEvent, TermRequest,
     };
     use slopty_proto::transfer::{
         BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Held, Offer, Peer, Purpose,
@@ -335,7 +335,7 @@ mod golden {
     #[test]
     fn open_session_and_failures() {
         use slopty_proto::orchestration::ErrorCode;
-        use slopty_proto::terminal::{OpenSession, TermError, TermSize};
+        use slopty_proto::terminal::{OpenSession, TermSize};
         snap(
             "client_open_session",
             &ClientMsg::OpenSession {
@@ -1577,6 +1577,25 @@ mod golden {
         );
     }
 
+    /// The prompt box's words for an agent's terminal, and the worker's refusal while the agent
+    /// waits on the person at a dialog.
+    #[test]
+    fn submit() {
+        snap(
+            "client_term_submit",
+            &ClientMsg::Term {
+                session: session(),
+                req: TermRequest::Submit { text: "fix the build\nthen test".to_owned() },
+            },
+        );
+        snap(
+            "worker_term_refused",
+            &TermEvent::Error(TermError::Refused(
+                "Claude Code is asking you something in its terminal".to_owned(),
+            )),
+        );
+    }
+
     /// ⌘V and ⌃V with a picture on the client's clipboard: the offer is placed on the
     /// worker's pasteboard, then the chord applied.
     #[test]
@@ -2444,6 +2463,15 @@ mod ctl {
             }),
         );
         snap("ctl_request_wake", &CtlRequest::Wake);
+        snap(
+            "ctl_request_hook",
+            &CtlRequest::Hook {
+                session: session(),
+                token: "0f1e2d".to_owned(),
+                at_us: 1_793_000_000_000_000,
+                payload: r#"{"hook_event_name":"Stop","session_id":"s1"}"#.to_owned(),
+            },
+        );
         let handed = [
             Handed::Taken { client: "Studio".to_owned() },
             Handed::Offered { client: "Studio".to_owned(), why: OfferReason::NotTyped },

@@ -129,11 +129,8 @@ async fn applied(programs: &Programs, repo: &str, op: GitOp, terminals: &[PathBu
                 .map(|review| GitDone::Changes(Box::new(review)))
                 .map_err(|failed| GitOutcome::Failed { said: failed.0 })
         }
-        GitOp::Turn { turn, before, after, ignore_whitespace } => {
-            super::snapshot::turn(git, &root, (turn, before, after), ignore_whitespace)
-                .await
-                .map(|review| GitDone::Changes(Box::new(review)))
-                .map_err(|failed| GitOutcome::Failed { said: failed.0 })
+        GitOp::Turn { .. } => {
+            Err(GitOutcome::Failed { said: crate::thread::review::NO_TURN_SNAPSHOTS.to_owned() })
         }
         GitOp::Range { base, head } => super::snapshot::range(git, &root, &base, &head)
             .await

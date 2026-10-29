@@ -587,8 +587,9 @@ more full-window layer.
   missed. The hits are what did not change. The cache works; a gate that sits on the zed fork
   misses whenever the fork moves.
   - Each lane runs on a runner of its own: a matrix job per lane runs
-    `cargo xtask setup --lane <lane>` (that lane's tools only; the tools lane alone builds taplo,
-    which has no binary for binstall) and `cargo xtask gate --ci --lane <lane>`. A lane alone
+    `cargo xtask setup --lane <lane>` (that lane's tools only; taplo's release does publish
+    builds, under names binstall does not look for, so `setup` fetches them itself: "taplo
+    comes from its release", below) and `cargo xtask gate --ci --lane <lane>`. A lane alone
     sets no `CARGO_BUILD_JOBS` and takes every core. It keeps its target dir name, and sccache
     leaves `CARGO_BUILD_JOBS` out of its key, so local lanes and CI lanes keep their cache
     entries. `--ci` checks in place and gives the tests lane nextest's `ci` profile. With no
@@ -2764,3 +2765,26 @@ more full-window layer.
     and synced with its upstream, as gpui-fast is, when its old major costs the app.
   - **CI's actions** moved to their Node 24 majors (cache 6, checkout 7, upload-artifact 7,
     action-gh-release 3); none of their breaking changes touches how the workflows use them.
+
+- ✅ **taplo comes from its release, and CI's sccache is 0.19** (2026-10-29). taplo 0.10.0's
+  release publishes a gzipped build for each platform, under names cargo-binstall does not look
+  for, so binstall found none and compiled `taplo-cli` from source in every tools job: 84 s of
+  its 180 s. `xtask setup` now downloads its host's build itself (`taplo-<os>-<arch>.gz`, for
+  macOS on arm64 and Linux on x86_64 and arm64), checks it against the SHA-256 pinned beside it
+  (`setup::TAPLO_BUILDS`) and unpacks it into cargo's bin directory: under half a second on a
+  hosted runner of either architecture (runs 40909259886 and 40909266325). A new taplo needs its
+  digests pinned anew, and a test holds the version to them. CI's sccache moved from 0.18.0 to
+  0.19.0, which streams a unit's metadata to cargo on a miss, so its dependents start before its
+  code generation ends, and writes dep-info locally. Its first run (a check of `slopty-proto`,
+  three jobs) missed 926 of the 1,026 units it compiled and stored them in R2; the rerun of the
+  same commit hit 629 of 657 (96 %), and its lint job took 150 s where the first took 338 s.
+  The warm runners use no sccache: their incremental target dirs are the cache.
+
+- ✅ **One triple for every cargo call on a Mac** (2026-10-29). Clippy and rustdoc named
+  `--target aarch64-apple-darwin` while the tests and the binaries they spawn did not, so a
+  target dir built its proc macros and build scripts twice: once in cross mode, once for the
+  host with the triple's `-C target-cpu`. That was 411 units and 985 CPU-s in every cold lane
+  dir and after every dependency bump, ghostty's zig build and Luau's among them. Every cargo
+  call on a Mac now names the triple (`gate::mac_target`: the test build, nextest, the spawned
+  binaries, `check`'s and the warm gate's), so each unit is built once. Off a Mac nothing
+  changes; the Linux lanes build for their host as before.

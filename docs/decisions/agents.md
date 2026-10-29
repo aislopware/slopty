@@ -4,7 +4,88 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
 `.research/gui-first-2026-10-01/`. `plan.md` there synthesises it, and `protocols.md`,
 `desktops.md`, `orchestrators.md`, `workflows.md` and `design.md` hold the evidence.
 
-- ✅ **GUI-first: the agent's own session is the source of truth** (2026-10-01, verified against
+- ✅ **TUI-first: each agent works in its own TUI; the GUI inspects it read-only and types
+  only what the person writes into it** (2026-10-29; plan and evidence in
+  `.research/tui-first-plan-2026-10-29.md`, inventories `tui-first-inventory-*-2026-10-29.md`,
+  the observed lane recovered in `tui-first-observed-lane-2026-10-29.md`). After using the
+  premium GUIs (Claude Code desktop, T3 Code and others), the person found that none covers all
+  of Claude Code's TUI and none can keep up with it. Slopty therefore goes back to terminal and
+  TUI first. The GUI supports the TUI and stops trying to replace it. The person also asked that
+  the complex machinery built for GUI-first be deleted, and that the inspector return to the
+  simple, efficient read-only view of the observed era.
+  - **What this supersedes.** "GUI-first: the agent's own session is the source of truth"
+    (2026-10-01, below) and its drives: Claude Code driven over `claude -p` (2026-10-16), Codex
+    shared through its app-server, pi over RPC, and any ACP agent through the adapter. It also
+    supersedes the GUI-parity goal of 2026-10-16 ("Claude Code's doors beside messages, as its
+    TUI has them" and the rulings that followed it). Kept: rule 1 (the native session is the
+    record) and rule 5 (the person's own unmodified binary, no login, no credential).
+  - **The rules.**
+    1. An agent session is the agent's own TUI (`claude`, `codex`, `pi`) in a Slopty terminal
+       that ptyd keeps. Slopty starts it with Slopty's tools and, for Claude Code, Slopty's
+       hooks, or the person types it into any Slopty terminal.
+    2. The person is the one writer, in the TUI; the GUI types nothing into an agent.
+       Orchestration's `agent_tell` (and a `SendMessage`) types into the agent's terminal: a
+       bracketed paste, then Enter as its own write 200 ms later (Ink takes an Enter that
+       arrives in the paste's read as part of the paste). Nothing is typed while the session
+       waits on the person at a dialog, because the TUI would read the Enter as an answer.
+       Verified 2026-10-29 on 2.1.312: a two-line paste and its Enter land as one user
+       message, and a pasted `/rename …` or `/model` with Enter runs the command.
+    3. Slopty reads an agent only through its own records and published doors: Claude Code's
+       hooks (status), its live-session registry (`<config>/sessions/<pid>.json`, which names
+       the session a process holds and moves with `/clear` and `/resume`) and its transcript
+       with the subagents' files, followed on the kernel's word. It never reads the screen.
+    4. The GUI is read-only toward the agent. It has no approvals, answers, queue, pickers,
+       stop, fork, rewind, ask aside, review-with-agent, keep, revert or schedule; the TUI does
+       all of that. The inspector keeps only what helps inspect the session: status and meters,
+       what it is doing, its tasks, subagents and background work, the files it changed, and
+       each turn rendered properly with tool calls folded and their whole input and output a
+       press away.
+    5. No GUI prompt box (2026-10-29, the same day: the person found it not worth its
+       weight). It had the composer's completions, from a `-p` `initialize` probe, and staged
+       notes written on diff lines; both are deleted with it, and the GUI writes no notes.
+       In its place the inspector is to show the TUI's own prompt box live, its draft and the
+       pictures pasted into it, read through Claude Code's own doors (lane D's study,
+       `.research/tui-first-live-prompt-2026-10-29.md`).
+  - **Codex and pi** run as their own TUIs with Slopty's tools through their config doors, and
+    have no inspector. **ACP agents** have no TUI; the adapter is deleted, and an agent's own
+    CLI runs in a terminal like any other program.
+  - **On the worker** (2026-10-29, `crates/slopty-worker/src/thread/{start,claude}.rs`,
+    `apps/slopty-worker/src/conn.rs`, `crates/slopty-worker/src/orchestrate.rs`; the stand-in
+    `crates/slopty-testkit/src/claude_tui.rs`, tests in `apps/slopty-worker/tests/threads.rs`;
+    the contract for the clients in `.research/tui-first-worker-notes-2026-10-29.md`).
+    - *A start is a terminal.* Claude Code runs as the person's own `claude` with
+      `--session-id` (or `--resume`), the model, mode and effort only when the start names
+      them, joined to their flags, and the prompt after `--`. It gets Slopty's tools
+      (`--mcp-config`) and the relay (`slopty hook`) for every hook event (`--settings`); the
+      markers of a Claude Code the worker itself runs under (`CLAUDECODE`,
+      `CLAUDE_CODE_ENTRYPOINT`) are taken out of every terminal's environment. Codex and pi
+      start as their TUIs with their tools. The terminal is the seat's for a seated start, else
+      the start's own id, and the thread's row names it.
+    - *Every Claude Code is read.* Any Claude Code in any Slopty terminal is found by its
+      registry record and its transcript followed on the kernel's word. A session is one
+      thread; a `/clear` or `/resume` moves the terminal to the next session's thread, and the
+      one before ends resumable. A restarted worker reads the threads again from its terminals.
+      Status comes from the hooks; a session with none takes its phase from its transcript.
+      The transcript is read before each hook is applied, so a rest never shows ahead of the
+      turn it ends; a `Stop` ends the turn there, since the records that close it come after
+      the hook, and an Esc's interrupt record ends it in the decoder, since Esc fires no hook
+      and Claude Code writes no end of its own for it.
+    - *Typing.* The worker's submit pastes (bracketed when the program asked for it), then
+      writes Enter 200 ms later; it is refused while the session needs the person.
+      `SendMessage` and `agent_tell` are a submit; no client sends one. An agent's words go framed as an agent's:
+      "Agent <name> (<id>) says (an agent, not the person):". `agent_stop` presses Esc in each
+      session at work under the agent, the deepest first; one at rest answers that there is
+      nothing to stop.
+    - *What went.* Every intent but `Seen` and `Name` answers `Unsupported`, and so does
+      `AnswerRequest`, which the hub refuses for every caller without asking the worker: the TUI
+      asks in its terminal and takes the answer there. The CLI's `agent answer` is gone. A note
+      answers nothing: a push carries no request and no buttons, and opens its session; the
+      quiet re-push that followed a note's request is gone. An MCP App's call is refused (no
+      door to the agent's servers). A review compares the repository's states, never turn
+      snapshots. The server delivers nothing to an agent: a parent hears of its children by
+      `agent_wait`, which waits on their rows alone.
+
+- ❌ **GUI-first: the agent's own session is the source of truth** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-01, verified against
   Claude Code 2.1.286, Codex app-server at `ecc78e4`, pi 0.99.2 and ACP at `9e03215`). After a
   long time working in terminals, the person found that a terminal's productivity cannot match
   a GUI that is well designed, beautiful and complete. In agentic work the person mostly
@@ -368,8 +449,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     two messages never interleave in the terminal. It wakes on the thread's batches, on a new
     intent, and every 250 ms while something waits on the guard or the agent.
 
-- ✅ **Every turn is snapshotted into private refs, and a review is a diff between two
-  snapshots** (2026-10-02, `crates/slopty-worker/src/repo/snapshot.rs`,
+- ❌ **Every turn is snapshotted into private refs, and a review is a diff between two
+  snapshots** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-02, `crates/slopty-worker/src/repo/snapshot.rs`,
   `crates/slopty-worker/src/thread/review.rs`; tests in `crates/slopty-worker/tests/review.rs`
   on a real repository, cost in `docs/MEASUREMENTS.md`, "a turn snapshot of this
   repository").
@@ -557,8 +638,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     worker's thread table names opens on its face on every device and draws the thread view;
     any other agent tile keeps the conversation face.
 
-- ✅ **The review tile reads the worker's review frames, and every keep, revert and comment is
-  an intent** (2026-10-02, `crates/slopty-ui/src/review/`; `review/tests.rs`). The scopes are
+- ❌ **The review tile reads the worker's review frames, and every keep, revert and comment is
+  an intent** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-02, `crates/slopty-ui/src/review/`; `review/tests.rs`). The scopes are
   the ones the worker answers today: the last turn (the default), since reviewed, and every
   turn; a branch, the unstaged changes and a task's span wait on the worker. Files go by
   weight, with tests, fixtures, snapshots, locks and generated code listed after the rest.
@@ -566,8 +647,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   comments are anchored by their line's text, dropped when it changes, and go as one message
   of `path L<n>: body` lines. A keep or revert the worker acted on asks for the review again.
 
-- ✅ **"Review with <agent>" runs the agent's own review over the change on show, and its
-  findings become the tile's comments** (2026-10-04, frontier must-have M1; replaces the
+- ❌ **"Review with <agent>" runs the agent's own review over the change on show, and its
+  findings become the tile's comments** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, frontier must-have M1; replaces the
   projects' reviewer stage). The research behind it is in
   `.research/feature-prune-frontier-2026-10-04.md` §6, with each agent's door checked against
   its own docs and source.
@@ -720,7 +801,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       `a_thread_goes_by_its_agents_tile_everywhere` (workspace), all in `slopty-ui`.
     - The app e2e `a_line_names_the_turn_that_wrote_it_and_opens_it`, with goldens
       `file-author` and `file-author-dark`.
-- ✅ **The thread composer's menus never blank, and a waiting message is changed in place**
+- ❌ **The thread composer's menus never blank, and a waiting message is changed in place** *Superseded 2026-10-29 by "TUI-first" above.*
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/composing.rs`;
   `thread/tests/composing.rs`). `/` lists the commands the thread says its agent takes, ranked
   as the conversation face ranks them; a source the client does not know ranks after plugins
@@ -735,8 +816,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   on the pencil until they dismiss it. If the message goes while it is being changed, its words
   stay in the composer as a new draft, with the draft that was put aside after them.
 
-- ✅ **Codex: Slopty is one more client of the user's app-server, and the first answer to an
-  approval settles it** (2026-10-02, verified against Codex 0.160.0;
+- ❌ **Codex: Slopty is one more client of the user's app-server, and the first answer to an
+  approval settles it** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-02, verified against Codex 0.160.0;
   `crates/slopty-agent/src/codex/`, `xtask/src/codex/`; `crates/slopty-agent/tests/codex.rs`
   over `tests/fixtures/codex/approval.jsonl`).
   - **Types from the pinned build.** `cargo xtask codex schema` runs the official 0.160.0
@@ -811,7 +892,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       clipped output, which the worker serves only for Claude Code (`Threads::expand` in
       `apps/slopty-worker/src/threads.rs`).
 
-- ✅ **pi is driven over its RPC mode, with a gate that fails closed by pi's own rule**
+- ❌ **pi is driven over its RPC mode, with a gate that fails closed by pi's own rule** *Superseded 2026-10-29 by "TUI-first" above.*
   (2026-10-02, verified against pi 1.0.0, the latest on npm; `crates/slopty-agent/src/pi.rs`,
   `pi/rpc.rs`, `assets/pi-gate/gate.ts`, `xtask/src/pi/`; `crates/slopty-agent/tests/pi.rs`
   over `tests/fixtures/pi/gate.jsonl`).
@@ -848,8 +929,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     into the typed records, with none of an unknown kind. What went to pi reads back to the
     same JSON, and the gate's asks and answers are asserted as recorded.
 
-- ✅ **pi on the worker: a thread started here runs the person's own pi, one writer per
-  session, and nothing passes the gate but an answer it offers** (2026-10-02, verified against
+- ❌ **pi on the worker: a thread started here runs the person's own pi, one writer per
+  session, and nothing passes the gate but an answer it offers** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-02, verified against
   pi 1.0.0; `crates/slopty-agent/src/pi/driven.rs`, `crates/slopty-worker/src/thread/pi.rs`,
   `crates/slopty-testkit/src/bin/slopty-stub-pi.rs`; `crates/slopty-agent/tests/pi.rs` maps the
   recording, `crates/slopty-worker/tests/pi.rs` drives the stand-in end to end).
@@ -902,8 +983,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`Intent::Send::attachments`, `slopty-worker/src/thread/pi.rs`). Queueing came on
     2026-10-06: see "One queue on the worker for ACP, Codex and pi".
 
-- ✅ **Any ACP agent is driven by one adapter, as the person's own program, asking before it
-  acts** (2026-10-02, ACP v1 through `agent-client-protocol-schema` 1.10.2;
+- ❌ **Any ACP agent is driven by one adapter, as the person's own program, asking before it
+  acts** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-02, ACP v1 through `agent-client-protocol-schema` 1.10.2;
   `crates/slopty-agent/src/acp/`, `crates/slopty-worker/src/thread/acp.rs`; the tests in
   `crates/slopty-agent/tests/acp.rs` and `crates/slopty-worker/tests/acp.rs`).
   - **The types, not the SDK.** The `agent-client-protocol` crate brings an async runtime of its
@@ -991,7 +1072,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Not carried yet:** the client's offer itself (queued for the UI) and the unstable methods
     (forking, subagents, session notices).
 
-- ✅ **A client starts Claude Code and Codex threads too, each through the agent's own door**
+- ❌ **A client starts Claude Code and Codex threads too, each through the agent's own door** *Superseded 2026-10-29 by "TUI-first" above.*
   (2026-10-02, `crates/slopty-worker/src/thread/claude/start.rs` and `thread/codex.rs`,
   `slopty_agent::resume::started` and `codex::shared::start`; tests
   `crates/slopty-worker/tests/claude_start.rs`, `crates/slopty-worker/tests/codex.rs`, and
@@ -1060,8 +1141,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Refusals are said, never opened.** A worker that refuses a start (a missing binary, a
     Codex daemon not running) answers in words, shown as a notice, and no tile is added.
 
-- ✅ **One answer answers all of a request's questions, and each adapter reads it as its agent
-  takes it** (2026-10-02, `detail::Answer::{choice, read, parts}` and the doc of
+- ❌ **One answer answers all of a request's questions, and each adapter reads it as its agent
+  takes it** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-02, `detail::Answer::{choice, read, parts}` and the doc of
   `Intent::Answer` in `slopty-proto`; tests `one_answer_answers_every_question`,
   `a_questionnaires_answer_is_the_answers_claude_code_takes` and
   `codex_questions_are_carried_and_answered_by_their_ids`).
@@ -1141,7 +1222,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **A hook's folder outranks the terminal's.** A hook-only Claude Code thread had no folder,
     so its review said "not in a git repository" and its paths were absolute. The worker now
     takes `cwd` from `SessionStart` and every later hook, ahead of the terminal's process
-    folder, and offers the folder's slash commands (`CommandsSet`). Test:
+    folder. Test:
     `a_session_works_where_its_hooks_say`.
   - **A hunk is headed as git heads it** (`Hunk.heading` in both patch types). The rule is
     git's default for a file with no diff driver: the nearest line above the hunk that starts
@@ -1159,7 +1240,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     ACP subagents and compaction. Since done: Claude Code `StopFailure` reads as failed (with
     its error, and a rate limit's reset), and pi's edits carry their diff (readiness rank 16).
 
-- ✅ **A Codex thread reads like every other agent's** (2026-10-02, from the showcase).
+- ❌ **A Codex thread reads like every other agent's** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-02, from the showcase).
   - A thread Codex has not named takes its first prompt as its title, as pi and ACP threads do,
     until `thread/name/updated` names it.
   - Codex runs every command through the person's shell (`/bin/zsh -lc '…'`). The call's title,
@@ -1176,7 +1257,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_open_request_waits_on_the_person_whatever_the_flags`,
     `a_commands_shell_wrapper_is_taken_off` and `the_session_maps_onto_the_thread`.
 
-- ✅ **A Codex start brings the person's daemon up** (2026-10-04, rulings §3). A Codex start
+- ❌ **A Codex start brings the person's daemon up** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, rulings §3). A Codex start
   while no app-server daemon answers runs `codex app-server daemon start`. That is Codex's own
   lifecycle command, published for remote clients reaching a machine over SSH, and the one
   Codex's TUI itself runs at launch since 0.157.0. It runs the person's `codex`, found as their
@@ -1204,7 +1285,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_start_that_names_a_thread_takes_it_up_again`. A stand-in `codex` records how it was run.
     Also `daemon::tests::a_start_reads_as_its_socket_or_codexs_words`.
 
-- ✅ **What an agent turns down is said, and Codex answers through its own doors** (2026-10-04,
+- ❌ **What an agent turns down is said, and Codex answers through its own doors** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04,
   readiness #2, #8, #9, #14).
   - **Refusals stay in words.** The client's outbox settles a failed intent at once, so a
     refused stop, model switch, mode, compact, answer, release, Keep or Revert used to vanish
@@ -1298,7 +1379,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_edited_allow_reads_back_and_nothing_else_does` (`slopty-proto::thread`), goldens
     `machine_permission_editable`, `machine_answer_edited` and `intent_answer_edited`.
 
-- ✅ **A thread lists the modes its agent publishes** (2026-10-04). `ThreadMeta::modes` (id,
+- ❌ **A thread lists the modes its agent publishes** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04). `ThreadMeta::modes` (id,
   label, the agent's own description) answers the proposed change above. An ACP agent's session
   modes, or its mode config option, fill it. Claude Code, Codex and pi publish none on their
   doors, so theirs stay empty and the TUI changes their mode. Where the thread can switch
@@ -1327,7 +1408,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `new_agent_opens_the_picker_with_the_last_choices` (the prompt) in
     `workspace/tests/thread_start.rs`.
 
-- ✅ **Files go with a message, landed outside the work** (2026-10-04, readiness item 2). A file
+- ❌ **Files go with a message, landed outside the work** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, readiness item 2). A file
   dropped or picked in the composer is uploaded first, over the ordinary transfer, to
   `~/.slopty/drop/<transfer>/`. That needs no terminal and puts nothing in the agent's working
   tree, where it would show in its diff, be committed by accident, or be lost to a `git clean`.
@@ -1350,7 +1431,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_picture_goes_as_an_image_and_a_file_as_a_link`,
     `files_go_by_path_and_a_fork_and_a_listing_go_to_codex`, golden `intent_send_attachments`.
 
-- ✅ **Every thread takes files, and a thread tile takes a drop** (2026-10-05, readiness 10-05
+- ❌ **Every thread takes files, and a thread tile takes a drop** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-05, readiness 10-05
   G3a). The worker took attachments from every adapter ("Files go with a message"), but the
   composer still refused them on a thread with no terminal, and sent the landed paths typed
   after the words, so Codex, pi and ACP never saw a picture as a picture. Now:
@@ -1392,7 +1473,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `past_threads_are_listed_with_the_words_that_resume_them` (Codex), goldens
     `client_sessions`, `link_worker_sessions` and `link_worker_sessions_absent`.
 
-- ✅ **Fork, as each agent forks** (2026-10-04, readiness item 3). `Intent::Fork` branches a new
+- ❌ **Fork, as each agent forks** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, readiness item 3). `Intent::Fork` branches a new
   thread off one, through a turn or the whole of it, and is answered once per intent like a
   start. It needs `Cap::FORK`, which a thread has when its agent can fork.
   - Codex forks over its app-server (`thread/fork`), through any turn that has ended.
@@ -1416,7 +1497,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_fork_resumes_into_a_new_conversation` (Claude Code's words), goldens `intent_fork` and
     `intent_fork_whole`.
 
-- ✅ **Codex threads at rest are let go** (2026-10-04). The worker kept every Codex thread it
+- ❌ **Codex threads at rest are let go** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04). The worker kept every Codex thread it
   followed subscribed, so Codex kept each one loaded with its MCP servers until the worker
   restarted: about 29 MiB per thread for Slopty's relay alone (`docs/MEASUREMENTS.md`,
   2026-10-04).
@@ -1465,7 +1546,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     Tests: `a_thread_left_working_is_read_again_once_codex_is_joined`,
     `a_quiet_turn_is_read_again_and_ends_as_codex_has_it`.
 
-- ✅ **A Codex thread's commands claim no Slopty terminal** (2026-10-04). Codex's shared
+- ❌ **A Codex thread's commands claim no Slopty terminal** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04). Codex's shared
   daemon runs every thread's commands with its own environment, which is that of whatever
   started it. A Codex TUI typed in a Slopty shell can start it, and then every thread's tools
   carried that shell's `SLOPTY_SESSION`, its token and its project task, so Slopty's CLI in
@@ -1508,7 +1589,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `a_turn_a_usage_limit_stopped_fails_until_it_resets` (Claude Code and Codex) and
     `a_stopped_turn_fails_by_what_stopped_it`.
 
-- ✅ **A queued message can be moved in the list or sent now** (2026-10-04, from the T3 Code
+- ❌ **A queued message can be moved in the list or sent now** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, from the T3 Code
   study's queue controls). *`Reorder` was deleted the same day ("Sleep, waits on another
   thread, queue reordering and edited allows are gone"); `Promote` stays, and now reads
   `Cap::QUEUE`, as the tray's "Send now" does; the tests named below predate the deletion.*
@@ -1678,7 +1759,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_agent_put_to_sleep_stands_below_one_at_rest` (`slopty-proto`); goldens `intent_sleep`,
     `intent_wake`, `frame_actions` and `attention_ladder`.
 
-- ✅ **The person schedules a message for a time, or for when another thread rests** (2026-10-04,
+- ❌ **The person schedules a message for a time, or for when another thread rests** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04,
   from the Ghostex study's seventh idea). *`Delivery::After` was deleted the same day; `At` stays
   for "Continue at" a limit's reset. See "Sleep, waits on another thread, queue reordering and
   edited allows are gone" below.* Two deliveries join the two a message already has:
@@ -1715,7 +1796,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `the_worker_sends_a_scheduled_message_at_its_moment` (`slopty-worker/tests/threads.rs`);
     golden `intent_send_at`.
 
-- ✅ **A thread goes on in a new one, on another agent or on its own afresh** (2026-10-04, R8 of
+- ❌ **A thread goes on in a new one, on another agent or on its own afresh** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, R8 of
   the T3 Code orchestrator study, after T3's budgeted context handoff and Amp's Handoff). *The
   account and the draft went the same day; the new thread's composer opens on a pointer back.
   See "Dollar cost, the carried account and drafts on the worker are gone" below.*
@@ -1753,7 +1834,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`slopty-worker/tests/pi.rs`); `only_an_agent_at_rest_with_nothing_under_way_sleeps` for
     the draft; goldens `intent_continue` and `intent_send_draft`.
 
-- ✅ **A message sent now to an agent with no steer of its own stops its turn** (2026-10-04, R13
+- ❌ **A message sent now to an agent with no steer of its own stops its turn** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, R13
   of the T3 Code orchestrator study, after T3's steering restart and ACP agents steered by
   cancel and resend). `Delivery::Interrupt` needs `Cap::INTERRUPT` and `Cap::QUEUE`. It is for
   an agent without `Cap::STEER`, today any ACP agent, whose message otherwise waits for the turn
@@ -1776,7 +1857,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `a_message_sent_by_interrupt_stops_the_turn_and_goes_next`
     (`slopty-worker/tests/acp.rs`); golden `intent_send_interrupt`.
 
-- ✅ **Model, effort and mode are switched through each agent's own settings door** (2026-10-04).
+- ❌ **Model, effort and mode are switched through each agent's own settings door** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04).
   `Intent::SetEffort { effort }` joins `SetModel` and `SetMode`, with `Cap::SET_EFFORT`. A thread
   says what it can be switched to: `ThreadMeta::models`, `ThreadMeta::efforts` (new, each an
   `Effort { id, label, description }`) and `ThreadMeta::modes`. Each list is the agent's own, so
@@ -1891,7 +1972,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_queued_message_promoted_goes_now` (`slopty-worker/tests/compose.rs`) and
     `a_held_message_promoted_steers_the_turn` (`slopty-agent/tests/codex.rs`).
 
-- ✅ **The person's stop holds what is queued until they speak again** (2026-10-04, A1 of the
+- ❌ **The person's stop holds what is queued until they speak again** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, A1 of the
   T3 Code delta study, after T3's "Queue paused" once Stop is pressed). Before this, a queued
   message went as soon as the stopped turn ended, so Stop with a message queued started it.
   - **Held, in words.** `Intent::Interrupt` holds every queued message not yet on its way as
@@ -1917,7 +1998,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `slopty-worker/tests/compose.rs` (Claude Code), `slopty-worker/tests/acp.rs` (a stub ACP
     agent) and `slopty-agent/tests/codex.rs` (Codex).
 
-- ✅ **A Codex goal shows as Codex holds it, read-only** (2026-10-04, A11 of the T3 Code delta
+- ❌ **A Codex goal shows as Codex holds it, read-only** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, A11 of the T3 Code delta
   study; T3's #6777 and #15133, and #7935 for why goal controls stay out). *Deleted
   2026-10-10 with the client's reader: see "Continue, the Codex goal and interrupt-and-send
   leave the wire".*
@@ -1936,7 +2017,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `a_codex_goal_shows_as_codex_holds_it` (`slopty-agent/tests/codex.rs`); `GoalSet` in
     the `golden_thread` actions.
 
-- ✅ **An archived Codex thread is unarchived and taken up again, once** (2026-10-04, A8 of the
+- ❌ **An archived Codex thread is unarchived and taken up again, once** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, A8 of the
   T3 Code delta study, after T3's `44bd4c9c` (#15389), which closes #10481).
   - A Codex thread archived outside Slopty, by Codex's own TUI or `codex archive`, makes
     `thread/resume` fail.
@@ -1952,7 +2033,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     a stand-in daemon that refuses until unarchived); `only_an_archived_thread_is_unarchived`
     (`thread::codex`).
 
-- ✅ **Ask aside: a side question on a fork that goes away** (2026-10-04, A9 of the T3 Code
+- ❌ **Ask aside: a side question on a fork that goes away** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04, A9 of the T3 Code
   delta study; T3's most-upvoted idea, #7311, never merged there).
   - **The wire.** All three intents need `Cap::FORK`.
     - `Intent::Aside` forks the whole thread as `Intent::Fork` does, so Claude Code's
@@ -2024,7 +2105,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       (`slopty_worker::conversation`).
     - The measurement `echo_beside_a_followed_thread` (e2e, ignored).
 
-- ✅ **The person's stop holds deliveries to that agent until they speak again** (2026-10-04,
+- ❌ **The person's stop holds deliveries to that agent until they speak again** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-04,
   A2 of the T3 Code delta study). A report that fell due a minute after the person stopped an
   orchestrator was posted to its idle session and started it working again.
   - **The signal.** The interrupt record in Claude Code's transcript ("[Request interrupted by
@@ -2056,7 +2137,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     for a finished task (`ladder::COMMANDS_WAIT`).
   - Test: `a_wait_on_commands_left_running_names_them` (`slopty-agent` observed tests).
 
-- ✅ **A Codex thread another client rewrote is read again, its held messages kept**
+- ❌ **A Codex thread another client rewrote is read again, its held messages kept** *Superseded 2026-10-29 by "TUI-first" above.*
   (2026-10-04). Codex's `thread/reverted` says a client rewrote the thread's history in place.
   The worker takes the thread up again (`thread/resume`) and reads it whole, and the messages
   the person queued are put back ahead of anything queued since.
@@ -2208,7 +2289,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       `a_client_gets_the_agents_on_connect_and_again_after_it_lagged`, over the ladder; the
       worker's relay, managed-launcher, hook and interrupt tests, which now wait on the row.
 
-- ✅ **One queue on the worker for ACP, Codex and pi, and pi queues there** (2026-10-06;
+- ❌ **One queue on the worker for ACP, Codex and pi, and pi queues there** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-06;
   `crates/slopty-agent/src/queue.rs`, `crates/slopty-worker/src/thread/pi/driven.rs`).
   - **One queue.** ACP and Codex each held the person's queued messages in a copy of the same
     code: hold, take back, change, send now, the stop that holds them all, and the release when
@@ -2242,7 +2323,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     take back, and the stop's hold) and `a_message_queued_behind_an_extensions_command_goes` in
     `crates/slopty-worker/tests/pi.rs`.
 
-- ✅ **How a message goes is the thread's to say, by two named rules** (2026-10-06;
+- ❌ **How a message goes is the thread's to say, by two named rules** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-06;
   `ThreadMeta::delivery_now`, `ThreadMeta::delivery_after_turn` in `crates/slopty-proto/src/thread.rs`).
   - **Now.** A message the person sends now steers where the agent takes a message mid-turn, and
     is queued where it cannot steer but can queue (ACP). The composer, "Interrupt and send", the
@@ -2257,7 +2338,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     each adapter's own caps against the worker's first check); `comments_to_an_agent_with_no_steer_go_queued`
     (the review tile).
 
-- ✅ **A thread's pull request is watched** (2026-10-06, `.research/readiness-2026-10-07.md` rank
+- ❌ **A thread's pull request is watched** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-06, `.research/readiness-2026-10-07.md` rank
   7). Only a project task's pull request was read again (`Hub::watch_checks`); a thread's was
   asked for when the commit sheet or the review opened and with every push, and nothing polled.
   A check failing, changes asked for, or a pull request ready to merge never reached *Needs
@@ -2297,7 +2378,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`slopty-worker`), `git::tests::a_pull_request_stands_on_its_most_pressing_fact`
     (`slopty-proto`).
 
-- ✅ **A start carries its mode, effort and files, and a worker says what each agent offers**
+- ❌ **A start carries its mode, effort and files, and a worker says what each agent offers** *Superseded 2026-10-29 by "TUI-first" above.*
   (2026-10-06, `.research/readiness-2026-10-07.md` rank 2). A new thread's first message is
   written in the same composer a running thread has, so its model, mode and effort menus and
   its attachments have to work before the thread exists. Only the model went in a `Start`; plan
@@ -2375,7 +2456,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
 - ❌ **Deleted 2026-10-16: the observed Claude Code ruling below.** Claude Code is driven
   (see "Each agent's drive" and "Why Claude is driven" above): its hooks, its mod, its
   transcript follower and its keystroke paths went with that ruling. Kept as the record.
-- ✅ **A yes or no waits for a pocketed phone, which answers it through the server**
+- ❌ **A yes or no waits for a pocketed phone, which answers it through the server** *Superseded 2026-10-29 by "TUI-first" above.*
   (2026-10-09, `.research/readiness-2026-10-08.md` rank 3; wire change). A phone's link ends
   soon after it leaves the screen. Once it did, nobody was left to answer an approval, so the
   worker handed it straight to the TUI. The server's push then carried a note whose Allow and
@@ -2429,8 +2510,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `thread::tests::commit::a_gitlab_repository_s_sheet_speaks_of_merge_requests`, and the
     `worker_git_merge_request_status` golden.
 
-- ✅ **A thread's agent fixes its checks, addresses its review and catches up, on the person's
-  press** (2026-10-09, `.research/readiness-2026-10-08.md` R6). The commit sheet showed a pull
+- ❌ **A thread's agent fixes its checks, addresses its review and catches up, on the person's
+  press** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-09, `.research/readiness-2026-10-08.md` R6). The commit sheet showed a pull
   request's failed checks and changes asked for, but the next step was the person's to type.
   Only a project task's board offered Fix CI, and it named the checks by count.
   - *The steps.* Over an open pull request, a thread's sheet (one whose agent takes a message)
@@ -2468,7 +2549,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       `no_next_step_without_an_agent_to_take_it`.
     - The goldens `client_git_pull_comments` and `worker_git_pull_comments`.
 
-- ✅ **Keep this run** (2026-10-09, `.research/readiness-2026-10-08.md` R11). One message run on
+- ❌ **Keep this run** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-09, `.research/readiness-2026-10-08.md` R11). One message run on
   several agents, each in a worktree of its own, could be reviewed side by side. Keeping the
   best one left the others running and their worktrees on disk, to be closed one by one.
   - *The line.* A thread with runs offers "Keep this run, close the other N" in its composer's
@@ -2495,7 +2576,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `threads::a_start_in_a_worktree_opens_its_agent_there_and_a_close_takes_it_away`, and
     `workspace::tests::agent_tile::keeping_a_run_closes_the_message_s_other_runs`.
 
-- ✅ **A thread goes on on another machine that has its repository** (readiness R18,
+- ❌ **A thread goes on on another machine that has its repository** *Superseded 2026-10-29 by "TUI-first" above.* (readiness R18,
   2026-10-09). Deleted 2026-10-10 with the branch panel (`ui.md`, "'Branch from here' becomes
   Fork from here and Ask aside"): moving work between machines is a task's restart.
   "Branch from here" offered only the thread's own machine, so work begun on the laptop
@@ -2585,14 +2666,14 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     daemon's `server_link::a_yes_or_no_waits_for_a_pocketed_phone_and_is_answered_through_the_server`
     (a plan held with no client linked until the relay's wait runs out, then handed back).
 
-- ✅ **A resumed session names `default` too** (2026-10-09). A resume carries the mode the
+- ❌ **A resumed session names `default` too** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-09). A resume carries the mode the
   hooks last reported (`resume::with_mode`). It used to drop the flag for `default`, because
   no flag once meant default. Since Claude Code 2.1.283 a run with no mode starts in auto, so
   a session the person kept asking ("Manual") came back looser. `default` is now passed as
   `--permission-mode default` like any other mode. Tests: `resume::tests::the_last_permission_mode_wins`,
   `tests::the_newest_conversation_is_the_one_to_resume`.
 
-- ✅ **"Always allow" says what it grants in Claude Code's words** (readiness rank 10,
+- ❌ **"Always allow" says what it grants in Claude Code's words** *Superseded 2026-10-29 by "TUI-first" above.* (readiness rank 10,
   2026-10-09). The standing grant used to read like settings: "Always allow · /work; accept
   edits mode". It now reads on from its button as one sentence, the way Claude Code's own
   dialog says it: "Always allow edits in /work this session".
@@ -2610,7 +2691,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `observed::tests::always_allow_says_what_it_grants_as_claude_code_does`,
     `decision::tests::a_scoped_answer_says_how_far_it_reaches`; golden `thread-phone`.
 
-- ✅ **pi's edits and writes carry their diff** (readiness rank 16, 2026-10-09). A pi `edit`
+- ❌ **pi's edits and writes carry their diff** *Superseded 2026-10-29 by "TUI-first" above.* (readiness rank 16, 2026-10-09). A pi `edit`
   or `write` used to be a title with no body, so the review surfaces had nothing to show.
   - **While it runs.** An `edit` is an `EditDetail` built from the texts it replaces, one
     hunk per replacement and no line numbers yet. Its arguments are read the way pi itself
@@ -2866,7 +2947,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `tests/claude_start.rs`: the offer and its reach, the flag kept, the same command opened
     again and the thread in its new terminal, a second press refused).
 
-- ✅ **Keep takes a turn's change onto what is kept** (2026-10-11, readiness 10-11 rank 2, the
+- ❌ **Keep takes a turn's change onto what is kept** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-11, readiness 10-11 rank 2, the
   worker's half). A thread's review opens on its last turn. When an earlier turn had changed
   the same file and was not kept, Keep and "Mark reviewed" there failed with "was kept otherwise
   since it was reviewed". The last turn's old side holds the earlier turn's lines, and what is
@@ -2956,7 +3037,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - `review::tests::{a_note_is_placed_on_both_lines_where_the_diff_keeps_its_line,
       a_review_out_of_bounds_or_saying_nothing_is_refused, a_review_at_an_older_head_is_refused}`.
 
-- ✅ **Codex gets the commands and background work its app-server publishes** (2026-10-12,
+- ❌ **Codex gets the commands and background work its app-server publishes** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-12,
   readiness 10-12 "below the line", kept by the orchestrator-first study). A Codex thread had no
   slash menu and an empty tray. The app-server (0.162.1, checked in its JSON Schema and its TUI's
   source) has a door for each, so the adapter uses them and nothing else:
@@ -3014,7 +3095,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_archived_thread_is_unarchived_and_taken_up_again` (`slopty-worker/tests/codex.rs`, no
     goal read on the resume).
 
-- ✅ **What is written to Codex while its app-server restarts waits for it** (2026-10-11, the
+- ❌ **What is written to Codex while its app-server restarts waits for it** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-11, the
   orchestrator-first study, item 24's first half).
   - Before this, a message, an edit or an answer given while Codex's app-server was away was
     dropped. So was one held on a link that went down. Each had already been answered done, so
@@ -3046,7 +3127,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_followed_thread_is_taken_up_again_once_codex_is_back`,
     `a_message_queued_behind_a_turn_goes_after_codex_s_link_comes_back`.
 
-- ✅ **pi's gate lets through what its mode allows** (2026-10-11, readiness-w 10-11 rank 4). This
+- ❌ **pi's gate lets through what its mode allows** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-11, readiness-w 10-11 rank 4). This
   refines "pi is driven over its RPC mode, with a gate that fails closed by pi's own rule".
   - **The gap.** The gate put every call to the person: reads, Slopty's own tools, all of
     them. A project's autonomy never reached a pi task. The server held only Claude Code and
@@ -3252,14 +3333,14 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   `a_log_that_no_longer_reads_is_deleted`, and the read-again step of
   `a_starts_first_message_cut_off_by_a_restart_is_settled`.
 
-- ✅ **An ACP thread's queue is the thread's while its agent is gone** (2026-10-15). Queued
+- ❌ **An ACP thread's queue is the thread's while its agent is gone** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-15). Queued
   messages on an exited ACP thread could not be withdrawn, edited, moved or sent now, and an
   agent taken up again started with an empty queue, so they never went. As with pi, the queue
   is changed in the thread's record while no agent runs, a message sent now takes the thread up
   again, and a session loaded again starts from the queue the thread holds. Test: `acp.rs`
   `a_queue_left_by_a_gone_agent_is_changed_at_rest_and_goes_after_the_load`.
 
-- ✅ **A Codex thread ends as Codex left it, and no message to it vanishes** (2026-10-15). A
+- ❌ **A Codex thread ends as Codex left it, and no message to it vanishes** *Superseded 2026-10-29 by "TUI-first" above.* (2026-10-15). A
   thread whose app-server went, that Codex closed, or that a worker found at work with no Codex
   answering its first try was only marked exited, so it went on saying it worked; it now ends
   as an agent that quit does (`driven::cut_short`). A thread Codex cannot take up again is
@@ -3306,6 +3387,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   `threads::what_the_worker_owns_outlives_a_read_again`.
 
 - ✅ **Pictures, visuals, pages and MCP Apps through each agent's own doors (2026-10-16).**
+  - *Partly superseded 2026-10-29 by "TUI-first" above:* pictures from Claude Code's
+    transcript, `show_visual` and `show_page` stay; MCP Apps, Codex's, ACP's and pi's pictures
+    went with their drives.
   - **Pictures are kept by their digest.** A picture Codex viewed (`imageView`) or made
     (`imageGeneration`), an image block in an MCP result, an ACP agent's image and resource
     blocks, and pi's tool and message images are each kept once on the worker, by the BLAKE3 of
@@ -3350,7 +3434,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `{pictures_reach_the_thread_by_their_digest, the_models_own_picture_is_a_row_of_its_own}`;
     `media::tests`, `shown::tests`, `codex::apps::tests`; `slopty-tools` `show::tests`.
 
-- ✅ **Claude Code's doors beside messages, as its TUI has them (2026-10-16).**
+- ❌ **Claude Code's doors beside messages, as its TUI has them (2026-10-16).** *Superseded 2026-10-29 by "TUI-first" above.*
   - **Its own work is the thread's tasks.** `task_started`, `task_progress`, `task_updated`,
     `task_notification` and `background_tasks_changed` (which replaces the list whole) keep
     each task's kind, step, figures, parent and timeout. A notice with no call (a monitor, a
@@ -3466,7 +3550,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     a_visual_claude_code_shows_is_the_threads_once_checked}`, `thread::claude::settings::tests`,
     `thread::assets::tests`; `slopty-workerd` `threads.rs`
     `a_claude_code_page_asks_its_app_through_claude_code`.
-- ✅ **A code rewind can be undone; a command's edits and why Claude Code asks are shown (2026-10-16).**
+- ❌ **A code rewind can be undone; a command's edits and why Claude Code asks are shown (2026-10-16).** *Superseded 2026-10-29 by "TUI-first" above.*
   - **Undoing a rewind** (how the folder is kept: superseded on 2026-10-17, "A rewind is
     undone in any folder", below). Before `rewind_files`, the worker records the folder's tree
     as a private snapshot (`refs/slopty/threads/<thread>/rewound`) and sets
@@ -3501,7 +3585,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `claude::driven::tests::why_claude_code_asks_is_said_as_its_tui_says_it`; `slopty-worker`
     `claude.rs` `a_message_is_delivered_and_a_permission_answered_by_its_id` (reason and
     edits).
-- ✅ **Claude Code's cards, modes and settings in its TUI's words (2026-10-16).**
+- ❌ **Claude Code's cards, modes and settings in its TUI's words (2026-10-16).** *Superseded 2026-10-29 by "TUI-first" above.*
   - **Permission cards.** Each card's title and question are the TUI's for its tool: "Bash
     command" with the command and what it is for, "Edit file" ("Do you want to make this edit
     to main.rs?"), "Create file", "Overwrite file" or "Write file" by whether the file is there
@@ -3562,7 +3646,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     a_limit_nearly_used_and_credits_drawn_say_so, a_plugins_ask_names_the_plugin}`,
     `claude::history::cards::tests`,
     `claude::driven::model::tests`.
-- ✅ **A request only the person at its card answers (2026-10-16).** Claude Code marks a
+- ❌ **A request only the person at its card answers (2026-10-16).** *Superseded 2026-10-29 by "TUI-first" above.* Claude Code marks a
   permission request `requires_user_interaction` when one-tap answers must not be offered. The
   adapter keeps it as `Request::needs_presence` (and `RequestCard::needs_presence` in the table),
   and offers no "always allow" with it. Only the person's own click or key on the card answers
@@ -3587,7 +3671,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `workspace::view_model::work::tests::no_rule_allows_what_needs_the_person_at_the_card`,
     `view_model::tests::a_request_needing_the_person_reaches_its_card_as_one`; `slopty-shell`
     `composer::dock_tests::a_card_says_it_needs_the_person_at_it`.
-- ✅ **The TUI's words from Claude Code's own doors, second round (2026-10-16).** What the TUI
+- ❌ **The TUI's words from Claude Code's own doors, second round (2026-10-16).** *Superseded 2026-10-29 by "TUI-first" above.* What the TUI
   says of a call, a request or the session now reaches Slopty, read only from what stream-json
   and the control protocol carry:
   - **Calls in the TUI's words.** A call's header and result line come from its input and its
@@ -3649,8 +3733,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   to bypass permissions mid-session ("not launched with --dangerously-skip-permissions"): every
   driven run now starts with `--allow-dangerously-skip-permissions`, which only allows the mode,
   as the desktop app's runs do; the person still picks it.
+  - *The bypass half is superseded 2026-10-29 by "TUI-first" above:* the person picks a mode
+    in the TUI itself, and a start passes one only when it names it.
 
-- ⏳ **Past Claude Code sessions are seen and continued in the GUI (2026-10-16, lane R).** The TUI
+- ❌ **Past Claude Code sessions are seen and continued in the GUI (2026-10-16, lane R).** *Superseded 2026-10-29 by "TUI-first" above: a past session is resumed as its TUI in a terminal.* The TUI
   and Slopty's `claude -p` share Claude Code's own store on each machine, so a session run in a
   terminal is one Slopty can show and go on with. Claude desktop's Code tab, t3code and zeron
   each keep history apart from live work and reachable from a search; Slopty does both.
@@ -3768,8 +3854,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `ctl::tests::an_agents_ask_of_the_window_crosses_the_socket`; `slopty-tools` `ui::tests`
     and `tools::tests::the_window_tools_reach_the_window_through_their_carrier`; `slopty-cli`
     `ui::tests`.
-- ✅ **A side question (`/btw`) goes through Claude Code's own `side_question` door (2026-10-17,
-  lanes C2, C3).** Claude Code answers a side question from the conversation so far, without
+- ❌ **A side question (`/btw`) goes through Claude Code's own `side_question` door (2026-10-17,
+  lanes C2, C3).** *Superseded 2026-10-29 by "TUI-first" above.* Claude Code answers a side question from the conversation so far, without
   tools, without entering the conversation and without interrupting the turn under way
   (`interactive-mode.md`, "Side questions with /btw"). A driven session takes it as a stream-json
   control request, the one the Agent SDK's `askSideQuestion` sends and Claude desktop uses:
@@ -3800,7 +3886,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`slopty-ui`); `composer::dock_tests::a_btw_draft_asks_beside_and_its_answer_shows_until_dismissed`
     and `composer::side::tests::a_btw_draft_names_its_question` (`slopty-shell`).
 
-- ✅ **A Claude Code that ends unasked says what kind of end it was (2026-10-17).** From
+- ❌ **A Claude Code that ends unasked says what kind of end it was (2026-10-17).** *Superseded 2026-10-29 by "TUI-first" above.* From
   `.research/claude-desktop-2026-10-16.md` §d.7 and §d.13 (D7). A Claude Code that failed used to
   leave "Claude Code ended: <its last line of standard error>", a bare line in the chat's own
   words, and a turn failed under the generic "The turn failed". The worker now says what kind of
@@ -3829,8 +3915,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `claude::driven::tests::a_claude_code_gone_mid_turn_cuts_its_turn`; `slopty-worker`
     `claude::an_end_by_a_signal_says_what_kind_it_was` (the stand-in killed and terminated
     mid-turn through ptyd), `claude::a_crash_mid_turn_fails_the_turn_with_why`.
-- ✅ **A press on a note for a request that needs the person says so, wherever it lands
-  (2026-10-17).** Claude Code's `requires_user_interaction` asks a host to offer no one-tap
+- ❌ **A press on a note for a request that needs the person says so, wherever it lands
+  (2026-10-17).** *Superseded 2026-10-29 by "TUI-first" above.* Claude Code's `requires_user_interaction` asks a host to offer no one-tap
   answer, so a note for such a request keeps offering no button, as ruled on 2026-10-16. A
   press can still come: a note posted before the request said so, or one a phone kept. In the
   app it said "Answer in Slopty", but through the server, which a phone's background
@@ -3874,8 +3960,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   ladder sorts it first. Tests: `hub::ladder::tests::a_need_left_open_is_told_again_once_per_wait`
   and `a_reminder_says_how_long_it_waited`.
 
-- ✅ **A rewind is undone in any folder, and an undo puts back all of it or nothing
-  (2026-10-17).** "Undo rewind" after "Code and conversation" deleted the branch and left the
+- ❌ **A rewind is undone in any folder, and an undo puts back all of it or nothing
+  (2026-10-17).** *Superseded 2026-10-29 by "TUI-first" above.* "Undo rewind" after "Code and conversation" deleted the branch and left the
   files rewound whenever the chat's folder was not in git, with no word of why. The worker kept
   the folder before a rewind only as a git tree of its repository, so outside git it kept
   nothing; the branch alone was enough for the toast to offer an undo, and the undo then only
@@ -3905,6 +3991,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   0.162.1 to 0.163.0, pi 1.1.0 to 1.3.0, OpenCode 1.18.34 to OpenCode 2 (2.0.32, published as
   `@opencode/cli`; `opencode-ai` keeps the 1.x line), ACP's schema 1.12; each recording made
   again (`cargo xtask {codex,pi,acp} fixtures`). What each brought, and the ruling:
+  - *Partly superseded 2026-10-29 by "TUI-first" above:* Codex's, pi's and ACP's rulings
+    below went with their drives; Codex and pi run as their own TUIs.
   - **ACP: an agent's notices and its compactions are shown** (stable since schema 1.11).
     `initialize` says the client takes both. A notice becomes the thread's note at its level
     (`Notice::WARNING` and `Notice::ERROR` join the open list, drawn as the warning and error

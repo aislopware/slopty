@@ -1,6 +1,6 @@
 // slopty: Slopty's own file (not in zeron).
-//! Right-click in the chat opens a menu where people expect one: on selected text, Copy and
-//! Quote in reply; on a code block, its header's actions (Copy code, Fit content or Use
+//! Right-click in the chat opens a menu where people expect one: on selected text, Copy; on a
+//! code block, its header's actions (Copy code, Fit content or Use
 //! horizontal scrolling, Run in terminal). The menu is the house's floating menu
 //! (`popover::menu_at`) at the pointer, driven by the keyboard as every menu is.
 
@@ -27,26 +27,17 @@ struct ContextMenu {
     active: Option<usize>,
 }
 
-/// The menu of a selection of `words`: Copy, and Quote in reply.
+/// The menu of a selection of `words`: Copy. slopty: no Quote in reply; the inspector is
+/// read-only toward the agent.
 pub(super) fn selection_choices(words: &str) -> Vec<MenuChoice> {
     let copied = words.to_owned();
-    let quoted = words.to_owned();
-    vec![
-        MenuChoice {
-            label: "Copy".into(),
-            keys: Some("mod-c"),
-            act: Rc::new(move |_: &mut Window, cx: &mut App| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone()));
-            }),
-        },
-        MenuChoice {
-            label: "Quote in reply".into(),
-            keys: None,
-            act: Rc::new(move |window: &mut Window, cx: &mut App| {
-                crate::composer::insert_quote(&quoted, window, cx);
-            }),
-        },
-    ]
+    vec![MenuChoice {
+        label: "Copy".into(),
+        keys: Some("mod-c"),
+        act: Rc::new(move |_: &mut Window, cx: &mut App| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone()));
+        }),
+    }]
 }
 
 impl Transcript {
@@ -62,7 +53,6 @@ impl Transcript {
         if choices.is_empty() {
             return;
         }
-        self.withdraw_quote(cx);
         self.context_menu.menu.open(ContextMenu { label, position, choices, active: None });
         let focus = self.context_menu.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         window.focus(&focus, cx);
@@ -190,13 +180,12 @@ fn div_label(label: SharedString) -> gpui::Div {
 mod tests {
     use super::*;
 
-    /// A selection's menu copies it and quotes it, Copy saying its key.
+    /// A selection's menu copies it, Copy saying its key.
     #[test]
-    fn a_selection_offers_copy_and_quote() {
+    fn a_selection_offers_copy() {
         let choices = selection_choices("the words");
         let labels: Vec<&str> = choices.iter().map(|c| c.label.as_ref()).collect();
-        assert_eq!(labels, ["Copy", "Quote in reply"]);
+        assert_eq!(labels, ["Copy"]);
         assert_eq!(choices[0].keys, Some("mod-c"));
-        assert_eq!(choices[1].keys, None);
     }
 }

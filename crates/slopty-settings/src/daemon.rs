@@ -150,8 +150,7 @@ mod tests {
     }
 
     /// Edits under the daemon's tables, `[network]` among them, land in its file, the rest of it as
-    /// it was; an entry of a map goes in and out on its own; with no edits the file is only
-    /// read.
+    /// it was; with no edits the file is only read.
     #[test]
     fn a_daemon_s_own_keys_are_edited_in_place() {
         let dir = tempfile::tempdir().expect("temp");
@@ -160,12 +159,6 @@ mod tests {
         let edits = [
             edit("worker", "keep_awake", Some(r#""never""#)),
             edit("network", "server", Some(r#""studio""#)),
-            Edit {
-                table: "worker",
-                key: "acp",
-                entry: Some("gemini"),
-                literal: Some(r#"["gemini", "--acp"]"#),
-            },
         ];
         let file = read_and_edit(&path, &WORKER, &edits).expect("edited");
         let read = Settings::load(&path);
@@ -173,17 +166,10 @@ mod tests {
         assert_eq!(read.settings.worker.keep_awake, crate::KeepAwake::Never);
         let server = read.settings.network.server.as_ref().map(ToString::to_string);
         assert_eq!(server.as_deref(), Some("studio:45560"), "[network] is the worker's too");
-        assert_eq!(
-            read.settings.worker.acp.get("gemini"),
-            Some(&vec!["gemini".to_owned(), "--acp".to_owned()])
-        );
         assert!((read.settings.terminal.minimum_contrast - 4.5).abs() < f32::EPSILON);
         assert!(file.text.starts_with("# mine\n"), "{}", file.text);
         assert_eq!(std::fs::read_to_string(&path).expect("read"), file.text);
 
-        let gone = Edit { table: "worker", key: "acp", entry: Some("gemini"), literal: None };
-        read_and_edit(&path, &WORKER, &[gone]).expect("edited");
-        assert!(Settings::load(&path).settings.worker.acp.is_empty());
         let only = read_and_edit(&path, &WORKER, &[]).expect("read");
         assert_eq!(only.text, std::fs::read_to_string(&path).expect("read"));
     }

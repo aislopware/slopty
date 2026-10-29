@@ -2,7 +2,7 @@
 //! chip opens a right-pane tab instead).
 //!
 //! A subagent lives only in its parent's chat (`docs/decisions/ui.md`, "Subagents live in their
-//! parent's chat"): this card, the Background tray above the composer, and the drill-in. The
+//! parent's chat"): this card in the inspector's timeline, and the drill-in. The
 //! card is zeron's chip anatomy: an icon tile, the task as its label, its kind and model faint
 //! on the right; under it the subagent's step and figures, live while it runs and settled to
 //! its outcome after (slopty: a run that went well says what it answered, and "Done" only when
@@ -10,9 +10,9 @@
 //! and scrolling on its own, following its end while it runs; the newest running child of the
 //! turn under way opens itself while it is what the parent waits on, and closes once the turn
 //! moves on, unless the person opened or closed it. Open (⌘↵) drills into the child as the
-//! session view; Stop (⌘.) stops it; Escape closes the card.
+//! session view; Escape closes the card. Stopping it is the agent's TUI's.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, SharedString, Subscription, div, prelude::*,
@@ -143,8 +143,6 @@ pub(super) struct SubagentsState {
     open: HashMap<String, InlineChild>,
     /// Each card's keyboard focus, by card.
     focus: HashMap<SharedString, FocusHandle>,
-    /// Tray rows asked to stop, until their card settles.
-    stopping: HashSet<String>,
     /// Each card's run, as open as it was last drawn: whether it was open, and its height then.
     drawn: HashMap<SharedString, (bool, f32)>,
     /// Cards opening or closing: the height each moves from, and since when.
@@ -221,7 +219,7 @@ impl Card {
                 needs_you: None,
             };
         };
-        let kind = [progress.agent_type.clone(), progress.model.clone().or(model)]
+        let kind = [progress.agent_type.clone(), model]
             .into_iter()
             .flatten()
             .filter(|word| !word.is_empty())
@@ -277,7 +275,6 @@ impl SubagentsState {
     pub fn close_all(&mut self, state: &Entity<crate::state::AppState>, cx: &mut gpui::App) {
         let children: Vec<String> = self.open.drain().map(|(chat, _)| chat).collect();
         self.toggled.clear();
-        self.stopping.clear();
         self.drawn.clear();
         self.moving.clear();
         if children.is_empty() {
@@ -344,32 +341,6 @@ impl Transcript {
 }
 
 impl Transcript {
-    // slopty: S2's Background tray asks to show the call a row came from.
-    /// Scroll to the call [`crate::background_tray::CallReveal`] names, its subagent card open.
-    pub(super) fn on_call_reveal(&mut self, cx: &mut Context<Self>) {
-        let Some(ask) = cx.try_global::<crate::background_tray::CallReveal>().cloned() else {
-            return;
-        };
-        if self.chat_id.as_deref() != Some(ask.chat_id.as_str()) {
-            return;
-        }
-        let tail = format!("#{}", ask.part_id);
-        let found = self.rows.iter().enumerate().find_map(|(at, row)| match &row.kind {
-            super::RowKind::ToolGroup { tools, .. } => tools
-                .iter()
-                .position(|tool| tool.part_id == ask.part_id)
-                .map(|ix| (at, Some(format!("{}#s{ix}", row.id)))),
-            _ => row.id.ends_with(&tail).then_some((at, None)),
-        });
-        let Some((at, card)) = found else { return };
-        if let Some(key) = card {
-            self.subagents.toggled.insert(SharedString::from(key), true);
-            self.list.remeasure_items(at..at + 1);
-        }
-        self.scroll_to_row(at, cx);
-        cx.notify();
-    }
-
     /// Whether the card `key` of a child is open: the person's word, else the frontier rule.
     fn card_open(&self, key: &SharedString, frontier: bool) -> bool {
         self.subagents.toggled.get(key).copied().unwrap_or(frontier)
@@ -427,14 +398,6 @@ impl Transcript {
         }
     }
 
-    /// Stop the subagent of tray row `row`.
-    fn stop_subagent(&mut self, row: String, cx: &mut Context<Self>) {
-        if self.subagents.stopping.insert(row.clone()) {
-            self.stop_work(row, cx);
-            cx.notify();
-        }
-    }
-
     /// The card of spawn call `tool`, the `ix`th of group row `row_id`. `frontier`: it is the
     /// newest running child of the turn under way, which opens itself. `rail`: it sits in a
     /// fold's rail (compact mode), where it never opens in place.
@@ -474,13 +437,9 @@ impl Transcript {
         {
             self.close_child(chat, cx);
         }
-        if !card.running && let Some(row) = &card.row {
-            self.subagents.stopping.remove(row);
-        }
         if card.running {
             self.tick_soon(cx);
         }
-        let stopping = card.row.as_ref().is_some_and(|row| self.subagents.stopping.contains(row));
         let focus = self
             .subagents
             .focus
@@ -549,18 +508,6 @@ impl Transcript {
                         .text_color(theme.text_muted),
                 )
         };
-        let stop = card
-            .row
-            .clone()
-            .filter(|_| card.running && !stopping)
-            .map(|row| {
-                quiet(format!("{key}-stop"), "Stop subagent", crate::icons::CLOSE).on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.stop_subagent(row.clone(), cx);
-                    }),
-                )
-            });
         let drill = card.chat.clone().map(|chat| {
             quiet(format!("{key}-open"), "Open subagent", crate::icons::ARROW_UP_RIGHT).on_click(
                 cx.listener(move |_, _, _, cx| {
@@ -661,7 +608,6 @@ impl Transcript {
                         .child(kind),
                 )
             })
-            .children(stop)
             .children(drill)
             .children(glyph.map(|glyph| div().flex_none().child(glyph)))
             .children(chevron);
@@ -692,11 +638,7 @@ impl Transcript {
                         // slopty: the word swaps as it changes (Amp).
                         .child(status_word(
                             SharedString::from(format!("{key}-status")),
-                            SharedString::from(if stopping {
-                                "Stopping…".to_owned()
-                            } else {
-                                card.step.clone().unwrap_or_default()
-                            }),
+                            SharedString::from(card.step.clone().unwrap_or_default()),
                             view,
                             cx,
                         )),
@@ -790,7 +732,6 @@ impl Transcript {
             .join(" · ");
         let toggle_key = key.clone();
         let key_chat = card.chat.clone();
-        let key_row = card.row.clone().filter(|_| card.running);
         div()
             .id(key.clone())
             .track_focus(&focus)
@@ -840,11 +781,6 @@ impl Transcript {
                     "enter" if command => {
                         if let Some(chat) = key_chat.clone() {
                             cx.emit(TranscriptEvent::OpenSubagent { chat_id: chat });
-                        }
-                    }
-                    "." if command => {
-                        if let Some(row) = key_row.clone() {
-                            this.stop_subagent(row, cx);
                         }
                     }
                     "escape" if open => this.toggle_card(toggle_key.clone(), open, cx),
@@ -902,7 +838,6 @@ mod tests {
     fn a_card_reads_its_step_then_its_outcome() {
         let mut progress = SubagentProgress {
             agent_type: Some("Explore".into()),
-            model: Some("haiku".into()),
             running: true,
             state: SubagentProgress::RUNNING.into(),
             step: Some("Reading parser.rs".into()),
@@ -916,7 +851,7 @@ mod tests {
         };
         let card = Card::of(&spawn(Some(progress.clone())));
         assert_eq!(card.title.as_ref(), "Count lines");
-        assert_eq!(card.kind.as_deref(), Some("Explore · haiku"));
+        assert_eq!(card.kind.as_deref(), Some("Explore"));
         assert_eq!(card.chat.as_deref(), Some("child-chat"));
         assert_eq!(card.step.as_deref(), Some("Reading parser.rs"));
         assert_eq!(card.figures_at(124_000), "12 tools · 41k tokens · 2m 3s");

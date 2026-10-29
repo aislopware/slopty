@@ -680,14 +680,6 @@ allow = [
         ] {
             assert_eq!(entries(file, "clipboard", "workers"), want, "{file}");
         }
-        let acp = "[worker.acp]\nmine = [\"/opt/mine\", \"--acp\"]\ngoose = []\n";
-        assert_eq!(
-            entries(acp, "worker", "acp"),
-            [
-                ("mine".to_owned(), Value::List(vec!["/opt/mine".into(), "--acp".into()])),
-                ("goose".to_owned(), Value::List(Vec::new())),
-            ]
-        );
         assert_eq!(entries(FILE, "clipboard", "workers"), Vec::new(), "no map");
     }
 
@@ -730,8 +722,8 @@ mono_size = 13.0
             write_entry(inline, "clipboard", "workers", "b c", "false"),
             "[clipboard]\nworkers = { a = true, \"b c\" = false } # mine\nsync = true\n"
         );
-        let fresh = write_entry(FILE, "worker", "acp", "mine", "[\"/opt/mine\", \"--acp\"]");
-        assert_eq!(fresh, format!("{FILE}\n[worker.acp]\nmine = [\"/opt/mine\", \"--acp\"]\n"));
+        let fresh = write_entry(FILE, "clipboard", "workers", "studio", "false");
+        assert_eq!(fresh, format!("{FILE}\n[clipboard.workers]\nstudio = false\n"));
         for text in [&flipped, &added, &fresh] {
             assert!(toml::from_str::<toml::Table>(text).is_ok(), "still TOML: {text}");
         }
@@ -756,8 +748,9 @@ mono_size = 13.0
         assert_eq!(one, file.replace("laptop = false\n", ""));
         let none = remove_entry(&one, "clipboard", "workers", "studio");
         assert_eq!(none, "[clipboard]\nsync = true\n\n[font]\nmono_size = 13.0\n");
-        let last = "[font]\nmono_size = 13.0\n\n[worker.acp]\nmine = []\n";
-        assert_eq!(remove_entry(last, "worker", "acp", "mine"), "[font]\nmono_size = 13.0\n");
+        let last = "[font]\nmono_size = 13.0\n\n[clipboard.workers]\nstudio = true\n";
+        let taken = remove_entry(last, "clipboard", "workers", "studio");
+        assert_eq!(taken, "[font]\nmono_size = 13.0\n");
         let inline = "[clipboard]\nworkers = { a = true, b = false }\nsync = true\n";
         let less = remove_entry(inline, "clipboard", "workers", "a");
         assert_eq!(less, "[clipboard]\nworkers = { b = false }\nsync = true\n");

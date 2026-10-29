@@ -2,7 +2,8 @@
 
 See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
-- ✅ **Four layers, each answering one question, fastest first** (2026-09-05). Unit tests for
+- ❌ **Four layers, each answering one question, fastest first** (2026-09-05; superseded
+  2026-10-29 by "Simulation, models and mutants carry the tests; e2e is a smoke set", below). Unit tests for
   logic behind traits with fakes (`slopty_input::Recorder`); headless GPUI tests in
   `slopty-ui` (`#[gpui::test]`, `VisualTestContext`) for layout, focus, key bindings and what
   the scene paints; the app self-test (`crates/slopty-e2e`, `cargo xtask e2e app`) for the
@@ -1363,3 +1364,65 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   layer (`cargo xtask e2e screen`, the guest's `vm live`). The harness's idle window, which only
   this test used, is gone; `slopty-capture`'s geometry tests still start the binary.
   - Test: `surfaces_live::a_remote_window_is_a_right_pane_surface_and_takes_the_window`.
+
+- ✅ **Simulation, models and mutants carry the tests; e2e is a smoke set** (2026-10-29). The
+  person asked for the heavy suites (e2e, integration), which can never reach every corner, to
+  give way to modern techniques. Coverage is to stay as tight as possible, at the least test
+  time and machine, in every language. The facts behind it (`.research/testing-inventory-2026-10-29.md`):
+  - All of the last 10 `e2e.yml` runs were red, and Deep was red on 8 of 9 nights.
+  - The one mutation run missed 299 of 1,459 mutants (proto 71.5 %, predict 78.5 %).
+  - There were 7 property tests and no state-machine test.
+  - The gate's slow, flaky tail is real-time waits.
+
+  The studies are `.research/testing-rust-modern-2026-10-29.md` (Rust, every e2e test mapped)
+  and `.research/testing-ts-mod-2026-10-29.md` (the Claude Code mod). The shape:
+  1. **Red means something first.** Each gate lane and Deep job carries a canary that must
+     fail it, and nextest's `flaky-result = "fail"` applies. A job that is always red is fixed
+     or deleted; red two nights running is a lane's work.
+  2. **Real code, simulated world.** Server, workers, a ptyd model and clients run in one
+     process on virtual time. This extends `slopty_shape::sim`; noq is sans-IO, and its
+     runtime reads tokio's paused clock. Faults are injected (loss, stall, partition, crash
+     and restart, disk full), every run is seeded, and a two-run digest proves the run is
+     deterministic. The doors (clock, id and RNG, spawner, `Custodian`/`PtyIo`, Fs/Watcher,
+     platform) land first, by one owner, with clippy bans on direct use. The real and
+     simulated sides of each door pass one shared contract suite. Mocks of Slopty's own logic
+     stay banned; a door's simulated side is the world, not the code under test.
+  3. **Models over examples.** proptest-state-machine models pin `InputOrder`/`FrameOrder`,
+     `TermState`, the item mirror, the hub's leases, the driver seat and the view model; a
+     stateright model pins custody, succession and reclaim.
+  4. **Metamorphic and differential relations:**
+     - for the terminal, byte-split invariance (inside UTF-8 and escape sequences), resize round
+       trips, and a differential against a reference VT;
+     - for the transcript decoder, split, tail and unknown-field invariance;
+     - for the shell fuzzer, theme, scale and size invariance and a11y invariants at every step.
+  5. **Every decoder a peer reaches is fuzzed** (transcript, hooks, registry, markdown,
+     visuals, plus today's), with minimized corpora committed and replayed at the gate, and
+     grown nightly.
+  6. **Strength is the mutation score, not line coverage.** `cargo mutants --in-diff` runs on
+     the core crates at each landing, capped. The day's diff runs nightly, and each missed
+     mutant becomes a lane's test. The TypeScript mod uses Stryker at 100 % of the
+     non-equivalent mutants.
+  7. **Exhaustive contracts where cheap:**
+     - a serde-reflection registry of every wire type in `FINGERPRINT` (the byte goldens shrink
+       to about 40);
+     - a hooks drift check against the Agent SDK's published `HookInput` union;
+     - Claude Code fixtures recorded again on each new release.
+  8. **Semantic snapshots over pixels.** The a11y tree and the scene go in insta, and PNG goldens
+     stay only where only pixels can say it (glass, Metal), about 12 of 104.
+  9. **e2e is six smoke tests:**
+     - S1, a session in a real terminal with its inspector;
+     - S2, a VideoToolbox stream;
+     - S3, WebKit pages;
+     - S4, the CLI and MCP through the server;
+     - S5, iOS;
+     - S6, Linux.
+     Each runs when the impact map says a change can reach it, and all of them nightly. Before
+     an e2e test is deleted, what replaces it must hold what it held (unique coverage first).
+  10. **Run only what a change can reach** (rdeps, the path map), and everything nightly.
+
+  The TypeScript mod gets no libraries: Effect 4 fails the mod sandbox's source scan and its
+  clock, and Claude Code already checks every payload. Its checks are TypeScript 7 at its
+  strictest, oxlint with tsgolint, oxfmt, `claude plugin validate --strict`, and `claude plugin
+  test` on the kit's mocked clock, about 2 s a change, plus Stryker. Logic stays in Rust; the
+  mod only debounces and relays.
+

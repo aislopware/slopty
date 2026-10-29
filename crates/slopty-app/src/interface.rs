@@ -129,7 +129,13 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
         let theme = theme.unwrap_or_default();
         slopty_terminal::fits(&theme, Some(frame), size, window, cx)
     });
-    // A transcript's Run types its line into the chat's terminal: run, or left at the prompt.
+    // Whether the person has words in a terminal's line unsent: what an agent driving the
+    // window reads as them typing.
+    slopty_shell::live::serve_drafting(cx, |view, cx| {
+        view.clone().downcast::<TerminalView>().is_ok_and(|terminal| terminal.read(cx).drafting())
+    });
+    // A line an orchestrating agent asks to run goes into the shell terminal it opened: typed and
+    // run, or left at the prompt for the person to read first.
     let typed = view.downgrade();
     slopty_shell::live::serve_runs(cx, move |id, line, enter, cx| {
         let Some(view) = typed.upgrade() else { return false };

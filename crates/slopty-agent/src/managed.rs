@@ -12,8 +12,9 @@
 //! Running it in the background costs a control-plane round trip and on a machine not enrolled
 //! opens a browser, so the worker never asks it `--version` or `agents`: it asks once whether it
 //! is one ([`MANAGED_HELP`], which such a launcher answers before any I/O), takes the version
-//! from the client's path ([`artifact_version`]) or its artifacts ([`newest_artifact`]). A
-//! driven run hands its flags through the launcher to the client unchanged.
+//! from the client's path ([`artifact_version`]) or its artifacts ([`newest_artifact`]). A start
+//! hands its flags through the launcher to the client unchanged, and the menus' probe runs
+//! through it only once a session of its client is followed, when it is enrolled already.
 
 use std::path::{Path, PathBuf};
 

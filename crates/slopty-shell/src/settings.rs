@@ -22,17 +22,15 @@ use slopty_view_proto::{AuthState, WorkspaceScope};
 pub mod add_device;
 pub mod appearance;
 pub mod archived;
-pub mod composer;
+// slopty: no composer, so no picks of its to remember.
 pub mod devices;
 pub mod files;
 pub mod harnesses;
 // slopty: the code a phone or iPad scans for the server.
 pub mod invite;
 pub mod notifications;
-pub mod permissions; // slopty: an agent's permission rules (S2)
 pub mod shortcuts;
 // slopty: no thread naming: an agent's thread is titled by the agent.
-pub mod wallpaper_colors;
 pub mod widgets;
 // slopty: no per-device worktree locations (the engine side is not taken).
 
@@ -74,53 +72,6 @@ pub const FILES_AUTOSAVE_DELAY_MIN_MS: u64 = 100;
 pub const FILES_AUTOSAVE_DELAY_MAX_MS: u64 = 10_000;
 
 const FILE_NAME: &str = "ui-settings.json";
-const NEW_THREAD_BACKGROUND_DIR: &str = "new-thread-backgrounds";
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NewThreadComposerBackground {
-    /// Managed copy inside Slopty's device-local data directory.
-    pub path: String,
-    /// Original file name shown in Appearance settings.
-    pub name: String,
-    /// Viewport-relative framing, kept with the image it belongs to.
-    #[serde(default)]
-    pub adjustment: NewThreadBackgroundAdjustment,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct NewThreadBackgroundAdjustment {
-    /// Normalized horizontal alignment of the overflowing image: 0 left, 1 right.
-    pub focal_x: f32,
-    /// Normalized vertical alignment of the overflowing image: 0 top, 1 bottom.
-    pub focal_y: f32,
-    /// Multiplier applied after the image has been scaled to cover the viewport.
-    pub zoom: f32,
-}
-
-impl NewThreadBackgroundAdjustment {
-    pub const MIN_ZOOM: f32 = 1.0;
-    pub const MAX_ZOOM: f32 = 4.0;
-
-    pub fn normalized(mut self) -> Self {
-        let defaults = Self::default();
-        self.focal_x = clamp_or(self.focal_x, 0.0, 1.0, defaults.focal_x);
-        self.focal_y = clamp_or(self.focal_y, 0.0, 1.0, defaults.focal_y);
-        self.zoom = clamp_or(self.zoom, Self::MIN_ZOOM, Self::MAX_ZOOM, defaults.zoom);
-        self
-    }
-}
-
-impl Default for NewThreadBackgroundAdjustment {
-    fn default() -> Self {
-        Self {
-            focal_x: 0.5,
-            focal_y: 0.5,
-            zoom: 1.0,
-        }
-    }
-}
 
 // slopty: no History surface (ruled out).
 
@@ -259,165 +210,6 @@ pub fn current(cx: &App) -> UiSettings {
         .unwrap_or_default()
 }
 
-/// Copy a selected image into Slopty's device-local data directory and make it
-/// the new-thread canvas background. A unique file name avoids stale image
-/// caches when the background is replaced.
-pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Result<(), String> {
-    let staged = crate::attachments::stage_file_verbatim(source)?;
-    // Do not persist the candidate or retire the old managed file until the
-    // renderer's decoder has accepted the exact bytes we are about to save.
-    let image = crate::new_thread_background_image::decode(staged.bytes()).map_err(|_| {
-        "This background image is unsupported or damaged. Choose a valid image such as PNG or JPEG.".to_string()
-    })?;
-    let proxy = image.thumbnail(64, 64).to_rgba8();
-    let color = wallpaper_colors::extract(proxy.pixels().map(|pixel| pixel.0));
-    let data_dir = cx
-        .try_global::<SettingsStore>()
-        .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Couldn\u{2019}t save the image. Restart Slopty and try again.".to_string())?;
-    let prepared = prepare_background_file(staged, &data_dir)?;
-    commit_background(prepared, color, cx)
-}
-
-/// Owns a prewritten managed file until it is committed; a failed commit cleans up its file
-/// without touching the active image.
-struct PreparedBackgroundFile(Option<NewThreadComposerBackground>);
-
-impl Drop for PreparedBackgroundFile {
-    fn drop(&mut self) {
-        if let Some(background) = &self.0 {
-            let _ = std::fs::remove_file(&background.path);
-        }
-    }
-}
-
-fn prepare_background_file(
-    staged: crate::attachments::StagedAttachment,
-    data_dir: &Path,
-) -> Result<PreparedBackgroundFile, String> {
-    let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
-    std::fs::create_dir_all(&backgrounds_dir).map_err(|_| {
-        "Couldn\u{2019}t save the image. Check the folder\u{2019}s permissions and try again.".to_string()
-    })?;
-
-    let extension = Path::new(&staged.name)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("png");
-    let destination = backgrounds_dir.join(format!(
-        "new-thread-background-{}.{}",
-        uuid::Uuid::new_v4(),
-        extension
-    ));
-    let temporary = destination.with_extension(format!("{extension}.tmp"));
-    if std::fs::write(&temporary, staged.bytes())
-        .and_then(|_| std::fs::rename(&temporary, &destination))
-        .is_err()
-    {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(
-            "Couldn\u{2019}t save the image. Check the folder\u{2019}s permissions and try again.".to_string(),
-        );
-    }
-
-    let replacement = NewThreadComposerBackground {
-        path: destination.to_string_lossy().into_owned(),
-        name: staged.name,
-        adjustment: NewThreadBackgroundAdjustment::default(),
-    };
-    Ok(PreparedBackgroundFile(Some(replacement)))
-}
-
-fn commit_background(
-    mut prepared: PreparedBackgroundFile,
-    color: Option<slopty_shell_theme::Color>,
-    cx: &mut App,
-) -> Result<(), String> {
-    let data_dir = cx
-        .try_global::<SettingsStore>()
-        .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Couldn\u{2019}t save the image. Restart Slopty and try again.".to_string())?;
-    let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
-    let replacement = prepared.0.as_ref().unwrap().clone();
-    let mut next = current(cx);
-    next.wallpaper_color = color;
-    let previous = next
-        .new_thread_composer_background
-        .replace(replacement.clone());
-    // Persist the pointer before retiring the old file. `update(Immediate)`
-    // updates memory first and only logs an I/O failure; for a file-backed
-    // setting that order can leave disk pointing at an image we just deleted.
-    if next.save(&data_dir).is_err() {
-        return Err(
-            "Couldn\u{2019}t save the image. Check the folder\u{2019}s permissions and try again.".to_string(),
-        );
-    }
-    prepared.0.take();
-    replace(next, SavePolicy::Immediate, cx);
-    remove_managed_new_thread_background(previous.as_ref(), &backgrounds_dir);
-    if current(cx).wallpaper_theme_colors {
-        crate::appearance::apply(cx);
-    }
-    cx.refresh_windows();
-    Ok(())
-}
-
-pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String> {
-    let data_dir = cx
-        .try_global::<SettingsStore>()
-        .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Couldn\u{2019}t remove the image. Restart Slopty and try again.".to_string())?;
-    let mut next = current(cx);
-    let previous = next.new_thread_composer_background.take();
-    next.wallpaper_color = None;
-    if previous.is_none() {
-        return Ok(());
-    }
-    if next.save(&data_dir).is_err() {
-        return Err(
-            "Couldn\u{2019}t remove the image. Check the folder\u{2019}s permissions and try again.".to_string(),
-        );
-    }
-    replace(next, SavePolicy::Immediate, cx);
-    remove_managed_new_thread_background(
-        previous.as_ref(),
-        &data_dir.join(NEW_THREAD_BACKGROUND_DIR),
-    );
-    if current(cx).wallpaper_theme_colors {
-        crate::appearance::apply(cx);
-    }
-    cx.refresh_windows();
-    Ok(())
-}
-
-pub fn set_new_thread_background_adjustment(
-    adjustment: NewThreadBackgroundAdjustment,
-    cx: &mut App,
-) {
-    if update(SavePolicy::Immediate, cx, |settings| {
-        if let Some(background) = settings.new_thread_composer_background.as_mut() {
-            background.adjustment = adjustment.normalized();
-        }
-    }) {
-        cx.refresh_windows();
-    }
-}
-
-fn remove_managed_new_thread_background(
-    background: Option<&NewThreadComposerBackground>,
-    backgrounds_dir: &Path,
-) {
-    let Some(background) = background else {
-        return;
-    };
-    let path = Path::new(&background.path);
-    // Never delete an arbitrary legacy or hand-edited path. Only files copied
-    // directly into the directory owned by this setting are disposable.
-    if path.parent() == Some(backgrounds_dir) {
-        let _ = std::fs::remove_file(path);
-    }
-}
-
 pub fn update(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut UiSettings)) -> bool {
     if !cx.has_global::<SettingsStore>() {
         return false;
@@ -452,14 +244,6 @@ fn schedule(policy: SavePolicy, cx: &mut App) {
 }
 
 // slopty: no History surface (ruled out).
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ComposerSendBehavior {
-    #[default]
-    Enter,
-    ModEnter,
-}
 
 /// Persist the latest revision. Safe to call at shutdown.
 pub fn flush(cx: &mut App) {
@@ -598,10 +382,10 @@ pub enum SavedSurface {
     Browser { url: String },
     /// A diff.
     Diff,
-    /// A side chat.
-    SideChat { chat: String },
     /// A remote window or desktop, by what was chosen.
     Screen { screen: String, title: String },
+    /// slopty: the session's inspector.
+    Inspector,
 }
 
 /// slopty: one chat's open panes, as `ui-settings.json` keeps them.
@@ -620,8 +404,6 @@ pub struct UiSettings {
     // slopty: dictation removed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
-    /// Submit using Enter or the platform modifier plus Enter.
-    pub composer_send_behavior: ComposerSendBehavior,
     // slopty: `$` skills and `/` commands for every agent; the toggles are gone (P11).
     // slopty: the compact model picker is the one picker (Amp's prune P6).
     pub sidebar_width: f32,
@@ -717,20 +499,12 @@ pub struct UiSettings {
     pub files_word_wrap: bool,
     /// Include hidden and ignored entries in workspace file trees.
     pub files_show_all: bool,
-    /// The user hid the session card (project, device, side chats, actions)
-    /// that otherwise shows beside a transcript with room for it.
-    pub session_info_hidden: bool,
     /// Interactive identity overlay; the theme default keeps each theme's own accent.
     pub accent: slopty_shell_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
     pub surface: slopty_shell_theme::SurfacePreference,
-    /// Optional device-local artwork behind the blank new-thread composer.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_thread_composer_background: Option<NewThreadComposerBackground>,
-    // slopty: the wallpaper folder and its shuffle are gone; a wallpaper is one chosen image.
-    pub wallpaper_theme_colors: bool,
-    pub wallpaper_color: Option<slopty_shell_theme::Color>,
-    // slopty: the artwork's effects are gone; the glyph field is the hero's treatment.
+    // slopty: the new-chat canvas's artwork, its wallpaper colours and its glyph field went with
+    // the canvas (TUI-first: a session is its terminal).
     // slopty: reduced motion follows the OS alone (Amp's prune P12).
     /// Also snap animations while the main window is not focused.
     pub pause_animations_in_background: bool,
@@ -763,7 +537,6 @@ impl Default for UiSettings {
             session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
             keymap: KeymapConfig::default(),
             settings_section: crate::shell::SettingsSection::default(),
-            composer_send_behavior: ComposerSendBehavior::default(),
             // slopty: appshots removed.
             appearance: crate::appearance::AppearanceMode::default(),
             // slopty: no History surface (ruled out).
@@ -785,12 +558,8 @@ impl Default for UiSettings {
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
             files_show_all: false,
-            session_info_hidden: false,
             accent: slopty_shell_theme::AccentSelection::default(),
             surface: slopty_shell_theme::SurfacePreference::default(),
-            new_thread_composer_background: None,
-            wallpaper_theme_colors: false,
-            wallpaper_color: None,
             pause_animations_in_background: false,
             // slopty: voice removed.
         }
@@ -837,21 +606,18 @@ pub enum ShortcutId {
     ToggleTerminal,
     NewSession,
     NewProject,
-    OpenModelPicker,
     NextSession,
     PrevSession,
     ArchiveSession,
-    // slopty: the right pane's last closed tab, and the composer's branch and effort.
+    // slopty: the right pane's last closed tab.
     ReopenClosedTab,
-    OpenBranchPicker,
-    NextEffort,
     ResumeSession, // slopty: Claude Code's past sessions (`shell::past_sessions`)
     NextNeedsYou, // slopty: the next chat waiting on the person (`shell::sidebar_status`)
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 17 + JUMP_SLOTS] = [ // slopty: dictation and appshots removed.
+    pub const ALL: [ShortcutId; 14 + JUMP_SLOTS] = [ // slopty: dictation, appshots and the composer's pickers removed.
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
         ShortcutId::ToggleSidebar,
@@ -860,13 +626,10 @@ impl ShortcutId {
         ShortcutId::ToggleTerminal,
         ShortcutId::NewSession,
         ShortcutId::NewProject,
-        ShortcutId::OpenModelPicker,
         ShortcutId::NextSession,
         ShortcutId::PrevSession,
         ShortcutId::ArchiveSession,
         ShortcutId::ReopenClosedTab, // slopty
-        ShortcutId::OpenBranchPicker, // slopty
-        ShortcutId::NextEffort, // slopty
         ShortcutId::ResumeSession, // slopty
         ShortcutId::NextNeedsYou, // slopty
         ShortcutId::JumpSession(0),
@@ -894,15 +657,12 @@ impl ShortcutId {
             ShortcutId::ToggleChanges => "Toggle side pane",
             ShortcutId::ToggleFiles => "Toggle files panel",
             ShortcutId::ToggleTerminal => "Toggle terminal",
-            ShortcutId::NewSession => "New chat",
+            ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New project",
-            ShortcutId::OpenModelPicker => "Open model picker",
             ShortcutId::NextSession => "Next chat or side pane tab",
             ShortcutId::PrevSession => "Previous chat or side pane tab",
             ShortcutId::ArchiveSession => "Archive chat",
             ShortcutId::ReopenClosedTab => "Reopen closed tab", // slopty
-            ShortcutId::OpenBranchPicker => "Open branch picker", // slopty
-            ShortcutId::NextEffort => "Next effort level", // slopty
             ShortcutId::ResumeSession => "Resume a Claude Code session", // slopty
             ShortcutId::NextNeedsYou => "Next chat that needs you", // slopty
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
@@ -928,7 +688,6 @@ impl ShortcutId {
             ShortcutId::ToggleTerminal => "mod-j",
             ShortcutId::NewSession => "mod-n",
             ShortcutId::NewProject => "mod-shift-n",
-            ShortcutId::OpenModelPicker => "mod-/",
             // Ctrl+Tab on every platform — but spelled the way THAT platform's
             // recorder spells ctrl (see `combo_from_keystroke`). Off macOS
             // ctrl IS the primary and stores as "mod"; on macOS it is its own
@@ -947,11 +706,7 @@ impl ShortcutId {
             // Mod+A is the composer's Select all, so archiving takes the
             // shifted combo.
             ShortcutId::ArchiveSession => "mod-shift-a",
-            // slopty: ⌘⇧G is Find previous and ⌘⇧B the sidebar's fallback when an older map
-            // migrates, so the branch picker takes ⌥⌘B.
-            ShortcutId::ReopenClosedTab => "mod-shift-t",
-            ShortcutId::OpenBranchPicker => "mod-alt-b",
-            ShortcutId::NextEffort => "mod-shift-e",
+            ShortcutId::ReopenClosedTab => "mod-shift-t", // slopty
             ShortcutId::ResumeSession => "mod-shift-o", // slopty
             // slopty: free in the app, the terminal (its ⌘. Escape binds on iPad only, in the
             // grid) and macOS text fields, where ⌘⇧↓ selects to the end.
@@ -983,14 +738,11 @@ pub struct KeymapConfig {
     pub toggle_terminal: String,
     pub new_session: String,
     pub new_project: String,
-    pub open_model_picker: String,
     pub next_session: String,
     pub prev_session: String,
     pub archive_session: String,
-    // slopty: the right pane's last closed tab, and the composer's branch and effort.
+    // slopty: the right pane's last closed tab.
     pub reopen_closed_tab: String,
-    pub open_branch_picker: String,
-    pub next_effort: String,
     pub resume_session: String, // slopty: Claude Code's past sessions
     pub next_needs_you: String, // slopty: the next chat waiting on the person
     /// One combo per jump slot, in slot order. A list rather than nine fields:
@@ -1053,13 +805,10 @@ impl Default for KeymapConfig {
             toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
             new_session: ShortcutId::NewSession.default_combo().into(),
             new_project: ShortcutId::NewProject.default_combo().into(),
-            open_model_picker: ShortcutId::OpenModelPicker.default_combo().into(),
             next_session: ShortcutId::NextSession.default_combo().into(),
             prev_session: ShortcutId::PrevSession.default_combo().into(),
             archive_session: ShortcutId::ArchiveSession.default_combo().into(),
             reopen_closed_tab: ShortcutId::ReopenClosedTab.default_combo().into(), // slopty
-            open_branch_picker: ShortcutId::OpenBranchPicker.default_combo().into(), // slopty
-            next_effort: ShortcutId::NextEffort.default_combo().into(), // slopty
             resume_session: ShortcutId::ResumeSession.default_combo().into(), // slopty
             next_needs_you: ShortcutId::NextNeedsYou.default_combo().into(), // slopty
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
@@ -1079,13 +828,10 @@ impl KeymapConfig {
             ShortcutId::ToggleTerminal => &self.toggle_terminal,
             ShortcutId::NewSession => &self.new_session,
             ShortcutId::NewProject => &self.new_project,
-            ShortcutId::OpenModelPicker => &self.open_model_picker,
             ShortcutId::NextSession => &self.next_session,
             ShortcutId::PrevSession => &self.prev_session,
             ShortcutId::ArchiveSession => &self.archive_session,
             ShortcutId::ReopenClosedTab => &self.reopen_closed_tab, // slopty
-            ShortcutId::OpenBranchPicker => &self.open_branch_picker, // slopty
-            ShortcutId::NextEffort => &self.next_effort, // slopty
             ShortcutId::ResumeSession => &self.resume_session, // slopty
             ShortcutId::NextNeedsYou => &self.next_needs_you, // slopty
             ShortcutId::JumpSession(slot) => self
@@ -1107,13 +853,10 @@ impl KeymapConfig {
             ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
             ShortcutId::NewSession => self.new_session = combo,
             ShortcutId::NewProject => self.new_project = combo,
-            ShortcutId::OpenModelPicker => self.open_model_picker = combo,
             ShortcutId::NextSession => self.next_session = combo,
             ShortcutId::PrevSession => self.prev_session = combo,
             ShortcutId::ArchiveSession => self.archive_session = combo,
             ShortcutId::ReopenClosedTab => self.reopen_closed_tab = combo, // slopty
-            ShortcutId::OpenBranchPicker => self.open_branch_picker = combo, // slopty
-            ShortcutId::NextEffort => self.next_effort = combo, // slopty
             ShortcutId::ResumeSession => self.resume_session = combo, // slopty
             ShortcutId::NextNeedsYou => self.next_needs_you = combo, // slopty
             ShortcutId::JumpSession(slot) => {
@@ -1139,18 +882,6 @@ impl KeymapConfig {
         while self.jump_session.len() < JUMP_SLOTS {
             self.jump_session
                 .push(JUMP_DEFAULTS[self.jump_session.len()].to_string());
-        }
-    }
-
-    /// Cmd/Ctrl+Enter belongs to the composer on every send mode. Older
-    /// settings could assign it to an app shortcut while plain Enter was the
-    /// configured sender; restore only those newly-conflicting rows to their
-    /// defaults and preserve every unrelated customization.
-    fn heal_reserved_composer_shortcuts(&mut self) {
-        for id in ShortcutId::ALL {
-            if self.get(id) == "mod-enter" {
-                self.reset(id);
-            }
         }
     }
 }
@@ -1253,12 +984,6 @@ pub fn jump_hints_visible(keymap: &KeymapConfig, primary: bool, alt: bool, shift
         .any(|id| combo_modifiers(keymap.get(id)) == (primary, alt, shift))
 }
 
-/// Cmd on macOS and Ctrl elsewhere reveals the composer's modified-submit
-/// hint only while that modifier is held by itself.
-pub fn modifier_send_hint_visible(primary: bool, alt: bool, shift: bool) -> bool {
-    primary && !alt && !shift
-}
-
 /// Translate a stored combo into a bindable keystroke for this platform.
 pub fn platform_combo(combo: &str) -> String {
     platform_combo_on(crate::keys::MOD_IS_COMMAND, combo) // slopty: an iPad's ⌘ too
@@ -1316,7 +1041,6 @@ impl UiSettings {
         merge!(
             // slopty: dictation removed.
             window_geometry,
-            composer_send_behavior,
             sidebar_width,
             sidebar_collapsed,
             // slopty: no Star on GitHub banner.
@@ -1358,12 +1082,8 @@ impl UiSettings {
             files_autosave_delay_ms,
             files_word_wrap,
             files_show_all,
-            session_info_hidden,
             accent,
             surface,
-            new_thread_composer_background,
-            wallpaper_theme_colors,
-            wallpaper_color,
             pause_animations_in_background,
             // slopty: voice removed.
             // slopty: no pull-request pages.
@@ -1412,11 +1132,8 @@ impl UiSettings {
         );
         // slopty: no History surface (ruled out).
         self.ui_font_size = self.ui_font_size.normalized();
-        if let Some(background) = self.new_thread_composer_background.as_mut() {
-            background.adjustment = background.adjustment.normalized();
-        }
         self.keymap.heal_jump_slots();
-        self.keymap.heal_reserved_composer_shortcuts();
+        // slopty: no composer holds a key, so none is healed for one.
         self
     }
 
@@ -1627,7 +1344,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
+    fn old_and_partial_settings_load_with_their_defaults() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
@@ -1636,9 +1353,7 @@ mod tests {
         .unwrap();
 
         let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
         assert!(loaded.open_web_links_in_slopty);
-        assert!(loaded.new_thread_composer_background.is_none());
         assert!(!loaded.pause_animations_in_background);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
@@ -1730,18 +1445,18 @@ mod tests {
 
         // A file written before the field existed.
         let legacy: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
-        assert_eq!(legacy.settings_section, SettingsSection::General);
+        assert_eq!(legacy.settings_section, SettingsSection::Appearance);
         assert_eq!(legacy.sidebar_width, 300.0);
-        // Unknown names and malformed values read as General without
+        // Unknown names and malformed values read as Appearance without
         // defaulting the rest of the file.
-        for raw in [r#""billing""#, "42", "null", r#"{"section":"devices"}"#] {
+        for raw in [r#""billing""#, r#""general""#, "42", "null", r#"{"section":"devices"}"#] {
             std::fs::write(
                 UiSettings::path(dir.path()),
                 format!(r#"{{"sidebarWidth": 300, "settingsSection": {raw}}}"#),
             )
             .unwrap();
             let loaded = UiSettings::load(dir.path());
-            assert_eq!(loaded.settings_section, SettingsSection::General, "{raw}");
+            assert_eq!(loaded.settings_section, SettingsSection::Appearance, "{raw}");
             assert_eq!(loaded.sidebar_width, 300.0, "{raw}");
         }
     }
@@ -1924,239 +1639,6 @@ mod tests {
         );
     }
 
-    // slopty: appshots removed.
-    #[test]
-    fn background_cleanup_only_removes_files_owned_by_the_setting() {
-        let dir = tempfile::tempdir().unwrap();
-        let backgrounds = dir.path().join(NEW_THREAD_BACKGROUND_DIR);
-        std::fs::create_dir(&backgrounds).unwrap();
-        let managed = backgrounds.join("new-thread-background-owned.png");
-        let unrelated = dir.path().join("keep.png");
-        std::fs::write(&managed, b"managed").unwrap();
-        std::fs::write(&unrelated, b"unrelated").unwrap();
-
-        remove_managed_new_thread_background(
-            Some(&NewThreadComposerBackground {
-                path: unrelated.to_string_lossy().into_owned(),
-                name: "keep.png".into(),
-                adjustment: NewThreadBackgroundAdjustment::default(),
-            }),
-            &backgrounds,
-        );
-        assert!(unrelated.exists());
-        remove_managed_new_thread_background(
-            Some(&NewThreadComposerBackground {
-                path: managed.to_string_lossy().into_owned(),
-                name: "owned.png".into(),
-                adjustment: NewThreadBackgroundAdjustment::default(),
-            }),
-            &backgrounds,
-        );
-        assert!(!managed.exists());
-    }
-
-    #[test]
-    fn legacy_background_defaults_to_centered_cover_adjustment() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"newThreadComposerBackground":{"path":"managed.png","name":"background.png"}}"#,
-        )
-        .unwrap();
-
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(
-            loaded.new_thread_composer_background.unwrap().adjustment,
-            NewThreadBackgroundAdjustment::default()
-        );
-    }
-
-    #[test]
-    fn background_adjustment_normalizes_invalid_and_out_of_range_values() {
-        let normalized = NewThreadBackgroundAdjustment {
-            focal_x: f32::NAN,
-            focal_y: 2.0,
-            zoom: f32::INFINITY,
-        }
-        .normalized();
-        assert_eq!(
-            normalized,
-            NewThreadBackgroundAdjustment {
-                focal_x: 0.5,
-                focal_y: 1.0,
-                zoom: 1.0,
-            }
-        );
-
-        let clamped = UiSettings {
-            new_thread_composer_background: Some(NewThreadComposerBackground {
-                path: "managed.png".into(),
-                name: "background.png".into(),
-                adjustment: NewThreadBackgroundAdjustment {
-                    focal_x: -1.0,
-                    focal_y: 0.25,
-                    zoom: 99.0,
-                },
-            }),
-            ..Default::default()
-        }
-        .clamped();
-        assert_eq!(
-            clamped.new_thread_composer_background.unwrap().adjustment,
-            NewThreadBackgroundAdjustment {
-                focal_x: 0.0,
-                focal_y: 0.25,
-                zoom: NewThreadBackgroundAdjustment::MAX_ZOOM,
-            }
-        );
-    }
-
-    #[gpui::test]
-    fn background_adjustment_setter_normalizes_and_persists_immediately(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            let settings = UiSettings {
-                new_thread_composer_background: Some(NewThreadComposerBackground {
-                    path: "managed.png".into(),
-                    name: "background.png".into(),
-                    adjustment: NewThreadBackgroundAdjustment::default(),
-                }),
-                ..Default::default()
-            };
-            init(settings, dir.path(), cx);
-            set_new_thread_background_adjustment(
-                NewThreadBackgroundAdjustment {
-                    focal_x: -0.5,
-                    focal_y: 0.7,
-                    zoom: 2.25,
-                },
-                cx,
-            );
-
-            let expected = NewThreadBackgroundAdjustment {
-                focal_x: 0.0,
-                focal_y: 0.7,
-                zoom: 2.25,
-            };
-            assert_eq!(
-                current(cx)
-                    .new_thread_composer_background
-                    .unwrap()
-                    .adjustment,
-                expected
-            );
-            assert_eq!(
-                UiSettings::load(dir.path())
-                    .new_thread_composer_background
-                    .unwrap()
-                    .adjustment,
-                expected
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn invalid_background_replacement_preserves_previous_image_and_settings(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let original = dir.path().join("original.png");
-        image::RgbaImage::from_pixel(8, 8, image::Rgba([20, 100, 200, 255]))
-            .save(&original)
-            .unwrap();
-        cx.update(|cx| {
-            init(UiSettings::default(), dir.path(), cx);
-            install_new_thread_composer_background(&original, cx).unwrap();
-            let before = current(cx);
-            let previous = PathBuf::from(&before.new_thread_composer_background.as_ref().unwrap().path);
-            let saved = std::fs::read(UiSettings::path(dir.path())).unwrap();
-            let previous_bytes = std::fs::read(&previous).unwrap();
-            for (name, bytes) in [
-                ("replacement.svg", br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="red"/></svg>"#.as_slice()),
-                ("corrupt.png", b"not a PNG".as_slice()),
-                ("truncated.png", &previous_bytes[..previous_bytes.len() / 2]),
-            ] {
-                let candidate = dir.path().join(name);
-                std::fs::write(&candidate, bytes).unwrap();
-                let result = install_new_thread_composer_background(&candidate, cx);
-                assert!(result.is_err(), "accepted invalid replacement: {name}");
-                assert_eq!(current(cx), before);
-                assert_eq!(std::fs::read(UiSettings::path(dir.path())).unwrap(), saved);
-                assert_eq!(std::fs::read(&previous).unwrap(), previous_bytes);
-                assert_eq!(std::fs::read_dir(dir.path().join(NEW_THREAD_BACKGROUND_DIR)).unwrap().count(), 1);
-                assert!(candidate.exists(), "source files must never be deleted");
-            }
-        });
-    }
-
-    #[gpui::test]
-    fn valid_background_replacement_persists_renderable_image_before_retiring_previous(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first.png");
-        let second = dir.path().join("second.jpg");
-        image::RgbaImage::from_pixel(8, 8, image::Rgba([20, 100, 200, 255]))
-            .save(&first)
-            .unwrap();
-        image::RgbImage::from_pixel(12, 10, image::Rgb([200, 100, 20]))
-            .save(&second)
-            .unwrap();
-        cx.update(|cx| {
-            init(UiSettings::default(), dir.path(), cx);
-            install_new_thread_composer_background(&first, cx).unwrap();
-            set_new_thread_background_adjustment(
-                NewThreadBackgroundAdjustment {
-                    focal_x: 0.2,
-                    focal_y: 0.8,
-                    zoom: 2.0,
-                },
-                cx,
-            );
-            let old_path = current(cx).new_thread_composer_background.unwrap().path;
-            install_new_thread_composer_background(&second, cx).unwrap();
-            let settings = current(cx);
-            let replacement = settings.new_thread_composer_background.as_ref().unwrap();
-            assert_ne!(replacement.path, old_path);
-            let saved_image = std::fs::read(&replacement.path).unwrap();
-            assert_eq!(saved_image, std::fs::read(&second).unwrap());
-            let decoded = crate::new_thread_background_image::decode(&saved_image).unwrap();
-            assert_eq!((decoded.width(), decoded.height()), (12, 10));
-            assert_eq!(UiSettings::load(dir.path()), settings);
-            assert_eq!(
-                replacement.adjustment,
-                NewThreadBackgroundAdjustment::default()
-            );
-            assert!(!Path::new(&old_path).exists());
-            assert!(first.exists() && second.exists());
-            assert_eq!(
-                std::fs::read_dir(dir.path().join(NEW_THREAD_BACKGROUND_DIR))
-                    .unwrap()
-                    .count(),
-                1
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn invalid_initial_background_import_does_not_create_managed_files_or_settings(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let candidate = dir.path().join("corrupt.png");
-        std::fs::write(&candidate, b"not a PNG").unwrap();
-        cx.update(|cx| {
-            init(UiSettings::default(), dir.path(), cx);
-            assert!(install_new_thread_composer_background(&candidate, cx).is_err());
-            assert!(current(cx).new_thread_composer_background.is_none());
-            assert!(!dir.path().join(NEW_THREAD_BACKGROUND_DIR).exists());
-            assert!(!UiSettings::path(dir.path()).exists());
-            assert!(candidate.exists());
-        });
-    }
-
     #[test]
     fn obsolete_steering_preference_does_not_reset_other_settings() {
         let loaded: UiSettings = serde_json::from_str(
@@ -2215,7 +1697,6 @@ mod tests {
                 ..KeymapConfig::default()
             },
             settings_section: crate::shell::SettingsSection::Shortcuts,
-            composer_send_behavior: ComposerSendBehavior::ModEnter,
             // slopty: appshots removed.
             appearance: crate::appearance::AppearanceMode::Light,
             // slopty: no History surface (ruled out).
@@ -2240,20 +1721,8 @@ mod tests {
             code_font_family: crate::typography::UiFontFamily::Geist,
             code_font_size: 11.0,
             files_show_all: true,
-            session_info_hidden: true,
             accent: slopty_shell_theme::AccentSelection::Preset(slopty_shell_theme::AccentPreset::Cyan),
             surface: slopty_shell_theme::SurfacePreference::Frosted,
-            new_thread_composer_background: Some(NewThreadComposerBackground {
-                path: "/tmp/slopty/new-thread-background.png".into(),
-                name: "background.png".into(),
-                adjustment: NewThreadBackgroundAdjustment {
-                    focal_x: 0.25,
-                    focal_y: 0.75,
-                    zoom: 1.8,
-                },
-            }),
-            wallpaper_theme_colors: false,
-            wallpaper_color: None,
             pause_animations_in_background: true,
         };
         settings.save(dir.path()).unwrap();
@@ -2261,9 +1730,6 @@ mod tests {
         assert!(json.contains(r#""diffWrap": true"#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""openWebLinksInSlopty": false"#));
-        assert!(json.contains(r#""focalX": 0.25"#));
-        assert!(json.contains(r#""focalY": 0.75"#));
-        assert!(json.contains(r#""zoom": 1.8"#));
         assert!(json.contains(r#""conversationWidth": "wide""#));
         assert!(json.contains(r#""pauseAnimationsInBackground": true"#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
@@ -2741,13 +2207,16 @@ mod tests {
                 "wallpaperSource": "/wallpapers/a.png",
                 "wallpaperHistory": ["/wallpapers/a.png"],
                 "newThreadBackgroundEffect": "ascii",
+                "newThreadComposerBackground": {"path": "/tmp/a.png", "name": "a.png"},
+                "wallpaperThemeColors": true,
+                "wallpaperColor": [51, 102, 153],
                 "keymap": {"randomWallpaper": "mod-shift-u", "saveFile": "mod-alt-s"}
             }"#,
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.sidebar_width, 300.0);
-        assert_eq!(loaded.settings_section, crate::shell::SettingsSection::General);
+        assert_eq!(loaded.settings_section, crate::shell::SettingsSection::Appearance);
         assert!(!backup_path(dir.path()).exists(), "nothing was set aside");
         assert_eq!(loaded.keymap.save_file, "mod-alt-s", "the keymap's live combos kept");
         loaded.save(dir.path()).unwrap();
@@ -2770,6 +2239,9 @@ mod tests {
             "wallpaperSource",
             "wallpaperHistory",
             "newThreadBackgroundEffect",
+            "newThreadComposerBackground",
+            "wallpaperThemeColors",
+            "wallpaperColor",
             "randomWallpaper",
         ] {
             assert!(!saved.contains(gone), "{gone} is not written back");
@@ -3083,23 +2555,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_modifier_enter_shortcut_heals_without_losing_other_customizations() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"keymap": {"newSession": "mod-enter", "toggleSidebar": "mod-shift-x"}}"#,
-        )
-        .unwrap();
-
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(
-            loaded.keymap.get(ShortcutId::NewSession),
-            ShortcutId::NewSession.default_combo()
-        );
-        assert_eq!(loaded.keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
-    }
-
-    #[test]
     fn jump_hints_need_an_exact_modifier_match() {
         let keymap = KeymapConfig::default();
         // Mod alone matches mod-1..9.
@@ -3124,14 +2579,6 @@ mod tests {
         let mut bare = KeymapConfig::default();
         bare.set(ShortcutId::JumpSession(0), "f5".into());
         assert!(!jump_hints_visible(&bare, false, false, false));
-    }
-
-    #[test]
-    fn modifier_send_hint_needs_only_the_primary_modifier() {
-        assert!(modifier_send_hint_visible(true, false, false));
-        assert!(!modifier_send_hint_visible(false, false, false));
-        assert!(!modifier_send_hint_visible(true, true, false));
-        assert!(!modifier_send_hint_visible(true, false, true));
     }
 
     #[test]

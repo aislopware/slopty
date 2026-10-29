@@ -1,12 +1,8 @@
-// slopty: Slopty's own review aids over zeron's diff model (T3 Code's find in diff, whitespace,
-// file tree and any turn's diff, drawn in zeron's components): the pure halves, kept apart from
-// the copied pane.
-//! Find in a diff, the whitespace filter, the changed files as a tree, and the turns a chat's
-//! diff can be read at.
+// slopty: Slopty's own review aids over zeron's diff model (T3 Code's find in diff, whitespace
+// and file tree, drawn in zeron's components): the pure halves, kept apart from the copied pane.
+//! Find in a diff, the whitespace filter and the changed files as a tree.
 
 use std::ops::Range;
-
-use slopty_view_doc::{MessagePart, MessageRole, SessionMessageEntry};
 
 use super::{DiffLine, FileDiff, LineKind};
 
@@ -159,16 +155,9 @@ fn piece(
 // The scoped capture's asking
 // ---------------------------------------------------------------------------
 
-/// What a scoped `GetCheckoutDiff` adds to say which turn (`turn`, the user entry's id; none for
-/// the latest) and that whitespace does not count (`ignoreWhitespace`, `git diff -w`).
-pub fn scoped_params(
-    params: &mut serde_json::Map<String, serde_json::Value>,
-    turn: Option<String>,
-    ignore_whitespace: bool,
-) {
-    if let Some(turn) = turn {
-        params.insert("turn".into(), serde_json::Value::String(turn));
-    }
+/// What a scoped `GetCheckoutDiff` adds to say that whitespace does not count
+/// (`ignoreWhitespace`, `git diff -w`).
+pub fn scoped_params(params: &mut serde_json::Map<String, serde_json::Value>, ignore_whitespace: bool) {
     if ignore_whitespace {
         params.insert("ignoreWhitespace".into(), serde_json::Value::Bool(true));
     }
@@ -328,74 +317,6 @@ fn walk(node: &Node, depth: usize, prefix: &str, rows: &mut Vec<TreeRow>) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Turns
-// ---------------------------------------------------------------------------
-
-/// A turn the diff can be read at: the person's message that began it, by its entry id.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TurnChoice {
-    /// The user entry's id, which `GetCheckoutDiff` takes as `turn`.
-    pub entry_id: String,
-    /// The message's first line.
-    pub label: String,
-    /// When it was sent, epoch ms; 0 when its agent never said.
-    pub at: i64,
-}
-
-/// The longest a turn's label runs, in characters.
-const TURN_LABEL_MAX: usize = 60;
-
-/// The chat's turns, newest first: each message of the person's, labelled by its first line.
-pub fn turn_choices(transcript: &[SessionMessageEntry]) -> Vec<TurnChoice> {
-    transcript
-        .iter()
-        .rev()
-        .filter(|entry| entry.role == MessageRole::User)
-        .map(|entry| TurnChoice {
-            entry_id: entry.id.clone(),
-            label: first_line(entry),
-            at: entry.created_at,
-        })
-        .collect()
-}
-
-fn first_line(entry: &SessionMessageEntry) -> String {
-    let raw = entry
-        .parts
-        .iter()
-        .filter_map(|part| match part {
-            MessagePart::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let text = crate::attachments::parse_user_message_images(&raw).text;
-    let text = crate::composer::sent_mention_display(&text).map_or(text, |(shown, _)| shown);
-    let line = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("Message");
-    if line.chars().count() > TURN_LABEL_MAX {
-        let cut: String = line.chars().take(TURN_LABEL_MAX - 1).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        line.to_owned()
-    }
-}
-
-/// The turn an entry belongs to, as the user entry that began it: `id` itself when it is one,
-/// else the nearest message of the person's before it; `None` when the transcript holds neither.
-pub fn turn_of(transcript: &[SessionMessageEntry], id: &str) -> Option<String> {
-    let at = transcript.iter().position(|entry| entry.id == id)?;
-    transcript[..=at]
-        .iter()
-        .rev()
-        .find(|entry| entry.role == MessageRole::User)
-        .map(|entry| entry.id.clone())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,15 +408,12 @@ diff --git a/src/ui/b.rs b/src/ui/b.rs
     }
 
     #[test]
-    fn a_turn_and_whitespace_ride_the_scoped_ask() {
+    fn whitespace_rides_the_scoped_ask() {
         let mut params = serde_json::Map::new();
-        scoped_params(&mut params, None, false);
-        assert!(params.is_empty(), "the latest turn, whitespace counted: nothing added");
-        scoped_params(&mut params, Some("u1".into()), true);
-        assert_eq!(
-            serde_json::Value::Object(params),
-            serde_json::json!({ "turn": "u1", "ignoreWhitespace": true })
-        );
+        scoped_params(&mut params, false);
+        assert!(params.is_empty(), "whitespace counted: nothing added");
+        scoped_params(&mut params, true);
+        assert_eq!(serde_json::Value::Object(params), serde_json::json!({ "ignoreWhitespace": true }));
     }
 
     #[test]
@@ -516,38 +434,5 @@ diff --git a/src/ui/b.rs b/src/ui/b.rs
             ]
         );
         assert_eq!(rows[4].path, "src/ui/b.rs");
-    }
-
-    fn entry(id: &str, role: MessageRole, text: &str, at: i64) -> SessionMessageEntry {
-        SessionMessageEntry {
-            id: id.into(),
-            role,
-            parts: vec![MessagePart::Text { id: format!("{id}:text"), text: text.into() }],
-            created_at: at,
-            device_id: "d".into(),
-            status: None,
-            continuation_of: None,
-            duration_ms: None,
-        }
-    }
-
-    #[test]
-    fn turns_are_the_persons_messages_newest_first() {
-        let long = "x".repeat(80);
-        let transcript = vec![
-            entry("u1", MessageRole::User, "\n  fix the build\nplease", 1),
-            entry("answer:a1", MessageRole::Assistant, "done", 2),
-            entry("u2", MessageRole::User, &long, 3),
-            entry("answer:a2", MessageRole::Assistant, "ok", 4),
-        ];
-        let turns = turn_choices(&transcript);
-        assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].entry_id, "u2");
-        assert_eq!(turns[0].label.chars().count(), TURN_LABEL_MAX);
-        assert!(turns[0].label.ends_with('…'));
-        assert_eq!(turns[1].label, "fix the build");
-        assert_eq!(turn_of(&transcript, "answer:a1").as_deref(), Some("u1"));
-        assert_eq!(turn_of(&transcript, "u2").as_deref(), Some("u2"));
-        assert_eq!(turn_of(&transcript, "nope"), None);
     }
 }

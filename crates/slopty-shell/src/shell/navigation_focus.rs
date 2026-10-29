@@ -107,7 +107,7 @@ impl Shell {
             // goes where no software keyboard rises.
             (self.unfocused.clone(), self.unfocused.clone())
         } else { // slopty: voice removed.
-            (self.composer.focus_handle(cx), self.unfocused.clone())
+            (self.session_terminal.read(cx).focus_handle(), self.unfocused.clone())
         }
     }
 }

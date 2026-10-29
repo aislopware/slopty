@@ -223,6 +223,13 @@ pub(crate) struct Daemon {
 }
 
 impl Daemon {
+    /// Why the person's words may not be typed into `session` now: the agent there waits on
+    /// them at a dialog ([`slopty_worker::thread::submit_refused`]).
+    pub fn submit_refused(&self, session: SessionId) -> Option<String> {
+        let (_thread, status) = self.threads.as_ref()?.host().at_terminal(session)?;
+        slopty_worker::thread::submit_refused(&status)
+    }
+
     /// End `session` (kill its program if it still runs) and tell every client and the server
     /// why, on behalf of `by` (whose item delta is not echoed back to it).
     ///
@@ -333,9 +340,8 @@ impl Drop for Joined {
 
 /// Register with the server at `addr` on a task of its own that dials and keeps dialing
 /// (`server::run`), registering with the daemon's [`Daemon::caps`], and keep this worker's
-/// facts for it on another ([`slopty_worker::facts::watch`]), gathered once the server asks, the
-/// person's own ACP agents read from the settings under `data_dir` each time. `None` when no
-/// endpoint could be bound.
+/// facts for it on another ([`slopty_worker::facts::watch`]), gathered once the server asks.
+/// `None` when no endpoint could be bound.
 fn join_server(
     daemon: &Daemon,
     addr: slopty_net::HostAddr,
@@ -360,18 +366,16 @@ fn join_server(
     );
     if let Some(threads) = &daemon.threads {
         orchestrator.set_seated_threads(Arc::new(threads.clone()));
-        orchestrator.set_thread_reads(Arc::new(threads::Reads::new(threads.clone())));
+        orchestrator.set_thread_reads(Arc::new(threads::Reads::new(threads)));
     }
-    let settings = slopty_settings::path_in(data_dir);
-    orchestrator.set_settings_file(settings.clone());
+    orchestrator.set_settings_file(slopty_settings::path_in(data_dir));
     if let Some(restart) = &daemon.restart {
         orchestrator.set_restart(Arc::clone(restart));
     }
     let kept = slopty_worker::facts::Kept::default();
     orchestrator.set_facts(kept.clone());
     let facts = kept.subscribe();
-    let own = move || slopty_settings::Settings::load(&settings).settings.worker.acp;
-    let facts_task = tokio::spawn(slopty_worker::facts::watch(kept, own));
+    let facts_task = tokio::spawn(slopty_worker::facts::watch(kept));
     let watched = server::Watched { caps: daemon.caps.clone(), facts };
     let run = tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, watched));
     Some(Joined(vec![facts_task.abort_handle(), run.abort_handle()]))
@@ -405,8 +409,6 @@ struct Changed {
     server: Option<slopty_net::HostAddr>,
     /// `keep_awake` changed: what keeps the machine awake from now.
     keeping: Option<slopty_worker::wake::Policy>,
-    /// `[worker.acp]` changed: the person's own ACP agents, for the capabilities to probe.
-    acp: Option<std::collections::BTreeMap<String, Vec<String>>>,
 }
 
 /// [`Changed`] for a file that went from `before` to `now`.
@@ -426,7 +428,6 @@ fn changed(
         reregister,
         server,
         keeping: (before.keep_awake != now.keep_awake).then(|| policy(now.keep_awake)),
-        acp: (before.acp != now.acp).then(|| now.acp.clone()),
     }
 }
 
@@ -442,15 +443,13 @@ const fn policy(keep: slopty_settings::KeepAwake) -> slopty_worker::wake::Policy
 /// Follow `settings.toml` under `data_dir` for as long as the daemon runs, applying each change
 /// of `[network]` and `[worker]` as it is read ([`Changed`]): the allowed ranges from the next
 /// peer on, a new server registered with at once (`joined`, the registration running now,
-/// ended first), the sleep policy at once, and the person's ACP agents probed again into `acp`. A
-/// file that does not parse changes nothing.
+/// ended first), and the sleep policy at once. A file that does not parse changes nothing.
 async fn follow_settings(
     daemon: Daemon,
     data_dir: PathBuf,
     flag: Option<String>,
     ctl_path: PathBuf,
     mut joined: Option<Joined>,
-    acp: tokio::sync::watch::Sender<std::collections::BTreeMap<String, Vec<String>>>,
 ) -> ! {
     let path = slopty_settings::path_in(&data_dir);
     let mut seen = slopty_settings::follow::Seen::of(&path);
@@ -466,7 +465,7 @@ async fn follow_settings(
             continue;
         }
         let now = loaded.settings;
-        let Changed { allow, reregister, server, keeping, acp: own_acp } =
+        let Changed { allow, reregister, server, keeping } =
             changed(&applied, &now, flag.as_deref());
         if let Some(allow) = allow {
             let ranges: Vec<String> = allow.iter().map(ToString::to_string).collect();
@@ -489,35 +488,27 @@ async fn follow_settings(
             tracing::info!(?policy, "[worker] keep_awake changed: applied");
             daemon.wake.lock().set_policy(policy);
         }
-        if let Some(own) = own_acp {
-            tracing::info!(agents = ?own.keys().collect::<Vec<_>>(), "[worker.acp] changed: probing");
-            acp.send_replace(own);
-        }
         applied = now;
     }
 }
 
 /// Keep `caps` and `load` current (the agents' versions follow once their `--version`
-/// answers, the person's own ACP agents as `own_acp` last says among them, and an agent
-/// installed or removed while the worker runs as its directory changes) and tell every client
-/// each change. What each agent can be started with follows the threads `host` holds.
+/// answers, and an agent installed or removed while the worker runs as its directory changes)
+/// and tell every client each change.
 fn watch_caps(
     caps: tokio::sync::watch::Sender<slopty_proto::server::WorkerCaps>,
     load: tokio::sync::watch::Sender<f32>,
     events: broadcast::Sender<slopty_proto::WorkerMsg>,
-    mut own_acp: tokio::sync::watch::Receiver<std::collections::BTreeMap<String, Vec<String>>>,
-    host: Option<slopty_worker::thread::Host>,
 ) {
     let mut changed = caps.subscribe();
     let mut moved = load.subscribe();
     let load_events = events.clone();
     tokio::spawn(async move {
         let dirs = slopty_worker::facts::agent_dirs().await;
-        let own = own_acp.borrow_and_update().clone();
-        let found = slopty_worker::caps::installed_agents(&dirs, &own).await;
+        let found = slopty_worker::caps::installed_agents(&dirs).await;
         let (installed, agents) = tokio::sync::watch::channel(found);
-        tokio::spawn(slopty_worker::caps::watch(caps, load, agents, host));
-        slopty_worker::caps::follow_agents(dirs, own_acp, installed).await;
+        tokio::spawn(slopty_worker::caps::watch(caps, load, agents));
+        slopty_worker::caps::follow_agents(dirs, installed).await;
     });
     tokio::spawn(async move {
         while changed.changed().await.is_ok() {
@@ -923,7 +914,6 @@ async fn run(
         &slopty_worker::caps::Seldom::default(),
     ));
     let (load_tx, load) = tokio::sync::watch::channel(slopty_worker::caps::load());
-    let (own_acp, acp) = tokio::sync::watch::channel(own.acp.clone());
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
     if let Some(displays) = &displays {
         hold_displays(displays, &ctl_path, &data_dir);
@@ -936,14 +926,14 @@ async fn run(
     let transfers = Arc::new(slopty_worker::xfer::Transfers::new(
         args.drop_dir.clone().unwrap_or_else(slopty_worker::xfer::Transfers::default_drop_root),
     ));
-    // The pictures agents other than Claude Code returned, kept for a client to ask for.
-    if let Err(e) = slopty_agent::media::set_dir(&data_dir.join("media")) {
-        tracing::warn!("pictures will not be kept: {e}");
-    }
-    let (threads, adapters) =
-        threads::open(&data_dir.join("threads"), &data_dir.join("snapshots"), worker.clone())
-            .unzip();
-    watch_caps(caps_tx, load_tx, events.clone(), acp, threads.as_ref().map(|t| t.host().clone()));
+    let threads = threads::open(
+        &data_dir.join("threads"),
+        worker.clone(),
+        events.clone(),
+        items.clone(),
+        paths::worker_name(),
+    );
+    watch_caps(caps_tx, load_tx, events.clone());
     let daemon = Daemon {
         worker,
         listener,
@@ -995,9 +985,7 @@ async fn run(
     tokio::spawn(ports::watch(daemon.clone(), port_hints));
     // Agents people run by hand in terminals: the foreground process and the title.
     tokio::spawn(agents::watch(daemon.clone()));
-    if let Some(adapters) = adapters {
-        threads::start(&daemon, adapters);
-    }
+    threads::start(&daemon);
 
     // A terminal whose program exits stays, its last screen and its status kept, until a client
     // closes it (`docs/decisions/terminal.md`, "An exited shell stays until it is closed"). The
@@ -1066,7 +1054,6 @@ async fn run(
         args.server.clone(),
         ctl_path,
         joined,
-        own_acp,
     ));
 
     let allow: Vec<String> =
@@ -1235,8 +1222,8 @@ mod tests {
     use super::{Changed, admission, changed};
 
     /// A change of the file asks the running worker for what changed and nothing else: new
-    /// ranges, a new server or none, the sleep policy and the ACP agents; a server named by
-    /// `--server` holds over the file's.
+    /// ranges, a new server or none and the sleep policy; a server named by `--server` holds
+    /// over the file's.
     #[test]
     fn a_change_of_the_file_is_applied_as_it_is_read() {
         let before = slopty_settings::Settings::default();
@@ -1245,14 +1232,12 @@ mod tests {
         now.network.allow = vec!["10.0.0.0/8".to_owned(), "bogus".to_owned()];
         now.network.server = Some(slopty_net::HostAddr::new("hub", 45_560));
         now.worker.keep_awake = slopty_settings::KeepAwake::Never;
-        now.worker.acp.insert("mine".to_owned(), vec!["/opt/mine".to_owned()]);
         let asked = changed(&before, &now, None);
         let ranges: Vec<String> = asked.allow.iter().flatten().map(ToString::to_string).collect();
         assert_eq!(ranges, ["10.0.0.0/8"], "a range that does not parse is skipped");
         assert!(asked.reregister);
         assert_eq!(asked.server, Some(slopty_net::HostAddr::new("hub", 45_560)));
         assert_eq!(asked.keeping, Some(slopty_worker::wake::Policy::Never));
-        assert_eq!(asked.acp.as_ref(), Some(&now.worker.acp));
         let cleared = changed(&now, &before, None);
         assert_eq!((cleared.reregister, cleared.server), (true, None), "cleared: on its own");
         assert!(!changed(&before, &now, Some("other")).reregister, "the flag holds");

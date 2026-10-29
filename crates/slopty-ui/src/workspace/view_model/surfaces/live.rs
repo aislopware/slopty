@@ -127,9 +127,6 @@ impl WorkspaceView {
         {
             return Some((target.unwrap_or(worker), Some(path)));
         }
-        if let Some(minted) = self.view_model.minted.get(chat) {
-            return Some((target.unwrap_or(minted.worker), Some(minted.cwd.clone())));
-        }
         if let Some((worker, thread)) = self.chat_thread(chat, cx) {
             let cwd = self.thread_place(thread).and_then(|place| place.cwd.clone());
             return Some((target.unwrap_or(worker), cwd));

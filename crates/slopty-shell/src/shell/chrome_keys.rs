@@ -4,11 +4,8 @@
 //!   ⌘⇧G step through the matches. The finding itself is the transcript's and the diff's own
 //!   (`transcript::FindInThread`, `FindNext`, `FindPrevious`; `changes::FindInDiff`,
 //!   `FindNextInDiff`, `FindPreviousInDiff` in the `Changes` context).
-//! - A transcript's "Open diff" (`changes::ShowTurnDiff`) opens Changes on that turn.
 //! - ⌘[ and ⌘] walk the history, as the titlebar's arrows do.
 //! - ⌘T opens the right pane's new tab menu, and ⌘⇧T the tab closed last (`closed_tabs`).
-//! - ⌥⌘B opens the branch picker and ⌘⇧E steps the model's effort. (⌘⇧G is Find previous, and
-//!   ⌘⇧B is where an older map's sidebar key moves.)
 //! - ⌘Z undoes the archive just made, while its toast is up.
 //! - ⇧⌘O opens "Resume a session…", the picker of Claude Code's past sessions (`past_sessions`).
 //! - ⌘. opens the next chat that needs the person, across projects and machines, then the
@@ -25,7 +22,7 @@ use std::time::Duration;
 use gpui::{App, Context, KeyBinding, Window, actions, prelude::*};
 
 use super::{RightSurface, Route, Shell};
-use crate::changes::{FindInDiff, FindNextInDiff, FindPreviousInDiff, ShowTurnDiff};
+use crate::changes::{FindInDiff, FindNextInDiff, FindPreviousInDiff};
 use crate::settings::{KeymapConfig, ShortcutId, platform_combo};
 use crate::transcript::{FindInThread, FindNext as FindNextInThread, FindPrevious as FindPreviousInThread};
 
@@ -39,14 +36,14 @@ actions!(
         NavigateForward,
         NewRightTab,
         ReopenClosedTab,
-        OpenBranchPicker,
-        NextEffort,
         UndoArchive,
         ResumeSession,
         NextNeedsYou,
         OpenIn,
         ToggleExpandPane,
-        ToggleSessionInfo
+        // slopty: ⌘I shows or hides the session's inspector (`docs/decisions/ui.md`, "The
+        // Inspector reads the session"): ⌘ is free of the terminal's keys and of every TUI's.
+        ToggleInspector
     ]
 );
 
@@ -79,7 +76,7 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     fixed!("mod-z", UndoArchive);
     fixed!("alt-mod-o", OpenIn);
     fixed!("mod-shift-\\", ToggleExpandPane);
-    fixed!("mod-i", ToggleSessionInfo);
+    fixed!("mod-i", ToggleInspector);
     // The diff's own find, where the Changes surface has the keyboard.
     bindings.push(KeyBinding::new(&platform_combo("mod-f"), FindInDiff, Some("Changes")));
     bindings.push(KeyBinding::new(&platform_combo("mod-g"), FindNextInDiff, Some("Changes")));
@@ -90,8 +87,6 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     ));
     for (id, action) in [
         (ShortcutId::ReopenClosedTab, Box::new(ReopenClosedTab) as Box<dyn gpui::Action>),
-        (ShortcutId::OpenBranchPicker, Box::new(OpenBranchPicker)),
-        (ShortcutId::NextEffort, Box::new(NextEffort)),
         (ShortcutId::ResumeSession, Box::new(ResumeSession)),
         (ShortcutId::NextNeedsYou, Box::new(NextNeedsYou)),
     ] {
@@ -109,12 +104,17 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     cx.bind_keys(bindings);
 }
 
-/// Whether the focus is in a terminal or a web page, which keep their own keys.
+/// Whether the focus is in a web page, which keeps its own ⌘ chords (back, forward, a new tab,
+/// undo). A terminal keeps only the chords it binds, which its context takes first: every other
+/// ⌘ chord is the app's (`slopty_terminal`), so the window's keys hold from a session's
+/// terminal, where the keyboard lives.
 fn in_own_keys(window: &Window) -> bool {
-    window
-        .context_stack()
-        .iter()
-        .any(|context| context.contains("Terminal") || context.contains("Browser"))
+    window.context_stack().iter().any(|context| context.contains("Browser"))
+}
+
+/// Whether the focus is in a terminal or a web page, whose own find a find key is for.
+fn in_own_find(window: &Window) -> bool {
+    in_own_keys(window) || window.context_stack().iter().any(|context| context.contains("Terminal"))
 }
 
 /// Which find a key asks for.
@@ -161,30 +161,16 @@ impl Shell {
                 cx.propagate();
             }
         }))
-        .on_action(cx.listener(|this, _: &OpenBranchPicker, window, cx| {
-            if !matches!(this.route, Route::Chat) || this.overlay_owns_keyboard(cx) {
-                return;
-            }
-            let pickers = this.composer.read(cx).pickers().clone();
-            pickers.update(cx, |pickers, cx| pickers.open_branch_menu(window, cx));
-        }))
-        .on_action(cx.listener(|this, _: &NextEffort, _, cx| {
-            if !matches!(this.route, Route::Chat) || this.overlay_owns_keyboard(cx) {
-                return;
-            }
-            let pickers = this.composer.read(cx).pickers().clone();
-            pickers.update(cx, |pickers, cx| pickers.step_effort(cx));
-        }))
         .on_action(cx.listener(|this, _: &ResumeSession, window, cx| {
             // Over another overlay the key waits; the picker's own key shuts it.
-            if this.overlay_owns_keyboard(cx) && !this.past_sessions.picker_open() {
+            if this.overlay_owns_keyboard() && !this.past_sessions.picker_open() {
                 return;
             }
             this.toggle_resume_picker(window, cx);
         }))
         .on_action(cx.listener(|this, _: &NextNeedsYou, _, cx| {
             // Under an overlay that holds the keyboard the key waits, as the chat keys do.
-            if !this.overlay_owns_keyboard(cx) {
+            if !this.overlay_owns_keyboard() {
                 this.open_next_needing_you(cx);
             }
         }))
@@ -193,11 +179,8 @@ impl Shell {
                 cx.propagate();
             }
         }))
-        .on_action(cx.listener(|this, _: &ShowTurnDiff, window, cx| {
-            this.show_turn_diff(window, cx);
-        }))
         .on_action(cx.listener(|this, _: &OpenIn, window, cx| {
-            if in_own_keys(window) || this.overlay_owns_keyboard(cx) || !this.toggle_open_in(cx) {
+            if in_own_keys(window) || this.overlay_owns_keyboard() || !this.toggle_open_in(cx) {
                 cx.propagate();
             }
         }))
@@ -208,19 +191,18 @@ impl Shell {
             }
             this.toggle_right_pane_expand(cx);
         }))
-        .on_action(cx.listener(|this, _: &ToggleSessionInfo, window, cx| {
-            if in_own_keys(window) || !matches!(this.route, Route::Chat) || this.overlay_owns_keyboard(cx)
-            {
+        // slopty: from the terminal too, which never takes ⌘I.
+        .on_action(cx.listener(|this, _: &ToggleInspector, window, cx| {
+            if !matches!(this.route, Route::Chat) || this.overlay_owns_keyboard() {
                 cx.propagate();
                 return;
             }
-            this.toggle_session_info(cx);
+            this.toggle_inspector(window, cx);
         }))
     }
 
-    /// A transcript's "Open diff": the chat's Changes surface in front, which takes the turn the
-    /// transcript asked for (`changes::show_turn`).
-    fn show_turn_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The chat's Changes surface in front, opened when it is not up.
+    fn show_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.route, Route::Chat) || self.active_chat.is_empty() {
             return;
         }
@@ -242,10 +224,16 @@ impl Shell {
         cx.notify();
     }
 
+    /// slopty: the inspector's changed file: the chat's Changes in front, at that file.
+    pub(super) fn show_change_at(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        crate::changes::show_file(path, cx);
+        self.show_changes(window, cx);
+    }
+
     /// Hand a find key to the chat's thread (the diff's own bindings take it in the Changes
     /// surface).
     fn find(&mut self, step: FindStep, window: &mut Window, cx: &mut Context<Self>) {
-        if in_own_keys(window) || !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard(cx)
+        if in_own_find(window) || !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard()
         {
             cx.propagate();
             return;
@@ -263,7 +251,7 @@ impl Shell {
     fn open_new_right_tab(&mut self, cx: &mut Context<Self>) -> bool {
         if !matches!(self.route, Route::Chat)
             || self.active_chat.is_empty()
-            || self.overlay_owns_keyboard(cx)
+            || self.overlay_owns_keyboard()
         {
             return false;
         }

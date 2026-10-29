@@ -303,21 +303,10 @@ impl JsonSchema for Chords {
 /// `[worker]`: what `slopty-worker` reads from the same file.
 ///
 /// It follows the file, applying every key as it changes.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "Share this Mac's shells and windows")]
 pub struct WorkerSettings {
-    /// ACP agents beside the ones Slopty knows; an empty command hides one.
-    ///
-    /// A name and the command line that serves the Agent Client Protocol on stdio
-    /// (`mine = ["/opt/mine/bin/agent", "--acp"]`). A name Slopty already knows (`gemini`,
-    /// `opencode`, the ACP registry's) is started this way instead, and an empty list takes it
-    /// away. Its threads' agent is `acp:<name>`. A change is probed again at once.
-    #[schemars(
-        title = "ACP agents",
-        example = serde_json::json!({ "mine": ["/opt/mine/bin/agent", "--acp"], "goose": [] })
-    )]
-    pub acp: BTreeMap<String, Vec<String>>,
     /// While working also counts an agent at work with nobody attached.
     ///
     /// What keeps this Mac out of idle sleep: a client attached or an agent at work, a client
@@ -330,7 +319,7 @@ pub struct WorkerSettings {
 
 impl Default for WorkerSettings {
     fn default() -> Self {
-        Self { acp: BTreeMap::new(), keep_awake: KeepAwake::Working }
+        Self { keep_awake: KeepAwake::Working }
     }
 }
 
@@ -379,8 +368,8 @@ pub struct AgentSettings {
     /// How freely an agent another agent starts acts before it asks you.
     ///
     /// Applied by each agent's own harness: Claude Code's permission mode, Codex's approval
-    /// policy, pi's gate; an ACP agent starts in its own default. Questions an agent asks you
-    /// reach you whatever it is. The server reads it for each start.
+    /// policy. Questions an agent asks you reach you in its terminal whatever it is. The server
+    /// reads it for each start.
     #[schemars(title = "Autonomy")]
     pub autonomy: Autonomy,
 }
@@ -607,13 +596,6 @@ server = \"\"
 # until it is listed here. Traffic is not encrypted by Slopty: the VPN or
 # tailnet is the boundary.
 allow = []
-
-[worker]
-# Agents that speak ACP on stdio, by name and command line, beside the ones
-# Slopty knows; a known name is started this way instead, and [] hides it.
-#
-# [worker.acp]
-# mine = [\"/opt/mine/bin/agent\", \"--acp\"]
 ",
             minimum_contrast = toml_float(d.terminal.minimum_contrast),
             copy_on_select = d.terminal.copy_on_select,
@@ -704,8 +686,8 @@ impl Loaded {
 }
 
 /// Tables whose keys the person names. `[keys]` names a terminal's commands, which the terminal
-/// knows and this crate does not; a worker's ACP agents are anything.
-const OPEN_TABLES: [&str; 3] = ["keys", "clipboard.workers", "worker.acp"];
+/// knows and this crate does not; `[clipboard.workers]` names machines.
+const OPEN_TABLES: [&str; 2] = ["keys", "clipboard.workers"];
 
 /// Keys in `given` with no counterpart in `known`, recursively through tables, except the
 /// [`OPEN_TABLES`].
@@ -1071,22 +1053,6 @@ mod tests {
             ["unknown key `worker.labels`", "unknown key `worker.probes`"],
             "{loaded:?}"
         );
-    }
-
-    /// A worker's own ACP agents are any name and a command line, and an empty one hides it.
-    #[test]
-    fn worker_acp_agents() {
-        let read = Settings::parse(
-            "[worker.acp]\nmine = [\"/opt/mine/bin/agent\", \"--acp\"]\ngoose = []\n",
-        );
-        assert!(read.error.is_none() && read.warnings.is_empty(), "{read:?}");
-        let acp = &read.settings.worker.acp;
-        assert_eq!(acp["mine"], ["/opt/mine/bin/agent", "--acp"]);
-        assert_eq!(acp["goose"], Vec::<String>::new());
-        assert!(Settings::default().worker.acp.is_empty());
-        assert!(Settings::parse("[worker.acp]\nmine = \"agent\"\n").error.is_some(), "a list");
-        let back = toml::to_string(&read.settings).unwrap_or_default();
-        assert_eq!(Settings::parse(&back).settings.worker.acp, *acp, "written back:\n{back}");
     }
 
     /// The person's one autonomy setting, `auto` when the file leaves it out; the old

@@ -82,7 +82,7 @@ fn fixture(
 ) -> (Entity<ModalSelectionHarness>, &mut VisualTestContext) {
     cx.update(|cx| {
         cx.set_global(Theme::dark());
-        motion::set_reduced_motion(cx, true);
+        crate::motion::set_reduced_motion(cx, true);
     });
     let (view, cx) = cx.add_window_view(|_, cx| ModalSelectionHarness {
         input: cx.new(|cx| {

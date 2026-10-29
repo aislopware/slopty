@@ -7,17 +7,8 @@ Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Article │ You
-Paragraph │ Tidy the greeting
-Button │ Copy message
-Button │ Rewind…
-Article │ Claude Code
-Paragraph │ Done: Tidy the greeting
-Button │ Attach images
-MultilineTextInput │ Do anything…
-Button │ Model: Opus 5.5, High
-Button │ Send message
-Button │ Mode: Auto
+Group
+Terminal │ shell │ >
 Button │ Diff scope: Working tree
 Button │ Find in diff
 Button │ Show file tree
@@ -25,8 +16,6 @@ Button │ Ignore whitespace
 Button │ Split view
 Button │ Wrap long lines
 Button │ Collapse all files
-Button │ .claude/settings.json, expanded
-Button │ Open file
 Button │ NOTES.md, expanded
 Button │ Open file
 Button │ src/main.rs, expanded
@@ -34,7 +23,9 @@ Button │ Open file
 Button │ Show these lines
 Splitter │ Resize side pane
 Button │ Open in…
-Button │ Show chat details
+Button │ Show inspector
+Button │ Inspector
+Button │ Close Inspector
 Button │ Working tree
 Button │ Close Working tree
 Button │ New tab
@@ -44,4 +35,4 @@ Button │ Hide side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ New chat
+Button │ New session

@@ -598,8 +598,6 @@ pub struct Theme {
     pub family_id: SharedString,
     /// Whether the base theme or a user preset owns interactive identity.
     pub accent_selection: AccentSelection,
-    /// Effective wallpaper overlay; manual theme/accent selections remain intact.
-    pub wallpaper_color: Option<slopty_shell_theme::Color>,
     /// The persisted policy that resolved [`Self::surface_treatment`].
     pub surface_preference: SurfacePreference,
     /// The effective treatment after applying [`Self::surface_preference`] to
@@ -1044,33 +1042,14 @@ impl Theme {
     /// (sits more naturally there than the general-purpose separator), the
     /// theme border otherwise.
     pub fn composer_surface_border(&self) -> Hsla {
-        // slopty: Claude desktop's composer ring strength (8 % on dark, 12 % on light) in
-        // zeron's slate.
         if self.is_frost() {
             match self.appearance {
-                Appearance::Dark => hsla(210.0 / 360.0, 0.18, 0.78, 0.08),
-                Appearance::Light => hsla(210.0 / 360.0, 0.18, 0.32, 0.12),
+                Appearance::Dark => hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
+                Appearance::Light => hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
             }
         } else {
             self.border
         }
-    }
-
-    /// slopty: the composer's lift on an opaque surface, Claude desktop's `0 4px 20px` black at
-    /// 3.5 % resting and 7.5 % at `focus_t` 1. A frosted composer draws none: a drop shadow is
-    /// painted behind the element and would grey its glass (see [`card_selected_shadows`]).
-    pub fn composer_shadow(&self, focus_t: f32) -> Vec<gpui::BoxShadow> {
-        if self.is_frost() {
-            return Vec::new();
-        }
-        let alpha = 0.035 + (0.075 - 0.035) * focus_t.clamp(0.0, 1.0);
-        vec![gpui::BoxShadow {
-            color: hsla(0.0, 0.0, 0.0, alpha),
-            offset: gpui::point(gpui::px(0.0), gpui::px(4.0)),
-            blur_radius: gpui::px(20.0),
-            spread_radius: gpui::px(0.0),
-            inset: false,
-        }]
     }
 
     /// slopty: the edge and depth of a surface floating at `level` (opencode's ring and lit top
@@ -1232,7 +1211,6 @@ impl Theme {
             variant_id: "slopty-dark".into(),
             family_id: "slopty".into(),
             accent_selection: AccentSelection::Preset(accent_color.into()),
-            wallpaper_color: None,
             surface_preference: SurfacePreference::ThemeDefault,
             surface_treatment: SurfaceTreatment::Frosted,
             accent_color,
@@ -1312,7 +1290,6 @@ impl Theme {
             variant_id: "slopty-light".into(),
             family_id: "slopty".into(),
             accent_selection: AccentSelection::Preset(accent_color.into()),
-            wallpaper_color: None,
             surface_preference: SurfacePreference::ThemeDefault,
             surface_treatment: SurfaceTreatment::Frosted,
             accent_color,
@@ -1438,22 +1415,6 @@ impl Theme {
         accent_selection: AccentSelection,
         surface_preference: SurfacePreference,
     ) -> Self {
-        Self::for_selection_with_wallpaper(
-            appearance,
-            variant_id,
-            accent_selection,
-            surface_preference,
-            None,
-        )
-    }
-
-    fn for_selection_with_wallpaper(
-        appearance: Appearance,
-        variant_id: &str,
-        accent_selection: AccentSelection,
-        surface_preference: SurfacePreference,
-        wallpaper_color: Option<slopty_shell_theme::Color>,
-    ) -> Self {
         let registry = ThemeRegistry::builtin();
         let fallback_id = match appearance {
             Appearance::Dark => "slopty-dark",
@@ -1464,24 +1425,7 @@ impl Theme {
             .filter(|variant| model_appearance(variant.appearance) == appearance)
             .or_else(|| registry.variant(fallback_id))
             .expect("the built-in registry contains both Slopty appearances");
-        if let Some(color) = wallpaper_color {
-            let mut variant = variant.clone();
-            crate::settings::wallpaper_colors::tint_variant(&mut variant, color);
-            let mut theme =
-                Self::from_variant(&variant, AccentSelection::ThemeDefault, surface_preference);
-            theme.accent_selection = accent_selection;
-            theme.wallpaper_color = Some(color);
-            if theme.surface_treatment == SurfaceTreatment::Frosted {
-                // Glass interactions lift toward white rather than laying a
-                // dark wallpaper accent over the translucent surface.
-                theme.element_hover = gpui::white().opacity(0.09);
-                theme.element_active = gpui::white().opacity(0.15);
-                theme.band = theme.element_hover;
-            }
-            theme
-        } else {
-            Self::from_variant(variant, accent_selection, surface_preference)
-        }
+        Self::from_variant(variant, accent_selection, surface_preference)
     }
 
     pub(crate) fn from_variant(
@@ -1663,13 +1607,7 @@ impl Theme {
         force_generation: bool,
         cx: &mut App,
     ) {
-        let next = Self::for_selection_with_wallpaper(
-            appearance,
-            variant_id,
-            accent_selection,
-            surface_preference,
-            crate::settings::wallpaper_colors::active(cx),
-        )
+        let next = Self::for_selection(appearance, variant_id, accent_selection, surface_preference)
         .with_font_sans(crate::typography::effective_family_name(cx))
         .with_font_mono(crate::typography::code_effective_family_name(cx))
         .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
@@ -1680,7 +1618,6 @@ impl Theme {
                 || theme.accent_selection != next.accent_selection
                 || theme.surface_preference != next.surface_preference
                 || theme.appearance != next.appearance
-                || theme.wallpaper_color != next.wallpaper_color
         });
         set_current_appearance(appearance);
         sync_gpui_base_scrollbar(&next, cx);
@@ -2198,7 +2135,14 @@ pub const LIGHT_SPINNER_FLOOR: f32 = 0.3;
 
 /// Shared silver/slate edge for the composer and its companion surfaces.
 pub fn composer_surface_border(theme: &Theme) -> Hsla {
-    theme.composer_surface_border() // slopty: one ring
+    if theme.is_frost() {
+        match theme.appearance {
+            Appearance::Dark => hsla(210.0 / 360.0, 0.18, 0.78, 0.09),
+            Appearance::Light => hsla(210.0 / 360.0, 0.18, 0.32, 0.10),
+        }
+    } else {
+        theme.border
+    }
 }
 
 /// Linear per-component mix of two colors (paint helper for the gradient spinner).
@@ -2321,61 +2265,6 @@ mod tests {
         assert_eq!(light.busy, light.accent);
         assert_eq!(light.glyph.mid, light.accent);
         assert_eq!(light.caret, light.accent);
-    }
-
-    #[test]
-    fn wallpaper_glass_interactions_lift_toward_white_in_both_appearances() {
-        for (appearance, id) in [
-            (Appearance::Dark, "slopty-dark"),
-            (Appearance::Light, "slopty-light"),
-        ] {
-            let theme = Theme::for_selection_with_wallpaper(
-                appearance,
-                id,
-                AccentSelection::ThemeDefault,
-                SurfacePreference::Frosted,
-                Some(ModelColor::rgb(20, 60, 140)),
-            );
-            for wash in [theme.element_hover, theme.element_active] {
-                assert_eq!(wash.l, 1.0);
-                assert_eq!(wash.s, 0.0);
-                assert!(wash.a > 0.0 && wash.a < 1.0);
-            }
-        }
-    }
-
-    #[test]
-    fn wallpaper_colours_keep_text_readable_in_light_and_dark_modes() {
-        for (appearance, id) in [
-            (Appearance::Dark, "slopty-dark"),
-            (Appearance::Light, "slopty-light"),
-        ] {
-            for color in [
-                ModelColor::BLACK,
-                ModelColor::WHITE,
-                ModelColor::rgb(255, 220, 20),
-                ModelColor::rgb(10, 40, 240),
-            ] {
-                let theme = Theme::for_selection_with_wallpaper(
-                    appearance,
-                    id,
-                    AccentSelection::ThemeDefault,
-                    SurfacePreference::Opaque,
-                    Some(color),
-                );
-                for background in [
-                    theme.bg,
-                    theme.surface,
-                    theme.surface_raised,
-                    theme.surface_card,
-                    theme.surface_dialog,
-                    theme.input_bg,
-                ] {
-                    assert!(contrast_ratio(theme.text, background) >= 4.49);
-                    assert!(contrast_ratio(theme.text_muted, background) >= 4.49);
-                }
-            }
-        }
     }
 
     #[test]
@@ -3244,24 +3133,6 @@ mod tests {
         assert_eq!(Theme::HEADER_HEIGHT, 44.0); // h-11
         assert_eq!(Theme::STATUS_STRIP_HEIGHT, 24.0); // h-6
         assert_eq!(Theme::BUBBLE_RADIUS, 16.0);
-    }
-
-    /// The composer rests on a faint lift and deepens it with the keyboard on an opaque
-    /// surface; frosted glass takes no shadow, which would grey it from behind.
-    #[test]
-    fn the_composer_lifts_with_focus_only_where_it_is_opaque() {
-        let mut theme = Theme::light();
-        theme.surface_treatment = SurfaceTreatment::Opaque;
-        let alpha = |t: f32| theme.composer_shadow(t)[0].color.a;
-        assert!((alpha(0.0) - 0.035).abs() < 1e-6);
-        assert!((alpha(1.0) - 0.075).abs() < 1e-6);
-        assert!(alpha(0.5) > alpha(0.0) && alpha(0.5) < alpha(1.0));
-        assert_eq!(theme.composer_shadow(0.0)[0].blur_radius, gpui::px(20.0));
-        theme.surface_treatment = SurfaceTreatment::Frosted;
-        if theme.is_frost() {
-            assert!(theme.composer_shadow(1.0).is_empty());
-            assert!((theme.composer_surface_border().a - 0.12).abs() < 1e-6);
-        }
     }
 
     /// A float rings its edge from inside, 0.5 px, lit along the top on dark, and casts Amp's

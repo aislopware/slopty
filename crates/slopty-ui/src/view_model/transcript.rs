@@ -17,12 +17,12 @@ use std::collections::HashMap;
 
 use slopty_proto::thread::detail::{Clipped, Patch};
 use slopty_proto::thread::{
-    AskId, BackgroundTask, Compaction, ContentRef, Image, IntentId, Item, ItemBody, Notice,
-    Request, TaskNote, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId,
-    TurnState, UserMessage, kind,
+    AskId, BackgroundTask, Compaction, ContentRef, Image, Item, ItemBody, Notice, Request,
+    TaskNote, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState,
+    UserMessage, kind,
 };
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
-use slopty_view_proto::{UserInputAnswer, UserInputQuestion};
+use slopty_view_proto::UserInputQuestion;
 
 pub use super::facts::ChildRun;
 use super::facts::{note_row, page_card, task_part, tool_facts};
@@ -35,17 +35,12 @@ pub struct Look<'a> {
     host: Option<&'a str>,
     child_run: Box<dyn Fn(ThreadId) -> Option<ChildRun> + 'a>,
     chat_of: Box<dyn Fn(ThreadId) -> String + 'a>,
-    named: ByIntent<'a>,
-    said: ByIntent<'a>,
     whole: Whole<'a>,
     source: Source<'a>,
 }
 
 /// A thread's chat id and title, for the seam of a chat forked off it.
 type Source<'a> = Box<dyn Fn(ThreadId) -> Option<(String, String)> + 'a>;
-
-/// Words the workspace keeps by the intent that sent them.
-type ByIntent<'a> = Box<dyn Fn(IntentId) -> Option<String> + 'a>;
 
 /// The whole of a cut text, once it came.
 type Whole<'a> = Box<dyn Fn(&ContentRef) -> Option<String> + 'a>;
@@ -65,8 +60,6 @@ impl<'a> Look<'a> {
             host: None,
             child_run: Box::new(|_| None),
             chat_of: Box::new(|thread| thread.to_string()),
-            named: Box::new(|_| None),
-            said: Box::new(|_| None),
             whole: Box::new(|_| None),
             source: Box::new(|_| None),
         }
@@ -98,22 +91,6 @@ impl<'a> Look<'a> {
     #[must_use]
     pub fn chats(mut self, chat_of: impl Fn(ThreadId) -> String + 'a) -> Self {
         self.chat_of = Box::new(chat_of);
-        self
-    }
-
-    /// The id the shell gave a message it sent, by the intent that sent it, so its echo gives
-    /// way to it.
-    #[must_use]
-    pub fn named(mut self, named: impl Fn(IntentId) -> Option<String> + 'a) -> Self {
-        self.named = Box::new(named);
-        self
-    }
-
-    /// The words the shell sent by an intent, its chips as the person wrote them, which the
-    /// agent was given in its own words.
-    #[must_use]
-    pub fn said(mut self, said: impl Fn(IntentId) -> Option<String> + 'a) -> Self {
-        self.said = Box::new(said);
         self
     }
 
@@ -236,7 +213,7 @@ const IMAGES_TRAILER: &str = "Attached images (local files — open them to view
 
 /// `text` with `thread`'s pictures of item `item` after it, as the shell reads them.
 fn with_images(text: String, thread: ThreadId, item: &str, images: &[Image]) -> String {
-    if images.is_empty() || text.contains(IMAGES_TRAILER) {
+    if images.is_empty() {
         return text;
     }
     let paths: Vec<String> = images
@@ -299,15 +276,10 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
         let at = at(item.at_ms);
         match &item.body {
             ItemBody::User(message) => {
-                // The id the shell gave the message, where it sent it, so its echo gives way.
-                let shown = shown_as(message, &id, &look.named);
-                // The person's own words where the shell sent them, its chips and pictures as
-                // the shell holds them; else what the agent was given, and its pictures.
-                let text = message.intent.and_then(&look.said).unwrap_or_else(|| {
-                    let words =
-                        marked(message.command.as_deref(), look.words(&message.text), state);
-                    with_images(words, thread, &id, &message.images)
-                });
+                let shown = shown_as(message, &id);
+                // The person's words as the agent was given them, and its pictures.
+                let words = marked(message.command.as_deref(), look.words(&message.text));
+                let text = with_images(words, thread, &id, &message.images);
                 // slopty: a plan sent to be implemented reads as the plan's own card under the
                 // message, as the TUI boxes it ("Plan to implement").
                 let plan = text
@@ -486,9 +458,9 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
     out
 }
 
-/// slopty: the person's words as the TUI's row says them: a slash command as `/name args`, a
-/// skill run as one as `Skill(name)` with its words after it, a shell command as `! command`.
-fn marked(command: Option<&str>, words: String, state: &ThreadState) -> String {
+/// slopty: the person's words as the TUI's row says them: a slash command (a skill run as one
+/// too) as `/name args`, a shell command as `! command`.
+fn marked(command: Option<&str>, words: String) -> String {
     let Some(command) = command.map(str::trim).filter(|c| !c.is_empty()) else { return words };
     let after = |mark: String| {
         if words.trim().is_empty() { mark } else { format!("{mark} {}", words.trim_start()) }
@@ -496,9 +468,7 @@ fn marked(command: Option<&str>, words: String, state: &ThreadState) -> String {
     if command == "!" {
         return after("!".to_owned());
     }
-    let name = command.trim_start_matches('/');
-    let skill = state.commands.iter().any(|c| c.skill && c.name.trim_start_matches('/') == name);
-    after(if skill { format!("Skill({name})") } else { format!("/{name}") })
+    after(format!("/{}", command.trim_start_matches('/')))
 }
 
 /// An entry no turn's answer holds: the person's message, a divider, a card.
@@ -647,18 +617,16 @@ fn report(item: &str, text: &str, at: i64, device: &str) -> Vec<SessionMessageEn
 }
 
 /// Each failed turn's error, at the end of its last answer, unless a notice there already says
-/// it; the last turn's, when it failed, offers to try it again.
+/// it.
 fn failures(
     state: &ThreadState,
     look: &Look<'_>,
     turns: &[Option<TurnId>],
     out: &mut [SessionMessageEntry],
 ) {
-    let last_turn = state.turns.last().map(|turn| turn.id);
     for turn in &state.turns {
         let TurnState::Failed { error, .. } = &turn.state else { continue };
         let Some(last) = turns.iter().rposition(|t| *t == Some(turn.id)) else { continue };
-        let retry = Some(turn.id) == last_turn;
         let says = |part: &MessagePart| match part {
             MessagePart::Error { message, detail, .. } => {
                 detail.as_deref().unwrap_or(message).trim() == error.trim()
@@ -666,22 +634,18 @@ fn failures(
             }
             _ => false,
         };
-        let mut said = false;
-        for (_, entry) in turns.iter().zip(out.iter_mut()).filter(|(t, _)| **t == Some(turn.id)) {
-            if let Some(MessagePart::Error { retry: again, .. }) =
-                entry.parts.iter_mut().rev().find(|part| says(part))
-            {
-                *again = retry;
-                said = true;
-            }
-        }
+        let said = turns
+            .iter()
+            .zip(out.iter())
+            .filter(|(t, _)| **t == Some(turn.id))
+            .any(|(_, entry)| entry.parts.iter().any(says));
         if said {
             continue;
         }
         if let Some(entry) = out.get_mut(last) {
             let id = format!("{}:error", entry.id);
             let (message, detail) = error_words(TURN_FAILED, error, look.host, None);
-            entry.parts.push(MessagePart::Error { id, message, detail, retry });
+            entry.parts.push(MessagePart::Error { id, message, detail });
         }
     }
 }
@@ -843,20 +807,10 @@ fn plan_part(state: &ThreadState, written: bool, device: &str, out: &mut Vec<Ses
 /// A task's text by its id.
 type Named<'a> = HashMap<&'a str, &'a str>;
 
-/// The id the person's message `message`, the item `item`, goes by in the shell.
-///
-/// Its intent's, which is the id the shell gave it where the shell sent it, or the one `named`
-/// keeps for a message sent again under a new intent; its item's where no intent is known to
-/// have sent it.
-pub fn shown_as(
-    message: &UserMessage,
-    item: &str,
-    named: &dyn Fn(IntentId) -> Option<String>,
-) -> String {
-    message.intent.map_or_else(
-        || item.to_owned(),
-        |intent| named(intent).unwrap_or_else(|| intent.to_string()),
-    )
+/// The id the person's message `message`, the item `item`, goes by in the shell: its intent's,
+/// else its item's where no intent is known to have sent it.
+pub fn shown_as(message: &UserMessage, item: &str) -> String {
+    message.intent.map_or_else(|| item.to_owned(), |intent| intent.to_string())
 }
 
 /// A task list's steps as the shell's checklist, a step of no text of its own named by its id
@@ -987,8 +941,7 @@ pub fn child_asks(
 /// `why` an intent was turned down, said at the end of the transcript.
 pub fn refused(why: &str, at: i64, device: &str, entries: &mut Vec<SessionMessageEntry>) {
     let id = format!("refused:{at}");
-    let part =
-        MessagePart::Error { id: id.clone(), message: why.to_owned(), detail: None, retry: false };
+    let part = MessagePart::Error { id: id.clone(), message: why.to_owned(), detail: None };
     if let Some(entry) = tail(entries, &id, at, device) {
         entry.parts.push(part);
     }
@@ -1141,10 +1094,6 @@ fn escaped_payload(payload: &str) -> String {
 
 /// The id of the one question of a request that offers its choices.
 const CHOICE: &str = "choice";
-
-/// The id an answer goes under that skips a request's questions (the shell's Skip): it goes as
-/// the request's plain decline.
-pub const SKIP: &str = "skip";
 
 /// What a request asks, as the panel heads it.
 fn header(request: &Request) -> String {
@@ -1505,111 +1454,6 @@ fn input(request: &Request, state: &ThreadState) -> MessagePart {
     MessagePart::Input { id: format!("ask:{request_id}"), request_id, questions, resolved: false }
 }
 
-/// The choice and words an [`Intent::Answer`](slopty_proto::thread::wire::Intent::Answer) to
-/// `request` carries for the panel's `answers`; why not, when they answer nothing it offers.
-///
-/// A question's answers go as its agent takes them
-/// ([`Answer::choice`](slopty_proto::thread::detail::Answer::choice)); any other request takes
-/// the choice picked, or, for words of one's own, its plain deny with them as the reason, or the
-/// words themselves where it offers nothing to pick.
-pub fn answer(
-    request: &Request,
-    answers: &[UserInputAnswer],
-) -> Result<(String, Option<String>), String> {
-    use slopty_proto::thread::detail::Answer;
-    // slopty: questions skipped go as the agent's plain decline, its TUI's Esc.
-    if answers.iter().any(|a| a.question_id == SKIP) {
-        return slopty_proto::thread::plain_deny(&request.options)
-            .map(|deny| (deny.id.clone(), None))
-            .ok_or_else(|| "These questions can't be skipped".to_owned());
-    }
-    // slopty: the choice beside the questions, picked alone.
-    let aside =
-        answers.iter().find(|a| a.question_id == CHOICE).and_then(|a| a.labels.first()).and_then(
-            |label| request.options.iter().find(|c| super::text::escaped(&c.label) == *label),
-        );
-    if let Some(aside) = aside.filter(|_| !request.questions.is_empty()) {
-        return Ok((aside.id.clone(), None));
-    }
-    if !request.questions.is_empty() {
-        let given: Vec<Answer> = request
-            .questions
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, question)| {
-                let labels = &answers.iter().find(|a| a.question_id == ix.to_string())?.labels;
-                // A label shown with its hidden characters as codes goes back as the agent's.
-                let labels: Vec<&str> = labels
-                    .iter()
-                    .map(|label| {
-                        question
-                            .options
-                            .iter()
-                            .find(|o| super::text::escaped(&o.label) == *label)
-                            .map_or(label.as_str(), |o| o.label.as_str())
-                    })
-                    .collect();
-                Some(Answer { question: question.text.clone(), answer: labels.join(Answer::JOIN) })
-            })
-            .collect();
-        if given.len() != request.questions.len() {
-            return Err("Answer every question".to_owned());
-        }
-        // slopty: the person's notes on the questions go beside the answers, by question text.
-        let notes: serde_json::Map<String, serde_json::Value> = request
-            .questions
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, question)| {
-                let notes =
-                    answers.iter().find(|a| a.question_id == ix.to_string())?.notes.as_ref()?;
-                let notes = notes.trim();
-                (!notes.is_empty())
-                    .then(|| (question.text.clone(), serde_json::Value::String(notes.to_owned())))
-            })
-            .collect();
-        let notes = (!notes.is_empty()).then(|| serde_json::Value::Object(notes).to_string());
-        return Ok((Answer::choice(&request.questions, &given), notes));
-    }
-    let picked = answers
-        .iter()
-        .find(|a| a.question_id == CHOICE)
-        .and_then(|a| a.labels.first())
-        .map(|label| label.trim().to_owned())
-        .filter(|label| !label.is_empty())
-        .ok_or_else(|| "Pick an answer".to_owned())?;
-    let chosen = |label: &str| {
-        request.options.iter().find(|c| super::text::escaped(&choice_label(request, c)) == label)
-    };
-    // slopty: an allow and the person's words beside it: the call goes ahead and the words go
-    // as the next message.
-    let words = answers
-        .iter()
-        .find(|a| a.question_id == CHOICE)
-        .and_then(|a| a.labels.get(1))
-        .map(|words| words.trim().to_owned())
-        .filter(|words| !words.is_empty());
-    if let (Some(choice), Some(words)) = (chosen(&picked), words)
-        && choice.effect == slopty_proto::thread::Effect::Allow
-    {
-        return Ok((choice.id.clone(), Some(words)));
-    }
-    if let Some(choice) = chosen(&picked) {
-        return Ok((choice.id.clone(), None));
-    }
-    if request.options.is_empty() {
-        return Ok((picked, None));
-    }
-    // slopty: a form's or a dialog's result is a JSON object of its own.
-    let form = request.kind == Request::ELICITATION || request.dialog_kind().is_some();
-    if form && serde_json::from_str::<serde_json::Value>(&picked).is_ok_and(|v| v.is_object()) {
-        return Ok((picked, None));
-    }
-    let deny = slopty_proto::thread::plain_deny(&request.options)
-        .ok_or_else(|| format!("{picked} is not one of its answers"))?;
-    Ok((deny.id.clone(), Some(picked)))
-}
-
 /// A turn's answer, begun with its first part; a failed turn's error goes at its end
 /// ([`failures`]).
 fn assistant(
@@ -1699,12 +1543,12 @@ fn notice_part(id: String, notice: &Notice, look: &Look<'_>) -> Option<MessagePa
         Notice::INTERRUPTED => None,
         // A Claude Code too old to drive is said as a notice; the shell draws it as a banner.
         Notice::INFO if slopty_shell::transcript::claude_too_old(&text).is_some() => {
-            Some(MessagePart::Error { id, message: text, detail: None, retry: false })
+            Some(MessagePart::Error { id, message: text, detail: None })
         }
         Notice::INFO | Notice::COMMAND | Notice::REWOUND => Some(MessagePart::Text { id, text }),
         kind => {
             let (message, detail) = error_words(kind, &text, look.host, notice.retry.as_ref());
-            Some(MessagePart::Error { id, message, detail, retry: false })
+            Some(MessagePart::Error { id, message, detail })
         }
     }
 }

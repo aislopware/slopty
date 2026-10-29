@@ -90,7 +90,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.navigation_overlay_open(cx) {
+        if self.navigation_overlay_open() {
             return;
         }
         // slopty: no pull-request pages.
@@ -116,9 +116,8 @@ impl Shell {
         }
     }
 
-    fn navigation_overlay_open(&self, cx: &App) -> bool {
-        self.overlay_owns_keyboard(cx) // slopty: no accounts, sync or sign-in.
-            || self.delete_confirm.is_some()
+    fn navigation_overlay_open(&self) -> bool {
+        self.overlay_owns_keyboard() // slopty: no accounts, sync or sign-in.
             || self.delete_space_confirm.is_some()
             || self.chat_rename.is_some()
             || self.rename_space_dialog.is_some()
@@ -140,8 +139,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.navigation_focus.right_was_focused = true;
-        self.composer
-            .update(cx, |composer, _| composer.focus_pending = false);
         // Establish a stable target before detaching the old editor. Read-only
         // surfaces keep it; editable surfaces claim their own focus below/on mount.
         window.focus(&self.navigation_focus.right, cx);
@@ -162,21 +159,25 @@ impl Shell {
             self.activate_right_surface(self.resolved_right_active(cx), window, cx);
         } else {
             self.navigation_focus.right_was_focused = false;
-            window.focus(&self.composer.focus_handle(cx), cx);
+            self.focus_session_terminal(window, cx); // slopty: the session
         }
     }
 
-    /// Navigation requests focus once the destination composer renders.
+    /// slopty: navigation gives the session's terminal the keyboard once it renders.
     pub(super) fn focus_composer(&mut self, cx: &mut Context<Self>) {
-        self.composer.update(cx, |composer, cx| {
-            composer.focus_pending = true;
-            cx.notify();
-        });
+        self.session_terminal.update(cx, |panel, cx| panel.request_focus(cx));
     }
 
-    /// slopty: landing on a chat (opening it, the boot's landing, back and forward) gives the
-    /// composer the keyboard, but not on a touch screen, where it would raise the software
-    /// keyboard over the chat: there it comes when the person taps the composer
+    /// slopty: the session's terminal takes the keyboard now (the dock closing, the pane
+    /// closing), and keeps it once its view renders.
+    pub(super) fn focus_session_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.session_terminal.read(cx).focus_handle(), cx);
+        self.focus_composer(cx);
+    }
+
+    /// slopty: landing on a session (opening it, the boot's landing, back and forward) gives
+    /// its terminal the keyboard, but not on a touch screen, where it would raise the software
+    /// keyboard over the session: there it comes when the person taps it
     /// ([`super::touch_screen`]).
     pub(super) fn focus_composer_on_landing(&mut self, cx: &mut Context<Self>) {
         if !super::touch_screen() {
@@ -194,7 +195,7 @@ impl Shell {
     /// `on_key_down`, so a cycle under the add-space palette would strand the
     /// overlay over a session the user never picked.
     pub(super) fn cycle_session(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if self.overlay_owns_keyboard(cx) {
+        if self.overlay_owns_keyboard() {
             return;
         }
         // The same list `render_active_rows` draws and the jump shortcuts
@@ -243,74 +244,12 @@ impl Shell {
         cx.notify();
     }
 
-    /// `+` in the titlebar: open the new-session canvas. A set sidebar filter
-    /// re-homes the canvas onto that project; under "All" the canvas reopens
-    /// on the project/device it was left at (see `AppState::canvas_target`).
-    ///
-    /// A new chat always starts with the terminal hidden: when the drawer is
-    /// open it just hides (detach, not close — the source chat's tabs and
-    /// PTYs survive for the return trip).
-    ///
-    /// `project` (the per-project `+` on a sidebar group header) homes the
-    /// canvas on that project and wins over the sidebar filter.
+    /// slopty: `+` in the titlebar, the sidebar's and ⌘N: New session…, which starts an agent's
+    /// TUI or a terminal in a project at once (`new_session`). `project` (a project's own `+`)
+    /// is offered first. The open session stays until the new one opens.
     pub(super) fn open_new_session(&mut self, project: Option<String>, cx: &mut Context<Self>) {
-        self.command_palette = None;
-        // slopty: voice removed.
         self.set_route(Route::Chat, cx);
-        self.focus_composer(cx);
-        // Pre-hide before the selection flips so the state change can't
-        // auto-create a canvas tab (the panel's observer runs on the same
-        // update). The source chat's flag stays set — returning restores it.
-        let was_open = self.terminal_open(cx)
-            || self
-                .terminal
-                .as_ref()
-                .is_some_and(|panel| panel.read(cx).is_open());
-        if was_open {
-            self.terminal_tween = None;
-            if let Some(panel) = self.terminal.clone() {
-                panel.update(cx, |panel, cx| panel.set_open(false, cx));
-            }
-        }
-        self.nav.push(NavEntry::Chat(String::new()));
-        let target = {
-            let state = self.state.read(cx);
-            project
-                .or_else(|| self.settings.space_filter.clone())
-                .filter(|id| state.space_row(id).is_some())
-        };
-        let defaults = crate::settings::composer::ComposerDefaults::load(&self.data_dir);
-        self.state.update(cx, |s, cx| {
-            // Leaving a chat puts the canvas's own target back; the filter
-            // (an explicit standing choice) then applies on top of it.
-            let restores = s.canvas_target.is_some();
-            s.select_chat(None, cx);
-            if target.is_some() {
-                s.select_space(target, cx);
-            } else if !restores && defaults.no_project {
-                // No canvas target was set aside (e.g. after a runtime swap):
-                // fall back to the saved new-session opt-out.
-                s.select_space(None, cx);
-                if let Some(device) = defaults.device {
-                    s.select_device(device, cx);
-                }
-            }
-        });
-        // The canvas never restores a drawer: a previously opened canvas
-        // terminal must not pop open on a fresh new chat.
-        let key = self.panel_key(cx);
-        if self.panels.get(&key).terminal_open {
-            self.panels.update(&key, |panels| {
-                panels.terminal_open = false;
-            });
-        }
-        self.terminal_tween = None;
-        if let Some(panel) = self.terminal.clone()
-            && panel.read(cx).is_open()
-        {
-            panel.update(cx, |panel, cx| panel.set_open(false, cx));
-        }
-        cx.notify();
+        self.open_new_session_picker(project, cx);
     }
 
     /// The trailing titlebar strip follows the columns beneath it.
@@ -409,7 +348,7 @@ impl Shell {
     /// animated left inset, the toggle-changes button on git projects).
     pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        // The canvas titles as NOTHING (user request — a "New chat"
+        // The canvas titles as NOTHING (user request — a "New session"
         // header over the empty canvas was noise); the bar keeps its height,
         // drag region, and buttons. Where a session runs, and its side-chat
         // and project actions, live in the session card.
@@ -418,7 +357,7 @@ impl Shell {
             match state.selected_chat_row() {
                 Some(chat) => (
                     SharedString::from(transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New chat".into()),
+                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
                     )),
                     chat.config.as_ref().map(|c| c.harness),
                     false,
@@ -453,23 +392,11 @@ impl Shell {
             content_width,
         } = self.titlebar_trailing_layout(on_canvas, cx);
 
-        // What runs alongside the open chat: its working subagents and side
-        // chats, counted on the session card's toggle.
+        // slopty: the open session's working subagents, counted on the inspector's toggle.
         let running_lanes = {
             let state = self.state.read(cx);
             let now = crate::clock::utc(cx);
-            state.selected_chat.as_deref().map_or(0, |chat| {
-                let side_chats = state
-                    .chats
-                    .iter()
-                    .filter(|side| {
-                        super::session_lanes::side_chat_of(side, chat) // slopty: no subagent
-                            && state.display_status_for(side, now)
-                                == slopty_view_proto::ChatIndicator::Working
-                    })
-                    .count() as u32;
-                state.running_subagents_for(chat, now) + side_chats
-            })
+            state.selected_chat.as_deref().map_or(0, |chat| state.running_subagents_for(chat, now))
         };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
@@ -632,31 +559,24 @@ impl Shell {
             )
         };
 
-        // The session card's toggle belongs to the transcript: it ends the
-        // transcript's stretch of the titlebar, left of the side pane's tabs
-        // when one is open, else just left of the explorer toggle.
-        let session_info_toggle = (!takeover && !on_canvas).then(|| {
-            let open = self.session_info_visible(cx);
-            let label = if open {
-                "Hide chat details"
-            } else {
-                "Show chat details"
-            };
+        // slopty: the inspector's toggle ends the session's stretch of the titlebar, left of
+        // the side pane's tabs when one is open, else just left of the explorer toggle. A plain
+        // terminal has nothing to inspect.
+        let inspects = crate::inspector::inspects(self.state.read(cx), &self.active_chat);
+        let session_info_toggle = (!takeover && !on_canvas && inspects).then(|| {
+            let open = self.inspector_shown(cx);
+            let label = if open { "Hide inspector" } else { "Show inspector" };
             header_icon_button_with(
-                "toggle-session-info",
+                "toggle-inspector",
                 icons::corner_card_glyph(16.0, theme.text_muted),
                 open,
                 &theme,
-                cx.listener(|this, _, _, cx| this.toggle_session_info(cx)),
+                cx.listener(|this, _, window, cx| this.toggle_inspector(window, cx)),
             )
-            .action_hint(label, Keys::Action(Box::new(chrome_keys::ToggleSessionInfo)), cx)
+            .action_hint(label, Keys::Action(Box::new(chrome_keys::ToggleInspector)), cx)
             .flex_none()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| this.note_session_info_press()),
-            )
-            // Running subagents and side chats ride the card's lanes: the
-            // button counts them, open or closed, for as long as they run.
+            // The session's running subagents: the button counts them, open or closed, for as
+            // long as they run.
             .when(running_lanes > 0, |button| {
                 crate::running_pill::mark_titlebar_button(button, running_lanes, &theme)
             })

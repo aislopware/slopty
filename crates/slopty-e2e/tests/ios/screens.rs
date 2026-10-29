@@ -1,7 +1,8 @@
-//! What a chat asks and opens on the simulator (`cargo xtask e2e ios --sim iphone|ipad`), each a
-//! golden in light and in dark, `ios-<device>-compact-<state>-*`: a question of Claude Code's (the
-//! stand-in's `AskUserQuestion`) and an approval of a command, each answered at its card by a tap;
-//! a shell of the chat's worker that runs what is typed; and the files of the chat's folder.
+//! A session on the simulator (`cargo xtask e2e ios --sim iphone|ipad`), each state a golden in
+//! light and in dark, `ios-<device>-compact-<state>-*`: the session is its terminal, the stand-in
+//! Claude Code's TUI, which takes what a finger types; its inspector reads the turn, a sheet over
+//! the session on a phone and a pane beside it on an iPad; and a shell of the session's worker
+//! and the files of its folder open from it.
 
 use std::time::Duration;
 
@@ -10,15 +11,9 @@ use slopty_e2e::{A11yNode, Driver, Dump};
 
 use crate::compact::{PHONE_BELOW, SETTLE, STEP, chats_page, goldens, saying, simulator, tap};
 
-/// The stand-in's question (`ask`): "Which color?", Red or Blue.
-const QUESTION: &str = "ask";
-/// The stand-in's command asked about before it runs (`bash <cmd>`).
-const APPROVAL: &str = "bash rm -rf build";
-
-/// The button of `d` labelled exactly `label`.
-fn button<'a>(d: &'a Dump, label: &str) -> Option<&'a A11yNode> {
-    d.a11y.iter().find(|n| n.role == "Button" && n.label.as_deref() == Some(label))
-}
+/// What the session is first asked, its title, and what a finger then types into its TUI.
+const FIRST: &str = "Say hello";
+const NEXT: &str = "Carry on";
 
 /// The chat's row of `d`: a button whose label holds `words`, the prompt its title comes from.
 fn row<'a>(d: &'a Dump, words: &str) -> Option<&'a A11yNode> {
@@ -104,72 +99,92 @@ async fn read_until(
     }
 }
 
-/// Whether a thread's read holds a request waiting on the person.
-fn asking(read: &serde_json::Value) -> bool {
-    read["requests"].as_array().is_some_and(|r| !r.is_empty())
+/// Whether a node past the session's terminal, its right pane or its sheet, says `words`.
+fn inspector_says(dump: &Dump, words: &str) -> bool {
+    let terminal = dump.a11y.iter().find(|n| n.role == "Terminal").map(|n| n.bounds);
+    let sheet = dump.a11y_node("Dialog", Some("Inspector")).map(|sheet| sheet.bounds);
+    dump.a11y.iter().any(|n| {
+        let [left, top] = [n.bounds[0], n.bounds[1]];
+        let beside = terminal
+            .is_none_or(|[x, y, width, height]| left >= x + width - 1.0 || top >= y + height - 1.0);
+        let inside = sheet.is_some_and(|[x, y, width, height]| {
+            left >= x && top >= y && left <= x + width && top <= y + height
+        });
+        n.role != "Terminal"
+            && (beside || inside)
+            && [&n.label, &n.value].into_iter().flatten().any(|text| text.contains(words))
+    })
 }
 
-/// A question and an approval wait at their cards on the device, and a tap answers each: the
-/// stand-in asks "Which color?" (`AskUserQuestion`), whose card offers Red and Blue, and a tap on
-/// Red answers it; then a command it wants to run (`rm -rf build`) is asked about, whose card
-/// offers Allow and Deny, and a tap on Deny refuses it.
+/// A session on the device is its terminal, the stand-in's TUI, with nothing over or under it: a
+/// finger taps it and types the next prompt into the TUI, which answers. The inspector reads the
+/// turn: on a phone a sheet the navigation bar's Inspector puts up over the session and its
+/// close puts away, on an iPad the pane beside it.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e ios"]
-async fn a_question_and_an_approval_are_answered_at_their_cards() {
-    const MACHINE: &str = "e2e-ios-ask";
+async fn a_session_is_its_terminal_and_shows_its_inspector() {
+    const MACHINE: &str = "e2e-ios-session";
     let (mut stack, phone) = device(MACHINE).await;
     let dir = stack.dir.path().to_path_buf();
     let device = if phone { "phone" } else { "pad" };
     let folder = stack.path("repo");
     std::fs::create_dir_all(&folder).unwrap();
+    let agent = start(&stack, MACHINE, &folder, FIRST).await;
+    let said = |words: &'static str| {
+        move |r: &serde_json::Value| r.to_string().contains(&format!("Done: {words}"))
+    };
+    read_until(&stack, &agent, "the agent never answered", said(FIRST)).await;
 
-    let asked = start(&stack, MACHINE, &folder, QUESTION).await;
-    read_until(&stack, &asked, "the question never came", asking).await;
     let drv = &mut stack.driver;
-    open_chat(drv, phone, QUESTION).await;
-    shown(drv, "the question's card", |d| {
-        button(d, "Red").is_some() && button(d, "Blue").is_some()
+    open_chat(drv, phone, FIRST).await;
+    let session = shown(drv, "the session's terminal", |d| {
+        d.a11y.iter().any(|n| n.role == "Terminal")
+            && d.lines_containing(&format!("Done: {FIRST}")).len() == 1
     })
     .await;
+    assert!(
+        session.a11y.iter().all(|n| n.role != "MultilineTextInput"),
+        "no field beside the terminal: {:?}",
+        session.a11y.iter().filter(|n| n.role == "MultilineTextInput").collect::<Vec<_>>()
+    );
     tokio::time::sleep(SETTLE).await;
-    goldens(drv, &dir, device, "question").await;
-    tap(drv, "Button", "Red").await;
-    let since = std::time::Instant::now();
-    loop {
-        let read = read_until(&stack, &asked, "", |_| true).await;
-        if !asking(&read) {
-            break;
-        }
-        // A pick that waits for its send goes with Return.
-        if since.elapsed() > Duration::from_secs(3) {
-            stack.driver.keys("enter").await.unwrap();
-        }
-        assert!(since.elapsed() < STEP, "the card's tap answered it: {read}");
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    goldens(drv, &dir, device, "session").await;
+
+    // A finger taps the terminal and types the next prompt into the TUI.
+    let [left, top, width, height] =
+        session.a11y.iter().find(|n| n.role == "Terminal").map(|n| n.bounds).unwrap();
+    drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
+    shown(drv, "the terminal holding the keyboard", |d| d.focused.starts_with("terminal:")).await;
+    drv.ui_insert_text(NEXT).await.unwrap();
+    drv.keys("enter").await.unwrap();
+    read_until(&stack, &agent, "the typed words never reached the TUI", said(NEXT)).await;
+
+    let drv = &mut stack.driver;
+    if phone {
+        tap(drv, "Button", "Show inspector").await;
     }
-    let said = |r: &serde_json::Value| r.to_string().contains("Done: noted.");
-    read_until(&stack, &asked, "the answer never reached it", said).await;
-
-    let approval = start(&stack, MACHINE, &folder, APPROVAL).await;
-    read_until(&stack, &approval, "the approval never came", asking).await;
-    let drv = &mut stack.driver;
-    open_chat(drv, phone, "rm -rf build").await;
-    shown(drv, "the approval's card", |d| {
-        button(d, "Allow").is_some() && button(d, "Deny").is_some() && saying(d, "rm -rf").is_some()
+    shown(drv, "the inspector reading the turn", |d| {
+        (!phone || d.a11y_node("Dialog", Some("Inspector")).is_some())
+            && inspector_says(d, &format!("Done: {NEXT}"))
     })
     .await;
     tokio::time::sleep(SETTLE).await;
-    goldens(drv, &dir, device, "approval").await;
-    tap(drv, "Button", "Deny").await;
-    read_until(&stack, &approval, "the tap on Deny answered nothing", |r| !asking(r)).await;
+    goldens(drv, &dir, device, "inspector").await;
+    if phone {
+        tap(drv, "Button", "Close inspector").await;
+        shown(drv, "the session again", |d| {
+            d.a11y_node("Dialog", Some("Inspector")).is_none()
+                && d.a11y_node("Button", Some("Show inspector")).is_some()
+        })
+        .await;
+    }
     stack.shutdown().await;
 }
 
-/// A shell of the chat's worker and the files of its folder open from the chat on the device, a
-/// finger's reach away: on a phone from its navigation bar ("Show terminal", and "Show files" as
-/// a page over the chat that leads back to it), on an iPad the files from the titlebar's "Show
-/// files panel" and the shell from ⌘J. The shell runs what is typed; the files list the folder's
-/// own.
+/// A shell of the session's worker and the files of its folder open from the session on the
+/// device: the shell from ⌘J, the files a finger's reach away (on a phone the navigation bar's
+/// "Show files", a page over the session that leads back to it; on an iPad the titlebar's "Show
+/// files panel"). The shell runs what is typed; the files list the folder's own.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e ios"]
 async fn a_chats_shell_and_its_files_open_on_the_device() {
@@ -192,14 +207,9 @@ async fn a_chats_shell_and_its_files_open_on_the_device() {
     let title = "Say hello";
     let drv = &mut stack.driver;
     open_chat(drv, phone, title).await;
-    shown(drv, "the chat's composer", |d| d.a11y.iter().any(|n| n.role == "MultilineTextInput"))
-        .await;
+    shown(drv, "the session's terminal", |d| d.a11y.iter().any(|n| n.role == "Terminal")).await;
 
-    if phone {
-        tap(drv, "Button", "Show terminal").await;
-    } else {
-        drv.keys("cmd-j").await.unwrap();
-    }
+    drv.keys("cmd-j").await.unwrap();
     shown(drv, "a shell at its prompt", |d| {
         d.terminals.iter().any(|t| t.at_prompt) && d.prompts_settled()
     })
@@ -212,11 +222,7 @@ async fn a_chats_shell_and_its_files_open_on_the_device() {
     .await;
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &dir, device, "terminal").await;
-    if phone {
-        tap(drv, "Button", "Hide terminal").await;
-    } else {
-        drv.keys("cmd-j").await.unwrap();
-    }
+    drv.keys("cmd-j").await.unwrap();
 
     if phone {
         tap(drv, "Button", "Show files").await;
@@ -232,9 +238,9 @@ async fn a_chats_shell_and_its_files_open_on_the_device() {
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &dir, device, "files").await;
     if phone {
-        // The files are a page over the chat, whose back leads to it.
+        // The files are a page over the session, whose back leads to it.
         tap(drv, "Button", "Back to Chat").await;
-        shown(drv, "the chat again", |d| d.a11y_node("Button", Some("Back to Chats")).is_some())
+        shown(drv, "the session again", |d| d.a11y_node("Button", Some("Back to Chats")).is_some())
             .await;
     } else {
         tap(drv, "Button", "Hide files panel").await;

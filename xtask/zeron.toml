@@ -30,7 +30,6 @@ provenance = "// Derived from zeron (MIT, github.com/zeronsh/zeron @ {base}), se
 "crates/zatex" = "crates/slopty-math"
 # Excerpts of the engine and the agent drivers: the types and helpers the shell reads.
 "crates/engine/src/registry.rs" = "crates/slopty-shell/src/catalog/registry.rs"
-"crates/harness/src/claude/catalog.rs" = "crates/slopty-shell/src/catalog/claude.rs"
 "crates/harness/src/lib.rs" = "crates/slopty-shell/src/catalog/harness.rs"
 
 # Literal rewrites, applied in order to the whole text of every file taken. The specific come
@@ -252,6 +251,45 @@ paths = [
     "crates/ui/src/theme_library.rs",
     "crates/ui/src/settings/completion.rs",
     "crates/ui/src/settings/wallpaper.rs",
+    # TUI-first (docs/decisions/agents.md, "TUI-first"; docs/decisions/ui.md, "A session is its
+    # terminal, its inspector beside it"): each agent works in its own TUI, which does what these
+    # did. The composer's dock and queue, the side chats, the session's info and lanes, the to-do
+    # panel and context meter (the inspector says both), the drop on the chat, the new-thread hero
+    # and the wallpaper's colours.
+    "crates/ui/src/composer/attachment_chip_tests.rs",
+    "crates/ui/src/composer_dock.rs",
+    "crates/ui/src/composer_dock/",
+    "crates/ui/src/queue.rs",
+    "crates/ui/src/pickers/compact.rs",
+    "crates/ui/src/shell/side_chats.rs",
+    "crates/ui/src/shell/session_info.rs",
+    "crates/ui/src/shell/session_lanes.rs",
+    "crates/ui/src/todo_panel.rs",
+    "crates/ui/src/context_usage.rs",
+    "crates/ui/src/shell/chat_dropzone.rs",
+    "crates/ui/src/shell/chat_dropzone_tests.rs",
+    "crates/ui/src/new_thread_background_effects.rs",
+    "crates/ui/src/new_thread_background_image.rs",
+    "crates/ui/src/new_thread_background_mask.rs",
+    "crates/ui/src/settings/wallpaper_colors.rs",
+    "crates/doc/src/queue.rs",
+    # The GUI is read-only toward the agent (docs/decisions/ui.md, "The GUI is read-only toward
+    # the agent"): no review comments, no chips, mentions or markdown in a text field, and no
+    # composer whose picks are remembered.
+    "crates/ui/src/comments.rs",
+    "crates/ui/src/comment_ui.rs",
+    "crates/ui/src/badges.rs",
+    "crates/ui/src/composer/chip.rs",
+    "crates/ui/src/composer_markdown.rs",
+    "crates/ui/src/settings/composer.rs",
+    "crates/proto/src/attachment_mentions.rs",
+    "crates/proto/src/chat_mentions.rs",
+    "crates/proto/src/file_mentions.rs",
+    "crates/proto/src/invocation.rs",
+    # gpui-fast clips a rounded `overflow_hidden` itself (#76), and the sidebar's own sections
+    # were pruned as reading nothing.
+    "crates/ui/src/rounded_clip.rs",
+    "crates/ui/src/shell/sidebar_sections.rs",
     # zeron's mark: the shell draws Slopty's (`crates/slopty-shell/assets/icons/slopty-logo.svg`).
     "crates/ui/assets/icons/zeron-logo.svg",
     # The repository's own files: Slopty has its own.

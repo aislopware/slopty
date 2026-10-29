@@ -98,7 +98,6 @@ impl WorkspaceView {
         self.desktop_relinked(key);
         self.reset_remote(key, &known, cx);
         self.relink_terminals(key, &known, cx);
-        self.sync_approvals(cx);
         self.hub_agents(key, cx);
         cx.notify();
     }
@@ -141,7 +140,6 @@ impl WorkspaceView {
         for line in said {
             Self::show_notice(line, cx);
         }
-        self.sync_approvals(cx);
         // A machine out of reach starts nothing.
         self.hub_agents(key, cx);
         self.update_awake(cx);
@@ -552,17 +550,11 @@ impl WorkspaceView {
         });
         let theme = self.theme.clone();
         let clip = self.clip_hook(key);
-        // A block goes to an agent only from a shell opened for a chat.
-        let me = cx.entity().downgrade();
-        let attach: slopty_terminal::AttachProbe = std::rc::Rc::new(move |cx: &gpui::App| {
-            me.upgrade().is_some_and(|ws| ws.read(cx).chat_of(session).is_some())
-        });
         let view = cx.new(|cx| {
             let mut view = TerminalView::new(session, size, link.out.clone(), theme, cx);
             if let Some(clip) = clip {
                 view.set_clip_hook(clip);
             }
-            view.set_attach_probe(attach);
             view
         });
         let sid = session;
@@ -591,7 +583,6 @@ impl WorkspaceView {
             }
             TerminalViewEvent::OpenPage { url } => this.open_worker_page(sid, url, cx),
             TerminalViewEvent::ViewFile { path, line } => this.view_file(sid, path, *line, cx),
-            TerminalViewEvent::Attach(text) => this.attach_to_chat(sid, text, cx),
             #[cfg(target_os = "macos")]
             TerminalViewEvent::DragOut { path } => this.drag_shell_path(sid, path, cx),
             #[cfg(not(target_os = "macos"))]

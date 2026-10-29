@@ -28,18 +28,18 @@ use crate::{Dispatch, ToolError, ui, view};
 
 /// What the model reads before any tool description.
 pub const INSTRUCTIONS: &str = "\
-Slopty runs agents (Claude Code, Codex, pi, ACP agents) on a fleet of machines. machines lists \
-the machines and their facts. agent_start starts an agent on one, which records you as its \
-parent; when it comes to rest or needs the person, you hear it through your hooks. agent_tell \
-sends an agent words, agent_read reads its thread, agent_wait waits for agents to come to \
-rest, agent_stop ends one with the agents under it, and agents lists every agent with its \
-parent. branch_bring copies a branch from a clone on one machine to a clone on another. \
-Requests an agent asks are the person's to answer. show_visual shows the person a native \
-visual (a chart, table, dashboard, diagram, simulation or 3D view) inline, and show_page a web \
-page, each above your reply. ui_state reads the person's Slopty window (its regions, tabs and \
-the chat on screen); ui_terminal, ui_open, ui_region, ui_chat and ui_split change it, never \
-taking the keyboard from the person. Everything else is the `slopty` command: `slopty --help` \
-lists it.";
+Slopty runs agents (Claude Code, Codex, pi) on a fleet of machines, each its own TUI in a \
+terminal. machines lists the machines and their facts. agent_start starts an agent on one, \
+which records you as its parent. agent_tell types an agent words and submits them, agent_read \
+reads its thread, agent_wait waits for agents to come to rest or need the person, agent_stop \
+interrupts one and the agents under it as Esc does, and agents lists every agent with its \
+parent. branch_bring copies a branch from a clone on one machine to a clone on another. What \
+an agent asks is the person's to answer, in its terminal. show_visual shows the person a \
+native visual (a chart, table, dashboard, diagram, simulation or 3D view) inline, and \
+show_page a web page, each above your reply. ui_state reads the person's Slopty window (its \
+regions, tabs and the chat on screen); ui_terminal, ui_open, ui_region, ui_chat and ui_split \
+change it, never taking the keyboard from the person. Everything else is the `slopty` \
+command: `slopty --help` lists it.";
 
 /// How often a long wait with a progress sink reports that it is still waiting.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
@@ -63,7 +63,7 @@ struct AgentStartArgs {
     /// A fresh git worktree of the folder's clone, by this name, on the branch
     /// `worktree-<name>`.
     worktree: Option<String>,
-    /// `claude` (the default), `codex`, `pi`, or an ACP agent by its registry name.
+    /// `claude` (the default), `codex` or `pi`.
     agent: Option<String>,
     /// The model, by the agent's own id.
     model: Option<String>,
@@ -227,17 +227,18 @@ pub fn list() -> Vec<Tool> {
         ),
         tool::<AgentStartArgs>(
             "agent_start",
-            "Start an agent on a machine, in a `folder` or the machine's clone of a `repo`, \
-             optionally in a fresh `worktree`, told `prompt` first. It acts as freely as the \
-             person's autonomy setting allows, and has these tools too. You are recorded as its \
-             parent: its rest, or its need of the person, reaches you through your hooks. \
-             Returns its `agent` id and the `worktree` it works in.",
+            "Start an agent on a machine as its own TUI in a terminal, in a `folder` or the \
+             machine's clone of a `repo`, optionally in a fresh `worktree`, told `prompt` first. \
+             It acts as freely as the person's autonomy setting allows, and has these tools too. \
+             You are recorded as its parent; agent_wait tells you when it rests or needs the \
+             person. Returns its `agent` id and the `worktree` it works in.",
             Kind::Write,
         ),
         tool::<AgentTellArgs>(
             "agent_tell",
-            "Send an agent of your own tree words, marked as yours and not the person's. They \
-             reach it through its hooks, waking it when it is idle. Returns once they are queued.",
+            "Type words into the terminal of an agent of your own tree and submit them, marked as \
+             an agent's and not the person's. Refused while it waits on the person. Returns once \
+             they are typed.",
             Kind::Write,
         ),
         tool::<AgentReadArgs>(
@@ -258,7 +259,8 @@ pub fn list() -> Vec<Tool> {
         ),
         tool::<AgentStopArgs>(
             "agent_stop",
-            "End an agent and every agent under it, their conversations kept.",
+            "Interrupt an agent at work and every agent at work under it, as Esc does in its \
+             terminal; their terminals and conversations stay.",
             Kind::Ends,
         ),
         bare(

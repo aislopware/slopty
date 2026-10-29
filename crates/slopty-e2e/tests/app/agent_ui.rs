@@ -14,7 +14,7 @@ use slopty_e2e::harness::{ServedApp, bin_dir};
 
 use crate::served::{
     STEP, heard, holding, node, open_thread, says, seen, start, tell, thread_until,
-    type_in_composer,
+    type_in_terminal,
 };
 
 /// The worker's name, as the CLI names the machine.
@@ -87,15 +87,6 @@ async fn ui(stack: &ServedApp, cwd: &Path, args: &[&str]) -> (bool, Value) {
         )
     });
     (out.status.success(), said)
-}
-
-/// The composer as the frame has it: its text, and whether it holds the keyboard.
-fn composer(dump: &Dump) -> (String, bool) {
-    dump.a11y
-        .iter()
-        .find(|n| n.role == "MultilineTextInput")
-        .map(|n| (n.value.clone().unwrap_or_default(), n.focused))
-        .unwrap_or_default()
 }
 
 /// An agent's tools drive the window: the stand-in's `ui_region` hides the sidebar (the toggle
@@ -203,9 +194,10 @@ async fn an_agents_tools_lay_out_the_window() {
 }
 
 /// The person stays in charge, and every refusal says why: from an agent's shell, `slopty ui
-/// chat` puts the other chat on screen while nobody types; once the person types a draft, the
-/// same ask is busy, the draft and the keyboard stay, and an ask that moves nothing the person
-/// is in (`show terminal`) goes through with the keys still landing in the draft. A region, a
+/// chat` puts the other chat on screen while nobody types (its terminal holding the keyboard is
+/// someone watching); once the person types a draft in the session's terminal, the same ask
+/// is busy, the chat and the keyboard stay, and an ask that moves nothing the person is in
+/// (`show terminal`, the dock) goes through with the keyboard still the session's. A region, a
 /// file or a chat the window does not know is unknown, its message naming what it does know;
 /// with the app gone, no window is reached.
 #[tokio::test]
@@ -229,10 +221,11 @@ async fn the_window_stays_the_persons_and_says_why_it_refuses() {
     assert_eq!(moved["window"]["chat"]["title"], other, "{moved}");
     seen(&mut stack.driver, "the mark", STEP, |d| says_anywhere(d, &format!("put {other}"))).await;
 
-    // The person types a draft: the chat and the keyboard are theirs.
-    type_in_composer(&mut stack.driver, "half a thought").await;
-    seen(&mut stack.driver, "the draft", STEP, |d| composer(d) == ("half a thought".into(), true))
-        .await;
+    // The person types a draft in the session's terminal: the chat and the keyboard are theirs.
+    type_in_terminal(&mut stack.driver, "half a thought").await;
+    let typing =
+        seen(&mut stack.driver, "the draft", STEP, |d| d.focused.starts_with("terminal:")).await;
+    let session = typing.focused.clone();
     let (ok, busy) = ui(&stack, &repo, &["chat", &shown]).await;
     assert!(!ok, "{busy}");
     assert_eq!(busy["error"]["code"], "busy", "{busy}");
@@ -243,12 +236,8 @@ async fn the_window_stays_the_persons_and_says_why_it_refuses() {
     assert!(ok, "{drawer}");
     seen(&mut stack.driver, "the drawer", STEP, |d| node(d, "Button", "Hide terminal").is_some())
         .await;
-    stack.driver.type_text(", finished").await.unwrap();
-    let kept = seen(&mut stack.driver, "the keys in the draft", STEP, |d| {
-        composer(d).0 == "half a thought, finished"
-    })
-    .await;
-    assert!(composer(&kept).1, "the composer kept the keyboard");
+    let kept = stack.driver.dump().await.unwrap();
+    assert_eq!(kept.focused, session, "the session's terminal kept the keyboard");
 
     // What the window does not know.
     let (ok, region) = ui(&stack, &repo, &["show", "toolbar"]).await;
@@ -260,7 +249,7 @@ async fn the_window_stays_the_persons_and_says_why_it_refuses() {
     let (ok, chat) = ui(&stack, &repo, &["chat", "No such chat"]).await;
     assert!(!ok && chat["error"]["code"] == "unknown", "{chat}");
     let frame = stack.driver.dump().await.unwrap();
-    assert_eq!(composer(&frame), ("half a thought, finished".into(), true), "the draft is whole");
+    assert_eq!(frame.focused, session, "the keyboard is still the session's");
     assert!(holding(&frame, "Button", "README").is_none(), "nothing opened");
 
     // The app gone, no window answers.

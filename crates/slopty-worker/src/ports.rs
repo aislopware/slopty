@@ -149,7 +149,7 @@ pub fn listening(roots: &[(SessionId, u32)]) -> Vec<Port> {
 }
 
 /// The live direct children of `pid`: a managed launcher's Claude Code is its child
-/// (`slopty_agent::AgentTable::recover`).
+/// (`thread::claude`, which finds the session it keeps a record of).
 #[must_use]
 pub fn child_pids(pid: i32) -> Vec<i32> {
     let Ok(pid) = u32::try_from(pid) else { return Vec::new() };

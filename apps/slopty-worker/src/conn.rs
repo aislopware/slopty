@@ -1794,8 +1794,16 @@ impl Peer<'_> {
         }
     }
 
-    /// Hand `req` to `session`'s actor.
+    /// Hand `req` to `session`'s actor; a submit its agent's dialog would take as an answer
+    /// is refused instead, with why.
     fn request(&self, session: SessionId, req: TermRequest) {
+        if matches!(req, TermRequest::Submit { .. })
+            && let Some(why) = self.daemon.submit_refused(session)
+        {
+            tracing::info!(client = %self.client, %session, %why, "a submit was refused");
+            let event = TermEvent::Error(TermError::Refused(why));
+            return self.post(WorkerMsg::Term { session, event });
+        }
         let outcome = self.daemon.worker.get(session).and_then(|h| h.request(self.client, req));
         if let Err(e) = outcome {
             self.fail(session, &e);

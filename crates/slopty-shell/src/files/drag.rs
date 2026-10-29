@@ -402,7 +402,7 @@ fn edge_scroll_speed(y: f32, top: f32, bottom: f32) -> f32 {
 mod tests {
     use super::*;
     #[gpui::test]
-    fn real_tree_drop_emits_one_move_and_no_chat_reference(cx: &mut gpui::TestAppContext) {
+    fn real_tree_drop_emits_one_move(cx: &mut gpui::TestAppContext) {
         let (files, cx) = super::super::test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
@@ -439,11 +439,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(moves.len(), 1);
         assert_eq!(moves[0].destination.as_deref(), Some("folder/a.txt"));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, FilesEvent::AddToChat { .. }))
-        );
     }
     #[gpui::test]
     fn hover_expands_only_after_delay_and_escape_stops_tasks(cx: &mut gpui::TestAppContext) {

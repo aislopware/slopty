@@ -2,10 +2,11 @@
 //! slopty: a model-based fuzzer over the whole shell in a headless window.
 //!
 //! A seed picks a screen (the self-test's Mac window, a narrow one, an iPhone at 3 ×, an iPad)
-//! and a sequence of steps a person and the engine take: chats opened and switched, subagents
-//! drilled into and left, drafts typed and sent, turns stopped, the sidebar and the right pane
-//! toggled, shortcuts, resizes, turns starting and ending, chats arriving and going, a queue
-//! coming and going, the clock and the wall clock moving on, frames delivered mid-motion. After
+//! and a sequence of steps a person and the engine take: sessions opened and switched, a
+//! subagent's timeline opened and left for its parent's, sessions' terminals coming and going,
+//! the sidebar, the inspector and the right pane toggled, shortcuts, resizes,
+//! turns starting and ending, chats arriving and going, the clock and the wall clock moving on,
+//! frames delivered mid-motion. After
 //! every step: nothing panicked (GPUI's own retained check panics on a stale frame as it draws
 //! it), the frame shown paints what a frame from scratch at its moment paints
 //! ([`super::retention_tests::stale`]), the shell selected the chat the model says it did, the
@@ -26,7 +27,7 @@ use std::time::Duration;
 use chrono::DateTime;
 
 use gpui::{TestAppContext, TestDispatcher, VisualTestContext};
-use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, QueuedMessage, SessionMessageEntry};
+use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use slopty_view_proto::SessionStatus;
 
 use super::retention_tests::{PHONE, Screen, chat_row, frames, launch, session_row, stale, turn, wobble};
@@ -52,12 +53,13 @@ const RESIZES: [&[(f32, f32)]; 4] = [
 /// The shortcuts a step presses.
 const KEYS: &[&str] = &[
     "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-b", "cmd-r", "cmd-e", "cmd-n", "cmd-[", "cmd-]", "cmd-t",
-    "cmd-i", "cmd-k", "cmd-/", "cmd-.", "cmd-;", "cmd-f", "cmd-shift-t", "ctrl-tab", "ctrl-shift-tab",
+    "cmd-i", "cmd-k", "cmd-l", "cmd-/", "cmd-.", "cmd-;", "cmd-f", "cmd-shift-t", "ctrl-tab",
+    "ctrl-shift-tab",
     "escape", "escape", "tab", "enter",
 ];
 
-/// The chats a run starts with: two at the top, two subagents of `b` that run inside it (one
-/// drilled into from the other), one of `a` that takes messages.
+/// The chats a run starts with: three at the top, two subagents of `b` that run inside it, one
+/// of `a`.
 const START: &[(&str, Option<(&str, bool)>)] = &[
     ("a", None),
     ("b", None),
@@ -73,12 +75,10 @@ enum Step {
     Key(&'static str),
     /// A chat's row tapped, or a subagent's card opened, while it is listed.
     Open(String),
-    /// A subagent's "Back to …".
+    /// The inspector's way back from a subagent's timeline to its parent's.
     Back,
-    /// Words typed into the composer, focused first as a tap focuses it.
-    Type(&'static str),
-    /// The composer's draft sent with Enter.
-    Send,
+    /// A session's terminal coming (the session runs in one) or going (it ended).
+    Terminal(String, bool),
     /// A chat's turn starting or ending.
     Turn(String, bool),
     /// The open chat's transcript in, with `n` streamed paragraphs on its last answer.
@@ -87,8 +87,6 @@ enum Step {
     Arrive(String),
     /// A chat going away (archived or deleted elsewhere).
     Leave(String),
-    /// A message queued under the open chat, or the queue delivered.
-    Queue(bool),
     /// The window resized to one of its screen's sizes.
     Resize(usize),
     /// The clock moving on by this many ms, its frames drawn.
@@ -138,8 +136,7 @@ fn steps_of(seed: u64, len: usize) -> Vec<Step> {
             0..18 => Step::Key(rng.pick(KEYS)),
             18..32 => Step::Open(rng.pick(&ids).clone()),
             32..38 => Step::Back,
-            38..44 => Step::Type(rng.pick(&["Say more", "x", "A longer draft that wraps onto a second line of the composer"])),
-            44..48 => Step::Send,
+            38..48 => Step::Terminal(rng.pick(&ids).clone(), rng.below(3) != 0),
             48..56 => Step::Turn(rng.pick(&ids).clone(), rng.below(2) == 0),
             56..64 => Step::Stream(rng.below(6)),
             64..67 => {
@@ -148,8 +145,7 @@ fn steps_of(seed: u64, len: usize) -> Vec<Step> {
                 ids.push(id.clone());
                 Step::Arrive(id)
             }
-            67..70 => Step::Leave(rng.pick(&ids).clone()),
-            70..75 => Step::Queue(rng.below(2) == 0),
+            67..75 => Step::Leave(rng.pick(&ids).clone()),
             75..80 => Step::Resize(rng.below(resizes)),
             80..86 => Step::Wait(*rng.pick(&[5, 40, 120, 400, 1500])),
             86..94 => Step::Frames(1 + rng.below(6)),
@@ -158,10 +154,12 @@ fn steps_of(seed: u64, len: usize) -> Vec<Step> {
         .collect()
 }
 
-/// What the model holds of the engine's side: the chats, their sessions and what is open.
+/// What the model holds of the engine's side: the chats, their sessions and their terminals.
 struct Model {
     chats: Vec<(String, Option<(String, bool)>)>,
     working: Vec<String>,
+    /// The sessions running in a terminal, each in its own.
+    terminals: Vec<String>,
 }
 
 impl Model {
@@ -169,7 +167,18 @@ impl Model {
         Self {
             chats: START.iter().map(|(id, parent)| ((*id).to_owned(), parent.map(|(p, i)| (p.to_owned(), i)))).collect(),
             working: vec!["a".into()],
+            terminals: vec!["a".into(), "b".into()],
         }
+    }
+
+    /// The parent of chat `id`, when it is a subagent.
+    fn parent(&self, id: &str) -> Option<String> {
+        self.chats.iter().find(|(chat, _)| chat == id).and_then(|(_, parent)| parent.as_ref().map(|(p, _)| p.clone()))
+    }
+
+    /// Each session running in a terminal, by its chat: the view model's `WatchSessionTerminals`.
+    fn session_terminals(&self) -> std::collections::BTreeMap<String, String> {
+        self.terminals.iter().map(|chat| (chat.clone(), format!("t-{chat}"))).collect()
     }
 
     fn rows(&self, now: DateTime<Utc>) -> Vec<slopty_view_proto::Chat> {
@@ -211,10 +220,12 @@ fn shell_now(cx: &mut VisualTestContext) -> DateTime<Utc> {
 fn apply_model(model: &Model, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     let now = shell_now(cx);
     let (rows, sessions) = (model.rows(now), model.sessions(now));
+    let terminals = model.session_terminals();
     shell.update(cx, |shell, cx| {
         shell.state.update(cx, |state, cx| {
             state.apply_chats(rows);
             state.apply_sessions(sessions);
+            state.apply_session_terminals(terminals);
             cx.notify();
         });
     });
@@ -243,21 +254,19 @@ fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx
         }
         Step::Open(_) => {}
         Step::Back => {
-            shell.update(cx, |shell, cx| {
-                shell.leave_drill(cx);
+            if let Some(parent) = selected(shell, cx).and_then(|chat| model.parent(&chat)) {
+                shell.update(cx, |shell, cx| shell.open_chat(parent, cx));
+            }
+        }
+        Step::Terminal(id, running) => {
+            model.terminals.retain(|chat| chat != id);
+            if *running && model.parent(id).is_none() && model.chats.iter().any(|(chat, _)| chat == id) {
+                model.terminals.push(id.clone());
+            }
+            let terminals = model.session_terminals();
+            notify_state(shell, cx, &|state| {
+                state.apply_session_terminals(terminals.clone());
             });
-        }
-        Step::Type(text) => {
-            let input = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.clone());
-            cx.update(|window, cx| window.focus(&input.read(cx).focus_handle(cx), cx));
-            cx.run_until_parked();
-            cx.simulate_input(text);
-        }
-        Step::Send => {
-            let input = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.clone());
-            cx.update(|window, cx| window.focus(&input.read(cx).focus_handle(cx), cx));
-            cx.run_until_parked();
-            cx.simulate_keystrokes("enter");
         }
         Step::Turn(id, working) => {
             model.working.retain(|w| w != id);
@@ -292,11 +301,8 @@ fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx
         Step::Leave(id) => {
             model.chats.retain(|(chat, parent)| chat != id && parent.as_ref().is_none_or(|(p, _)| p != id));
             model.working.retain(|w| w != id);
+            model.terminals.retain(|chat| model.chats.iter().any(|(listed, _)| listed == chat));
             apply_model(model, shell, cx);
-        }
-        Step::Queue(on) => {
-            let queue = if *on { vec![QueuedMessage::new("q1", "Say more", "local")] } else { Vec::new() };
-            notify_state(shell, cx, &|state| state.queue = queue.clone());
         }
         Step::Resize(ix) => {
             let (w, h) = RESIZES[screen][*ix];
@@ -361,7 +367,7 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
                 for (ix, step) in steps.iter().enumerate() {
                     at.set(ix);
                     let before = selected(&shell, cx);
-                    let drill = shell.read_with(cx, |shell, cx| shell.subagent_drill(cx));
+                    let parent = before.as_deref().and_then(|chat| model.parent(chat));
                     take(step, &shell, &mut model, screen, cx);
                     // A step followed by frames or a pause is judged mid-motion: one frame
                     // drawn, then those; any other comes to rest first.
@@ -392,7 +398,7 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
                     let present = |id: &str| model.chats.iter().any(|(chat, _)| chat == id);
                     let expected = match step {
                         Step::Open(id) if present(id) => Some(Some(id.clone())),
-                        Step::Back => Some(drill.map_or(before, |drill| Some(drill.parent))),
+                        Step::Back => Some(parent.clone().or(before)),
                         _ => None,
                     };
                     if let Some(expected) = expected
@@ -410,40 +416,10 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
                     {
                         return Err(Failure { step: ix, kind: "model", detail: format!("{id} is selected but gone") });
                     }
-                    // A subagent shown names itself and its parent over its run, from the frame it
-                    // shows in: another's name there is the last one's left over.
-                    // A phone's Sessions page, or its page of the right pane or the files, stands
-                    // over it.
-                    let drilled = shell.update(cx, |shell, cx| {
-                        let covered = shell.compact()
-                            && (shell.compact_sessions_up(cx) || shell.right_pane_open(cx) || shell.files_panel_open(cx));
-                        shell.subagent_drill(cx).map(|drill| (drill, covered))
-                    });
                     let fault = cx.update(|window, cx| {
                         window.refresh();
                         window.draw(cx).clear(cx);
-                        a11y_fault(window).or_else(|| {
-                            let (drill, covered) = drilled.as_ref()?;
-                            let want = format!("{} › {}", drill.parent_title, drill.child_title);
-                            let tree = window.a11y_tree()?;
-                            let has = |role: gpui::accesskit::Role, label: &str| {
-                                tree.nodes.iter().any(|(_, node)| node.role() == role && node.label() == Some(label))
-                            };
-                            let named = has(gpui::accesskit::Role::Navigation, &want);
-                            // Shown is its run on screen: for one inside its parent, the bar in the
-                            // composer's place says so.
-                            let bar = format!("Runs inside {}", drill.parent_title);
-                            let shown = !covered && (!drill.in_parent || has(gpui::accesskit::Role::Status, &bar));
-                            let labels: Vec<String> = tree
-                                .nodes
-                                .iter()
-                                .filter(|(_, node)| matches!(node.role(), gpui::accesskit::Role::Navigation | gpui::accesskit::Role::Status | gpui::accesskit::Role::Tab))
-                                .map(|(_, node)| format!("{:?} {:?}", node.role(), node.label()))
-                                .collect();
-                            (shown != named).then(|| {
-                                format!("{}: run shown {shown}, breadcrumb {want:?} {named}; {labels:?}", drill.child)
-                            })
-                        })
+                        a11y_fault(window)
                     });
                     if let Some(fault) = fault {
                         return Err(Failure { step: ix, kind: "a11y", detail: fault });
@@ -581,42 +557,11 @@ fn a_long_fuzz_of_the_shell() {
     fuzz(first, env("SLOPTY_FUZZ_RUNS", 64), usize::try_from(env("SLOPTY_FUZZ_STEPS", 120)).unwrap_or(120), true);
 }
 
-/// The long run's three stops on a Mac (2026-10-18), shrunk: a cached spinner in the composer
-/// drawn again after the composer's clip moved (a turn started, the window resized, a chat
-/// opened). They were the old every-frame check showing its own frame, not the shell's; they
-/// stay as the check's regression seeds.
-#[test]
-fn the_long_run_s_clip_stops_draw_alike() {
-    let stops: [(u64, &[usize]); 3] = [
-        (1044, &[1, 10, 31, 46, 47, 97]),
-        (3140, &[1, 3, 11, 13, 15, 18, 35, 42, 45]),
-        (4132, &[51, 54, 56, 66, 76]),
-    ];
-    for (seed, keep) in stops {
-        let len = keep.iter().max().map_or(0, |max| max + 1);
-        let steps = kept(&steps_of(seed, len), keep);
-        if let Err(failure) = run(seed, &steps) {
-            panic!("seed {seed} {keep:?} fails at {:?}: {}: {}", steps.get(failure.step), failure.kind, failure.detail);
-        }
-    }
-}
-
-/// The long run's stop on the iPad (seed 4255, 2026-10-18), shrunk to five steps: a transcript in,
-/// the terminal opened, the iPad turned to portrait and judged a frame later, its prompts drawn
-/// folded as at the old width where a frame from scratch folds them anew. A prompt's bubble learns
-/// its wrapped height as it paints, and a view notified while its window paints asks for no frame,
-/// so the fold waited for whatever drew next.
-#[test]
-fn the_long_run_s_ipad_fold_stop_draws_alike() {
-    let (seed, keep): (u64, &[usize]) = (4255, &[70, 78, 79, 80, 81]);
-    let steps = kept(&steps_of(seed, keep.iter().max().map_or(0, |max| max + 1)), keep);
-    if let Err(failure) = run(seed, &steps) {
-        panic!("seed {seed} {keep:?} fails at {:?}: {}: {}", steps.get(failure.step), failure.kind, failure.detail);
-    }
-}
-
-/// The same fold brought down to itself: a prompt that shows open until its first layout wraps
-/// it past five lines folds in a frame of its own, the window otherwise at rest.
+/// The long run's stop on the iPad (seed 4255, 2026-10-18) brought down to itself: a prompt that
+/// shows open until its first layout wraps it past five lines folds in a frame of its own, the
+/// window otherwise at rest. The timeline is the inspector's now. A prompt's bubble learns its wrapped height as it paints, and a view
+/// notified while its window paints asks for no frame, so the fold once waited for whatever drew
+/// next.
 #[gpui::test]
 fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut TestAppContext) {
     let (shell, cx) = launch(cx, super::retention_tests::DESKTOP);
@@ -631,6 +576,8 @@ fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut Tes
     });
     cx.update(|window, _| window.set_a11y_active(true));
     frames(cx, Duration::from_millis(16), 60);
+    // slopty: a session shown the first time opens on its inspector, the timeline in it.
+    assert!(shell.read_with(cx, |shell, cx| shell.inspector_shown(cx)), "the inspector shows");
     // Under the 400 characters that fold a prompt before it is measured, on one line: only its
     // layout knows it wraps past five lines in the column.
     let prompt = format!("{}word", "word ".repeat(79));

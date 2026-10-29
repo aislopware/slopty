@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use slopty_proto::thread::{Limit, ThreadState, Wait};
+use slopty_proto::thread::ThreadState;
 
 use super::*;
 use crate::conversation::{Conversation, Transcripts};
 use crate::transcript::Tail;
 
-const CONVERSATIONS: [&str; 10] = [
+const CONVERSATIONS: [&str; 9] = [
     "edit",
     "tools",
     "interrupt",
@@ -16,7 +16,6 @@ const CONVERSATIONS: [&str; 10] = [
     "permission",
     "background",
     "auto",
-    "approve-edit",
     "notebook",
     "fork",
 ];
@@ -220,9 +219,8 @@ fn a_subagent_works_until_its_call_ends_then_is_done() {
 }
 
 /// A subagent runs only in the Claude Code that started it: one the session's transcript left
-/// at work works on under a process that started before it, and once a process started after
-/// it runs the session (`--resume`, a worker that came back to a new one), it stopped with the
-/// one before: its turn ended, exited and not resumable.
+/// at work works on while that Claude Code runs, and once it is gone (the TUI quit, its
+/// terminal closed), it stopped with it: its turn ended, exited and not resumable.
 #[test]
 fn a_subagent_left_at_work_stops_with_the_claude_code_that_ran_it() {
     let source = dir("conversation", "tools");
@@ -245,12 +243,11 @@ fn a_subagent_left_at_work_stops_with_the_claude_code_that_ran_it() {
         .expect("the subagent at work");
     let began = host.thread(sub).turns.iter().map(|t| t.started_ms).min().expect("its turn");
 
-    host.take(observed.started(WallMs::from_millis(1)));
     let working = host.thread(sub);
     assert_eq!((working.status.phase, working.status.liveness), (Phase::Working, Liveness::Live));
 
     let after = WallMs::from_millis(began.as_millis() + 60_000);
-    host.take(observed.started(after));
+    host.take(observed.gone(after));
     let stopped = host.thread(sub);
     assert_eq!(stopped.status.phase, Phase::Stopped);
     assert_eq!(stopped.status.liveness, Liveness::Exited { resumable: false });
@@ -408,31 +405,15 @@ fn a_turn_a_usage_limit_stopped_fails_until_it_resets() {
     assert_eq!(host.thread(observed.main()).status.phase, Phase::Done, "a new prompt starts over");
 }
 
-/// A limit stop with no quota recorded resets when the full window does; any
-/// other error that ended a turn fails it with no reset, as an API error; and a turn the
-/// model went on in after an error completes.
+/// A limit stop that says no reset fails with none, as a limit; any other error that ended a
+/// turn fails it with no reset, as an API error; and a turn the model went on in after an
+/// error completes.
 #[test]
 fn a_stopped_turn_fails_by_what_stopped_it() {
-    let full = Meters {
-        limits: vec![
-            Limit {
-                name: "five-hour".to_owned(),
-                used_bp: 10_000,
-                resets_ms: Some(WallMs::from_millis(1_790_030_000_000)),
-            },
-            Limit {
-                name: "seven-day".to_owned(),
-                used_bp: 4_000,
-                resets_ms: Some(WallMs::from_millis(1_790_500_000_000)),
-            },
-        ],
-        ..Meters::default()
-    };
     let ended = |records: &[serde_json::Value]| {
         let mut observed = observed();
         let mut host = Host::default();
         host.take(observed.drain());
-        host.take(observed.meters(full.clone()));
         host.take(observed.transcript(&read(records), &[]));
         let thread = host.thread(observed.main());
         let notice = thread.items.iter().find_map(|i| match &i.body {
@@ -442,11 +423,7 @@ fn a_stopped_turn_fails_by_what_stopped_it() {
         (thread.turns.first().map(|t| t.state.clone()), notice)
     };
     let (state, notice) = ended(&stopped_turn(conv::Stop::RATE_LIMIT, None));
-    assert!(
-        matches!(state, Some(TurnState::Failed { until_ms: Some(at), .. })
-            if at == WallMs::from_millis(1_790_030_000_000)),
-        "{state:?}"
-    );
+    assert!(matches!(state, Some(TurnState::Failed { until_ms: None, .. })), "{state:?}");
     assert_eq!(notice.as_deref(), Some(Notice::LIMIT));
     let (state, notice) = ended(&stopped_turn("server_error", None));
     assert!(matches!(state, Some(TurnState::Failed { until_ms: None, .. })), "{state:?}");
@@ -492,119 +469,6 @@ fn only_what_ran_in_the_background_is_background_work() {
     }
 }
 
-/// The slash commands Claude Code takes are the thread's, each by where it comes from, told
-/// once, and told again when the thread begins anew from its transcript.
-#[test]
-fn slash_commands_are_the_threads() {
-    let listed = vec![
-        conv::SlashCommand {
-            name: "compact".to_owned(),
-            description: "Compact the conversation".to_owned(),
-            argument_hint: None,
-            source: conv::CommandSource::BuiltIn,
-            skill: false,
-        },
-        conv::SlashCommand {
-            name: "ship".to_owned(),
-            description: "Ship it".to_owned(),
-            argument_hint: Some("<branch>".to_owned()),
-            source: conv::CommandSource::Project,
-            skill: false,
-        },
-    ];
-    let mut observed = observed();
-    let mut host = Host::default();
-    host.take(observed.drain());
-    host.take(observed.commands(&listed));
-    let thread = host.thread(observed.main());
-    let named: Vec<(&str, &str)> =
-        thread.commands.iter().map(|c| (c.name.as_str(), c.source.as_str())).collect();
-    assert_eq!(named, [("compact", "built-in"), ("ship", "project")]);
-    assert_eq!(thread.commands[1].argument_hint.as_deref(), Some("<branch>"));
-    assert!(observed.commands(&listed).is_empty(), "told once");
-}
-
-/// A thread reviews through Claude Code's own `/code-review` only while Claude Code lists it:
-/// the review capability comes with the command and goes with it.
-#[test]
-fn a_thread_reviews_while_claude_code_lists_code_review() {
-    let command = |name: &str| conv::SlashCommand {
-        name: name.to_owned(),
-        description: String::new(),
-        argument_hint: None,
-        source: conv::CommandSource::BuiltIn,
-        skill: false,
-    };
-    let mut observed = observed();
-    let mut host = Host::default();
-    host.take(observed.drain());
-    let reviews =
-        |host: &Host, observed: &History| host.thread(observed.main()).meta.can(Cap::REVIEW);
-    host.take(observed.commands(&[command("compact")]));
-    assert!(!reviews(&host, &observed), "no door without the command");
-    host.take(observed.commands(&[command("compact"), command(REVIEW_COMMAND)]));
-    assert!(reviews(&host, &observed), "the command is the door");
-    let caps = &host.thread(observed.main()).meta.caps;
-    assert!(caps.windows(2).all(|w| w[0] < w[1]), "still sorted: {caps:?}");
-    host.take(observed.commands(&[command("compact")]));
-    assert!(!reviews(&host, &observed), "and goes with it");
-}
-
-/// An agent at rest whose only work left running is commands it started in the background
-/// waits on them by name (`Wait::COMMAND`), worded again once the transcript shows them; more
-/// work than the transcript shows (a monitor) or a scheduled prompt is a task of its own.
-#[test]
-fn a_wait_on_commands_left_running_names_them() {
-    use serde_json::json;
-    let main = conv::ThreadId::Main;
-    let mut conversation = Conversation::default();
-    let mut observed = observed();
-    let mut host = Host::default();
-    host.take(observed.drain());
-    let wait = |host: &Host, observed: &History| {
-        host.thread(observed.main()).status.wait.clone().expect("a wait")
-    };
-
-    host.take(done(&mut observed));
-    host.take(observed.background(1, 0, None));
-    assert_eq!(wait(&host, &observed).kind, Wait::TASK, "nothing named running yet");
-    let input = json!({"command": "npm run dev", "run_in_background": true});
-    let call = json!({
-        "type": "assistant", "uuid": "a1", "timestamp": "2026-09-27T03:15:26.000Z",
-        "message": { "role": "assistant", "content": [
-            { "type": "tool_use", "id": "t1", "name": "Bash", "input": input },
-        ] },
-    });
-    let started = json!({
-        "type": "user", "uuid": "u1", "parentUuid": "a1",
-        "timestamp": "2026-09-27T03:15:27.000Z",
-        "message": { "role": "user", "content": [{
-            "type": "tool_result", "tool_use_id": "t1",
-            "content": "Command running in background with ID: b1. Output is being written \
-                        to: /tmp/b1.output.",
-        }] },
-        "toolUseResult": { "stdout": "", "stderr": "", "backgroundTaskId": "b1" },
-    });
-    let mut changes = conversation.ingest(&main, &call);
-    changes.extend(conversation.ingest(&main, &started));
-    host.take(observed.transcript(&changes, &[]));
-    let state = host.thread(observed.main());
-    let [task] = state.tasks.as_slice() else { panic!("one task: {:?}", state.tasks) };
-    assert_eq!(task.kind, BackgroundTask::SHELL);
-    assert_eq!(
-        wait(&host, &observed),
-        Wait { kind: Wait::COMMAND.to_owned(), text: task.title.clone() },
-        "worded again once the transcript names it"
-    );
-
-    host.take(observed.background(2, 0, None));
-    assert_eq!(wait(&host, &observed).kind, Wait::TASK, "a monitor the transcript does not show");
-    host.take(observed.background(1, 1, None));
-    assert_eq!(wait(&host, &observed).kind, Wait::TASK, "a scheduled prompt holds it");
-    host.take(observed.background(1, 0, None));
-    assert_eq!(wait(&host, &observed).kind, Wait::COMMAND);
-}
-
 /// A session read again from its records alone is the thread the records make, its last turn
 /// ended there, named by the session the records name.
 #[test]
@@ -632,122 +496,6 @@ fn a_session_replays_from_its_records() {
             state.turns
         );
     }
-}
-
-/// A call of an MCP tool read before the session's servers were listed (a first turn's, a
-/// resumed session's) is shown as its app's page once they are, as it ended.
-#[test]
-fn an_app_call_read_before_the_servers_were_listed_shows_its_page() {
-    let records = [
-        serde_json::json!({"type": "user", "uuid": "p1", "parentUuid": null,
-            "timestamp": "2026-10-17T03:15:25.000Z",
-            "message": {"role": "user", "content": "Echo hi"}}),
-        serde_json::json!({"type": "assistant", "uuid": "a1", "parentUuid": "p1",
-            "timestamp": "2026-10-17T03:15:26.000Z",
-            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1",
-                "name": "mcp__apps__echo", "input": {"text": "hi"}}]}}),
-        serde_json::json!({"type": "user", "uuid": "r1", "parentUuid": "a1",
-            "timestamp": "2026-10-17T03:15:27.000Z",
-            "message": {"role": "user", "content": [{"type": "tool_result",
-                "tool_use_id": "toolu_1", "content": "hi"}]}}),
-    ];
-    let mut history = observed();
-    let mut host = Host::default();
-    host.take(history.drain());
-    host.take(history.transcript(&read(&records), &[]));
-    let id = history.meta().id;
-    let shown_of = |host: &Host| {
-        host.thread(id)
-            .items
-            .iter()
-            .find_map(|item| match &item.body {
-                ItemBody::Tool(call) if call.name == "mcp__apps__echo" => {
-                    Some((call.detail.clone(), call.state.clone()))
-                }
-                _ => None,
-            })
-            .expect("the call")
-    };
-    assert!(matches!(shown_of(&host).0, Some(detail::ToolDetail::Mcp(_))), "no app known yet");
-
-    let app = slopty_proto::visual::McpApp {
-        server: "apps".to_owned(),
-        tool: "echo".to_owned(),
-        resource_uri: "ui://apps/echo".to_owned(),
-        display_mode: None,
-        result: None,
-    };
-    let was = shown_of(&host).1;
-    host.take(history.set_apps(HashMap::from([(("apps".to_owned(), "echo".to_owned()), app)])));
-    let (shown, state) = shown_of(&host);
-    let Some(detail::ToolDetail::Page(page)) = shown else { panic!("{shown:?}") };
-    assert!(
-        matches!(&page.source, slopty_proto::visual::PageSource::App(a)
-            if a.resource_uri == "ui://apps/echo"),
-        "{page:?}"
-    );
-    assert_eq!(state, was, "as it ended");
-}
-
-/// "Always allow" says a granted folder short, as the TUI does: the chat's own folder as "this
-/// folder", one in it relative to it, one under the home from `~`, any other in full.
-#[test]
-fn a_granted_folder_is_said_relative_to_the_chats_folder_or_home() {
-    use crate::conversation::{Clipped, Grant, Suggestion, ToolDetail};
-    let places = Places { cwd: "/Users/me/work/".to_owned(), home: "/Users/me".to_owned() };
-    let said = |dirs: &[&str], mode: Option<&str>| {
-        let mut suggestions = vec![Suggestion {
-            grant: Grant::Directories {
-                directories: dirs.iter().map(|d| (*d).to_owned()).collect(),
-            },
-            destination: Some("session".to_owned()),
-        }];
-        if let Some(mode) = mode {
-            suggestions.insert(
-                0,
-                Suggestion {
-                    grant: Grant::Mode { mode: mode.to_owned() },
-                    destination: Some("session".to_owned()),
-                },
-            );
-        }
-        let prompt = PermissionPrompt {
-            reason: None,
-            ask: 1,
-            tool: "Edit".to_owned(),
-            call: None,
-            detail: ToolDetail::Other {
-                input: Clipped { text: String::new(), lines: 0, chars: 0, full: None },
-            },
-            suggestions,
-            mode: None,
-            asked_ms: WallMs::ZERO,
-            needs_presence: false,
-            input: serde_json::Value::Null,
-            exists: None,
-            context_used: None,
-            before_plan: None,
-            on_disk: None,
-            default_to_no: false,
-        };
-        grants(&prompt, &places)
-    };
-    let (_, folders) = said(&["/Users/me/work/src", " /opt/x "], None);
-    assert_eq!(folders, ["/Users/me/work/src", "/opt/x"], "in full, for the tooltip");
-    let said = |dirs: &[&str], mode: Option<&str>| said(dirs, mode).0;
-    assert_eq!(
-        said(&["/Users/me/work"], Some("acceptEdits")).as_deref(),
-        Some("edits in this folder this session")
-    );
-    assert_eq!(
-        said(&["/Users/me/work/src/lexer", "/Users/me/notes", "/Users/me", "/opt/x"], None)
-            .as_deref(),
-        Some("access to src/lexer, ~/notes, ~, /opt/x this session")
-    );
-    assert_eq!(
-        said(&["/Users/me/workbench"], None).as_deref(),
-        Some("access to ~/workbench this session")
-    );
 }
 
 /// A fork subagent (on by default in `-p` since 2.1.302), recorded from Claude Code: its card

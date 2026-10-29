@@ -1,8 +1,7 @@
 //! The server's state files.
 //!
 //! They hold the last-known info of every worker, so a restarted server lists them (as gone)
-//! before they re-register, the words on their way to the agents (`DeliveryStore`), and the
-//! phones it pushes to ([`PushStore`]).
+//! before they re-register, and the phones it pushes to ([`PushStore`]).
 //!
 //! Each file is replaced whole ([`slopty_platform::fs::replace`]), so a crash leaves the old
 //! one or the new one. One that does not parse is set aside under a name of its own and read
@@ -17,15 +16,12 @@ use serde::de::DeserializeOwned;
 use slopty_proto::server::WorkerInfo;
 use tokio::sync::watch;
 
-use crate::deliver::Kept;
 use crate::hub::PushKept;
 
 /// The file's name in the server's data directory.
 pub const FILE: &str = "workers.json";
 /// The phones the server pushes to, beside [`FILE`].
 pub const PUSH_FILE: &str = "push.json";
-/// The reports on their way to the agents, beside [`FILE`].
-pub const DELIVERIES_FILE: &str = "deliveries.json";
 /// How long a keeper waits after a change for more before it writes: an agent's burst of
 /// hooks costs one write.
 pub const SETTLE: Duration = Duration::from_millis(250);
@@ -86,45 +82,6 @@ impl Store {
                 tracing::warn!(path = %self.path.display(), error = %e, "state not saved");
             }
         }
-    }
-}
-
-/// The reports on their way to the agents ([`DELIVERIES_FILE`]): what waits for each and
-/// what was sent and not yet handed over, so a server that restarts, as every update does,
-/// loses none and sends the outstanding again.
-#[derive(Clone, Debug)]
-pub(crate) struct DeliveryStore {
-    path: PathBuf,
-}
-
-impl DeliveryStore {
-    /// The store in `dir` (created on the first save).
-    #[must_use]
-    pub(crate) fn in_dir(dir: &Path) -> Self {
-        Self { path: dir.join(DELIVERIES_FILE) }
-    }
-
-    /// Its path.
-    #[must_use]
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// What it holds: nothing when there is no file. One that does not parse is set aside as
-    /// `deliveries.json.bad-<ms>` and read as nothing.
-    ///
-    /// # Errors
-    /// The file is there and cannot be read, or cannot be set aside.
-    pub(crate) async fn load(&self) -> io::Result<Kept> {
-        load(&self.path).await
-    }
-
-    /// Replace the file with `kept`.
-    ///
-    /// # Errors
-    /// The file cannot be written.
-    pub(crate) async fn save(&self, kept: &Kept) -> io::Result<()> {
-        write(&self.path, serde_json::to_vec(kept).map_err(io::Error::other)?).await
     }
 }
 
@@ -331,7 +288,7 @@ mod tests {
     async fn an_unreadable_state_file_stops_the_server_instead_of_being_replaced() {
         let dir = tempfile::tempdir().unwrap();
         let data_dir = dir.path().join("server");
-        std::fs::create_dir_all(data_dir.join(DELIVERIES_FILE)).unwrap();
+        std::fs::create_dir_all(data_dir.join(FILE)).unwrap();
         let config = crate::Config {
             name: "server".to_owned(),
             quic: "127.0.0.1:0".parse().unwrap(),
@@ -343,7 +300,7 @@ mod tests {
         let Err(crate::ServerError::State { path, .. }) = started else {
             panic!("started over an unreadable file")
         };
-        assert_eq!(path, data_dir.join(DELIVERIES_FILE));
-        assert!(data_dir.join(DELIVERIES_FILE).is_dir(), "left as it was");
+        assert_eq!(path, data_dir.join(FILE));
+        assert!(data_dir.join(FILE).is_dir(), "left as it was");
     }
 }

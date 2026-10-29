@@ -3,11 +3,11 @@ use slopty_proto::thread::detail::Clipped;
 use slopty_proto::thread::wire::RequestCard;
 use slopty_proto::thread::{
     AskId, BackgroundTask, Cap, ContextUsage, Item, ItemBody, ItemId, Link, Meters, Mode, Notice,
-    Phase, Retry, Rule, Rules, Status, ThreadState, Turn, TurnId, TurnState, Usage,
+    Phase, Retry, Status, ThreadState, Turn, TurnId, TurnState, Usage,
 };
 use slopty_view_doc::{ModeChip, WorkRow};
 
-use super::{Child, chat_row, dock, rules, status_spans, task_row, tray};
+use super::{Child, chat_row, dock, task_row, tray};
 use crate::conversation::thread::fixtures;
 
 /// A wall time `ms` after a fixed moment well past the year 2000.
@@ -107,8 +107,7 @@ fn dont_ask_is_not_loud() {
         .map(|id| Mode { id: (*id).to_owned(), label: super::humane(id), description: None })
         .collect();
     state.meters = Meters { mode: Some("dontAsk".to_owned()), ..Meters::default() };
-    let counts = tray(&state, &[], &chat_of).counts;
-    let chip = dock(&state, &counts, 0).mode.expect("a chip");
+    let chip = dock(&state).mode.expect("a chip");
     assert_ne!(chip.tone, ModeChip::DANGER);
 }
 
@@ -208,18 +207,15 @@ fn the_mode_chip_is_loud_for_bypass() {
         .map(|id| Mode { id: (*id).to_owned(), label: super::humane(id), description: None })
         .collect();
     state.meters = Meters { mode: Some("bypassPermissions".to_owned()), ..Meters::default() };
-    let counts = tray(&state, &[], &chat_of).counts;
-    let chip = dock(&state, &counts, 0).mode.expect("a chip");
+    let chip = dock(&state).mode.expect("a chip");
     assert_eq!(chip.words, "Bypass permissions on");
     assert_eq!(chip.tone, ModeChip::DANGER);
-    assert_eq!(chip.choices.len(), 4);
     state.meters.mode = Some("default".to_owned());
-    let quiet = dock(&state, &counts, 0).mode.expect("a chip");
+    let quiet = dock(&state).mode.expect("a chip");
     assert_eq!((quiet.words.as_str(), quiet.tone.as_str()), ("", ModeChip::QUIET));
-    assert!(dock(&state, &counts, 0).can.set_mode);
 }
 
-/// Auto, the recommended default, is quiet on the chip, and its menu row says it is recommended.
+/// Auto, the recommended default, is quiet on the chip.
 #[test]
 fn the_recommended_auto_mode_is_quiet() {
     let mut state = thread_with(&[Cap::SET_MODE]);
@@ -228,12 +224,8 @@ fn the_recommended_auto_mode_is_quiet() {
         .map(|id| Mode { id: (*id).to_owned(), label: super::humane(id), description: None })
         .collect();
     state.meters = Meters { mode: Some("auto".to_owned()), ..Meters::default() };
-    let counts = tray(&state, &[], &chat_of).counts;
-    let chip = dock(&state, &counts, 0).mode.expect("a chip");
+    let chip = dock(&state).mode.expect("a chip");
     assert_eq!((chip.words.as_str(), chip.tone.as_str()), ("", ModeChip::QUIET));
-    let recommended: Vec<&str> =
-        chip.choices.iter().filter(|c| c.recommended).map(|c| c.id.as_str()).collect();
-    assert_eq!(recommended, ["auto"]);
 }
 
 /// The context card warns as the TUI does: before it compacts on its own, or when it is nearly
@@ -274,8 +266,7 @@ fn context_usage_keeps_its_categories_and_warns() {
         before: None,
         after: None,
     }];
-    let counts = slopty_view_doc::WorkCounts::default();
-    let ctx = dock(&state, &counts, 0).context.expect("a context");
+    let ctx = dock(&state).context.expect("a context");
     assert_eq!(ctx.used_percent, 70);
     assert_eq!(ctx.categories.len(), 2);
     assert_eq!(ctx.categories[0].share_bp, 7_000);
@@ -287,7 +278,7 @@ fn context_usage_keeps_its_categories_and_warns() {
         ctx.auto_compact_bp = None;
         ctx.tokens = 170_000;
     }
-    let low = dock(&full, &counts, 0).context.expect("a context");
+    let low = dock(&full).context.expect("a context");
     assert_eq!(
         low.words.as_deref(),
         Some("Context low (15% remaining) · Run /compact to compact & continue")
@@ -321,8 +312,7 @@ fn a_retry_counts_down_in_the_line_under_way() {
         at_ms: ms(1_000),
         body: ItemBody::Notice(notice),
     }];
-    let counts = slopty_view_doc::WorkCounts::default();
-    let retry = dock(&state, &counts, 0).activity.and_then(|a| a.retry).expect("a retry");
+    let retry = dock(&state).activity.and_then(|a| a.retry).expect("a retry");
     assert_eq!(retry.what, "Overloaded");
     assert_eq!(retry.at, Some(super::at(ms(6_000))));
     assert!(retry.hint.is_some(), "the third attempt of an overload points at the status page");
@@ -339,160 +329,5 @@ fn a_retry_counts_down_in_the_line_under_way() {
         at_ms: ms(7_000),
         body: ItemBody::Text(Clipped::whole("back")),
     });
-    assert!(dock(&state, &counts, 0).activity.and_then(|a| a.retry).is_none());
-}
-
-/// The person's status line keeps its colours as spans; links and titles are not drawn.
-#[test]
-fn a_status_line_keeps_its_colours() {
-    let spans =
-        status_spans("\u{1b}[1;31mfail\u{1b}[0m · \u{1b}[38;2;1;2;3mrgb\u{1b}]8;;https://x\u{7}");
-    assert_eq!(spans.len(), 3);
-    assert_eq!(spans[0].text, "fail");
-    assert!(spans[0].bold);
-    assert_eq!(spans[0].fg.as_deref(), Some("ansi:1"));
-    assert_eq!(spans[1].text, " · ");
-    assert!(spans[1].fg.is_none() && !spans[1].bold);
-    assert_eq!(spans[2].fg.as_deref(), Some("#010203"));
-    assert_eq!(spans[2].text, "rgb");
-    assert_eq!(status_spans(""), []);
-}
-
-/// The rules read in the person's words; scopes are offered only where the agent writes them.
-#[test]
-fn rules_say_where_they_come_from() {
-    let mut state = thread_with(&[Cap::RULES]);
-    state.rules = Some(Rules {
-        rules: vec![Rule {
-            behavior: Rule::ALLOW.to_owned(),
-            text: "Bash(cargo test:*)".to_owned(),
-            source: Rule::LOCAL.to_owned(),
-            description: None,
-            editable: true,
-            in_effect: true,
-        }],
-        directories: vec!["/tmp".to_owned()],
-    });
-    let read = rules(&state, "c1");
-    assert!(read.known);
-    assert_eq!(read.rules[0].source_label, "This project, this machine");
-    assert_eq!(read.scopes.len(), 3);
-    assert_eq!(read.scopes[0].id, Rule::LOCAL);
-    let blind = rules(&thread_with(&[]), "c2");
-    assert!(!blind.known && blind.scopes.is_empty());
-}
-
-/// A notification past its time is gone; a goal says what it cost since it was set; the
-/// footer counts the work and the turn footer says what it waits on.
-#[test]
-fn the_dock_drops_what_expired_and_counts_the_work() {
-    let mut state = thread_with(&[]);
-    state.status.phase = Phase::Waiting;
-    state.notes = vec![
-        slopty_proto::thread::AgentNote {
-            key: "a".to_owned(),
-            text: "old".to_owned(),
-            priority: "low".to_owned(),
-            color: None,
-            at_ms: ms(0),
-            until_ms: Some(ms(10)),
-        },
-        slopty_proto::thread::AgentNote {
-            key: "b".to_owned(),
-            text: "Context low".to_owned(),
-            priority: "high".to_owned(),
-            color: Some("warning".to_owned()),
-            at_ms: ms(0),
-            until_ms: None,
-        },
-    ];
-    state.goal = Some(slopty_proto::thread::Goal {
-        condition: "tests pass".to_owned(),
-        iterations: 2,
-        set_ms: ms(0),
-        tokens_at_start: 100,
-        last_reason: None,
-    });
-    let mut usage = Usage::default();
-    usage.0.insert(Usage::OUTPUT.to_owned(), 600);
-    state.turns = vec![Turn {
-        id: TurnId(1),
-        input: None,
-        state: TurnState::Complete,
-        started_ms: ms(0),
-        ended_ms: Some(ms(1)),
-        usage,
-        models: Vec::new(),
-        changed: slopty_proto::thread::Changed::default(),
-        before: None,
-        after: None,
-    }];
-    state.tasks = vec![task("a1", BackgroundTask::AGENT, 1), task("a2", BackgroundTask::AGENT, 2)];
-    let counts = tray(&state, &[], &chat_of).counts;
-    let now = super::at(ms(100));
-    let dock = dock(&state, &counts, now);
-    assert_eq!(dock.notes.len(), 1);
-    assert_eq!(dock.notes[0].tone, slopty_view_doc::NoteLine::WARNING);
-    assert_eq!(dock.goal.as_ref().and_then(|g| g.tokens), Some(500));
-    assert_eq!(dock.waiting.as_deref(), Some("Waiting for 2 subagents to finish"));
-    assert!(dock.activity.is_none(), "no turn under way");
-}
-
-/// The side questions reach the dock as asked, answered or failed, by their intent; a chat whose
-/// agent cannot take one is offered none.
-#[test]
-fn side_questions_reach_the_dock() {
-    let mut state = thread_with(&[Cap::SIDE]);
-    let intent = slopty_proto::thread::IntentId::new();
-    state.side = vec![
-        slopty_proto::thread::SideExchange {
-            intent,
-            question: "Which file?".to_owned(),
-            answer: Some("`codec.rs`".to_owned()),
-            failed: None,
-            at_ms: ms(5),
-        },
-        slopty_proto::thread::SideExchange {
-            intent: slopty_proto::thread::IntentId::new(),
-            question: "And?".to_owned(),
-            answer: None,
-            failed: None,
-            at_ms: ms(6),
-        },
-    ];
-    let counts = tray(&state, &[], &chat_of).counts;
-    let dock = dock(&state, &counts, 0);
-    assert!(dock.can.side);
-    assert_eq!(dock.side.len(), 2);
-    assert_eq!(dock.side[0].id, intent.to_string());
-    assert_eq!(dock.side[0].answer.as_deref(), Some("`codec.rs`"));
-    assert_eq!(dock.side[0].at, super::at(ms(5)));
-    assert!(dock.side[1].pending());
-    assert!(!super::dock(&thread_with(&[]), &counts, 0).can.side);
-}
-
-/// The context card lists the agent's MCP servers as it last said them, a reconnect offered
-/// for one that is on and not connected, and the controls only where the agent takes them.
-#[test]
-fn the_dock_lists_the_agents_mcp_servers() {
-    let server = |name: &str, status: &str| slopty_proto::thread::McpServer {
-        name: name.to_owned(),
-        status: status.to_owned(),
-        error: (status == "failed").then(|| "connection refused".to_owned()),
-        source: Some("project".to_owned()),
-    };
-    let mut state = thread_with(&[Cap::MCP_SERVERS]);
-    state.servers =
-        vec![server("github", "connected"), server("db", "failed"), server("old", "disabled")];
-    let counts = tray(&state, &[], &chat_of).counts;
-    let got = dock(&state, &counts, 0);
-    assert!(got.can.mcp_servers);
-    let rows: Vec<(&str, bool, bool)> =
-        got.servers.iter().map(|row| (row.name.as_str(), row.reconnects, row.disabled())).collect();
-    assert_eq!(rows, [("github", false, false), ("db", true, false), ("old", false, true)]);
-    assert_eq!(got.servers[1].error.as_deref(), Some("connection refused"));
-    assert!(
-        !dock(&thread_with(&[]), &counts, 0).can.mcp_servers,
-        "no control the agent cannot take"
-    );
+    assert!(dock(&state).activity.and_then(|a| a.retry).is_none());
 }

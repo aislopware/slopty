@@ -753,7 +753,7 @@ mod tests {
     ) {
         cx.update(|cx| {
             gpui_base::init(cx);
-            crate::composer::init(cx, Default::default());
+            crate::composer::init(cx);
             cx.set_global(crate::theme::Theme::default());
             bind_keys(cx, &crate::settings::KeymapConfig::default());
         });
@@ -868,19 +868,34 @@ fn favicon_message(body: &str) -> Option<(String, String)> {
     Some((page, data))
 }
 
-/// slopty: a page's icon as the PNG the tab chip shows: only a PNG `data:` URL (what the page's
-/// canvas makes), at most 256 px a side, scaled down to [`FAVICON_SIDE`]. Anything else is `None`
-/// and the tab keeps the default icon.
+/// slopty: a page's icon as the PNG the tab chip shows, from a base64 `data:` URL: the PNG the
+/// page's canvas makes or, where the canvas cannot be read back, the icon's own file, read by
+/// what its bytes are (PNG, ICO, JPEG, GIF, WebP, BMP), never by the type it claims. At most 256
+/// px a side, scaled down to [`FAVICON_SIDE`]. Anything else (an SVG, a link) is `None` and the
+/// tab keeps the default icon.
 #[cfg(any(target_os = "macos", test))]
 fn favicon_png(data: &str) -> Option<Vec<u8>> {
     use base64::Engine as _;
-    let encoded = data.strip_prefix("data:image/png;base64,")?;
+    let (_, encoded) = data.strip_prefix("data:")?.split_once(";base64,")?;
     if encoded.len() > FAVICON_MESSAGE_MAX {
         return None;
     }
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
     let mut reader =
-        image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+        image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    if !matches!(
+        reader.format(),
+        Some(
+            image::ImageFormat::Png
+                | image::ImageFormat::Ico
+                | image::ImageFormat::Jpeg
+                | image::ImageFormat::Gif
+                | image::ImageFormat::WebP
+                | image::ImageFormat::Bmp
+        )
+    ) {
+        return None;
+    }
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(256);
     limits.max_image_height = Some(256);
@@ -897,20 +912,24 @@ fn favicon_png(data: &str) -> Option<Vec<u8>> {
     Some(png.into_inner())
 }
 
-// slopty: the page's icon is taken only as a small PNG, and anything else leaves the globe.
+// slopty: the page's icon is taken only as a small picture, kept as a PNG, and anything else
+// leaves the globe.
 #[cfg(test)]
 mod favicon_tests {
     use super::{FAVICON_SIDE, favicon_message, favicon_png};
     use base64::Engine as _;
 
     fn png_url(side: u32) -> String {
+        picture_url("image/png", side, image::ImageFormat::Png)
+    }
+
+    /// A `side` px picture in `format`, as a `data:` URL that says it is `mime`.
+    fn picture_url(mime: &str, side: u32, format: image::ImageFormat) -> String {
         let image = image::RgbaImage::from_pixel(side, side, image::Rgba([200, 30, 30, 255]));
-        let mut png = std::io::Cursor::new(Vec::new());
-        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
-        format!(
-            "data:image/png;base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(png.into_inner())
-        )
+        let mut file = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut file, format).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(file.into_inner());
+        format!("data:{mime};base64,{encoded}")
     }
 
     fn side_of(bytes: &[u8]) -> (u32, u32) {
@@ -926,13 +945,24 @@ mod favicon_tests {
         assert_eq!(side_of(&small), (16, 16), "never scaled up");
     }
 
+    /// Where the page's canvas cannot be read back, the icon's own file comes, read by what its
+    /// bytes are.
     #[test]
-    fn anything_but_a_small_png_leaves_the_default_icon() {
+    fn an_icons_own_file_is_read_by_what_it_is() {
+        let ico = favicon_png(&picture_url("image/x-icon", 48, image::ImageFormat::Ico));
+        assert_eq!(side_of(&ico.expect("an ICO")), (FAVICON_SIDE, FAVICON_SIDE));
+        let named_wrong = picture_url("application/octet-stream", 16, image::ImageFormat::Bmp);
+        assert_eq!(side_of(&favicon_png(&named_wrong).expect("a BMP")), (16, 16));
+        assert!(favicon_png("data:,").is_none(), "a canvas that could not be read");
+    }
+
+    #[test]
+    fn anything_but_a_small_picture_leaves_the_default_icon() {
         assert!(favicon_png("https://example.com/favicon.ico").is_none(), "a link, not data");
-        assert!(favicon_png("data:image/svg+xml;base64,PHN2Zz4=").is_none(), "not a PNG");
+        assert!(favicon_png("data:image/svg+xml;base64,PHN2Zz4=").is_none(), "an SVG's own file");
         assert!(favicon_png("data:image/png;base64,!!!").is_none(), "not base64");
         let not_png = base64::engine::general_purpose::STANDARD.encode(b"GIF89a....");
-        assert!(favicon_png(&format!("data:image/png;base64,{not_png}")).is_none(), "lies");
+        assert!(favicon_png(&format!("data:image/png;base64,{not_png}")).is_none(), "cut short");
         assert!(favicon_png(&png_url(300)).is_none(), "past 256 px a side");
         let huge = format!("data:image/png;base64,{}", "A".repeat(600 * 1024));
         assert!(favicon_png(&huge).is_none(), "past the byte cap");

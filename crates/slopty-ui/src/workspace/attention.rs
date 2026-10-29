@@ -11,13 +11,8 @@
 //! note it posted, because the shell now shows the same things. The icon badge counts what is
 //! left for the person.
 //!
-//! An agent that waits on a yes or no its thread's row shows (`approvals`) is posted with the
-//! approval buttons (`notify::APPROVAL`): "Allow" and "Deny" answer it where the note is,
-//! "Show" opens its tile as a tap does. The row shows the request a moment after the agent's
-//! status says it waits, so the note already up is replaced, silently, once the request comes,
-//! and again without the buttons once it is gone. A request this client answered takes its note
-//! away instead: the agent still reads as waiting until its worker's table moves past it, and
-//! the answer is not news.
+//! A note answers nothing and sends nothing to the agent (TUI-first, `docs/decisions/agents.md`):
+//! a tap opens the session, whose TUI the person answers in.
 //!
 //! Nothing notifies either while the person is at another of their devices
 //! ([`Attention::set_present_elsewhere`]): at the Mac, the phone in their pocket stays quiet, and
@@ -27,7 +22,7 @@
 //! thread on one ladder and picks the clients a moment goes to by where the person is, so two
 //! devices never both say it. Its notices are then the only agent moments that post here
 //! ([`Attention::notice`], made by [`WorkspaceView::heard`]); the workspace's own look still
-//! adds the approval buttons to a note up, takes back what was answered, and keeps the badge.
+//! takes back what no longer waits, and keeps the badge.
 //! A shell's moments and a program's records are this client's own and post as before: the
 //! server never hears a program's records.
 //!
@@ -46,46 +41,23 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{Context, Entity};
+use gpui::Entity;
 use slopty_client::WorkerKey;
 use slopty_core::{ItemId, SessionId};
-use slopty_platform::notify::info::{ASK, ITEM, SESSION, THREAD, WORKER};
-use slopty_platform::notify::{self, APPROVAL, Alerts, Note, Notifier, REPLYING, Tap};
+use slopty_platform::notify::info::{ITEM, SESSION, THREAD, WORKER};
+use slopty_platform::notify::{self, Alerts, Note, Notifier, Tap};
+use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
-use slopty_proto::thread::wire::{NoteChoice, RequestCard};
-use slopty_proto::thread::{AskId, ThreadId};
 use slopty_terminal::TerminalView;
 
 use super::agents::{agent_ask_text, agent_status_word};
-use super::approvals::answerable;
 use super::{Finished, WorkspaceView};
-
-/// What a note's answer says when its request was no longer open: answered elsewhere.
-pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 
 /// How long after a program's record sounded or notified another of the same program's may.
 ///
 /// A program is any program, and one that flips between waiting and working would otherwise
 /// sound with each flip.
 pub const PROGRAM_QUIET: Duration = Duration::from_secs(10);
-
-/// Whether `tap` is a note's "Allow", "Deny", pick or reply, which answers where the note is
-/// and may have woken the app in the background to do it.
-#[must_use]
-pub fn answers(tap: &Tap) -> bool {
-    tap.action.as_deref() == Some(notify::REPLY) || notify::Pressed::of(tap).is_some()
-}
-
-/// What a note's buttons answer of `card`, an open request: a yes or no's id, with no picks,
-/// or a small question's id with its options; nothing for anything else, which a note only
-/// opens.
-fn note_buttons(card: Option<&RequestCard>) -> (Option<String>, Vec<NoteChoice>) {
-    match card {
-        Some(card) if !card.buttons.is_empty() => (Some(card.id.0.clone()), card.buttons.clone()),
-        Some(card) if answerable(card) => (Some(card.id.0.clone()), Vec::new()),
-        Some(_) | None => (None, Vec::new()),
-    }
-}
 
 /// What a note is about: a terminal, whose shell or program it speaks of, or an agent's
 /// thread.
@@ -166,47 +138,22 @@ pub struct Asking {
     pub title: String,
     /// What it asks (`agent_ask_text`), else its state in a word or two.
     pub body: String,
-    /// The request the note's buttons answer, as the note carries it: the request's id on the
-    /// thread the agent runs. A yes or no takes Allow and Deny, a small question its options
-    /// ([`Self::picks`]).
-    pub approval: Option<String>,
-    /// A small question's options, the note's buttons in place of Allow and Deny.
-    pub picks: Vec<NoteChoice>,
-    /// The request this client answered that its worker's table still shows open.
-    pub answered: Option<String>,
     /// This client's own moment: a program waiting on the person (`OSC 7501`), which no
     /// server's ladder ranks, so it posts here even while a server leads.
     pub own: bool,
 }
 
 impl Asking {
-    /// Its note: the approval buttons while a yes or no is open, a question's options while
-    /// a small one is, and a sound unless `silent`.
-    fn note(&self, silent: bool) -> Note {
-        let mut info = self.route.info();
-        if let Some(ask) = &self.approval {
-            info.insert(ASK.to_owned(), ask.clone());
-        }
+    /// Its note, which opens the session it is about.
+    fn note(&self) -> Note {
         Note {
             id: self.route.about.note_id(),
             title: self.title.clone(),
             body: self.body.clone(),
-            info,
-            // A program's own wait has no agent to reply to.
-            category: if self.approval.is_some() {
-                Some(APPROVAL)
-            } else {
-                (!self.own).then_some(REPLYING)
-            },
-            picks: Vec::new(),
-            silent,
+            info: self.route.info(),
             urgent: true,
+            ..Note::default()
         }
-        .picking(&if self.approval.is_some() {
-            self.picks.iter().map(|p| p.label.clone()).collect()
-        } else {
-            Vec::new()
-        })
     }
 }
 
@@ -252,7 +199,6 @@ enum Why {
     Asks,
     Finished,
     Program,
-    Unanswered,
 }
 
 /// What the app says, once a run, on coming back after a note went unsaid because
@@ -280,8 +226,6 @@ pub struct Attention {
     turns: HashSet<About>,
     /// The notes up.
     posted: HashMap<About, Why>,
-    /// The prompt or request each agent's note up answers.
-    answers: HashMap<About, Option<String>>,
     /// The badge last set.
     badge: Option<usize>,
     /// A note went out while notifications were off, since the app last came back.
@@ -319,7 +263,6 @@ impl Attention {
             asking: HashSet::new(),
             turns: HashSet::new(),
             posted: HashMap::new(),
-            answers: HashMap::new(),
             badge: None,
             unsaid: false,
             said_off: false,
@@ -352,8 +295,8 @@ impl Attention {
     }
 
     /// The app came to the front or left it. Coming back takes back every note it put up but a
-    /// live ask's, which stays to be answered from the Notification Centre and goes once it is
-    /// answered. The notes pushed while it was away are the system's to list
+    /// live ask's, which stays in the Notification Centre and goes once the agent stops
+    /// waiting. The notes pushed while it was away are the system's to list
     /// ([`Self::delivered`]).
     pub fn set_active(&mut self, active: bool) {
         if active && !self.active {
@@ -365,7 +308,6 @@ impl Attention {
             for (about, _) in stale {
                 self.notifier.withdraw(&about.note_id());
             }
-            self.answers.retain(|about, _| kept.iter().any(|(k, _)| k == about));
             self.posted.extend(kept);
         }
         self.active = active;
@@ -426,8 +368,7 @@ impl Attention {
     }
 
     /// The server picked this client to say `heard`: posted while the app is not in front,
-    /// where the shell already shows it. A wait's note gets its approval buttons from the next
-    /// [`Self::look`].
+    /// where the shell already shows it.
     pub fn notice(&mut self, heard: &Heard) {
         if self.active || !self.listening {
             return;
@@ -438,15 +379,10 @@ impl Attention {
             title: heard.title.clone(),
             body: heard.body.clone(),
             info: heard.route.info(),
-            category: Some(REPLYING),
             ..Note::default()
         };
-        // Only what waits on the person is theirs to answer; the rest is to look at.
         let why = if heard.kind == NoticeKind::NeedsYou { Why::Asks } else { Why::Finished };
         self.post(session, why, note);
-        if why == Why::Asks {
-            self.answers.insert(session, None);
-        }
     }
 
     /// Whether a program's record in `about` may post a note now: none posted in the last
@@ -474,7 +410,6 @@ impl Attention {
         for (about, _) in self.posted.drain() {
             self.notifier.withdraw(&about.note_id());
         }
-        self.answers.clear();
     }
 
     /// The workspace changed: an agent that has just started to wait notifies while the app is
@@ -484,25 +419,12 @@ impl Attention {
         if self.away() {
             for asking in &look.asking {
                 let session = asking.route.about;
-                let up = self.posted.get(&session) == Some(&Why::Asks);
-                let was = self.answers.get(&session).cloned().flatten();
-                if !self.asking.contains(&session) && (!self.server_led || asking.own) {
-                    if asking.own && !self.own_due(session) {
-                        continue;
-                    }
-                    self.post(session, Why::Asks, asking.note(false));
-                } else if up && asking.approval.is_none() && was.is_some() && was == asking.answered
+                if !self.asking.contains(&session)
+                    && (!self.server_led || asking.own)
+                    && (!asking.own || self.own_due(session))
                 {
-                    self.posted.remove(&session);
-                    self.notifier.withdraw(&session.note_id());
-                    self.answers.insert(session, None);
-                    continue;
-                } else if up && self.answers.get(&session) != Some(&asking.approval) {
-                    self.post(session, Why::Asks, asking.note(true));
-                } else {
-                    continue;
+                    self.post(session, Why::Asks, asking.note());
                 }
-                self.answers.insert(session, asking.approval.clone());
             }
         }
         let stopped: Vec<About> = self.asking.difference(&now).copied().collect();
@@ -511,7 +433,6 @@ impl Attention {
                 self.posted.remove(&session);
                 self.notifier.withdraw(&session.note_id());
             }
-            self.answers.remove(&session);
         }
         self.asking = now;
         let turns: HashSet<About> = look.turns.iter().map(|t| t.route.about).collect();
@@ -524,7 +445,6 @@ impl Attention {
                     title: turn.title.clone(),
                     body: turn.body.clone(),
                     info: turn.route.info(),
-                    category: Some(REPLYING),
                     ..Note::default()
                 };
                 self.post(turn.route.about, Why::Finished, note);
@@ -579,22 +499,6 @@ impl Attention {
         self.post(route.about, Why::Program, note);
     }
 
-    /// A note's "Allow" or "Deny" for `route`'s agent found no prompt to answer (`why`): said
-    /// in a note of its own while the app is away. `title` is the tile's name.
-    pub fn unanswered(&mut self, route: Route, title: String, why: &str) {
-        if !self.away() {
-            return;
-        }
-        let note = Note {
-            id: route.about.note_id(),
-            title,
-            body: why.to_owned(),
-            info: route.info(),
-            ..Note::default()
-        };
-        self.post(route.about, Why::Unanswered, note);
-    }
-
     fn post(&mut self, about: About, why: Why, mut note: Note) {
         if !self.enabled {
             return;
@@ -602,9 +506,6 @@ impl Attention {
         tracing::debug!(?about, ?why, "attention note");
         // Only an agent that needs the person breaks through a Focus.
         note.urgent = why == Why::Asks;
-        if why != Why::Asks {
-            self.answers.remove(&about);
-        }
         self.posted.insert(about, why);
         self.send(note);
     }
@@ -623,9 +524,7 @@ impl WorkspaceView {
                 let body = agent_ask_text(stand).unwrap_or_else(|| agent_status_word(stand));
                 let route = Route { worker: w.worker, item: None, about: About::Thread(w.thread) };
                 let title = self.thread_title(w.thread);
-                let (approval, picks) = note_buttons(stand.asks.as_ref());
-                let answered = self.thread_answered_here(w.thread).map(|ask| ask.0.clone());
-                Some(Asking { route, title, body, approval, picks, answered, own: false })
+                Some(Asking { route, title, body, own: false })
             })
             .collect();
         let turns = self
@@ -689,37 +588,12 @@ impl WorkspaceView {
         self.terminals.iter().map(|(s, v)| (*s, v.clone())).collect()
     }
 
-    /// The human tapped a note. An approval note's "Allow" or "Deny" answers its prompt and a
-    /// reply goes to its agent, each leaving the app where it is; "Show" is a tap, which brings
-    /// the app forward (the app's own doing).
-    pub fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
-        let route = Route::of_tap(tap);
-        tracing::debug!(id = tap.id, ?route, action = ?tap.action, "note opened");
-        if tap.action.as_deref() == Some(notify::REPLY) {
-            match (route, tap.text.as_deref().map(str::trim).filter(|t| !t.is_empty())) {
-                (Some(route), Some(text)) => self.reply_tapped(route, text.to_owned(), cx),
-                _ => self.settle_taps(cx),
-            }
-            return;
-        }
-        if let Some(pressed) = notify::Pressed::of(tap) {
-            match (route, tap.info.get(ASK)) {
-                (Some(route), Some(ask)) => {
-                    self.verdict_tapped(route, AskId(ask.clone()), pressed, cx);
-                }
-                // Nothing to answer, but the tap still settles: the system waits on the app's
-                // word that it is done with it.
-                _ => self.settle_taps(cx),
-            }
-        }
-    }
-
     /// The chat a tapped note is about, as the interface knows it: its agent's thread; `None`
     /// for a note about a terminal.
     #[must_use]
-    pub fn tapped_chat(&self, tap: &Tap) -> Option<String> {
+    pub fn tapped_chat(tap: &Tap) -> Option<String> {
         let About::Thread(thread) = Route::of_tap(tap)?.about else { return None };
-        Some(self.chat_id(thread))
+        Some(thread.to_string())
     }
 
     /// What a note's title says: its agent's thread's name, else the worker's.

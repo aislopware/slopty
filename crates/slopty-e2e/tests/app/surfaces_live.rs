@@ -337,8 +337,17 @@ mod stream {
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         open_thread(drv, 1).await;
 
-        drv.keys("cmd-r").await.unwrap();
-        click_button(drv, "Remote window").await;
+        // The right pane's new-tab menu, from the session's terminal.
+        drv.keys("cmd-t").await.unwrap();
+        let menu = drv
+            .wait_for("the pane's new-tab menu", STEP, |d| {
+                node(d, "MenuItem", "Remote window").is_some()
+            })
+            .await
+            .unwrap();
+        let [x, y, w, h] =
+            node(&menu, "MenuItem", "Remote window").map(|n| n.bounds).unwrap_or_default();
+        drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
         let title = "Synthetic editor";
         let listed = drv
             .wait_for("the worker's windows", STEP, |d| {

@@ -1,11 +1,11 @@
-//! Claude Code's past sessions on a real stack: sessions a stand-in "TUI" left in Claude Code's own
-//! store on the worker (a transcript under `~/.claude/projects/<folder>/` and the prompts in
+//! Claude Code's past sessions on a real stack: sessions a TUI left in Claude Code's own store on
+//! the worker (a transcript under `~/.claude/projects/<folder>/` and the prompts in
 //! `~/.claude/history.jsonl`, as Claude Code writes them) are listed under the project's History,
-//! found by what was asked in them from "Resume a Claude Code session…", opened with their whole
-//! conversation and continued: the stand-in Claude Code (`slopty-stub-claude`) is started on the
-//! same session (`--resume <id>`) and hears the new message. Each case is judged by the
-//! accessibility tree and by what the stand-in heard (`STUB_RECORD`, one file per session it was
-//! started on), and the worker's words in a thread by its read.
+//! found by what was asked in them from "Resume a Claude Code session…", and taken up again: the
+//! stand-in Claude Code TUI (`slopty-stub-claude`) starts on the same session (`--resume <id>`)
+//! in a terminal that is the session's main column, and hears what is typed there. Each case is
+//! judged by the accessibility tree and by what the stand-ins heard (`STUB_RECORD`, one file per
+//! stand-in), and the worker's words in a thread by its read.
 
 use std::path::{Path, PathBuf};
 
@@ -13,8 +13,8 @@ use slopty_e2e::Dump;
 use slopty_e2e::harness::ServedApp;
 
 use crate::served::{
-    STEP, TURN, all_holding, click, goldens, heard, holding, middle, says, seen, start,
-    thread_until, unread,
+    STEP, TURN, all_holding, click, escaped, goldens, heard, holding, middle, rfc3339, says, seen,
+    start, thread_until,
 };
 
 /// The worker's name, as the CLI names the machine.
@@ -39,39 +39,11 @@ const HELD_SAID: [&str; 1] = ["Startup spends most of its time loading fonts."];
 /// What the live chat that brings the project into the sidebar is asked.
 const LIVE: &str = "Say hello";
 
-/// Claude Code's name for a folder's project directory: every character but a letter or a digit
-/// made `-`.
-fn escaped(dir: &Path) -> String {
-    dir.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
-}
-
 /// When the TUI's sessions were first asked, in ms since the epoch: a day and an hour before the
 /// run, so History says "1d" of them on whatever day the run is.
 fn asked_at() -> u64 {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     u64::try_from(now.as_millis()).unwrap().saturating_sub(25 * 3_600_000)
-}
-
-/// `at` (ms since the epoch) as Claude Code's transcripts write a moment: RFC 3339 in UTC, to the
-/// millisecond (the days-to-date step is Howard Hinnant's `civil_from_days`).
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "the days-to-civil formula cannot overflow an i64 for any moment since the epoch"
-)]
-fn rfc3339(at: u64) -> String {
-    let (secs, ms) = (i64::try_from(at / 1000).unwrap(), at % 1000);
-    let (days, of_day) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let doe = shifted - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    let (hour, minute, second) = (of_day / 3600, of_day % 3600 / 60, of_day % 60);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{ms:03}Z")
 }
 
 /// Claude Code's own records of session `id` in `folder`, under `home`: its transcript, one
@@ -140,7 +112,7 @@ fn mark_running(home: &Path, folder: &Path, id: &str, pid: u32) {
 }
 
 /// A stack whose worker's Claude Code store holds the TUI's sessions of `root/repo`, and whose
-/// stand-in writes what it heard to `root/heard-<session>.json`.
+/// stand-ins each write what they heard to `root/heard-<pid>.json`.
 /// The project's folder, by its real path, and the worker's home.
 async fn stack() -> (ServedApp, PathBuf, PathBuf) {
     let stack = ServedApp::launch_rooted(MACHINE, &[], |root| {
@@ -156,7 +128,7 @@ async fn stack() -> (ServedApp, PathBuf, PathBuf) {
         seed(&home, &repo, PARSER, at, &PARSER_ASKED, &PARSER_SAID);
         seed(&home, &repo, LEXER, at, &LEXER_ASKED, &LEXER_SAID);
         seed(&home, &repo, HELD, at, &HELD_ASKED, &HELD_SAID);
-        let record = root.join("heard-{conversation}.json");
+        let record = root.join(concat!("heard-{", "pid", "}.json"));
         vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())]
     })
     .await
@@ -220,41 +192,46 @@ fn thread_of(id: &str) -> String {
     slopty_proto::thread::ThreadId::derived(&["claude-code session", id]).to_string()
 }
 
-/// What the stand-in started on session `id` heard, once it heard `words`.
-async fn heard_on(root: &Path, id: &str, words: &str) -> serde_json::Value {
-    let path = root.join(format!("heard-{id}.json"));
+/// The record of the stand-in started on session `id` (`--resume <id>`), once it took a line
+/// holding `words` (any line, for none); each stand-in writes its own, `heard-<pid>.json`.
+async fn resumed_on(root: &Path, id: &str, words: Option<&str>) -> serde_json::Value {
     let since = std::time::Instant::now();
     loop {
-        let record = heard(&path);
-        if record["received"].to_string().contains(words) {
+        if let Some(record) = resumed(root, id).filter(|record| {
+            words.is_none_or(|words| record["prompts"].to_string().contains(words))
+        }) {
             return record;
         }
-        assert!(since.elapsed() < TURN, "the stand-in on {id} never heard {words:?}: {record}");
+        assert!(
+            since.elapsed() < TURN,
+            "no stand-in on {id} took {words:?}: {:?}",
+            resumed(root, id)
+        );
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
 
-/// Read thread `thread` with its notices (`slopty agent read --activity`) until one says
-/// `words`: a notice is drawn as words of the chat's turn, which the accessibility tree does not
-/// hold.
-async fn noticed(stack: &ServedApp, thread: &str, words: &str) {
-    let since = std::time::Instant::now();
-    loop {
-        let read = stack.slopty(&["agent", "read", "--activity", "--thread", thread]).await;
-        if read.as_ref().is_ok_and(|read| says(read, words)) {
-            return;
+/// The record of a stand-in started on session `id`, when one was.
+fn resumed(root: &Path, id: &str) -> Option<serde_json::Value> {
+    std::fs::read_dir(root).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("heard-") {
+            return None;
         }
-        assert!(since.elapsed() < TURN, "the thread never said {words:?}: {read:?}");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+        let record = heard(&entry.path());
+        let args: Vec<&str> =
+            record["args"].as_array()?.iter().filter_map(serde_json::Value::as_str).collect();
+        let resumed = args.windows(2).any(|pair| pair == ["--resume", id]);
+        resumed.then_some(record)
+    })
 }
 
 /// A session the person ran in Claude Code's TUI is in its project's History, titled by its
-/// first prompt; opened, its whole conversation is the chat's, and a message sent there goes to
-/// Claude Code started on that same session in its folder (`--resume <id>`), so the TUI and the
-/// GUI share one history. "Resume a Claude Code session…" (⇧⌘O) finds another by a word asked
-/// in it, the word lit in the prompt that matched, and opens it the same way. A session that
-/// became a chat leaves History.
+/// first prompt; opened, Claude Code takes it up again in a terminal in its folder (`--resume
+/// <id>`), that terminal the session's main column, its whole conversation the thread's, and a
+/// message typed there goes on with it. "Resume a Claude Code session…" (⇧⌘O) finds another
+/// by a word asked in it, the word lit in the prompt that matched, and opens it the same way. A
+/// session that became a chat leaves History.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_tui_session_is_listed_opened_and_continued() {
@@ -280,17 +257,17 @@ async fn a_tui_session_is_listed_opened_and_continued() {
     rest(drv).await;
     goldens(drv, &renders, "past-sessions-history", &[]).await;
 
-    // Opened, it is a chat of the project, open, its two turns drawn at once, and leaves History.
+    // Opened, it is a session of the project: Claude Code taken up on it in a terminal, in its
+    // folder (`--resume <id>`), that terminal the main column, and it leaves History.
     click(drv, "Button", &past(&listed, PARSER_ASKED[0]).unwrap().label.clone().unwrap()).await;
-    let opened = seen(drv, "the session open as a chat", STEP, |d| {
+    seen(drv, "the session open in its terminal", STEP, |d| {
         chat(d, PARSER_ASKED[0]).is_some()
             && past(d, PARSER_ASKED[0]).is_none()
-            && all_holding(d, "Status", "Worked for").len() == PARSER_ASKED.len()
-            // Seen as it opened: its turns, which may reach the app after the open, had ended.
-            && !unread(d, PARSER_ASKED[0])
+            && d.a11y.iter().any(|n| n.role == "Terminal")
     })
     .await;
-    assert!(words(&opened).contains("Open in"), "the chat is open:\n{}", words(&opened));
+    let record = resumed_on(&root, PARSER, None).await;
+    assert_eq!(record["cwd"].as_str().map(Path::new), Some(repo.as_path()), "in its folder");
     rest(drv).await;
     goldens(drv, &renders, "past-sessions-opened", &[]).await;
     // Its whole conversation is the thread's, read from Claude Code's transcript.
@@ -300,39 +277,18 @@ async fn a_tui_session_is_listed_opened_and_continued() {
     })
     .await;
 
-    // A message continues the same session, in the same folder, in the same chat.
+    // Typed in its terminal, a message goes on with the same session, in the same thread.
     let drv = &mut stack.driver;
-    crate::served::type_in_composer(drv, "Keep going").await;
+    crate::served::type_in_terminal(drv, "Keep going").await;
     drv.keys("enter").await.unwrap();
-    let record = heard_on(&root, PARSER, "Keep going").await;
-    let argv: Vec<&str> =
-        record["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
-    let at = argv.iter().position(|a| *a == "--resume").expect("started with --resume");
-    assert_eq!(argv.get(at + 1), Some(&PARSER), "the same session: {argv:?}");
-    assert_eq!(record["cwd"].as_str().map(Path::new), Some(repo.as_path()), "in its folder");
+    resumed_on(&root, PARSER, Some("Keep going")).await;
     thread_until(&stack, &parser, "answered in the same thread", |read| {
         says(read, "Done: Keep going") && says(read, PARSER_SAID[1])
     })
     .await;
-
-    // The app has the answer drawn, as the worker said it: the chat behind the picker stands
-    // where its last turn leaves it.
     let drv = &mut stack.driver;
-    seen(drv, "the answer in the chat, its turn ended", STEP, |d| {
-        // The last reply: a settled turn that worked reads as its divider ("Worked for 1s"),
-        // then its answer; one that only answered ends on its done line.
-        let last = d
-            .a11y
-            .iter()
-            .rposition(|n| n.role == "Article" && n.label.as_deref() == Some("Claude Code"));
-        let reply = last.map_or(&[][..], |at| &d.a11y[at..]);
-        let said = |role: &str, words: &str| {
-            reply
-                .iter()
-                .any(|n| n.role == role && n.label.as_deref().is_some_and(|l| l.contains(words)))
-        };
-        said("Paragraph", "Done: Keep going")
-            && (said("Button", "Worked for") || said("Status", "Worked for"))
+    seen(drv, "the answer in its terminal", STEP, |d| {
+        d.terminals.iter().any(|t| t.lines.iter().any(|line| line.contains("Done: Keep going")))
     })
     .await;
 
@@ -414,9 +370,8 @@ async fn history_says_why_it_has_nothing() {
 }
 
 /// A session a Claude Code still runs in a terminal of its machine is marked so in History, and
-/// is not taken up a second time: opened, its conversation shows with the plain words that it
-/// runs in another terminal, and a message sent there starts no second Claude Code on it. Once
-/// that Claude Code ends, the chat says the session is free.
+/// is not taken up a second time: opening it says why it did not open, and no second Claude Code
+/// starts on it. Once that Claude Code ends, the same row takes it up.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_session_running_elsewhere_is_shown_not_taken() {
@@ -436,24 +391,25 @@ async fn a_session_running_elsewhere_is_shown_not_taken() {
     .await;
     let label = past(&listed, HELD_ASKED[0]).unwrap().label.clone().unwrap();
     click(drv, "Button", &label).await;
-    // Its conversation is the chat's, with the worker's words for why nothing runs on it.
-    seen(drv, "the held session open", STEP, |d| chat(d, HELD_ASKED[0]).is_some()).await;
-    let held = thread_of(HELD);
-    thread_until(&stack, &held, "its conversation", |read| says(read, HELD_SAID[0])).await;
-    noticed(&stack, &held, "This session is running in another terminal on past").await;
-    let drv = &mut stack.driver;
-    crate::served::type_in_composer(drv, "Carry on").await;
-    drv.keys("enter").await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    let record = heard(&root.join(format!("heard-{HELD}.json")));
-    assert!(
-        !record["received"].to_string().contains("Carry on"),
-        "no second Claude Code took the session up: {record}"
-    );
+    let refused = "Couldn\u{2019}t open the Claude Code session";
+    seen(drv, "why it did not open", STEP, |d| {
+        d.a11y
+            .iter()
+            .any(|n| [&n.label, &n.value].into_iter().flatten().any(|text| text.contains(refused)))
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(resumed(&root, HELD).is_none(), "no second Claude Code took the session up");
 
-    // Once the terminal's Claude Code ends, the chat says the session is free to go on.
+    // Once the terminal's Claude Code ends, the session is free to take up.
     let _killed = terminal.kill();
     let _reaped = terminal.wait();
-    noticed(&stack, &held, "The other Claude Code on this session ended").await;
+    let drv = &mut stack.driver;
+    let free =
+        seen(drv, "the held session's row", STEP, |d| past(d, HELD_ASKED[0]).is_some()).await;
+    let label = past(&free, HELD_ASKED[0]).unwrap().label.clone().unwrap();
+    click(drv, "Button", &label).await;
+    let record = resumed_on(&root, HELD, None).await;
+    assert_eq!(record["cwd"].as_str().map(Path::new), Some(repo.as_path()), "in its folder");
     stack.shutdown().await;
 }

@@ -1,0 +1,34 @@
+Window (focused)
+Button │ Filter projects: All projects
+Button │ Done, 1
+Button │ List the machines
+Button │ Inactive, 0
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Splitter │ Resize sidebar
+Group
+Terminal │ shell │ >
+Heading │ List the machines
+Article │ You
+Paragraph │ List the machines
+Button │ Copy message
+Button │ MCP slopty · machines
+Code │ slopty · machines⏎{}
+Code │ [{"worker":"7ee7bc23-d948-bc06-1956-95be56974ce1","name":"session","liveness":"online","address":"127.0.0.1:$PORT","os":"macos","os_version":"27.0.1","arch":"aa…
+Button │ Show full output (876 B)
+Paragraph │ Done: List the machines
+Button │ Copy message
+Splitter │ Resize side pane
+Button │ Open in…
+Button │ Hide inspector
+Button │ Inspector
+Button │ Close Inspector
+Button │ New tab
+Button │ Expand side pane
+Button │ Show files panel
+Button │ Hide side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New session

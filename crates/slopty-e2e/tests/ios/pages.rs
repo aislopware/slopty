@@ -1,7 +1,9 @@
-//! A finger over a live page card on the simulator, as UIKit itself delivers it
+//! A finger over a live page card in a session's inspector on the simulator (a phone's sheet
+//! taken to the whole screen, an iPad's pane), as UIKit itself delivers it
 //! ([`slopty_e2e::Command::UiFinger`]), so the page's web view and its scroll views see it as a
-//! person's: over a page with nothing to scroll a drag scrolls the chat by the whole drag and the
-//! fling carries it on; a tap reaches the page; a tall page scrolls itself and the chat stays.
+//! person's: over a page with nothing to scroll a drag scrolls the timeline by the whole drag and
+//! the fling carries it on; a tap reaches the page; a tall page scrolls itself and the timeline
+//! stays.
 
 use std::time::Duration;
 
@@ -218,15 +220,26 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
         .map(|n| n.bounds)
         .unwrap();
     drv.ui_tap(row[0] + row[2] / 2.0, row[1] + row[3] / 2.0).await.unwrap();
-    let chat = drv
-        .wait_for("the chat's composer", STEP, |d| {
-            d.a11y.iter().any(|n| n.role == "MultilineTextInput")
-        })
+    drv.wait_for("the session's terminal", STEP, |d| d.a11y.iter().any(|n| n.role == "Terminal"))
         .await
         .unwrap();
-    let composer = chat.a11y.iter().find(|n| n.role == "MultilineTextInput").unwrap().bounds;
-    // What of the chat shows: under the bars at the top, over the composer.
-    let (top, bottom) = (100.0, composer[1] - 8.0);
+    // The turn's pages are in its inspector: on a phone a sheet over the session, taken to the
+    // whole screen; on an iPad the pane beside the session.
+    if phone {
+        crate::compact::tap(drv, "Button", "Show inspector").await;
+        crate::compact::tap(drv, "Button", "Expand inspector").await;
+    }
+    let up = |d: &Dump| !phone || d.a11y_node("Button", Some("Collapse inspector")).is_some();
+    drv.wait_for("the inspector", STEP, up).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let chat = drv.dump().await.unwrap();
+    // What of the timeline shows: under the bars (a phone's sheet's header) at the top, over the
+    // screen's foot.
+    let top = chat
+        .a11y_node("Dialog", Some("Inspector"))
+        .filter(|_| phone)
+        .map_or(100.0, |sheet| sheet.bounds[1] + 52.0);
+    let bottom = chat.window.height - chat.window.safe_bottom - 8.0;
     let device = if phone { "phone" } else { "pad" };
 
     // Each check that fails is said at the end, with the others' numbers.

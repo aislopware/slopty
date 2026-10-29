@@ -537,7 +537,7 @@ const CODEX_OWNER: &str = "codex-thread.json";
 /// Where Codex makes the worktrees it manages: `$CODEX_HOME/worktrees`, as its settings default
 /// to (`codex-rs/worktree/src/settings.rs`), resolved.
 fn codex_worktrees() -> Option<PathBuf> {
-    let root = crate::thread::codex::codex_home()?.join("worktrees");
+    let root = crate::thread::history::Stores::here().codex?.join("worktrees");
     Some(std::fs::canonicalize(&root).unwrap_or(root))
 }
 

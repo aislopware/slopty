@@ -1,6 +1,6 @@
-//! Turn snapshots and the review over them, on a real git repository: a thread's turn edges
-//! are applied to the host as an adapter applies them, the working tree changes between, and
-//! what is judged is the trees, the refs and the files, never the time.
+//! A thread's repository read for review, on a real git repository: its working tree against a
+//! commit, a branch's commits, the sides of a file, and what a scope between turns says now that
+//! no turn is snapshotted. What is judged is the trees and the files, never the time.
 
 #[cfg(test)]
 mod review {
@@ -8,21 +8,13 @@ mod review {
     use std::process::Command;
     use std::time::Duration;
 
-    use slopty_agent::claude::driven::Driven;
-    use slopty_agent::claude::history::Out;
     use slopty_core::WallMs;
-    use slopty_proto::thread::wire::{Intent, Outcome, Pick, Review, ReviewScope};
-    use slopty_proto::thread::{
-        Action, Changed, IntentId, Liveness, Phase, Status, ThreadId, ThreadState, TreeRef, Turn,
-        TurnId, TurnState, Usage,
-    };
+    use slopty_proto::thread::wire::{Against, Expanded, Review, ReviewScope};
+    use slopty_proto::thread::{AgentId, Drive, ThreadId, ThreadMeta, TurnId};
     use slopty_worker::repo::snapshot::Repo;
     use slopty_worker::thread::Host;
     use slopty_worker::thread::log::Limits;
-    use slopty_worker::thread::review::{NOT_IN_GIT, Snapshots};
-
-    /// Long enough for any git on a loaded machine; the tests judge what comes.
-    const BOUND: Duration = Duration::from_secs(30);
+    use slopty_worker::thread::review::{NO_TURN_SNAPSHOTS, NOT_IN_GIT, Reviews};
 
     fn git() -> PathBuf {
         slopty_worker::changes::git().expect("git on this machine").to_owned()
@@ -50,416 +42,64 @@ mod review {
         repo
     }
 
-    struct Rig {
-        host: Host,
-        snapshots: Snapshots,
-        thread: ThreadId,
-        _observer: tokio::task::JoinHandle<()>,
-    }
-
-    impl Rig {
-        fn new(dir: &Path, cwd: &Path) -> Self {
-            let host = Host::open(&dir.join("threads"), Limits::default()).unwrap();
-            let cwd = cwd.to_string_lossy();
-            let session = "11111111-2222-4333-8444-555555555555";
-            let mut driven = Driven::new(session, &cwd, WallMs::ZERO);
-            let Some(Out::Begin(meta)) = driven.drain().into_iter().next() else { panic!() };
-            let thread = meta.id;
-            host.create(*meta).unwrap();
-            let snapshots = Snapshots::new(host.clone(), &dir.join("snapshots"), Some(git()));
-            let observer = snapshots.spawn();
-            Self { host, snapshots, thread, _observer: observer }
-        }
-
-        fn apply(&self, action: Action) {
-            self.host.apply(self.thread, vec![action]);
-        }
-
-        fn status(&self, phase: Phase) {
-            let status =
-                Status { phase, wait: None, liveness: Liveness::Live, since_ms: WallMs::ZERO };
-            self.apply(Action::Status(status));
-        }
-
-        fn begin(&self, turn: u32) {
-            self.apply(Action::TurnStarted(Turn {
-                id: TurnId(turn),
-                input: None,
-                state: TurnState::Active,
-                started_ms: WallMs::ZERO,
-                ended_ms: None,
-                usage: Usage::default(),
-                models: Vec::new(),
-                changed: Changed::default(),
-                before: None,
-                after: None,
-            }));
-        }
-
-        fn end(&self, turn: u32) {
-            self.apply(Action::TurnEnded {
-                turn: TurnId(turn),
-                state: TurnState::Complete,
-                usage: Usage::default(),
-                ended_ms: WallMs::ZERO,
-            });
-        }
-
-        /// Wait until the thread satisfies `done`, woken by each batch it applies.
-        async fn until(&self, done: impl Fn(&ThreadState) -> bool) -> ThreadState {
-            let mut feed = self.host.watch(self.thread).unwrap();
-            let waited = tokio::time::timeout(BOUND, async {
-                loop {
-                    let state = self.host.state(self.thread).unwrap().0;
-                    if done(&state) {
-                        return state;
-                    }
-                    let _batch = feed.recv().await;
-                }
-            });
-            waited.await.expect("the thread came to the state awaited")
-        }
-
-        async fn pick(&self, id: IntentId, intent: &Intent) -> Outcome {
-            self.snapshots.pick(self.thread, id, intent).await.unwrap()
-        }
-    }
-
-    fn file<'a>(
-        review: &'a Review,
-        path: &str,
-    ) -> Option<&'a slopty_proto::thread::wire::FileDiff> {
-        review.files.iter().find(|f| f.path == path)
-    }
-
-    fn pick(review: &Review, path: &str, hunks: Vec<u32>) -> Pick {
-        let diff = file(review, path).unwrap();
-        Pick {
-            path: path.to_owned(),
-            from: diff.from.clone(),
-            stamp: diff.to.clone(),
-            hunks,
-            old_path: diff.old_path.clone(),
-        }
-    }
-
-    /// A turn's start is snapshotted when the agent starts working, its end when it ends, both
-    /// kept in the thread's refs, and the turn told again mid-way keeps its start; the person's
-    /// index is left alone. Its review has every file
-    /// it touched (a change, a new file, a removed one), the change in two hunks.
-    #[tokio::test]
-    async fn a_turn_is_snapshotted_at_its_edges_and_reviewed() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = repository(dir.path());
-        let rig = Rig::new(dir.path(), &repo);
-        rig.status(Phase::Working);
-        rig.begin(1);
-        let state = rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
-        let before = state.turns.first().unwrap().before.clone().unwrap();
-        assert_eq!(before.0, run(&repo, &["rev-parse", "HEAD^{tree}"]), "nothing changed yet");
-
-        let changed = A.replace("two\n", "TWO\n").replace("eleven\n", "ELEVEN\nmore\n");
-        std::fs::write(repo.join("a.txt"), &changed).unwrap();
-        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
-        std::fs::remove_file(repo.join("gone.txt")).unwrap();
-        rig.begin(1);
-        rig.end(1);
-        let state = rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
-        let after = state.turns.first().unwrap().after.clone().unwrap();
-        assert_eq!(state.turns.first().unwrap().before, Some(before.clone()), "told again");
-        let thread = rig.thread;
-        let pinned = |edge: &str| {
-            run(&repo, &["rev-parse", &format!("refs/slopty/threads/{thread}/1-{edge}^{{tree}}")])
+    /// A thread named by its folder: no agent's, as a test holds it.
+    fn thread_in(host: &Host, cwd: &Path) -> ThreadId {
+        let id = ThreadId::new();
+        let meta = ThreadMeta {
+            id,
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            agent_version: String::new(),
+            native: id.to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            title: String::new(),
+            parent: None,
+            origin: ThreadMeta::PERSON.to_owned(),
+            forked_from: None,
+            drive: Drive::named(Drive::OBSERVED),
+            caps: Vec::new(),
+            models: Vec::new(),
+            modes: Vec::new(),
+            efforts: Vec::new(),
+            facts: std::collections::BTreeMap::new(),
+            created_ms: WallMs::ZERO,
         };
-        assert_eq!((pinned("before"), pinned("after")), (before.0.clone(), after.0.clone()));
-        assert_eq!(run(&repo, &["diff", "--cached", "--name-only"]), "", "the person's index");
-
-        let review = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(1))).await;
-        assert_eq!(review.absent, None);
-        let mut paths: Vec<&str> = review.files.iter().map(|f| f.path.as_str()).collect();
-        paths.sort_unstable();
-        assert_eq!(paths, ["a.txt", "gone.txt", "new.txt"]);
-        let a = file(&review, "a.txt").unwrap();
-        assert_eq!(a.patch.hunks.len(), 2, "{:#?}", a.patch);
-        assert_eq!((a.patch.added, a.patch.removed), (3, 2));
-        assert_eq!(file(&review, "new.txt").unwrap().from, None);
-        assert_eq!(file(&review, "gone.txt").unwrap().to, None);
+        host.create(meta).unwrap();
+        id
     }
 
-    /// A hunk put back leaves the other; a revert of a file that changed since is refused,
-    /// and the same intent again is its first outcome with nothing done. What is kept leaves
-    /// what is left to review, a hunk or a file at a time, and the thread is to review until
-    /// everything is kept; a change kept twice is kept once.
-    #[tokio::test]
-    async fn changes_are_kept_and_put_back_by_hunk_and_by_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = repository(dir.path());
-        let rig = Rig::new(dir.path(), &repo);
-        rig.status(Phase::Working);
-        rig.begin(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
-        let changed = A.replace("two\n", "TWO\n").replace("eleven\n", "ELEVEN\nmore\n");
-        std::fs::write(repo.join("a.txt"), &changed).unwrap();
-        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
-        assert!(!rig.host.state(rig.thread).unwrap().0.to_review, "nothing ended yet");
-        rig.end(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
-        rig.until(|s| s.to_review).await;
-        let review = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(1))).await;
-
-        let back = IntentId::new();
-        let first = Intent::Revert(pick(&review, "a.txt", vec![0]));
-        assert_eq!(rig.pick(back, &first).await, Outcome::Done);
-        let a = std::fs::read_to_string(repo.join("a.txt")).unwrap();
-        assert_eq!(a, A.replace("eleven\n", "ELEVEN\nmore\n"), "the first hunk went back");
-        assert_eq!(rig.pick(back, &first).await, Outcome::Done, "the same intent again");
-        let stale = rig.pick(IntentId::new(), &first).await;
-        assert!(matches!(stale, Outcome::Refused { .. }), "the file changed since: {stale:?}");
-        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), a, "nothing done");
-
-        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
-        assert_eq!(file(&left, "a.txt").unwrap().patch.hunks.len(), 1);
-        let keep = Intent::Keep(pick(&left, "a.txt", vec![0]));
-        assert_eq!(rig.pick(IntentId::new(), &keep).await, Outcome::Done);
-        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
-        assert!(file(&left, "a.txt").is_none(), "all of a.txt is kept: {left:#?}");
-        let again = rig.pick(IntentId::new(), &keep).await;
-        assert_eq!(again, Outcome::Done, "kept already: the same change again changes nothing");
-        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
-        assert!(file(&left, "a.txt").is_none(), "{left:#?}");
-        let whole = Intent::Keep(pick(&left, "new.txt", vec![]));
-        assert_eq!(rig.pick(IntentId::new(), &whole).await, Outcome::Done);
-        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
-        assert!(left.files.is_empty(), "nothing left to review: {left:#?}");
-        let to_review = || rig.host.state(rig.thread).unwrap().0.to_review;
-        assert!(!to_review(), "all of it kept, the thread is no longer to review");
-
-        let gone = Intent::Revert(pick(&review, "new.txt", vec![]));
-        assert_eq!(rig.pick(IntentId::new(), &gone).await, Outcome::Done);
-        assert!(!repo.join("new.txt").exists(), "an added file put back is no file");
-        assert!(to_review(), "what was kept is gone from the tree: a change to review");
+    /// The reviews of a host under `dir` with one thread in `repo`.
+    fn reviews_in(dir: &Path, repo: &Path) -> (Reviews, ThreadId) {
+        let host = Host::open(&dir.join("threads"), Limits::default()).unwrap();
+        let thread = thread_in(&host, repo);
+        (Reviews::new(host, Some(git())), thread)
     }
 
-    /// A review tells each file for what it is: a file moved and touched is one rename with
-    /// its old path and its hunks, a picture its size, a text file too large to cut its size, a
-    /// binary file none, and a mode change its two modes. A rename kept takes the old path out
-    /// of what is kept, and put back whole it goes back to where it was.
+    /// A thread's working tree is reviewed against `HEAD` in the repository its folder is in,
+    /// a side of a file comes whole by its blob, a scope between its turns says there is no
+    /// snapshot to compare, and a thread outside git has no review.
     #[tokio::test]
-    async fn renames_pictures_large_files_and_modes_are_told_and_a_rename_keeps_whole() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        use slopty_proto::thread::wire::{FileKind, Modes};
-
+    async fn a_threads_repository_is_reviewed_as_it_stands() {
         let dir = tempfile::tempdir().unwrap();
         let repo = repository(dir.path());
-        let rig = Rig::new(dir.path(), &repo);
-        rig.status(Phase::Working);
-        rig.begin(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
-        std::fs::remove_file(repo.join("a.txt")).unwrap();
-        std::fs::write(repo.join("moved.txt"), A.replace("twelve\n", "TWELVE\n")).unwrap();
-        let png = [&b"\x89PNG\r\n\x1a\n"[..], &[0; 24]].concat();
-        std::fs::write(repo.join("pic.png"), &png).unwrap();
-        let big = "x\n".repeat(slopty_worker::repo::snapshot::TEXT_BYTES / 2 + 1);
-        std::fs::write(repo.join("big.txt"), &big).unwrap();
-        std::fs::write(repo.join("bin.dat"), b"a\0b").unwrap();
-        let gone = repo.join("gone.txt");
-        std::fs::set_permissions(&gone, std::fs::Permissions::from_mode(0o755)).unwrap();
-        rig.end(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
-        rig.until(|s| s.to_review).await;
-        let review = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(1))).await;
-
-        let moved = file(&review, "moved.txt").unwrap();
-        assert_eq!(moved.old_path.as_deref(), Some("a.txt"), "one rename: {review:#?}");
-        assert!(file(&review, "a.txt").is_none(), "not a removal beside an addition");
-        assert_eq!((moved.kind, moved.patch.hunks.len()), (FileKind::Text, 1));
-        let size = |path: &str| file(&review, path).map(|f| f.kind);
-        let png_bytes = u64::try_from(png.len()).unwrap();
-        assert_eq!(size("pic.png"), Some(FileKind::Image { bytes: png_bytes }));
-        let big_bytes = u64::try_from(big.len()).unwrap();
-        assert_eq!(size("big.txt"), Some(FileKind::TooLarge { bytes: big_bytes }));
-        assert_eq!(size("bin.dat"), Some(FileKind::Binary));
-        let mode = file(&review, "gone.txt").unwrap();
-        assert_eq!(mode.modes, Some(Modes { from: 0o100_644, to: 0o100_755 }));
-        assert!(mode.patch.hunks.is_empty(), "the bytes are the same");
-
-        let keep = Intent::Keep(pick(&review, "moved.txt", vec![]));
-        assert_eq!(rig.pick(IntentId::new(), &keep).await, Outcome::Done);
-        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
-        let named = |path: &str| file(&left, path).is_some();
-        assert!(!named("moved.txt") && !named("a.txt"), "the rename kept whole: {left:#?}");
-
-        let back = Intent::Revert(pick(&review, "moved.txt", vec![]));
-        assert_eq!(rig.pick(IntentId::new(), &back).await, Outcome::Done);
-        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), A, "back where it was");
-        assert!(!repo.join("moved.txt").exists(), "and gone from where it went");
-    }
-
-    /// A file two turns changed, neither kept: keeping the last turn's review (the scope a
-    /// thread's review opens on) takes that turn's change onto what is kept, leaving the first
-    /// turn's still to review, and keeping the first turn then takes the rest. A change that
-    /// meets lines kept otherwise is refused, saying which lines, and nothing is kept.
-    #[tokio::test]
-    async fn the_last_turn_is_kept_though_an_earlier_one_is_not() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = repository(dir.path());
-        let rig = Rig::new(dir.path(), &repo);
-        rig.status(Phase::Working);
-        rig.begin(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
-        let first = A.replace("two\n", "TWO\n");
-        std::fs::write(repo.join("a.txt"), &first).unwrap();
-        rig.end(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
-        rig.begin(2);
-        rig.until(|s| s.turns.get(1).is_some_and(|t| t.before.is_some())).await;
-        let both = first.replace("eleven\n", "ELEVEN\nmore\n");
-        std::fs::write(repo.join("a.txt"), &both).unwrap();
-        rig.end(2);
-        rig.until(|s| s.turns.get(1).is_some_and(|t| t.after.is_some())).await;
-
-        let last = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(2))).await;
-        let keep = Intent::Keep(pick(&last, "a.txt", vec![0]));
-        assert_eq!(rig.pick(IntentId::new(), &keep).await, Outcome::Done);
-        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
-        let a = file(&left, "a.txt").expect("the first turn's change is left");
-        let shown: Vec<&str> =
-            a.patch.hunks.iter().flat_map(|h| &h.lines).map(String::as_str).collect();
-        assert!(shown.contains(&"+TWO"), "{shown:?}");
-        assert!(!shown.iter().any(|l| l.contains("ELEVEN")), "the last turn's is kept: {shown:?}");
-        let again = rig.pick(IntentId::new(), &keep).await;
-        assert_eq!(again, Outcome::Done, "kept already, so keeping it again changes nothing");
-
-        let earlier = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(1))).await;
-        let keep = Intent::Keep(pick(&earlier, "a.txt", vec![]));
-        assert_eq!(rig.pick(IntentId::new(), &keep).await, Outcome::Done);
-        let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
-        assert!(left.files.is_empty(), "both turns kept: {left:#?}");
-
-        // A third turn rewrites a line the second turn changed; the person then keeps a
-        // revert of it by hand: the kept side now differs from the turn's old side on the
-        // very line the turn changes.
-        rig.begin(3);
-        rig.until(|s| s.turns.get(2).is_some_and(|t| t.before.is_some())).await;
-        std::fs::write(repo.join("a.txt"), both.replace("ELEVEN\n", "Eleven!\n")).unwrap();
-        rig.end(3);
-        rig.until(|s| s.turns.get(2).is_some_and(|t| t.after.is_some())).await;
-        let third = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(3))).await;
-        std::fs::write(repo.join("a.txt"), both.replace("ELEVEN\n", "eleven, as it was\n"))
-            .unwrap();
-        rig.status(Phase::Working);
-        rig.begin(4);
-        rig.until(|s| s.turns.get(3).is_some_and(|t| t.before.is_some())).await;
-        rig.end(4);
-        rig.until(|s| s.turns.get(3).is_some_and(|t| t.after.is_some())).await;
-        let fourth = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
-        let keep_fourth = Intent::Keep(pick(&fourth, "a.txt", vec![]));
-        assert_eq!(rig.pick(IntentId::new(), &keep_fourth).await, Outcome::Done);
-        let keep = Intent::Keep(pick(&third, "a.txt", vec![]));
-        match rig.pick(IntentId::new(), &keep).await {
-            Outcome::Refused { reason } => assert!(reason.contains("line 11"), "{reason}"),
-            other => panic!("a change over lines kept otherwise: {other:?}"),
+        std::fs::write(repo.join("a.txt"), "one\nchanged\n").unwrap();
+        let host = Host::open(&dir.path().join("threads"), Limits::default()).unwrap();
+        let reviews = Reviews::new(host.clone(), Some(git()));
+        let thread = thread_in(&host, &repo);
+        let review = reviews.review(thread, ReviewScope::WorkingTree(Against::Head)).await;
+        assert_eq!(review.absent, None, "{review:?}");
+        let file = review.files.iter().find(|f| f.path == "a.txt").expect("a.txt changed");
+        let blob = file.from.clone().expect("its committed side");
+        match reviews.blob(thread, &blob).await {
+            Expanded::Text(text) => assert!(text.starts_with("one"), "{text:?}"),
+            other => panic!("{other:?}"),
         }
-    }
-
-    /// Each side of a file a review showed reads back whole from its blob, for the lines
-    /// between the hunks; what is no blob of the repository, and a thread outside git, read as
-    /// gone.
-    #[tokio::test]
-    async fn a_review_s_sides_read_back_whole_from_their_blobs() {
-        use slopty_proto::thread::wire::Expanded;
-        let dir = tempfile::tempdir().unwrap();
-        let repo = repository(dir.path());
-        let rig = Rig::new(dir.path(), &repo);
-        rig.status(Phase::Working);
-        rig.begin(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
-        let changed = A.replace("two\n", "TWO\n").replace("eleven\n", "ELEVEN\nmore\n");
-        std::fs::write(repo.join("a.txt"), &changed).unwrap();
-        rig.end(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
-        let review = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(1))).await;
-        let a = file(&review, "a.txt").unwrap();
-        let (from, to) = (a.from.clone().unwrap(), a.to.clone().unwrap());
-
-        let (snapshots, thread) = (&rig.snapshots, rig.thread);
-        assert_eq!(snapshots.blob(thread, &to).await, Expanded::Text(changed), "the new side");
-        assert_eq!(snapshots.blob(thread, &from).await, Expanded::Text(A.to_owned()), "the old");
-        let missing = "0".repeat(40);
-        assert_eq!(snapshots.blob(thread, &missing).await, Expanded::Gone, "no such blob");
-        assert_eq!(snapshots.blob(thread, "--help").await, Expanded::Gone, "no object id");
-        assert_eq!(snapshots.blob(thread, "HEAD:a.txt").await, Expanded::Gone, "a name");
-
-        let plain = dir.path().join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-        let outside = Rig::new(&dir.path().join("other"), &plain);
-        assert_eq!(outside.snapshots.blob(outside.thread, &from).await, Expanded::Gone);
-    }
-
-    /// A thread outside git takes no snapshot and its review says why.
-    #[tokio::test]
-    async fn a_thread_outside_git_has_no_review() {
-        let dir = tempfile::tempdir().unwrap();
-        let plain = dir.path().join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-        let rig = Rig::new(dir.path(), &plain);
-        let review = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
-        assert_eq!(review.absent.as_deref(), Some(NOT_IN_GIT));
-    }
-
-    /// The change a review showed is kept for the agent's own review as one commit on a base
-    /// of its own, so `base...head` and the head commit both say exactly it. Each review
-    /// overwrites the one pair; a push of the person's branch carries none of it, refs or
-    /// commits; and a thread forgotten takes every ref of its own with it.
-    #[tokio::test]
-    async fn an_agents_review_names_the_change_as_one_pair_that_never_leaves() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = repository(dir.path());
-        let remote = dir.path().join("remote.git");
-        run(dir.path(), &["init", "-q", "--bare", remote.to_str().unwrap()]);
-        run(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
-        let rig = Rig::new(dir.path(), &repo);
-        rig.status(Phase::Working);
-        rig.begin(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
-        std::fs::write(repo.join("a.txt"), A.replace("two\n", "TWO\n")).unwrap();
-        rig.end(1);
-        let state = rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
-        let turn = state.turns.first().unwrap();
-        let (from, to) = (turn.before.clone().unwrap(), turn.after.clone().unwrap());
-
-        let first = rig.snapshots.review_range(rig.thread, &from, &to).await.unwrap();
-        let tree = |rev: &str| run(&repo, &["rev-parse", &format!("{rev}^{{tree}}")]);
-        assert_eq!((tree(&first.base), tree(&first.head)), (from.0.clone(), to.0.clone()));
-        assert_eq!(run(&repo, &["rev-parse", &format!("{}^", first.head)]), first.base);
-        assert_eq!(run(&repo, &["diff", "--name-only", &first.dots()]), "a.txt");
-        assert_eq!(first.dots(), format!("{}...{}", first.base, first.head));
-        let again = rig.snapshots.review_range(rig.thread, &to, &to).await.unwrap();
-        let thread = rig.thread;
-        let pair = |name: &str| {
-            run(&repo, &["rev-parse", &format!("refs/slopty/threads/{thread}/review-{name}")])
-        };
-        assert_eq!((pair("base"), pair("head")), (again.base, again.head), "overwritten");
-        assert!(
-            rig.snapshots.review_range(rig.thread, &from, &TreeRef("0".repeat(40))).await.is_err(),
-            "no such tree"
-        );
-
-        run(&repo, &["push", "-q", "origin", "main"]);
-        assert_eq!(run(&remote, &["for-each-ref", "--format=%(refname)"]), "refs/heads/main");
-        let carried = Command::new(git())
-            .arg("-C")
-            .arg(&remote)
-            .args(["cat-file", "-e", &first.head])
-            .output()
-            .unwrap();
-        assert!(!carried.status.success(), "the review's commit stays home");
-
-        let state = rig.host.state(rig.thread).unwrap().0;
-        rig.snapshots.forget(&state).await;
-        let left = run(&repo, &["for-each-ref", "--format=%(refname)", "refs/slopty/"]);
-        assert_eq!(left, "", "every ref of the thread goes with it");
+        let turn = reviews.review(thread, ReviewScope::Turn(TurnId(1))).await;
+        assert_eq!(turn.absent.as_deref(), Some(NO_TURN_SNAPSHOTS));
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = thread_in(&host, outside.path());
+        let none = reviews.review(elsewhere, ReviewScope::WorkingTree(Against::Head)).await;
+        assert_eq!(none.absent.as_deref(), Some(NOT_IN_GIT));
+        assert_eq!(reviews.blob(elsewhere, &blob).await, Expanded::Gone);
     }
 
     /// A folder's working tree, reviewed with no thread through the person's git op: against
@@ -512,9 +152,8 @@ mod review {
         let nowhere = changes(Against::Branch("nope".to_owned())).await;
         assert_eq!(nowhere.absent.as_deref(), Some(NO_BASE), "a branch that is not there");
 
-        let rig = Rig::new(dir.path(), &repo);
-        let threads =
-            rig.snapshots.review(rig.thread, ReviewScope::WorkingTree(Against::Head)).await;
+        let (reviews, thread) = reviews_in(dir.path(), &repo);
+        let threads = reviews.review(thread, ReviewScope::WorkingTree(Against::Head)).await;
         assert_eq!(paths(&threads), paths(&head), "a thread's review of the span reads the same");
 
         let alone = dir.path().join("alone");
@@ -673,8 +312,8 @@ mod review {
         let apart = range("main", "alone").await;
         assert_eq!(apart.absent.as_deref(), Some(NO_FORK), "two histories that never met");
 
-        let rig = Rig::new(dir.path(), &repo);
-        let threads = rig.snapshots.review(rig.thread, scope).await;
+        let (reviews, thread) = reviews_in(dir.path(), &repo);
+        let threads = reviews.review(thread, scope).await;
         assert_eq!(
             paths(&threads),
             ["goal.txt", "gone.txt", "pushed.txt"],
@@ -774,74 +413,6 @@ mod review {
             let refused = apply(&programs, &folder, GitOp::Blob { blob }, &[]).await;
             assert!(matches!(refused, GitOutcome::Refused { .. }), "{refused:?}");
         }
-    }
-
-    /// A pull request the watcher sees merge keeps all of its thread's tree, so the thread no
-    /// longer stands To review, and a later turn that changes nothing leaves it so while one
-    /// that changes a file is to review again. Each read comes at once on a git op's nudge,
-    /// not on the watcher's clock. The forge is a stand-in gh answering from a file, so no
-    /// one's GitHub is reached.
-    #[tokio::test]
-    async fn a_pull_request_seen_merged_keeps_the_tree_and_a_nudge_reads_it_at_once() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        use slopty_proto::thread::wire::PullStands;
-        use slopty_worker::repo::commit::Programs;
-        use slopty_worker::thread::pulls;
-
-        let dir = tempfile::tempdir().unwrap();
-        let repo = repository(dir.path());
-        run(&repo, &["checkout", "-q", "-b", "feature"]);
-        let gh = dir.path().join("gh");
-        let said = |state: &str| {
-            let view = format!(
-                r#"{{"number":7,"url":"https://github.com/o/demo/pull/7","title":"Keep it",
-                "state":"{state}","isDraft":false,"headRefName":"feature","headRefOid":"0123",
-                "baseRefName":"main","reviewDecision":"","mergeable":"MERGEABLE",
-                "mergeStateStatus":"CLEAN","statusCheckRollup":[]}}"#
-            );
-            std::fs::write(dir.path().join("view.json"), view).unwrap();
-        };
-        said("OPEN");
-        let script = format!(
-            "#!/bin/sh\ncase \"$1 $2\" in\n'pr view') cat \"{}/view.json\" ;;\n\
-             *) echo \"unexpected: $*\" >&2; exit 2 ;;\nesac\n",
-            dir.path().display()
-        );
-        std::fs::write(&gh, script).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let rig = Rig::new(dir.path(), &repo);
-        let programs = Programs { git: Some(git()), gh: Some(gh), glab: None, path: None };
-        let _watch = pulls::spawn(rig.host.clone(), programs, rig.snapshots.clone());
-
-        rig.status(Phase::Working);
-        rig.begin(1);
-        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
-        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
-        rig.end(1);
-        rig.until(|s| s.to_review).await;
-        rig.status(Phase::Idle);
-
-        let stands = |s: &ThreadState, want| s.pull.as_ref().is_some_and(|p| p.stands == want);
-        pulls::nudge(&repo);
-        let open = rig.until(|s| stands(s, PullStands::Ready)).await;
-        assert!(open.to_review, "an open pull request leaves the work to review");
-
-        said("MERGED");
-        pulls::nudge(&repo.join("new.txt"));
-        rig.until(|s| stands(s, PullStands::Merged) && !s.to_review).await;
-
-        let turn = |n: u32| {
-            rig.status(Phase::Working);
-            rig.begin(n);
-            rig.end(n);
-        };
-        turn(2);
-        let state = rig.until(|s| s.turns.iter().any(|t| t.id == TurnId(2) && t.after.is_some()));
-        assert!(!state.await.to_review, "nothing changed since the merge");
-        std::fs::write(repo.join("after.txt"), "after\n").unwrap();
-        turn(3);
-        rig.until(|s| s.to_review).await;
     }
 
     /// What a snapshot costs on this repository, cloned: the first (every file hashed), one

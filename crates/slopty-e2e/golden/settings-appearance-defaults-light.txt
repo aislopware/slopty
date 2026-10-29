@@ -2,15 +2,13 @@ Window
 Group │ Settings
 Button │ Back
 TabList │ Settings sections
-Tab │ General
 Tab │ Appearance
 Tab │ Notifications
 Tab │ Shortcuts
 Tab │ Providers
-Tab │ Permissions
 Tab │ Devices
 Tab │ Files
-Tab │ Archived chats
+Tab │ Archived sessions
 Button │ Server: e2e-server, Connected
 Button │ Close settings
 Button │ System
@@ -28,10 +26,8 @@ Button │ Green
 Button │ Cyan
 Button │ Blue
 Button │ Pink
-Switch │ Match wallpaper colors
 Button │ Reset Glass to default
 Button │ Glass: Opaque
-Button │ Choose image
 Switch │ Pause animations in background
 Button │ Interface font: Geist
 Button │ Interface font size: 16 px

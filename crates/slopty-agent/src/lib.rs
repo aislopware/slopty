@@ -1,16 +1,16 @@
-//! Coding agents on the worker.
+//! Coding agents on the worker, each its own TUI in a Slopty terminal (`docs/decisions/agents.md`,
+//! "TUI-first").
 //!
-//! Every agent Slopty runs is driven through its own published door, one adapter per agent, each
-//! a sans-IO codec here and its IO on the worker: Claude Code over stream-json with the control
-//! protocol ([`claude`]), Codex over its app-server ([`codex`]), pi over its RPC mode ([`pi`]),
-//! and any ACP agent over the Agent Client Protocol ([`acp`]). They share the thread model's
-//! pieces: the transcript decoder ([`conversation`]), the queue of messages that wait on the
-//! worker ([`queue`]), the files sent with a message ([`attach`]), and Slopty's tools for an
-//! agent it starts ([`mcp`]).
+//! Slopty starts the person's own agent in a terminal with Slopty's tools ([`mcp`]): Claude Code
+//! on a session it names, with its hooks relayed ([`claude`], [`hooks`]), Codex ([`codex`]) and
+//! pi ([`pi`]). Nothing of a screen is read and nothing is answered for the person. A Claude Code
+//! session in any terminal is read from its own records: the live record that names the session
+//! ([`claude::sessions`]) and its transcript, mapped onto the thread model ([`claude::history`],
+//! through the transcript decoder [`conversation`]). The person's past prompts are searched in
+//! each agent's record of them ([`history`]).
 //!
-//! An agent the person runs in a terminal by hand is that terminal's program. The worker knows
-//! of it only that it is there ([`AgentTable`]), by its [`detect`]ed foreground process: nothing
-//! of its screen is read, nothing is typed into it and nothing of its own record is read.
+//! The worker knows of every terminal's agent that it is there ([`AgentTable`]), by its
+//! [`detect`]ed foreground process.
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -19,24 +19,19 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
-pub mod acp;
-pub mod attach;
 pub mod claude;
 pub mod codex;
-pub mod commands;
 pub mod conversation;
 pub mod detect;
-pub mod driven;
 pub mod history;
+pub mod hooks;
 pub mod managed;
 pub mod mcp;
 pub mod media;
-pub mod permission;
 pub mod pi;
-pub mod queue;
-pub mod reports;
 pub mod shown;
 pub mod status;
+pub mod title;
 pub mod transcript;
 pub mod trust;
 pub mod vouch;

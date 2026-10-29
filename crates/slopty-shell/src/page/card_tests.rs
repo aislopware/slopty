@@ -249,7 +249,7 @@ fn a_page_in_the_pane_leaves_a_line_in_its_card(cx: &mut gpui::TestAppContext) {
     assert!(find(&nodes, Role::Button, "Open in pane").is_none(), "it is there already");
     let pane = nodes.values().find(|n| n.role == Role::Group && n.label == "Page: Plot" && n.value == "pane");
     assert!(pane.is_some(), "the pane's node, beside the card's");
-    assert!(find(&nodes, Role::Button, "Back to the chat").is_some());
+    assert!(find(&nodes, Role::Button, "Back to the inspector").is_some());
 }
 
 /// A page that could not be shown says why with Try again, which asks its host to open it

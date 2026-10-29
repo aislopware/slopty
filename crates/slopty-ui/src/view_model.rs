@@ -30,12 +30,12 @@ use futures::stream::BoxStream;
 use parking_lot::Mutex;
 use serde::Serialize;
 use slopty_view_doc::{
-    ChatDock, PermissionRules, QueuedMessage, SessionMessageEntry, TranscriptBaseline,
-    TranscriptFrame, TranscriptUpdate, WorkTray, calls,
+    ChatDock, SessionMessageEntry, TranscriptBaseline, TranscriptFrame, TranscriptUpdate, WorkTray,
+    calls,
 };
 use slopty_view_proto::{
     AgentUsageWindow, Chat, ChatConnectivity, Connectivity, ConnectivityState, Device, EngineInfo,
-    ServerPresence, Session, SidebarPreferencesState, Space, TransferProgress, WorkspaceScope,
+    ServerPresence, Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
 use slopty_view_rpc::{RpcError, RpcReply, RpcService, methods};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -86,20 +86,17 @@ pub struct Feed {
     spaces: watch::Sender<Option<Arc<[Space]>>>,
     chats: watch::Sender<Option<Arc<[Chat]>>>,
     sessions: watch::Sender<Arc<[Session]>>,
+    /// slopty: the terminal each session is, by chat (`calls::WATCH_SESSION_TERMINALS`).
+    terminals: watch::Sender<Arc<std::collections::BTreeMap<String, String>>>,
     /// The link to the server, for the sidebar's foot, and each chat's link to its worker.
     connectivity: watch::Sender<Connectivity>,
     /// Whether any worker is linked now, `None` with none at all: the whole's state where no
     /// server is followed.
     workers_up: Mutex<Option<bool>>,
-    /// The files on their way to a machine to go with a message, by the upload id the composer
-    /// gave each.
-    transfers: watch::Sender<Arc<[TransferProgress]>>,
     /// This machine's own worker as a device id, once the app knows whether it has one.
     local: watch::Sender<Local>,
     /// Each followed chat's transcript, `None` until its thread has come.
     transcripts: Mutex<HashMap<String, Followed>>,
-    /// The messages waiting to go to each chat's agent, for the chats whose queue is watched.
-    queues: Mutex<HashMap<String, watch::Sender<Arc<[QueuedMessage]>>>>,
     /// The pull requests the threads' branches have, as their rows show them.
     pulls: watch::Sender<Arc<[Pull]>>,
     /// The sidebar's pins, `None` until the workspace says them.
@@ -128,14 +125,13 @@ enum Local {
     Known(Option<String>),
 }
 
-/// One followed chat's transcript, the rest of what its thread says (slopty: its tray, dock
-/// and rules), and how many watches are open on any of it: the thread stays open while one is.
+/// One followed chat's transcript, the rest of what its thread says (slopty: its tray and
+/// dock), and how many watches are open on any of it: the thread stays open while one is.
 #[derive(Debug)]
 struct Followed {
     said: watch::Sender<Option<Arc<Transcript>>>,
     work: watch::Sender<Option<Arc<WorkTray>>>,
     dock: watch::Sender<Option<Arc<ChatDock>>>,
-    rules: watch::Sender<Option<Arc<PermissionRules>>>,
     watches: usize,
 }
 
@@ -145,7 +141,6 @@ impl Followed {
             said: watch::Sender::new(None),
             work: watch::Sender::new(None),
             dock: watch::Sender::new(None),
-            rules: watch::Sender::new(None),
             watches: 0,
         }
     }
@@ -159,8 +154,6 @@ pub struct ChatViews {
     pub work: WorkTray,
     /// Its dock: activity, goal, notes, the status line, the mode, the context card.
     pub dock: ChatDock,
-    /// Its agent's permission rules.
-    pub rules: PermissionRules,
 }
 
 /// Replace a followed chat's value, waking its watches only when it changed.
@@ -212,12 +205,11 @@ impl Feed {
             spaces: watch::Sender::new(None),
             chats: watch::Sender::new(None),
             sessions: watch::Sender::new(Arc::default()),
+            terminals: watch::Sender::new(Arc::default()),
             connectivity: watch::Sender::new(Connectivity::default()),
             workers_up: Mutex::new(None),
-            transfers: watch::Sender::new(Arc::default()),
             local: watch::Sender::new(Local::Unknown),
             transcripts: Mutex::new(HashMap::new()),
-            queues: Mutex::new(HashMap::new()),
             pulls: watch::Sender::new(Arc::default()),
             sidebar: watch::Sender::new(None),
         }
@@ -295,6 +287,17 @@ impl Feed {
         publish(&self.sessions, sessions);
     }
 
+    /// slopty: the terminal each session is, by chat. An unchanged map wakes no watch.
+    pub fn terminals(&self, terminals: std::collections::BTreeMap<String, String>) {
+        self.terminals.send_if_modified(|now| {
+            if **now == terminals {
+                return false;
+            }
+            *now = Arc::new(terminals);
+            true
+        });
+    }
+
     /// The server this client follows, and whether it is linked now; `None` without one.
     pub fn server(&self, server: Option<ServerPresence>) {
         let workers = *self.workers_up.lock();
@@ -325,11 +328,6 @@ impl Feed {
         });
     }
 
-    /// The files on their way to a machine with a message, each by its upload id.
-    pub fn transfers(&self, transfers: Vec<TransferProgress>) {
-        publish(&self.transfers, transfers);
-    }
-
     /// The connectivity as last said.
     #[cfg(test)]
     pub(crate) fn said_connectivity(&self) -> Connectivity {
@@ -358,38 +356,10 @@ impl Feed {
     /// slopty: what `chat`'s thread says beside its transcript; nothing while no watch is open
     /// on the chat.
     pub fn chat_views(&self, chat: &str, views: ChatViews) {
-        let senders = self
-            .transcripts
-            .lock()
-            .get(chat)
-            .map(|f| (f.work.clone(), f.dock.clone(), f.rules.clone()));
-        let Some((work, dock, rules)) = senders else { return };
+        let senders = self.transcripts.lock().get(chat).map(|f| (f.work.clone(), f.dock.clone()));
+        let Some((work, dock)) = senders else { return };
         publish_value(&work, views.work);
         publish_value(&dock, views.dock);
-        publish_value(&rules, views.rules);
-    }
-
-    /// The chats whose queue is watched: the workspace publishes their waiting messages.
-    #[must_use]
-    pub fn queued(&self) -> Vec<String> {
-        self.queues.lock().keys().cloned().collect()
-    }
-
-    /// The messages waiting to go to `chat`'s agent; nothing while no watch is open on it.
-    pub fn queue(&self, chat: &str, items: Vec<QueuedMessage>) {
-        let sender = self.queues.lock().get(chat).cloned();
-        if let Some(sender) = sender {
-            publish(&sender, items);
-        }
-    }
-
-    /// A watch opened on `chat`'s queue.
-    fn watch_queue(&self, chat: &str) -> watch::Receiver<Arc<[QueuedMessage]>> {
-        let mut queues = self.queues.lock();
-        queues
-            .entry(chat.to_owned())
-            .or_insert_with(|| watch::Sender::new(Arc::default()))
-            .subscribe()
     }
 
     /// A watch opened on `chat`: the receiver it reads, and whether it is the first.
@@ -466,30 +436,6 @@ pub struct ViewModel {
     asks: mpsc::UnboundedSender<Ask>,
 }
 
-/// What the shell may ask of Slopty, on this device and on every worker.
-///
-/// Its composer's chips, put in each agent's words on the way; the thread's queue of messages
-/// sent while the agent works, whose files stay chips beside the words; and a chat with no
-/// project in a dated scratch folder of its own, which the view model makes on its machine
-/// before the agent starts there.
-/// Updating an agent Slopty does not do.
-#[must_use]
-pub fn capabilities() -> Vec<String> {
-    use slopty_view_proto::capabilities as can;
-    [
-        can::COMPOSER_REFERENCES_V1,
-        can::MESSAGE_QUEUE_V1,
-        can::MESSAGE_QUEUE_ACTIONS_V1,
-        can::MESSAGE_QUEUE_ATTACHMENTS_V1,
-        can::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
-        can::MESSAGE_QUEUE_EDIT_LEASE_V1,
-        can::PROJECTLESS_SCRATCH_V1,
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
-
 impl ViewModel {
     /// A view model for the client `device`, with the feed the workspace publishes into and the
     /// asks it answers.
@@ -502,7 +448,7 @@ impl ViewModel {
             // Slopty has no sign-in of its own: the tailnet decides who reaches what.
             workspace_scope: WorkspaceScope::Local,
             cursor_sdk_version: None,
-            capabilities: capabilities(),
+            capabilities: Vec::new(),
         };
         (Arc::new(Self { info, feed: Arc::clone(&feed), asks }), feed, asked)
     }
@@ -554,29 +500,7 @@ impl ViewModel {
             });
         RpcReply::Stream(frames.boxed())
     }
-
-    /// slopty: `WatchRules`: a chat's rules, or those of the newest thread on a machine (in a
-    /// folder) whose agent reads them, which the workspace picks.
-    async fn rules(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        let chat = if let Some(chat) = chat_param(&params) {
-            chat
-        } else {
-            let picked = if let RpcReply::Value(value) = self.ask(RULES_CHAT, params).await? {
-                value
-            } else {
-                serde_json::Value::Null
-            };
-            chat_param(&picked).ok_or_else(|| {
-                RpcError::Failed("No chat on that machine reads permission rules".to_owned())
-            })?
-        };
-        Ok(self.chat_watch(chat, |followed| followed.rules.subscribe()))
-    }
 }
-
-/// slopty: the workspace's own call naming the chat whose rules `WatchRules` reads for
-/// `{ deviceId, cwd? }`: `{ chatId }`.
-pub(crate) const RULES_CHAT: &str = "slopty.rulesChat";
 
 /// The `chatId` a call names.
 fn chat_param(params: &serde_json::Value) -> Option<String> {
@@ -815,20 +739,6 @@ impl RpcService for ViewModel {
                 Ok(RpcReply::Stream(list_frames(self.feed.sessions.subscribe())))
             }
             methods::WATCH_DOC_MESSAGES => self.transcript(&params),
-            methods::WATCH_QUEUE => {
-                let chat = params.get("chatId").and_then(serde_json::Value::as_str).unwrap_or("");
-                let queue = self.feed.watch_queue(chat);
-                // A queue the workspace has not published yet still reads from the start.
-                let _sent = self.asks.send(Ask::Republish);
-                let frames = futures::stream::unfold((queue, true), async |(mut queue, first)| {
-                    if !first {
-                        queue.changed().await.ok()?;
-                    }
-                    let items = queue.borrow_and_update().clone();
-                    Some((serde_json::json!({ "items": &*items }), (queue, false)))
-                });
-                Ok(RpcReply::Stream(frames.boxed()))
-            }
             methods::WATCH_CHECKOUT_CHANGE_REQUEST => Ok(self.change_request(&params)),
             // Pins are this client's own, kept by the workspace.
             methods::WATCH_SIDEBAR_PREFERENCES => {
@@ -846,11 +756,8 @@ impl RpcService for ViewModel {
             methods::WATCH_CONNECTIVITY => {
                 Ok(RpcReply::Stream(value_frames(self.feed.connectivity.subscribe())))
             }
-            methods::WATCH_TRANSFERS => {
-                Ok(RpcReply::Stream(list_frames(self.feed.transfers.subscribe())))
-            }
             methods::AUTH_STATUS => still(&serde_json::json!({ "_tag": "SignedOut" })),
-            // slopty: a chat's tray, dock and rules, followed as its transcript is.
+            // slopty: a chat's tray and dock, followed as its transcript is.
             calls::WATCH_WORK | calls::WATCH_DOCK => {
                 let chat = chat_param(&params)
                     .ok_or_else(|| RpcError::BadParams("chatId is required".to_owned()))?;
@@ -860,7 +767,9 @@ impl RpcService for ViewModel {
                     self.chat_watch(chat, |followed| followed.dock.subscribe())
                 })
             }
-            calls::WATCH_RULES => self.rules(params).await,
+            calls::WATCH_SESSION_TERMINALS => {
+                Ok(RpcReply::Stream(value_frames(self.feed.terminals.subscribe())))
+            }
             _ => self.ask(method, params).await,
         }
     }

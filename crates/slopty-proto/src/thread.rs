@@ -217,6 +217,9 @@ pub struct Drive(pub String);
 impl Drive {
     /// Slopty runs the agent over its protocol.
     pub const DRIVEN: &'static str = "driven";
+    /// The agent runs as its own TUI in a Slopty terminal, which the thread names
+    /// ([`ThreadMeta::TERMINAL_FACT`]); Slopty reads it through its own records, read-only.
+    pub const OBSERVED: &'static str = "observed";
     /// Slopty is a second live client of the agent's own server, beside its TUI.
     pub const SHARED: &'static str = "shared";
 
@@ -356,6 +359,10 @@ impl ThreadMeta {
     pub const PERSON: &'static str = "person";
     /// Started by another thread's call.
     pub const SUBAGENT: &'static str = "subagent";
+    /// The fact naming the terminal (its `SessionId`) the thread's agent runs in now, as its
+    /// own TUI: a client opens that terminal for the thread. Only a main thread carries it, and
+    /// only while its session runs there; at most one thread names a terminal at a time.
+    pub const TERMINAL_FACT: &'static str = "slopty.terminal";
 
     /// Whether the thread's agent can do `cap`.
     #[must_use]
@@ -388,6 +395,12 @@ impl ThreadMeta {
     #[must_use]
     pub fn aside_of(&self) -> Option<ThreadId> {
         self.facts.get(Self::ASIDE_FACT).and_then(|id| id.parse().ok())
+    }
+
+    /// The terminal the thread's agent runs in now ([`Self::TERMINAL_FACT`]).
+    #[must_use]
+    pub fn terminal(&self) -> Option<slopty_core::SessionId> {
+        self.facts.get(Self::TERMINAL_FACT).and_then(|id| id.parse().ok())
     }
 }
 

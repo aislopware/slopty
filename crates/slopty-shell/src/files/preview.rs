@@ -7,11 +7,11 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, HighlightStyle, ListAlignment, ListOffset,
-    ListSizingBehavior, ListState, ScrollHandle, SharedString, Subscription, Window, div,
-    font, list, point, prelude::*, px,
+    AnyElement, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListOffset,
+    ListSizingBehavior, ListState, ScrollHandle, SharedString, Window, div, font, list, point,
+    prelude::*, px,
 };
-use gpui_base::input::{RopeExt as _, TextDecoration, TextDecorationCollection};
+use gpui_base::input::RopeExt as _;
 use slopty_view_proto::{
     ReadWorkspaceFileRequest, WorkspaceReadOnlyReason, WriteWorkspaceFileOutcome,
     WriteWorkspaceFileRequest,
@@ -24,8 +24,6 @@ use super::{
     toolbar, toolbar_button, toolbar_toggle_keyed,
 };
 use crate::{
-    comments::{self, ReviewComment},
-    composer::{ComposerInput, ComposerInputEvent},
     icons::{self, icon},
     syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache},
     theme::Theme,
@@ -37,10 +35,6 @@ use crate::motion::HoverFade as _;
 // file that cannot be edited, no longer moves its text 1 or 1.5 px.
 const PREVIEW_LINE_HEIGHT: f32 = 20.0;
 const PREVIEW_LINE_HEIGHT_RATIO: f32 = PREVIEW_LINE_HEIGHT / crate::typography::CODE_FONT_SIZE_DEFAULT;
-const EDITOR_COMMENT_CARD_WIDTH: f32 = 320.0;
-const EDITOR_COMMENT_CARD_MARGIN: f32 = 8.0;
-const EDITOR_COMMENT_CARD_MIN_ANCHORED_WIDTH: f32 = 220.0;
-const EDITOR_COMMENT_DRAFT_HEIGHT: f32 = 92.0;
 // A read response is capped at 8 MiB and editable files at 1 MiB. The byte
 // budget bounds large previews while the entry cap bounds many tiny editors.
 // Protected documents may exceed either limit rather than risk losing work.
@@ -50,39 +44,6 @@ const MAX_RETAINED_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
 struct HighlightedFile {
     content_hash: String,
     document: Arc<slopty_syntax::HighlightedDocument>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommentAnchorEdge {
-    Start,
-    End,
-}
-
-struct EditorCommentAnchor {
-    range: TextDecorationCollection,
-    edge: CommentAnchorEdge,
-}
-
-struct EditorCommentDraft {
-    editing_id: Option<String>,
-    key: String,
-    path: String,
-    line: u32,
-    input: Entity<ComposerInput>,
-    _events: Subscription,
-}
-
-struct EditorOverlayRow {
-    line: u32,
-    top: f32,
-}
-
-struct EditorOverlayLayout {
-    gutter_width: f32,
-    line_height: f32,
-    viewport_width: f32,
-    viewport_height: f32,
-    rows: Vec<EditorOverlayRow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,9 +67,6 @@ pub(super) struct FilePreviewState {
     autosave_delay_ms: u64,
     reload_confirmation: Option<String>,
     close_requested: bool,
-    comment_anchors: HashMap<String, HashMap<String, EditorCommentAnchor>>,
-    comment_draft: Option<EditorCommentDraft>,
-    active_comment: Option<String>,
     typography_generation: u32,
 }
 
@@ -134,9 +92,6 @@ impl FilePreviewState {
             autosave_delay_ms,
             reload_confirmation: None,
             close_requested: false,
-            comment_anchors: HashMap::new(),
-            comment_draft: None,
-            active_comment: None,
             typography_generation: 0,
         }
     }
@@ -149,9 +104,6 @@ impl FilePreviewState {
         self.list.reset(0);
         self.reload_confirmation = None;
         self.close_requested = false;
-        self.comment_anchors.clear();
-        self.comment_draft = None;
-        self.active_comment = None;
     }
 
     pub(super) fn has_active(&self) -> bool {
@@ -177,10 +129,6 @@ impl FilePreviewState {
     fn document_is_evictable(&self, path: &str, protected_paths: &HashSet<String>) -> bool {
         if self.active.as_deref() == Some(path)
             || self.reload_confirmation.as_deref() == Some(path)
-            || self
-                .comment_draft
-                .as_ref()
-                .is_some_and(|draft| draft.path == path)
             || protected_paths.contains(path)
         {
             return false;
@@ -202,7 +150,6 @@ impl FilePreviewState {
                 && document.pending_save.is_none()
                 && document.pending_external_reload.is_none()
                 && !document.reconcile_after_save
-                && !document.review_comment_flush_pending
         })
     }
 
@@ -212,14 +159,6 @@ impl FilePreviewState {
         }
         self.document_recency.retain(|candidate| candidate != path);
         self.highlights.remove(path);
-        if let Some(anchors) = self.comment_anchors.remove(path)
-            && self
-                .active_comment
-                .as_ref()
-                .is_some_and(|id| anchors.contains_key(id))
-        {
-            self.active_comment = None;
-        }
         true
     }
 
@@ -379,85 +318,6 @@ fn document_blocks_lifecycle(document: &FileDocument) -> bool {
                 | DocumentPhase::ExternallyModified { .. }
                 | DocumentPhase::DeletedOnDisk
         )
-}
-
-fn document_finishes_review_comment_flush(document: &FileDocument) -> bool {
-    (!document.is_dirty() && matches!(document.phase, DocumentPhase::Ready))
-        || matches!(
-            document.phase,
-            DocumentPhase::SaveFailed(_) | DocumentPhase::Conflict { .. }
-        )
-}
-
-fn comment_anchor_range(
-    text: &gpui_base::input::Rope,
-    line: u32,
-) -> Option<(std::ops::Range<usize>, CommentAnchorEdge)> {
-    let line = line.saturating_sub(1) as usize;
-    if line >= text.lines_len() {
-        return None;
-    }
-    let start = text.line_start_offset(line);
-    let end = if line + 1 < text.lines_len() {
-        text.line_start_offset(line + 1)
-    } else {
-        text.len()
-    };
-    if start < end {
-        Some((start..end, CommentAnchorEdge::Start))
-    } else if start > 0 {
-        // The trailing empty line has no byte of its own. Track the newline
-        // immediately before it and resolve the anchor from the range's end.
-        Some((start - 1..start, CommentAnchorEdge::End))
-    } else {
-        None
-    }
-}
-
-fn tracked_comment_line(
-    text: &gpui_base::input::Rope,
-    range: &std::ops::Range<usize>,
-    edge: CommentAnchorEdge,
-) -> u32 {
-    let offset = match edge {
-        CommentAnchorEdge::Start => range.start,
-        CommentAnchorEdge::End => range.end,
-    }
-    .min(text.len());
-    (text.offset_to_point(offset).row + 1) as u32
-}
-
-fn editor_overlay_layout(editor: &super::editor::FileEditorState) -> Option<EditorOverlayLayout> {
-    let visible = editor.visible_row_range()?;
-    let input_bounds = editor.input_bounds();
-    let text_bounds = editor.text_bounds()?;
-    let line_height = f32::from(editor.line_height()?);
-    let text = editor.text();
-    let mut rows = Vec::with_capacity(visible.len());
-    let mut gutter_width = None;
-    for line in visible {
-        if line >= text.lines_len() {
-            continue;
-        }
-        let offset = text.line_start_offset(line);
-        let Some(bounds) = editor.range_to_bounds(&(offset..offset)) else {
-            continue;
-        };
-        gutter_width.get_or_insert_with(|| {
-            f32::from(bounds.origin.x - text_bounds.origin.x).clamp(24.0, 64.0)
-        });
-        rows.push(EditorOverlayRow {
-            line: (line + 1) as u32,
-            top: f32::from(bounds.origin.y - input_bounds.origin.y),
-        });
-    }
-    Some(EditorOverlayLayout {
-        gutter_width: gutter_width.unwrap_or(36.0),
-        line_height,
-        viewport_width: f32::from(input_bounds.size.width),
-        viewport_height: f32::from(input_bounds.size.height),
-        rows,
-    })
 }
 
 fn file_highlight_result_is_current(
@@ -791,346 +651,14 @@ impl FilesSurface {
         cx.notify();
     }
 
-    fn staged_file_comments(&self, path: &str, cx: &App) -> Vec<ReviewComment> {
-        self.state
-            .read(cx)
-            .review_comments(&self.chat_id)
-            .iter()
-            .filter(|comment| comment.is_file() && comment.path == path)
-            .cloned()
-            .collect()
-    }
-
-    fn trim_document_cache(&mut self, cx: &App) {
-        let mut protected_paths = self
-            .state
-            .read(cx)
-            .review_comments(&self.chat_id)
-            .iter()
-            .filter(|comment| comment.is_file())
-            .map(|comment| comment.path.clone())
-            .collect::<HashSet<_>>();
+    fn trim_document_cache(&mut self) {
+        let mut protected_paths = HashSet::new();
         if let Some(path) = self.editor_path.as_ref() {
             protected_paths.insert(path.clone());
         }
         for path in self.preview.trim_document_cache(&protected_paths) {
             tracing::debug!(path = %path, "evicted inactive workspace document");
         }
-    }
-
-    fn require_review_comment_flush(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(document) = self.preview.documents.get_mut(path) else {
-            return;
-        };
-        if !document.is_dirty() {
-            return;
-        }
-        document.review_comment_flush_pending = true;
-        let key = self.chat_id.clone();
-        let source = self.review_comment_flush_source;
-        self.state.update(cx, |state, cx| {
-            state.begin_review_comment_flush(&key, source);
-            cx.notify();
-        });
-    }
-
-    fn finish_review_comment_flush_if_idle(&mut self, cx: &mut Context<Self>) {
-        if self
-            .preview
-            .documents
-            .values()
-            .any(|document| document.review_comment_flush_pending)
-        {
-            return;
-        }
-        let key = self.chat_id.clone();
-        let source = self.review_comment_flush_source;
-        self.state.update(cx, |state, cx| {
-            state.finish_review_comment_flush(&key, source);
-            cx.notify();
-        });
-    }
-
-    pub(super) fn cancel_review_comment_flush(&mut self, cx: &mut Context<Self>) {
-        for document in self.preview.documents.values_mut() {
-            document.review_comment_flush_pending = false;
-        }
-        self.finish_review_comment_flush_if_idle(cx);
-    }
-
-    fn sync_editor_comment_anchors(
-        &mut self,
-        path: &str,
-        editor: &Entity<super::editor::FileEditorState>,
-        cx: &mut Context<Self>,
-    ) {
-        let comments = self.staged_file_comments(path, cx);
-        let anchors = self
-            .preview
-            .comment_anchors
-            .entry(path.to_string())
-            .or_default();
-        anchors.retain(|id, _| comments.iter().any(|comment| comment.id == *id));
-        let missing = comments
-            .into_iter()
-            .filter(|comment| !anchors.contains_key(&comment.id))
-            .collect::<Vec<_>>();
-        for comment in missing {
-            let anchor = editor.update(cx, |state, cx| {
-                let line = comment.line.min(state.text().lines_len().max(1) as u32);
-                let (range, edge) = comment_anchor_range(state.text(), line)?;
-                let range = state.create_decorations_collection(
-                    vec![TextDecoration::new(range, HighlightStyle::default())],
-                    cx,
-                );
-                Some(EditorCommentAnchor { range, edge })
-            });
-            if let Some(anchor) = anchor {
-                self.preview
-                    .comment_anchors
-                    .entry(path.to_string())
-                    .or_default()
-                    .insert(comment.id, anchor);
-            }
-        }
-    }
-
-    fn sync_editor_comment_lines(
-        &mut self,
-        path: &str,
-        editor: &Entity<super::editor::FileEditorState>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(anchors) = self.preview.comment_anchors.get(path) else {
-            return;
-        };
-        let (updates, detached) = editor.read_with(cx, |state, cx| {
-            let mut updates = Vec::new();
-            let mut detached = Vec::new();
-            for (id, anchor) in anchors {
-                if let Some(range) = anchor.range.get_ranges(cx).into_iter().next() {
-                    updates.push((
-                        id.clone(),
-                        tracked_comment_line(state.text(), &range, anchor.edge),
-                    ));
-                } else {
-                    detached.push(id.clone());
-                }
-            }
-            (updates, detached)
-        });
-        if !detached.is_empty() {
-            if let Some(anchors) = self.preview.comment_anchors.get_mut(path) {
-                anchors.retain(|id, _| !detached.contains(id));
-            }
-            self.sync_editor_comment_anchors(path, editor, cx);
-        }
-        if let Some(draft) = self.preview.comment_draft.as_mut()
-            && draft.path == path
-            && let Some((_, line)) = updates
-                .iter()
-                .find(|(id, _)| draft.editing_id.as_ref() == Some(id))
-        {
-            draft.line = *line;
-        }
-        if !updates.is_empty() {
-            let key = self.chat_id.clone();
-            self.state.update(cx, |state, cx| {
-                for (id, line) in updates {
-                    state.update_review_comment_line(&key, &id, line);
-                }
-                cx.notify();
-            });
-        }
-    }
-
-    fn open_editor_comment_draft(
-        &mut self,
-        path: String,
-        line: u32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let placeholder = if self
-            .preview
-            .documents
-            .get(&path)
-            .is_some_and(|d| d.show_markdown)
-        {
-            "Request a change…"
-        } else {
-            "Add a comment…"
-        };
-        let input = cx.new(|cx| {
-            ComposerInput::new(placeholder, cx)
-                .with_text_metrics(12.0, crate::composer::INPUT_LINE_HEIGHT)
-        });
-        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
-            ComposerInputEvent::Submitted => this.commit_editor_comment(cx),
-            ComposerInputEvent::Edited => cx.notify(),
-            _ => {}
-        });
-        let focus = input.read(cx).focus_handle(cx);
-        self.preview.comment_draft = Some(EditorCommentDraft {
-            editing_id: None,
-            key: self.chat_id.clone(),
-            path,
-            line,
-            input,
-            _events: events,
-        });
-        self.preview.active_comment = None;
-        window.focus(&focus, cx);
-        cx.notify();
-    }
-
-    pub(super) fn edit_editor_comment(
-        &mut self,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(comment) = self
-            .state
-            .read(cx)
-            .review_comments(&self.chat_id)
-            .iter()
-            .find(|comment| comment.id == id && comment.is_file())
-            .cloned()
-        else {
-            return;
-        };
-        self.open_editor_comment_draft(comment.path, comment.line, window, cx);
-        let draft = self.preview.comment_draft.as_mut().unwrap();
-        draft.editing_id = Some(comment.id);
-        draft
-            .input
-            .update(cx, |input, cx| input.set_text(comment.body, cx));
-        cx.notify();
-    }
-
-    pub(super) fn cancel_editor_comment(&mut self, cx: &mut Context<Self>) {
-        if let Some(draft) = self.preview.comment_draft.take() {
-            self.preview.active_comment = draft.editing_id;
-        }
-        self.trim_document_cache(cx);
-        cx.notify();
-    }
-
-    pub(super) fn commit_editor_comment(&mut self, cx: &mut Context<Self>) {
-        let Some(draft) = self.preview.comment_draft.take() else {
-            return;
-        };
-        let body = draft.input.read(cx).text().trim().to_string();
-        if body.is_empty() {
-            self.preview.active_comment = draft.editing_id;
-            cx.notify();
-            return;
-        }
-        if let Some(id) = draft.editing_id {
-            self.state.update(cx, |state, cx| {
-                state.update_review_comment_body(&draft.key, &id, body);
-                cx.notify();
-            });
-            self.preview.active_comment = Some(id);
-            self.trim_document_cache(cx);
-            cx.notify();
-            return;
-        }
-        let comment = ReviewComment::file(draft.path.clone(), draft.line, body);
-        self.state.update(cx, |state, cx| {
-            state.add_review_comment(&draft.key, comment);
-            cx.notify();
-        });
-        if let Some(editor) = self
-            .preview
-            .documents
-            .get(&draft.path)
-            .and_then(|document| document.editor.clone())
-        {
-            self.sync_editor_comment_anchors(&draft.path, &editor, cx);
-        }
-        self.preview.active_comment = None;
-        self.require_review_comment_flush(&draft.path, cx);
-        if self.preview.autosave_enabled
-            && self
-                .preview
-                .documents
-                .get(&draft.path)
-                .is_some_and(FileDocument::can_autosave)
-        {
-            self.save_document(draft.path, cx);
-        }
-        cx.notify();
-    }
-
-    pub(super) fn remove_editor_comment(&mut self, id: &str, cx: &mut Context<Self>) {
-        let key = self.chat_id.clone();
-        let removed_path = self
-            .state
-            .read(cx)
-            .review_comments(&key)
-            .iter()
-            .find(|comment| comment.id == id && comment.is_file())
-            .map(|comment| comment.path.clone());
-        self.state.update(cx, |state, cx| {
-            state.remove_review_comment(&key, id);
-            cx.notify();
-        });
-        for anchors in self.preview.comment_anchors.values_mut() {
-            anchors.remove(id);
-        }
-        if self.preview.active_comment.as_deref() == Some(id) {
-            self.preview.active_comment = None;
-        }
-        if let Some(path) = removed_path
-            && self
-                .state
-                .read(cx)
-                .review_comments(&key)
-                .iter()
-                .all(|comment| !comment.is_file() || comment.path != path)
-            && let Some(document) = self.preview.documents.get_mut(&path)
-        {
-            document.review_comment_flush_pending = false;
-        }
-        self.finish_review_comment_flush_if_idle(cx);
-        self.trim_document_cache(cx);
-        cx.notify();
-    }
-
-    pub(super) fn open_markdown_comment(
-        &mut self,
-        path: String,
-        line: u32,
-        source: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(editor) = self
-            .preview
-            .documents
-            .get(&path)
-            .and_then(|d| d.editor.as_ref())
-        else {
-            return;
-        };
-        if !editor.read(cx).context_menu_capabilities().is_editable()
-            || editor.read(cx).value().as_ref() != source
-        {
-            return;
-        }
-        self.open_editor_comment_draft(path, line, window, cx);
-    }
-
-    fn toggle_editor_comment(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.preview.active_comment.as_deref() == Some(id.as_str()) {
-            self.preview.active_comment = None;
-        } else {
-            self.preview.active_comment = Some(id);
-            self.preview.comment_draft = None;
-        }
-        cx.notify();
     }
 
     pub(super) fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
@@ -1180,7 +708,7 @@ impl FilesSurface {
         } else {
             self.sync_preview_list();
         }
-        self.trim_document_cache(cx);
+        self.trim_document_cache();
         cx.notify();
     }
 
@@ -1250,7 +778,7 @@ impl FilesSurface {
                         surface.sync_preview_list();
                     }
                 }
-                surface.trim_document_cache(cx);
+                surface.trim_document_cache();
                 cx.notify();
             });
         });
@@ -1400,7 +928,7 @@ impl FilesSurface {
                     );
                     cx.notify();
                 }
-                surface.trim_document_cache(cx);
+                surface.trim_document_cache();
             });
         });
         if let Some(document) = self.preview.documents.get_mut(&path)
@@ -1427,10 +955,6 @@ impl FilesSurface {
             document.mark_user_edit();
             document.revision
         };
-        self.sync_editor_comment_lines(path, &editor, cx);
-        if !self.staged_file_comments(path, cx).is_empty() {
-            self.require_review_comment_flush(path, cx);
-        }
         self.request_editor_highlight(path.to_string(), source, revision, cx);
         self.schedule_autosave(path.to_string(), cx);
         cx.emit(FilesEvent::TitleChanged);
@@ -1487,7 +1011,7 @@ impl FilesSurface {
                 }
                 document.highlight_task = None;
                 let Some(highlighted) = highlighted else {
-                    surface.trim_document_cache(cx);
+                    surface.trim_document_cache();
                     return;
                 };
                 let editor = document.editor.clone();
@@ -1498,7 +1022,7 @@ impl FilesSurface {
                 if let Some(editor) = editor {
                     super::editor_adapter::install_highlighter(&editor, source, highlighted, cx);
                 }
-                surface.trim_document_cache(cx);
+                surface.trim_document_cache();
                 cx.notify();
             });
         });
@@ -1638,11 +1162,6 @@ impl FilesSurface {
                 let save_again = document.can_autosave();
                 let reconcile = document.reconcile_after_save;
                 document.reconcile_after_save = false;
-                if document.review_comment_flush_pending
-                    && document_finishes_review_comment_flush(document)
-                {
-                    document.review_comment_flush_pending = false;
-                }
                 if save_again {
                     if surface.preview.close_requested || surface.target_change_pending {
                         surface.save_document(task_path.clone(), cx);
@@ -1653,9 +1172,8 @@ impl FilesSurface {
                 if reconcile {
                     surface.reconcile_document(task_path.clone(), cx);
                 }
-                surface.finish_review_comment_flush_if_idle(cx);
                 surface.finish_pending_lifecycle(cx);
-                surface.trim_document_cache(cx);
+                surface.trim_document_cache();
                 cx.emit(FilesEvent::TitleChanged);
                 cx.notify();
             });
@@ -1728,7 +1246,6 @@ impl FilesSurface {
         for document in self.preview.documents.values_mut() {
             document.discard_changes();
         }
-        self.cancel_review_comment_flush(cx);
         self.preview.close_requested = false;
         if closing {
             cx.emit(FilesEvent::CloseReady);
@@ -1973,26 +1490,12 @@ impl FilesSurface {
                 self.editor_path = Some(new_document_path.clone());
             }
             self.preview.highlights.remove(old_document_path);
-            if let Some(anchors) = self.preview.comment_anchors.remove(old_document_path) {
-                self.preview
-                    .comment_anchors
-                    .insert(new_document_path.clone(), anchors);
-            }
-            if let Some(draft) = self.preview.comment_draft.as_mut()
-                && draft.path == *old_document_path
-            {
-                draft.path = new_document_path.clone();
-            }
             self.preview.document_recency.retain(|recent_path| {
                 recent_path != old_document_path && recent_path != new_document_path
             });
             self.preview
                 .document_recency
                 .push_back(new_document_path.clone());
-            let key = self.chat_id.clone();
-            self.state.update(cx, |state, _| {
-                state.rename_review_comment_path(&key, old_document_path, new_document_path);
-            });
             self.preview
                 .documents
                 .insert(new_document_path.clone(), document);
@@ -2688,44 +2191,7 @@ impl FilesSurface {
                 view.set_source(source, truncated, cx);
             });
         }
-        self.sync_markdown_comments(path, cx);
         Some(view)
-    }
-
-    pub(super) fn sync_active_markdown_comments(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.preview.active.clone() {
-            self.sync_markdown_comments(&path, cx);
-        }
-    }
-
-    fn sync_markdown_comments(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(view) = self
-            .preview
-            .documents
-            .get(path)
-            .filter(|document| document.show_markdown)
-            .and_then(|document| document.markdown.clone())
-        else {
-            return;
-        };
-        let comments = self.staged_file_comments(path, cx);
-        let draft = self
-            .preview
-            .comment_draft
-            .as_ref()
-            .filter(|draft| draft.path == path && draft.key == self.chat_id)
-            .map(|draft| (draft.line, draft.input.clone(), draft.editing_id.is_some()));
-        let editing_id = self
-            .preview
-            .comment_draft
-            .as_ref()
-            .and_then(|draft| draft.editing_id.as_ref());
-        let comments = comments
-            .into_iter()
-            .filter(|comment| Some(&comment.id) != editing_id)
-            .collect();
-        let owner = cx.weak_entity();
-        view.update(cx, |view, cx| view.set_comments(owner, comments, draft, cx));
     }
 
     fn render_document_body(
@@ -2759,9 +2225,6 @@ impl FilesSurface {
         }
         let editor = self.ensure_editor(path, theme, window, cx);
         self.apply_line_navigation(path, editor.as_ref(), window, cx);
-        if let Some(editor) = &editor {
-            self.sync_editor_comment_anchors(path, editor, cx);
-        }
         let outside = self
             .preview
             .documents
@@ -2826,7 +2289,6 @@ impl FilesSurface {
             editor.update(cx, |state, _| {
                 state.set_editor_style(super::editor_adapter::editor_style(theme));
             });
-            let overlays = self.render_editor_comment_overlays(path, &editor, theme, cx);
             return div()
                 .id("files-editor-body")
                 .flex_1()
@@ -2838,7 +2300,6 @@ impl FilesSurface {
                 .text_size(px(self.preview.code_text_size()))
                 .line_height(self.preview.line_height())
                 .child(super::editor::editor_element(&editor))
-                .children(overlays)
                 .into_any_element();
         }
         let Some(file) = document.file.as_ref() else {
@@ -2908,306 +2369,6 @@ impl FilesSurface {
             .into_any_element()
     }
 
-    fn render_editor_comment_overlays(
-        &mut self,
-        path: &str,
-        editor: &Entity<super::editor::FileEditorState>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let Some(layout) = editor.read_with(cx, |state, _| editor_overlay_layout(state)) else {
-            return Vec::new();
-        };
-        let comments = self.staged_file_comments(path, cx);
-        let comments_by_line = comments
-            .iter()
-            .map(|comment| (comment.line, comment.clone()))
-            .collect::<HashMap<_, _>>();
-        let (card_left, card_width) = editor_comment_overlay_horizontal(&layout);
-        let mut overlays = Vec::with_capacity(layout.rows.len() + 1);
-        for row in &layout.rows {
-            let reveal: SharedString = format!("file-comment-gutter-{}-{}", path, row.line).into();
-            let cell = div()
-                .id(("file-comment-gutter", row.line as usize))
-                .absolute()
-                .left(px(0.0))
-                .top(px(row.top))
-                .w(px(layout.gutter_width))
-                .h(px(layout.line_height))
-                .flex()
-                .items_center()
-                .justify_center();
-            if let Some(comment) = comments_by_line.get(&row.line) {
-                let id = comment.id.clone();
-                let fade = format!("files-comment-mark-{}-fade", row.line);
-                overlays.push(
-                    // slopty: the mark's hover fades a control step over its card (M23).
-                    cell.bg(crate::motion::hover_blend(
-                        &fade,
-                        theme.surface_card,
-                        theme.surface_card.blend(crate::theme::control_hover()),
-                    ))
-                    .hover_fade(fade)
-                        .cursor_pointer()
-                        .role(gpui::Role::Button)
-                        .aria_label(format!("Open comment on line {}", row.line))
-                        // slopty: a comment's mark is a keyboard stop; the empty lines' adders
-                        // are not, or Tab would walk every line (M8).
-                        .map(|el| crate::surface_chrome::key_stop(el, theme))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.toggle_editor_comment(id.clone(), cx)
-                        }))
-                        .child(
-                            icon(icons::CHAT_ROUND_LINE)
-                                .size(px(12.0))
-                                .text_color(theme.text_muted),
-                        )
-                        .into_any_element(),
-                );
-            } else {
-                let target = path.to_string();
-                let line = row.line;
-                overlays.push(
-                    cell.cursor_pointer()
-                        .role(gpui::Role::Button)
-                        .aria_label(format!("Comment on line {line}"))
-                        .hover(|style| style.bg(theme.surface_card))
-                        // slopty: the adder fades in with the line's hover (M23).
-                        .hover_fade(reveal.clone())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_editor_comment_draft(target.clone(), line, window, cx)
-                        }))
-                        .child(
-                            div()
-                                .size(px(comments::COMMENT_ADDER_SIZE))
-                                .opacity(crate::motion::hover_t(&reveal))
-                                .rounded(px(4.0))
-                                .bg(theme.solid)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(icon(icons::PLUS).size(px(11.0)).text_color(theme.on_solid)),
-                        )
-                        .into_any_element(),
-                );
-            }
-        }
-
-        let active_comment = self
-            .preview
-            .active_comment
-            .as_deref()
-            .and_then(|id| comments.iter().find(|comment| comment.id == id))
-            .cloned();
-        if let Some(comment) = active_comment
-            && let Some(top) = editor_comment_overlay_top(
-                &layout,
-                comment.line,
-                comments::card_height(&comment.body),
-            )
-        {
-            overlays.push(
-                self.render_editor_comment_card(comment, card_left, card_width, top, theme, cx),
-            );
-        } else if let Some(draft) = self
-            .preview
-            .comment_draft
-            .as_ref()
-            .filter(|draft| draft.path == path)
-            && let Some(top) =
-                editor_comment_overlay_top(&layout, draft.line, EDITOR_COMMENT_DRAFT_HEIGHT)
-        {
-            overlays.push(self.render_editor_comment_draft(
-                draft.input.clone(),
-                card_left,
-                card_width,
-                top,
-                theme,
-                cx,
-            ));
-        }
-        overlays
-    }
-
-    fn render_editor_comment_card(
-        &self,
-        comment: ReviewComment,
-        left: f32,
-        width: f32,
-        top: f32,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let theme = &theme.for_popup();
-        let group: SharedString = format!("file-comment-card-{}", comment.id).into();
-        // slopty: the card's quiet controls fade in with its hover (M23).
-        let reveal: SharedString = format!("{group}-reveal").into();
-        let shown = crate::motion::hover_t(&reveal);
-        let id = comment.id.clone();
-        let card = crate::popover::popover_card_flush(theme)
-            .id(group.clone())
-            .hover_fade(reveal)
-            .group(group.clone())
-            .absolute()
-            .left(px(left))
-            .top(px(top))
-            .w(px(width))
-            .h(px(comments::card_height(&comment.body)))
-            .flex()
-            .flex_col()
-            .font_family(theme.font_sans.clone())
-            .px(px(Theme::SPACE_LG))
-            .py(px(comments::CARD_PAD_V / 2.0))
-            .child(
-                div()
-                    .h(px(comments::CARD_HEADER_HEIGHT))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        icon(icons::CHAT_ROUND_LINE)
-                            .size(px(12.0))
-                            .text_color(theme.text_faint),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(11.0))
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(comment.location())),
-                    )
-                    .child(crate::comment_ui::render_comment_edit(
-                        &comment,
-                        group.clone(),
-                        theme,
-                        cx,
-                        Self::edit_editor_comment,
-                    ))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "file-comment-remove-{}",
-                                comment.id
-                            )))
-                            // slopty: a 24 px target around the 16 px mark (M25).
-                            .size(px(24.0))
-                            .m(px(-4.0))
-                            .role(gpui::Role::Button)
-                            .aria_label("Remove comment")
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.0))
-                            .cursor_pointer()
-                            .opacity(shown)
-                            .map(|el| crate::surface_chrome::key_stop_revealing(el, theme))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.remove_editor_comment(&id, cx)
-                            }))
-                            .tooltip(crate::settings::widgets::text_tooltip("Remove comment"))
-                            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-                            .child(
-                                icon(icons::CLOSE_CIRCLE)
-                                    .size(px(12.0))
-                                    .text_color(theme.text_muted),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .line_height(px(comments::CARD_LINE_HEIGHT))
-                    .text_color(theme.text_dim)
-                    .child(SharedString::from(comment.body)),
-            );
-        crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
-            .into_any_element()
-    }
-
-    fn render_editor_comment_draft(
-        &self,
-        input: Entity<ComposerInput>,
-        left: f32,
-        width: f32,
-        top: f32,
-        theme: &Theme,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let theme = &theme.for_popup();
-        let card = crate::popover::popover_card_flush(theme)
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    cx.stop_propagation();
-                    this.cancel_editor_comment(cx);
-                }
-            }))
-            .absolute()
-            .left(px(left))
-            .top(px(top))
-            .w(px(width))
-            .h(px(EDITOR_COMMENT_DRAFT_HEIGHT))
-            .flex()
-            .flex_col()
-            .font_family(theme.font_sans.clone())
-            .px(px(Theme::SPACE_LG))
-            .py(px(8.0))
-            .child(
-                div()
-                    .h(px(48.0))
-                    .flex_none()
-                    .overflow_hidden()
-                    .rounded(px(Theme::CONTROL_RADIUS))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.input_glass_bg())
-                    .px(px(8.0))
-                    .py(px(Theme::SPACE_SNUG))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .child(input.into_any_element()),
-            )
-            .child(
-                div()
-                    .h(px(28.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .child(
-                        editor_comment_action("file-comment-cancel", "Cancel", false, theme)
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_editor_comment(cx))),
-                    )
-                    .child(
-                        editor_comment_action(
-                            "file-comment-commit",
-                            if self
-                                .preview
-                                .comment_draft
-                                .as_ref()
-                                .is_some_and(|draft| draft.editing_id.is_some())
-                            {
-                                "Save"
-                            } else {
-                                "Comment"
-                            },
-                            true,
-                            theme,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.commit_editor_comment(cx))),
-                    ),
-            );
-        crate::frost::frosted(crate::popover::CARD_RADIUS, crate::frost::MENU_BLUR, card)
-            .into_any_element()
-    }
-
     fn ensure_editor(
         &mut self,
         path: &str,
@@ -3250,7 +2411,6 @@ impl FilesSurface {
         if let Some((source, highlighted)) = syntax {
             super::editor_adapter::install_highlighter(&editor, source, highlighted, cx);
         }
-        self.sync_editor_comment_anchors(path, &editor, cx);
         Some(editor)
     }
 
@@ -3334,67 +2494,6 @@ impl FilesSurface {
             )
             .into_any_element()
     }
-}
-
-fn editor_comment_overlay_top(
-    layout: &EditorOverlayLayout,
-    line: u32,
-    card_height: f32,
-) -> Option<f32> {
-    let row = layout.rows.iter().find(|row| row.line == line)?;
-    let preferred = row.top + layout.line_height;
-    Some(preferred.clamp(0.0, (layout.viewport_height - card_height).max(0.0)))
-}
-
-fn editor_comment_overlay_horizontal(layout: &EditorOverlayLayout) -> (f32, f32) {
-    let anchored_left =
-        (layout.gutter_width - EDITOR_COMMENT_CARD_MARGIN).max(EDITOR_COMMENT_CARD_MARGIN);
-    let anchored_width = (layout.viewport_width - anchored_left - EDITOR_COMMENT_CARD_MARGIN)
-        .min(EDITOR_COMMENT_CARD_WIDTH)
-        .max(0.0);
-    if anchored_width >= EDITOR_COMMENT_CARD_MIN_ANCHORED_WIDTH {
-        (anchored_left, anchored_width)
-    } else {
-        (
-            EDITOR_COMMENT_CARD_MARGIN,
-            (layout.viewport_width - EDITOR_COMMENT_CARD_MARGIN * 2.0).max(0.0),
-        )
-    }
-}
-
-fn editor_comment_action(
-    id: &'static str,
-    label: &'static str,
-    primary: bool,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(22.0))
-        .px(px(10.0))
-        .flex()
-        .items_center()
-        .rounded(px(6.0))
-        .text_size(crate::typography::ui_rems(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .cursor_pointer()
-        .role(gpui::Role::Button)
-        // slopty: a keyboard stop with the shell's ring (M8).
-        .map(|el| crate::surface_chrome::key_stop(el, theme))
-        .when(primary, |element| {
-            element.bg(theme.solid).text_color(theme.on_solid)
-        })
-        .when(!primary, |element| {
-            element
-                .text_color(crate::motion::hover_blend(id, theme.text_muted, theme.text))
-                .bg(crate::motion::hover_blend(
-                    id,
-                    gpui::transparent_black(),
-                    theme.element_hover,
-                ))
-                .hover_fade(id)
-        })
-        .child(SharedString::from(label))
 }
 
 fn centered_state(message: impl Into<SharedString>, color: gpui::Hsla) -> AnyElement {
@@ -3731,18 +2830,13 @@ mod tests {
         preview.documents.get_mut("src/1.rs").unwrap().revision = 1;
         preview.documents.get_mut("src/2.rs").unwrap().phase =
             DocumentPhase::Conflict { disk_hash: None };
-        preview
-            .documents
-            .get_mut("src/3.rs")
-            .unwrap()
-            .review_comment_flush_pending = true;
         preview.documents.get_mut("src/7.rs").unwrap().phase = DocumentPhase::Loading;
         let protected = HashSet::from(["src/4.rs".to_string()]);
 
         let evicted = preview.trim_document_cache_to(&protected, 15, usize::MAX);
 
-        assert_eq!(evicted, vec!["src/5.rs", "src/6.rs", "src/8.rs"]);
-        for retained in ["src/0.rs", "src/1.rs", "src/2.rs", "src/3.rs", "src/4.rs"] {
+        assert_eq!(evicted, vec!["src/3.rs", "src/5.rs", "src/6.rs"]);
+        for retained in ["src/0.rs", "src/1.rs", "src/2.rs", "src/4.rs"] {
             assert!(preview.documents.contains_key(retained));
         }
         assert!(preview.documents.contains_key("src/7.rs"));
@@ -3781,9 +2875,6 @@ mod tests {
             preview.touch_document(path);
         }
         preview.active = Some("active.rs".into());
-        preview
-            .comment_anchors
-            .insert("old.rs".into(), HashMap::new());
         let highlighted = Arc::new(
             slopty_syntax::highlight(slopty_syntax::HighlightRequest {
                 source: "fn main() {}",
@@ -3804,7 +2895,6 @@ mod tests {
 
         assert_eq!(evicted, vec!["old.rs"]);
         assert!(!preview.highlights.contains_key("old.rs"));
-        assert!(!preview.comment_anchors.contains_key("old.rs"));
         assert!(!preview.document_recency.iter().any(|path| path == "old.rs"));
     }
 
@@ -3965,32 +3055,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_save_outcomes_release_review_comment_flushes() {
-        let mut document = FileDocument::loading(DocumentKey {
-            chat_id: "chat-1".into(),
-            checkout_id: Some("checkout-1".into()),
-            path: "src/lib.rs".into(),
-        });
-        document.revision = 1;
-        document.review_comment_flush_pending = true;
-
-        document.phase = DocumentPhase::Saving;
-        assert!(!document_finishes_review_comment_flush(&document));
-
-        document.phase = DocumentPhase::SaveFailed("offline".into());
-        assert!(document_finishes_review_comment_flush(&document));
-
-        document.phase = DocumentPhase::Conflict { disk_hash: None };
-        assert!(document_finishes_review_comment_flush(&document));
-
-        document.phase = DocumentPhase::Ready;
-        assert!(!document_finishes_review_comment_flush(&document));
-
-        document.saved_revision = document.revision;
-        assert!(document_finishes_review_comment_flush(&document));
-    }
-
-    #[test]
     fn directory_rename_updates_open_descendant_paths() {
         assert_eq!(
             renamed_document_path("src/files/mod.rs", "src", "crates/ui/src"),
@@ -4009,47 +3073,6 @@ mod tests {
         assert!(!path_is_same_or_descendant("src-old/lib.rs", "src"));
     }
 
-    #[test]
-    fn comment_ranges_anchor_normal_and_trailing_empty_lines() {
-        let text = gpui_base::input::Rope::from("one\ntwo\n");
-        let (second, second_edge) = comment_anchor_range(&text, 2).unwrap();
-        assert_eq!(second, 4..8);
-        assert_eq!(second_edge, CommentAnchorEdge::Start);
-        assert_eq!(tracked_comment_line(&text, &second, second_edge), 2);
-
-        let (trailing, trailing_edge) = comment_anchor_range(&text, 3).unwrap();
-        assert_eq!(trailing, 7..8);
-        assert_eq!(trailing_edge, CommentAnchorEdge::End);
-        assert_eq!(tracked_comment_line(&text, &trailing, trailing_edge), 3);
-    }
-
-    #[test]
-    fn comment_overlay_stays_inside_the_editor_viewport() {
-        let layout = EditorOverlayLayout {
-            gutter_width: 32.0,
-            line_height: 20.0,
-            viewport_width: 420.0,
-            viewport_height: 100.0,
-            rows: vec![EditorOverlayRow { line: 5, top: 80.0 }],
-        };
-        assert_eq!(editor_comment_overlay_top(&layout, 5, 60.0), Some(40.0));
-        assert_eq!(editor_comment_overlay_top(&layout, 6, 60.0), None);
-    }
-
-    #[test]
-    fn comment_overlay_is_compact_when_space_allows_and_inset_when_narrow() {
-        let mut layout = EditorOverlayLayout {
-            gutter_width: 40.0,
-            line_height: 20.0,
-            viewport_width: 480.0,
-            viewport_height: 300.0,
-            rows: Vec::new(),
-        };
-        assert_eq!(editor_comment_overlay_horizontal(&layout), (32.0, 320.0));
-
-        layout.viewport_width = 210.0;
-        assert_eq!(editor_comment_overlay_horizontal(&layout), (8.0, 194.0));
-    }
 }
 
 #[cfg(test)]
@@ -4541,420 +3564,6 @@ mod markdown_buffer_tests {
                         - (viewport.origin.y + viewport.size.height / 2.0),
                 );
                 assert!(distance.abs() <= f32::from(row.size.height));
-            })
-            .unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn markdown_inline_comments_use_file_review_workflow() {
-        struct Harness {
-            owner: Entity<FilesSurface>,
-            view: Entity<super::super::markdown_preview::MarkdownPreview>,
-            _observer: Subscription,
-        }
-        impl gpui::Render for Harness {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.owner.update(cx, |owner, cx| {
-                    let editor = owner.preview.documents["README.md"].editor.clone();
-                    owner.prepare_markdown_preview("README.md", editor.as_ref(), cx);
-                });
-                div().size_full().child(self.view.clone())
-            }
-        }
-        fn click(window: &mut Window, position: gpui::Point<gpui::Pixels>, cx: &mut App) {
-            window.dispatch_event(
-                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
-                    position,
-                    ..Default::default()
-                }),
-                cx,
-            );
-            window.refresh();
-            let _ = window.draw(cx);
-            window.dispatch_event(
-                gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                    position,
-                    button: gpui::MouseButton::Left,
-                    click_count: 1,
-                    ..Default::default()
-                }),
-                cx,
-            );
-            window.dispatch_event(
-                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
-                    position,
-                    button: gpui::MouseButton::Left,
-                    click_count: 1,
-                    ..Default::default()
-                }),
-                cx,
-            );
-        }
-        gpui_platform::headless().run(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            let source =
-                "# Título 🦀\n\nUn párrafo para revisar.\n\n- Primera tarea\n- Segunda tarea\n";
-            let window = cx
-                .open_window(
-                    gpui::WindowOptions {
-                        window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::new(
-                            gpui::Point::default(),
-                            gpui::size(px(1100.0), px(600.0)),
-                        ))),
-                        ..Default::default()
-                    },
-                    |window, cx| {
-                        let state = cx.new(|_| crate::state::AppState::new());
-                        let owner = cx.new(|cx| {
-                            let mut owner = FilesSurface::new(
-                                state,
-                                "chat".into(),
-                                false,
-                                1000,
-                                13.0,
-                                false,
-                                false,
-                                cx,
-                            );
-                            let mut document = FileDocument::loading(DocumentKey {
-                                chat_id: "chat".into(),
-                                checkout_id: Some("checkout".into()),
-                                path: "README.md".into(),
-                            });
-                            document.set_loaded(slopty_view_proto::WorkspaceFileText {
-                                checkout_id: "checkout".into(),
-                                path: "README.md".into(),
-                                text: Some(source.into()),
-                                content_hash: Some("hash".into()),
-                                size: source.len() as u64,
-                                modified_at: None,
-                                encoding: slopty_view_proto::WorkspaceTextEncoding::Utf8,
-                                line_ending: Some(slopty_view_proto::WorkspaceLineEnding::Lf),
-                                read_only_reason: None,
-                                truncated: false,
-                            });
-                            let theme = Theme::of(cx).clone();
-                            document.editor = Some(super::super::editor::new_file_editor(
-                                source,
-                                "README.md",
-                                false,
-                                &theme,
-                                window,
-                                cx,
-                            ));
-                            document.show_markdown = true;
-                            owner.preview.active = Some("README.md".into());
-                            owner.preview.documents.insert("README.md".into(), document);
-                            owner
-                        });
-                        let view = owner.update(cx, |owner, cx| {
-                            let editor = owner.preview.documents["README.md"].editor.clone();
-                            owner
-                                .prepare_markdown_preview("README.md", editor.as_ref(), cx)
-                                .unwrap()
-                        });
-                        cx.new(|cx| Harness {
-                            _observer: cx.observe(&owner, |_, _, cx| cx.notify()),
-                            owner,
-                            view,
-                        })
-                    },
-                )
-                .unwrap();
-            let root = window.entity(cx).unwrap();
-            let owner = root.read(cx).owner.clone();
-            let view = root.read(cx).view.clone();
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(300))
-                    .await;
-                cx.update(|cx| {
-                    cx.update_window(window.into(), |_, window, cx| {
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        let bounds = view.read(cx).test_block_bounds(1);
-                        let gutter = ((bounds.size.width - px(900.0)) / 2.0).max(px(24.0));
-                        click(
-                            window,
-                            gpui::point(bounds.left() + gutter - px(12.0), bounds.top() + px(11.0)),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                    let input = owner
-                        .read(cx)
-                        .preview
-                        .comment_draft
-                        .as_ref()
-                        .expect("plus opens draft")
-                        .input
-                        .clone();
-                    assert_eq!(
-                        owner.read(cx).preview.comment_draft.as_ref().unwrap().line,
-                        3
-                    );
-                    cx.update_window(window.into(), |_, window, cx| {
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        assert!(input.read(cx).focus_handle(cx).is_focused(window));
-                        input.update(cx, |input, cx| input.set_text("Clarify this paragraph", cx));
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        let bounds = view.read(cx).test_block_bounds(1);
-                        assert!(bounds.size.height > px(comments::DRAFT_CARD_HEIGHT));
-                        let gutter = ((bounds.size.width - px(900.0)) / 2.0).max(px(24.0));
-                        click(
-                            window,
-                            gpui::point(
-                                bounds.right() - gutter - px(45.0),
-                                bounds.bottom() - px(36.0),
-                            ),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                    assert!(
-                        owner.read(cx).preview.comment_draft.is_none(),
-                        "Comment commits the draft"
-                    );
-                    let staged = owner.read(cx).staged_file_comments("README.md", cx);
-                    assert_eq!(staged.len(), 1);
-                    assert_eq!(staged[0].line, 3);
-                    assert_eq!(staged[0].body, "Clarify this paragraph");
-                    assert!(staged[0].is_file());
-                    for save in [false, true] {
-                        cx.update_window(window.into(), |_, window, cx| {
-                            window.refresh();
-                            let _ = window.draw(cx);
-                            let bounds = view.read(cx).test_block_bounds(1);
-                            let gutter = ((bounds.size.width - px(900.0)) / 2.0).max(px(24.0));
-                            click(
-                                window,
-                                gpui::point(
-                                    bounds.right() - gutter - px(30.0),
-                                    bounds.bottom()
-                                        - px(12.0)
-                                        - px(comments::card_height(&staged[0].body))
-                                        + px(21.0),
-                                ),
-                                cx,
-                            );
-                            let input = owner
-                                .read(cx)
-                                .preview
-                                .comment_draft
-                                .as_ref()
-                                .expect("Edit reopens the comment input")
-                                .input
-                                .clone();
-                            assert_eq!(input.read(cx).text(), staged[0].body);
-                            assert!(input.read(cx).focus_handle(cx).is_focused(window));
-                            input.update(cx, |input, cx| input.set_text("Revised paragraph", cx));
-                            window.refresh();
-                            let _ = window.draw(cx);
-                            if save {
-                                let bounds = view.read(cx).test_block_bounds(1);
-                                click(
-                                    window,
-                                    gpui::point(
-                                        bounds.right() - gutter - px(22.0),
-                                        bounds.bottom() - px(36.0),
-                                    ),
-                                    cx,
-                                );
-                            } else {
-                                window.dispatch_event(
-                                    gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
-                                        keystroke: gpui::Keystroke::parse("escape").unwrap(),
-                                        is_held: false,
-                                        prefer_character_input: false,
-                                    }),
-                                    cx,
-                                );
-                            }
-                        })
-                        .unwrap();
-                        assert!(owner.read(cx).preview.comment_draft.is_none());
-                        let mut expected = staged[0].clone();
-                        if save {
-                            expected.body = "Revised paragraph".into();
-                        }
-                        assert_eq!(
-                            owner.read(cx).staged_file_comments("README.md", cx),
-                            vec![expected]
-                        );
-                    }
-                    let editor = owner.read(cx).preview.documents["README.md"]
-                        .editor
-                        .clone()
-                        .unwrap();
-                    assert_eq!(editor.read(cx).value().as_ref(), source);
-                    assert!(!owner.read(cx).preview.documents["README.md"].is_dirty());
-                    cx.update_window(window.into(), |_, window, cx| {
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        let bounds = view.read(cx).test_block_bounds(1);
-                        let gutter = ((bounds.size.width - px(900.0)) / 2.0).max(px(24.0));
-                        // The 16px remove button ends at the reading column's right edge.
-                        // Click its center; Markdown cards have no inner horizontal padding.
-                        click(
-                            window,
-                            gpui::point(
-                                bounds.right() - gutter - px(8.0),
-                                bounds.bottom()
-                                    - px(12.0)
-                                    - px(comments::card_height("Clarify this paragraph"))
-                                    + px(21.0),
-                            ),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                    assert!(
-                        owner
-                            .read(cx)
-                            .staged_file_comments("README.md", cx)
-                            .is_empty()
-                    );
-                    cx.update_window(window.into(), |_, window, cx| {
-                        owner.update(cx, |owner, cx| {
-                            owner.open_markdown_comment(
-                                "README.md".into(),
-                                3,
-                                "outdated buffer",
-                                window,
-                                cx,
-                            );
-                            assert!(owner.preview.comment_draft.is_none());
-                            owner.open_markdown_comment("README.md".into(), 3, source, window, cx);
-                        });
-                        window.refresh();
-                        let _ = window.draw(cx);
-                        window.dispatch_event(
-                            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
-                                keystroke: gpui::Keystroke::parse("escape").unwrap(),
-                                is_held: false,
-                                prefer_character_input: false,
-                            }),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                    assert!(
-                        owner.read(cx).preview.comment_draft.is_none(),
-                        "Escape cancels without staging a comment"
-                    );
-                    cx.quit();
-                });
-            })
-            .detach();
-        });
-    }
-
-    #[gpui::test]
-    fn editing_file_comments_keeps_the_live_anchor(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
-        });
-        window
-            .update(cx, |surface, window, cx| {
-                let theme = Theme::of(cx).clone();
-                let editor = super::super::editor::new_file_editor(
-                    "first\nsecond\nthird\n",
-                    "a.rs",
-                    false,
-                    &theme,
-                    window,
-                    cx,
-                );
-                let mut document = FileDocument::loading(DocumentKey {
-                    chat_id: "chat".into(),
-                    checkout_id: None,
-                    path: "a.rs".into(),
-                });
-                document.editor = Some(editor.clone());
-                surface.preview.documents.insert("a.rs".into(), document);
-                let original = ReviewComment::file("a.rs", 2, "Original 🦀\nSecond line");
-                surface.state.update(cx, |state, _| {
-                    state.add_review_comment("chat", original.clone())
-                });
-                surface.sync_editor_comment_anchors("a.rs", &editor, cx);
-                let anchor = surface.preview.comment_anchors["a.rs"][&original.id]
-                    .range
-                    .clone();
-
-                surface.edit_editor_comment(&original.id, window, cx);
-                let input = surface
-                    .preview
-                    .comment_draft
-                    .as_ref()
-                    .unwrap()
-                    .input
-                    .clone();
-                assert_eq!(input.read(cx).text(), original.body);
-                assert!(input.read(cx).focus_handle(cx).is_focused(window));
-                input.update(cx, |input, cx| input.set_text("Cancelled", cx));
-                assert_eq!(
-                    surface.staged_file_comments("a.rs", cx),
-                    vec![original.clone()]
-                );
-                surface.cancel_editor_comment(cx);
-                assert_eq!(
-                    surface.staged_file_comments("a.rs", cx),
-                    vec![original.clone()]
-                );
-                assert_eq!(
-                    surface.preview.active_comment.as_deref(),
-                    Some(original.id.as_str())
-                );
-
-                surface.edit_editor_comment(&original.id, window, cx);
-                // Move the existing editor decoration while the body is being edited.
-                let (range, _) = comment_anchor_range(editor.read(cx).text(), 3).unwrap();
-                anchor.set(
-                    vec![TextDecoration::new(range, HighlightStyle::default())],
-                    cx,
-                );
-                surface.sync_editor_comment_lines("a.rs", &editor, cx);
-                assert_eq!(surface.preview.comment_draft.as_ref().unwrap().line, 3);
-                surface
-                    .preview
-                    .comment_draft
-                    .as_ref()
-                    .unwrap()
-                    .input
-                    .clone()
-                    .update(cx, |input, cx| {
-                        input.set_text("  Revised\nMore detail  ", cx)
-                    });
-                surface.commit_editor_comment(cx);
-                let mut expected = original.clone();
-                expected.line = 3;
-                expected.body = "Revised\nMore detail".into();
-                assert_eq!(surface.staged_file_comments("a.rs", cx), vec![expected]);
-                // The original decoration handle still controls the stored anchor.
-                let (range, _) = comment_anchor_range(editor.read(cx).text(), 1).unwrap();
-                anchor.set(
-                    vec![TextDecoration::new(range, HighlightStyle::default())],
-                    cx,
-                );
-                surface.sync_editor_comment_lines("a.rs", &editor, cx);
-                assert_eq!(surface.staged_file_comments("a.rs", cx)[0].line, 1);
-
-                surface.edit_editor_comment(&original.id, window, cx);
-                let sent = surface
-                    .state
-                    .update(cx, |state, _| state.take_review_comments("chat"));
-                assert!(comments::with_comments("", &sent).contains("Revised\n  More detail"));
-                surface.commit_editor_comment(cx);
-                assert!(surface.staged_file_comments("a.rs", cx).is_empty());
             })
             .unwrap();
     }

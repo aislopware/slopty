@@ -301,7 +301,7 @@ pub(super) fn title_hints<'a>(
 ) -> std::collections::HashMap<String, SharedString> {
     let rows = chats.into_iter().map(|chat| TitledRow {
         id: chat.id.clone(),
-        title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).trim().to_lowercase(),
+        title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session")).trim().to_lowercase(),
         project: state.space_for_chat(chat).map(|space| space.display_name().to_owned()),
         machine: state.device_name(&chat.device_id).map(str::to_owned),
     });
@@ -1196,11 +1196,10 @@ mod tests {
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
-            crate::composer::init(cx, crate::settings::ComposerSendBehavior::default());
+            crate::composer::init(cx);
             super::super::apply_keymap(
                 cx,
                 &crate::settings::KeymapConfig::default(),
-                crate::settings::ComposerSendBehavior::default(),
             );
         });
         let path = dir.path().to_path_buf();

@@ -73,9 +73,10 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
             let names: Vec<&str> = names().collect();
             if let Some(spawned) = crate::gate::spawned_selection(Some(&names)) {
                 let bins = crate::gate::spawned_bin_args();
+                let target = crate::gate::mac_target();
                 quiet_step(
                     "spawned binaries",
-                    cmd!(sh, "cargo build --profile test {spawned...} {bins...}"),
+                    cmd!(sh, "cargo build --profile test {target...} {spawned...} {bins...}"),
                 )?;
             }
             let _fresh = sh.push_env(crate::gate::BINS_FRESH, "1");
@@ -144,11 +145,13 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
 /// nextest on `built`, the crates and [`WORKSPACE_HACK`] as `-p` arguments, with `profile`'s
 /// arguments (none for the default profile).
 fn nextest(sh: &Shell, built: &[String], profile: &[&str]) -> Result<()> {
-    // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
+    // Test binaries run out of `run/`, not `deps/` (`crate::runner`), and are built for the
+    // triple clippy and rustdoc take beside them (`gate::mac_target`).
     let runner = crate::runner::command()?;
+    let target = crate::gate::mac_target();
     quiet_step(
         "nextest",
-        cmd!(sh, "cargo nextest run {built...} {profile...} --no-tests=pass")
+        cmd!(sh, "cargo nextest run {built...} {target...} {profile...} --no-tests=pass")
             .env(crate::runner::RUNNER_VAR, runner),
     )
 }

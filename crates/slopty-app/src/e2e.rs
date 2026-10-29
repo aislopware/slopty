@@ -26,7 +26,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta,
     ScrollEvent, TouchPhase, Window, point, px, size,
 };
-use slopty_core::{ItemId, SessionId, WorkerId};
+use slopty_core::{ItemId, WorkerId};
 use slopty_e2e::{
     Button, Command, Dump, FaceInfo, FrameInfo, ItemInfo, LatencyInfo, Reply, ScreenInfo,
     TerminalInfo, WindowInfo, WorkerInfo,
@@ -128,7 +128,6 @@ pub(crate) fn serve(
                 // The system's own answers, from the async task: nothing on screen changes.
                 Command::PushRegister { token } => push_register(&token).await,
                 Command::OpenPush { payload } => open_push(&payload),
-                Command::PressNote { action, info } => press_note(action, info).await,
                 Command::Delivered => {
                     let notes = slopty_platform::notify::delivered().await;
                     Reply::Delivered {
@@ -498,30 +497,6 @@ fn open_push(payload: &str) -> Reply {
     }
 }
 
-/// [`Command::PressNote`]: the press answered as one nobody in the app listens to, on a thread
-/// of its own since it blocks ([`crate::verdict::answer_alone`]).
-async fn press_note(action: String, info: std::collections::BTreeMap<String, String>) -> Reply {
-    let tap = slopty_platform::notify::Tap {
-        id: "e2e-press".to_owned(),
-        info,
-        action: Some(action),
-        text: None,
-    };
-    let (done_tx, done_rx) = oneshot::channel();
-    let spawned =
-        std::thread::Builder::new().name("slopty-e2e-press".to_owned()).spawn(move || {
-            let _sent = done_tx.send(crate::verdict::answer_alone(&tap));
-        });
-    if let Err(e) = spawned {
-        return error(&e);
-    }
-    match done_rx.await {
-        Ok(crate::verdict::Answered::Sent) => Reply::Ok,
-        Ok(other) => Reply::Error { message: format!("{other:?}") },
-        Err(e) => error(&e),
-    }
-}
-
 /// [`Command::OpenPush`] where nothing is pushed to.
 #[cfg(not(target_os = "ios"))]
 fn open_push(_payload: &str) -> Reply {
@@ -797,14 +772,6 @@ fn apply(
             workspace.update(cx, |ws, cx| ws.forget_worker(id, cx));
             Reply::Ok
         }
-        Command::NotificationResponse { tag } => {
-            if tag.parse::<SessionId>().is_err() {
-                return Reply::Error { message: format!("not a session id: {tag}") };
-            }
-            let tap = slopty_platform::notify::Tap { id: tag, ..Default::default() };
-            workspace.update(cx, |ws, cx| ws.open_notification(&tap, cx));
-            Reply::Ok
-        }
         Command::HoldMain { ms } => {
             // Busy, as a hang is: a sleep would give the thread back to the system.
             let (started, held) = (std::time::Instant::now(), std::time::Duration::from_millis(ms));
@@ -838,7 +805,6 @@ fn apply(
         | Command::PushRegister { .. }
         | Command::OpenPush { .. }
         | Command::Delivered
-        | Command::PressNote { .. }
         | Command::Render { .. }
         | Command::Quit
         | Command::UiKeyPress { .. }

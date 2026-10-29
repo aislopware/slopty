@@ -1181,40 +1181,6 @@ pub(crate) fn select_fill(theme: &Theme, lifted: bool) -> gpui::Hsla {
     theme.wash(if lifted { 0.10 } else { 0.06 })
 }
 
-thread_local! {
-    /// slopty: the select trigger the pointer is over, by its own enter and leave.
-    static SELECT_POINTER: std::cell::RefCell<Option<SharedString>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// slopty: a trigger's hover listener, which also remembers the pointer over it. A settings page
-/// the window draws from its last frame reads none of its fades, so the fades let go of the
-/// trigger's; the trigger still under the pointer is lifted again when the page is next built,
-/// as the frame it left drew it (the sidebar's rows do the same, `spaces::sidebar_hover`).
-fn select_hover(key: SharedString) -> impl Fn(&bool, &mut Window, &mut gpui::App) + 'static {
-    let fade = crate::motion::hover_listener(key.clone());
-    move |hovered, window, cx| {
-        SELECT_POINTER.with(|pointer| {
-            let mut pointer = pointer.borrow_mut();
-            if *hovered {
-                *pointer = Some(key.clone());
-            } else if pointer.as_ref() == Some(&key) {
-                *pointer = None;
-            }
-        });
-        fade(hovered, window, cx);
-    }
-}
-
-/// [`crate::motion::hover_blend`] of a trigger's fade `key`, set by [`select_hover`].
-fn select_hover_blend(key: &str, rest: gpui::Hsla, hover: gpui::Hsla) -> gpui::Hsla {
-    let over = SELECT_POINTER.with(|pointer| pointer.borrow().as_deref() == Some(key));
-    if over && !crate::motion::hover_known(key) {
-        crate::motion::set_hover(key, true, true);
-    }
-    crate::motion::hover_blend(key, rest, hover)
-}
-
 /// The trigger of every settings dropdown: a borderless filled pill. The
 /// caller adds the value ([`select_value`], after any leading glyph), then
 /// [`select_chevron`], plus its own listeners. Its focus ring is paint only,
@@ -1239,10 +1205,9 @@ pub fn select_trigger(
         .bg(if open {
             lifted
         } else {
-            select_hover_blend(&hover_key, select_fill(theme, false), lifted)
+            crate::motion::hover_blend(&hover_key, select_fill(theme, false), lifted)
         })
-        .on_hover(select_hover(hover_key.clone()))
-        .child(crate::motion::fade_driver(hover_key))
+        .hover_fade(hover_key)
         .flex()
         .flex_row()
         .items_center()
@@ -2286,32 +2251,6 @@ pub fn middle_truncate(
 #[cfg(test)]
 mod hint_tests {
     use super::*;
-
-    /// A select trigger under the pointer stays lifted through frames the window draws its page
-    /// from the last one, which read no fade and let the fades drop its key, so a page built
-    /// afresh draws it as the frame it left did; once the pointer leaves, it rests.
-    #[gpui::test]
-    fn a_trigger_under_the_pointer_keeps_its_lift_over_frames_drawn_from_the_last(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let cx = cx.add_empty_window();
-        let key = SharedString::from("light-theme-hover-test");
-        let (rest, lifted) = (gpui::black(), gpui::white());
-        let listener = select_hover(key.clone());
-        cx.update(|window, cx| listener(&true, window, cx));
-        for _ in 0..3 {
-            crate::motion::hover_fades_active(std::time::Instant::now());
-        }
-        assert!(!crate::motion::hover_known(&key), "the fades dropped it");
-        assert_eq!(select_hover_blend(&key, rest, lifted), lifted, "still under the pointer");
-        cx.update(|window, cx| listener(&false, window, cx));
-        for _ in 0..3 {
-            crate::motion::hover_fades_active(
-                std::time::Instant::now() + std::time::Duration::from_secs(1),
-            );
-        }
-        assert_eq!(select_hover_blend(&key, rest, lifted), rest, "the pointer left");
-    }
 
     #[test]
     fn standing_reads_in_plain_words() {

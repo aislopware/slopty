@@ -7,35 +7,11 @@ Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Article │ You
-Paragraph │ Tidy the greeting
-Button │ Copy message
-Button │ Rewind…
-Article │ Claude Code
-Paragraph │ Done: Tidy the greeting
-MultilineTextInput │ Do anything…
-Button │ Attach images
-Button │ Model: Opus 5.5, High
-Button │ Send message
-Button │ Mode: Auto
+Group
+Terminal │ shell │ >
 Group │ Workspace files (focused)
 Button │ Reveal file in tree
 Button │ Turn on word wrap
-Button │ Comment on line 1
-Button │ Comment on line 2
-Button │ Comment on line 3
-Button │ Comment on line 4
-Button │ Comment on line 5
-Button │ Comment on line 6
-Button │ Comment on line 7
-Button │ Comment on line 8
-Button │ Comment on line 9
-Button │ Comment on line 10
-Button │ Comment on line 11
-Button │ Comment on line 12
-Button │ Comment on line 13
-Button │ Comment on line 14
-Button │ Comment on line 15
 Group │ Workspace files
 SearchInput │ Search files
 Button │ Show hidden files
@@ -47,7 +23,9 @@ TreeItem │ README.md
 Splitter │ Resize files panel
 Splitter │ Resize side pane
 Button │ Open in…
-Button │ Show chat details
+Button │ Show inspector
+Button │ Inspector
+Button │ Close Inspector
 Button │ src/main.rs
 Button │ Close main.rs
 Button │ New tab
@@ -57,4 +35,4 @@ Button │ Hide side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ New chat
+Button │ New session

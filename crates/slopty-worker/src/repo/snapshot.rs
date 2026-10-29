@@ -1,23 +1,14 @@
-//! Snapshots of a working tree at a thread's turn edges, in private refs, and the review over
-//! them: what changed between two, and a change kept or put back.
+//! A repository read for review: its working tree as a tree, the files that differ between two
+//! trees cut into hunks, and the blobs either side names.
 //!
-//! A snapshot is the working tree as `git add -A` sees it (untracked files in, ignored ones
-//! out), written as a tree through an index of the thread's own, so the person's index, `HEAD`
-//! and stash are never touched. The index stays between snapshots, so each one hashes only
-//! what changed since the last (git's stat cache); the first starts from `HEAD`. Each tree is
-//! kept alive by a commit under `refs/slopty/threads/<thread>/<turn>-{before,after}`, and what
-//! the person kept under `refs/slopty/threads/<thread>/kept`. The change an agent was last asked
-//! to review is one commit on a base of its own, under `review-base` and `review-head`, which
-//! the next review overwrites. A push names the person's branches, never `refs/slopty`, and none
-//! of these commits is an ancestor of a branch, so none leaves the machine.
+//! The working tree is read as `git add -A` sees it (untracked files in, ignored ones out),
+//! written as a tree through a scratch copy of the person's index ([`working_tree`]), so their
+//! index, `HEAD` and refs are never touched and only what changed since git last looked is
+//! hashed. It is compared against `HEAD` or the branch's base; a range of commits is read from
+//! the object store alone ([`range`]). No snapshot is taken of an agent's turn
+//! (`docs/decisions/agents.md`, "TUI-first").
 //!
-//! A folder's working tree is reviewed the same way with no thread ([`working_tree`]), against
-//! `HEAD` or the branch's base, through a scratch copy of the person's index that goes with the
-//! review.
-//!
-//! Hunks are cut here, with three lines of context, the same way every time: a hunk named by
-//! its place ([`Pick::hunks`]) is the hunk the review showed, as long as both of its sides are
-//! the blobs it showed. Each change is checked against them before anything is written.
+//! Hunks are cut here, with three lines of context, the same way every time.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -29,9 +20,9 @@ use similar::{Algorithm, DiffOp, DiffTag};
 use slopty_proto::git::BLOB_MAX;
 use slopty_proto::thread::detail::{Hunk, heading};
 use slopty_proto::thread::wire::{
-    Against, FileDiff, FileKind, Modes, Pick, Review, ReviewScope, reading_order,
+    Against, FileDiff, FileKind, Modes, Review, ReviewScope, reading_order,
 };
-use slopty_proto::thread::{Edge, Patch, ThreadId, TreeRef, TurnId};
+use slopty_proto::thread::{Patch, TreeRef};
 use tokio::io::AsyncWriteExt as _;
 
 /// Lines of context around each change in a hunk.
@@ -43,19 +34,8 @@ pub const REVIEW_LINES: u32 = 20_000;
 /// The largest file cut into hunks; a larger one is shown as changed, with no hunks.
 pub const TEXT_BYTES: usize = 4 << 20;
 
-/// The turns whose snapshots a thread keeps; an older turn's refs go.
-pub const KEEP_TURNS: u32 = 256;
-
 /// How long one git run may take.
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Who the snapshot commits say made them: no person's identity is needed or used.
-const IDENTITY: [(&str, &str); 4] = [
-    ("GIT_AUTHOR_NAME", "Slopty"),
-    ("GIT_AUTHOR_EMAIL", "slopty@localhost"),
-    ("GIT_COMMITTER_NAME", "Slopty"),
-    ("GIT_COMMITTER_EMAIL", "slopty@localhost"),
-];
 
 /// Something git would not do, in words.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,15 +49,15 @@ impl std::fmt::Display for Failed {
 
 impl std::error::Error for Failed {}
 
-/// One repository's snapshots: its root, the git that runs on it, and where the thread's own
-/// index is kept.
+/// One repository read for review: its root, the git that runs on it, and the index its working
+/// tree is written through.
 #[derive(Clone, Debug)]
 pub struct Repo {
     /// The git to run.
     pub git: PathBuf,
     /// The repository's root.
     pub root: PathBuf,
-    /// The thread's index, made on the first snapshot.
+    /// The index the working tree is written through, made on the first take.
     pub index: PathBuf,
 }
 
@@ -93,7 +73,6 @@ impl Repo {
             .arg("-C")
             .arg(&self.root)
             .args(args)
-            .envs(IDENTITY)
             .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -201,7 +180,7 @@ impl Repo {
         }
     }
 
-    /// The working tree as a tree, through the thread's index.
+    /// The working tree as a tree, through [`Self::index`].
     ///
     /// # Errors
     ///
@@ -222,170 +201,6 @@ impl Repo {
         }
         self.run(&["add", "-A", "--", "."], index, None).await?;
         Ok(TreeRef(self.line(&["write-tree"], index).await?))
-    }
-
-    /// Keep `tree` as `thread`'s snapshot at `edge` of `turn`, and let the snapshots of the
-    /// turn [`KEEP_TURNS`] before it go.
-    ///
-    /// # Errors
-    ///
-    /// When git fails.
-    pub async fn record(
-        &self,
-        thread: ThreadId,
-        turn: TurnId,
-        edge: Edge,
-        tree: &TreeRef,
-    ) -> Result<(), Failed> {
-        let name = format!("{}-{}", turn.0, edge_name(edge));
-        self.pin(thread, &name, tree).await?;
-        if let Some(old) = turn.0.checked_sub(KEEP_TURNS) {
-            for edge in [Edge::Before, Edge::After] {
-                let gone = format!("{}/{old}-{}", refs(thread), edge_name(edge));
-                let _missing = self.run(&["update-ref", "-d", &gone], None, None).await;
-            }
-        }
-        Ok(())
-    }
-
-    /// Keep `tree` alive under `thread`'s ref `name`.
-    async fn pin(&self, thread: ThreadId, name: &str, tree: &TreeRef) -> Result<(), Failed> {
-        let message = format!("slopty: thread {thread} {name}");
-        let commit = self.line(&["commit-tree", &tree.0, "-m", &message], None).await?;
-        let reference = format!("{}/{name}", refs(thread));
-        self.run(&["update-ref", &reference, &commit], None, None).await?;
-        Ok(())
-    }
-
-    /// The change from `from` to `to` as one commit, for an agent's own review of it: `from`
-    /// as a base commit of its own and `to` as a commit on it, kept under `thread`'s
-    /// `review-base` and `review-head`, which each review overwrites. Their ids, base first, so
-    /// `base...head` and the head commit alone both say exactly the change. They are made at
-    /// a fixed time ([`Self::commit_at`]), so the same change is always the same two ids.
-    ///
-    /// # Errors
-    ///
-    /// When git fails, or either side is no tree here.
-    pub async fn review_pair(
-        &self,
-        thread: ThreadId,
-        from: &TreeRef,
-        to: &TreeRef,
-    ) -> Result<(String, String), Failed> {
-        let base_message = format!("slopty: thread {thread} review base");
-        let at = slopty_core::WallMs::ZERO;
-        let base = self.commit_at(from, None, &base_message, at).await?;
-        let message = format!("slopty: thread {thread} review");
-        let head = self.commit_at(to, Some(&base), &message, at).await?;
-        let refs = refs(thread);
-        let updates = format!(
-            "start\nupdate {refs}/review-base {base}\nupdate {refs}/review-head {head}\n\
-             prepare\ncommit\n"
-        );
-        self.run(&["update-ref", "--stdin"], None, Some(updates.as_bytes())).await?;
-        Ok((base, head))
-    }
-
-    /// A commit of `tree` on `parent` that says `message`, authored at `at` by Slopty: the same
-    /// arguments always make the same commit, so a history of a thread's turns is made once
-    /// and found again. Nothing names it; it stays while something it is in is asked about.
-    ///
-    /// # Errors
-    ///
-    /// When git fails, or `tree` is no tree here.
-    pub async fn commit_at(
-        &self,
-        tree: &TreeRef,
-        parent: Option<&str>,
-        message: &str,
-        at: slopty_core::WallMs,
-    ) -> Result<String, Failed> {
-        // `hash-object` writes whatever it is given: a commit of a tree not here would break
-        // the repository.
-        let tree_here = format!("{}^{{tree}}", tree.0);
-        self.run(&["rev-parse", "-q", "--verify", &tree_here], None, None).await?;
-        let secs = at.as_millis() / 1_000;
-        let parent = parent.map(|p| format!("parent {p}\n")).unwrap_or_default();
-        let who = format!("Slopty <slopty@localhost> {secs} +0000");
-        let object =
-            format!("tree {}\n{parent}author {who}\ncommitter {who}\n\n{message}\n", tree.0);
-        let out = self
-            .run(&["hash-object", "-t", "commit", "-w", "--stdin"], None, Some(object.as_bytes()))
-            .await?;
-        Ok(String::from_utf8_lossy(&out).trim().to_owned())
-    }
-
-    /// The commit each line of the working file `path` (relative to the root) came from, as
-    /// `git blame` reads the file against the history ending at `head`, in the file's order. A
-    /// line changed since `head` has no commit.
-    ///
-    /// # Errors
-    ///
-    /// When git fails, or `head` has no such file.
-    pub async fn blame(&self, head: &str, path: &str) -> Result<Vec<Option<String>>, Failed> {
-        let file = self.root.join(path);
-        let file = file.to_string_lossy();
-        let args = ["blame", "--porcelain", "--contents", &file, head, "--", path];
-        let out = self.run(&args, None, None).await?;
-        Ok(blamed(&String::from_utf8_lossy(&out)))
-    }
-
-    /// The thread each of `commits` names in its `Slopty-Thread` trailer, with when it was
-    /// made; a commit that names none is left out.
-    ///
-    /// # Errors
-    ///
-    /// When git fails.
-    pub async fn trailed(
-        &self,
-        commits: &[String],
-    ) -> Result<HashMap<String, (ThreadId, slopty_core::WallMs)>, Failed> {
-        if commits.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let format =
-            "--format=%H%x1f%ct%x1f%(trailers:key=Slopty-Thread,valueonly,separator=%x2C)%x1e";
-        let mut args = vec!["show", "-s", "--no-walk", format];
-        args.extend(commits.iter().map(String::as_str));
-        let out = self.run(&args, None, None).await?;
-        Ok(trailers(&String::from_utf8_lossy(&out)))
-    }
-
-    /// The id git gives the working file `path` (relative to the root).
-    ///
-    /// # Errors
-    ///
-    /// When git fails.
-    pub async fn blob_of(&self, path: &str) -> Result<String, Failed> {
-        self.line(&["hash-object", "--", path], None).await
-    }
-
-    /// Let every ref of `thread` go, its snapshots and its review alike: the thread is gone.
-    ///
-    /// # Errors
-    ///
-    /// When git fails.
-    pub async fn forget(&self, thread: ThreadId) -> Result<(), Failed> {
-        let prefix = format!("{}/", refs(thread));
-        let listed = self.line(&["for-each-ref", "--format=%(refname)", &prefix], None).await?;
-        let deletes: String = listed.lines().flat_map(|name| ["delete ", name, "\n"]).collect();
-        if deletes.is_empty() {
-            return Ok(());
-        }
-        self.run(&["update-ref", "--stdin"], None, Some(deletes.as_bytes())).await.map(|_| ())
-    }
-
-    /// What `thread`'s person has kept, if they have kept anything.
-    ///
-    /// # Errors
-    ///
-    /// When git fails.
-    pub async fn kept(&self, thread: ThreadId) -> Result<Option<TreeRef>, Failed> {
-        let reference = format!("{}/kept^{{tree}}", refs(thread));
-        match self.line(&["rev-parse", "-q", "--verify", &reference], None).await {
-            Ok(tree) if !tree.is_empty() => Ok(Some(TreeRef(tree))),
-            _ => Ok(None),
-        }
     }
 
     /// Every file that differs from `from` to `to`, by path, cut into hunks while the review
@@ -544,255 +359,6 @@ impl Repo {
             None => Ok(Vec::new()),
         }
     }
-
-    /// The blob the file at `path` would be now; `None` when there is no file.
-    ///
-    /// # Errors
-    ///
-    /// When git fails.
-    pub async fn stamp(&self, path: &str) -> Result<Option<String>, Failed> {
-        if tokio::fs::symlink_metadata(self.root.join(path)).await.is_err() {
-            return Ok(None);
-        }
-        Ok(Some(self.line(&["hash-object", "--", path], None).await?))
-    }
-
-    /// Put `pick` back in the working tree as its old side has it, once the file is checked to
-    /// be what the review showed.
-    ///
-    /// # Errors
-    ///
-    /// The file changed since, a hunk that is not there, or git failing.
-    pub async fn revert(&self, pick: &Pick) -> Result<(), Failed> {
-        let path = self.inside(&pick.path)?;
-        if self.stamp(&pick.path).await? != pick.stamp {
-            return Err(Failed(format!("{} changed since it was reviewed", pick.path)));
-        }
-        let old = self.blob(pick.from.as_deref()).await?;
-        // A rename put back whole goes back to where it was.
-        if let Some(was) =
-            pick.old_path.as_deref().filter(|was| pick.hunks.is_empty() && *was != pick.path)
-        {
-            let there = self.stamp(was).await?;
-            if there.is_some() && there != pick.from {
-                return Err(Failed(format!(
-                    "{was} is there again, so {} cannot go back to it",
-                    pick.path
-                )));
-            }
-            let back = self.inside(was)?;
-            if let Some(dir) = back.parent() {
-                tokio::fs::create_dir_all(dir).await.map_err(|e| Failed(format!("{was}: {e}")))?;
-            }
-            tokio::fs::write(&back, &old).await.map_err(|e| Failed(format!("{was}: {e}")))?;
-            return tokio::fs::remove_file(&path)
-                .await
-                .map_err(|e| Failed(format!("{}: {e}", pick.path)));
-        }
-        let bytes = if pick.hunks.is_empty() {
-            if pick.from.is_none() {
-                return tokio::fs::remove_file(&path)
-                    .await
-                    .map_err(|e| Failed(format!("{}: {e}", pick.path)));
-            }
-            old
-        } else {
-            let new =
-                tokio::fs::read(&path).await.map_err(|e| Failed(format!("{}: {e}", pick.path)))?;
-            if !is_text(&old) || !is_text(&new) {
-                return Err(Failed(format!("{} is not text, so it goes back whole", pick.path)));
-            }
-            swap(&lossy(&old), &lossy(&new), &pick.hunks, Side::Old)?.into_bytes()
-        };
-        if let Some(dir) = path.parent() {
-            tokio::fs::create_dir_all(dir)
-                .await
-                .map_err(|e| Failed(format!("{}: {e}", pick.path)))?;
-        }
-        tokio::fs::write(&path, bytes).await.map_err(|e| Failed(format!("{}: {e}", pick.path)))
-    }
-
-    /// Take `pick` into what `thread`'s person has kept, starting from `base` when they have
-    /// kept nothing yet.
-    ///
-    /// When what is kept of the file is the review's old side, the picked change is kept as it
-    /// is. When it is not (an earlier turn's change to the file is not kept, so the last turn's
-    /// review starts from lines the kept side lacks), the picked change is merged onto what is
-    /// kept, three ways from the review's old side (`merge3`), and refused only where the two
-    /// meet.
-    ///
-    /// # Errors
-    ///
-    /// The change meets lines kept otherwise (named by line), a side that is not text where
-    /// the kept side differs, a hunk that is not there, or git failing.
-    pub async fn keep(
-        &self,
-        thread: ThreadId,
-        base: &TreeRef,
-        pick: &Pick,
-    ) -> Result<TreeRef, Failed> {
-        let kept = self.kept(thread).await?.unwrap_or_else(|| base.clone());
-        // A rename not kept yet is still at its old path in what is kept.
-        let now = match (self.entry(&kept, &pick.path).await?, pick.old_path.as_deref()) {
-            (None, Some(old)) => self.entry(&kept, old).await?,
-            (now, _) => now,
-        };
-        let kept_blob = now.as_ref().map(|(_, blob)| blob.clone());
-        let as_reviewed = kept_blob == pick.from;
-        let chosen = if pick.hunks.is_empty() {
-            Chosen::Blob(pick.stamp.clone())
-        } else {
-            let (old, new) =
-                (self.blob(pick.from.as_deref()).await?, self.blob(pick.stamp.as_deref()).await?);
-            if !is_text(&old) || !is_text(&new) {
-                return Err(Failed(format!("{} is not text, so it is kept whole", pick.path)));
-            }
-            Chosen::Text(swap(&lossy(&old), &lossy(&new), &pick.hunks, Side::New)?)
-        };
-        let blob = match chosen {
-            Chosen::Blob(blob) if as_reviewed => blob,
-            Chosen::Text(text) if as_reviewed => Some(self.hashed(&text).await?),
-            // The turn removed the file: it goes from what is kept too.
-            Chosen::Blob(None) => None,
-            chosen => {
-                let mine = match chosen {
-                    Chosen::Text(text) => text.into_bytes(),
-                    Chosen::Blob(blob) => self.blob(blob.as_deref()).await?,
-                };
-                let (from, held) = (
-                    self.blob(pick.from.as_deref()).await?,
-                    self.blob(kept_blob.as_deref()).await?,
-                );
-                if ![&from, &held, &mine].into_iter().all(|b| is_text(b)) {
-                    return Err(Failed(format!(
-                        "{} was kept otherwise since it was reviewed, and is not text to merge",
-                        pick.path
-                    )));
-                }
-                let merged = merge3(&lossy(&from), &lossy(&held), &lossy(&mine)).map_err(|at| {
-                    Failed(format!(
-                        "{}: this change meets lines kept otherwise, at {}",
-                        pick.path,
-                        lines_named(&at)
-                    ))
-                })?;
-                Some(self.hashed(&merged).await?)
-            }
-        };
-        let index = self.index.with_extension("kept");
-        let index = Some(index.as_path());
-        self.run(&["read-tree", &kept.0], index, None).await?;
-        match blob {
-            Some(blob) => {
-                let mode = now.map_or_else(|| "100644".to_owned(), |(mode, _)| mode);
-                let info = format!("{mode},{blob},{}", pick.path);
-                self.run(&["update-index", "--add", "--cacheinfo", &info], index, None).await?;
-                // Keeping a rename takes the file away from where it was.
-                if let Some(old) = pick.old_path.as_deref().filter(|old| *old != pick.path) {
-                    self.run(&["update-index", "--force-remove", "--", old], index, None).await?;
-                }
-            }
-            None => {
-                self.run(&["update-index", "--force-remove", "--", &pick.path], index, None)
-                    .await?;
-            }
-        }
-        let tree = TreeRef(self.line(&["write-tree"], index).await?);
-        self.pin(thread, "kept", &tree).await?;
-        Ok(tree)
-    }
-
-    /// Keep all of `tree` for `thread`'s person: what they keep from now is kept on top of it.
-    ///
-    /// # Errors
-    ///
-    /// When git fails.
-    pub async fn keep_whole(&self, thread: ThreadId, tree: &TreeRef) -> Result<(), Failed> {
-        self.pin(thread, "kept", tree).await
-    }
-
-    /// `text` written as a blob of the repository.
-    async fn hashed(&self, text: &str) -> Result<String, Failed> {
-        self.line_with(&["hash-object", "-w", "--stdin"], text.as_bytes()).await
-    }
-
-    async fn line_with(&self, args: &[&str], input: &[u8]) -> Result<String, Failed> {
-        let out = self.run(args, None, Some(input)).await?;
-        Ok(String::from_utf8_lossy(&out).trim().to_owned())
-    }
-
-    /// The mode and blob of `path` in `tree`.
-    async fn entry(&self, tree: &TreeRef, path: &str) -> Result<Option<(String, String)>, Failed> {
-        let out = self.run(&["ls-tree", "-z", &tree.0, "--", path], None, None).await?;
-        let line = String::from_utf8_lossy(&out);
-        let Some(entry) = line.split('\0').next().filter(|e| !e.is_empty()) else {
-            return Ok(None);
-        };
-        let mut words = entry.split_whitespace();
-        let (mode, _kind, blob) = (words.next(), words.next(), words.next());
-        Ok(mode.zip(blob).map(|(mode, blob)| (mode.to_owned(), blob.to_owned())))
-    }
-
-    /// `path` under the root, refused when it would climb out.
-    fn inside(&self, path: &str) -> Result<PathBuf, Failed> {
-        let relative = Path::new(path);
-        let climbs = relative.components().any(|c| !matches!(c, std::path::Component::Normal(_)));
-        if climbs || path.is_empty() {
-            return Err(Failed(format!("{path} is not a path in the repository")));
-        }
-        Ok(self.root.join(relative))
-    }
-}
-
-/// The refs of `thread`'s snapshots.
-/// The commit of each line in `git blame --porcelain`'s answer, in the file's order; the
-/// all-zero commit, a line not in the history, is none.
-fn blamed(porcelain: &str) -> Vec<Option<String>> {
-    let mut lines: Vec<Option<String>> = Vec::new();
-    let mut current: Option<(String, usize)> = None;
-    for line in porcelain.lines() {
-        if line.starts_with('\t') {
-            if let Some((commit, at)) = current.as_mut() {
-                if lines.len() <= *at {
-                    lines.resize(at.saturating_add(1), None);
-                }
-                if let Some(slot) = lines.get_mut(*at) {
-                    *slot = (commit.bytes().any(|b| b != b'0')).then(|| commit.clone());
-                }
-                *at = at.saturating_add(1);
-            }
-            continue;
-        }
-        let mut words = line.split(' ');
-        let (Some(commit), Some(_orig), Some(fin)) = (words.next(), words.next(), words.next())
-        else {
-            continue;
-        };
-        let header = commit.len() >= 40 && commit.bytes().all(|b| b.is_ascii_hexdigit());
-        if let (true, Ok(fin)) = (header, fin.parse::<usize>()) {
-            current = Some((commit.to_owned(), fin.saturating_sub(1)));
-        }
-    }
-    lines
-}
-
-/// `trailed`'s answer read: each commit with a thread in its trailer, and its time.
-fn trailers(out: &str) -> HashMap<String, (ThreadId, slopty_core::WallMs)> {
-    out.split('\x1e')
-        .filter_map(|record| {
-            let mut fields = record.trim().split('\x1f');
-            let commit = fields.next()?.trim();
-            let secs: u64 = fields.next()?.trim().parse().ok()?;
-            let thread =
-                fields.next()?.split(',').find_map(|t| t.trim().parse::<ThreadId>().ok())?;
-            let at = slopty_core::WallMs::from_millis(secs.saturating_mul(1_000));
-            Some((commit.to_owned(), (thread, at)))
-        })
-        .collect()
-}
-
-fn refs(thread: ThreadId) -> String {
-    format!("refs/slopty/threads/{thread}")
 }
 
 /// The branches a working tree's base is looked for on, in order ([`Repo::against`]).
@@ -863,40 +429,6 @@ pub async fn working_tree_with(
     let to = repo.take().await?;
     let files = repo.changes_with(&from, &to, ignore_whitespace).await?;
     Ok(Review { scope, from: Some(from), to: Some(to), files, absent: None })
-}
-
-/// What one turn changed in the repository at `root` ([`ReviewScope::Turn`]).
-///
-/// From `before`, the tree the worker took when it began, to `after`, the one it took when it
-/// ended, or to the working tree now while it runs; whitespace not counting when
-/// `ignore_whitespace`.
-///
-/// # Errors
-///
-/// When git fails, or no scratch index can be made.
-pub async fn turn(
-    git: &Path,
-    root: &Path,
-    (turn, before, after): (TurnId, TreeRef, Option<TreeRef>),
-    ignore_whitespace: bool,
-) -> Result<Review, Failed> {
-    let (repo, _scratch) = scratch_repo(git, root).await?;
-    tree_id(&before)?;
-    let to = match after {
-        Some(after) => {
-            tree_id(&after)?;
-            after
-        }
-        None => repo.take().await?,
-    };
-    let files = repo.changes_with(&before, &to, ignore_whitespace).await?;
-    let scope = ReviewScope::Turn(turn);
-    Ok(Review { scope, from: Some(before), to: Some(to), files, absent: None })
-}
-
-/// A tree a client named, refused unless it is an object id.
-fn tree_id(tree: &TreeRef) -> Result<(), Failed> {
-    object_id(&tree.0)
 }
 
 /// The repository at `root` written through a scratch copy of the person's index, so a tree of
@@ -989,13 +521,6 @@ pub async fn blob(git: &Path, root: &Path, id: &str) -> Result<Vec<u8>, Failed> 
         return Err(Failed(format!("{id} is {size} bytes, past the {BLOB_MAX} sent whole")));
     }
     repo.blob(Some(id)).await
-}
-
-const fn edge_name(edge: Edge) -> &'static str {
-    match edge {
-        Edge::Before => "before",
-        Edge::After => "after",
-    }
 }
 
 /// Keep the hunks of the files read first while `budget` lines last, in the order the review
@@ -1155,7 +680,7 @@ fn lines(text: &str) -> Vec<&str> {
     text.split_inclusive('\n').collect()
 }
 
-/// The hunks from `old` to `new`, as a review shows them and a pick names them.
+/// The hunks from `old` to `new`, as a review shows them.
 fn groups<T: std::hash::Hash + Eq + Ord>(old: &[T], new: &[T]) -> Vec<Vec<DiffOp>> {
     let ops = similar::capture_diff_slices(Algorithm::Myers, old, new);
     similar::group_diff_ops(ops, CONTEXT)
@@ -1232,137 +757,6 @@ pub fn diff_with(old: &str, new: &str, ignore_whitespace: bool) -> Patch {
     patch
 }
 
-/// Which side a [`swap`] takes the picked hunks from.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Side {
-    /// `new`, with the picked hunks as `old` has them: a revert.
-    Old,
-    /// `old`, with the picked hunks as `new` has them: a keep.
-    New,
-}
-
-/// What a keep takes of a file: a side's blob as it is (`None`, removed), or the old side with
-/// the picked hunks.
-enum Chosen {
-    Blob(Option<String>),
-    Text(String),
-}
-
-/// One change of a three-way merge: lines `at` of the common old side, replaced by lines `to`
-/// of the changed side.
-struct Change {
-    at: Range<usize>,
-    to: Range<usize>,
-}
-
-/// The changes from `base` to `other`, in order: a run replaced is one change (the diff's
-/// capture folds a delete and the insert after it into one replace).
-fn changes(base: &[&str], other: &[&str]) -> Vec<Change> {
-    similar::capture_diff_slices(Algorithm::Myers, base, other)
-        .iter()
-        .filter(|op| op.tag() != DiffTag::Equal)
-        .map(|op| Change { at: op.old_range(), to: op.new_range() })
-        .collect()
-}
-
-/// `base` with the changes to it in `ours` and in `theirs` both made: three ways, as
-/// `git merge-file` merges. Two changes over the same lines, or touching, meet; the same change
-/// made on both sides is made once.
-///
-/// # Errors
-///
-/// Where the changes meet, as lines (counted from one) of `theirs`.
-fn merge3(base: &str, ours: &str, theirs: &str) -> Result<String, Vec<Range<usize>>> {
-    let (base_lines, our_lines, their_lines) = (lines(base), lines(ours), lines(theirs));
-    let ours_of = |c: &Change| our_lines.get(c.to.clone()).unwrap_or_default();
-    let theirs_of = |c: &Change| their_lines.get(c.to.clone()).unwrap_or_default();
-    let (mine, other) = (changes(&base_lines, &our_lines), changes(&base_lines, &their_lines));
-    let meets = |x: &Change, y: &Change| x.at.start <= y.at.end && y.at.start <= x.at.end;
-    let mut out = String::with_capacity(ours.len().max(theirs.len()));
-    let mut met = Vec::new();
-    let (mut a, mut b, mut at) = (mine.iter().peekable(), other.iter().peekable(), 0);
-    loop {
-        let (change, with) = match (a.peek().copied(), b.peek().copied()) {
-            (None, None) => break,
-            (Some(mine), Some(theirs)) if meets(mine, theirs) => {
-                let (_ours, _theirs) = (a.next(), b.next());
-                let (lines_mine, lines_theirs) = (ours_of(mine), theirs_of(theirs));
-                if mine.at != theirs.at || lines_mine != lines_theirs {
-                    let to = &theirs.to;
-                    met.push(to.start..to.end.max(to.start.saturating_add(1)));
-                    continue;
-                }
-                (mine, lines_mine)
-            }
-            (Some(x), Some(y)) if x.at.start <= y.at.start => {
-                let _ours = a.next();
-                (x, ours_of(x))
-            }
-            (Some(x), None) => {
-                let _ours = a.next();
-                (x, ours_of(x))
-            }
-            (_, Some(y)) => {
-                let _theirs = b.next();
-                (y, theirs_of(y))
-            }
-        };
-        out.extend(base_lines.get(at..change.at.start).unwrap_or_default().iter().copied());
-        out.extend(with.iter().copied());
-        at = change.at.end;
-    }
-    if !met.is_empty() {
-        return Err(met);
-    }
-    out.extend(base_lines.get(at..).unwrap_or_default().iter().copied());
-    Ok(out)
-}
-
-/// Line ranges (from zero) in words, counted from one: "line 4", "lines 4–6, 9".
-fn lines_named(ranges: &[Range<usize>]) -> String {
-    let named: Vec<String> = ranges
-        .iter()
-        .map(|r| match r.len() {
-            0 | 1 => format!("{}", r.start.saturating_add(1)),
-            _ => format!("{}\u{2013}{}", r.start.saturating_add(1), r.end),
-        })
-        .collect();
-    let single = ranges.len() == 1 && ranges.first().is_some_and(|r| r.len() <= 1);
-    format!("{} {}", if single { "line" } else { "lines" }, named.join(", "))
-}
-
-/// One side with the hunks `picked` taken from the other.
-fn swap(old: &str, new: &str, picked: &[u32], take: Side) -> Result<String, Failed> {
-    let (old_lines, new_lines) = (lines(old), lines(new));
-    let groups = groups(&old_lines, &new_lines);
-    if let Some(missing) =
-        picked.iter().find(|&&h| usize::try_from(h).map_or(true, |h| h >= groups.len()))
-    {
-        return Err(Failed(format!("there is no hunk {missing}")));
-    }
-    let (base, other) = match take {
-        Side::Old => (&new_lines, &old_lines),
-        Side::New => (&old_lines, &new_lines),
-    };
-    let mut out = String::with_capacity(old.len().max(new.len()));
-    let mut at = 0;
-    for (n, group) in groups.iter().enumerate() {
-        let (old_span, new_span) = span(group);
-        let (here, there) = match take {
-            Side::Old => (new_span, old_span),
-            Side::New => (old_span, new_span),
-        };
-        if !picked.iter().any(|&h| usize::try_from(h).is_ok_and(|h| h == n)) {
-            continue;
-        }
-        out.extend(base.get(at..here.start).unwrap_or_default().iter().copied());
-        out.extend(other.get(there).unwrap_or_default().iter().copied());
-        at = here.end;
-    }
-    out.extend(base.get(at..).unwrap_or_default().iter().copied());
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1371,24 +765,6 @@ mod tests {
 
     fn changed() -> String {
         OLD.replace("b\n", "B\n").replace("l\n", "L\nL2\n")
-    }
-
-    /// Changes on each side apart from each other are both made; the same change on both is
-    /// made once; changes over the same lines, or touching, meet and are named by `theirs`'
-    /// lines; a change at the very end is made.
-    #[test]
-    fn three_ways_merge_apart_and_meet_where_they_touch() {
-        let ours = OLD.replace("b\n", "B\n");
-        let theirs = OLD.replace("l\n", "L\nL2\n");
-        assert_eq!(merge3(OLD, &ours, &theirs).as_deref(), Ok(changed().as_str()));
-        assert_eq!(merge3(OLD, &theirs, &theirs).as_deref(), Ok(theirs.as_str()), "the same");
-        let at_end = format!("{OLD}n\n");
-        assert_eq!(merge3(OLD, &ours, &at_end), Ok(format!("{ours}n\n")));
-
-        let met = |theirs: &str| merge3(OLD, &ours, theirs).map_err(|at| lines_named(&at));
-        assert_eq!(met(&OLD.replace("b\n", "b!\n")), Err("line 2".to_owned()), "the same line");
-        assert_eq!(met(&OLD.replace("c\n", "C\n")), Err("line 3".to_owned()), "the line after");
-        assert_eq!(lines_named(&[1..4, 8..9]), "lines 2\u{2013}4, 9");
     }
 
     /// Two changes far apart are two hunks, each with its context, numbered as git numbers
@@ -1409,22 +785,6 @@ mod tests {
             (9, 5, 9, 6)
         );
         assert_eq!((patch.added, patch.removed), (3, 2));
-    }
-
-    /// Reverting one hunk leaves the other; keeping one takes only it; both of either give
-    /// the other side whole.
-    #[test]
-    fn a_picked_hunk_goes_back_or_is_kept_alone() {
-        let new = changed();
-        let back = swap(OLD, &new, &[0], Side::Old).unwrap();
-        assert_eq!(back, OLD.replace("l\n", "L\nL2\n"));
-        let kept = swap(OLD, &new, &[1], Side::New).unwrap();
-        assert_eq!(kept, OLD.replace("l\n", "L\nL2\n"));
-        assert_eq!(swap(OLD, &new, &[0, 1], Side::Old).unwrap(), OLD);
-        assert_eq!(swap(OLD, &new, &[0, 1], Side::New).unwrap(), new);
-        assert!(swap(OLD, &new, &[2], Side::Old).is_err(), "no third hunk");
-        let no_end = swap("a\nb", "a\nc", &[0], Side::Old).unwrap();
-        assert_eq!(no_end, "a\nb", "a last line without its end stays so");
     }
 
     /// Each hunk is headed as git heads it with no diff driver: the same file pair through
@@ -1481,37 +841,5 @@ mod tests {
         assert_eq!(entries[1].path, "new.txt");
         assert_eq!(entries[1].from, None);
         assert!(entries[0].from.is_some() && entries[0].to.is_some());
-    }
-
-    /// Blame's porcelain names each line's commit once per group, its own line numbers after;
-    /// a line not yet committed is the all-zero commit, which is no one's.
-    #[test]
-    fn blame_gives_each_line_its_commit() {
-        let a = "a".repeat(40);
-        let zero = "0".repeat(40);
-        let porcelain = format!(
-            "{a} 1 1 2\nauthor Slopty\nsummary slopty: thread\nfilename x\n\tone\n\
-             {a} 2 2\n\ttwo\n\
-             {zero} 3 3 1\nauthor Not Committed Yet\nprevious {a} x\nfilename x\n\tthree\n\
-             {a} 4 4 1\n\tfour\n"
-        );
-        let lines = blamed(&porcelain);
-        assert_eq!(lines, [Some(a.clone()), Some(a.clone()), None, Some(a)]);
-    }
-
-    /// Each commit's trailer names its thread, a list keeps its first thread, and a commit with
-    /// no trailer or a word that is no thread is left out.
-    #[test]
-    fn trailers_name_the_thread_that_made_a_commit() {
-        let thread = ThreadId::new();
-        let other = ThreadId::new();
-        let out = format!(
-            "c1\x1f100\x1f{thread}\x1e\nc2\x1f200\x1f\x1e\nc3\x1f300\x1fnot a thread\x1e\n\
-             c4\x1f400\x1f{other},{thread}\x1e\n"
-        );
-        let found = trailers(&out);
-        assert_eq!(found.len(), 2, "{found:?}");
-        assert_eq!(found.get("c1"), Some(&(thread, slopty_core::WallMs::from_millis(100_000))));
-        assert_eq!(found.get("c4").map(|f| f.0), Some(other));
     }
 }

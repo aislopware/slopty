@@ -43,10 +43,6 @@ pub(super) struct ExtrasState {
     changes_open: HashSet<SharedString>,
     /// slopty: when each turn-changes row's list last opened or closed, for its tween (#12).
     changes_toggled: HashMap<SharedString, std::time::Instant>,
-    /// Error cards whose retry was asked for, until the thread moves past them.
-    retried: HashSet<SharedString>,
-    /// A selection's Quote: where the press ended, and the words.
-    quote: Option<(gpui::Point<gpui::Pixels>, String)>,
 }
 
 /// A text part the view model marks as a proposed plan (`plan:<id>`).
@@ -154,16 +150,10 @@ pub fn plan_rows(
     }
 }
 
-/// An error part with the agent's own words or a retry, as a card.
-pub fn error_card_row(
-    entry_id: &str,
-    part_id: &str,
-    message: &str,
-    detail: Option<&str>,
-    retry: bool,
-) -> Row {
+/// An error part with the agent's own words, as a card.
+pub fn error_card_row(entry_id: &str, part_id: &str, message: &str, detail: Option<&str>) -> Row {
     let message = slopty_view_proto::view::single_line(message);
-    let version = fnv1a(format!("{message}\0{}\0{retry}", detail.unwrap_or_default()).as_bytes());
+    let version = fnv1a(format!("{message}\0{}", detail.unwrap_or_default()).as_bytes());
     Row {
         id: format!("{entry_id}#{part_id}").into(),
         version,
@@ -171,7 +161,6 @@ pub fn error_card_row(
         kind: RowKind::ErrorCard {
             message: message.into(),
             detail: detail.map(|detail| detail.trim().to_owned().into()),
-            retry,
         },
         entry_id: entry_id.to_owned().into(),
         timestamp: None,
@@ -184,10 +173,9 @@ pub fn error_card_row(
 const TITLE_MOST: usize = 90;
 
 /// slopty: an error's words as a card says them (Amp): its first sentence, what happened, is
-/// the title; the next, what to do, is the one sentence under it, left out where it only says
-/// "Try again." over a card whose action does. Words that do not split read under a calm
-/// "Something went wrong".
-pub(super) fn error_title(message: &str, retry: bool) -> (SharedString, Option<SharedString>) {
+/// the title; the next, what to do, is the one sentence under it. Words that do not split read
+/// under a calm "Something went wrong".
+pub(super) fn error_title(message: &str) -> (SharedString, Option<SharedString>) {
     let message = message.trim();
     let split = message
         .split_once(". ")
@@ -199,7 +187,6 @@ pub(super) fn error_title(message: &str, retry: bool) -> (SharedString, Option<S
         }
         None => ("Something went wrong".to_owned(), Some(message.to_owned())),
     };
-    let rest = rest.filter(|rest| !(retry && rest.trim_end_matches('.') == "Try again"));
     (title.into(), rest.map(SharedString::from))
 }
 
@@ -515,110 +502,6 @@ impl Transcript {
         }))
     }
 
-    /// Offer to quote the selection that a press ending at `at` left, in the main chat.
-    pub(super) fn offer_quote(&mut self, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
-        if self.doc_override.is_some() || self.chat_id.is_none() {
-            return;
-        }
-        let words = crate::markdown::selection::selected_text()
-            .map(|text| text.trim().to_owned())
-            .filter(|text| !text.is_empty());
-        if let Some(words) = words {
-            self.extras.quote = Some((at, words));
-            cx.notify();
-        }
-    }
-
-    /// Take the Quote away.
-    pub(super) fn withdraw_quote(&mut self, cx: &mut Context<Self>) {
-        if self.extras.quote.take().is_some() {
-            cx.notify();
-        }
-    }
-
-    /// The Quote beside a selection's end, while the selection stands.
-    pub(super) fn render_quote_offer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (at, words) = self.extras.quote.clone()?;
-        let standing = crate::markdown::selection::selected_text()
-            .is_some_and(|text| text.trim() == words);
-        if !standing {
-            self.extras.quote = None;
-            return None;
-        }
-        let theme = Theme::of(cx).clone();
-        let button = div()
-            .id("quote-selection")
-            .role(gpui::Role::Button)
-            .aria_label("Quote")
-            .h(px(28.0))
-            .px(px(10.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            // slopty: the faded hover.
-            .bg(crate::motion::mix(
-                crate::popover::surface_bg(&theme),
-                theme.text,
-                0.08 * crate::motion::hover_t("quote-selection"),
-            ))
-            .hover_fade("quote-selection")
-            .shadow_md()
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(12.5))
-            .text_color(theme.text)
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                if crate::composer::insert_quote(&words, window, cx) {
-                    this.extras.quote = None;
-                    cx.notify();
-                }
-            }))
-            .child(
-                crate::icons::icon(crate::icons::CHAT_ROUND_LINE)
-                    .size(px(13.0))
-                    .text_color(theme.text_muted),
-            )
-            .child(SharedString::from("Quote"));
-        Some(
-            gpui::deferred(
-                gpui::anchored()
-                    .position(at + gpui::point(px(8.0), px(10.0)))
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(button),
-            )
-            .priority(1)
-            .into_any_element(),
-        )
-    }
-
-    /// Ask the agent to run the failed turn again with the person's own words.
-    fn retry_turn(&mut self, row_id: SharedString, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.chat_id.clone() else {
-            return;
-        };
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.extras.retried.insert(row_id);
-        cx.notify();
-        cx.spawn(async move |_, _| {
-            let params = serde_json::json!({ "chatId": chat_id });
-            if let Err(err) = engine
-                .client()
-                .call(slopty_view_rpc::methods::RETRY_TURN, params)
-                .await
-            {
-                tracing::warn!(error = %err, "turn retry failed");
-            }
-        })
-        .detach();
-    }
-
     /// Open or close a plan's fold at once (no tween: the rows below move as one).
     fn toggle_plan_fold(&mut self, fold: SharedString, cx: &mut Context<Self>) {
         let entry = self.folds.entry(fold).or_default();
@@ -646,11 +529,9 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match &row.kind {
-            RowKind::ErrorCard {
-                message,
-                detail,
-                retry,
-            } => self.render_error_card(row, message, detail.as_ref(), *retry, theme, cx),
+            RowKind::ErrorCard { message, detail } => {
+                self.render_error_card(row, message, detail.as_ref(), theme, cx)
+            }
             RowKind::UpdateNeeded { least, have } => self.render_update_needed(row, least, have, theme, cx),
             RowKind::Marker { text } => marker(text.clone(), theme),
             RowKind::PlanHeader { copy } => self.render_plan_header(row, copy, theme, cx),
@@ -662,23 +543,20 @@ impl Transcript {
         }
     }
 
-    /// slopty: an error as Amp says one (`.research/amp-study-2026-10-19.md` item 8): a title,
-    /// one calm sentence, and one action that carries the work on (Try again, where the turn
-    /// can be); the agent's own words open under Details, and the whole error copies. A request
-    /// tried again counts down in its own row (`RetryLine`), a usage limit in the composer's
-    /// limit notice.
+    /// slopty: an error as Amp says one (`.research/amp-study-2026-10-19.md` item 8): a title
+    /// and one calm sentence; the agent's own words open under Details, and the whole error
+    /// copies. It sends nothing: what to do next is done in the agent's TUI. A request tried
+    /// again counts down in its own row (`RetryLine`).
     pub(super) fn render_error_card(
         &mut self,
         row: &Row,
         message: &SharedString,
         detail: Option<&SharedString>,
-        retry: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.extras.details_open.contains(&row.id);
-        let retried = self.extras.retried.contains(&row.id);
-        let (title, sentence) = error_title(message, retry);
+        let (title, sentence) = error_title(message);
         let (accent, muted) = (theme.danger, theme.danger_muted);
         let quiet = |id: String, label: &'static str| {
             let fade = format!("{id}-hover");
@@ -703,46 +581,6 @@ impl Transcript {
                 .child(SharedString::from(label))
         };
         let mut actions = div().flex().flex_row().items_center().gap(px(2.0));
-        if retry {
-            let id = row.id.clone();
-            actions = actions.child(if retried {
-                div()
-                    .h(px(24.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from("Trying again…"))
-                    .into_any_element()
-            } else {
-                // The one way on, drawn as the card's lead action in its own hue.
-                let fade = format!("{}-retry-hover", row.id);
-                div()
-                    .id(SharedString::from(format!("{}-retry", row.id)))
-                    .debug_selector(|| "error-retry".into()) // slopty: for the tests
-                    .role(gpui::Role::Button)
-                    .aria_label("Try again")
-                    .h(px(24.0))
-                    .px(px(10.0))
-                    .mr(px(4.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .tab_index(0)
-                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(muted)
-                    .bg(crate::motion::hover_blend(&fade, accent.opacity(0.12), accent.opacity(0.2)))
-                    .active(|s| s.opacity(0.8))
-                    .hover_fade(fade)
-                    .on_click(cx.listener(move |this, _, _, cx| this.retry_turn(id.clone(), cx)))
-                    .child(SharedString::from("Try again"))
-                    .into_any_element()
-            });
-        }
         if detail.is_some() {
             let id = row.id.clone();
             actions = actions.child(
@@ -1122,7 +960,6 @@ impl Transcript {
             None => (turn_changes_label(files), None),
         };
         let toggle_id = row.id.clone();
-        let entry_id = row.entry_id.clone();
         let header = div()
             .id(SharedString::from(format!("{}-toggle", row.id)))
             .aria_label(SharedString::from(match &folder {
@@ -1189,39 +1026,6 @@ impl Transcript {
             }))
             .children(counts(additions, deletions).map(|counts| counts.flex_none()))
             .child(div().flex_1())
-            .child(
-                // slopty: a button the keyboard reaches (#9).
-                crate::surface_chrome::key_stop(
-                    div().id(SharedString::from(format!("{}-open-diff", row.id))),
-                    theme,
-                )
-                    .role(gpui::Role::Button)
-                    .aria_label("Open diff")
-                    .flex_none()
-                    .h(px(22.0))
-                    .px(px(8.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    // slopty: the faded hover, at the control strength.
-                    .text_color(crate::motion::mix(
-                        theme.text_muted,
-                        theme.text,
-                        crate::motion::hover_t(&format!("{}-open-diff", row.id)),
-                    ))
-                    .bg(crate::motion::hover_blend(
-                        &format!("{}-open-diff", row.id),
-                        gpui::transparent_black(),
-                        crate::theme::wash(0.11),
-                    ))
-                    .hover_fade(format!("{}-open-diff", row.id))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_turn_diff(entry_id.clone(), window, cx);
-                    }))
-                    .child(SharedString::from("Open diff")),
-            )
             .when(!single, |header| {
                 // slopty: the chevron every other disclosure turns (#12).
                 header.child(
@@ -1304,16 +1108,6 @@ impl Transcript {
                 )
             })
             .into_any_element()
-    }
-
-    /// Open Changes at the turn `entry_id` answered.
-    fn open_turn_diff(
-        &mut self,
-        entry_id: SharedString,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) {
-        crate::changes::show_turn(&entry_id, window, cx);
     }
 
     /// `inner` dressed as its segment of a plan's card, with the row's gap moved inside the
@@ -1528,7 +1322,7 @@ mod tests {
             assert_eq!(claude_too_old(other), None, "{other}");
         }
         let turn = entry(
-            vec![MessagePart::Error { id: "refused:1".into(), message: start, detail: None, retry: false }],
+            vec![MessagePart::Error { id: "refused:1".into(), message: start, detail: None }],
             MessageStatus::Complete,
         );
         let rows = super::super::work_rows(&turn, false, &mut |_, text| {
@@ -1666,27 +1460,29 @@ mod tests {
     }
 
     /// slopty: an error card says its first sentence as its title and the next as its one
-    /// sentence; "Try again." over a card that can try again is its button, not words; words
-    /// that do not split read under a calm title.
+    /// sentence; words that do not split read under a calm title.
     #[test]
     fn an_error_says_a_title_and_one_sentence() {
-        let words = |message: &str, retry: bool| {
-            let (title, sentence) = super::error_title(message, retry);
+        let words = |message: &str| {
+            let (title, sentence) = super::error_title(message);
             (title.to_string(), sentence.map(|s| s.to_string()))
         };
         assert_eq!(
-            words("The model's service returned an error on studio. Try again.", true),
-            ("The model's service returned an error on studio".to_owned(), None)
+            words("The model's service returned an error on studio. Try again."),
+            (
+                "The model's service returned an error on studio".to_owned(),
+                Some("Try again.".to_owned())
+            )
         );
         assert_eq!(
-            words("A hook stopped this step on studio. Fix the hook, then try again.", false),
+            words("A hook stopped this step on studio. Fix the hook, then try again."),
             (
                 "A hook stopped this step on studio".to_owned(),
                 Some("Fix the hook, then try again.".to_owned())
             )
         );
-        assert_eq!(words("Couldn't start the agent", false), ("Couldn't start the agent".to_owned(), None));
+        assert_eq!(words("Couldn't start the agent"), ("Couldn't start the agent".to_owned(), None));
         let long = "exit status 101\nthread 'main' panicked at src/main.rs:3:5";
-        assert_eq!(words(long, false), ("Something went wrong".to_owned(), Some(long.to_owned())));
+        assert_eq!(words(long), ("Something went wrong".to_owned(), Some(long.to_owned())));
     }
 }

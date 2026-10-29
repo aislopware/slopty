@@ -386,7 +386,7 @@ enum Command {
 impl Command {
     fn label(&self) -> &'static str {
         match self {
-            Self::NewChat => "New chat",
+            Self::NewChat => "New session",
             Self::NewProject => "New project\u{2026}", // slopty: it opens a picker
             Self::ResumeSession => super::past_sessions::RESUME, // slopty
             Self::Settings => "Settings", // slopty: the name its menu and button use
@@ -1000,7 +1000,7 @@ impl Shell {
                     })
                     .unwrap_or_default();
                 let fields = thread_search::ThreadFields {
-                    title: chat.title.as_deref().unwrap_or("New chat"),
+                    title: chat.title.as_deref().unwrap_or("New session"),
                     project: state
                         .space_for_chat(chat)
                         .map(|s| s.display_name())
@@ -1304,7 +1304,7 @@ impl Shell {
                 let state = self.state.read(cx);
                 let chat = state.chats.iter().find(|chat| chat.id == found.chat_id)?;
                 let title: SharedString =
-                    transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).into();
+                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into();
                 let harness = chat.config.as_ref().map(|config| config.harness);
                 let who = if found.agent { "Agent:" } else { "You:" };
                 let target = row.clone();
@@ -1361,7 +1361,7 @@ impl Shell {
                 let harness = chat.config.as_ref().map(|c| c.harness);
                 self.render_chat_row(
                     id.clone(),
-                    transcript::single_line(chat.title.as_deref().unwrap_or("New chat")).into(),
+                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
                     None,
                     format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), crate::clock::utc(cx))
                         .into(),
@@ -2146,7 +2146,7 @@ mod tests {
             .unwrap();
     }
 
-    // slopty: the palette's headings are in sentence case, as every label in the app; New chat
+    // slopty: the palette's headings are in sentence case, as every label in the app; New session
     // wears the titlebar's glyph for it, and New project, which opens a picker, says so.
     #[test]
     fn the_palette_speaks_as_the_app_does() {
@@ -3174,11 +3174,10 @@ mod tests {
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
             // slopty: no History surface (ruled out).
-            crate::composer::init(cx, ComposerSendBehavior::default());
+            crate::composer::init(cx);
             apply_keymap(
                 cx,
                 &KeymapConfig::default(),
-                ComposerSendBehavior::default(),
             );
         });
         let (window, _) = palette_window(cx);

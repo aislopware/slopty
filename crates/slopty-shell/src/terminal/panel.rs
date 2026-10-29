@@ -46,6 +46,10 @@ actions!(terminal, [ToggleTerminal, NewTerminalTab]);
 /// slopty: the panel's key context, where its own tab keys bind.
 pub const KEY_CONTEXT: &str = "TerminalPanel";
 
+/// slopty: the session panel's contexts while it shows an agent's session, whose terminal's ⌘K
+/// opens the palette (`crate::shell::apply_keymap`).
+const AGENT_SESSION_CONTEXT: &str = "TerminalPanel AgentSession";
+
 /// Bind the terminal keymap (global): Cmd+J on Apple keyboards, Ctrl+J elsewhere.
 pub fn init(cx: &mut App) {
     let toggle = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌘ too
@@ -211,6 +215,9 @@ pub struct TerminalPanel {
     state: Entity<AppState>,
     focus_handle: FocusHandle,
     focus_pending: bool,
+    /// slopty: the terminal view the body drew last, asked whether the person has words in it
+    /// unsent ([`Self::drafting`]).
+    drawn: Option<gpui::AnyView>,
     chats: HashMap<String, ChatTabs>,
     /// Shell-driven visibility gate: no RPC happens while closed (lazy).
     open: bool,
@@ -219,6 +226,13 @@ pub struct TerminalPanel {
     /// explicitly (no ensure-on-open/chat-switch), and closing the last tab
     /// must not dispatch the bottom drawer's [`ToggleTerminal`].
     embedded: bool,
+    /// slopty: the main column's panel: each chat's one terminal, the session itself (its
+    /// agent's TUI, or a plain shell), opened as the chat is shown (`docs/decisions/ui.md`,
+    /// "A session is its terminal").
+    session: bool,
+    /// slopty: in the session panel, the terminal each chat's tab was opened on: a chat whose
+    /// session moved to another terminal (`/clear`, `/resume`) gets a tab of that one.
+    session_asked: HashMap<String, String>,
     /// The right pane is in its width tween. Keep painting the retained grid
     /// through the changing clip, but do not feed transient widths into the
     /// emulator: alternate-screen rows truncate rather than reflow.
@@ -240,6 +254,14 @@ pub struct TerminalPanel {
     /// slopty: sessions waiting for the body's first draw to open at its grid.
     awaiting_fit: Vec<oneshot::Sender<(u16, u16)>>,
     _observe: Subscription,
+}
+
+/// slopty: what an open asks for: a fresh shell, a terminal shown when the app last ran, or
+/// the terminal a session is (`AppState::session_terminal`).
+enum Open {
+    Fresh,
+    Again(String),
+    Session(String),
 }
 
 /// slopty: the grid a session opens at when the panel's body is not drawn: the view fits it
@@ -264,9 +286,12 @@ impl TerminalPanel {
             state,
             focus_handle: cx.focus_handle(),
             focus_pending: false,
+            drawn: None,
             chats: HashMap::new(),
             open: false,
             embedded: false,
+            session: false,
+            session_asked: HashMap::new(),
             resize_suspended: false,
             window_corner_bl: false,
             window_corner_br: false,
@@ -332,8 +357,27 @@ impl TerminalPanel {
         panel
     }
 
+    /// slopty: the main column's panel (see the `session` field): no strip, always open, and
+    /// each chat shown gets its session's terminal.
+    pub fn new_session(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let mut panel = Self::new_embedded(state, cx);
+        panel.session = true;
+        panel.open = true;
+        panel
+    }
+
+    /// slopty: the session terminal the selected chat shows, once it is attached.
+    pub fn session_terminal_id(&self, cx: &App) -> Option<&str> {
+        self.active_tab(cx)?.terminal_id.as_deref()
+    }
+
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
+    }
+
+    /// slopty: whether the terminal shown holds words the person typed and has not sent.
+    pub fn drafting(&self, cx: &App) -> bool {
+        self.drawn.as_ref().is_some_and(|view| live::drafting(view, cx))
     }
 
     /// Claim focus once the terminal body mounts, after opening or selecting it.
@@ -464,7 +508,7 @@ impl TerminalPanel {
             target_device_id,
             Some(session),
             None,
-            None,
+            Open::Fresh,
             cx,
         );
         if let Some(tab) = self.tab_mut(chat, key) {
@@ -517,7 +561,9 @@ impl TerminalPanel {
             self.last_selected = Some(selected_key.clone());
             self.drag = None;
         }
-        if self.open && !self.embedded {
+        if self.session {
+            self.sync_session_tab(&selected_key, cx);
+        } else if self.open && !self.embedded {
             // Returning to a chat with tabs restores them; a fresh chat (or an
             // engine that only just finished booting) gets its first tab —
             // ensure_tab is idempotent, so calling on every state change is safe.
@@ -557,6 +603,30 @@ impl TerminalPanel {
 
     fn selected_chat(&self, cx: &App) -> String {
         self.state.read(cx).panel_session_key()
+    }
+
+    /// slopty: the session panel's chat `chat` shows the terminal its session is now, once it
+    /// has one (an ended session has none, and its tab stays as it was until the shell stops
+    /// showing it).
+    fn sync_session_tab(&mut self, chat: &str, cx: &mut Context<Self>) {
+        let Some(terminal) = self.state.read(cx).session_terminals.get(chat).cloned() else {
+            return;
+        };
+        if self.session_asked.get(chat) == Some(&terminal) {
+            return;
+        }
+        let Some(engine) = self.engine(cx) else { return };
+        // The tab of the terminal it was is let go here; that terminal runs on.
+        self.chats.remove(chat);
+        self.session_asked.insert(chat.to_owned(), terminal.clone());
+        let key = self.reserve_tab_for_chat(chat.to_owned(), "Session", cx);
+        let target = self.chat_target(chat, cx);
+        let open = Open::Session(terminal);
+        let run = Self::spawn_session(chat.to_owned(), key, engine, target, None, None, open, cx);
+        if let Some(tab) = self.tab_mut(chat, key) {
+            tab._run = Some(run);
+        }
+        cx.notify();
     }
 
     fn ensure_tab(&mut self, cx: &mut Context<Self>) {
@@ -608,7 +678,7 @@ impl TerminalPanel {
         let target = self.chat_target(&chat, cx);
         let cwd = self.state.read(cx).terminal_open_cwd_for(&chat);
         let run =
-            Self::spawn_session(chat.clone(), key, engine, target, None, cwd, None, cx);
+            Self::spawn_session(chat.clone(), key, engine, target, None, cwd, Open::Fresh, cx);
         if let Some(tab) = self.tab_mut(&chat, key) {
             tab._run = Some(run);
         }
@@ -625,7 +695,7 @@ impl TerminalPanel {
         let key = self.reserve_tab_for_chat(chat.clone(), title, cx);
         let target = self.chat_target(&chat, cx);
         let run =
-            Self::spawn_session(chat.clone(), key, engine, target, None, None, Some(id), cx);
+            Self::spawn_session(chat.clone(), key, engine, target, None, None, Open::Again(id), cx);
         if let Some(tab) = self.tab_mut(&chat, key) {
             tab._run = Some(run);
         }
@@ -663,25 +733,37 @@ impl TerminalPanel {
         target: Option<String>,
         existing_session: Option<TerminalSession>,
         cwd: Option<String>,
-        again: Option<String>,
+        open: Open,
         cx: &mut Context<Self>,
     ) -> Task<()> {
+        // slopty: a session's terminal is the agent's, never the tab's to end.
+        let own = matches!(open, Open::Session(_));
         cx.spawn(async move |this, cx| {
             let session = match existing_session {
                 Some(session) => session,
                 None => {
                     // slopty: a session shown before keeps its grid; a new one starts at the
                     // body's.
-                    let (cols, rows) =
-                        if again.is_some() { UNFITTED } else { Self::grid(&this, cx).await };
+                    let (cols, rows) = if matches!(open, Open::Fresh) {
+                        Self::grid(&this, cx).await
+                    } else {
+                        UNFITTED
+                    };
                     let mut params =
                         serde_json::json!({ "chatId": chat, "cols": cols, "rows": rows });
                     if let (Some(cwd), Some(object)) = (cwd, params.as_object_mut()) {
                         object.insert("cwd".into(), serde_json::Value::String(cwd));
                     }
-                    let again = match (again, params.as_object_mut()) {
-                        (Some(id), Some(object)) => {
+                    let again = match (open, params.as_object_mut()) {
+                        (Open::Again(id), Some(object)) => {
                             object.insert("terminalId".into(), serde_json::Value::String(id));
+                            true
+                        }
+                        (Open::Session(id), Some(object)) => {
+                            let chat_id = format!("{}{id}", crate::inspector::TERMINAL_CHAT);
+                            object.insert("chatId".into(), serde_json::Value::String(chat_id));
+                            object.insert("terminalId".into(), serde_json::Value::String(id));
+                            object.insert("session".into(), serde_json::Value::Bool(true));
                             true
                         }
                         _ => false,
@@ -698,6 +780,10 @@ impl TerminalPanel {
                         // slopty: a terminal shown before that has ended goes with its tab.
                         Err(_) if again => {
                             let _ = this.update(cx, |panel, cx| {
+                                // slopty: a session's terminal is asked for again as it next moves.
+                                if own {
+                                    panel.session_asked.remove(&chat);
+                                }
                                 if let Some(tabs) = panel.chats.get_mut(&chat) {
                                     tabs.tabs.retain(|tab| tab.key != key);
                                     tabs.active = tabs.active.min(tabs.tabs.len().saturating_sub(1));
@@ -727,7 +813,7 @@ impl TerminalPanel {
                     panel.attach_view(&chat, key, terminal_id.clone(), target.clone(), cx)
                 })
                 .unwrap_or(false);
-            if !attached {
+            if !attached && !own {
                 // Tab was closed before the open completed — release the PTY.
                 let _ = engine
                     .client()
@@ -1286,7 +1372,8 @@ impl Render for TerminalPanel {
         // Embedded, the RIGHT PANE's own surface shows through — a second
         // fill here stacked another shade on the pane (user report); the
         // drawer keeps its own tone.
-        let panel_bg: Option<gpui::Hsla> = (!self.embedded).then(|| terminal_panel_bg(&theme));
+        let panel_bg: Option<gpui::Hsla> =
+            (!self.embedded || self.session).then(|| terminal_panel_bg(&theme));
         // Docked at the window's bottom edge, the panel's own fill carries
         // the CSD window's bottom corners when it sits at them (the shell
         // decides per frame; embedded panels never do).
@@ -1302,6 +1389,7 @@ impl Render for TerminalPanel {
             .unwrap_or_default();
         let look = TerminalLook::of(cx);
         let hosted = id.and_then(|id| live::terminal(&id, &look, cx));
+        self.drawn = hosted.as_ref().map(|hosted| hosted.view.clone()); // slopty
         // Focus lands on the panel's body once, and passes on to the terminal when it is there.
         if self.open && std::mem::take(&mut self.focus_pending) {
             window.focus(hosted.as_ref().map_or(&self.focus_handle, |h| &h.focus), cx);
@@ -1343,7 +1431,14 @@ impl Render for TerminalPanel {
             .flex()
             .flex_col()
             // slopty: ⌘T and ⌘W act on the panel's tabs while it has the keyboard.
-            .key_context(KEY_CONTEXT)
+            .key_context(if self.session
+                && crate::inspector::is_agent_session(&chat)
+                && !chat.starts_with(CANVAS_PANEL_PREFIX)
+            {
+                AGENT_SESSION_CONTEXT
+            } else {
+                KEY_CONTEXT
+            })
             .on_action(cx.listener(|this, _: &NewTerminalTab, _, cx| {
                 if this.embedded {
                     cx.propagate();

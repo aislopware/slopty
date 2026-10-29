@@ -27,9 +27,7 @@ use slopty_proto::WorkerMsg;
 use slopty_proto::codec::CodecError;
 use slopty_proto::ctl::{LinkState, ServerHealth};
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
-use slopty_proto::server::{
-    AgentReport, Facts, FromServer, Refusal, Registration, Role, ToServer, WorkerCaps,
-};
+use slopty_proto::server::{Facts, FromServer, Refusal, Registration, Role, ToServer, WorkerCaps};
 use slopty_worker::orchestrate::{Agents, Orchestrator};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
@@ -317,24 +315,6 @@ async fn session(
                         }
                         let _sent = out.send(ToServer::Reply { id, outcome }).await;
                     });
-                }
-                // The thread seated there is sent the reports as a message.
-                Ok(FromServer::Deliver { session, batch, reports }) => {
-                    let context = reports.text();
-                    let sent = daemon.threads.as_ref().map(|t| t.deliver(session, batch, &context));
-                    match sent {
-                        Some(
-                            slopty_proto::thread::wire::Outcome::Done
-                            | slopty_proto::thread::wire::Outcome::Accepted,
-                        ) => {
-                            tracing::debug!(%session, batch, "reports sent to the seat's thread");
-                            let report = AgentReport::Delivered { session, batch };
-                            if out.send(ToServer::Report(report)).await.is_err() {
-                                break "the writer stopped";
-                            }
-                        }
-                        other => tracing::warn!(%session, batch, ?other, "reports not sent"),
-                    }
                 }
                 Ok(other) => tracing::debug!(?other, "server message a worker does not take"),
                 Err(NetError::Closed) => break "the server closed the link",

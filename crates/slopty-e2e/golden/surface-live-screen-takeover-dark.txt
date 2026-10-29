@@ -7,19 +7,11 @@ Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Article │ You
-Paragraph │ Say hello
-Button │ Copy message
-Button │ Rewind…
-Article │ Claude Code
-Paragraph │ Done: Say hello
-Button │ Copy message
-Button │ Attach images
-MultilineTextInput │ Do anything…
-Button │ Model: Opus 5.5, High
-Button │ Send message
-Button │ Mode: Auto
+Group
+Terminal │ shell │ >
 Button │ Window controls
+Button │ Inspector
+Button │ Close Inspector
 Button │ Synthetic editor
 Button │ Close Synthetic editor
 Button │ New tab
@@ -29,4 +21,4 @@ Button │ Hide side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ New chat
+Button │ New session

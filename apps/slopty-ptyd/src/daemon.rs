@@ -680,29 +680,6 @@ impl Connection {
                     Err(e) => self.error(Some(id), PtydError::Os(e.to_string())).await,
                 }
             }
-            PtydRequest::SpawnPiped { id, spec, stderr } => {
-                if self.handing() {
-                    return self.error(Some(id), handing()).await;
-                }
-                if self.session(id).is_some() {
-                    return self.error(Some(id), PtydError::SessionExists).await;
-                }
-                match Session::spawn_piped(
-                    id,
-                    &spec,
-                    stderr.as_deref(),
-                    self.state.backlog_bytes,
-                    self.state.events.clone(),
-                ) {
-                    Ok(session) => {
-                        let info = session.info();
-                        tracing::info!(session = %id, pid = info.pid, "spawned on a pipe");
-                        self.state.sessions.lock().insert(id, session);
-                        self.reply(&PtydEvent::Spawned { id, pid: info.pid }, None).await
-                    }
-                    Err(e) => self.error(Some(id), PtydError::Os(e.to_string())).await,
-                }
-            }
             PtydRequest::Attach { id } => {
                 if self.handing() {
                     return self.error(Some(id), handing()).await;
@@ -757,10 +734,6 @@ impl Connection {
                     tracing::debug!(session = %id, "resize of no session");
                     return Ok(());
                 };
-                if session.piped() {
-                    // No tty: a pipe has no size.
-                    return Ok(());
-                }
                 session.set_size(size);
                 if let Err(e) = slopty_pty::pty::set_size(session.master_fd(), size) {
                     tracing::warn!(session = %id, error = %e, "TIOCSWINSZ failed");
@@ -804,7 +777,7 @@ impl Connection {
                 }
                 self.reply(&PtydEvent::Ok, None).await
             }
-            PtydRequest::Adopt { id, pid, size, started_ms, term, piped } => {
+            PtydRequest::Adopt { id, pid, size, started_ms, term } => {
                 // The master rode on this frame, so it is the oldest one queued.
                 let Some(master) = self.inbox.take_fd() else {
                     let missing = PtydError::Os("no master came with the session".to_owned());
@@ -816,7 +789,7 @@ impl Connection {
                 if self.session(id).is_some() {
                     return self.error(Some(id), PtydError::SessionExists).await;
                 }
-                let child = slopty_pty::Adoptee { pid, size, started_ms, term, piped };
+                let child = slopty_pty::Adoptee { pid, size, started_ms, term };
                 match Session::adopt(
                     id,
                     master,

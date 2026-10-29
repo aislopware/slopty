@@ -17,6 +17,8 @@ base; the premium references set the bar"). Where Claude Code desktop, T3 Code, 
 do something more beautiful, elegant or striking, adopt it: the study in `.research` names the
 values. When no reference is clearly better, do what zeron does. Colour is never muted into grey;
 a hue changes only to one a reference shows is better. Nothing Slopty draws may read as a seam.
+TUI-first (`docs/decisions/agents.md`): a session's terminal is the main surface and nothing sits
+over it; the inspector supports it, read-only and quiet, keeping only what helps.
 
 - Change the shell only by a minimal edit marked `// slopty:`; zeron's improvements arrive by
   `cargo xtask upstream adopt zeron` through `xtask/zeron.toml`.

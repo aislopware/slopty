@@ -226,9 +226,8 @@ fn a_subagent_card_opens_in_place_and_drills_in(cx: &mut gpui::TestAppContext) {
     let _events = cx.update(|_, cx| {
         let opened = opened.clone();
         cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
-            if let TranscriptEvent::OpenSubagent { chat_id } = event {
-                opened.borrow_mut().push(chat_id.clone());
-            }
+            let TranscriptEvent::OpenSubagent { chat_id } = event;
+            opened.borrow_mut().push(chat_id.clone());
         })
     });
     let nodes = draw(cx);
@@ -298,9 +297,8 @@ fn a_phones_tap_on_a_subagents_card_drills_in(cx: &mut gpui::TestAppContext) {
     let _events = cx.update(|_, cx| {
         let opened = opened.clone();
         cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
-            if let TranscriptEvent::OpenSubagent { chat_id } = event {
-                opened.borrow_mut().push(chat_id.clone());
-            }
+            let TranscriptEvent::OpenSubagent { chat_id } = event;
+            opened.borrow_mut().push(chat_id.clone());
         })
     });
     let nodes = draw(cx);
@@ -311,10 +309,10 @@ fn a_phones_tap_on_a_subagents_card_drills_in(cx: &mut gpui::TestAppContext) {
     assert_eq!(*opened.borrow(), ["child-chat"], "the tap drills in");
 }
 
-/// A background task's row opens the tray at its row, and names its task on the right unless
-/// its words already do; a retry says what is tried again.
+/// A background task's row says its status and names its task on the right unless its words
+/// already do.
 #[gpui::test]
-fn work_rows_link_to_the_tray(cx: &mut gpui::TestAppContext) {
+fn work_rows_name_their_task(cx: &mut gpui::TestAppContext) {
     let task = TaskRow {
         task: "t1".into(),
         row: "task:t1".into(),
@@ -349,11 +347,11 @@ fn work_rows_link_to_the_tray(cx: &mut gpui::TestAppContext) {
         ),
     );
     let nodes = draw(cx);
-    let row = find(&nodes, Role::Button, "Background command finished · cargo test")
+    let row = find(&nodes, Role::Status, "Background command finished · cargo test")
         .expect("the task's row")
         .clone();
     assert!(
-        find(&nodes, Role::Button, "Background command \"Build\" completed (exit code 0)").is_some(),
+        find(&nodes, Role::Status, "Background command \"Build\" completed (exit code 0)").is_some(),
         "words that name the task say it once"
     );
     assert_eq!(row.value, "completed");
@@ -362,13 +360,6 @@ fn work_rows_link_to_the_tray(cx: &mut gpui::TestAppContext) {
         .find(|node| node.role == Role::Status && node.label.contains("Saved 2 memories"))
         .expect("the note");
     assert_eq!(notice.value, "hook");
-    assert!(cx.update(|_, cx| cx.try_global::<super::WorkReveal>().is_none()));
-
-    cx.simulate_click(row.center, gpui::Modifiers::default());
-    draw(cx);
-    let reveal = cx.update(|_, cx| cx.try_global::<super::WorkReveal>().cloned());
-    let reveal = reveal.expect("the tray was asked to open");
-    assert_eq!((reveal.chat_id.as_str(), reveal.row_id.as_str(), reveal.seq), ("chat", "task:t1", 1));
 }
 
 /// A reply's images: two side by side make a gallery, a file that cannot be read says
@@ -438,7 +429,6 @@ fn an_error_card_copies_its_error_and_scrolls_its_detail(cx: &mut gpui::TestAppC
         id: "error".into(),
         message: "The turn failed".into(),
         detail: Some(detail.clone()),
-        retry: true,
     };
     let (_, cx) = open(cx, entry(MessageStatus::Complete, vec![failed]));
     let nodes = draw(cx);
@@ -488,63 +478,6 @@ fn a_subagent_run_open_in_its_card_is_as_tall_as_its_rows(cx: &mut gpui::TestApp
     let nodes = settled(cx);
     let run = find(&nodes, Role::Group, "Transcript of Count lines").expect("open in place");
     assert!((run.height - cap).abs() <= 1.5, "the card's room, {cap}: {run:?}");
-}
-
-/// The rewind menu hangs from the person's bubble's left edge, under it, not from wherever the
-/// press landed (flush with its right edge under a narrower bubble); its note says what its first row does, then what the row under the pointer
-/// does (#20).
-#[gpui::test]
-fn the_rewind_menu_hangs_from_the_bubble_and_says_what_its_row_does(cx: &mut gpui::TestAppContext) {
-    // A long answer under the message, read from its top, so the menu has room under it.
-    let said = (0..40).map(|n| text(&format!("Paragraph {n} of the answer."))).collect();
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, said));
-    cx.simulate_resize(gpui::size(px(1600.0), px(800.0)));
-    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
-    let prompt = SessionMessageEntry {
-        id: "prompt".into(),
-        role: MessageRole::User,
-        parts: vec![text("Write the notes file")],
-        created_at: 1,
-        ..entry(MessageStatus::Complete, Vec::new())
-    };
-    state.update(cx, |state, cx| {
-        state.transcript.insert(0, prompt);
-        state.transcript_revision += 1;
-        cx.notify();
-    });
-    transcript.update(cx, |this, cx| {
-        this.chat_id = Some("chat".into());
-        let can = slopty_view_doc::dock::DockCan { rewind: true, fork: true, ..Default::default() };
-        this.let_rewind("chat", can);
-        this.sync(cx);
-        this.pinned = false;
-        this.list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.0) });
-        cx.notify();
-    });
-    let nodes = draw(cx);
-    let bubble = find(&nodes, Role::Paragraph, "Write the notes file").expect("the bubble").clone();
-    let rewind = find(&nodes, Role::Button, "Rewind…").expect("its Rewind").clone();
-    // The pointer comes over the bubble's foot, as a person's does, and the strip shows.
-    cx.simulate_mouse_move(rewind.center, None, gpui::Modifiers::default());
-    draw(cx);
-    cx.simulate_click(rewind.center, gpui::Modifiers::default());
-    let nodes = draw(cx);
-    let menu = find(&nodes, Role::Menu, "Rewind to before this message").expect("the menu").clone();
-    let left = |node: &Node| f32::from(node.center.x) - node.width / 2.0;
-    let top = |node: &Node| f32::from(node.center.y) - node.height / 2.0;
-    let bottom = |node: &Node| f32::from(node.center.y) + node.height / 2.0;
-    // A bubble narrower than the menu has it flush with its right edge, in the column.
-    let right = |node: &Node| f32::from(node.center.x) + node.width / 2.0;
-    let edge = left(&bubble).min(right(&bubble) - menu.width);
-    assert!((left(&menu) - edge).abs() <= 1.0, "from the bubble's edge: {menu:?} {bubble:?}");
-    assert!(top(&menu) >= bottom(&bubble), "under it: {menu:?} {bubble:?}");
-    let note = |cx: &mut VisualTestContext| transcript.read_with(cx, |this, _| this.rewind_note());
-    let first = note(cx).expect("a note");
-    assert!(first.starts_with("Files and the chat go back"), "{first}");
-    let row = find(&nodes, Role::MenuItem, "Conversation only").expect("the chat's row").clone();
-    cx.simulate_mouse_move(row.center, None, gpui::Modifiers::default());
-    draw(cx);
-    assert_eq!(note(cx).as_deref(), Some("The chat goes back; files stay as they are."));
 }
 
 /// A subagent's card slides its run open and shut: its height eases from none to its own and
@@ -749,9 +682,8 @@ fn a_cards_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppCon
     let _events = cx.update(|_, cx| {
         let opened = opened.clone();
         cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
-            if let TranscriptEvent::OpenSubagent { chat_id } = event {
-                opened.borrow_mut().push(chat_id.clone());
-            }
+            let TranscriptEvent::OpenSubagent { chat_id } = event;
+            opened.borrow_mut().push(chat_id.clone());
         })
     });
     let nodes = draw(cx);
@@ -1082,6 +1014,28 @@ fn a_lone_call_shows_itself(cx: &mut gpui::TestAppContext) {
     assert!(find(&nodes, Role::Button, "Ran 2 commands").is_some(), "two calls fold");
 }
 
+/// A call pressed open says its result to assistive tech, whole, as its code block draws it.
+#[gpui::test]
+fn an_open_calls_result_says_its_lines(cx: &mut gpui::TestAppContext) {
+    const SAID: &str = "\"liveness\": \"online\"";
+    let mut call = exec("call", "", true, false);
+    if let MessagePart::Tool { call, output, .. } = &mut call {
+        *call = ToolCall::Mcp { server: "slopty".into(), tool: "machines".into(), input: None };
+        *output = Some(format!("[\n  {{\n    \"name\": \"studio\",\n    {SAID}\n  }}\n]"));
+    }
+    let (_, cx) = open_turn(cx, entry(MessageStatus::Complete, vec![call, text("One machine.")]));
+    let says = |nodes: &HashMap<NodeId, Node>| {
+        nodes.values().any(|node| node.role == Role::Code && node.label.contains(SAID))
+    };
+    let nodes = draw(cx);
+    assert!(!says(&nodes), "folded to its line");
+    let line = find(&nodes, Role::Button, "MCP slopty · machines").expect("its line").clone();
+    cx.simulate_click(line.center, gpui::Modifiers::default());
+    let nodes = draw(cx);
+    let words: Vec<_> = nodes.values().map(|node| (node.role, node.label.as_str())).collect();
+    assert!(says(&nodes), "its result, whole: {words:?}");
+}
+
 /// #12: a turn that ended on a call that never settled says it stopped, never that it runs.
 #[test]
 fn a_finished_turns_summary_never_says_running() {
@@ -1361,7 +1315,7 @@ fn a_failed_call_tints_only_its_icon_and_result() {
 }
 
 /// #9: Tab reaches a reply's controls: its group's summary, its call rows, the subagent card,
-/// the files card and its Open diff, and the strip's Copy, which a hover alone showed before.
+/// the files card, and the strip's Copy, which a hover alone showed before.
 #[gpui::test]
 fn the_keyboard_reaches_the_controls_of_a_reply(cx: &mut gpui::TestAppContext) {
     let progress = SubagentProgress {
@@ -1416,7 +1370,7 @@ fn the_keyboard_reaches_the_controls_of_a_reply(cx: &mut gpui::TestAppContext) {
     };
     // The settled turn's divider stands for its work, then what it changed and its strip.
     let reached = reach(cx);
-    for want in ["Show work, ran 2 commands", "2 files changed", "Open diff", "Copy message"] {
+    for want in ["Show work, ran 2 commands", "2 files changed", "Copy message"] {
         assert!(reached.iter().any(|label| label.starts_with(want)), "{want}: {reached:?}");
     }
     // Enter opens the divider, as a click does, and its work's controls join the order.
@@ -1461,26 +1415,6 @@ fn a_reply_opens_at_its_first_row(cx: &mut gpui::TestAppContext) {
         buttons.iter().any(|button| button.label.starts_with("Show work, ran 2 commands")),
         "the first group is the reply's: {buttons:?}"
     );
-}
-
-/// #11: a send that never arrived says so under its bubble, with one quiet Retry.
-#[gpui::test]
-fn an_undelivered_send_offers_retry_under_its_bubble(cx: &mut gpui::TestAppContext) {
-    let (transcript, cx) = open(cx, answer("a1", "Earlier."));
-    transcript.update(cx, |this, cx| {
-        this.state.update(cx, |state, _| {
-            state.begin_pending_send("chat", "p1", chrono::Utc::now() - chrono::TimeDelta::hours(1));
-        });
-        cx.notify();
-    });
-    let nodes = show(&transcript, vec![answer("a1", "Earlier."), prompt("p1", "Hello?")], cx);
-    let labels: Vec<String> = nodes.values().map(|n| n.label.clone()).collect();
-    let failed = find(&nodes, Role::Status, "Not sent").unwrap_or_else(|| panic!("{labels:?}")).clone();
-    let retry = find(&nodes, Role::Button, "Retry").expect("Retry").clone();
-    let bubble = find(&nodes, Role::Paragraph, "Hello?").expect("the bubble").clone();
-    let right = |node: &Node| f32::from(node.center.x) + node.width / 2.0;
-    assert!((right(&retry) - right(&bubble)).abs() <= 1.0, "under the bubble's right edge");
-    assert!(top(&failed) >= bottom(&bubble), "under the bubble");
 }
 
 /// #12: the files card names a lone file in itself; several open under a chevron, tweened.

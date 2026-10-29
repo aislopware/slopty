@@ -370,27 +370,27 @@ mod tests {
     #[gpui::test]
     fn the_files_toggle_names_the_key_the_keymap_holds(cx: &mut gpui::TestAppContext) {
         use crate::settings::widgets::Keys;
-        use crate::settings::{ComposerSendBehavior, KeymapConfig, ShortcutId};
+        use crate::settings::{KeymapConfig, ShortcutId};
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::default());
-            crate::shell::apply_keymap(cx, &KeymapConfig::default(), ComposerSendBehavior::default());
+            crate::shell::apply_keymap(cx, &KeymapConfig::default());
         });
         let keys = Keys::Action(Box::new(crate::shell::ToggleFiles));
         let window = cx.add_empty_window();
         window.update(|window, cx| {
             assert_eq!(keys.text(window, cx), Some(combo_text("mod-e")));
             assert_eq!(keys.aria(cx), Some(aria_combo("mod-e")));
-            // The fixed keys the keymap applies, the side panes' among them.
-            let side_chat = Keys::Action(Box::new(crate::shell::NewSideChat));
-            assert_eq!(side_chat.text(window, cx), Some(combo_text("mod-;")));
+            // The fixed keys the keymap applies, the inspector's among them.
+            let inspector = Keys::Action(Box::new(crate::shell::ToggleInspector));
+            assert_eq!(inspector.text(window, cx), Some(combo_text("mod-i")));
             let bound = |action: &dyn gpui::Action| {
                 cx.key_bindings().borrow().bindings_for_action(action).next().is_some()
             };
             assert!(bound(&crate::files::ToggleHiddenFiles) && bound(&crate::changes::ToggleDiffTree));
             let mut keymap = KeymapConfig::default();
             keymap.set(ShortcutId::ToggleFiles, "mod-shift-e".into());
-            crate::shell::apply_keymap(cx, &keymap, ComposerSendBehavior::default());
+            crate::shell::apply_keymap(cx, &keymap);
             assert_eq!(keys.text(window, cx), Some(combo_text("mod-shift-e")));
             cx.clear_key_bindings();
             assert_eq!(keys.text(window, cx), None, "the label alone");

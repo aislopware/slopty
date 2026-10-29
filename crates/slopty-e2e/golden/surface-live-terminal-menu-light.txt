@@ -19,7 +19,6 @@ Menu │ Command block (focused)
 MenuItem │ Copy command
 MenuItem │ Copy output
 MenuItem │ Rerun
-MenuItem │ Add to chat
 MenuItem │ Select block
 MenuItem │ Paste
 MenuItem │ Find…

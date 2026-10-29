@@ -8,8 +8,8 @@ use slopty_e2e::{Command, Stack};
 /// The shell's main window as it first opens.
 const WINDOW: (f32, f32) = (1320.0, 880.0);
 
-/// The app comes up as the shell: its sidebar, its new-chat canvas and its composer,
-/// drawn and named for a screen reader, in light and dark, on its opaque planes and frosted
+/// The app comes up as the shell: its sidebar and its new-session canvas, drawn and named for a
+/// screen reader, in light and dark, on its opaque planes and frosted
 /// over the render's fixed backdrop.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
@@ -398,7 +398,8 @@ fn tab_closes(dump: &slopty_e2e::Dump) -> Vec<[f32; 4]> {
         .collect()
 }
 
-/// ⌘T opens the right pane's tabs; a Changes tab closed comes back, in front, with ⌘⇧T.
+/// ⌘T, from the session's terminal, opens the right pane's new-tab menu; a Changes tab closed
+/// comes back, in front, with ⌘⇧T.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_closed_tab_comes_back_with_cmd_shift_t() {
@@ -409,14 +410,14 @@ async fn a_closed_tab_comes_back_with_cmd_shift_t() {
     drv.keys("cmd-t").await.unwrap();
     let picker = drv
         .wait_for("the pane's surfaces", STEP, |d| {
-            d.a11y.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some("Changes"))
+            d.a11y.iter().any(|n| n.role == "MenuItem" && n.label.as_deref() == Some("Changes"))
         })
         .await
         .unwrap();
     let diffs = picker
         .a11y
         .iter()
-        .find(|n| n.role == "Button" && n.label.as_deref() == Some("Changes"))
+        .find(|n| n.role == "MenuItem" && n.label.as_deref() == Some("Changes"))
         .unwrap()
         .bounds;
     drv.click(diffs[0] + diffs[2] / 2.0, diffs[1] + diffs[3] / 2.0).await.unwrap();
@@ -600,13 +601,14 @@ async fn a_pages_icon_shows_on_its_tab() {
     drv.wait_for("the thread open", STEP, |d| d.a11y_node("Button", Some("Open in…")).is_some())
         .await
         .unwrap();
-    // The right pane, its picker's Browser, and the page's address.
-    drv.keys("cmd-r").await.unwrap();
+    // The right pane's new-tab menu (⌘T, from the session's terminal), its Browser, and the
+    // page's address.
+    drv.keys("cmd-t").await.unwrap();
     let picker = drv
-        .wait_for("the pane's picker", STEP, |d| d.a11y_node("Button", Some("Browser")).is_some())
+        .wait_for("the pane's picker", STEP, |d| d.a11y_node("MenuItem", Some("Browser")).is_some())
         .await
         .unwrap();
-    let [x, y, w, h] = picker.a11y_node("Button", Some("Browser")).unwrap().bounds;
+    let [x, y, w, h] = picker.a11y_node("MenuItem", Some("Browser")).unwrap().bounds;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     drv.type_text(&format!("http://127.0.0.1:{port}/")).await.unwrap();

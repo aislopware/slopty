@@ -42,9 +42,6 @@ opt-level = 0
 [profile.dev.package.darling_macro]
 opt-level = 0
 
-[profile.dev.package.defmt-macros]
-opt-level = 0
-
 [profile.dev.package.derive_more-impl]
 opt-level = 0
 
@@ -97,9 +94,6 @@ opt-level = 0
 opt-level = 0
 
 [profile.dev.package.interpolate_name]
-opt-level = 0
-
-[profile.dev.package.jiff-static]
 opt-level = 0
 
 [profile.dev.package.jni-macros]
@@ -175,9 +169,6 @@ opt-level = 0
 opt-level = 0
 
 [profile.dev.package.serde_repr]
-opt-level = 0
-
-[profile.dev.package.serde_with_macros]
 opt-level = 0
 
 [profile.dev.package.simd_helpers]

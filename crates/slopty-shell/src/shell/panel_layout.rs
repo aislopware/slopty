@@ -191,7 +191,8 @@ impl Shell {
                 self.sidebar_opened_at,
             ),
             (
-                on_chat && present(panels.changes_open, self.right_tween),
+                // slopty: a phone shows the pane's surfaces as a page or a sheet over the session.
+                on_chat && !self.compact() && present(panels.changes_open, self.right_tween),
                 panels.changes_opened_at,
             ),
             (

@@ -1,35 +1,12 @@
-//! pi, driven over its RPC mode (`pi --mode rpc`), with Slopty's permission gate.
-//!
-//! pi has no permission system of its own, so the worker loads a small extension into every pi
-//! it drives (`assets/pi-gate/gate.ts`). Its `tool_call` handler asks about each call through
-//! the RPC extension UI, as a `select` whose title is the call in JSON ([`GATE_PROTOCOL`]), and
-//! lets it run only on an `allow`. Anything else blocks it, and so does a handler that fails, by
-//! pi's own rule. What to ask the person and what to let through is decided here, not in the
-//! extension.
-//!
-//! Like the Claude mod, the gate is embedded and written under the worker's data directory in a
-//! directory named by its digest ([`install`]), so a running pi keeps the file it loaded while a
-//! newer worker writes its own beside it.
+//! pi, its own TUI in a Slopty terminal (`docs/decisions/agents.md`, "TUI-first"), with Slopty's
+//! tools registered by a small extension ([`TOOLS`]).
 
-pub mod driven;
-pub mod modes;
-pub mod rpc;
 pub mod sessions;
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The pi version the gate and the codec were recorded against
-/// (`crates/slopty-agent/tests/fixtures/pi`, `cargo xtask pi fixtures`).
-pub const VERSION: &str = "1.3.0";
-
-/// What the gate names itself in each dialog it opens.
-pub const GATE_PROTOCOL: &str = "slopty-gate/1";
-
-/// The gate's one file.
-pub const GATE: (&str, &str) = ("gate.ts", include_str!("../assets/pi-gate/gate.ts"));
-
-/// The variable that hands the gate Slopty's tools to register, for a server task's thread.
+/// The variable that hands the tools extension ([`TOOLS`]) Slopty's tools to register.
 ///
 /// Its value is an `mcp.json` server entry in JSON ([`tools`]). pi connects a server an extension
 /// registers (`pi.registerMcpServer`, pi's `docs/extensions.md`, "MCP servers") as one of its own.
@@ -47,124 +24,60 @@ pub fn tools(relay: &str, env: &[(String, String)]) -> serde_json::Value {
 /// The flag that loads an extension.
 pub const EXTENSION_FLAG: &str = "--extension";
 
-/// The gate's digest, the name of its directory: 16 hex digits of BLAKE3 over its name and
-/// content, each behind its length.
-#[must_use]
-pub fn digest() -> String {
-    let mut hasher = blake3::Hasher::new();
-    for part in <[&str; 2]>::from(GATE) {
-        hasher.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(part.as_bytes());
-    }
-    hasher.finalize().to_hex().as_str().chars().take(16).collect()
-}
+/// The tools extension's one file: it registers Slopty's tools ([`TOOLS_ENV`]) and nothing
+/// else, for a pi Slopty starts in a terminal.
+pub const TOOLS: (&str, &str) = ("tools.ts", include_str!("../assets/pi-tools/tools.ts"));
 
-/// Write the gate under `data_dir` (`pi-gate/<digest>/gate.ts`) and return the file.
+/// Write the tools extension under `data_dir` (`pi-tools/<digest>/tools.ts`) and return the
+/// file, under its digest.
 ///
-/// A gate already there whole is left as it is. A partial write never takes the name: the file
+/// A file already there whole is left as it is. A partial write never takes the name: the file
 /// goes to a sibling that is renamed into place.
 ///
 /// # Errors
 ///
 /// When the directory cannot be written.
-pub fn install(data_dir: &Path) -> io::Result<PathBuf> {
-    let root = data_dir.join("pi-gate");
-    let file = root.join(digest()).join(GATE.0);
-    if std::fs::read_to_string(&file).is_ok_and(|have| have == GATE.1) {
+pub fn install_tools(data_dir: &Path) -> io::Result<PathBuf> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(TOOLS.1.as_bytes());
+    let digest: String = hasher.finalize().to_hex().as_str().chars().take(16).collect();
+    let root = data_dir.join("pi-tools");
+    let file = root.join(&digest).join(TOOLS.0);
+    if std::fs::read_to_string(&file).is_ok_and(|have| have == TOOLS.1) {
         return Ok(file);
     }
-    std::fs::create_dir_all(root.join(digest()))?;
-    let staging = root.join(format!(".{}-{}", digest(), std::process::id()));
-    std::fs::write(&staging, GATE.1)?;
+    std::fs::create_dir_all(root.join(&digest))?;
+    let staging = root.join(format!(".{digest}-{}", std::process::id()));
+    std::fs::write(&staging, TOOLS.1)?;
     std::fs::rename(&staging, &file)?;
     Ok(file)
 }
 
-/// pi's flags that change neither what the gate asks nor which session is driven, nor reach a
-/// credential: each with whether a value follows it.
-///
-/// From `pi --help` of the pinned [`VERSION`]. Every other flag is refused: one that loads code
-/// (`--extension`, `--approve`), names a session (`--session`, `--continue`, `--fork`), changes
-/// the mode (`--print`, `--mode`), or carries a key (`--api-key`). A new flag is judged before it
-/// is let through, never after.
-pub const SAFE_FLAGS: [(&str, bool); 30] = [
-    ("--provider", true),
-    ("--model", true),
-    ("--models", true),
-    ("--thinking", true),
-    ("--tools", true),
-    ("-t", true),
-    ("--exclude-tools", true),
-    ("-xt", true),
-    ("--no-builtin-tools", false),
-    ("-nbt", false),
-    ("--no-tools", false),
-    ("-nt", false),
-    ("--name", true),
-    ("-n", true),
-    ("--no-extensions", false),
-    ("-ne", false),
-    ("--skill", true),
-    ("--no-skills", false),
-    ("-ns", false),
-    ("--prompt-template", true),
-    ("--no-prompt-templates", false),
-    ("-np", false),
-    ("--no-context-files", false),
-    ("-nc", false),
-    ("--system-prompt", true),
-    ("--append-system-prompt", true),
-    ("--no-approve", false),
-    ("-na", false),
-    ("--offline", false),
-    ("--verbose", false),
-];
-
-/// `args` for a driven pi, when each is one of [`SAFE_FLAGS`] or the value after one; else the
-/// first that is not, and why.
-///
-/// # Errors
-///
-/// When an argument is no safe flag: a flag outside the list, a message (the first prompt goes
-/// over RPC), a flag's value written into it (`--model=x`), or a value missing or reading as a
-/// flag.
-pub fn checked(args: &[String]) -> Result<&[String], String> {
-    let mut rest = args.iter();
-    while let Some(arg) = rest.next() {
-        match SAFE_FLAGS.iter().find(|(flag, _)| flag == arg) {
-            // A value that reads as a flag may be taken as one by pi's parser.
-            Some((_, true)) => {
-                if rest.next().is_none_or(|value| value.starts_with('-')) {
-                    return Err(format!("{arg} needs a value after it"));
-                }
-            }
-            Some((_, false)) => {}
-            None if arg.starts_with('-') => {
-                return Err(format!("{arg} is not a flag Slopty passes to pi"));
-            }
-            None => return Err(format!("{arg} is not a flag: the first prompt goes on its own")),
-        }
-    }
-    Ok(args)
-}
-
-/// The arguments of a pi driven over RPC with the gate at `gate`, on session `session`, before
-/// `args`, the thread's own.
-///
-/// `--session-id` opens the session of that id in pi's own session directory, or makes it, so
-/// starting a thread and taking it up again are the same words, and the person's own pi finds
-/// the session where it keeps its others.
+/// The arguments of pi's own TUI: session `resumed` taken up again, else a new one under
+/// `session`; `model` when the start named one; the tools extension at `tools`; the first
+/// prompt last, after `--`.
 #[must_use]
-pub fn args(gate: &Path, session: &str, args: &[String]) -> Vec<String> {
-    let fixed = [
-        "--mode".to_owned(),
-        "rpc".to_owned(),
-        EXTENSION_FLAG.to_owned(),
-        gate.display().to_string(),
-        "--session-id".to_owned(),
-        session.to_owned(),
-    ];
-    fixed.into_iter().chain(args.iter().cloned()).collect()
+pub fn tui(
+    resumed: Option<&str>,
+    session: &str,
+    model: Option<&str>,
+    tools: Option<&Path>,
+    prompt: Option<&str>,
+) -> Vec<String> {
+    let mut args = match resumed {
+        Some(id) => sessions::resume_args(id),
+        None => vec!["--session-id".to_owned(), session.to_owned()],
+    };
+    if let Some(tools) = tools {
+        args.extend([EXTENSION_FLAG.to_owned(), tools.display().to_string()]);
+    }
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        args.extend(["--model".to_owned(), model.to_owned()]);
+    }
+    if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
+        args.push(prompt.to_owned());
+    }
+    args
 }
 
 #[cfg(test)]
@@ -172,94 +85,49 @@ mod tests {
     use super::*;
 
     /// Slopty's tools for pi are an `mcp.json` server entry over `slopty mcp`, the seat's
-    /// variables its environment; the gate registers what it is handed.
+    /// variables its environment; the extension registers what it is handed.
     #[test]
-    fn the_tools_are_an_mcp_server_entry_the_gate_registers() {
+    fn the_tools_are_an_mcp_server_entry_the_extension_registers() {
         let env = [("SLOPTY_SESSION".to_owned(), "seat-1".to_owned())];
         assert_eq!(
             tools("/bin/slopty", &env),
             serde_json::json!({"command": "/bin/slopty", "args": ["mcp"],
                 "env": {"SLOPTY_SESSION": "seat-1"}})
         );
-        assert!(GATE.1.contains(&format!("process.env.{TOOLS_ENV}")), "the gate reads it");
-        assert!(GATE.1.contains("pi.registerMcpServer("));
+        assert!(TOOLS.1.contains(&format!("process.env.{TOOLS_ENV}")), "the extension reads it");
+        assert!(TOOLS.1.contains("pi.registerMcpServer("));
     }
 
     /// Written once, read back whole; a second install finds it; a damaged file is rewritten,
     /// and no staging file is left behind.
     #[test]
-    fn the_gate_is_written_under_its_digest() {
+    fn the_tools_extension_is_written_under_its_digest() {
         let data = tempfile::tempdir().expect("a temp dir");
-        let file = install(data.path()).expect("installed");
-        assert_eq!(file, data.path().join("pi-gate").join(digest()).join("gate.ts"));
-        assert_eq!(std::fs::read_to_string(&file).expect("written"), GATE.1);
-        assert_eq!(install(data.path()).expect("again"), file);
+        let file = install_tools(data.path()).expect("installed");
+        assert_eq!(std::fs::read_to_string(&file).expect("written"), TOOLS.1);
+        assert_eq!(install_tools(data.path()).expect("again"), file);
         std::fs::write(&file, "// damaged\n").expect("damage");
-        assert_eq!(install(data.path()).expect("repaired"), file);
-        assert_eq!(std::fs::read_to_string(&file).expect("read"), GATE.1);
-        let names: Vec<_> = std::fs::read_dir(data.path().join("pi-gate"))
+        assert_eq!(install_tools(data.path()).expect("repaired"), file);
+        assert_eq!(std::fs::read_to_string(&file).expect("read"), TOOLS.1);
+        let names: Vec<_> = std::fs::read_dir(data.path().join("pi-tools"))
             .expect("listed")
             .map(|e| e.expect("an entry").file_name())
             .collect();
-        assert_eq!(names, [std::ffi::OsString::from(digest())]);
+        assert_eq!(names.len(), 1, "{names:?}");
     }
 
-    /// The gate names the protocol the worker reads, and fails closed.
+    /// A TUI opens its session, loads the tools, takes the model only when named, and has its
+    /// first prompt last.
     #[test]
-    fn the_gate_speaks_the_protocol_and_blocks_by_default() {
-        assert!(GATE.1.contains(&format!("\"{GATE_PROTOCOL}\"")));
-        assert!(GATE.1.contains("if (answer === \"allow\")"));
-        assert!(GATE.1.contains("block: true"));
-    }
-
-    /// The thread's own flags pass when each is a safe one with its value; a flag that loads
-    /// code, names a session, carries a key or is unknown is refused, and so is a message.
-    #[test]
-    fn only_safe_flags_reach_pi() {
-        let owned = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
-        let fine = owned(&["--model", "anthropic/x", "-t", "read,bash", "-ne", "--offline"]);
-        assert_eq!(checked(&fine), Ok(fine.as_slice()));
-        assert_eq!(checked(&[]), Ok(&[][..]));
-        for bad in [
-            &["--extension", "/tmp/x.ts"][..],
-            &["-e", "/tmp/x.ts"],
-            &["--approve"],
-            &["--api-key", "k"],
-            &["--session", "s"],
-            &["--session-id", "s"],
-            &["--continue"],
-            &["--fork", "s"],
-            &["--mode", "json"],
-            &["--print"],
-            &["--model=x"],
-            &["hello"],
-            &["@file.md"],
-        ] {
-            assert!(checked(&owned(bad)).is_err(), "{bad:?}");
-        }
-        assert!(checked(&owned(&["--model"])).is_err(), "a flag without its value");
-        let hidden = owned(&["--model", "--extension", "/tmp/x.ts"]);
-        assert!(checked(&hidden).is_err(), "a flag where a value goes");
-    }
-
-    /// RPC mode, the gate and the session come first; the thread's own arguments after.
-    #[test]
-    fn a_driven_pi_runs_rpc_with_the_gate_on_its_session() {
-        let got = args(
-            Path::new("/data/pi-gate/0123/gate.ts"),
-            "0190-ab",
-            &["--model".to_owned(), "m".to_owned()],
-        );
-        let want = [
-            "--mode",
-            "rpc",
-            "--extension",
-            "/data/pi-gate/0123/gate.ts",
-            "--session-id",
-            "0190-ab",
-            "--model",
-            "m",
-        ];
+    fn a_tui_runs_its_session_with_the_tools_and_the_prompt_last() {
+        let tools = Path::new("/data/pi-tools/0123/tools.ts");
+        let got = tui(None, "0190-ab", Some(" "), Some(tools), Some("Fix it"));
+        let want =
+            ["--session-id", "0190-ab", "--extension", "/data/pi-tools/0123/tools.ts", "Fix it"];
         assert_eq!(got, want);
+        assert_eq!(
+            tui(None, "0190-ab", Some("m"), None, None),
+            ["--session-id", "0190-ab", "--model", "m"]
+        );
     }
 }

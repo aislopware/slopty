@@ -7,8 +7,9 @@
 //! Linux server too, checking certificates as the system does. A phone APNs says is gone is
 //! forgotten.
 //!
-//! A pushed ask answered on another client is taken back ([`Sending::TakeBack`]): a background
-//! push naming the note's opaque collapse id, which iOS made the shown note's identifier.
+//! A note answers nothing; it opens its session. Once what it told of no longer needs the
+//! person, it is taken back ([`Sending::TakeBack`]): a background push naming the note's opaque
+//! collapse id, which iOS made the shown note's identifier.
 
 use std::fmt;
 use std::future::Future;
@@ -40,12 +41,9 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 pub const RETRY_AFTER: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(10)];
 /// How much of a notice's title, and of the subagent's it names, a push carries, in bytes.
 pub const TITLE_BYTES: usize = 256;
-/// How much of a notice's text a push carries, in bytes: with the title and the picks, the
-/// sealed body stays well inside APNs' 4 KB once it is in base64.
+/// How much of a notice's text a push carries, in bytes: with the title, the sealed body stays
+/// well inside APNs' 4 KB once it is in base64.
 pub const TEXT_BYTES: usize = 1536;
-/// How much of each pick's label a push carries, in bytes: a button's title, which the system
-/// cuts shorter still.
-pub const PICK_BYTES: usize = 64;
 
 /// How the server pushes to phones.
 #[derive(Clone, Debug, Default)]
@@ -298,10 +296,6 @@ fn note(device: &PushDevice, body: &PushBody) -> Result<apns::Note, SealError> {
     if let Some(via) = &mut body.notice.via {
         cut(&mut via.title, TITLE_BYTES);
     }
-    body.picks.truncate(slopty_proto::thread::wire::NoteChoice::MAX);
-    for pick in &mut body.picks {
-        cut(pick, PICK_BYTES);
-    }
     let bytes = slopty_proto::codec::encode_body(&body)?;
     let sealed = slopty_push::seal::seal(&device.key, &device.token, &bytes)?;
     let thread = match &body.notice.about {
@@ -473,81 +467,6 @@ mod tests {
         let mut long = "ééééé".to_owned();
         cut(&mut long, 6);
         assert_eq!(long, "é\u{2026}", "an ellipsis is three bytes, and half an é is none");
-    }
-
-    /// A question asking at length with four long options still fits APNs' 4 KB: a pick
-    /// carries its label, cut, and its place, never the choice, which repeats the whole
-    /// question for each.
-    #[test]
-    fn a_long_question_s_four_options_still_fit_apns() {
-        use slopty_core::WorkerId;
-        use slopty_proto::thread::attention::{Notice, ThreadAt};
-        use slopty_proto::thread::detail::{Offered, Question};
-        use slopty_proto::thread::wire::NoteChoice;
-        use slopty_proto::thread::{AskId, Request, RequestState, ThreadId};
-
-        let asked = "Which of these layouts should the settings page use? ".repeat(60);
-        let request = Request {
-            id: AskId("toolu_".repeat(20)),
-            item: None,
-            kind: Request::QUESTION.to_owned(),
-            title: asked.clone(),
-            text: None,
-            options: Vec::new(),
-            questions: vec![Question {
-                text: asked.clone(),
-                header: None,
-                options: (0..NoteChoice::MAX)
-                    .map(|n| Offered {
-                        label: format!("{n} {}", "é".repeat(400)),
-                        description: None,
-                        preview: None,
-                    })
-                    .collect(),
-                multi_select: false,
-            }],
-            proposed: None,
-            schema_json: None,
-            url: None,
-            reason: None,
-            state: RequestState::Open,
-            opened_ms: slopty_core::WallMs::ZERO,
-            until_ms: None,
-            needs_presence: false,
-        };
-        let buttons = NoteChoice::of(&request);
-        assert_eq!(buttons.len(), NoteChoice::MAX);
-        let choices: usize = buttons.iter().map(|b| b.choice.len()).sum();
-        assert!(choices > apns::MAX_PAYLOAD, "the choices alone would not fit: {choices}");
-        let device = PushDevice {
-            token: "ab".repeat(32),
-            key: slopty_push::seal::DeviceKey::generate().unwrap().public(),
-            sandbox: false,
-            topic: "dev.aislopware.slopty".to_owned(),
-            quiet_ms: 0,
-        };
-        let worker = WorkerId::new();
-        let notice = Notice {
-            kind: NoticeKind::NeedsYou,
-            about: Subject::Thread(ThreadAt { worker, thread: ThreadId::new() }),
-            title: "\u{1f600}".repeat(500),
-            text: asked,
-            worked_ms: None,
-            via: None,
-        };
-        let out = Outgoing {
-            client: ClientId::new(),
-            device: device.clone(),
-            what: Sending::Note(PushBody {
-                notice,
-                ask: Some(request.id),
-                picks: buttons.iter().map(|b| b.label.clone()).collect(),
-                quiet: true,
-            }),
-        };
-        let push = sealed(&out).unwrap();
-        let request = apns::request(&push, &device.topic, "token").unwrap();
-        assert!(request.body.len() <= apns::MAX_PAYLOAD, "{} bytes", request.body.len());
     }
 
     /// However long a notice's words, its push fits APNs' 4 KB, and its ids are opaque, the

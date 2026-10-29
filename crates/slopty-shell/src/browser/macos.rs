@@ -550,7 +550,9 @@ impl NativePage {
 
 // slopty: finds the icon link (else `/favicon.ico`), fetches it as the page would, decodes it
 // in WebKit (ICO and SVG included), and posts it once; then again whenever the page changes its
-// icon link. Failures (no icon, CORS, CSP) post nothing and the tab keeps the globe.
+// icon link. Failures (no icon, CORS, CSP) post nothing and the tab keeps the globe. Where the
+// canvas cannot be read back (`data:,`, as in a virtual Mac's web view), the icon's own bytes go
+// instead, a small file only, for the shell to decode (`super::favicon_png`).
 const FAVICON_SCRIPT: &str = r#"(() => {
   const ipc = window.ipc;
   if (!ipc) return;
@@ -576,7 +578,17 @@ const FAVICON_SCRIPT: &str = r#"(() => {
         canvas.height = side;
         canvas.getContext('2d').drawImage(
           image, (side - w * scale) / 2, (side - h * scale) / 2, w * scale, h * scale);
-        ipc.postMessage(JSON.stringify({ sloptyFavicon: page, data: canvas.toDataURL('image/png') }));
+        let data = canvas.toDataURL('image/png');
+        if (data.length <= 'data:,'.length) {
+          if (blob.size > 262144) return;
+          data = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(blob);
+          });
+        }
+        ipc.postMessage(JSON.stringify({ sloptyFavicon: page, data }));
       } finally {
         URL.revokeObjectURL(url);
       }

@@ -22,7 +22,7 @@ use slopty_proto::thread::attention::{Notice, NoticeKind, Subject};
 use slopty_push::seal::{DeviceKey, Sealed};
 use tokio::sync::watch;
 
-use super::{APPROVAL, Note, info};
+use super::{Note, info};
 
 /// The `userInfo` key of a push's encapsulated key, as APNs delivers it.
 pub const ENC: &str = "e";
@@ -53,10 +53,8 @@ pub fn note_id(notice: &Notice) -> String {
 
 /// The note `body` makes on the phone: what the app would have posted for its notice.
 ///
-/// It has a question's options as its buttons when the body offers them, the approval's when it
-/// carries a yes or no they answer, else, for an agent's thread, a reply ([`super::REPLYING`]). A
-/// quiet push only moves what its buttons answer under a note already up, so it sounds no second
-/// time.
+/// It answers nothing, as no note does: a tap opens its session. A quiet push only says more
+/// under a note already up, so it sounds no second time.
 ///
 /// It knows no tile, so it carries no [`info::ITEM`]; the app finds the tile by the session or
 /// the thread. A thread's note with no title says the app's name, which stands in for the tile
@@ -78,43 +76,17 @@ pub fn note_of(body: &PushBody) -> Note {
             keys.insert(info::SESSION.to_owned(), term.session.to_string());
         }
     }
-    if let Some(ask) = &body.ask {
-        keys.insert(info::ASK.to_owned(), ask.0.clone());
-    }
     let title = Some(notice.title.trim())
         .filter(|t| !t.is_empty())
         .map_or_else(|| slopty_push::apns::TITLE.to_owned(), str::to_owned);
-    let picks = if body.ask.is_some() { body.picks.as_slice() } else { &[] };
     Note {
         id: note_id(notice),
         title,
         body: notice_body(notice),
         info: keys,
-        category: category_of(body),
-        picks: Vec::new(),
         silent: body.quiet,
         urgent: notice.kind == NoticeKind::NeedsYou,
     }
-    .picking(picks)
-}
-
-/// The buttons a pushed note carries: a question's options are its picks ([`Note::picking`]),
-/// which take a category of their own; else Allow and Deny on a yes or no, else a reply on an
-/// agent's own moment (one that needs the person, failed or finished). A program's record has
-/// none.
-fn category_of(body: &PushBody) -> Option<super::Category> {
-    if body.ask.is_some() && !body.picks.is_empty() {
-        return None;
-    }
-    if body.ask.is_some() {
-        return Some(APPROVAL);
-    }
-    let agent = matches!(body.notice.about, Subject::Thread(_));
-    let moment = matches!(
-        body.notice.kind,
-        NoticeKind::NeedsYou | NoticeKind::Failed | NoticeKind::Finished
-    );
-    (agent && moment).then_some(super::REPLYING)
 }
 
 /// The notes a background push takes back, from the ids under its
@@ -413,8 +385,8 @@ mod tests {
         }
     }
 
-    /// A thread's note is its thread's, with its worker and thread for the tap, urgent and with
-    /// the buttons when it asks a yes or no.
+    /// A thread's note is its thread's, with its worker and thread for the tap, urgent when it
+    /// needs the person, and with no buttons: what it asks is answered in the agent's terminal.
     #[test]
     fn a_pushed_note_carries_what_a_tap_routes_by() {
         let (worker, session, thread) = (WorkerId::new(), SessionId::new(), ThreadId::new());
@@ -439,18 +411,12 @@ mod tests {
         let worker_key = worker.as_uuid().as_u128().to_string();
         assert_eq!(
             note.info,
-            keys(&[
-                (info::WORKER, worker_key.clone()),
-                (info::THREAD, thread.to_string()),
-                (info::ASK, "toolu_01".to_owned()),
-            ])
+            keys(&[(info::WORKER, worker_key.clone()), (info::THREAD, thread.to_string()),])
         );
-        assert_eq!((note.category, note.urgent), (Some(APPROVAL), true));
-        assert!(!note.silent, "the first push sounds");
+        assert!(note.urgent && !note.silent, "the first push sounds, through a Focus");
         let moved = note_of(&PushBody { ask: None, picks: Vec::new(), quiet: true, ..body });
         assert_eq!(moved.id, note.id, "in place of the note up");
-        assert!(moved.silent, "a quiet push only moves its buttons");
-        assert_eq!(moved.category, Some(super::super::REPLYING), "the yes or no went: a reply");
+        assert!(moved.silent, "a quiet push only says more");
 
         let mut done = notice(NoticeKind::Finished, at);
         done.via = Some(Via { thread: ThreadId::new(), title: "Explore".to_owned() });
@@ -465,7 +431,7 @@ mod tests {
             (note.title.as_str(), note.body.as_str()),
             ("Slopty", "Explore: Run cargo test?")
         );
-        assert_eq!((note.category, note.urgent), (Some(super::super::REPLYING), false));
+        assert!(!note.urgent, "a finished turn breaks through no Focus");
 
         // A program's own wait leads to its terminal, under the id the app's own note has.
         let program = notice(NoticeKind::NeedsYou, Subject::Terminal(tile));
@@ -479,53 +445,7 @@ mod tests {
                 (info::SESSION, session.to_string())
             ])
         );
-        assert_eq!((note.category, note.urgent), (None, true));
-    }
-
-    /// A small question's options pushed with its request are the note's own buttons: each a
-    /// pick by its label, under a category named by the labels, no Allow or Deny; a press of
-    /// one answers with the request's option at its place, looked up where it is answered. A
-    /// body with no request offers none.
-    #[test]
-    fn a_questions_options_are_its_notes_buttons() {
-        use slopty_proto::thread::wire::NoteChoice;
-
-        use crate::notify::{PICKING, Pressed, Tap, pick_id, picking_id};
-        let at = Subject::Thread(ThreadAt { worker: WorkerId::new(), thread: ThreadId::new() });
-        let labels = |l: &[&str]| l.iter().map(|l| (*l).to_owned()).collect::<Vec<String>>();
-        let picks = labels(&["Split", "Unified"]);
-        let body = PushBody {
-            notice: notice(NoticeKind::NeedsYou, at),
-            ask: Some(AskId("toolu_02".to_owned())),
-            picks: picks.clone(),
-            quiet: false,
-        };
-        let note = note_of(&body);
-        assert_eq!(note.picks, picks);
-        assert_eq!(note.category, None, "the picks' own category, no Allow or Deny");
-        assert_eq!(note.info.get(info::ASK).map(String::as_str), Some("toolu_02"));
-        let id = picking_id(&note.picks);
-        assert!(id.starts_with(PICKING), "{id}");
-        assert_eq!(id, picking_id(&picks), "the same labels share a category");
-        assert_ne!(id, picking_id(&labels(&["Split", "Stacked"])));
-
-        let pressed =
-            Tap { id: note.id.clone(), info: note.info, action: Some(pick_id(1)), text: None };
-        assert!(pressed.finished_later(), "answered where the note is");
-        assert_eq!(Pressed::of(&pressed), Some(Pressed::Pick(1)));
-        let offered: Vec<NoteChoice> = picks
-            .iter()
-            .map(|label| NoteChoice { label: label.clone(), choice: format!("[{label}]") })
-            .collect();
-        let answer = Pressed::Pick(1).choice(&[], &offered);
-        assert_eq!(answer.as_deref(), Some("[Unified]"), "the request's own choice at its place");
-        assert_eq!(Pressed::Pick(2).choice(&[], &offered), None, "a place it does not offer");
-        let past = Tap { action: Some(pick_id(NoteChoice::MAX)), ..pressed.clone() };
-        assert_eq!(Pressed::of(&past), None, "past the most a note offers");
-        assert_eq!(Pressed::of(&Tap { action: Some("pick.x".to_owned()), ..pressed }), None);
-
-        let unasked = note_of(&PushBody { ask: None, ..body });
-        assert!(unasked.picks.is_empty(), "no request, nothing to answer");
+        assert!(note.urgent);
     }
 
     /// What the server seals opens on the phone to the note, under its token and key only.

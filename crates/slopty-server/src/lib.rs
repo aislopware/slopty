@@ -19,7 +19,6 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
-mod deliver;
 pub mod hub;
 pub mod link;
 pub mod push;
@@ -32,7 +31,6 @@ pub use hub::{GONE_AFTER, Hold, Hub, KeepAwake, Lan, Lease, Speaker, SystemLan, 
 pub use push::PushConfig;
 use slopty_net::admission::Admission;
 use slopty_net::server::ServerListener;
-use store::DeliveryStore;
 pub use store::{PushStore, Store};
 use tokio::task::JoinHandle;
 
@@ -113,8 +111,6 @@ pub struct Server {
     listener: ServerListener,
     quic: SocketAddr,
     store: Store,
-    /// Keeps the words on their way to the agents, written once more at shutdown.
-    deliveries: DeliveryStore,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -127,8 +123,6 @@ impl Server {
             move |source| ServerError::State { path, source }
         };
         let hub = Hub::new(config.name, store.load().await.map_err(unreadable(store.path()))?);
-        let deliveries = DeliveryStore::in_dir(&config.data_dir);
-        hub.adopt_deliveries(deliveries.load().await.map_err(unreadable(deliveries.path()))?);
         let phones = PushStore::in_dir(&config.data_dir);
         let devices = phones.load().await.map_err(unreadable(phones.path()))?;
         let devices = hub.keep_phones(devices);
@@ -141,14 +135,12 @@ impl Server {
         let tasks = vec![
             tokio::spawn(phones.keep(devices)),
             tokio::spawn(store.clone().keep(hub.persisted())),
-            tokio::spawn(Hub::deliver_reports(hub.downgrade())),
-            tokio::spawn(hub.keep_deliveries(deliveries.clone())),
             tokio::spawn(Hub::publish_ladder(hub.downgrade())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),
         ];
 
         tracing::info!(name = %hub.name(), %quic, state = %store.path().display(), "serving");
-        Ok(Self { hub, listener, quic, store, deliveries, tasks })
+        Ok(Self { hub, listener, quic, store, tasks })
     }
 
     /// The registry.
@@ -182,9 +174,6 @@ impl Server {
             && let Err(e) = self.store.save(&workers).await
         {
             tracing::warn!(error = %e, "state not saved at shutdown");
-        }
-        if let Err(e) = self.deliveries.save(&self.hub.deliveries_file()).await {
-            tracing::warn!(error = %e, "words on their way not saved at shutdown");
         }
     }
 }

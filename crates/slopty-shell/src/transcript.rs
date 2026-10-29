@@ -64,13 +64,11 @@ mod extras;
 // subagent's card, which opens in place.
 mod md_images;
 mod pages;
-mod rewind;
 mod sticky; // slopty: the prompt a long turn answers, held at the top.
 mod subagents;
 #[cfg(test)]
 mod surface_tests; // slopty: the transcript's own rows, read by assistive tech.
 pub mod work;
-pub use work::{WorkReveal, reveal_work};
 pub(crate) mod find;
 pub use extras::{claude_too_old, serve_terminal_runs};
 pub use find::{FindInThread, FindNext, FindPrevious};
@@ -98,13 +96,15 @@ fn jump_visibility(was_shown: bool, distance: f32) -> bool {
 }
 /// Bound session-local viewport memory independently of total chat history.
 const MAX_SAVED_VIEWPORTS: usize = 256;
-/// Bound locally-authored queue ids waiting to become transcript prompts.
-const MAX_PENDING_QUEUED_TURNS: usize = 256;
 /// Text-selection edge scrolling runs only during a drag. A 24 ms cadence is
 /// smooth enough to track text while avoiding a permanent animation-frame loop
 /// on low-end devices.
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
 const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
+// slopty: the working line's words, in its muted ink, read at a glance beside the reply (Claude
+// desktop's status line); its figures (the timer) a step smaller.
+const WORKING_LEAD_SIZE: f32 = 13.0;
+const WORKING_FIGURES_SIZE: f32 = 12.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
 /// Activity row height / gap — analytic, so fold heights need no measurement.
 /// Ordinary tools place their icon on the rail; subagents retain a 30px card.
@@ -293,12 +293,10 @@ fn agent_name(harness: Option<slopty_view_proto::HarnessId>) -> SharedString {
         .map_or_else(|| harness.as_str().into(), |(_, name)| (*name).into())
 }
 
-/// slopty: the focus of a strip's controls, and what redraws the strip as either gains or
-/// loses it.
+/// slopty: the focus of a strip's Copy, and what redraws the strip as it gains or loses it.
 struct StripFocus {
     copy: gpui::FocusHandle,
-    rewind: gpui::FocusHandle,
-    _redraw: [gpui::Subscription; 4],
+    _redraw: [gpui::Subscription; 2],
 }
 
 /// slopty: `inner` as the start of a message `who` said, to the accessibility tree.
@@ -1006,14 +1004,7 @@ pub fn tool_detail(
         });
     }
     let output = output?;
-    // slopty: a line of JSON reads pretty-printed, as the TUI's output does.
-    let mut lines: Vec<SharedString> = output
-        .lines()
-        .flat_map(|line| match pretty_json(line) {
-            Some(pretty) => pretty.lines().map(output_line).collect::<Vec<_>>(),
-            None => vec![output_line(line)],
-        })
-        .collect();
+    let mut lines = output_lines(output); // slopty
     // Trim trailing blank output lines so the block hugs its content.
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
@@ -1028,6 +1019,18 @@ pub fn tool_detail(
         truncated_by,
         stderr_from: None,
     })
+}
+
+/// slopty: an output's lines as its block draws them: a line of JSON pretty-printed, as the
+/// TUI's output does.
+fn output_lines(output: &str) -> Vec<SharedString> {
+    output
+        .lines()
+        .flat_map(|line| match pretty_json(line) {
+            Some(pretty) => pretty.lines().map(output_line).collect::<Vec<_>>(),
+            None => vec![output_line(line)],
+        })
+        .collect()
 }
 
 /// Longest line of JSON an output pretty-prints, as the TUI's.
@@ -1282,19 +1285,11 @@ pub enum RowKind {
         title: String,
     },
     User {
-        /// Visible prompt (attachment-ref trailer already stripped). When the
-        /// prompt carries file mentions this is the *projected* display text —
-        /// chip labels in place of the raw Markdown links.
+        /// Visible prompt (attachment-ref trailer already stripped).
         text: SharedString,
-        /// File-mention chips over `text`, in display-byte terms. Computed
-        /// once per entry change in [`rows_for_entry`] (rows are cached by
-        /// fingerprint), never per frame. Empty for ordinary prompts.
-        mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
         /// Image refs parsed out of the message text (message-attachments.ts):
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
-        /// Context the prompt folded in as text, lifted back out by `badges`.
-        badges: Arc<Vec<crate::badges::MessageBadge>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
     },
@@ -1354,7 +1349,6 @@ pub enum RowKind {
     ErrorCard {
         message: SharedString,
         detail: Option<SharedString>,
-        retry: bool,
     },
     Marker {
         text: SharedString,
@@ -1705,40 +1699,9 @@ fn entry_rows(
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
         let parsed = crate::attachments::parse_user_message_images(&raw);
-        // File mentions render as chips here too, not just in the composer.
-        // The projection is pure over the text, so the raw-length row version
-        // below stays a valid cache/diff key.
-        // Lifted before the mention projection, so a comment body's own
-        // Markdown never lands in the bubble.
-        let (body, badges) = crate::badges::split(&parsed.text);
-        let body = agent_message_display(&body);
-        // Chips stand in for their attachments: those leave the strip, and a
-        // chip carries its upload's path for its progress and, for an image,
-        // a click opening it.
-        let chips = slopty_view_proto::attachment_mentions::attachment_mentions(&body);
-        let mut attachments = parsed.attachments;
-        let (text, mut mentions) = match crate::composer::sent_mention_display(&body) {
-            Some((display, spans)) => (display, spans),
-            None => (body, Vec::new()),
-        };
-        for span in &mut mentions {
-            let Some(chip) = chips
-                .iter()
-                .find(|chip| Some(chip.index) == span.attachment)
-            else {
-                continue;
-            };
-            span.upload = attachments
-                .iter()
-                .find(|att| crate::attachments::chip_names_attachment(chip, &att.path))
-                .map(|att| att.path.clone().into());
-        }
-        attachments.retain(|att| {
-            // slopty: appshots removed.
-            !chips
-                    .iter()
-                    .any(|chip| crate::attachments::chip_names_attachment(chip, &att.path))
-        });
+        // slopty: the words as the agent's record has them: a TUI's prompt holds no chips.
+        let text = agent_message_display(&parsed.text);
+        let attachments = parsed.attachments;
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
             id: entry.id.clone().into(),
@@ -1746,9 +1709,7 @@ fn entry_rows(
             turn_start: true,
             kind: RowKind::User {
                 text: text.into(),
-                mentions: Arc::new(mentions),
                 attachments: Arc::new(attachments),
-                badges: Arc::new(badges),
                 pending,
             },
             entry_id,
@@ -2077,14 +2038,13 @@ fn entry_rows(
                             rows.push(row);
                         }
                     }
-                    // slopty: an error with the agent's own words or a retry is a card.
+                    // slopty: an error with the agent's own words is a card.
                     MessagePart::Error {
                         id: part_id,
                         message,
-                        detail,
-                        retry,
-                    } if detail.is_some() || *retry => {
-                        rows.push(extras::error_card_row(&entry.id, part_id, message, detail.as_deref(), *retry));
+                        detail: Some(detail),
+                    } => {
+                        rows.push(extras::error_card_row(&entry.id, part_id, message, Some(detail)));
                     }
                     MessagePart::Error {
                         id: part_id,
@@ -3009,7 +2969,8 @@ fn blob_detail(text: &str, is_diff: bool) -> Option<ToolDetail> {
         let diff: slopty_view_proto::ToolDiff = serde_json::from_str(text).ok()?;
         return tool_detail(None, Some(&diff), None);
     }
-    let mut lines: Vec<SharedString> = text.lines().map(output_line).collect();
+    // slopty: the whole output reads as its summary does, JSON pretty-printed.
+    let mut lines = output_lines(text);
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
@@ -3056,16 +3017,6 @@ pub const FLAVOUR_WORDS: [&str; 21] = [
 ];
 pub const FLAVOUR_ROTATE_SECS: i64 = 7;
 
-/// slopty: what a send held back waits for: this device's own network when it is offline,
-/// else the chat's machine `host` (#11, #18).
-fn queued_words(this_device_offline: bool, host: Option<&str>) -> String {
-    match host {
-        _ if this_device_offline => "Queued \u{b7} sends when you're back online".to_owned(),
-        Some(host) => format!("Queued \u{b7} sends when {host} is back"),
-        None => "Queued \u{b7} sends when its machine is back".to_owned(),
-    }
-}
-
 /// The flavour word for a seed at an elapsed time.
 pub fn flavour_word(seed: u64, elapsed_secs: i64) -> &'static str {
     let step = (elapsed_secs.max(0) / FLAVOUR_ROTATE_SECS) as u64;
@@ -3075,21 +3026,6 @@ pub fn flavour_word(seed: u64, elapsed_secs: i64) -> &'static str {
 /// A stable per-chat seed.
 pub fn flavour_seed(chat_id: &str) -> u64 {
     fnv1a(chat_id.as_bytes())
-}
-
-/// The working trailer's "Sending…" bridge: true while an in-flight send is
-/// fresher than the session row's turn start — the row still carries the
-/// PREVIOUS turn (or none), so a timer would count the send round-trip and
-/// restart when the turn actually begins.
-pub fn sending_bridge(
-    send_started: Option<chrono::DateTime<chrono::Utc>>,
-    turn_started: Option<chrono::DateTime<chrono::Utc>>,
-) -> bool {
-    match (send_started, turn_started) {
-        (Some(send), Some(turn)) => turn <= send,
-        (Some(_), None) => true,
-        (None, _) => false,
-    }
 }
 
 /// Compact elapsed formatting, using at most two units up to days.
@@ -3823,50 +3759,6 @@ impl OwnTurnAnchor {
     }
 }
 
-/// Locally-authored queue rows whose stable ids have not appeared in the
-/// transcript yet. Registration is deliberately inert: adding a queue row
-/// must leave the currently-visible turn and its runway untouched. Once a
-/// matching prompt materializes, the newest match becomes the own-turn anchor.
-#[derive(Default)]
-struct PendingQueuedTurns {
-    items: VecDeque<(String, SharedString)>,
-}
-
-impl PendingQueuedTurns {
-    fn register(&mut self, chat_id: String, message_id: String) {
-        self.items
-            .retain(|(chat, id)| chat != &chat_id || id.as_ref() != message_id);
-        self.items
-            .push_back((chat_id, SharedString::from(message_id)));
-        while self.items.len() > MAX_PENDING_QUEUED_TURNS {
-            self.items.pop_front();
-        }
-    }
-
-    /// Consume every candidate from this chat that is now present and return
-    /// the newest one. Multiple rows can land in one doc frame; the last send
-    /// owns the runway, matching consecutive immediate sends.
-    fn take_latest_materialized(&mut self, chat_id: &str, rows: &[Row]) -> Option<String> {
-        let mut latest = None;
-        self.items.retain(|(chat, message_id)| {
-            let materialized = chat == chat_id
-                && rows
-                    .iter()
-                    .any(|row| row.turn_start && row.entry_id == message_id.as_ref());
-            if materialized {
-                latest = Some(message_id.to_string());
-            }
-            !materialized
-        });
-        latest
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.items.len()
-    }
-}
-
 /// A stable per-chat viewport anchor. Row identity is preferred over its old
 /// index because async replay can insert or remove rows while a chat is away.
 #[derive(Clone, Debug)]
@@ -4229,9 +4121,6 @@ pub struct Transcript {
     /// A locally-sent prompt currently held near the viewport top while its
     /// reply grows into the empty space below it.
     own_turn: Option<OwnTurnAnchor>,
-    /// Queue rows authored in this window. They become own-turn anchors only
-    /// after the host promotes their stable id into a transcript message.
-    pending_queued_turns: PendingQueuedTurns,
     /// A layout-affecting change needs one post-layout own-turn measurement.
     own_turn_kick: bool,
     /// One own-turn `on_next_frame` callback in flight at most.
@@ -4259,12 +4148,7 @@ pub struct Transcript {
     /// One-shot timer rescheduled only while the pointer remains in an edge
     /// zone. Dropping it on mouse-up stops all selection scroll work.
     selection_scroll_task: Option<Task<()>>,
-    /// MessageRail width gate (set by the shell from the container width).
-    rail_enabled: bool,
-    /// Height of the shell's composer/status/terminal stack overlaying the
-    /// transcript's bottom (measured last frame): the last row pads past it
-    /// so pinned content rests above the glass chrome it scrolls under.
-    bottom_clearance: f32,
+    // slopty: no composer stack over the transcript's bottom, so no clearance under it.
     /// slopty: a subagent's transcript open in its card (`transcript/subagents.rs`), which
     /// takes the height its rows measure: told to the card after each layout.
     fit: Option<Fit>,
@@ -4277,8 +4161,6 @@ pub struct Transcript {
     /// slopty: the list's viewport as this frame began. A page row reads it while the list lays
     /// out, when asking the list itself would borrow it twice.
     page_viewport: gpui::Bounds<Pixels>,
-    /// Hovered rail tick (grows + shows the preview card).
-    rail_hover: Option<usize>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
     /// strip (slopty chat-view.tsx `group-hover`; the rows report hover
     /// themselves). Keyed by ROW so a row→row move within one entry can't
@@ -4342,8 +4224,6 @@ pub struct Transcript {
     // slopty: background work's rows, subagents' cards, and pages shown inline, keyed by row id.
     work: work::WorkState,
     subagents: subagents::SubagentsState,
-    // slopty: going back to before a person's message.
-    rewind: rewind::RewindState,
     // slopty: the right-click menu.
     context_menu: context_menu::ContextMenuState,
     pages: HashMap<SharedString, Entity<crate::page::PageCardView>>,
@@ -4384,13 +4264,6 @@ pub enum TranscriptEvent {
     /// breadcrumb back to its parent (`docs/decisions/ui.md`, "Subagents live in their parent's
     /// chat").
     OpenSubagent { chat_id: String },
-    /// A rewind in chat `from` went back to before a message: its words return to the composer
-    /// as a draft, in the branched chat when the conversation was branched (`chat_id`).
-    Rewound {
-        from: String,
-        chat_id: Option<String>,
-        prompt: String,
-    },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -4513,8 +4386,6 @@ impl Transcript {
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         Self::install_find(cx); // slopty: find's keys reach the main transcript.
-        // slopty: S2's Background tray scrolls the main transcript to a row's call.
-        cx.observe_global::<crate::background_tray::CallReveal>(Self::on_call_reveal).detach();
         Self::build(state, None, true, cx)
     }
 
@@ -4590,9 +4461,6 @@ impl Transcript {
                 }
             },
         );
-        // The rail is sized for the conversation column; a narrow right-pane
-        // tab has no width gate driving it, so override instances skip it.
-        let rail_enabled = doc_override.is_none();
         // `follow` is the initial pin: the primary transcript always opens
         // pinned; an override instance pins only while its doc is LIVE (a
         // frozen transcript reads top-down, free-scrolling). Short content
@@ -4661,7 +4529,6 @@ impl Transcript {
             wheel_travel: 0.0,
             pinned,
             own_turn: None,
-            pending_queued_turns: PendingQueuedTurns::default(),
             own_turn_kick: false,
             own_turn_scheduled: FrameAsk::default(),
             own_turn_last_tick: None,
@@ -4675,13 +4542,10 @@ impl Transcript {
             landed: None,
             selection_drag_position: None,
             selection_scroll_task: None,
-            rail_enabled,
-            bottom_clearance: 0.0,
             fit: None,
             clock: crate::clock::utc(cx),
             clock_tick: None,
             page_viewport: gpui::Bounds::default(),
-            rail_hover: None,
             hovered_entry: None,
             strip_focus: HashMap::new(),
             strip_drawn: HashSet::new(),
@@ -4707,7 +4571,6 @@ impl Transcript {
             attachment_loads: HashMap::new(),
             visuals: HashMap::new(),
             work: Default::default(),      // slopty: background work,
-            rewind: Default::default(),
             context_menu: Default::default(),
             subagents: Default::default(), // subagents' cards,
             pages: HashMap::new(),         // and pages.
@@ -4725,9 +4588,6 @@ impl Transcript {
         this
     }
 
-    // ---- rail plumbing (rendering lives in crate::rail) ----
-
-    /// Shell-driven width gate: the rail hides below 48rem of container width.
     /// Shell-driven: hold `reserve` px free on the right of the reading
     /// column (a docked side card), so the column and card center together.
     pub fn set_right_reserve(&mut self, reserve: f32, cx: &mut Context<Self>) {
@@ -4741,17 +4601,6 @@ impl Transcript {
             }
             cx.notify();
         }
-    }
-
-    pub fn set_rail_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.rail_enabled != enabled {
-            self.rail_enabled = enabled;
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn rail_enabled(&self) -> bool {
-        self.rail_enabled
     }
 
     /// slopty: measure the rows' height after each layout into `height`, and have `card`
@@ -4773,37 +4622,6 @@ impl Transcript {
     pub(crate) fn row_resized(&mut self, row: &str, cx: &mut Context<Self>) {
         self.diagram_layout_changed(&[SharedString::from(row.to_owned())], cx);
         cx.notify();
-    }
-
-    /// Shell-driven: the measured height of the bottom chrome stack the
-    /// transcript scrolls under. Sub-pixel jitter is ignored so steady-state
-    /// frames don't re-notify.
-    pub fn set_bottom_clearance(&mut self, height: f32, cx: &mut Context<Self>) {
-        if (self.bottom_clearance - height).abs() > 0.5 {
-            self.bottom_clearance = height;
-            // slopty: the last row's pad is the clearance, so its measured height moves with it
-            // whether or not a turn of the person's own holds the runway: a list kept its old
-            // height, and a list pinned to its end then stood where a fresh frame does not.
-            self.remeasure_last_row();
-            if self.own_turn.is_some() {
-                self.own_turn_kick = true;
-            }
-            cx.notify();
-        }
-    }
-
-    /// slopty: the height of the stack the transcript scrolls under ([`Self::set_bottom_clearance`]).
-    #[cfg(test)]
-    pub(crate) const fn bottom_clearance(&self) -> f32 {
-        self.bottom_clearance
-    }
-
-    pub(crate) fn rail_hover(&self) -> Option<usize> {
-        self.rail_hover
-    }
-
-    pub(crate) fn set_rail_hover(&mut self, hover: Option<usize>) {
-        self.rail_hover = hover;
     }
 
     pub(crate) fn rows(&self) -> &[Row] {
@@ -5178,7 +4996,6 @@ impl Transcript {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.withdraw_quote(cx); // slopty: a new press drops the last selection's quote.
         // Text listeners claim the drag before it bubbles here. Stop following
         // immediately: a stream commit can otherwise virtualize the anchor
         // before the first mouse move. Keep the user bubble's long-press timer.
@@ -5195,11 +5012,10 @@ impl Transcript {
 
     fn on_selection_mouse_up(
         &mut self,
-        event: &MouseUpEvent,
+        _: &MouseUpEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.offer_quote(event.position, cx); // slopty: a selection can be quoted to the agent.
         let was_selecting = self.selection_drag_position.is_some();
         self.stop_selection_scroll();
         if let Some(_text) = crate::markdown::selection::end_active_drag() {
@@ -5308,46 +5124,6 @@ impl Transcript {
         self.own_turn_kick = true;
         self.remeasure_last_row();
         cx.notify();
-    }
-
-    /// Remember a locally-authored queue row without touching the active
-    /// runway. If host promotion won the race with the QueueMessage reply, the
-    /// matching prompt is already present and can be anchored immediately.
-    pub fn on_own_queued_send(
-        &mut self,
-        chat_id: String,
-        message_id: String,
-        cx: &mut Context<Self>,
-    ) {
-        let materialized = self.chat_id.as_deref() == Some(chat_id.as_str())
-            && self
-                .rows
-                .iter()
-                .any(|row| row.turn_start && row.entry_id == message_id.as_str());
-        if materialized {
-            self.on_own_send(chat_id, message_id, cx);
-        } else {
-            self.pending_queued_turns.register(chat_id, message_id);
-        }
-    }
-
-    /// Promote a queued row only after its real transcript bubble exists.
-    /// Materializations first observed while attaching to a chat are consumed
-    /// without taking viewport ownership: navigation must not create a hidden
-    /// auto-follow merely because queued work ran while the chat was away.
-    fn promote_materialized_queued_turn(&mut self, attached: bool, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.chat_id.clone() else {
-            return;
-        };
-        let Some(message_id) = self
-            .pending_queued_turns
-            .take_latest_materialized(&chat_id, &self.rows)
-        else {
-            return;
-        };
-        if !attached {
-            self.on_own_send(chat_id, message_id, cx);
-        }
     }
 
     /// Convert a glued scroll offset (`None`/past-the-end — layout re-snaps
@@ -6000,7 +5776,6 @@ impl Transcript {
             // slopty: the row the pointer was on left with its chat, unmounted with no leave, so
             // its strip must not come back lit on the return.
             self.hovered_entry = None;
-            self.rewind.feet.borrow_mut().clear(); // slopty: the feet of the last chat's bubbles
             self.pending_bubbles.clear(); // slopty
             self.sent_bubbles.clear(); // slopty
             self.compact_fold_heights.clear();
@@ -6088,11 +5863,6 @@ impl Transcript {
                     ));
                 } else {
                     new_rows.extend(self.rows_for(entry, false, now));
-                }
-            }
-            if self.doc_override.is_none() {
-                for echo in state.pending_echoes() {
-                    new_rows.extend(self.rows_for(echo, true, now));
                 }
             }
             (
@@ -6377,7 +6147,6 @@ impl Transcript {
                 if self.restore_pending_viewport(replay) {
                     cx.notify();
                 }
-                self.promote_materialized_queued_turn(attached, cx);
                 return;
             }
             Some((old_range, count)) => {
@@ -6425,7 +6194,6 @@ impl Transcript {
         self.release_departed_tool_images(cx);
         self.reconcile_own_turn_prompt();
         self.restore_pending_viewport(replay);
-        self.promote_materialized_queued_turn(attached, cx);
         if self.land_end_pending && !self.rows.is_empty() {
             // First content for an unpinned override tab: land at the end.
             // `scroll_to_end` is ITEM-anchored (past-the-end offset that the
@@ -6846,21 +6614,8 @@ impl Transcript {
         let mut keys = std::collections::HashSet::new();
         for row in &self.rows {
             // Generated images use bounded LRU retention, not history-wide protection.
-            if let RowKind::User {
-                attachments,
-                mentions,
-                ..
-            } = &row.kind
-            {
-                let chipped = mentions
-                    .iter()
-                    .filter(|span| span.kind == crate::composer::ChipKind::Image)
-                    .filter_map(|span| span.upload.as_ref().map(|path| path.to_string()));
-                for path in attachments
-                    .iter()
-                    .map(|att| att.path.clone())
-                    .chain(chipped)
-                {
+            if let RowKind::User { attachments, .. } = &row.kind {
+                for path in attachments.iter().map(|att| att.path.clone()) {
                     for dev in &devices {
                         keys.insert((dev.clone(), path.clone()));
                     }
@@ -7031,173 +6786,6 @@ impl Transcript {
             .ok();
         });
         self.attachment_retries.insert(key, task);
-    }
-
-    /// Open a sent image chip's upload full size, as its thumbnail did. An
-    /// image still loading opens on a later click.
-    fn open_chip_image(
-        &mut self,
-        path: &SharedString,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let device_ids = self.attachment_device_ids(cx);
-        if let crate::attachments::AttachmentSnapshot::Loaded(image) =
-            self.attachment_state(&device_ids, path, None, cx)
-        {
-            let preview = crate::attachments::PreviewImage::new(image.name, image.image.clone());
-            self.attachment_preview_return_focus = window.focused(cx);
-            preview.viewer.reset();
-            self.attachment_preview = Some(preview);
-            window.focus(&self.attachment_preview_focus, cx);
-            cx.notify();
-        }
-    }
-
-    /// Whether an attachment ref is still crossing to the chat's host, and
-    /// how far along it is. Two ref shapes mean "still crossing": the queued
-    /// flow's `pending://` (bytes ship engine-side after the send; the host
-    /// rewrites the ref to an absolute path once they land and the run
-    /// starts) and the legacy echo's synthetic `pending/`. Percent sources, in
-    /// order: this attachment's own relay transfer (`WatchTransfers`, by the
-    /// uploadId its ref names — the leg that actually takes time), else the
-    /// send-wide staging/legacy upload percent. Neither → no number, so a
-    /// ring never shows one that isn't a real transfer position (2026-08-20
-    /// report: the staging-only percent blinked out in ~100ms and lied about
-    /// the slow part).
-    fn upload_status(&self, path: &str, cx: &Context<Self>) -> (bool, Option<u8>) {
-        let sending = path.starts_with("pending://") || path.starts_with("pending/");
-        let upload_id = path
-            .strip_prefix("pending://")
-            .and_then(|rest| rest.split_once('/'))
-            .map(|(id, _)| id);
-        let percent = upload_id
-            .and_then(|id| self.state.read(cx).transfer_percent(id))
-            .or_else(|| {
-                sending
-                    .then(|| self.state.read(cx).upload_progress_percent())
-                    .flatten()
-            });
-        (sending, percent)
-    }
-
-    /// What a sent bubble's attachment chips show beyond their label: the
-    /// progress of an upload still crossing to the host in place of the icon
-    /// (the strip's thumbnails used to carry it), a warning for an image that
-    /// can't be read back, and a click target opening a loaded image.
-    fn chip_overlays(
-        &mut self,
-        row_id: &SharedString,
-        mentions: &[crate::composer::SentMentionSpan],
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Vec<ChipOverlay> {
-        use crate::attachments::AttachmentSnapshot;
-        // slopty: a chip naming a chat is live too (`chat_chip_overlay`).
-        if mentions.iter().all(|span| span.upload.is_none() && span.kind != crate::composer::ChipKind::Chat) {
-            return Vec::new();
-        }
-        let device_ids = self.attachment_device_ids(cx);
-        let mut overlays = Vec::new();
-        for (ix, span) in mentions.iter().enumerate() {
-            if span.kind == crate::composer::ChipKind::Chat {
-                overlays.push(self.chat_chip_overlay(span, cx));
-                continue;
-            }
-            let Some(upload) = &span.upload else {
-                continue;
-            };
-            let (sending, percent) = self.upload_status(upload, cx);
-            let mut status = sending.then(|| match percent {
-                Some(pct) => crate::loaders::upload_progress_arc(
-                    pct,
-                    CHIP_STATUS_SIZE,
-                    theme.text_muted.opacity(0.35),
-                    theme.text,
-                ),
-                None => crate::loaders::mini_glyph_spinner(
-                    format!("chip-sending-{row_id}-{ix}"),
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element(),
-            });
-            let mut open = None;
-            if span.kind == crate::composer::ChipKind::Image {
-                // Loading here keeps the image ready for a click, as the
-                // strip's thumbnail did.
-                match self.attachment_state(&device_ids, upload, None, cx) {
-                    AttachmentSnapshot::Loaded(_) => open = Some(upload.clone()),
-                    AttachmentSnapshot::Error { .. } if !sending => {
-                        status = Some(
-                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                                .size(px(CHIP_STATUS_SIZE - 2.0))
-                                .text_color(theme.text_muted)
-                                .into_any_element(),
-                        );
-                    }
-                    _ => {}
-                }
-            }
-            if open.is_some() || status.is_some() {
-                let label = format!(
-                    "Preview {}",
-                    crate::attachments::attachment_display_name(
-                        upload.rsplit(['/', '\\']).next().unwrap_or(upload),
-                    )
-                );
-                overlays.push(ChipOverlay {
-                    range: span.range.clone(),
-                    open,
-                    label: label.into(),
-                    tip: None,
-                    status,
-                });
-            }
-        }
-        overlays
-    }
-
-    /// slopty: open what a sent chip's click target names: its chat, or its image full size.
-    fn open_chip(&mut self, target: &SharedString, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(chat) = target.strip_prefix(CHAT_TARGET) {
-            let chat = chat.to_owned();
-            self.state.update(cx, |state, cx| state.select_chat(Some(chat), cx));
-            return;
-        }
-        self.open_chip_image(target, window, cx);
-    }
-
-    /// slopty: a sent chip naming a chat, live as zeron's and t3code's thread links are: a click
-    /// opens the chat, and its tooltip names the chat as it is called now, the chip keeping the
-    /// title it was sent with. A chat gone from this client says so and opens nothing.
-    fn chat_chip_overlay(&self, span: &crate::composer::SentMentionSpan, cx: &gpui::App) -> ChipOverlay {
-        let chat = self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .find(|chat| *chat.id == *span.path);
-        let (open, label, tip): (Option<SharedString>, SharedString, SharedString) = match chat {
-            Some(chat) => {
-                let title = single_line(chat.title.as_deref().unwrap_or("New chat"));
-                (
-                    Some(format!("{CHAT_TARGET}{}", chat.id).into()),
-                    format!("Open {title}").into(),
-                    title.into(),
-                )
-            }
-            None => (None, CHAT_GONE.into(), CHAT_GONE.into()),
-        };
-        ChipOverlay {
-            range: span.range.clone(),
-            open,
-            label,
-            tip: Some(tip),
-            status: None,
-        }
     }
 
     // ---- tool-call image previews + the image context menu ----
@@ -7574,12 +7162,10 @@ impl Transcript {
         row_id: &SharedString,
         row_ix: usize,
         text: SharedString,
-        mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let chip_overlays = self.chip_overlays(row_id, &mentions, theme, cx);
         let fold = self.user_folds.get(row_id).copied().unwrap_or_default();
         let expanded = fold.open.unwrap_or(false);
         let line_height =
@@ -7643,18 +7229,7 @@ impl Transcript {
                     this.cancel_user_hold();
                 }))
             })
-            .child(user_bubble_text(
-                row_id,
-                text,
-                mentions,
-                theme,
-                measured_h.clone(),
-                cx.entity_id(),
-                chip_overlays,
-                Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
-                    this.open_chip(path, window, cx); // slopty: a chat chip opens its chat
-                })),
-            ));
+            .child(user_bubble_text(row_id, text, theme, measured_h.clone(), cx.entity_id()));
         // Height motion uses the same ease-out curve as sidebars, tool folds,
         // and pane transitions, with duration scaled to travel distance. The
         // full text remains laid out behind the clip; only the viewport over it
@@ -8007,7 +7582,9 @@ impl Transcript {
                         }),
                     )
                     .w(px(dimensions.0 as f32 * scale))
-                    .h(px(dimensions.1 as f32 * scale))
+                    // slopty: as tall as the picture at the width its column leaves it (the
+                    // inspector's is narrower than 512), never a letterbox round it.
+                    .h_auto()
                     .role(gpui::Role::Button)
                     .aria_label(image_label(path, name))
                     .tab_index(0)
@@ -8022,11 +7599,17 @@ impl Transcript {
                         cx.notify();
                     }))
                     .child(
-                        gpui::img(loaded.image)
-                            .size_full()
-                            // The frame's overflow clip is rectangular; round the image itself.
-                            .rounded(px(TRANSCRIPT_CARD_RADIUS))
-                            .object_fit(gpui::ObjectFit::Contain),
+                        div()
+                            .w_full()
+                            .aspect_ratio(dimensions.0.max(1) as f32 / dimensions.1.max(1) as f32)
+                            .child(
+                                gpui::img(loaded.image)
+                                    .size_full()
+                                    // The frame's overflow clip is rectangular; round the image
+                                    // itself.
+                                    .rounded(px(TRANSCRIPT_CARD_RADIUS))
+                                    .object_fit(gpui::ObjectFit::Contain),
+                            ),
                     )
                     .into_any_element()
             }
@@ -8095,7 +7678,6 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         use crate::attachments::AttachmentSnapshot;
-        let glyph = Theme::of(cx).glyph;
         let device_ids = self.attachment_device_ids(cx);
         let mut strip = div()
             .w_full()
@@ -8116,11 +7698,6 @@ impl Transcript {
                 continue;
             }
             let state = self.attachment_state(&device_ids, &att.path, None, cx);
-            // The in-flight send's progress belongs ON the thumbnail
-            // (2026-08-18 user request). No percent → the indeterminate
-            // spinner (staged-but-waiting, retry backoff, or
-            // committed-awaiting-rewrite); see `upload_status`.
-            let (sending, uploading) = self.upload_status(&att.path, cx);
             // slopty: appshots removed.
             let frame = div()
                 .flex_none()
@@ -8179,38 +7756,6 @@ impl Transcript {
                                 .rounded(px(7.0))
                                 .object_fit(ObjectFit::Cover),
                         )
-                        .when(sending, |el| {
-                            // The pulse read registers this entity for frames,
-                            // so the overlay stays live even once the trailer's
-                            // 30s pending-send bridge has lapsed.
-                            let pulse = motion::pulse_wave(motion::pulse_delta(
-                                &motion::SLOPTY_PULSE,
-                                cx.entity_id(),
-                                cx,
-                            ));
-                            let indicator: AnyElement = match uploading {
-                                Some(pct) => crate::loaders::upload_progress_ring(pct, 34.0),
-                                None => crate::loaders::mini_glyph_spinner(
-                                    format!("att-sending-{row_id}-{aix}"),
-                                    3.0,
-                                    glyph,
-                                    cx.entity_id(),
-                                    cx,
-                                )
-                                .into_any_element(),
-                            };
-                            el.child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .rounded(px(7.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(gpui::hsla(0.0, 0.0, 0.0, 0.38 + 0.05 * pulse))
-                                    .child(indicator),
-                            )
-                        })
                         .into_any_element()
                 }
                 // Errored/unavailable: the dashed "missing" thumb.
@@ -8247,34 +7792,6 @@ impl Transcript {
     /// — user request), so it reads as part of the streaming reply and
     /// scrolls away with it. The spinner drives this entity's frames, which
     /// keeps the elapsed timer ticking through delta-quiet tool runs.
-    /// The failed-send retry (trailer affordance): re-kick every delivery
-    /// road engine-side (fresh chat2 socket, host nudge, delivery escorts)
-    /// and restart the grace clock so the trailer returns to Sending/Queued
-    /// while the retry runs.
-    fn retry_send(&mut self, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.chat_id.clone() else {
-            return;
-        };
-        let engine = self.state.read(cx).engine().cloned();
-        self.state.update(cx, |s, cx| {
-            s.retry_pending_send(&chat_id, crate::clock::utc(cx));
-            cx.notify();
-        });
-        if let Some(engine) = engine {
-            cx.spawn(async move |_, _| {
-                let params = serde_json::json!({ "chatId": chat_id });
-                if let Err(err) = engine
-                    .client()
-                    .call(slopty_view_rpc::methods::RETRY_DELIVERY, params)
-                    .await
-                {
-                    tracing::warn!(error = %err, "delivery retry RPC failed");
-                }
-            })
-            .detach();
-        }
-    }
-
     /// slopty: take the time again at the next whole second after `start` (ms since the epoch),
     /// or in a second, and draw again: what the working line says moves on only then.
     fn tick_clock(&mut self, start: Option<i64>, cx: &mut Context<Self>) {
@@ -8300,7 +7817,7 @@ impl Transcript {
         // `turn` (the turn's start, ms) keys the rolling word and timer, so a
         // new turn's labels appear fresh instead of rolling from the last
         // turn's final values.
-        let (sending, queued, elapsed_secs, seed, turn) = if let Some(doc_id) = &self.doc_override {
+        let (elapsed_secs, seed, turn) = if let Some(doc_id) = &self.doc_override {
             // A subagent doc has no Session row — `indicator_for` would read
             // the PARENT chat's live state into this tab. Liveness rides the
             // doc itself instead: the sink's assistant entry streams until
@@ -8318,95 +7835,26 @@ impl Transcript {
                 return None;
             }
             let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
-            (false, false, elapsed, flavour_seed(doc_id), last.created_at)
+            (elapsed, flavour_seed(doc_id), last.created_at)
         } else {
             let chat_id = self.chat_id.clone()?;
-            // Failed-send state first: past the grace window the trailer IS
-            // the retry affordance, whatever the indicator fell back to.
-            if self.state.read(cx).send_undelivered(&chat_id, now) {
-                let theme = Theme::of(cx).clone();
-                // slopty: what happened, then one action, under the bubble it is about (#11).
-                let under_bubble =
-                    self.rows.last().is_some_and(|row| matches!(row.kind, RowKind::User { .. }));
-                let fade = "undelivered-retry-hover";
-                return Some(
-                    div()
-                        .id("undelivered")
-                        .role(gpui::Role::Status)
-                        .aria_label("Not sent")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .when(under_bubble, |el| el.justify_end())
-                        .gap(px(6.0))
-                        // slopty: the row lane's anatomy (`ROW_LANE_HEIGHT`).
-                        .pt(px(Theme::SPACE_SM))
-                        .h(px(ROW_LANE_HEIGHT))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .child(
-                            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                                .flex_none()
-                                .size(px(12.0))
-                                .text_color(theme.danger),
-                        )
-                        .child(div().text_color(theme.text_muted).child("Not sent"))
-                        .child(
-                            crate::surface_chrome::key_stop(
-                                div().id("undelivered-retry"),
-                                &theme,
-                            )
-                            .role(gpui::Role::Button)
-                            .aria_label("Retry")
-                            .h(px(24.0))
-                            .px(px(8.0))
-                            .rounded(px(6.0))
-                            .flex()
-                            .items_center()
-                            .cursor_pointer()
-                            .text_color(motion::mix(theme.text_muted, theme.text, motion::hover_t(fade)))
-                            .bg(motion::hover_blend(fade, gpui::transparent_black(), crate::theme::wash(0.11)))
-                            .hover_fade(fade)
-                            .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
-                            .child("Retry"),
-                        )
-                        .into_any_element(),
-                );
-            }
-            let (sending, queued, elapsed, turn) = {
+            let (elapsed, turn) = {
                 let state = self.state.read(cx);
                 if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
                     return None;
                 }
-                // During the send→turn window the session row's `started_at`
-                // still belongs to the PREVIOUS turn — a timer based on the
-                // send counted the round-trip and then restarted when the
-                // turn actually began (user report). Bridge it as "Sending…"
-                // with no timer instead; the word + timer start with the
-                // turn.
                 let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
-                let send_started = state.pending_send_started(&chat_id, now);
-                let sending = sending_bridge(send_started, turn_started);
-                // Degraded delivery path: the send is a durable local write
-                // waiting on connectivity — say so instead of faking
-                // progress. (The overlay holds while degraded, so this line
-                // owns the surface until the ack or the failed state.)
-                let queued = sending && state.chat_delivery_degraded(&chat_id);
                 let elapsed = turn_started
                     .map(|t| now.signed_duration_since(t).num_seconds().max(0))
                     .unwrap_or(0);
-                // While sending, the session row still carries the PREVIOUS
-                // turn: the bridge keys on its own send instead, so it never
-                // rolls out of that turn's word or an earlier send's.
-                let turn = if sending { send_started } else { turn_started }
-                    .map_or(0, |t| t.timestamp_millis());
-                (sending, queued, elapsed, turn)
+                (elapsed, turn_started.map_or(0, |t| t.timestamp_millis()))
             };
-            (sending, queued, elapsed, flavour_seed(&chat_id), turn)
+            (elapsed, flavour_seed(&chat_id), turn)
         };
-        // slopty: the clock moves on at the timer's next whole second (a second on while it
-        // sends), so the second a frame says is the one every frame built after it says.
-        self.tick_clock(if sending || queued { None } else { Some(turn) }, cx);
-        if !sending && !queued && elapsed_secs > 0 {
+        // slopty: the clock moves on at the timer's next whole second, so the second a frame
+        // says is the one every frame built after it says.
+        self.tick_clock(Some(turn), cx);
+        if elapsed_secs > 0 {
             let entry_id = if let Some(doc_id) = &self.doc_override {
                 self.state
                     .read(cx)
@@ -8427,66 +7875,21 @@ impl Transcript {
             }
         }
         // slopty: the call under way, or the newest thought, in place of the flavour word.
-        let step = (!queued && !sending)
-            .then(|| {
-                let state = self.state.read(cx);
-                let entries = match &self.doc_override {
-                    Some(doc_id) => state.sub_transcript(doc_id),
-                    None => state.transcript.as_slice(),
-                };
-                entries.last().and_then(extras::working_step)
-            })
-            .flatten();
-        // slopty: what waits, and what it waits for (#11, #18).
-        let queued_words = queued.then(|| {
+        let step = {
             let state = self.state.read(cx);
-            let offline = state.connectivity.state == slopty_view_proto::ConnectivityState::Offline;
-            let host = self
-                .chat_id
-                .as_deref()
-                .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
-                .and_then(|chat| state.device_name(&chat.device_id));
-            queued_words(offline, host)
-        });
-        let word = if let Some(words) = queued_words.as_deref() {
-            words
-        } else if sending {
-            "Sending"
-        } else if let Some(step) = step.as_deref() {
+            let entries = match &self.doc_override {
+                Some(doc_id) => state.sub_transcript(doc_id),
+                None => state.transcript.as_slice(),
+            };
+            entries.last().and_then(extras::working_step)
+        };
+        let word = if let Some(step) = step.as_deref() {
             step
         } else {
             flavour_word(seed, elapsed_secs)
         };
-        // slopty: S2's live line from the chat's dock: its phrase, tokens, thinking, retry.
-        if !sending
-            && !queued
-            && self.doc_override.is_none()
-            && let Some(chat) = self.chat_id.clone()
-            && let Some(line) =
-                crate::composer::working_line(
-                    &chat,
-                    word,
-                    turn,
-                    elapsed_secs,
-                    now.timestamp_millis(),
-                    cx.entity_id(),
-                    cx,
-                )
-        {
-            return Some(line);
-        }
         let theme = Theme::of(cx).clone();
-        // slopty: a first Escape armed the stop: the line ends by saying a second one stops it.
-        let armed = match self.chat_id.clone() {
-            Some(chat) if !sending && !queued && self.doc_override.is_none() => {
-                crate::composer::armed_hint(&chat, cx.entity_id(), cx)
-            }
-            _ => None,
-        };
-        let spoken = match &armed {
-            Some(_) => format!("{word} · {}", crate::composer::ARMED_SPOKEN),
-            None => word.to_owned(),
-        };
+        let spoken = word.to_owned();
         Some(
             div()
                 // slopty: the working line says what it shows: the step, or the word.
@@ -8500,65 +7903,44 @@ impl Transcript {
                 // slopty: the row lane's anatomy (`ROW_LANE_HEIGHT`).
                 .pt(px(Theme::SPACE_SM))
                 .h(px(ROW_LANE_HEIGHT))
-                .text_size(crate::typography::ui_rems(crate::composer::WORKING_FIGURES_SIZE))
-                // slopty: a queued send waits under the clock glyph, in zeron's queued amber.
-                .child(if queued {
-                    crate::icons::icon(crate::icons::CLOCK_CIRCLE)
-                        .flex_none()
-                        .size(px(12.0))
-                        .text_color(theme.warning)
-                        .into_any_element()
-                } else {
-                    crate::loaders::gradient_spinner(
-                        "working-indicator",
-                        &theme,
-                        2.5,
-                        cx.entity_id(),
-                        cx,
-                    )
-                    .into_any_element()
-                })
+                .text_size(crate::typography::ui_rems(WORKING_FIGURES_SIZE))
+                .child(crate::loaders::gradient_spinner(
+                    "working-indicator",
+                    &theme,
+                    2.5,
+                    cx.entity_id(),
+                    cx,
+                ))
                 .child(
                     // The flavour word rotates every 7s; roll it as it turns.
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(crate::typography::ui_rems(crate::composer::WORKING_LEAD_SIZE))
-                        .text_color(if queued {
-                            theme.warning
-                        } else {
-                            theme.text_muted
-                        })
+                        .text_size(crate::typography::ui_rems(WORKING_LEAD_SIZE))
+                        .text_color(theme.text_muted)
                         .child(crate::roll_text::roll_text(
                             format!("working-word-{}-{turn}", cx.entity_id()),
-                            SharedString::from(if queued {
-                                word.to_string()
-                            } else {
-                                format!("{word}…")
-                            }),
+                            SharedString::from(format!("{word}…")),
                             cx.reduce_motion(),
                             crate::clock::now(cx),
                         )),
                 )
-                .when(!sending, |el| {
-                    // The timer ticks every second; its digits roll in place
-                    // (the unit suffix holds).
-                    el.child(
-                        div()
-                            .flex_none()
-                            .relative()
-                            .top(px(1.0))
-                            .text_color(theme.text_muted)
-                            .font_features(crate::typography::tabular())
-                            .child(crate::roll_text::roll_text(
-                                format!("working-timer-{}-{turn}", cx.entity_id()),
-                                SharedString::from(ticking_elapsed(elapsed_secs)),
-                                cx.reduce_motion(),
-                                crate::clock::now(cx),
-                            )),
-                    )
-                })
-                .children(armed.map(|(hint, shown)| crate::composer::armed_element(hint, shown, &theme)))
+                // The timer ticks every second; its digits roll in place (the unit suffix
+                // holds).
+                .child(
+                    div()
+                        .flex_none()
+                        .relative()
+                        .top(px(1.0))
+                        .text_color(theme.text_muted)
+                        .font_features(crate::typography::tabular())
+                        .child(crate::roll_text::roll_text(
+                            format!("working-timer-{}-{turn}", cx.entity_id()),
+                            SharedString::from(ticking_elapsed(elapsed_secs)),
+                            cx.reduce_motion(),
+                            crate::clock::now(cx),
+                        )),
+                )
                 .into_any_element(),
         )
     }
@@ -8603,16 +7985,16 @@ impl Transcript {
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
         };
-        // The last row must clear the composer/status stack the transcript
-        // scrolls under PLUS the fade band above it, or the timestamp strip
+        // The last row must clear the fade band at the bottom, or the timestamp strip
         // (the row's lowest content) renders half-faded (or hidden) when the
         // transcript is pinned to the bottom.
+        // slopty: no composer stack under it to clear as well.
         let is_last = ix + 1 == self.rows.len();
         let bottom_pad = if is_last && self.fit.is_some() {
             // slopty: fit to its rows, nothing scrolls under it and no fade covers its end.
             Theme::SPACE_SM
         } else if is_last {
-            self.bottom_clearance + Theme::TRANSCRIPT_FADE_BAND + 8.0
+            Theme::TRANSCRIPT_FADE_BAND + 8.0
         } else {
             0.0
         };
@@ -8637,13 +8019,8 @@ impl Transcript {
             || TOUCH;
         // slopty: the keyboard reaches the strip too: its controls stay mounted, unseen, and one
         // holding focus shows the strip as a hover does (#9); only a row with a strip has them.
-        let (copy_focus, rewind_focus) = row
-            .timestamp
-            .map(|_| self.strip_focus(&row.entry_id, window, cx))
-            .unzip();
-        let shown = hovered
-            || copy_focus.as_ref().is_some_and(|f| f.is_focused(window))
-            || rewind_focus.as_ref().is_some_and(|f| f.is_focused(window));
+        let copy_focus = row.timestamp.map(|_| self.strip_focus(&row.entry_id, window, cx));
+        let shown = hovered || copy_focus.as_ref().is_some_and(|f| f.is_focused(window));
         // slopty: the strip fades in and out over 200 ms as the pointer comes and goes (Amp's
         // message actions; the Amp study's item 9).
         let (strip_t, strip_moving) = if row.timestamp.is_some() {
@@ -8659,7 +8036,6 @@ impl Transcript {
             motion::copied(&copy_message_key(&row.entry_id), cx);
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
-        let rewind_message = row.entry_id.clone();
         let now_ms = self.clock.timestamp_millis();
         // slopty: under a pointer, the person's strip waits beside the bubble's foot and takes no
         // room under it, so their answer starts right under their question (#1). A touch screen
@@ -8737,14 +8113,7 @@ impl Transcript {
                 .gap(px(Theme::SPACE_SM));
             // slopty: a time the agent never said (0) shows none; the copy action stays.
             let metadata = metadata.children(timestamp).children(copy);
-            // slopty: a person's message can be gone back to (`transcript/rewind.rs`).
-            // slopty: not a run's task, which the person never sent.
-            let metadata = metadata.children(
-                rewind_focus
-                    .as_ref()
-                    .filter(|_| is_user_row && !task)
-                    .and_then(|focus| self.rewind_action(&rewind_message, focus, &theme, cx)),
-            );
+            // slopty: TUI-first: the TUI goes back to a message (`/rewind`), not the record.
             // slopty: unseen until hovered or focused, but there for the keyboard (#9).
             let metadata = metadata.opacity(strip_t).into_any_element();
             if on_done_line {
@@ -8786,15 +8155,11 @@ impl Transcript {
         let inner: AnyElement = match &row.kind {
             RowKind::User {
                 text,
-                mentions,
                 attachments,
-                badges,
                 pending,
             } => {
                 let attachments = attachments.clone();
-                let badges = badges.clone();
                 let text = text.clone();
-                let mentions = mentions.clone();
                 let pending = *pending;
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
@@ -8807,26 +8172,6 @@ impl Transcript {
                         window,
                         cx,
                     ));
-                }
-                if !badges.is_empty() {
-                    column = column.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .justify_end()
-                            .items_center()
-                            .gap(px(6.0))
-                            .pb(px(6.0))
-                            .children(badges.iter().enumerate().map(|(bix, badge)| {
-                                crate::badges::render(
-                                    SharedString::from(format!("{}#badge{bix}", row.id)),
-                                    badge,
-                                    &theme,
-                                )
-                            })),
-                    );
                 }
                 // slopty: a run's first words are its task, which its parent's agent wrote: a
                 // quiet paragraph, not the person's bubble, cut short in its card.
@@ -8863,9 +8208,7 @@ impl Transcript {
                                 // slopty: lit faintly in the theme's hues, under the words (Amp).
                                 .relative()
                                 .children(crate::lit::light_over(px(Theme::BUBBLE_RADIUS), &theme))
-                                .child(self.render_user_body(
-                                    &row.id, ix, text, mentions, &theme, window, cx,
-                                ));
+                                .child(self.render_user_body(&row.id, ix, text, &theme, window, cx));
                     // slopty: a send the agent took loses its tint, not in one frame (#15).
                     let bubble = if self.bubble_sent(&row.id, pending, cx) {
                         bubble
@@ -8893,9 +8236,7 @@ impl Transcript {
                         .min_w_0()
                         .flex()
                         .child(bubble)
-                        .children(beside.take())
-                        // slopty: where the rewind menu hangs from (#20).
-                        .child(self.bubble_foot_watch(&row.entry_id));
+                        .children(beside.take());
                     // slopty: the person's own send fades and rises in as it first draws (#15).
                     let foot = if self.bubble_enters(&row.entry_id, cx) {
                         foot.with_animation(
@@ -9089,8 +8430,8 @@ impl Transcript {
             RowKind::Visual { owner, path, title } => {
                 self.render_visual(&row.id, owner, path, title, cx)
             }
-            // slopty: a title, one sentence, and its one way on (`extras::render_error_card`).
-            RowKind::ErrorChip { message } => self.render_error_card(&row, message, None, false, &theme, cx),
+            // slopty: a title and one sentence (`extras::render_error_card`).
+            RowKind::ErrorChip { message } => self.render_error_card(&row, message, None, &theme, cx),
             RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
             // slopty: Slopty's own rows.
             RowKind::ErrorCard { .. }
@@ -9342,30 +8683,25 @@ impl Transcript {
         )
     }
 
-    /// slopty: the focus of `entry`'s strip controls (Copy, Rewind), made on first use and kept
-    /// while its strip is drawn: the keyboard reaches them, and their focus coming or going
-    /// draws the strip again (#9).
+    /// slopty: the focus of `entry`'s strip Copy, made on first use and kept while its strip is
+    /// drawn: the keyboard reaches it, and its focus coming or going draws the strip again (#9).
     fn strip_focus(
         &mut self,
         entry: &SharedString,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (gpui::FocusHandle, gpui::FocusHandle) {
+    ) -> gpui::FocusHandle {
         self.strip_drawn.insert(entry.clone());
         if let Some(focus) = self.strip_focus.get(entry) {
-            return (focus.copy.clone(), focus.rewind.clone());
+            return focus.copy.clone();
         }
         let copy = cx.focus_handle().tab_stop(true);
-        let rewind = cx.focus_handle().tab_stop(true);
         let redraw = [
             cx.on_focus(&copy, window, |_, _, cx| cx.notify()),
             cx.on_blur(&copy, window, |_, _, cx| cx.notify()),
-            cx.on_focus(&rewind, window, |_, _, cx| cx.notify()),
-            cx.on_blur(&rewind, window, |_, _, cx| cx.notify()),
         ];
-        let handles = (copy.clone(), rewind.clone());
-        self.strip_focus.insert(entry.clone(), StripFocus { copy, rewind, _redraw: redraw });
-        handles
+        self.strip_focus.insert(entry.clone(), StripFocus { copy: copy.clone(), _redraw: redraw });
+        copy
     }
 
     fn copy_message(&mut self, entry_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
@@ -9526,7 +8862,7 @@ impl Transcript {
         let frame_now = cx.frame_time(); // slopty: the frame's moment, for its tweens
         let file_opener = self.tool_file_opener(cx);
         // slopty: what calls say beyond zeron's chip; a running timer draws again each second.
-        let chip_facts = self.chip_facts(cx);
+        let chip_facts = self.chip_facts();
         if tools.iter().any(|tool| {
             !tool.resolved && tool.facts.as_ref().is_some_and(|facts| facts.timer.is_some())
         }) {
@@ -10334,53 +9670,19 @@ fn agent_message_display(text: &str) -> String {
     format!("Message from {name}\n\n{body}")
 }
 
-/// The bubble text's runs: body text in the sans font, chips as labels in it
-/// with their padding pinned to [`crate::composer::CHIP_PAD_FAMILY`], and an
-/// agent attribution's name in bold.
-fn user_bubble_runs(
-    text: &str,
-    mentions: &[crate::composer::SentMentionSpan],
-    theme: &Theme,
-) -> Vec<TextRun> {
-    // Split runs at chip boundaries (spans are in order). Size and line
-    // height flow from the bubble's div like every text child.
-    let body_run = |len: usize| TextRun {
-        len,
+/// The bubble text's runs: body text in the sans font, and an agent attribution's name in bold.
+fn user_bubble_runs(text: &str, theme: &Theme) -> Vec<TextRun> {
+    // Size and line height flow from the bubble's div like every text child.
+    let mut runs = vec![TextRun {
+        len: text.len(),
         font: gpui::font(theme.font_sans.clone()),
         color: theme.text,
         background_color: None,
         underline: None,
         strikethrough: None,
-    };
-    let mut runs = Vec::with_capacity(mentions.len() * 2 + 1);
-    let mut at = 0;
-    for span in mentions.iter() {
-        if at < span.range.start {
-            runs.push(body_run(span.range.start - at));
-        }
-        // Chips are labels in the body font, like the composer's, with their
-        // padding pinned to the face its insets are tuned for.
-        let [lead, trail] = crate::composer::chip_pad_ranges(&span.range);
-        for (len, pad) in [
-            (lead.len(), true),
-            (trail.start - lead.end, false),
-            (trail.len(), true),
-        ] {
-            if len > 0 {
-                let mut run = body_run(len);
-                if pad {
-                    run.font.family = crate::composer::CHIP_PAD_FAMILY.into();
-                }
-                runs.push(run);
-            }
-        }
-        at = span.range.end;
-    }
-    if at < text.len() {
-        runs.push(body_run(text.len() - at));
-    }
+    }];
     // Attribution names are bold sans text, never Markdown/italic. Split
-    // existing runs so file-mention styling and selection offsets stay intact.
+    // the run so selection offsets stay intact.
     if let Some(rest) = text.strip_prefix("Message from ")
         && let Some((name, _)) = rest.split_once("\n\n")
     {
@@ -10418,52 +9720,18 @@ fn user_bubble_runs(
 fn user_bubble_text(
     row_id: &SharedString,
     text: SharedString,
-    mentions: Arc<Vec<crate::composer::SentMentionSpan>>,
     theme: &Theme,
     measured_h: Rc<Cell<f32>>,
     entity_id: gpui::EntityId,
-    overlays: Vec<ChipOverlay>,
-    open_image: Rc<dyn Fn(&SharedString, &mut Window, &mut gpui::App)>,
 ) -> AnyElement {
-    let runs = user_bubble_runs(&text, &mentions, theme);
+    let runs = user_bubble_runs(&text, theme);
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
-    let chip_layout = layout.clone();
-    // A chip showing a status paints it over its icon well instead.
-    let chip_icons: Vec<Option<crate::composer::ChipIcon>> = mentions
-        .iter()
-        .map(|span| {
-            (!overlays
-                .iter()
-                .any(|overlay| overlay.status.is_some() && overlay.range == span.range))
-            .then(|| crate::composer::chip_icon(span.kind, &span.path, theme.appearance))
-        })
-        .collect();
     let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
     let underlay = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
         move |_, hitbox, window, cx| {
-            for (span, icon) in mentions.iter().zip(&chip_icons) {
-                // Centered on the label like the composer's chips.
-                let label = crate::composer::chip_pad_ranges(&span.range)[0].end;
-                for (row, rect) in render::range_rects(&layout, &span.range, 0.0, 2.0)
-                    .into_iter()
-                    .enumerate()
-                {
-                    let row_top = rect.origin.y - px(2.0);
-                    let offset = crate::composer::text_chip_label_offset(
-                        &layout,
-                        label,
-                        row_top,
-                        px(2.0),
-                        window,
-                    );
-                    let rect = Bounds::new(rect.origin + point(px(0.0), offset), rect.size);
-                    let icon = icon.as_ref().filter(|_| row == 0);
-                    crate::composer::paint_chip(window, rect, icon, &sel_theme, cx);
-                }
-            }
             render::paint_text_selection(window, hitbox, &sel_key, &text, &layout, &sel_theme);
             // Passive geometry cache only: no entity update and no notify.
             // `bounds().height` can be the collapsed clip height, so derive
@@ -10494,22 +9762,10 @@ fn user_bubble_text(
     .size_full();
     // Same wrapper as the assistant markdown: user-bubble text is
     // selectable (paint_text_selection above), so it gets the I-beam too.
-    let text = render::selectable_text_wrap()
+    render::selectable_text_wrap()
         .child(underlay)
         .child(styled)
-        .into_any_element();
-    if overlays.is_empty() {
-        return text;
-    }
-    ChipOverlays {
-        id: format!("{row_id}-chip-overlays").into(),
-        child: text,
-        layout: chip_layout,
-        overlays,
-        open: open_image,
-        well: crate::file_icons::well_bg(theme),
-    }
-    .into_any_element()
+        .into_any_element()
 }
 
 /// slopty: a hover strip's control: a tab stop whose hairline takes the accent from the
@@ -10539,161 +9795,10 @@ pub(super) fn strip_drawn() -> gpui::Div {
         .rounded(px(Theme::CONTROL_RADIUS))
 }
 
-/// The upload status painted in a sent chip's icon well.
-const CHIP_STATUS_SIZE: f32 = 14.0;
-
-/// slopty: what a chat chip's click target opens: the chat whose id follows.
-const CHAT_TARGET: &str = "slopty-open-chat:";
-/// slopty: what a chip naming a chat no longer here says.
-const CHAT_GONE: &str = "Chat no longer available";
-
-/// One sent chip's extras, laid over its pill: a status in place of its icon
-/// and, for a loaded image, a click target opening it full size.
-struct ChipOverlay {
-    range: Range<usize>,
-    open: Option<SharedString>,
-    /// slopty: what its click target is called, and its tooltip.
-    label: SharedString,
-    tip: Option<SharedString>,
-    status: Option<AnyElement>,
-}
-
-/// Wraps a sent bubble's text with its chips' overlays. They follow the
-/// shaped text, so a chip that wraps gets a click target per row; its status
-/// sits on the first row, where the icon would be.
-struct ChipOverlays {
-    id: SharedString,
-    child: AnyElement,
-    layout: gpui::TextLayout,
-    overlays: Vec<ChipOverlay>,
-    open: Rc<dyn Fn(&SharedString, &mut Window, &mut gpui::App)>,
-    well: gpui::Hsla,
-}
-
-impl IntoElement for ChipOverlays {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl gpui::Element for ChipOverlays {
-    type RequestLayoutState = ();
-    type PrepaintState = Vec<AnyElement>;
-
-    fn id(&self) -> Option<gpui::ElementId> {
-        Some(self.id.clone().into())
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        window: &mut Window,
-        cx: &mut gpui::App,
-    ) -> (gpui::LayoutId, ()) {
-        (self.child.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        window: &mut Window,
-        cx: &mut gpui::App,
-    ) -> Vec<AnyElement> {
-        self.child.prepaint(window, cx);
-        let mut targets = Vec::new();
-        for (index, overlay) in self.overlays.iter_mut().enumerate() {
-            let rects = render::range_rects(&self.layout, &overlay.range, 0.0, 2.0);
-            if let (Some(status), Some(first)) = (overlay.status.take(), rects.first()) {
-                // Matches `paint_chip`'s icon well.
-                let side = first.size.height - px(2.0);
-                let mut well = div()
-                    .size(side)
-                    .rounded(px(4.0))
-                    .bg(self.well)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(status)
-                    .into_any_element();
-                well.prepaint_as_root(
-                    first.origin + point(px(1.0), px(1.0)),
-                    size(side, side).map(gpui::AvailableSpace::Definite),
-                    window,
-                    cx,
-                );
-                targets.push(well);
-            }
-            // slopty: a chip with a tooltip and nothing to open still gets a target.
-            if overlay.open.is_none() && overlay.tip.is_none() {
-                continue;
-            }
-            for (part, rect) in rects.into_iter().enumerate() {
-                let open = self.open.clone();
-                let path = overlay.open.clone();
-                let mut target = div()
-                    .id(SharedString::from(format!("{}-{index}-{part}", self.id)))
-                    .w(rect.size.width)
-                    .h(rect.size.height)
-                    .aria_label(overlay.label.clone())
-                    .when_some(overlay.tip.clone(), |el, tip| {
-                        el.tooltip(crate::settings::widgets::text_tooltip(tip))
-                    })
-                    .when_some(path, |el, path| {
-                        el.cursor_pointer()
-                            .role(gpui::Role::Button)
-                            .on_click(move |event, window, cx| {
-                                // A drag that selects text across the chip is not a click.
-                                if event.click_count() == 1
-                                    && crate::markdown::selection::selected_text().is_none()
-                                {
-                                    open(&path, window, cx);
-                                }
-                            })
-                    })
-                    .into_any_element();
-                target.prepaint_as_root(
-                    rect.origin,
-                    rect.size.map(gpui::AvailableSpace::Definite),
-                    window,
-                    cx,
-                );
-                targets.push(target);
-            }
-        }
-        targets
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&gpui::GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut (),
-        targets: &mut Vec<AnyElement>,
-        window: &mut Window,
-        cx: &mut gpui::App,
-    ) {
-        self.child.paint(window, cx);
-        for target in targets {
-            target.paint(window, cx);
-        }
-    }
-}
-
 /// A sent message's non-image attachment: the file's icon and name on the
 /// same soft pill the transcript uses for file badges. Its bytes are never
 /// read back to the transcript, so there is no thumbnail to wait for.
 fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
-    let name = crate::attachments::attachment_display_name(name);
     div()
         .h(px(28.0))
         .max_w(px(260.0))
@@ -11028,11 +10133,15 @@ fn detail_body(
                     })
             }))
             .into_any_element(),
+        // slopty: the block says its lines to assistive tech, as a markdown block says its words.
         ToolDetail::Output {
             lines,
             truncated_by,
             stderr_from,
         } => body
+            .id(SharedString::from(format!("{selection_key}-output")))
+            .role(gpui::Role::Code)
+            .aria_label(SharedString::from(lines.join("\n")))
             .py(px(6.0))
             .font_family(theme.font_mono.clone())
             .text_size(px(TOOL_TEXT_SIZE))
@@ -11988,10 +11097,10 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         if let MessagePart::Input { resolved, .. } = part {
             acc.push(0x10 | *resolved as u8);
         }
-        // slopty: an error's retry and a divider's words change in place.
+        // slopty: an error's and a divider's words change in place.
         match part {
-            MessagePart::Error { message, retry, .. } => {
-                acc.push(0x20 | *retry as u8);
+            MessagePart::Error { message, .. } => {
+                acc.push(0x20);
                 acc.extend_from_slice(message.as_bytes());
             }
             MessagePart::Marker { text, .. } => acc.extend_from_slice(text.as_bytes()),
@@ -12013,7 +11122,6 @@ impl Render for Transcript {
         // slopty: a subagent's card sizes its child by the window, and drills in on a phone's.
         self.subagents.window = window.viewport_size();
         self.mark_jump();
-        self.watch_rewind(cx);
         self.md_images.borrow_mut().folder = self.image_host(cx).1;
         if record_view_frame("transcript") {
             tracing::warn!(
@@ -12033,7 +11141,7 @@ impl Render for Transcript {
         // slopty: a strip no longer drawn lets its focus go, unless it holds the keyboard (#13).
         let drawn = std::mem::take(&mut self.strip_drawn);
         self.strip_focus.retain(|entry, focus| {
-            drawn.contains(entry) || focus.copy.is_focused(window) || focus.rewind.is_focused(window)
+            drawn.contains(entry) || focus.copy.is_focused(window)
         });
         let content_width =
             crate::settings::transcript_width(f32::from(window.viewport_size().width), cx);
@@ -12195,7 +11303,6 @@ impl Render for Transcript {
                     .ok();
             });
         }
-        let rail = self.render_rail(cx);
         // The scroll-to-bottom pill is rendered by the SHELL (conversation
         // region overlay): it must float just above the composer and paint
         // OVER the bottom fade gradient, which is a later sibling of this
@@ -12254,17 +11361,14 @@ impl Render for Transcript {
             // slopty: find's per-row counts start again each frame, before any row paints.
             .child(crate::markdown::find::frame_reset(cx.entity_id().as_u64()))
             .child(content)
-            .child(rail)
             .children(self.fit.clone().map(|fit| fit.measure(self.list.clone()))); // slopty
         // slopty: the held group's band defers its paint above the top fade; added before the
         // menus, which defer theirs too, so they open over it.
         let root = root.children(self.render_sticky_group(window, cx));
         let root = root.children(self.render_image_menu(cx));
-        let root = root.children(self.render_rewind_menu(cx)); // slopty
         let root = root.children(self.render_context_menu(cx)); // slopty
-        // slopty: find in thread, over the transcript's top right, and a selection's Quote.
+        // slopty: find in thread, over the transcript's top right.
         let root = root.children(self.render_find_bar(window, cx));
-        let root = root.children(self.render_quote_offer(cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -13659,46 +12763,6 @@ mod tests {
     }
 
     #[test]
-    fn queued_turn_waits_for_its_bubble_without_replacing_the_live_turn() {
-        let live_rows = vec![viewport_row("live", "live-prompt")];
-        let mut pending = PendingQueuedTurns::default();
-        pending.register("chat-a".into(), "queued-prompt".into());
-
-        assert_eq!(
-            pending.take_latest_materialized("chat-a", &live_rows),
-            None,
-            "queue-panel insertion alone must not claim a transcript anchor"
-        );
-        assert_eq!(pending.len(), 1, "the queued id remains armed");
-
-        let materialized = vec![
-            viewport_row("live", "live-prompt"),
-            viewport_row("queued", "queued-prompt"),
-        ];
-        assert_eq!(
-            pending.take_latest_materialized("chat-a", &materialized),
-            Some("queued-prompt".into()),
-            "the stable id promotes only when its real bubble appears"
-        );
-        assert_eq!(pending.len(), 0);
-    }
-
-    #[test]
-    fn newest_materialized_queue_turn_owns_a_batched_transcript_frame() {
-        let mut pending = PendingQueuedTurns::default();
-        pending.register("chat-a".into(), "queued-a".into());
-        pending.register("chat-b".into(), "other-chat".into());
-        pending.register("chat-a".into(), "queued-b".into());
-        let rows = vec![viewport_row("a", "queued-a"), viewport_row("b", "queued-b")];
-
-        assert_eq!(
-            pending.take_latest_materialized("chat-a", &rows),
-            Some("queued-b".into())
-        );
-        assert_eq!(pending.len(), 1, "another chat's candidate is preserved");
-    }
-
-    #[test]
     fn restored_viewport_discards_a_failed_optimistic_turn() {
         let outgoing = vec![viewport_row("prompt", "prompt")];
         let own_turn = OwnTurnAnchor {
@@ -13951,7 +13015,6 @@ mod tests {
                     .map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}")))
                     .collect();
                 this.list.reset(PROMPT + 1);
-                this.rail_enabled = false;
                 cx.notify();
             });
             let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
@@ -14012,10 +13075,10 @@ mod tests {
         assert_eq!(image_label("slopty-image:7/toolu_01/0/abc.png", " "), "Preview generated image");
     }
 
-    /// slopty: a prompt the rail jumps to lands below the titlebar the transcript fades under,
+    /// slopty: a prompt a jump goes to lands below the titlebar the transcript fades under,
     /// where a sent prompt is held, not behind it.
     #[gpui::test]
-    fn a_rail_jump_lands_the_prompt_below_the_titlebar(cx: &mut gpui::TestAppContext) {
+    fn a_jump_lands_the_prompt_below_the_titlebar(cx: &mut gpui::TestAppContext) {
         struct Fixture(Entity<Transcript>);
         impl Render for Fixture {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -14036,7 +13099,6 @@ mod tests {
                 (0..60).map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}"))).collect();
             this.list.reset(60);
             this.pinned = false;
-            this.rail_enabled = false;
             cx.notify();
         });
         let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
@@ -14074,7 +13136,6 @@ mod tests {
                 (0..60).map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}"))).collect();
             this.list.reset(60);
             this.pinned = false;
-            this.rail_enabled = false;
             cx.notify();
         });
         let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
@@ -14154,7 +13215,6 @@ mod tests {
                 (0..60).map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}"))).collect();
             this.list.reset(60);
             this.pinned = false;
-            this.rail_enabled = false;
             cx.notify();
         });
         let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
@@ -14751,7 +13811,6 @@ mod tests {
                     id: "e1".into(),
                     message: "boom".into(),
                     detail: None, // slopty: new field.
-                    retry: false, // slopty: new field.
                 },
                 tool_part("t1", "pwd"),
                 text_part("r0", "the answer"),
@@ -15506,7 +14565,6 @@ mod tests {
                 )];
                 transcript.update(cx, |this, cx| {
                     feed(this, entries.clone(), cx);
-                    this.rail_enabled = false;
                     this.pinned = false;
                     this.list.scroll_to(ListOffset {
                         item_ix: 0,
@@ -15888,7 +14946,6 @@ mod tests {
                 transcript.update(cx, |this, cx| {
                     this.rows = vec![viewport_row("prompt", "prompt")];
                     this.list.reset(1);
-                    this.rail_enabled = false;
                     cx.notify();
                 });
                 draw(window, cx);
@@ -15938,7 +14995,6 @@ mod tests {
                 transcript.update(cx, |this, cx| {
                     this.rows = vec![viewport_row("prompt", "prompt")];
                     this.list.reset(1);
-                    this.rail_enabled = false;
                     this.on_own_send("chat".into(), "prompt".into(), cx);
                     this.list.scroll_to(ListOffset::default());
                 });
@@ -16028,7 +15084,6 @@ mod tests {
                         )],
                         cx,
                     );
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 let bounds = render::selection_test_bounds("reply#text.39:39");
@@ -16091,7 +15146,6 @@ mod tests {
             with_window(|transcript, window, cx| {
                 transcript.update(cx, |this, cx| {
                     feed(this, vec![prompt("prompt")], cx);
-                    this.rail_enabled = false;
                     this.state.update(cx, |state, _| {
                         state.sessions.push(slopty_view_proto::Session {
                             last_completed_turn: None,
@@ -16201,7 +15255,6 @@ mod tests {
             with_window(|transcript, window, cx| {
                 transcript.update(cx, |this, cx| {
                     feed(this, vec![], cx);
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 transcript.update(cx, |this, cx| {
@@ -16231,7 +15284,6 @@ mod tests {
             with_window(|transcript, window, cx| {
                 transcript.update(cx, |this, cx| {
                     feed(this, vec![prompt("prompt")], cx);
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 transcript.update(cx, |this, cx| {
@@ -16309,7 +15361,6 @@ mod tests {
                 transcript.update(cx, |this, cx| {
                     this.rows = vec![viewport_row("prompt", "prompt")];
                     this.list.reset(1);
-                    this.rail_enabled = false;
                     this.on_own_send("chat".into(), "prompt".into(), cx);
                     this.list.scroll_to(ListOffset::default());
                 });
@@ -16351,7 +15402,6 @@ mod tests {
             with_window(|transcript, window, cx| {
                 transcript.update(cx, |this, cx| {
                     feed(this, vec![prompt("prompt")], cx);
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 transcript.update(cx, |this, cx| {
@@ -16411,7 +15461,6 @@ mod tests {
             with_window(|transcript, window, cx| {
                 transcript.update(cx, |this, cx| {
                     feed(this, vec![prompt("first")], cx);
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 transcript.update(cx, |this, cx| {
@@ -16491,7 +15540,6 @@ mod tests {
                     ));
                     entries.push(prompt("prompt"));
                     feed(this, entries, cx);
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 transcript.update(cx, |this, cx| {
@@ -16542,7 +15590,6 @@ mod tests {
                         })
                         .collect();
                     feed(this, entries, cx);
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 for _ in 0..6 {
@@ -16589,7 +15636,6 @@ mod tests {
                 transcript.update(cx, |this, cx| {
                     this.rows = vec![viewport_row("prompt", "prompt")];
                     this.list.reset(1);
-                    this.rail_enabled = false;
                     this.on_own_send("chat".into(), "prompt".into(), cx);
                     this.list.scroll_to(ListOffset::default());
                 });
@@ -16637,7 +15683,6 @@ mod tests {
                         offset_in_item: px(0.0),
                     });
                     this.pinned = false;
-                    this.rail_enabled = false;
                     cx.notify();
                 });
                 draw(window, cx);
@@ -16668,7 +15713,6 @@ mod tests {
             with_window(|transcript, window, cx| {
                 transcript.update(cx, |this, cx| {
                     feed(this, vec![prompt("prompt")], cx);
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 transcript.update(cx, |this, cx| {
@@ -16738,7 +15782,6 @@ mod tests {
                         ],
                         cx,
                     );
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 transcript.update(cx, |this, cx| {
@@ -16794,7 +15837,6 @@ mod tests {
                     this.rows = vec![row];
                     this.list.reset(1);
                     this.pinned = false;
-                    this.rail_enabled = false;
                     cx.notify();
                 });
                 draw(window, cx);
@@ -16903,7 +15945,6 @@ mod tests {
                 for token in MERMAID_FENCE.split_inclusive([' ', '\n']) {
                     text.push_str(token);
                     transcript.update(cx, |this, cx| {
-                        this.rail_enabled = false;
                         feed(this, reply(MessageStatus::Streaming, text.clone()), cx)
                     });
                     tick(&transcript, window, cx);
@@ -17006,7 +16047,6 @@ mod tests {
                     ]
                 };
                 transcript.update(cx, |this, cx| {
-                    this.rail_enabled = false;
                     feed(
                         this,
                         reply(MessageStatus::Streaming, "\nAfter the diagram."),
@@ -17056,7 +16096,6 @@ mod tests {
             with_window(|transcript, window, cx| {
                 transcript.update(cx, |this, cx| {
                     feed(this, vec![prompt("prompt")], cx);
-                    this.rail_enabled = false;
                 });
                 draw(window, cx);
                 transcript.update(cx, |this, cx| {
@@ -17146,7 +16185,6 @@ mod tests {
                         .map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}")))
                         .collect();
                     this.list.reset(this.rows.len());
-                    this.rail_enabled = false;
                     cx.notify();
                 });
                 draw(window, cx);
@@ -17210,7 +16248,6 @@ mod tests {
                         offset_in_item: px(0.0),
                     });
                     this.pinned = false;
-                    this.rail_enabled = false;
                     this.own_turn = Some(OwnTurnAnchor {
                         chat_id: "chat".into(),
                         message_id: "entry-0".into(),
@@ -17301,7 +16338,6 @@ mod tests {
                         ],
                         cx,
                     );
-                    this.rail_enabled = false;
                     this.on_own_send("chat".into(), "prompt".into(), cx);
                 });
                 for _ in 0..80 {
@@ -17557,310 +16593,6 @@ mod tests {
         assert_eq!(attachments.len(), 1);
     }
 
-    /// A sent bubble shapes each chip's padding in Geist and its label, like
-    /// the rest of the body, in the interface font.
-    #[test]
-    fn bubble_chip_padding_is_shaped_in_geist() {
-        let raw = format!(
-            "open {} and {}",
-            slopty_view_proto::attachment_mentions::attachment_mention_link(1, None),
-            slopty_view_proto::attachment_mentions::attachment_mention_link(2, Some("notes.md")),
-        );
-        let (text, spans) = crate::composer::sent_mention_display(&raw).expect("chips project");
-        let mut theme = Theme::dark();
-        theme.font_sans = "Geist Mono".into();
-        let runs = user_bubble_runs(&text, &spans, &theme);
-        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
-        let mut at = 0;
-        let mut pads = Vec::new();
-        for run in &runs {
-            let range = at..at + run.len;
-            at = range.end;
-            if run.font.family.as_ref() == crate::composer::CHIP_PAD_FAMILY {
-                pads.push(range);
-            } else {
-                assert_eq!(run.font.family.as_ref(), "Geist Mono");
-            }
-        }
-        let expected: Vec<_> = spans
-            .iter()
-            .flat_map(|span| crate::composer::chip_pad_ranges(&span.range))
-            .collect();
-        assert_eq!(pads, expected);
-    }
-
-    /// A sent prompt's file mentions render as chips in the transcript: the
-    /// row carries the projected display text plus spans, while ordinary
-    /// prompts keep the empty-spans fast path. The row version derives from
-    /// the RAW text either way, so projection never perturbs the diff key.
-    /// A chip whose upload is still crossing to the host shows its progress
-    /// in place of its icon, as the strip's thumbnail did; once the bytes
-    /// land (the ref is rewritten to a local path) the icon comes back.
-    #[gpui::test]
-    fn sent_chips_show_upload_progress_until_their_bytes_land(cx: &mut gpui::TestAppContext) {
-        use slopty_view_proto::attachment_mentions::attachment_mention_link;
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
-        });
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, _| {
-            state.apply_transfers(vec![slopty_view_proto::TransferProgress {
-                upload_id: "att-1".into(),
-                file_name: "Image 1.png".into(),
-                done: 430,
-                total: 1_000,
-            }])
-        });
-        let transcript = cx.new(|cx| Transcript::new(state, cx));
-        let body = format!(
-            "compare {} with {} and {}",
-            attachment_mention_link(1, None),
-            attachment_mention_link(2, Some("notes.md")),
-            attachment_mention_link(3, Some("done.md")),
-        );
-        let raw = crate::attachments::with_attachments(
-            &body,
-            &[
-                "pending://att-1/Image 1.png".to_string(),
-                "pending://att-2/notes.md".to_string(),
-                "/uploads/ef56ab78-done.md".to_string(),
-            ],
-        );
-        let mut entry = assistant("u5", MessageStatus::Complete, vec![]);
-        entry.role = MessageRole::User;
-        entry.status = None;
-        entry.parts = vec![text_part("t0", &raw)];
-        let rows = work_rows(&entry, true, &mut parse);
-        let RowKind::User {
-            mentions,
-            attachments,
-            ..
-        } = &rows[0].kind
-        else {
-            panic!("expected a user row");
-        };
-        assert!(attachments.is_empty());
-        let mentions = mentions.clone();
-        transcript.update(cx, |transcript, cx| {
-            let overlays = transcript.chip_overlays(&"u5".into(), &mentions, &Theme::dark(), cx);
-            // The image (43% across) and the file still crossing show a
-            // status; the landed file shows its icon.
-            assert_eq!(
-                overlays
-                    .iter()
-                    .map(|overlay| (overlay.range.clone(), overlay.status.is_some()))
-                    .collect::<Vec<_>>(),
-                [
-                    (mentions[0].range.clone(), true),
-                    (mentions[1].range.clone(), true)
-                ]
-            );
-            assert_eq!(
-                transcript.upload_status("pending://att-1/Image 1.png", cx),
-                (true, Some(43))
-            );
-            assert_eq!(
-                transcript.upload_status("/uploads/ef56ab78-done.md", cx),
-                (false, None)
-            );
-        });
-    }
-
-    /// slopty: a sent chip naming a chat is live: its tooltip names the chat as it is called now
-    /// and a click opens it; a chip naming a chat gone from here says so and opens nothing.
-    #[gpui::test]
-    fn sent_chat_chips_open_their_chat(cx: &mut gpui::TestAppContext) {
-        use slopty_view_proto::chat_mentions::chat_mention_link;
-        struct Fixture(Entity<Transcript>);
-        impl Render for Fixture {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().child(self.0.clone())
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
-        });
-        let state = cx.new(|_| AppState::new());
-        state.update(cx, |state, _| {
-            let chat: slopty_view_proto::Chat = serde_json::from_value(serde_json::json!({
-                "id": "c1",
-                "deviceId": "dev",
-                "archived": false,
-                "createdAt": chrono::Utc::now(),
-                "title": "Renamed  since",
-            }))
-            .unwrap();
-            state.apply_chats(vec![chat]);
-        });
-        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-        let raw = format!(
-            "see {} and {}",
-            chat_mention_link("c1", "Old title").unwrap(),
-            chat_mention_link("gone1", "Gone").unwrap()
-        );
-        let mut entry = assistant("u6", MessageStatus::Complete, vec![]);
-        entry.role = MessageRole::User;
-        entry.status = None;
-        entry.parts = vec![text_part("t0", &raw)];
-        let rows = work_rows(&entry, true, &mut parse);
-        let RowKind::User { mentions, .. } = &rows[0].kind else {
-            panic!("expected a user row");
-        };
-        let mentions = mentions.clone();
-        let target = transcript.update(cx, |transcript, cx| {
-            let overlays = transcript.chip_overlays(&"u6".into(), &mentions, &Theme::dark(), cx);
-            let shown: Vec<_> = overlays
-                .iter()
-                .map(|overlay| {
-                    (
-                        overlay.open.as_ref().map(ToString::to_string),
-                        overlay.label.to_string(),
-                        overlay.tip.as_ref().map(ToString::to_string),
-                    )
-                })
-                .collect();
-            assert_eq!(
-                shown,
-                [
-                    (
-                        Some(format!("{CHAT_TARGET}c1")),
-                        "Open Renamed since".to_owned(),
-                        Some("Renamed since".to_owned())
-                    ),
-                    (None, CHAT_GONE.to_owned(), Some(CHAT_GONE.to_owned())),
-                ]
-            );
-            overlays[0].open.clone().unwrap()
-        });
-        let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
-        cx.update(|window, cx| {
-            transcript.update(cx, |transcript, cx| transcript.open_chip(&target, window, cx));
-        });
-        assert_eq!(state.read_with(cx, |state, _| state.selected_chat.clone()).as_deref(), Some("c1"));
-    }
-
-    /// A sent message with image, file-attachment and workspace-file chips
-    /// reads as chips in the bubble; only attachments without a chip stay in
-    /// the strip above.
-    #[test]
-    fn user_bubbles_project_attachment_chips_in_place_of_the_strip() {
-        use crate::composer::ChipKind;
-        use slopty_view_proto::attachment_mentions::attachment_mention_link;
-        let body = format!(
-            "compare {} with {} and {}",
-            attachment_mention_link(1, None),
-            attachment_mention_link(2, Some("notes.md")),
-            "[composer.rs](slopty-file:crates/ui/src/composer.rs)",
-        );
-        let raw = crate::attachments::with_attachments(
-            &body,
-            &[
-                "/uploads/ab12cd34-Image_1.png".to_string(),
-                "/uploads/ef56ab78-notes.md".to_string(),
-                "/uploads/0a1b2c3d-Image_3.png".to_string(),
-            ],
-        );
-        let mut entry = assistant("u4", MessageStatus::Complete, vec![]);
-        entry.role = MessageRole::User;
-        entry.status = None;
-        entry.parts = vec![text_part("t0", &raw)];
-        let rows = work_rows(&entry, false, &mut parse);
-        let RowKind::User {
-            text,
-            mentions,
-            attachments,
-            ..
-        } = &rows[0].kind
-        else {
-            panic!("expected a user row");
-        };
-        assert!(!text.contains("slopty-") && !text.contains("Attached images"));
-        assert_eq!(
-            mentions.iter().map(|m| m.kind).collect::<Vec<_>>(),
-            [ChipKind::Image, ChipKind::File, ChipKind::File]
-        );
-        let labels: Vec<String> = mentions
-            .iter()
-            .map(|m| {
-                text[m.range.clone()]
-                    .trim_matches(|c: char| !c.is_alphanumeric())
-                    .replace('\u{a0}', " ")
-            })
-            .collect();
-        assert_eq!(labels, ["Image 1", "notes.md", "composer.rs"]);
-        // Chips stand in for their attachments: only the unchipped image is
-        // left in the strip, and each attachment chip carries its upload.
-        assert_eq!(
-            attachments
-                .iter()
-                .map(|a| a.path.as_str())
-                .collect::<Vec<_>>(),
-            ["/uploads/0a1b2c3d-Image_3.png"]
-        );
-        assert_eq!(
-            mentions
-                .iter()
-                .map(|m| m.upload.as_deref())
-                .collect::<Vec<_>>(),
-            [
-                Some("/uploads/ab12cd34-Image_1.png"),
-                Some("/uploads/ef56ab78-notes.md"),
-                None
-            ]
-        );
-
-        // A files-only send hides the placeholder body.
-        let raw = crate::attachments::with_attachments("", &["/uploads/ef56ab78-notes.md".into()]);
-        entry.parts = vec![text_part("t0", &raw)];
-        let rows = work_rows(&entry, false, &mut parse);
-        let RowKind::User {
-            text, attachments, ..
-        } = &rows[0].kind
-        else {
-            panic!("expected a user row");
-        };
-        assert!(text.is_empty());
-        assert_eq!(attachments.len(), 1);
-    }
-
-    #[test]
-    fn user_rows_project_file_mentions_into_chips() {
-        let raw = "look at [composer.rs](slopty-file:crates/ui/src/composer.rs) please";
-        let mut entry = assistant("u3", MessageStatus::Complete, vec![]);
-        entry.role = MessageRole::User;
-        entry.status = None;
-        entry.parts = vec![text_part("t0", raw)];
-        let rows = work_rows(&entry, false, &mut parse);
-        let RowKind::User { text, mentions, .. } = &rows[0].kind else {
-            panic!("expected a user row");
-        };
-        assert!(
-            !text.contains("slopty-file:"),
-            "raw link left visible: {text}"
-        );
-        assert!(text.contains("composer.rs"));
-        assert_eq!(mentions.len(), 1);
-        assert_eq!(mentions[0].kind, crate::composer::ChipKind::File);
-        assert_eq!(mentions[0].path.as_ref(), "crates/ui/src/composer.rs");
-        let chip = &text[mentions[0].range.clone()];
-        assert!(chip.starts_with('\u{00A0}') && chip.contains("composer.rs"));
-        assert_eq!(rows[0].version, (raw.len() as u64) << 1);
-
-        entry.parts = vec![text_part("t0", "no mentions here")];
-        let rows = work_rows(&entry, false, &mut parse);
-        let RowKind::User { text, mentions, .. } = &rows[0].kind else {
-            panic!("expected a user row");
-        };
-        assert_eq!(text.as_ref(), "no mentions here");
-        assert!(mentions.is_empty());
-    }
-
     #[test]
     fn diff_rows_appends_and_middle_edits() {
         let entry1 = assistant("m1", MessageStatus::Complete, vec![text_part("t0", "one")]);
@@ -17991,6 +16723,16 @@ mod tests {
             assert_eq!(lines[0].chars().count(), OUTPUT_LINE_MAX_CHARS + 1);
             assert!(lines[0].ends_with("é…"));
             assert_eq!(lines[1].as_ref(), "short");
+        }
+
+        // slopty: a line of JSON reads pretty-printed, in the summary and the whole output alike.
+        let json = r#"[{"name":"studio","liveness":"online"}]"#;
+        for detail in [tool_detail(Some(json), None, None), blob_detail(json, false)] {
+            let Some(ToolDetail::Output { lines, .. }) = detail else {
+                panic!("expected output detail");
+            };
+            assert!(lines.len() > 1, "pretty-printed: {lines:?}");
+            assert!(lines.iter().any(|line| line.trim() == r#""liveness": "online""#));
         }
 
         // Nothing → no affordance.
@@ -18752,15 +17494,6 @@ mod tests {
         assert_eq!(flavour_word(seed, 3), flavour_word(seed, 3));
     }
 
-    /// slopty: a held send names who is away: this device when it is the one offline, never
-    /// the machine that is fine (#10).
-    #[test]
-    fn a_queued_send_says_who_it_waits_for() {
-        assert_eq!(queued_words(true, Some("studio")), "Queued \u{b7} sends when you're back online");
-        assert_eq!(queued_words(false, Some("studio")), "Queued \u{b7} sends when studio is back");
-        assert_eq!(queued_words(false, None), "Queued \u{b7} sends when its machine is back");
-    }
-
     #[test]
     fn elapsed_format_scales_from_seconds_to_days() {
         for (secs, expected) in [
@@ -18789,23 +17522,6 @@ mod tests {
         assert_eq!(ticking_elapsed(65), "1m 05s");
         assert_eq!(ticking_elapsed(3_900), "1h 05m");
         assert_eq!(ticking_elapsed(90_000), "1d 01h");
-    }
-
-    #[test]
-    fn sending_bridge_holds_until_the_turn_outdates_the_send() {
-        let send = chrono::DateTime::parse_from_rfc3339("2026-08-13T10:00:00Z")
-            .unwrap()
-            .to_utc();
-        let before = send - chrono::Duration::seconds(90);
-        let after = send + chrono::Duration::seconds(2);
-        // In flight, row still on the previous turn (or no row yet).
-        assert!(sending_bridge(Some(send), Some(before)));
-        assert!(sending_bridge(Some(send), None));
-        // The turn started after the send fired — timer takes over.
-        assert!(!sending_bridge(Some(send), Some(after)));
-        // No send in flight: never a bridge, whatever the row says.
-        assert!(!sending_bridge(None, Some(before)));
-        assert!(!sending_bridge(None, None));
     }
 
     #[test]

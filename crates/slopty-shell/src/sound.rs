@@ -218,9 +218,9 @@ impl SessionNotificationState {
         }
     }
 
-    /// Call after saving the new baseline, including when delivery is pending
-    /// or outputs are disabled. Suppressed pings must never be replayed later.
-    pub(crate) fn sound_since(&self, prev: &Self, send_pending: bool) -> Option<Sound> {
+    /// Call after saving the new baseline, including when outputs are
+    /// disabled. Suppressed pings must never be replayed later.
+    pub(crate) fn sound_since(&self, prev: &Self) -> Option<Sound> {
         if self.indicator == Indicator::Errored && prev.indicator != Indicator::Errored {
             return Some(Sound::Attention);
         }
@@ -228,8 +228,7 @@ impl SessionNotificationState {
         {
             return Some(Sound::Request);
         }
-        if !send_pending
-            && self.fresh
+        if self.fresh
             && self.last_completed_turn.is_some()
             && self.last_completed_turn != prev.last_completed_turn
         {
@@ -328,10 +327,10 @@ mod tests {
     fn interrupted_and_expired_activity_never_chime() {
         let working = baseline(Indicator::Working, Some("old"));
         let idle = baseline(Indicator::None, Some("old"));
-        assert_eq!(idle.sound_since(&working, false), None);
+        assert_eq!(idle.sound_since(&working), None);
         // An older host without explicit completion metadata is silent too.
         assert_eq!(
-            baseline(Indicator::None, None).sound_since(&baseline(Indicator::Working, None), false),
+            baseline(Indicator::None, None).sound_since(&baseline(Indicator::Working, None)),
             None
         );
     }
@@ -340,8 +339,8 @@ mod tests {
     fn a_run_error_chimes_once_and_never_masquerades_as_completion() {
         let working = baseline(Indicator::Working, Some("old"));
         let errored = baseline(Indicator::Errored, Some("failed"));
-        assert_eq!(errored.sound_since(&working, false), Some(Sound::Attention));
-        assert_eq!(errored.sound_since(&errored, false), None);
+        assert_eq!(errored.sound_since(&working), Some(Sound::Attention));
+        assert_eq!(errored.sound_since(&errored), None);
     }
 
     #[test]
@@ -374,22 +373,11 @@ mod tests {
     fn ordinary_queue_completions_survive_coalesced_working_states() {
         let first = baseline(Indicator::Working, None);
         let second = baseline(Indicator::Working, Some("first"));
-        assert_eq!(second.sound_since(&first, false), Some(Sound::Done));
-        assert_eq!(second.sound_since(&second, false), None);
+        assert_eq!(second.sound_since(&first), Some(Sound::Done));
+        assert_eq!(second.sound_since(&second), None);
         let last = baseline(Indicator::None, Some("second"));
-        assert_eq!(last.sound_since(&second, false), Some(Sound::Done));
-        assert_eq!(last.sound_since(&last, false), None);
-    }
-
-    #[test]
-    fn pending_send_consumes_completion_but_preserves_input_requests() {
-        let before = baseline(Indicator::Working, None);
-        let settled = baseline(Indicator::None, Some("first"));
-        assert_eq!(settled.sound_since(&before, true), None);
-        assert_eq!(settled.sound_since(&settled, false), None);
-        let question = baseline(Indicator::AwaitingInput, Some("first"));
-        assert_eq!(question.sound_since(&settled, true), Some(Sound::Request));
-        assert_eq!(question.sound_since(&question, false), None);
+        assert_eq!(last.sound_since(&second), Some(Sound::Done));
+        assert_eq!(last.sound_since(&last), None);
     }
 
     #[test]
@@ -397,9 +385,9 @@ mod tests {
         let before = baseline(Indicator::Working, None);
         let mut stale = baseline(Indicator::None, Some("old"));
         stale.fresh = false;
-        assert_eq!(stale.sound_since(&before, false), None);
+        assert_eq!(stale.sound_since(&before), None);
         let refreshed = baseline(Indicator::Working, Some("old"));
-        assert_eq!(refreshed.sound_since(&stale, false), None);
+        assert_eq!(refreshed.sound_since(&stale), None);
     }
 
     #[test]

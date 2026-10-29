@@ -6,9 +6,10 @@
 //! `slopty_agent::detect` says it is a coding agent, the session has an agent, and when it goes
 //! the agent goes with it. Nothing of the terminal's screen is read.
 //!
-//! What it sees keeps orchestration from typing into the terminal (`orchestrate::may_type`).
-//! The sleep policy counts the threads Slopty drives, as their host holds them
-//! (`crate::threads::awake`).
+//! What it sees keeps orchestration from typing into the terminal (`orchestrate::may_type`),
+//! and tells the Claude Code observer which terminals run Claude Code
+//! (`slopty_worker::thread::claude`), which reads each one's session as a thread. The sleep
+//! policy counts the threads at work, as their host holds them (`crate::threads::awake`).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use slopty_agent::Observation;
 use slopty_agent::detect::Program;
 use slopty_core::SessionId;
 use slopty_worker::session::Probe;
+use slopty_worker::thread::claude::Foreground;
 
 use crate::Daemon;
 
@@ -36,6 +38,11 @@ pub async fn watch(daemon: Daemon) -> ! {
         for session in unlooked {
             let _sent = daemon.presence.send((session, false));
         }
+        let seen: Vec<(SessionId, Foreground)> =
+            live.iter().map(|(id, probe)| (*id, foreground(probe))).collect();
+        if let Some(threads) = &daemon.threads {
+            threads.claude().tick(seen);
+        }
         let mut agents = daemon.agents.lock();
         for (session, probe) in live {
             if let Some(event) = agents.observe(session, &observation(probe)) {
@@ -44,6 +51,20 @@ pub async fn watch(daemon: Daemon) -> ! {
         }
         let _gone = agents.retain(&ids);
         drop(agents);
+    }
+}
+
+/// What the Claude Code observer is told of a terminal's foreground.
+fn foreground(probe: &Probe) -> Foreground {
+    match &probe.foreground {
+        Some(fg) if slopty_agent::detect::is_claude(&fg.name, &fg.argv) => {
+            match u32::try_from(fg.pid) {
+                Ok(pid) => Foreground::Claude { pid, cwd: fg.cwd.clone() },
+                Err(_) => Foreground::Unknown,
+            }
+        }
+        Some(_) => Foreground::Other,
+        None => Foreground::Unknown,
     }
 }
 

@@ -1,193 +1,39 @@
-//! Turn snapshots and the review over them, for every thread whatever drives its agent
-//! (`crate::repo::snapshot` is the git half).
+//! A thread's repository, read for review: its working tree against a commit, a range of its
+//! commits, and the sides of a file either showed (`crate::repo::snapshot` is the git half).
 //!
-//! The worker takes a snapshot of the thread's working tree as each turn begins and ends, off
-//! the turn's own path: the turn's edge goes out at once, and the snapshot follows as an
-//! [`Action::Snapshot`] when git is done. A turn's start is snapshotted at the earliest word of
-//! it, the agent starting to work ([`Moment::Busy`]), since an adapter may only see the turn
-//! itself once the agent has begun. A thread whose directory is not in git takes none.
-//!
-//! A review is a diff between two snapshots, "now" being one taken for it. Keeping and putting
-//! back act once per intent, each checked against the blobs the review showed.
-//!
-//! A rewind is undone ([`Intent::Unrewind`]) from the files its agent said it would put back,
-//! kept just before it in the worker's own directory, in git or not.
-//!
-//! An agent's own review ([`Intent::Review`]) takes the change a review showed as commits it can
-//! name ([`Snapshots::review_range`]): Claude Code's `/code-review` takes `base...head`, Codex's
-//! reviewer the head commit.
+//! No snapshot is taken of a turn: an agent works in its own TUI (`docs/decisions/agents.md`,
+//! "TUI-first"), and a review reads the repository as it stands. A scope between a thread's
+//! turns has nothing to compare, and says so.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use parking_lot::Mutex;
-use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded, Intent, Outcome, Review, ReviewScope};
-use slopty_proto::thread::{Action, Cap, Edge, IntentId, ThreadId, ThreadState, TreeRef, TurnId};
-use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinHandle;
+use slopty_proto::thread::ThreadId;
+use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded, Review, ReviewScope};
 
 use super::Host;
-use super::host::{Moment, TurnEdge};
-use crate::repo::snapshot::{Failed, Repo};
 
 /// Why a review has nothing to compare.
 pub const NOT_IN_GIT: &str = "This thread's folder is not in a git repository";
 
-/// The snapshots of every thread a host holds. Cheap to clone.
+/// Why a review of a thread's turns has nothing to compare.
+pub const NO_TURN_SNAPSHOTS: &str =
+    "No snapshot is taken of a turn: review the working tree or a range of commits";
+
+/// The repositories of the threads a host holds. Cheap to clone.
 #[derive(Clone, Debug)]
-pub struct Snapshots {
+pub struct Reviews {
     host: Host,
-    dir: PathBuf,
     git: Option<PathBuf>,
-    /// One git at a time on each thread's index.
-    locks: Arc<Mutex<HashMap<ThreadId, Arc<tokio::sync::Mutex<()>>>>>,
-    /// Keeps and reverts under way, so a repeat that comes meanwhile does nothing.
-    picking: Arc<Mutex<HashSet<IntentId>>>,
 }
 
-impl Snapshots {
-    /// Snapshots of `host`'s threads with `git`, their indexes kept under `dir`. With no git,
-    /// no thread takes any.
+impl Reviews {
+    /// Reviews of `host`'s threads with `git`; with no git, none has anything to compare.
     #[must_use]
-    pub fn new(host: Host, dir: &Path, git: Option<PathBuf>) -> Self {
-        Self { host, dir: dir.to_owned(), git, locks: Arc::default(), picking: Arc::default() }
+    pub const fn new(host: Host, git: Option<PathBuf>) -> Self {
+        Self { host, git }
     }
 
-    /// Take the snapshots at every thread's turn edges from now on.
-    #[must_use]
-    pub fn spawn(&self) -> JoinHandle<()> {
-        let this = self.clone();
-        let mut edges = self.host.edges();
-        tokio::spawn(async move {
-            let mut threads: HashMap<ThreadId, mpsc::UnboundedSender<Moment>> = HashMap::new();
-            loop {
-                let TurnEdge { thread, moment } = match edges.recv().await {
-                    Ok(edge) => edge,
-                    Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        tracing::warn!(missed, "turn snapshots missed");
-                        continue;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
-                };
-                let tx = threads.entry(thread).or_insert_with(|| {
-                    let (tx, rx) = mpsc::unbounded_channel();
-                    tokio::spawn(this.clone().take_turns(thread, rx));
-                    tx
-                });
-                if let Err(mpsc::error::SendError(moment)) = tx.send(moment) {
-                    let (again, rx) = mpsc::unbounded_channel();
-                    tokio::spawn(this.clone().take_turns(thread, rx));
-                    let _queued = again.send(moment);
-                    threads.insert(thread, again);
-                }
-            }
-        })
-    }
-
-    /// One thread's snapshots, in the order its moments came.
-    async fn take_turns(self, thread: ThreadId, mut moments: mpsc::UnboundedReceiver<Moment>) {
-        let mut armed: Option<TreeRef> = None;
-        while let Some(moment) = moments.recv().await {
-            if let Moment::Began(turn) = moment {
-                self.rewind_outworked(thread, turn);
-            }
-            let Some(repo) = self.repo(thread) else { continue };
-            let (turn, edge, tree) = match moment {
-                Moment::Busy => {
-                    if armed.is_none() {
-                        armed = self.take(thread, &repo).await;
-                    }
-                    continue;
-                }
-                Moment::Began(turn) => {
-                    // An adapter tells a turn again as it goes (its usage, its models); its
-                    // start was the first time.
-                    if self.host.update(thread, |s| (vec![], begun(s, turn))) != Some(false) {
-                        continue;
-                    }
-                    let tree = match armed.take() {
-                        Some(tree) => Some(tree),
-                        None => self.take(thread, &repo).await,
-                    };
-                    (turn, Edge::Before, tree)
-                }
-                Moment::Ended(turn) => {
-                    armed = None;
-                    (turn, Edge::After, self.take(thread, &repo).await)
-                }
-            };
-            let Some(tree) = tree else { continue };
-            if let Err(e) = repo.record(thread, turn, edge, &tree).await {
-                tracing::warn!(%thread, turn = turn.0, "a turn's snapshot was not kept: {e}");
-                continue;
-            }
-            self.host.apply(thread, vec![Action::Snapshot { turn, edge, tree: tree.clone() }]);
-            if edge == Edge::After {
-                self.judge(thread, &repo, &tree).await;
-            }
-        }
-    }
-
-    /// A turn begun after a rewind works on the folder as it is: the rewind is not undone over
-    /// its work, in git or not. (A turn told late is not one.)
-    fn rewind_outworked(&self, thread: ThreadId, turn: TurnId) {
-        let _cleared = self.host.update(thread, |s| {
-            let started = s.turns.iter().find(|t| t.id == turn).map(|t| t.started_ms);
-            let after = s.rewound.as_ref().zip(started).is_some_and(|(r, at)| at > r.at_ms);
-            let gone = after.then_some(Action::Rewound(None));
-            (gone.into_iter().collect(), ())
-        });
-    }
-
-    /// Mark whether `thread`'s tree `now` holds changes its person has not kept: anything
-    /// apart from what they kept, or from the thread's first snapshot when they kept nothing.
-    async fn judge(&self, thread: ThreadId, repo: &Repo, now: &TreeRef) {
-        let kept = match repo.kept(thread).await {
-            Ok(kept) => kept,
-            Err(e) => {
-                tracing::warn!(%thread, "what was kept could not be read: {e}");
-                return;
-            }
-        };
-        self.host.update(thread, |state| {
-            let to_review = kept.clone().or_else(|| base(state)).is_some_and(|from| from != *now);
-            let actions = if state.to_review == to_review {
-                vec![]
-            } else {
-                vec![Action::ToReview(to_review)]
-            };
-            (actions, ())
-        });
-    }
-
-    /// A snapshot of `thread`'s tree now, under its lock.
-    async fn take(&self, thread: ThreadId, repo: &Repo) -> Option<TreeRef> {
-        let lock = self.lock(thread);
-        let _held = lock.lock().await;
-        match repo.take().await {
-            Ok(tree) => Some(tree),
-            Err(e) => {
-                tracing::warn!(%thread, "a snapshot failed: {e}");
-                None
-            }
-        }
-    }
-
-    fn lock(&self, thread: ThreadId) -> Arc<tokio::sync::Mutex<()>> {
-        Arc::clone(self.locks.lock().entry(thread).or_default())
-    }
-
-    /// The repository `thread` works in; `None` outside git, or with no git here.
-    fn repo(&self, thread: ThreadId) -> Option<Repo> {
-        let git = self.git.clone()?;
-        let cwd = self.host.update(thread, |s| (vec![], s.meta.cwd.clone()))?;
-        let root = crate::repo::root_of(Path::new(&cwd))?;
-        let index = self.dir.join(thread.to_string()).join("index");
-        Some(Repo { git, root, index })
-    }
-
-    /// What changed in `thread`'s tree over `scope`.
+    /// What changed in `thread`'s repository over `scope`.
     pub async fn review(&self, thread: ThreadId, scope: ReviewScope) -> Review {
         let absent = |why: &str| Review {
             scope: scope.clone(),
@@ -196,378 +42,19 @@ impl Snapshots {
             files: Vec::new(),
             absent: Some(why.to_owned()),
         };
-        let Some(repo) = self.repo(thread) else { return absent(NOT_IN_GIT) };
-        if let ReviewScope::WorkingTree(against) = &scope {
-            let against = against.clone();
-            return match crate::repo::snapshot::working_tree(&repo.git, &repo.root, against).await {
-                Ok(review) => review,
-                Err(e) => absent(&e.to_string()),
-            };
-        }
-        if let ReviewScope::Range { base, head } = &scope {
-            return match crate::repo::snapshot::range(&repo.git, &repo.root, base, head).await {
-                Ok(review) => review,
-                Err(e) => absent(&e.to_string()),
-            };
-        }
-        let sides = self.host.update(thread, |state| (vec![], sides(state, &scope)));
-        let Some((from, to)) = sides else { return absent("The thread is gone") };
-        let from = match (&scope, from) {
-            (ReviewScope::Kept, base) => match repo.kept(thread).await {
-                Ok(Some(kept)) => Some(kept),
-                _ => base,
-            },
-            (_, from) => from,
-        };
-        let Some(from) = from else { return absent("No snapshot was taken there") };
-        let to = match to {
-            Some(to) => Some(to),
-            None => self.take(thread, &repo).await,
-        };
-        let Some(to) = to else { return absent("Couldn't snapshot the tree now") };
-        match repo.changes(&from, &to).await {
-            Ok(files) => Review { scope, from: Some(from), to: Some(to), files, absent: None },
-            Err(e) => absent(&e.to_string()),
-        }
-    }
-
-    /// Act on a keep or a revert once: a repeat of `id` gets the first outcome back, and one
-    /// that comes while the first is under way gets nothing (the first one's answer answers
-    /// it). `None` for any other intent, and for that repeat.
-    pub async fn pick(&self, thread: ThreadId, id: IntentId, intent: &Intent) -> Option<Outcome> {
-        if let Intent::Unrewind { tree } = intent {
-            return self.unrewind(thread, id, tree).await;
-        }
-        let (Intent::Keep(pick) | Intent::Revert(pick)) = intent else { return None };
-        if let Some(outcome) = self.host.outcome(thread, id) {
-            return Some(outcome);
-        }
-        if !self.picking.lock().insert(id) {
-            return None;
-        }
-        let refused = |reason: String| Outcome::Refused { reason };
-        let can = self.host.update(thread, |s| (vec![], (s.meta.can(Cap::SNAPSHOTS), base(s))));
-        let outcome = match (can, self.repo(thread)) {
-            (None, _) => refused("The thread is gone".to_owned()),
-            (Some((false, _)), _) => Outcome::Unsupported { cap: Cap::named(Cap::SNAPSHOTS) },
-            (_, None) => refused(NOT_IN_GIT.to_owned()),
-            (Some((true, base)), Some(repo)) => {
-                let lock = self.lock(thread);
-                let _held = lock.lock().await;
-                let done: Result<(), Failed> = match (intent, base) {
-                    (Intent::Revert(_), _) => repo.revert(pick).await,
-                    (_, Some(base)) => repo.keep(thread, &base, pick).await.map(|_kept| ()),
-                    (_, None) => Err(Failed("No snapshot was taken to keep from".to_owned())),
-                };
-                if done.is_ok() {
-                    match repo.take().await {
-                        Ok(now) => self.judge(thread, &repo, &now).await,
-                        Err(e) => tracing::warn!(%thread, "a snapshot failed: {e}"),
-                    }
-                }
-                done.map_or_else(|e| refused(e.0), |()| Outcome::Done)
+        let Some((git, root)) = self.repo(thread) else { return absent(NOT_IN_GIT) };
+        let read = match &scope {
+            ReviewScope::WorkingTree(against) => {
+                crate::repo::snapshot::working_tree(&git, &root, against.clone()).await
+            }
+            ReviewScope::Range { base, head } => {
+                crate::repo::snapshot::range(&git, &root, base, head).await
+            }
+            ReviewScope::Turn(_) | ReviewScope::Since(_) | ReviewScope::Kept => {
+                return absent(NO_TURN_SNAPSHOTS);
             }
         };
-        let recorded = self.host.intent(thread, id, |_state| (outcome, Vec::new()));
-        self.picking.lock().remove(&id);
-        recorded
-    }
-}
-
-impl Snapshots {
-    /// Keep `files` of `thread` as they are now, the ones its agent is about to put back to
-    /// before a turn (named as the agent names them, from the thread's folder), so the rewind can
-    /// be undone ([`Intent::Unrewind`]), in git or not: what names them, in place of the last
-    /// rewind's; `None` when they could not be kept.
-    pub async fn before_rewind(&self, thread: ThreadId, files: &[String]) -> Option<TreeRef> {
-        let cwd = self.host.update(thread, |s| (vec![], s.meta.cwd.clone()))?;
-        let lock = self.lock(thread);
-        let _held = lock.lock().await;
-        match keep(&self.rewound_dir(thread), Path::new(&cwd), files).await {
-            Ok(kept) => Some(kept),
-            Err(e) => {
-                tracing::warn!(%thread, "the files before a rewind were not kept: {e}");
-                None
-            }
-        }
-    }
-
-    /// Put `thread`'s files back as `kept`, the ones kept before its last rewind, once, for
-    /// intent `id`; one that is not the last rewind's is refused.
-    async fn unrewind(&self, thread: ThreadId, id: IntentId, kept: &TreeRef) -> Option<Outcome> {
-        if let Some(outcome) = self.host.outcome(thread, id) {
-            return Some(outcome);
-        }
-        if !self.picking.lock().insert(id) {
-            return None;
-        }
-        let refused = |reason: &str| Outcome::Refused { reason: reason.to_owned() };
-        let last = self.host.update(thread, |s| (vec![], s.rewound.clone()));
-        let outcome = match last {
-            None => refused("The thread is gone"),
-            Some(None) => refused("There is no rewind to undo"),
-            Some(Some(last)) if last.tree != *kept => {
-                refused("That rewind is not the last one, so it cannot be undone")
-            }
-            Some(Some(_)) => {
-                let lock = self.lock(thread);
-                let held = lock.lock().await;
-                let dir = self.rewound_dir(thread);
-                match put_back(&dir, kept).await {
-                    Ok(()) => {
-                        self.host.apply(thread, vec![Action::Rewound(None)]);
-                        let _gone = tokio::fs::remove_dir_all(&dir).await;
-                        drop(held);
-                        if let Some(repo) = self.repo(thread)
-                            && let Some(now) = self.take(thread, &repo).await
-                        {
-                            self.judge(thread, &repo, &now).await;
-                        }
-                        Outcome::Done
-                    }
-                    Err(e) => refused(&e.0),
-                }
-            }
-        };
-        let recorded = self.host.intent(thread, id, |_state| (outcome, Vec::new()));
-        self.picking.lock().remove(&id);
-        recorded
-    }
-
-    /// Where the files before `thread`'s last rewind are kept.
-    fn rewound_dir(&self, thread: ThreadId) -> PathBuf {
-        self.dir.join(thread.to_string()).join(REWOUND_DIR)
-    }
-}
-
-/// The directory under a thread's own that keeps the files before its last rewind: their
-/// list ([`REWOUND_LIST`]) and their bytes, each by its BLAKE3 hash.
-const REWOUND_DIR: &str = "rewound";
-
-/// The list of the files kept before a rewind, whose BLAKE3 hash names them
-/// ([`slopty_proto::thread::Rewound::tree`]).
-const REWOUND_LIST: &str = "files.json";
-
-/// One file a rewind was to put back, as it was just before.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Kept {
-    /// Where it is.
-    path: PathBuf,
-    /// Its bytes' hash and its mode; `None` when it was not there.
-    was: Option<(String, u32)>,
-}
-
-/// Keep `files` of the folder `cwd` as they are now in `dir`, in place of what it kept: what
-/// names them.
-async fn keep(dir: &Path, cwd: &Path, files: &[String]) -> Result<TreeRef, Failed> {
-    let failed = |what: &Path, e: std::io::Error| Failed(format!("{}: {e}", what.display()));
-    let fresh = dir.with_extension("new");
-    let _stale = tokio::fs::remove_dir_all(&fresh).await;
-    tokio::fs::create_dir_all(&fresh).await.map_err(|e| failed(&fresh, e))?;
-    let mut kept = Vec::new();
-    for file in files {
-        let path = cwd.join(file);
-        let plain = path
-            .components()
-            .all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_)));
-        if !plain {
-            return Err(Failed(format!("{file} is not a plain path")));
-        }
-        let was = match copy_hashed(&path, &fresh).await {
-            Ok(was) => Some(was),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(failed(&path, e)),
-        };
-        kept.push(Kept { path, was });
-    }
-    let list = serde_json::to_vec(&kept).map_err(|e| Failed(e.to_string()))?;
-    let at = fresh.join(REWOUND_LIST);
-    tokio::fs::write(&at, &list).await.map_err(|e| failed(&at, e))?;
-    match tokio::fs::remove_dir_all(dir).await {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(failed(dir, e)),
-        _ => {}
-    }
-    tokio::fs::rename(&fresh, dir).await.map_err(|e| failed(dir, e))?;
-    Ok(TreeRef(blake3::hash(&list).to_hex().to_string()))
-}
-
-/// The file at `path` copied into `dir` under its BLAKE3 hash, a piece at a time: its hash and
-/// its mode.
-async fn copy_hashed(path: &Path, dir: &Path) -> std::io::Result<(String, u32)> {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    let mut from = tokio::fs::File::open(path).await?;
-    let mode = std::os::unix::fs::PermissionsExt::mode(&from.metadata().await?.permissions());
-    let staged = dir.join("copying");
-    let mut to = tokio::fs::File::create(&staged).await?;
-    let mut hasher = blake3::Hasher::new();
-    let mut piece = vec![0; 256 * 1024];
-    loop {
-        let read = from.read(&mut piece).await?;
-        let Some(read) = piece.get(..read).filter(|r| !r.is_empty()) else { break };
-        hasher.update(read);
-        to.write_all(read).await?;
-    }
-    to.flush().await?;
-    let hash = hasher.finalize().to_hex().to_string();
-    tokio::fs::rename(&staged, dir.join(&hash)).await?;
-    Ok((hash, mode & 0o777))
-}
-
-/// The files kept in `dir` as `kept` named them put back, all of them or none: each written
-/// beside its place first, then every one moved in at once, what was there set aside until all
-/// are in and moved back should one fail; one that was not there taken away.
-async fn put_back(dir: &Path, kept: &TreeRef) -> Result<(), Failed> {
-    let list = tokio::fs::read(dir.join(REWOUND_LIST)).await.map_err(|_missing| gone())?;
-    if blake3::hash(&list).to_hex().as_str() != kept.0 {
-        return Err(gone());
-    }
-    let files: Vec<Kept> = serde_json::from_slice(&list).map_err(|e| Failed(e.to_string()))?;
-    let mut moves = Vec::new();
-    let staged = stage(dir, &files, &mut moves).await;
-    let moved = match staged {
-        Ok(()) => swap(&mut moves).await,
-        Err(e) => Err(e),
-    };
-    match moved {
-        Ok(()) => {
-            for one in &moves {
-                let _gone = tokio::fs::remove_file(aside(&one.path)).await;
-            }
-            Ok(())
-        }
-        Err(e) => {
-            undo_moves(&moves).await;
-            Err(e)
-        }
-    }
-}
-
-/// What a put back says when the files kept before the rewind are not all there.
-fn gone() -> Failed {
-    Failed("The files before that rewind are no longer kept".to_owned())
-}
-
-/// One file of a put back: where it goes, whether a copy of what it was is staged beside it,
-/// and how far it went.
-struct Move {
-    path: PathBuf,
-    staged: bool,
-    set_aside: bool,
-    moved_in: bool,
-}
-
-/// Where the file put back at `path` waits beside it.
-fn beside(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".slopty-unrewind");
-    path.with_file_name(name)
-}
-
-/// Where what was at `path` is set aside while the files go back.
-fn aside(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".slopty-rewound");
-    path.with_file_name(name)
-}
-
-/// Each file of `files` that was there, copied beside its place with its mode, noted in `moves`.
-async fn stage(dir: &Path, files: &[Kept], moves: &mut Vec<Move>) -> Result<(), Failed> {
-    let failed = |what: &Path, e: std::io::Error| Failed(format!("{}: {e}", what.display()));
-    for file in files {
-        let mut one =
-            Move { path: file.path.clone(), staged: false, set_aside: false, moved_in: false };
-        if let Some((hash, mode)) = &file.was {
-            let blob = dir.join(hash);
-            if !tokio::fs::try_exists(&blob).await.unwrap_or(false) {
-                return Err(gone());
-            }
-            if let Some(parent) = file.path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| failed(parent, e))?;
-            }
-            let at = beside(&file.path);
-            one.staged = true;
-            moves.push(one);
-            tokio::fs::copy(&blob, &at).await.map_err(|e| failed(&file.path, e))?;
-            let mode = std::os::unix::fs::PermissionsExt::from_mode(*mode);
-            tokio::fs::set_permissions(&at, mode).await.map_err(|e| failed(&file.path, e))?;
-        } else {
-            moves.push(one);
-        }
-    }
-    Ok(())
-}
-
-/// Every staged file of `moves` moved into its place, and every one that was not there taken
-/// away, what was there set aside first.
-async fn swap(moves: &mut [Move]) -> Result<(), Failed> {
-    for one in moves.iter_mut() {
-        match tokio::fs::rename(&one.path, aside(&one.path)).await {
-            Ok(()) => one.set_aside = true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(Failed(format!("{}: {e}", one.path.display()))),
-        }
-        if one.staged {
-            tokio::fs::rename(beside(&one.path), &one.path)
-                .await
-                .map_err(|e| Failed(format!("{}: {e}", one.path.display())))?;
-            one.moved_in = true;
-        }
-    }
-    Ok(())
-}
-
-/// The folder as it was before a put back that failed part-way: what went in taken out, what
-/// was set aside moved back, what was staged removed.
-async fn undo_moves(moves: &[Move]) {
-    for one in moves.iter().rev() {
-        if one.moved_in {
-            let _gone = tokio::fs::remove_file(&one.path).await;
-        }
-        if one.set_aside {
-            let _back = tokio::fs::rename(aside(&one.path), &one.path).await;
-        }
-        if one.staged && !one.moved_in {
-            let _gone = tokio::fs::remove_file(beside(&one.path)).await;
-        }
-    }
-}
-
-/// A change as an agent's own review names it: two commits whose difference it is, the head on
-/// the base.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Range {
-    /// The old side's commit.
-    pub base: String,
-    /// The new side's, whose parent is the base.
-    pub head: String,
-}
-
-impl Range {
-    /// How a ref range names it: `base...head`.
-    #[must_use]
-    pub fn dots(&self) -> String {
-        format!("{}...{}", self.base, self.head)
-    }
-}
-
-impl Snapshots {
-    /// The change from `from` to `to` in `thread`'s repository as commits an agent's review
-    /// takes, overwriting the last review's; why not, in words.
-    ///
-    /// # Errors
-    ///
-    /// Outside git, or when git refuses the trees.
-    pub async fn review_range(
-        &self,
-        thread: ThreadId,
-        from: &TreeRef,
-        to: &TreeRef,
-    ) -> Result<Range, String> {
-        let repo = self.repo(thread).ok_or_else(|| NOT_IN_GIT.to_owned())?;
-        let lock = self.lock(thread);
-        let _held = lock.lock().await;
-        let (base, head) = repo.review_pair(thread, from, to).await.map_err(|e| e.0)?;
-        Ok(Range { base, head })
+        read.unwrap_or_else(|e| absent(&e.to_string()))
     }
 
     /// The text of blob `id` in `thread`'s repository, the side of a file a review showed, for
@@ -575,8 +62,8 @@ impl Snapshots {
     /// git, for an id that is no blob there, a file that is not UTF-8, or one longer than
     /// [`EXPANDED_CHARS`]: its lines would be cut, so none are given.
     pub async fn blob(&self, thread: ThreadId, id: &str) -> Expanded {
-        let Some(repo) = self.repo(thread) else { return Expanded::Gone };
-        match repo.object(id).await.map(String::from_utf8) {
+        let Some((git, root)) = self.repo(thread) else { return Expanded::Gone };
+        match crate::repo::snapshot::blob(&git, &root, id).await.map(String::from_utf8) {
             Ok(Ok(text)) if text.len() <= EXPANDED_CHARS => Expanded::Text(text),
             Ok(_) => Expanded::Gone,
             Err(e) => {
@@ -586,107 +73,11 @@ impl Snapshots {
         }
     }
 
-    /// `thread`'s pull request merged: everything in its tree now counts as kept, so it no
-    /// longer stands To review for that work, and what it changes later is reviewed from here.
-    /// A thread outside git, or with no git here, just stops standing To review.
-    pub async fn merged(&self, thread: ThreadId) {
-        let Some(repo) = self.repo(thread) else {
-            self.host.update(thread, |s| {
-                (if s.to_review { vec![Action::ToReview(false)] } else { vec![] }, ())
-            });
-            return;
-        };
-        let lock = self.lock(thread);
-        let held = lock.lock().await;
-        let kept = match repo.take().await {
-            Ok(now) => repo.keep_whole(thread, &now).await.map(|()| now),
-            Err(e) => Err(e),
-        };
-        drop(held);
-        match kept {
-            Ok(now) => self.judge(thread, &repo, &now).await,
-            Err(e) => tracing::warn!(%thread, "a merged thread's tree was not kept: {e}"),
-        }
-    }
-
-    /// Let every ref `state`'s thread keeps in its repository go, and the files kept before its
-    /// last rewind, before the thread is.
-    pub async fn forget(&self, state: &ThreadState) {
-        let thread = state.meta.id;
-        let _gone = tokio::fs::remove_dir_all(self.rewound_dir(thread)).await;
-        let Some(repo) = self.repo(thread) else { return };
-        let lock = self.lock(thread);
-        let held = lock.lock().await;
-        if let Err(e) = repo.forget(thread).await {
-            tracing::warn!(%thread, "a gone thread's snapshots stayed: {e}");
-        }
-        drop(held);
-        self.locks.lock().remove(&thread);
-    }
-}
-
-/// The two snapshots `scope` compares in `state`; `None` on the new side for now.
-fn sides(state: &ThreadState, scope: &ReviewScope) -> (Option<TreeRef>, Option<TreeRef>) {
-    let turn = |id: TurnId| state.turns.iter().find(|t| t.id == id);
-    match scope {
-        ReviewScope::Turn(id) => match turn(*id) {
-            Some(t) => (t.before.clone(), t.after.clone()),
-            None => (None, None),
-        },
-        ReviewScope::Since(id) => (turn(*id).and_then(|t| t.before.clone()), None),
-        ReviewScope::Kept => (base(state), None),
-        // Not between snapshots: [`Snapshots::review`] reads it from the repository.
-        ReviewScope::WorkingTree(_) | ReviewScope::Range { .. } => (None, None),
-    }
-}
-
-/// Whether `turn` already has its before-snapshot.
-fn begun(state: &ThreadState, turn: TurnId) -> bool {
-    state.turns.iter().any(|t| t.id == turn && t.before.is_some())
-}
-
-/// Where what is kept starts: the first snapshot the thread took.
-fn base(state: &ThreadState) -> Option<TreeRef> {
-    state.turns.iter().find_map(|t| t.before.clone())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A put back is all or nothing: one kept file gone from the store leaves every file as the
-    /// rewind left it, and a whole store puts each back, taking away the one that was not there.
-    #[tokio::test]
-    async fn a_put_back_is_all_or_nothing() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let (cwd, store) = (root.path().join("work"), root.path().join("rewound"));
-        std::fs::create_dir_all(&cwd).expect("mkdir");
-        std::fs::write(cwd.join("a.txt"), "a before\n").expect("a");
-        std::fs::write(cwd.join("b.txt"), "b before\n").expect("b");
-        let files = ["a.txt", "b.txt", "new.txt"].map(str::to_owned);
-        let kept = keep(&store, &cwd, &files).await.expect("kept");
-        std::fs::write(cwd.join("a.txt"), "a rewound\n").expect("a");
-        std::fs::write(cwd.join("b.txt"), "b rewound\n").expect("b");
-        std::fs::write(cwd.join("new.txt"), "brought back\n").expect("new");
-        let rewound = |name: &str| std::fs::read_to_string(cwd.join(name)).ok();
-
-        let b_blob = store.join(blake3::hash(b"b before\n").to_hex().as_str());
-        let b_bytes = std::fs::read(&b_blob).expect("blob");
-        std::fs::remove_file(&b_blob).expect("rm");
-        assert!(put_back(&store, &kept).await.is_err());
-        assert_eq!(rewound("a.txt").as_deref(), Some("a rewound\n"), "nothing went back");
-        assert_eq!(rewound("new.txt").as_deref(), Some("brought back\n"));
-        let left: Vec<_> =
-            std::fs::read_dir(&cwd).expect("ls").flatten().map(|e| e.file_name()).collect();
-        assert_eq!(left.len(), 3, "nothing staged is left: {left:?}");
-
-        std::fs::write(&b_blob, b_bytes).expect("blob");
-        put_back(&store, &kept).await.expect("put back");
-        assert_eq!(rewound("a.txt").as_deref(), Some("a before\n"));
-        assert_eq!(rewound("b.txt").as_deref(), Some("b before\n"));
-        assert_eq!(rewound("new.txt"), None, "it was not there");
-        let left: Vec<_> =
-            std::fs::read_dir(&cwd).expect("ls").flatten().map(|e| e.file_name()).collect();
-        assert_eq!(left.len(), 2, "nothing set aside is left: {left:?}");
+    /// The git and the repository `thread` works in; `None` outside git, or with no git here.
+    fn repo(&self, thread: ThreadId) -> Option<(PathBuf, PathBuf)> {
+        let git = self.git.clone()?;
+        let (meta, _) = self.host.meta(thread)?;
+        let root = crate::repo::root_of(&crate::file::expand_home(Path::new(&meta.cwd)))?;
+        Some((git, root))
     }
 }

@@ -125,7 +125,7 @@ impl WorkspaceView {
             created_at: None,
             version: caps.and_then(|caps| version(&caps.build)),
             cursor_sdk_version: None,
-            capabilities: crate::view_model::capabilities(),
+            capabilities: Vec::new(),
             actions: self.device_actions.get(&key).cloned().unwrap_or_default(),
             // An editor reaches a folder there over SSH by it; this machine's own needs none.
             ssh_host: worker.address.clone().filter(|_| !self.surface_is_local(key)),
@@ -193,36 +193,9 @@ impl WorkspaceView {
         super::value(&serde_json::json!({}))
     }
 
-    /// The thread a chat id names, as the archive keeps it: a chat this app minted for a
-    /// thread is filed under the thread's own id, which outlives the app.
-    fn archive_key(&self, chat: &str) -> String {
-        self.view_model
-            .aliases
-            .iter()
-            .find(|(_, alias)| alias.as_str() == chat)
-            .map_or_else(|| chat.to_owned(), |(thread, _)| thread.to_string())
-    }
-
-    /// The chat `chat`, archived before its first message, is the thread `thread` now: it stays
-    /// archived under the thread's id.
-    pub(in crate::workspace) fn surface_rekey_archived(
-        &mut self,
-        chat: &str,
-        thread: String,
-        cx: &Context<Self>,
-    ) {
-        let path = archived_path();
-        let archived = &mut self.view_model.surfaces.archived;
-        if archived.set(&path).contains(chat) {
-            archived.file(&path, chat.to_owned(), false);
-            archived.file(&path, thread, true);
-            archived.keep(path, cx);
-        }
-    }
-
     /// Whether the person archived the chat `chat`.
     pub(in crate::workspace) fn surface_archived(&self, chat: &str) -> bool {
-        self.view_model.surfaces.archived.set(&archived_path()).contains(&self.archive_key(chat))
+        self.view_model.surfaces.archived.set(&archived_path()).contains(chat)
     }
 
     /// A change to the interface's lists the surfaces make: `setChatArchived`. `None` for any
@@ -242,12 +215,25 @@ impl WorkspaceView {
         let Some(archived) = params.get("archived").and_then(serde_json::Value::as_bool) else {
             return Some(Err(RpcError::BadParams("archived".to_owned())));
         };
-        let key = self.archive_key(chat);
+        let key = chat.to_owned();
         if self.view_model.surfaces.archived.file(&archived_path(), key, archived) {
             self.view_model.surfaces.archived.keep(archived_path(), cx);
             self.view_changed(cx);
         }
         Some(Ok(serde_json::json!({})))
+    }
+
+    /// Archive the chats `chats`, kept once for them all.
+    pub(in crate::workspace) fn surface_archive(&mut self, chats: Vec<String>, cx: &Context<Self>) {
+        let path = archived_path();
+        let mut changed = false;
+        for chat in chats {
+            changed |= self.view_model.surfaces.archived.file(&path, chat, true);
+        }
+        if changed {
+            self.view_model.surfaces.archived.keep(path, cx);
+            self.view_changed(cx);
+        }
     }
 }
 

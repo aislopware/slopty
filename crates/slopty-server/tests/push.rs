@@ -2,8 +2,8 @@
 //! phone has stopped listening, and the server seals the notice to the phone's key and sends it
 //! straight to a stand-in APNs with the person's own key. The stand-in speaks HTTP/2 over TLS
 //! on loopback, as the real one does. What APNs got opens with the phone's
-//! key to the notice's words, and carries none of them in the clear. Once the ask is answered
-//! elsewhere, a background push takes the note back by the id APNs showed it under.
+//! key to the notice's words, and carries none of them in the clear. Once the thread no longer
+//! needs the person, a background push takes the note back by the id APNs showed it under.
 
 #[cfg(test)]
 mod tests {
@@ -283,8 +283,8 @@ mod tests {
         (pushed, taken_back, key, token)
     }
 
-    /// What APNs got once the ask was answered elsewhere: a background push to the same phone,
-    /// showing nothing, naming the id the note was shown under and nothing else.
+    /// What APNs got once the thread no longer needed the person: a background push to the same
+    /// phone, showing nothing, naming the id the note was shown under and nothing else.
     fn takes_the_note_back(got: &Got, note: &Got, topic: &str) {
         assert_eq!(got.path, note.path);
         let header = |name: &str| got.headers.get(name).map(String::as_str);
@@ -300,8 +300,8 @@ mod tests {
     }
 
     /// What APNs got is an urgent alert to the phone's token in fixed words, with the notice
-    /// sealed: it opens with the phone's key to the notice and the ask its buttons answer, and
-    /// says none of its words in the clear.
+    /// sealed: it opens with the phone's key to the notice, offers no answer, and says none of
+    /// its words in the clear.
     fn opens_to_the_notice(got: &Got, key: &DeviceKey, token: &str, topic: &str) {
         assert_eq!(got.path, format!("/3/device/{token}"));
         let header = |name: &str| got.headers.get(name).map(String::as_str);
@@ -327,7 +327,11 @@ mod tests {
             (body.notice.title.as_str(), body.notice.text.as_str()),
             ("Rank the fleet", "Run cargo test?")
         );
-        assert_eq!(body.ask, Some(AskId("toolu_01".to_owned())));
+        assert_eq!(
+            (&body.ask, body.picks.len()),
+            (&None, 0),
+            "a note answers nothing: the person answers in the agent's terminal"
+        );
         assert!(key.open(&"1f".repeat(32), &sealed).is_err(), "bound to its own token");
     }
 

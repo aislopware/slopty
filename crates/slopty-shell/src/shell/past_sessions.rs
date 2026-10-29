@@ -618,7 +618,7 @@ impl Shell {
                     true,
                     div()
                         .line_height(px(17.0))
-                        .text_color(super::spaces::sidebar_hover_blend(&fade, theme.text_muted, theme.text))
+                        .text_color(crate::motion::hover_blend(&fade, theme.text_muted, theme.text))
                         .child(SharedString::from(label.clone())),
                 )),
             )
@@ -674,8 +674,8 @@ impl Shell {
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(format!("{PAST_SESSION} {label}, {corner}")))
             .text_size(crate::typography::ui_rems(13.0))
-            .bg(super::spaces::sidebar_hover_blend(&fade, crate::theme::wash(0.0), theme.glass_hover()))
-            .on_hover(super::spaces::sidebar_hover(fade.clone()))
+            .bg(crate::motion::hover_blend(&fade, crate::theme::wash(0.0), theme.glass_hover()))
+            .on_hover(crate::motion::hover_listener(fade.clone()))
             .child(crate::motion::fade_driver(fade.clone()))
             .tooltip(crate::settings::widgets::text_tooltip(tooltip))
             .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
@@ -747,12 +747,37 @@ impl Shell {
             let _gone = this.update(cx, |this, cx| {
                 this.past_sessions.opening = None;
                 this.close_resume_picker(None, cx);
+                // slopty: its terminal shows once its machine names it.
+                this.mark_starting(chat.clone(), cx);
                 this.open_chat(chat, cx);
                 this.reload_histories(cx);
             });
         });
         self.past_sessions.opening = Some((row.key, task));
         cx.notify();
+    }
+
+    /// slopty: resume ended session `chat` in a new terminal, by Claude Code's own `--resume`.
+    pub(super) fn resume_ended_session(&mut self, chat: &slopty_view_proto::Chat, cx: &mut Context<Self>) {
+        let Some(native) = chat.harness_session_id.clone().filter(|id| !id.is_empty()) else {
+            return;
+        };
+        let row = PastRow {
+            key: format!("{}:{native}", chat.device_id),
+            device_id: chat.device_id.clone(),
+            cwd: chat.cwd.clone(),
+            resume: vec!["--resume".to_owned(), native.clone()],
+            native,
+            ..PastRow::default()
+        };
+        self.open_past_session(row, cx);
+    }
+
+    /// slopty: whether ended session `chat` is being resumed now.
+    pub(super) fn resuming(&self, chat: &slopty_view_proto::Chat) -> bool {
+        chat.harness_session_id
+            .as_deref()
+            .is_some_and(|native| self.past_sessions.opening(&format!("{}:{native}", chat.device_id)))
     }
 
     /// The session `key` did not open, for `why`: said where it was asked, the picker's footer

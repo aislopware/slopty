@@ -900,6 +900,16 @@ pub struct ThreadRow {
     pub updated_ms: WallMs,
 }
 
+impl ThreadRow {
+    /// The terminal the thread's agent runs in now
+    /// ([`ThreadMeta::TERMINAL_FACT`](super::ThreadMeta::TERMINAL_FACT)): the one a client opens
+    /// for it.
+    #[must_use]
+    pub fn terminal(&self) -> Option<slopty_core::SessionId> {
+        self.facts.get(super::ThreadMeta::TERMINAL_FACT).and_then(|id| id.parse().ok())
+    }
+}
+
 /// A thread's latest turn that ended ([`ThreadRow::ended`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TurnEnded {

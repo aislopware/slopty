@@ -377,7 +377,7 @@ pub enum AgentCmd {
         /// A fresh git worktree of the folder's clone, by this name.
         #[arg(long)]
         worktree: Option<String>,
-        /// `claude` (the default), `codex`, `pi`, or an ACP agent by its registry name.
+        /// `claude` (the default), `codex` or `pi`.
         #[arg(long)]
         agent: Option<String>,
         /// The model, by the agent's own id.
@@ -390,7 +390,8 @@ pub enum AgentCmd {
         #[arg(required = true, num_args = 1..)]
         prompt: Vec<String>,
     },
-    /// Send an agent words; from inside an agent's terminal they are that agent's.
+    /// Type an agent words in its terminal and submit them; from inside an agent's terminal
+    /// they are that agent's. Refused while it waits on you.
     Tell {
         /// The agent's id.
         agent: String,
@@ -410,7 +411,8 @@ pub enum AgentCmd {
         #[arg(long, default_value_t = DEFAULT_WAIT_MS)]
         timeout: u32,
     },
-    /// End an agent and every agent under it, their conversations kept.
+    /// Interrupt an agent at work and every agent at work under it, as Esc does in its
+    /// terminal.
     Stop {
         /// The agent's id.
         agent: String,
@@ -420,8 +422,8 @@ pub enum AgentCmd {
         #[arg(help = TERM_HELP)]
         term: String,
     },
-    /// What an agent's thread did, whatever its agent, whole turns at a time, with the
-    /// requests waiting on it. Its terminal's prompts then wait for `slopty agent answer`.
+    /// What an agent's thread did, whatever its agent, whole turns at a time, with what it
+    /// waits on.
     Read {
         #[command(flatten)]
         which: ThreadWhich,
@@ -431,18 +433,6 @@ pub enum AgentCmd {
         /// The last turn already read: the `next` a read printed.
         #[arg(long)]
         after: Option<u32>,
-    },
-    /// Answer a request waiting on an agent's thread by one of the choices it offers.
-    Answer {
-        #[command(flatten)]
-        which: ThreadWhich,
-        /// The request, as `slopty agent read` lists it.
-        ask: String,
-        /// The choice it offers, by its id (`allow`, `deny`), or the answers to its questions.
-        choice: String,
-        /// Words to go with it, where the agent takes them.
-        #[arg(long)]
-        message: Option<String>,
     },
 }
 
@@ -840,10 +830,6 @@ async fn agent(
                 print!("{}", view::thread_read_text(&read));
             }
         }
-        AgentCmd::Answer { which, ask, choice, message } => {
-            ops::answer_request(res, which.arg(), (ask, choice, message), key).await?;
-            print_done(json)?;
-        }
     }
     Ok(())
 }
@@ -1169,16 +1155,6 @@ mod tests {
         assert_eq!((of.thread, of.term, activity, after), (Some("a1"), None, true, Some(4)));
         agent(&["read"]).unwrap_err();
         agent(&["read", "--agent", "a1", "--term", "t"]).unwrap_err();
-        let AgentCmd::Answer { which, ask, choice, message } =
-            agent(&["answer", "--term", "t", "7", "deny", "--message", "no"]).unwrap()
-        else {
-            panic!()
-        };
-        assert_eq!(
-            (which.term.as_deref(), ask.as_str(), choice.as_str(), message.as_deref()),
-            (Some("t"), "7", "deny", Some("no"))
-        );
-        parse(&["agent", "answer", "--term", "t", "7"]).unwrap_err();
 
         let VerbCmd::Capture { target, out, .. } =
             parse(&["capture", "--display", "1", "--out", "/tmp/d.png"]).unwrap()

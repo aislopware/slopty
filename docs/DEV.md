@@ -95,26 +95,13 @@ zed itself so it is never behind zed while longbridge lags.
   retention"). A view that shows an old state is a missing notify; `GPUI_VIEW_RETENTION=0` on the
   app turns retention off to confirm it, and a step in `workspace/tests/retained.rs` is how it
   stays fixed.
-- `cargo xtask fixtures claude [--only <name>]` records the conversation fixtures from a real
-  session (it uses the model and your login), and `cargo xtask fixtures claude-stream` records
-  Claude Code driven as the worker drives it (`claude -p` over stream-json with the control
-  protocol) against a canned local API with no account. Both run the official Claude Code build
-  that xtask fetches from npm into `target/claude/<version>/`, checked against the registry's
-  sha512; `SLOPTY_CLAUDE` points at another binary of the same pinned version.
-- `cargo xtask codex schema [--check]` writes the Codex app-server types
-  (`crates/slopty-agent/src/codex/protocol.rs`) from the pinned build's
-  `generate-json-schema --experimental`, and `cargo xtask codex fixtures` records
-  `crates/slopty-agent/tests/fixtures/codex/` from that build's app-server against a canned
-  Responses API, with nothing signed in and nothing fetched. The build comes from npm into
-  `target/codex/<version>/`, checked against the registry's sha512; `SLOPTY_CODEX` points at
-  another binary of the same pinned version. A Codex bump is the version in `xtask/src/codex.rs`,
-  then both commands, and the diff is the wire change.
-- `cargo xtask pi fixtures` records `crates/slopty-agent/tests/fixtures/pi/` from the pinned pi
-  driven over RPC with Slopty's gate, against a canned Messages API, with nothing signed in and
-  nothing fetched by pi. The package comes from npm into `target/pi/<version>/` by `bun
-  install`, checked against the registry's sha512, and runs under `node`; `SLOPTY_PI` points at
-  another `pi` of the same pinned version. A pi bump is the version in `xtask/src/pi.rs` and
-  `slopty_agent::pi::VERSION`, then the command.
+- `cargo xtask fixtures claude [--only <name>]` records the decoder's conversation fixtures
+  (`crates/slopty-agent/tests/fixtures/conversation`): the transcript and hook payloads of a
+  scripted headless session, the same records a TUI session writes. It uses the model and your
+  login, except for the scenarios answered by a canned local API with no account. It runs the
+  official Claude Code build that xtask fetches from npm into `target/claude/<version>/`,
+  checked against the registry's sha512; `SLOPTY_CLAUDE` points at another binary of the same
+  pinned version.
 - `cargo xtask linux` cross-builds the terminal-only Linux worker (`slopty-ptyd`,
   `slopty-worker`, `slopty`) for `aarch64-unknown-linux-gnu` under `target/linux`, with
   `cargo zigbuild` (`cargo binstall cargo-zigbuild`; zig is the one libghostty-vt takes).
@@ -334,6 +321,47 @@ the gate gives them and reuses one build of each; a bare `cargo nextest run -p <
 resolves its own and builds its own copies (add `-p workspace-hack` to share).
 `cargo hakari generate` rewrites the hack when a manifest changes its dependencies
 (`cargo gate --fix` runs it; the gate fails on a stale one).
+
+### Warm runners
+With the repository variable `SLOPTY_RUNNERS` at `warm`, a push to `gate` or a `v*` tag runs the
+gate on this Mac's two warm runners instead of the hosted matrix: `ci.yml`'s `warm` job, once
+per host, `cargo xtask gate --warm`. `slopty-warm-mac` runs the tools, host and iOS clippy,
+rustdoc and every Mac test in one nextest run (`warm` profile), the lints building beside the
+test binaries once those are built; `slopty-warm-linux` runs the Linux tests and clippy of the
+three Linux triples. Each keeps its checkout (`clean: false`), toolchains, tools and one
+incremental target dir between runs, which `prune` keeps under its budget after each run.
+Pull requests keep the hosted matrix whatever the variable says; `gh variable set
+SLOPTY_RUNNERS --body hosted` sends every push back to it at once. A check takes the warm
+runners with `check.yml`'s `warm` input (`yes`, `mac` or `linux`): `gh workflow run check.yml
+--ref check/<name> -f name=<name> -f sha=<sha> -f warm=yes`.
+
+Both runners refuse every other job before its first step: their job-started hook runs `xtask
+warm guard`, which lets through only a push to `gate` or a `v*` tag running `ci.yml` and a
+`check.yml` dispatch, by an actor with push access, from this repository and never a fork or a
+pull request (`xtask/src/warm/guard.rs`). Neither holds a credential of the person's. The Mac
+runner is a launchd daemon under the hidden user `slopty-ci`, inside a sandbox that denies it
+every path under `/Volumes` and `/Users` but its own, the person's files in `/tmp` and the
+loopback ports the person served when it was installed. The Linux runner is the actions runner
+in an arm64 Ubuntu VM under tart, sharing no directory of the Mac's. Both run at `Nice 10`,
+the VM's own process included, and take eight of the ten cores.
+
+Everything they keep is in `slopty-ci/` at the root of the checkout's volume, never in the
+checkout. Setting them up, once:
+- `cargo xtask warm mac install` unpacks the runner and rustup and writes the guard (a copy of
+  this xtask and `warm.toml`, the repository and its actors), the sandbox profile, the runner's
+  environment and both daemons' property lists, then prints what an administrator runs: the
+  user, the log directory (`/Library/Logs/slopty-warm/`) and the two daemons.
+- `cargo xtask warm mac register` registers the Mac runner with a token it asks `gh` for and
+  holds in memory only.
+- `cargo xtask warm linux install [--rev <commit>]` clones the VM from the pinned image,
+  provisions it, builds the guard from `rev` in it and registers its runner as a systemd
+  service. It starts the VM from the person's session; `cargo xtask warm linux stop` before the
+  VM's daemon takes it (`xtask warm linux run`, which the daemon runs, keeps it at `Nice 10`).
+- `cargo xtask warm status` lists both runners as GitHub has them, and each one's side here.
+Run `install` again when the guard's code changes, when a collaborator is added, or when the
+person starts a new service on a loopback port. `cargo xtask warm linux exec <command>` runs a
+command in the VM. A runner's target dir is deleted to start it cold (`_work/slopty/slopty/target`
+on the Mac, `/home/admin/actions-runner/_work/slopty/slopty/target` in the VM).
 
 ## Disk
 `target/` would grow without end: cargo never deletes a unit, and every `cargo update`, fork

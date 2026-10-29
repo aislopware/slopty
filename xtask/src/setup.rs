@@ -30,6 +30,78 @@ const TOOLS: &[(&str, &str)] = &[
     ("cargo-fuzz", "0.13.2"),
 ];
 
+/// taplo's own release builds, gzipped, each with its SHA-256, for the hosts that run the gate's
+/// tools: binstall looks for other names than taplo's release uses, finds none, and compiled
+/// `taplo-cli` from source, 84 s of every tools job (`docs/decisions/tooling.md`, "taplo comes
+/// from its release").
+const TAPLO_BUILDS: [(&str, &str, &str); 3] = [
+    ("macos", "aarch64", "713734314c3e71894b9e77513c5349835eefbd52908445a0d73b0c7dc469347d"),
+    ("linux", "x86_64", "8fe196b894ccf9072f98d4e1013a180306e17d244830b03986ee5e8eabeb6156"),
+    ("linux", "aarch64", "033681d01eec8376c3fd38fa3703c79316f5e14bb013d859943b60a07bccdcc3"),
+];
+
+/// The taplo build for this host and its SHA-256, by its release's name for the platform.
+fn taplo_build() -> Option<(String, &'static str)> {
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let (_, _, sha) = TAPLO_BUILDS.iter().find(|(o, a, _)| *o == os && *a == arch)?;
+    let platform = if os == "macos" { "darwin" } else { os };
+    Some((format!("{platform}-{arch}"), sha))
+}
+
+/// taplo `version` into cargo's bin directory from its release, checked against its pinned
+/// SHA-256, unless that version is on `PATH` already.
+fn install_taplo(sh: &Shell, version: &str) -> Result<()> {
+    let wanted = format!("taplo {version}");
+    let installed = cmd!(sh, "taplo --version").quiet().ignore_stderr().read();
+    if installed.is_ok_and(|v| v.trim() == wanted) {
+        return Ok(());
+    }
+    let Some((platform, sha)) = taplo_build() else {
+        anyhow::bail!(
+            "no taplo build is pinned for {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+    };
+    println!("▶ taplo {version} ({platform}) from its release");
+    let home = std::env::var("CARGO_HOME").map_or_else(
+        |_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cargo"),
+        std::path::PathBuf::from,
+    );
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin)?;
+    let gz = bin.join(format!(".taplo-{version}.gz"));
+    let url =
+        format!("https://github.com/tamasfe/taplo/releases/download/{version}/taplo-{platform}.gz");
+    cmd!(sh, "curl -fsSL --retry 5 -o {gz} {url}").quiet().run()?;
+    let digest = sha256(sh, &gz)?;
+    anyhow::ensure!(
+        digest == sha,
+        "taplo-{platform}.gz has SHA-256 {digest}, not the pinned {sha}"
+    );
+    let staged = bin.join(format!(".taplo-{version}"));
+    let unpacked = cmd!(sh, "gunzip -c {gz}").quiet().output()?;
+    std::fs::write(&staged, &unpacked.stdout)?;
+    std::fs::set_permissions(&staged, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
+    let taplo = bin.join("taplo");
+    std::fs::rename(&staged, &taplo)?;
+    std::fs::remove_file(&gz)?;
+    let now = cmd!(sh, "{taplo} --version").quiet().read()?;
+    anyhow::ensure!(now.trim() == wanted, "the installed taplo says {now:?}");
+    println!("  ✓ {wanted}");
+    Ok(())
+}
+
+/// The SHA-256 of `file`, as hex, by whichever of the two system tools this host has.
+pub fn sha256(sh: &Shell, file: &std::path::Path) -> Result<String> {
+    let line = cmd!(sh, "shasum -a 256 {file}")
+        .quiet()
+        .ignore_stderr()
+        .read()
+        .or_else(|_| cmd!(sh, "sha256sum {file}").quiet().read())?;
+    Ok(line.split_whitespace().next().unwrap_or_default().to_owned())
+}
+
 /// Install the tools and sync the submodules. Given `lanes` or `tools`, only what those gate
 /// lanes run and those tools: a CI job runs one lane and needs neither the other lanes' tools
 /// nor `xcodegen`.
@@ -48,6 +120,10 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId], tools: &[String]) -> Re
             step("install cargo-binstall", &cmd!(sh, "cargo install cargo-binstall --locked"))?;
         }
         for (tool, version) in TOOLS.iter().filter(|(tool, _)| wanted(tool)) {
+            if *tool == "taplo-cli" {
+                install_taplo(sh, version)?;
+                continue;
+            }
             let spec = format!("{tool}@{version}");
             step(
                 &format!("binstall {spec}"),
@@ -106,7 +182,7 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId], tools: &[String]) -> Re
 mod tests {
     use clap::ValueEnum as _;
 
-    use super::{LaneId, TOOLS};
+    use super::{LaneId, TAPLO_BUILDS, TOOLS};
 
     /// `setup --lane` installs a lane's tools from the pinned list, so each must be on it.
     #[test]
@@ -116,5 +192,20 @@ mod tests {
                 assert!(TOOLS.iter().any(|(pinned, _)| pinned == tool), "{lane:?} runs {tool}");
             }
         }
+    }
+
+    /// taplo comes from its release for every host that runs the tools (this Mac, CI's Linux
+    /// runners of both architectures and the warm runners), each build pinned by a SHA-256 of 64
+    /// hex digits, and the version fetched is the one the list pins.
+    #[test]
+    fn taplo_s_release_build_is_pinned_for_every_host_of_the_tools() {
+        for host in [("macos", "aarch64"), ("linux", "x86_64"), ("linux", "aarch64")] {
+            let build = TAPLO_BUILDS.iter().find(|(os, arch, _)| (*os, *arch) == host);
+            let (_, _, sha) = build.unwrap_or_else(|| panic!("no taplo build for {host:?}"));
+            assert!(sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()), "{sha}");
+        }
+        let (_, version) = TOOLS.iter().find(|(tool, _)| *tool == "taplo-cli").expect("pinned");
+        assert_eq!(*version, "0.10.0", "a new taplo needs its builds' SHA-256s pinned anew");
+        assert!(super::taplo_build().is_some(), "this host has a build");
     }
 }

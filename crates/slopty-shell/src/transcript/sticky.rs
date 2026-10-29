@@ -8,7 +8,7 @@
 //! transcript's top fade, which would otherwise fade it with the words it stays above.
 //!
 //! The person's prompt is held nowhere (2026-10-20): Amp, T3 Code and opencode hold none, and
-//! Claude desktop keeps its peek behind a flag; the rail's ticks go back to a prompt.
+//! Claude desktop keeps its peek behind a flag; find goes back to a prompt.
 
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
 
@@ -243,9 +243,7 @@ mod tests {
             kind: match prompt {
                 Some(text) => RowKind::User {
                     text: text.to_owned().into(),
-                    mentions: Arc::default(),
                     attachments: Arc::default(),
-                    badges: Arc::default(),
                     pending: false,
                 },
                 None => RowKind::ErrorChip {
@@ -302,7 +300,6 @@ mod tests {
             this.folds.insert(group.clone(), super::super::FoldState { open: Some(true), ..Default::default() });
             this.list.reset(60);
             this.pinned = false;
-            this.rail_enabled = false;
             cx.notify();
         });
         let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));

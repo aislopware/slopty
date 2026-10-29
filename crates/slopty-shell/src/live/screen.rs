@@ -114,10 +114,6 @@ pub struct ScreenSurface {
     query: String,
     /// The picker's keyboard row, in the order shown.
     active: Option<usize>,
-    // slopty: the fade key of the row under the pointer. A view drawn from its last frame reads
-    // no fade, and the fades let an unread key go as an element gone; the row the pointer is
-    // still over says so again before it is read (`motion::hover_known`), as a page card does.
-    hovered: Option<SharedString>,
     // slopty: what the wait said last, said on while its loader's hold runs out.
     waiting_caption: &'static str,
     scroll: ScrollHandle,
@@ -173,9 +169,7 @@ impl ScreenSurface {
                 }
                 cx.notify();
             }
-            ComposerInputEvent::Submitted
-            | ComposerInputEvent::ModifiedSubmitted
-            | ComposerInputEvent::MentionAccept => this.choose_active(cx),
+            ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => this.choose_active(cx),
             ComposerInputEvent::MentionDismiss => {
                 this.search.update(cx, |search, cx| search.set_text("", cx));
             }
@@ -192,7 +186,6 @@ impl ScreenSurface {
             search,
             query: String::new(),
             active: None,
-            hovered: None,
             waiting_caption: "Connecting…",
             scroll: ScrollHandle::new(),
             rail: popover::MenuScrollbarState::default(),
@@ -248,7 +241,6 @@ impl ScreenSurface {
                     Err(err) => Stage::Failed(err.to_string().into()),
                 };
                 this.active = None;
-                this.hovered = None;
                 this.focus_pending = true;
                 this.sync_search_keys(cx);
                 cx.notify();
@@ -488,11 +480,7 @@ impl ScreenSurface {
         let app = choice.app().map(|app| SharedString::from(app.to_owned()));
         let picked = choice.clone();
         let key = format!("screen-choice-{}", choice.id);
-        let fade: SharedString = key.clone().into();
-        if self.hovered.as_ref() == Some(&fade) && !crate::motion::hover_known(&fade) {
-            crate::motion::set_hover(&fade, true, true);
-        }
-        let row = popover::picker_row(theme, false, self.active == Some(at), key.clone())
+        popover::picker_row(theme, false, self.active == Some(at), key.clone())
             .id(("screen-choice", at))
             .debug_selector(move || key)
             .role(gpui::Role::Button)
@@ -513,18 +501,7 @@ impl ScreenSurface {
                     .text_size(crate::typography::ui_rems(12.0))
                     .text_color(theme.text_muted)
                     .child(app)
-            }));
-        // The row's own listener drives its fade; this one tells the view which row it is.
-        div()
-            .id(("screen-choice-hover", at))
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                let now = hovered.then(|| fade.clone());
-                if *hovered || this.hovered.as_ref() == Some(&fade) {
-                    this.hovered = now;
-                    cx.notify();
-                }
             }))
-            .child(row)
             .into_any_element()
     }
 
@@ -692,11 +669,12 @@ mod tests {
 
     /// The row under a resting pointer keeps its wash in every frame, as a frame from scratch
     /// draws it. Frames that draw only the view beside the picker leave the picker as it was, so
-    /// no frame reads its row's fade, and the fades let the key go (the shell's tick,
-    /// `hover_fades_active`): the row the pointer is still over tells them again. The oracle
-    /// judges the frame shown against the same state drawn from scratch. GPUI's own check of
-    /// every frame stays off here: its frames from scratch read the fade too, and would keep
-    /// the key the window's own frames let go.
+    /// no frame reads its row's fade, which the fades would take for a row gone (the shell's
+    /// tick, `hover_fades_active`): the row's fade driver holds the key for as long as GPUI
+    /// keeps the row (`motion::fade_driver`). The oracle judges the frame shown against the same
+    /// state drawn from scratch. A row that does go, its leave never heard, lets the key go with
+    /// it, and comes back at rest. GPUI's own check of every frame stays off here: its frames
+    /// from scratch read the fade too, so no frame would go unread.
     #[gpui::test]
     fn a_row_under_a_resting_pointer_paints_as_from_scratch(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -742,10 +720,9 @@ mod tests {
             beside.update(cx, |_, cx| cx.notify());
             frame(cx);
         }
-        // The frames drew the picker from its last frame: none read the row's fade, so the
-        // fades let its key go.
+        // The frames drew the picker from its last frame: none read the row's fade.
         assert!(
-            !crate::motion::hover_known("screen-choice-w2"),
+            crate::motion::hover_unread("screen-choice-w2"),
             "the picker was drawn again, so this tests nothing"
         );
         assert!(washed(cx), "the row under the resting pointer keeps its wash");
@@ -772,6 +749,22 @@ mod tests {
         surface.update(cx, |_, cx| cx.notify());
         frame(cx);
         assert!(washed(cx), "and keeps it when the picker is drawn again");
+        // The rows go from under the pointer, which never leaves them, and the pointer moves on.
+        surface.update(cx, |s, cx| {
+            s.stage = Stage::Listing;
+            cx.notify();
+        });
+        frame(cx);
+        frame(cx);
+        assert!(!crate::motion::hover_known("screen-choice-w2"), "the row gone, its fade goes too");
+        cx.simulate_mouse_move(gpui::point(px(1.0), px(1.0)), None, gpui::Modifiers::default());
+        surface.update(cx, |s, cx| {
+            s.stage = Stage::Choices(listing());
+            s.sync_search_keys(cx);
+            cx.notify();
+        });
+        frame(cx);
+        assert!(!washed(cx), "a row back with the pointer elsewhere comes back at rest");
     }
 
     /// Typing in the picker's search drops the rows it no longer matches.

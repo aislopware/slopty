@@ -221,14 +221,10 @@ pub enum MessagePart {
     Error {
         id: String,
         message: String,
-        // slopty: one error grammar: the copy in `message`, what the agent said kept apart, and
-        // whether the turn can be tried again.
+        // slopty: one error grammar: the copy in `message`, what the agent said kept apart.
         /// What the agent or its machine said, word for word, behind the copy.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        /// The failed turn can be tried again (`RetryTurn`).
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        retry: bool,
     },
     // slopty: a quiet one-line divider of Slopty's: a compaction, a subagent's news.
     /// A one-line divider between turns that no one wrote: "Compacted · 143k tokens →
@@ -513,7 +509,6 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 id,
                 message: message.clone(),
                 detail: None, // slopty: one error grammar.
-                retry: false,
             });
         }
         AgentEvent::Done { error, .. } => {
@@ -523,7 +518,6 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     id,
                     message: message.clone(),
                     detail: None, // slopty: one error grammar.
-                    retry: false,
                 });
             }
         }

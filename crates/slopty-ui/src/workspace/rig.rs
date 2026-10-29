@@ -32,8 +32,6 @@ pub struct Heard {
     pub withdrawn: Vec<HandoffId>,
     /// The files it asked the shell to open: the chat and the link.
     pub files: Vec<(String, String)>,
-    /// What it asked the shell to put in a chat's draft: the chat and the text.
-    pub attached: Vec<(String, String)>,
 }
 
 /// What the worker was sent, and what the workspace said.
@@ -87,9 +85,6 @@ pub fn hear(workspace: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Rc
                 WorkspaceEvent::Withdrawn { id, .. } => kept.withdrawn.push(*id),
                 WorkspaceEvent::OpenFile { chat, target } => {
                     kept.files.push((chat.clone(), target.clone()));
-                }
-                WorkspaceEvent::Attach { chat, text } => {
-                    kept.attached.push((chat.clone(), text.clone()));
                 }
                 _ => {}
             }

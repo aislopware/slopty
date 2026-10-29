@@ -971,8 +971,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   focus or Notification Summary, the one note that matters waited in the pile with the rest.
   A note now carries `urgent` (`slopty_platform::notify::Note`), which sets
   `UNNotificationInterruptionLevelTimeSensitive`. The workspace's attention sets it only for
-  an agent that needs the person: the look's asks, with their approval buttons or without, and
-  the server's `NeedsYou` notices, a project's included. A finished turn, a failure, a long
+  an agent that needs the person: the look's asks and the server's `NeedsYou` notices, a project's included. A finished turn, a failure, a long
   command and a program's own note stay at the active level. Two reasons: the system shows
   the person how often an app breaks through, and lets them take that away, and the 10-04
   APNs ruling already picked the same split.
@@ -999,9 +998,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     it. A finished turn shorter than that phone's slow-command time is not pushed, as a linked
     phone would not post it. Notices come only on a change of rung, so a ladder ranked again
     pushes nothing.
-  - **What is pushed.** The server's own `Notice`, sealed: `PushBody { notice, ask }`, where
-    `ask` is the thread's request when it is a plain yes or no a note's buttons answer
-    (`RequestCard::answerable`, which the app's notes use too). It is postcard, cut to fit APNs'
+  - **What is pushed.** The server's own `Notice`, sealed in a `PushBody`. Since 2026-10-29 the
+    body answers nothing: the server sets no `ask`, no `picks` and never `quiet`, and the note
+    has no buttons ("Pushes answer nothing", below). The fields stay on the wire until the
+    protocol's own pass removes them. It is postcard, cut to fit APNs'
     4 KB, and sealed with HPKE (X25519, HKDF-SHA256, ChaCha20-Poly1305, base mode) to the
     phone's key, with the token as associated data so it opens on no other phone. APNs sees fixed
     words ("Slopty", "An agent needs you" when it is urgent, else "An agent has news"),
@@ -1034,8 +1034,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     notices (`Attention::set_listening`), so a moment is said once. Back in front, it listens
     again.
   - **The extension** (`apps/slopty-notify`, a Rust appex) opens the body with the key and the
-    token and shows `note_of(body)`: the id, words, `userInfo`, category and urgency the app's
-    own note would have, so a tap, Allow and Deny route as they do on a local note. A body that
+    token and shows `note_of(body)`: the id, words, `userInfo` and urgency the app's own note
+    would have, so a tap routes as it does on a local note (with no buttons since 2026-10-29,
+    "A session is its terminal, its inspector beside it", `ui.md`). A body that
     does not open shows APNs' fixed words. Its work is one function in `slopty-platform`
     (`pushed::note_from`), which the self-test runs too.
   - **What a simulator can prove.** `simctl push` does not go through APNs: the simulator's
@@ -1087,14 +1088,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   back, and so did the notes a push put up while the phone was pocketed, which the app never
   posted and so never withdrew. Now the app checks them each time it comes to the front:
   - `Attention::set_active(true)` withdraws the notes it posted, except an ask still waiting on
-    the person. That note's Allow and Deny still work, and it goes once the ask is answered
-    anywhere.
+    the person. That note stays until the agent stops waiting, answered in its terminal
+    (no buttons since 2026-10-29, "Pushes answer nothing").
   - The app then asks the system for every note it shows (`notify::delivered`) and hands their
     ids to `Attention::delivered`. Pushed notes use the same ids as posted ones
     (`notify::pushed::note_id`), carried in the note's `info::NOTE` (corrected 2026-10-10:
     iOS shows a pushed note under its `apns-collapse-id`, so the identifier alone never
     matched). A pushed ask that is still live is adopted as the app's own,
-    so its answer takes it down. Every other note is withdrawn. The test notifier keeps the
+    so it goes once the agent stops waiting. Every other note is withdrawn. The test notifier keeps the
     list the same way the system does, so the behaviour is tested on the host.
   - Taking a note down while the phone stays pocketed came on 2026-10-10 ("A note answered
     elsewhere leaves a pocketed phone").
@@ -1103,7 +1104,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **A note answered elsewhere leaves a pocketed phone** (2026-10-10, readiness R4's M
   part). A pushed ask stayed on the phone's lock screen after the person answered it at the
-  Mac or in the terminal, until the app was next opened. Its Allow then answered nothing.
+  Mac or in the terminal, until the app was next opened. (Since 2026-10-29 every answer is the
+  terminal's; the take-back below is unchanged.)
   - **What iOS names a pushed note.** A remote note's identifier is the push's
     `apns-collapse-id`. Apple's `UNNotificationRequest.identifier` page says: "For remote
     notifications, the system sets this property to the value of the `apns-collapse-id` key".
@@ -1267,7 +1269,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `server::tests::the_worker_grant_lets_a_tagged_machine_in`,
     `this_mac::tests::the_server_line_follows_the_server_then_the_workers_link` (slopty-app).
 
-- ✅ **A press on a killed app is proved on the simulator** (2026-10-12, readiness 10-12
+- ❌ **A press on a killed app is proved on the simulator** *Superseded 2026-10-29 by
+  "TUI-first" (`agents.md`): a note has no buttons, so there is no press to answer with no window
+  ("A session is its terminal, its inspector beside it", `ui.md`).* (2026-10-12, readiness 10-12
   rank 7). The windowless answer (`verdict::answer_unheard`) had host tests for its parts and
   a Mac scenario through `press_note`, but nothing launched the phone app cold from a press.
   - simctl delivers pushes but cannot press a note's button. The e2e build reads
@@ -1330,7 +1334,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (slopty-ui); `verdict::tests::a_background_answer_that_did_not_land_is_said` (slopty-app);
     the simulator's cold press is "A press on a killed app is proved on the simulator" above.
 
-- ✅ **A small question is answered from its note** (2026-10-12, readiness 10-12 item 13, the
+- ❌ **A small question is answered from its note** *Superseded 2026-10-29 by "Pushes answer
+  nothing" (below): a push carries no request and no buttons, so the server sends no `picks`.*
+  (2026-10-12, readiness 10-12 item 13, the
   wire and the server). A note offered Allow and Deny on a plain yes or no and nothing else, so
   a question an agent asked could only be opened.
   - A request card carries `buttons` (`NoteChoice`), made where the card is
@@ -1347,9 +1353,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `hub::ladder::tests::needs_you_pushes_once_per_ask` (the pocketed phone's push carries a
     question's buttons).
 
-- ✅ **A note answers what its agent asks, not only a yes or no taken at first push**
-  (2026-10-12, readiness 10-12 rank 13, the app's half; the server re-pushes quietly when the
-  request moves and carries the options, lane W).
+- ❌ **A note answers what its agent asks, not only a yes or no taken at first push**
+  *Superseded 2026-10-29 by "TUI-first" (`agents.md`): a note answers nothing, so it has no
+  reply field and no options as buttons ("A session is its terminal, its inspector beside it",
+  `ui.md`).* (2026-10-12, readiness 10-12 rank 13, the app's half; the server re-pushes
+  quietly when the request moves and carries the options, lane W).
   - **Replies.** An agent's note with no yes or no (a question, a plan, a failure, a finish)
     carries a Reply field (`notify::REPLYING`). The reply goes to the thread as a message:
     straight to a worker linked here as the thread's composer sends it, else through the
@@ -1379,8 +1387,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `…::a_notes_reply_goes_through_the_server_while_its_worker_is_away` (slopty-ui).
 
 - ✅ **A pushed note keeps up with its thread** (2026-10-11, orchestrator-first study item 23,
-  the server's half). Three ways a pocketed phone's note fell behind what it said:
-  - **The request moved under it.** A thread that still needed the person while its request
+  the server's half). Three ways a pocketed phone's note fell behind what it said. The first
+  and the last (buttons that answered a request) are gone since 2026-10-29 with the buttons
+  themselves ("Pushes answer nothing", below): the quiet re-push and `PushBody.picks` are
+  deleted from the server. The need first seen and the finished turn's take-back stand.
+  - **The request moved under it** (deleted 2026-10-29). A thread that still needed the person while its request
     changed (a new one opened in the old one's place, or the one shown went) was never pushed
     again, so its buttons answered a request that was gone. Each phone's note now remembers
     the request its buttons answer (`Shown::asks`). Every ranking pass compares that request
@@ -1399,7 +1410,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `push.json`). It is taken back once the row's `seen` reaches that turn, or once the thread
     is gone from a linked worker's table. A later note about the thread replaces it, and with
     it the record. The file's shape changed again: an old one is set aside.
-  - **A long question was dropped.** Each of a question's four buttons carried its choice, and
+  - **A long question was dropped** (deleted 2026-10-29). Each of a question's four buttons carried its choice, and
     a choice repeats the whole question, so a long one went past APNs' 4 KB and was refused.
     `note()` cut only the title and the text. Now a note's buttons carry their labels
     (`PushBody.picks`, each cut to `PICK_BYTES`), and a press carries its place
@@ -1418,6 +1429,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `slopty-app` `verdict::tests::a_pick_answers_with_its_own_choice_with_no_window`;
     `slopty-ui` `workspace::tests::attention::a_small_question_is_answered_from_its_notes_options`;
     goldens `push_body_picks`, `thread_read`.
+
+- ✅ **Pushes answer nothing** (2026-10-29, "TUI-first", `agents.md`). An agent's own TUI
+  answers its requests in its terminal, and Slopty never answers for the person, so a pushed
+  note is words and a way to its session, nothing to press.
+  - **The server** sets no `PushBody::ask`, no `picks` and never `quiet`. The quiet re-push that
+    followed a note's request as it moved is deleted. A note still opens its session on a tap,
+    and is still taken back once its thread stops needing the person ("A note answered
+    elsewhere leaves a pocketed phone").
+  - **The phone** shows no Allow, Deny, picks or reply field: the notes' categories have no
+    actions, and the windowless answer is gone with them.
+  - The wire's `ask`, `picks` and `quiet` stay until the protocol's own pass deletes them.
 
 - ✅ **Save to Files comes down into the folder chosen** (2026-10-10, readiness audit "below
   the line"). On iPhone and iPad, "Save to Files…" and "Save a copy…" brought the whole file
@@ -1438,8 +1460,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Test: `workspace::tests::remote::saving_to_files_comes_down_into_the_chosen_folder`
     (slopty-ui, on the Mac through the same `save_into`).
 
-- ✅ **A note may say work is ready to merge or a goal is met, and carry the task its Merge
-  merges** (2026-10-10, the orchestrator-first study, items 12 and 13, the wire half).
+- ❌ **A note may say work is ready to merge or a goal is met, and carry the task its Merge
+  merges** *Superseded: the project engine, its tasks and `NoticeKind::ReadyToMerge` went
+  when projects became folders and agents got their own tools, and since 2026-10-29 a note has
+  no buttons ("Pushes answer nothing").* (2026-10-10, the orchestrator-first study, items 12 and 13, the wire half).
   - `NoticeKind::ReadyToMerge` is one note per project, its text the count of tasks ready.
     `PushBody.merges` names the task its Merge action merges, the oldest ready one, so the
     phone acts without a round trip to learn it. `NoticeKind::GoalDone` is the orchestrator
@@ -1468,7 +1492,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `notes_reach_a_phone_as_server_push_says` (slopty-serverd),
     `this_mac::tests::a_server_here_says_how_notes_reach_a_phone` (slopty-app).
 
-- ✅ **Merge on a note of work ready to merge** (2026-10-11, the orchestrator-first study, item
+- ❌ **Merge on a note of work ready to merge** *Superseded as the ruling above is: no task to
+  merge, and no buttons on a note.* (2026-10-11, the orchestrator-first study, item
   13, the app's half).
   - A pushed `ReadyToMerge` note whose body names a task (`PushBody.merges`) carries the
     `slopty.merge` category: "Merge", answered where the note is (on an unlocked device), and

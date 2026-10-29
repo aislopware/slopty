@@ -1,7 +1,7 @@
 //! The shell's Changes and Files surfaces and its settings pages on a real stack: a thread of a
 //! stand-in Claude Code (`slopty-stub-claude`) working in a git repository on the stack's
 //! worker, the repository's uncommitted changes in the right pane, its tree in the files column,
-//! and the Agents, Appearance, Shortcuts, Permissions, Devices and Archived pages. Every state is a
+//! and the Agents, Appearance, Shortcuts, Devices and Archived pages. Every state is a
 //! golden in light and in dark.
 
 use std::path::Path;
@@ -28,9 +28,6 @@ const MAIN_BEFORE: &str = "fn main() {\n    println!(\"hello\");\n}\n\n/// The f
 const MAIN_AFTER: &str = "fn main() {\n    let name = \"surfaces\";\n    println!(\"hello, {name}\");\n}\n\n/// The first number.\nfn one() -> u32 {\n    1\n}\n\n/// The second.\nfn two() -> u32 {\n    one() + 1\n}\n";
 const README: &str = "# Surfaces\n\nA repository an agent works in.\n";
 const NOTES: &str = "The agent's notes, new and not yet committed.\n";
-/// The project's permission rules (`.claude/settings.json`): one allowed, one always asked, one
-/// denied.
-const RULES: &str = r#"{"permissions":{"allow":["Bash(cargo test:*)"],"ask":["Bash(git push:*)"],"deny":["Bash(rm -rf:*)"]}}"#;
 
 /// Run git in `repo` with nothing of the developer's configuration.
 fn git(repo: &Path, args: &[&str]) {
@@ -49,7 +46,7 @@ fn git(repo: &Path, args: &[&str]) {
 }
 
 /// A repository with one commit, a file changed since and a file not yet added.
-fn repository(repo: &Path) {
+pub fn repository(repo: &Path) {
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("README.md"), README).unwrap();
     std::fs::write(repo.join("src/main.rs"), MAIN_BEFORE).unwrap();
@@ -79,18 +76,17 @@ async fn click(drv: &mut Driver, role: &str, label: &str) {
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
 }
 
-/// A stand-in agent's thread in a repository with changes: ⌘1 selects it, ⌘R opens the right
-/// pane, whose Changes surface shows the working tree's two changed files with their hunks; ⌘E
-/// opens the files column on the thread's folder, and the titlebar has no TUI switch: an agent
-/// is driven, never shown as a terminal. Then ⌘, opens Settings, whose Providers page
-/// lists the machine's agents and the autonomy setting, its Appearance and Shortcuts pages,
-/// Permissions with the project's rules as Claude Code reads them, Devices with Add
-/// device's dialog, and Archived with the thread archived by ⌘⇧A, which Unarchive brings back.
+/// A stand-in agent's thread in a repository with changes: ⌘1 selects it, ⌘T opens the right
+/// pane's new-tab menu, whose Changes surface shows the working tree's two changed files with
+/// their hunks; ⌘E opens the files column on the thread's folder, beside the session's terminal.
+/// Then ⌘, opens Settings, whose Providers page lists the machine's agents and the autonomy
+/// setting, its Appearance and Shortcuts pages,
+/// Devices with Add device's dialog, and Archived with the thread archived by ⌘⇧A, which Unarchive
+/// brings back.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn changes_files_and_settings_show_the_threads_work() {
-    // The stand-in takes its prompt's turn as Claude Code driven does, so its thread has a turn
-    // to show.
+    // The stand-in TUI takes its prompt's turn, so its thread has a turn to show.
     let mut stack = ServedApp::launch_rooted(MACHINE, &[], |_root| {
         vec![("STUB_TURNS".to_owned(), serde_json::json!({ PROMPT: [] }).to_string())]
     })
@@ -98,9 +94,6 @@ async fn changes_files_and_settings_show_the_threads_work() {
     .unwrap();
     let repo = stack.path("repo");
     repository(&repo);
-    // The project's own permission rules, which Settings → Permissions reads through the agent.
-    std::fs::create_dir_all(repo.join(".claude")).unwrap();
-    std::fs::write(repo.join(".claude/settings.json"), RULES).unwrap();
     let renders = stack.path("");
     let folder = repo.to_string_lossy().into_owned();
     let mut start = vec!["agent", "start", MACHINE, "--folder", &folder];
@@ -109,7 +102,7 @@ async fn changes_files_and_settings_show_the_threads_work() {
     let agent = started["agent"].as_str().unwrap_or_default().to_owned();
     assert!(!agent.is_empty(), "an agent started: {started}");
 
-    // The worker has the agent's thread, with its prompt, once the driven stand-in took it; the
+    // The worker has the agent's thread, with its prompt, once the stand-in took it; the
     // shell's sidebar then lists it.
     let listed = std::time::Instant::now();
     loop {
@@ -125,20 +118,22 @@ async fn changes_files_and_settings_show_the_threads_work() {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.keys("cmd-1").await.unwrap();
 
-    // The right pane's surface list, then the working tree's diff: its two files, its hunks.
-    drv.keys("cmd-r").await.unwrap();
-    click(drv, "Button", "Changes").await;
-    drv.wait_for("the diff surface", STEP, |d| node(d, "Button", "Changes").is_none())
+    // The right pane's new-tab menu (⌘T, from the session's terminal), then the working tree's
+    // diff: its two files, its hunks.
+    drv.keys("cmd-t").await.unwrap();
+    click(drv, "MenuItem", "Changes").await;
+    drv.wait_for("the diff surface", STEP, |d| node(d, "MenuItem", "Changes").is_none())
         .await
         .unwrap();
     // The worker's first diff of the tree. The diff opened under the pointer, which rests on a
-    // line and shows its Add comment: the pointer goes to the chat above the composer, so the
-    // render is the surface alone.
+    // line and lights it: the pointer goes to the session's terminal, so the render is the
+    // surface alone.
     tokio::time::sleep(SETTLE).await;
     let shown = drv.dump().await.unwrap();
-    let [x, y, w, _] =
-        node(&shown, "MultilineTextInput", "Do anything\u{2026}").expect("the composer").bounds;
-    drv.ok(&Command::Move { x: w.mul_add(0.5, x), y: y - 48.0 }).await.unwrap();
+    let terminal =
+        shown.a11y.iter().find(|n| n.role == "Terminal").expect("the session's terminal");
+    let [x, y, w, h] = terminal.bounds;
+    drv.ok(&Command::Move { x: w.mul_add(0.5, x), y: h.mul_add(0.5, y) }).await.unwrap();
     goldens(drv, &renders, "surface-files-changes").await;
 
     // The files column on the thread's folder, beside the diff.
@@ -148,12 +143,6 @@ async fn changes_files_and_settings_show_the_threads_work() {
         .unwrap();
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "surface-files-tree").await;
-    let tree = drv.dump().await.unwrap();
-    assert!(
-        node(&tree, "Button", "Claude Code's TUI beside the chat").is_none(),
-        "no TUI switch:\n{}",
-        slopty_e2e::frame_text(&tree.a11y)
-    );
 
     // Settings: the Agents page (Providers, as zeron names it) with the autonomy setting, then
     // Appearance.
@@ -196,21 +185,6 @@ async fn changes_files_and_settings_show_the_threads_work() {
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "settings-shortcuts").await;
 
-    // Permissions: the folder's rules as Claude Code reads them, by behaviour and by where each
-    // comes from.
-    click(drv, "Tab", "Permissions").await;
-    let rules = drv
-        .wait_for("the project's rules", STEP, |d| {
-            d.a11y.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("cargo test")))
-        })
-        .await;
-    if let Err(e) = &rules {
-        let shown = drv.dump().await.unwrap();
-        panic!("{e:#}\nPermissions said:\n{}", slopty_e2e::frame_text(&shown.a11y));
-    }
-    tokio::time::sleep(SETTLE).await;
-    goldens(drv, &renders, "settings-permissions").await;
-
     // Devices: this Mac's worker, then Add device's dialog, which a self-test has no ssh for.
     click(drv, "Tab", "Devices").await;
     drv.wait_for("the add row", STEP, |d| node(d, "Button", "Add a device").is_some())
@@ -232,7 +206,7 @@ async fn changes_files_and_settings_show_the_threads_work() {
     drv.keys("cmd-1").await.unwrap();
     drv.keys("cmd-shift-a").await.unwrap();
     drv.keys("cmd-,").await.unwrap();
-    click(drv, "Tab", "Archived chats").await;
+    click(drv, "Tab", "Archived sessions").await;
     drv.wait_for("the archived thread", STEP, |d| node(d, "Button", "Unarchive").is_some())
         .await
         .unwrap();

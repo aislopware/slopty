@@ -75,8 +75,8 @@ impl FilesSurface {
 
     fn tree_menu_enabled(&self, paths: &[String], action: usize, cx: &gpui::App) -> bool {
         match action {
-            0 | 1 => true,
-            2 => paths.len() == 1 && self.can_mutate_tree_entry(&paths[0], false, cx),
+            0 => true,
+            1 => paths.len() == 1 && self.can_mutate_tree_entry(&paths[0], false, cx),
             _ => paths
                 .iter()
                 .all(|path| self.can_mutate_tree_entry(path, true, cx)),
@@ -108,10 +108,10 @@ impl FilesSurface {
             key @ (popover::MenuKey::Up | popover::MenuKey::Down) => {
                 if let Some(menu) = self.tree_context_menu.as_open() {
                     let mut next = menu.active;
-                    for _ in 0..4 {
+                    for _ in 0..TREE_MENU_ROWS {
                         next = popover::menu_step(
                             Some(next),
-                            4,
+                            TREE_MENU_ROWS,
                             if matches!(key, popover::MenuKey::Up) {
                                 -1
                             } else {
@@ -152,39 +152,20 @@ impl FilesSurface {
             self.close_tree_context_menu(cx);
             return;
         }
-        let Some(entries) = paths
-            .iter()
-            .map(|path| {
-                let node = self.tree.node(path)?;
-                Some((
-                    path.clone(),
-                    node.entry.kind == slopty_view_proto::WorkspaceEntryKind::Directory,
-                ))
-            })
-            .collect::<Option<Vec<_>>>()
-        else {
+        if paths.iter().any(|path| self.tree.node(path).is_none()) {
             self.close_tree_context_menu(cx);
             return;
-        };
+        }
         self.close_tree_context_menu(cx);
         match action {
-            0 => {
-                for (path, is_directory) in entries {
-                    cx.emit(FilesEvent::AddToChat {
-                        path,
-                        is_directory,
-                        origin: origin.clone(),
-                    });
-                }
-            }
-            1 => self.copy_full_paths(&paths, &origin.context.cwd, window, cx),
+            0 => self.copy_full_paths(&paths, &origin.context.cwd, window, cx),
             // slopty: no index: a rename with no path does nothing.
-            2 => {
+            1 => {
                 if let Some(path) = paths.first() {
                     self.begin_tree_rename(path.clone(), window, cx);
                 }
             }
-            3 => self.begin_tree_delete(paths, window, cx),
+            2 => self.begin_tree_delete(paths, window, cx),
             _ => {}
         }
     }
@@ -232,7 +213,7 @@ impl FilesSurface {
         let key_of = |action: &dyn gpui::Action| {
             crate::keys::for_action(action, Some(&self.tree_focus), window, cx)
         };
-        let keys = [None, key_of(&super::CopyPath), None, key_of(&super::DeleteSelection)];
+        let keys = [key_of(&super::CopyPath), None, key_of(&super::DeleteSelection)];
         let delete_label = if count > 1 {
             format!("Delete {count} items…")
         } else {
@@ -244,8 +225,8 @@ impl FilesSurface {
             .flex_col()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_tree_context_menu(cx)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        // slopty: no "Add to prompt": the pane is read-only toward the agent.
         for (index, (label, icon_path)) in [
-            ("Add to chat".to_string(), icons::CHAT_ROUND_LINE),
             (
                 if count > 1 { "Copy full paths" } else { "Copy full path" }.to_string(),
                 icons::COPY,
@@ -256,7 +237,7 @@ impl FilesSurface {
         .into_iter()
         .enumerate()
         {
-            if index == 2 {
+            if index == 1 {
                 card = card.child(popover::menu_separator());
             }
             let enabled = self.tree_menu_enabled(&menu.paths, index, cx);
@@ -265,7 +246,7 @@ impl FilesSurface {
                     .id(gpui::SharedString::from(format!("tree-menu-{index}")))
                     .role(gpui::Role::MenuItem)
                     .aria_label(label.clone())
-                    .when(index == 3, |row| row.text_color(theme.danger))
+                    .when(index == 2, |row| row.text_color(theme.danger))
                     .when(!enabled, |el| {
                         el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
                     })
@@ -277,7 +258,7 @@ impl FilesSurface {
                     .child(
                         icons::icon(icon_path)
                             .size(px(16.0))
-                            .text_color(if index == 3 {
+                            .text_color(if index == 2 {
                                 theme.danger
                             } else {
                                 theme.text_muted
@@ -285,7 +266,7 @@ impl FilesSurface {
                     )
                     .child(div().flex_1().min_w_0().child(label))
                     .children(keys[index].as_ref().map(|keys| popover::kbd_hint(&theme, keys)))
-                    .when(index == 2, |row| popover::fixed_key(row, &theme, "f2")),
+                    .when(index == 1, |row| popover::fixed_key(row, &theme, "f2")),
             );
         }
         Some(popover::menu_at(
@@ -296,6 +277,9 @@ impl FilesSurface {
         ))
     }
 }
+
+/// The tree menu's rows: Copy full path, Rename…, Delete….
+const TREE_MENU_ROWS: usize = 3;
 
 /// What the toast says after a copy of `count` full paths.
 fn copied_paths_message(count: usize) -> String {
@@ -363,7 +347,7 @@ mod tests {
                         window,
                         cx,
                     );
-                    files.dispatch_tree_menu(1, window, cx);
+                    files.dispatch_tree_menu(0, window, cx);
                     assert_eq!(
                         cx.read_from_clipboard().unwrap().text().as_deref(),
                         Some(expected)
@@ -387,7 +371,7 @@ mod tests {
             files.open_tree_context_menu("a.txt".into(), gpui::point(px(50.), px(50.)), window, cx);
             assert_eq!(files.tree.selected(), Some("a.txt"));
             assert!(events.borrow().is_empty());
-            files.dispatch_tree_menu(1, window, cx);
+            files.dispatch_tree_menu(0, window, cx);
             assert_eq!(
                 cx.read_from_clipboard().unwrap().text().as_deref(),
                 Some("/workspace/a.txt")
@@ -399,10 +383,8 @@ mod tests {
                 cx,
             );
             assert!(!files.tree.is_expanded("folder"));
-            files.dispatch_tree_menu(0, window, cx);
         });
         cx.run_until_parked();
-        assert!(events.borrow().iter().any(|event|matches!(event,FilesEvent::AddToChat{path,is_directory:true,..} if path=="folder")));
         assert!(
             !events
                 .borrow()
@@ -479,20 +461,18 @@ mod tests {
             files.open_tree_context_menu("a.txt".into(), at, window, cx);
             let paths = files.tree_context_menu.as_open().unwrap().paths.clone();
             assert_eq!(paths, ["folder", "a.txt"]);
-            assert!(!files.tree_menu_enabled(&paths, 2, cx));
-            assert!(files.tree_menu_enabled(&paths, 3, cx));
-            files.dispatch_tree_menu(1, window, cx);
+            assert!(!files.tree_menu_enabled(&paths, 1, cx));
+            assert!(files.tree_menu_enabled(&paths, 2, cx));
+            files.dispatch_tree_menu(0, window, cx);
             assert_eq!(
                 cx.read_from_clipboard().unwrap().text().as_deref(),
                 Some("/workspace/folder\n/workspace/a.txt")
             );
             files.open_tree_context_menu("a.txt".into(), at, window, cx);
-            files.dispatch_tree_menu(2, window, cx);
+            files.dispatch_tree_menu(1, window, cx);
             assert!(files.tree_rename.is_none());
-            files.open_tree_context_menu("a.txt".into(), at, window, cx);
-            files.dispatch_tree_menu(0, window, cx);
             files.open_tree_context_menu("folder".into(), at, window, cx);
-            files.dispatch_tree_menu(3, window, cx);
+            files.dispatch_tree_menu(2, window, cx);
             assert_eq!(
                 files.tree_delete.as_ref().unwrap().paths,
                 ["folder", "a.txt"]
@@ -500,15 +480,6 @@ mod tests {
             files.dismiss_tree_delete(true, window, cx);
         });
         cx.run_until_parked();
-        let added = events
-            .borrow()
-            .iter()
-            .filter_map(|event| match event {
-                FilesEvent::AddToChat { path, .. } => Some(path.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(added, ["folder", "a.txt"]);
         assert!(events.borrow().iter().any(|event| matches!(
             event,
             FilesEvent::MutateMany(intents)

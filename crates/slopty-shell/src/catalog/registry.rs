@@ -8,7 +8,7 @@
 //! Per-device because CLI installs are — a viewer retargets the settings page at
 //! another device and edits THAT device's set over the forwarded RPCs.
 
-// slopty: an excerpt — the descriptor and title settings the interface reads. The registry
+// slopty: an excerpt — the descriptor the interface reads. The registry
 // itself, its harness slots and prefs file are the engine's, which is Slopty's.
 
 use serde::{Deserialize, Serialize};
@@ -43,16 +43,6 @@ pub struct HarnessDescriptor {
     pub usage: Option<slopty_view_proto::AgentUsage>,
 }
 
-impl HarnessDescriptor {
-    /// Whether this harness can accept a prompt inside the turn that is
-    /// currently running. Turn-boundary steering is still useful to the
-    /// automatic queue drain, but it is not the non-interrupting "Steer"
-    /// action exposed on an individual queued row.
-    pub fn steers_mid_turn(&self) -> bool {
-        self.supports_steering && self.steering_mode == SteeringMode::StepBoundary
-    }
-}
-
 fn default_installed() -> bool {
     true
 }
@@ -72,14 +62,4 @@ pub fn descriptor_enabled(descriptor: &HarnessDescriptor) -> bool {
     descriptor
         .enabled
         .unwrap_or_else(|| descriptor.installed && auto_enabled(descriptor.id))
-}
-
-/// Per-device automatic session title preferences.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct TitleSettings {
-    /// None follows the session harness, using a supported installed fallback.
-    pub harness: Option<HarnessId>,
-    /// None selects the cheapest model offered by the selected harness.
-    pub model: Option<String>,
 }

@@ -76,7 +76,7 @@ pub struct WorkRow {
     /// A subagent's kind (`general-purpose`, `Explore`), the agents list's first word.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
-    /// The model a subagent of that kind runs on, when the agent names one.
+    /// The model a subagent runs on, as its own run says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Where it stands, as the agent says: `running`, `pending`, `paused`, `waiting`,

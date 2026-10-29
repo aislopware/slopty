@@ -1,16 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Attachments (feature-inventory §1.7/§1.8): the composer's staged images,
-//! the chunked upload to the chat's host device, the plain-text attachment-ref
-//! transport that rides the prompt, the transcript read-back cache, and the
-//! full-size preview lightbox.
+//! Attachments: the pictures a transcript's message carries, read back from the machine that
+//! holds them, their decoded-image cache and the full-size preview lightbox.
 //!
-//! Ports of slopty's `composer/use-attachments.ts` (staging/upload),
-//! `control/message-attachments.ts` (the `withAttachments` /
-//! `parseUserMessageImages` text transport — attachment refs are embedded in
-//! the user message's plain text, which is exactly what persists in the doc),
-//! and `lib/transcript-attachment-cache.ts` (decoded-image cache keyed by
-//! `(deviceId, path)`, seeded locally after a send so own bubbles never
-//! round-trip).
+//! Ports of slopty's `control/message-attachments.ts` (`parseUserMessageImages`: a message's
+//! pictures ride its plain text as a trailer of paths, which the view model writes) and
+//! `lib/transcript-attachment-cache.ts` (decoded-image cache keyed by `(deviceId, path)`).
+//!
+//! slopty: TUI-first, nothing is staged or uploaded here: the GUI sends the agent nothing.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -19,7 +15,6 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use futures::TryStreamExt as _;
 use gpui::{
     AnyElement, BackgroundExecutor, Image, ImageFormat, SharedString, Size, div, prelude::*, px,
 };
@@ -28,16 +23,8 @@ use crate::state::EngineHandle;
 use crate::theme::ink;
 use slopty_view_rpc::methods;
 
-/// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
+/// The largest attachment read back (use-attachments.ts `MAX_ATTACHMENT_BYTES`).
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
-/// Base64 chars per `UploadChunk`, sized against the relay's hard ceiling:
-/// Cloudflare caps a WebSocket message at 1 MiB, and a chunk rides one relay
-/// frame (JSON envelope + uleb header add ~150 bytes) — 680 000 chars ≈
-/// 510 KB binary leaves ~35% headroom. Multiple of 4 so a slice of the
-/// whole-file base64 stays independently decodable. The old 60 000 (45 KB)
-/// made a 3 MB screenshot ~70 sequential round trips — each one a stall
-/// opportunity on a flaky link.
-pub const UPLOAD_CHUNK_B64_CHARS: usize = 680_000;
 /// state.ts `MAX_ATTACHMENT_READ_CHUNKS` — bounds the read-back loop.
 const MAX_READ_CHUNKS: usize = 1_000;
 /// slopty: how much of a file's first chunk a head reader sees, as base64 (64 KiB of bytes).
@@ -47,83 +34,36 @@ const HEAD_B64: usize = 64 * 1024 / 3 * 4;
 // Text transport (message-attachments.ts)
 // ---------------------------------------------------------------------------
 
-/// The body used for image-only sends (`use-attachments.ts`).
-pub const ATTACHMENT_ONLY_TEXT: &str = "See the attached image(s).";
-/// The body used when any attachment is not an image.
-pub const FILE_ATTACHMENT_ONLY_TEXT: &str = "See the attached file(s).";
-
-/// Whether `text` is the placeholder body of an attachments-only send.
-pub fn is_attachment_only_text(text: &str) -> bool {
-    text == ATTACHMENT_ONLY_TEXT || text == FILE_ATTACHMENT_ONLY_TEXT
-}
-
-/// The placeholder body for an attachments-only send of `paths`.
-pub fn attachment_only_text(paths: &[String]) -> &'static str {
-    if paths.iter().all(|path| is_image_path(path)) {
-        ATTACHMENT_ONLY_TEXT
-    } else {
-        FILE_ATTACHMENT_ONLY_TEXT
-    }
-}
-
 /// Whether an attachment ref names an image, as opposed to any other file.
 pub fn is_image_path(path: &str) -> bool {
     format_by_extension(Path::new(path)).is_some()
 }
 
-pub use slopty_view_proto::attachment_mentions::attachment_display_name;
-
-/// Whether `mention` is the chip for the attachment at `path`.
-pub fn chip_names_attachment(
-    mention: &slopty_view_proto::attachment_mentions::AttachmentMention,
-    path: &str,
-) -> bool {
-    mention.names_attachment(path)
-}
-
-/// Number restored attachments after the chips in `text` that name them, so
-/// those chips stay live; an attachment no chip names is left unnumbered.
-pub fn pair_with_chips(text: &str, attachments: &mut [StagedAttachment]) {
-    let chips = slopty_view_proto::attachment_mentions::attachment_mentions(text);
-    for att in attachments {
-        att.mention = chips
-            .iter()
-            .find(|chip| chip_names_attachment(chip, &att.name))
-            .map(|chip| chip.index);
+/// Image formats the whole pipeline supports: intersection of gpui's decoders
+/// and the engine's `mime_by_ext` read-back jail.
+fn format_by_extension(path: &Path) -> Option<ImageFormat> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "png" => Some(ImageFormat::Png),
+        "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+        "gif" => Some(ImageFormat::Gif),
+        "webp" => Some(ImageFormat::Webp),
+        "svg" => Some(ImageFormat::Svg),
+        "bmp" => Some(ImageFormat::Bmp),
+        "tif" | "tiff" => Some(ImageFormat::Tiff),
+        _ => None,
     }
 }
 
-/// The attachments no chip in `text` stands for, in order. A chip is the
-/// attachment's handle wherever it shows, so only these still need a tile;
-/// anything a chip can't be matched to keeps its tile.
-pub fn unchipped_attachments<'a>(text: &str, paths: &'a [String]) -> Vec<&'a String> {
-    let mentions = slopty_view_proto::attachment_mentions::attachment_mentions(text);
-    paths
-        .iter()
-        .filter(|path| {
-            !mentions
-                .iter()
-                .any(|mention| chip_names_attachment(mention, path))
-        })
-        .collect()
-}
-
-/// How attachments ride the prompt (use-attachments.ts `withAttachments`):
-/// plain local paths appended to the text — the files are staged on the device
-/// that runs the agent, so the agent can open them with its own tools; the
-/// same text is what persists as the user doc entry.
-pub fn with_attachments(text: &str, paths: &[String]) -> String {
+/// `text` with `paths` in the trailer the view model writes for a message's pictures
+/// (`slopty_ui`'s `with_images`).
+#[cfg(test)]
+pub(crate) fn with_attachments(text: &str, paths: &[String]) -> String {
     if paths.is_empty() {
         return text.to_string();
     }
     let refs: Vec<String> = paths.iter().map(|p| format!("- {p}")).collect();
-    let body = if text.is_empty() {
-        attachment_only_text(paths)
-    } else {
-        text
-    };
     format!(
-        "{body}\n\nAttached images (local files — open them to view):\n{}",
+        "{text}\n\nAttached images (local files — open them to view):\n{}",
         refs.join("\n")
     )
 }
@@ -139,7 +79,7 @@ pub struct UserImageAttachment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedUserMessage {
-    /// The visible prompt (the refs trailer stripped; empty for image-only sends).
+    /// The visible words (the refs trailer stripped; empty when a message is only pictures).
     pub text: String,
     pub attachments: Vec<UserImageAttachment>,
 }
@@ -213,236 +153,13 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
         };
     }
     ParsedUserMessage {
-        text: if is_attachment_only_text(body.trim()) {
-            String::new()
-        } else {
-            body.to_string()
-        },
+        text: body.to_string(),
         attachments,
     }
 }
 
-/// message-attachments.ts `userMessageRailText`: what the rail/sidebar shows
-/// for a user message ("Attached image" / "N attached images" when image-only).
-pub fn user_message_rail_text(content: &str) -> String {
-    let parsed = parse_user_message_images(content);
-    if !parsed.text.trim().is_empty() {
-        return parsed.text;
-    }
-    let kind = if parsed
-        .attachments
-        .iter()
-        .all(|att| is_image_path(&att.path))
-    {
-        "image"
-    } else {
-        "file"
-    };
-    match parsed.attachments.len() {
-        0 => content.to_string(),
-        1 => format!("Attached {kind}"),
-        n => format!("{n} attached {kind}s"),
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Staging (use-attachments.ts intake)
-// ---------------------------------------------------------------------------
-
-/// What a staged attachment holds. Images keep their decoded-at-paint
-/// [`Image`], which feeds thumbnails, the lightbox, the upload and the
-/// post-send cache seed; any other file stays opaque bytes.
-#[derive(Clone)]
-pub enum AttachmentContent {
-    Image(Arc<Image>),
-    File(Arc<Vec<u8>>),
-}
-
-/// A file staged in the composer, before upload.
-#[derive(Clone)]
-pub struct StagedAttachment {
-    pub id: String,
-    /// File name. Images carry a type-matching extension (use-attachments.ts
-    /// `ensureExtension` — agents sniff images by extension).
-    pub name: String,
-    pub content: AttachmentContent,
-    /// The composer's chip number when a chip in the draft mentions this
-    /// attachment. `None` for attachments the prompt does not reference
-    /// (appshots, drafts restored from before chips).
-    pub mention: Option<u32>,
-}
-
-impl StagedAttachment {
-    pub fn bytes(&self) -> &[u8] {
-        match &self.content {
-            AttachmentContent::Image(image) => &image.bytes,
-            AttachmentContent::File(bytes) => bytes,
-        }
-    }
-
-    /// The picture, for attachments that are images.
-    pub fn image(&self) -> Option<&Arc<Image>> {
-        match &self.content {
-            AttachmentContent::Image(image) => Some(image),
-            AttachmentContent::File(_) => None,
-        }
-    }
-
-    fn new(name: String, content: AttachmentContent) -> Self {
-        Self {
-            id: uuid::Uuid::new_v4().to_string(),
-            name,
-            content,
-            mention: None,
-        }
-    }
-
-    fn from_image(name: String, image: Image) -> Self {
-        Self::new(name, AttachmentContent::Image(Arc::new(image)))
-    }
-
-    fn from_file(name: &str, bytes: Vec<u8>) -> Self {
-        // Attachment refs ride the prompt one per line; a name must not add lines.
-        let name = name.replace(['\r', '\n'], "_");
-        Self::new(name, AttachmentContent::File(Arc::new(bytes)))
-    }
-}
-
-/// Image formats the whole pipeline supports: intersection of gpui's decoders
-/// and the engine's `mime_by_ext` read-back jail.
-pub fn format_by_extension(path: &Path) -> Option<ImageFormat> {
-    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-        "png" => Some(ImageFormat::Png),
-        "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
-        "gif" => Some(ImageFormat::Gif),
-        "webp" => Some(ImageFormat::Webp),
-        "svg" => Some(ImageFormat::Svg),
-        "bmp" => Some(ImageFormat::Bmp),
-        "tif" | "tiff" => Some(ImageFormat::Tiff),
-        _ => None,
-    }
-}
-
-/// use-attachments.ts `ensureExtension`: pasted screenshots often arrive as a
-/// bare "image" — make sure the staged name carries a type-matching extension.
-pub fn ensure_extension(name: &str, format: ImageFormat) -> String {
-    let has_ext = name
-        .rsplit_once('.')
-        .map(|(stem, ext)| {
-            !stem.is_empty()
-                && (2..=5).contains(&ext.len())
-                && ext.chars().all(|c| c.is_ascii_alphanumeric())
-        })
-        .unwrap_or(false);
-    if has_ext {
-        name.to_string()
-    } else {
-        format!("{name}.{}", format.extension())
-    }
-}
-
-/// Stage a file from disk (picker / drop / pasted path). An image keeps its
-/// thumbnail (a BMP is converted to PNG, which agents can read); any other
-/// regular file is staged as opaque bytes. `Err` carries the user-facing
-/// message (mirrors the old `onError` copy).
-pub fn stage_file(path: &Path) -> Result<StagedAttachment, String> {
-    if format_by_extension(path).is_none() {
-        return stage_plain_file(path);
-    }
-    let mut staged = stage_file_verbatim(path)?;
-    if let Some(image) = staged
-        .image()
-        .filter(|image| image.format == ImageFormat::Bmp)
-    {
-        let png =
-            bmp_to_png(image).map_err(|_| format!("{} is not a valid image.", staged.name))?;
-        staged.content = AttachmentContent::Image(Arc::new(png));
-        staged.name = Path::new(&staged.name)
-            .with_extension("png")
-            .to_string_lossy()
-            .into_owned();
-    }
-    Ok(staged)
-}
-
-/// Read a regular file within the attachment size limit. `Err` carries the
-/// user-facing message.
-fn read_regular_file(path: &Path, name: &str) -> Result<Vec<u8>, String> {
-    let meta = std::fs::metadata(path).map_err(|_| format!("{name} could not be read."))?;
-    if !meta.is_file() {
-        return Err(format!("{name} is not a file."));
-    }
-    if meta.len() > MAX_ATTACHMENT_BYTES {
-        return Err(format!("{name} is too large (24 MB max)."));
-    }
-    std::fs::read(path).map_err(|_| format!("{name} could not be read."))
-}
-
-fn file_name(path: &Path, fallback: &str) -> String {
-    path.file_name().map_or_else(
-        || fallback.to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    )
-}
-
-/// Stage a file's bytes exactly as stored, for callers that decode the image
-/// themselves (wallpapers) rather than hand it to an agent.
-pub fn stage_file_verbatim(path: &Path) -> Result<StagedAttachment, String> {
-    let name = file_name(path, "image");
-    let Some(format) = format_by_extension(path) else {
-        return Err(format!("{name} is not a supported image."));
-    };
-    let bytes = read_regular_file(path, &name)?;
-    Ok(StagedAttachment::from_image(
-        ensure_extension(&name, format),
-        Image::from_bytes(format, bytes),
-    ))
-}
-
-/// Stage any other regular file as opaque bytes.
-fn stage_plain_file(path: &Path) -> Result<StagedAttachment, String> {
-    let name = file_name(path, "file");
-    let bytes = read_regular_file(path, &name)?;
-    Ok(StagedAttachment::from_file(&name, bytes))
-}
-
-/// Stage an image pasted from the clipboard. A BMP (what Windows puts there for
-/// a screenshot) is converted to PNG like [`stage_file`] does; one that won't
-/// decode stays as pasted.
-pub fn stage_clipboard_image(image: Image) -> StagedAttachment {
-    let image = if image.format == ImageFormat::Bmp
-        && let Ok(png) = bmp_to_png(&image)
-    {
-        png
-    } else {
-        image
-    };
-    StagedAttachment::from_image(ensure_extension("image", image.format), image)
-}
-
-/// Windows screenshots are BMP, but no agent harness inlines BMP and the
-/// agent's `Read` tool can't decode one — so they go out as PNG.
-fn bmp_to_png(bmp: &Image) -> Result<Image, String> {
-    let decoded = image::load_from_memory_with_format(&bmp.bytes, image::ImageFormat::Bmp)
-        .map_err(|e| e.to_string())?;
-    let mut png = std::io::Cursor::new(Vec::new());
-    decoded
-        .write_to(&mut png, image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
-    Ok(Image::from_bytes(ImageFormat::Png, png.into_inner()))
-}
-
-/// Stage native macOS capture bytes without a temporary file. The capture
-/// service already encoded PNG and enforces the shared size limit.
-pub fn stage_png_bytes(name: String, bytes: Vec<u8>) -> StagedAttachment {
-    StagedAttachment::from_image(
-        ensure_extension(&name, ImageFormat::Png),
-        Image::from_bytes(ImageFormat::Png, bytes),
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Upload (state.ts uploadAttachment) + read-back (state.ts readAttachmentImage)
+// Read-back (state.ts readAttachmentImage)
 // ---------------------------------------------------------------------------
 
 fn with_target(mut params: serde_json::Value, target_device_id: Option<&str>) -> serde_json::Value {
@@ -452,13 +169,8 @@ fn with_target(mut params: serde_json::Value, target_device_id: Option<&str>) ->
     params
 }
 
-/// Per-call deadlines (desktop state.ts): a stalled-but-open relay link never
-/// fails an RPC on its own, so every attachment call races a timer. The first
-/// chunk gets 90s (a cold dial to a remote device), later chunks 30s; commit
-/// 150s (it must outlast the engine's cross-device assemble); reads 20s.
-const FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(90);
-const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
-const COMMIT_TIMEOUT: Duration = Duration::from_secs(150);
+/// Per-read deadline (desktop state.ts): a stalled-but-open relay link never fails an RPC on
+/// its own, so every read races a timer.
 const READ_CHUNK_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Race an RPC against `timeout` on the gpui background executor (these
@@ -476,151 +188,6 @@ pub(crate) async fn call_with_timeout(
     match futures::future::select(call, timer).await {
         futures::future::Either::Left((result, _)) => result.map_err(|e| e.to_string()),
         futures::future::Either::Right(_) => Err(format!("{method} timed out")),
-    }
-}
-
-/// Chunks in flight at once. `seq` slots are idempotent engine-side, so
-/// completion order doesn't matter; a small window hides per-chunk latency
-/// without flooding the relay socket.
-const UPLOAD_CONCURRENCY: usize = 3;
-
-/// Whole-attachment deadline. Per-chunk timeouts + retries bound each CALL,
-/// but on a flapping link chunks that succeed on attempt 2-of-3 never trip
-/// the 3-consecutive-failure abort — an upload could lawfully crawl for hours
-/// reading "Sending…" (2026-08-18 user report). Scaled with size, capped:
-/// past this, fail the send with the banner instead of spinning.
-fn attachment_deadline(n_chunks: usize) -> Duration {
-    Duration::from_secs((120 + 15 * n_chunks as u64).min(900))
-}
-
-/// The `(seq, b64 byte-range)` plan for a file's chunks. An empty file still
-/// sends one empty chunk (the commit needs the uploadId staged).
-fn chunk_ranges(b64_len: usize) -> Vec<(u64, std::ops::Range<usize>)> {
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-    let mut seq = 0u64;
-    loop {
-        let end = (start + UPLOAD_CHUNK_B64_CHARS).min(b64_len);
-        ranges.push((seq, start..end));
-        start = end;
-        seq += 1;
-        if start >= b64_len {
-            break;
-        }
-    }
-    ranges
-}
-
-/// Chunked upload: base64 the bytes, `UploadChunk{uploadId,seq,data}` per
-/// [`UPLOAD_CHUNK_B64_CHARS`] slice (positional `seq` makes the cheap retry
-/// idempotent), a few chunks in flight at once, then
-/// `UploadCommit{uploadId,fileName}` → the durable absolute path on the target
-/// device. The caller mints `upload_id` — the queued-attachment flow derives
-/// its `pending://` refs from the same identity before the bytes move.
-/// `progress` (when given) accumulates uploaded BINARY bytes — the
-/// composer's "Uploading… N%" reads it every paint. Errors return the raw
-/// cause (the composer shows friendly copy).
-pub async fn upload_attachment(
-    engine: &EngineHandle,
-    executor: &BackgroundExecutor,
-    target_device_id: Option<&str>,
-    upload_id: &str,
-    attachment: &StagedAttachment,
-    progress: Option<Arc<std::sync::atomic::AtomicU64>>,
-) -> Result<String, String> {
-    let b64 = BASE64.encode(attachment.bytes());
-    let ranges = chunk_ranges(b64.len());
-    let deadline = executor.timer(attachment_deadline(ranges.len()));
-    let upload = async {
-        futures::stream::iter(ranges.iter().cloned().map(Ok::<_, String>))
-            .try_for_each_concurrent(UPLOAD_CONCURRENCY, |(seq, range)| {
-                let progress = progress.clone();
-                let upload_id = &upload_id;
-                let b64 = &b64;
-                async move {
-                    let params = with_target(
-                        serde_json::json!({
-                            "uploadId": upload_id,
-                            "seq": seq,
-                            "data": &b64[range.clone()],
-                        }),
-                        target_device_id,
-                    );
-                    // The first WINDOW (not just seq 0) gets the cold-dial
-                    // allowance — its chunks all start before the link is warm.
-                    let timeout = if seq < UPLOAD_CONCURRENCY as u64 {
-                        FIRST_CHUNK_TIMEOUT
-                    } else {
-                        CHUNK_TIMEOUT
-                    };
-                    // One transient blip must not abort the upload; `seq`
-                    // slots are idempotent engine-side, so a blind re-send is
-                    // safe (timeouts retry too).
-                    let mut attempt = 0u32;
-                    loop {
-                        match call_with_timeout(
-                            engine,
-                            executor,
-                            methods::UPLOAD_CHUNK,
-                            params.clone(),
-                            timeout,
-                        )
-                        .await
-                        {
-                            Ok(_) => break,
-                            Err(err) if attempt < 2 => {
-                                attempt += 1;
-                                // warn, not debug: the 2026-08-19 incident
-                                // ground through silent timeout/retry cycles
-                                // for minutes with a literally empty log —
-                                // degraded uploads must narrate.
-                                tracing::warn!(error = %err, seq, attempt, "upload chunk retry");
-                                // Stagger by seq so parallel chunks that failed
-                                // together don't re-collide in lockstep.
-                                executor
-                                    .timer(Duration::from_millis(50 * (attempt as u64) * (seq + 1)))
-                                    .await;
-                            }
-                            Err(err) => return Err(err),
-                        }
-                    }
-                    if let Some(progress) = &progress {
-                        // b64 → binary bytes (final chunk's padding rounds up
-                        // by ≤2 bytes — irrelevant for a percentage).
-                        progress.fetch_add(
-                            (range.len() * 3 / 4) as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
-                    Ok(())
-                }
-            })
-            .await?;
-        let params = with_target(
-            serde_json::json!({ "uploadId": upload_id, "fileName": attachment.name }),
-            target_device_id,
-        );
-        let reply = call_with_timeout(
-            engine,
-            executor,
-            methods::UPLOAD_COMMIT,
-            params,
-            COMMIT_TIMEOUT,
-        )
-        .await?;
-        reply
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| "upload commit returned no path".to_string())
-    };
-    futures::pin_mut!(upload);
-    match futures::future::select(upload, deadline).await {
-        futures::future::Either::Left((result, _)) => result,
-        futures::future::Either::Right(_) => Err(format!(
-            "attachment upload exceeded {}s",
-            attachment_deadline(ranges.len()).as_secs()
-        )),
     }
 }
 
@@ -711,21 +278,6 @@ pub(crate) async fn read_attachment_bytes_with(
     Some((name, mime, bytes))
 }
 
-/// Read back a staged file of any type (a queued message restored for editing).
-pub async fn read_attachment_file(
-    engine: &EngineHandle,
-    executor: &BackgroundExecutor,
-    target_device_id: Option<&str>,
-    path: &str,
-) -> Option<StagedAttachment> {
-    let (name, _, bytes) =
-        read_attachment_bytes(engine, executor, target_device_id, path, None).await?;
-    Some(StagedAttachment::from_file(
-        attachment_display_name(&name),
-        bytes,
-    ))
-}
-
 pub async fn read_attachment_image(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
@@ -779,26 +331,6 @@ pub async fn read_attachment_image(
     })
 }
 
-/// Decode with a fixed allocation budget and retain only a small queue image.
-/// Full resolution is fetched on explicit preview, never retained by queue rows.
-pub(crate) fn queue_thumbnail_image(source: &Image) -> Option<Arc<Image>> {
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(source.bytes.as_slice()))
-        .with_guessed_format()
-        .ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16_384);
-    limits.max_image_height = Some(16_384);
-    limits.max_alloc = Some(128 * 1024 * 1024);
-    reader.limits(limits);
-    let thumb = reader.decode().ok()?.thumbnail(160, 112);
-    let mut bytes = std::io::Cursor::new(Vec::new());
-    thumb.write_to(&mut bytes, image::ImageFormat::Png).ok()?;
-    Some(Arc::new(Image::from_bytes(
-        ImageFormat::Png,
-        bytes.into_inner(),
-    )))
-}
-
 // ---------------------------------------------------------------------------
 // Transcript image cache (transcript-attachment-cache.ts)
 // ---------------------------------------------------------------------------
@@ -815,7 +347,7 @@ pub struct CachedAttachmentImage {
 pub enum AttachmentSnapshot {
     Loading,
     Loaded(CachedAttachmentImage),
-    /// Load failed; `retry_in` is how long until [`begin_load`] would hand out
+    /// Load failed; `retry_in` is how long until `begin_load_for` would hand out
     /// another attempt (the exponential 2s→15s ladder from user-attachments.tsx).
     Error {
         retry_in: Duration,
@@ -975,16 +507,7 @@ pub fn protect_attachments(keys: std::collections::HashSet<(String, String)>) {
     *protected().lock().unwrap() = keys;
 }
 
-fn key(device_id: &str, path: &str) -> AttachmentKey {
-    AttachmentKey::new(device_id, path, None)
-}
-
-pub fn attachment_snapshot(device_id: &str, path: &str) -> AttachmentSnapshot {
-    attachment_snapshot_for(&key(device_id, path))
-}
-
 pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnapshot {
-    let (device_id, path) = (source.device.as_str(), source.path.as_str());
     let mut cache = cache().lock().unwrap();
     let tick = {
         cache.tick += 1;
@@ -1000,55 +523,8 @@ pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnaps
         Some(CacheEntry::Error { attempts, at }) => AttachmentSnapshot::Error {
             retry_in: retry_delay(attempts.saturating_sub(1)).saturating_sub(crate::clock::spent(*at)),
         },
-        Some(CacheEntry::Loading { .. }) => AttachmentSnapshot::Loading,
-        None => {
-            // Queued-send alias: the host materializes `pending://{id}/{name}`
-            // at `{uploads}/{id8}-{name}` and rewrites the persisted ref to
-            // that ABSOLUTE path — one the sender can't know up front (it's
-            // the host's disk). The id8 basename prefix IS derivable though,
-            // so the send seeds the bytes under an alias and this fallback
-            // resolves the rewritten ref instantly instead of blanking the
-            // thumbnail into a skeleton while the bytes round-trip
-            // (2026-08-19 "photo disappears after it finishes sending").
-            if let Some(image) = source
-                .raster_mime
-                .is_none()
-                .then(|| upload_alias_id8(path))
-                .flatten()
-                .and_then(|id8| match cache.map.get(&alias_key(device_id, &id8)) {
-                    Some(CacheEntry::Loaded { image, .. }) => Some(image.clone()),
-                    _ => None,
-                })
-            {
-                cache.insert_loaded(key(device_id, path), image.clone());
-                return AttachmentSnapshot::Loaded(image);
-            }
-            AttachmentSnapshot::Loading
-        }
+        Some(CacheEntry::Loading { .. }) | None => AttachmentSnapshot::Loading,
     }
-}
-
-/// The uploadId fragment a committed upload's basename starts with
-/// (`{id8}-{name}` per the engine's `Uploads::pending_target`). `None` when
-/// the path can't be a committed upload.
-fn upload_alias_id8(path: &str) -> Option<String> {
-    let base = std::path::Path::new(path).file_name()?.to_str()?;
-    let (id8, _) = base.split_at_checked(8)?;
-    (base.as_bytes().get(8) == Some(&b'-') && id8.bytes().all(|b| b.is_ascii_alphanumeric()))
-        .then(|| id8.to_string())
-}
-
-fn alias_key(device_id: &str, id8: &str) -> AttachmentKey {
-    key(device_id, &format!("upload-alias://{id8}"))
-}
-
-/// Seed the just-sent image under its upload identity so the persisted
-/// message's rewritten absolute ref (host-side path) resolves from the same
-/// local bytes — see the alias fallback in [`attachment_snapshot`].
-pub fn seed_attachment_alias(device_id: &str, upload_id: &str, name: &str, image: Arc<Image>) {
-    let id8: String = upload_id.chars().take(8).collect();
-    let source = alias_key(device_id, &id8);
-    store_loaded_for(&source, name.to_string().into(), image);
 }
 
 /// Release gpui's decoded copies of evicted images: the asset-system entry
@@ -1066,10 +542,6 @@ pub fn flush_evicted(mut window: Option<&mut gpui::Window>, cx: &mut gpui::App) 
 /// Claim the load for a source: `true` ⇒ the caller should start fetching now
 /// (the entry is marked Loading so concurrent renders don't double-fetch).
 /// Errored sources hand out a retry only after their backoff has elapsed.
-pub fn begin_load(device_id: &str, path: &str) -> bool {
-    begin_load_for(&key(device_id, path))
-}
-
 pub(crate) fn begin_load_for(source: &AttachmentKey) -> bool {
     let mut cache = cache().lock().unwrap();
     let entry = cache.map.entry(source.clone());
@@ -1110,19 +582,11 @@ impl Drop for AttachmentLoadGuard {
     }
 }
 
-pub fn store_loaded(device_id: &str, path: &str, name: SharedString, image: Arc<Image>) {
-    store_loaded_for(&key(device_id, path), name, image);
-}
-
 pub(crate) fn store_loaded_for(source: &AttachmentKey, name: SharedString, image: Arc<Image>) {
     cache()
         .lock()
         .unwrap()
         .insert_loaded(source.clone(), CachedAttachmentImage { name, image });
-}
-
-pub fn store_error(device_id: &str, path: &str) {
-    store_error_for(&key(device_id, path));
 }
 
 pub(crate) fn store_error_for(source: &AttachmentKey) {
@@ -1139,27 +603,6 @@ pub(crate) fn store_error_for(source: &AttachmentKey) {
             at: crate::clock::stopwatch(), // slopty: a retry's wait, not a moment drawn
         },
     );
-}
-
-/// Seed the cache after a successful upload (composer send path) so the just-
-/// sent bubble's thumbnails render from local bytes instead of a round-trip.
-pub fn seed_attachment(device_id: &str, path: &str, name: &str, image: Arc<Image>) {
-    store_loaded(device_id, path, name.to_string().into(), image);
-}
-
-/// [`seed_attachment`] for a staged attachment; a file that is not an image
-/// has no thumbnail to seed.
-pub fn seed_staged(device_id: &str, path: &str, att: &StagedAttachment) {
-    if let Some(image) = att.image() {
-        seed_attachment(device_id, path, &att.name, image.clone());
-    }
-}
-
-/// [`seed_attachment_alias`] for a staged attachment.
-pub fn seed_staged_alias(device_id: &str, upload_id: &str, att: &StagedAttachment) {
-    if let Some(image) = att.image() {
-        seed_attachment_alias(device_id, upload_id, &att.name, image.clone());
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1437,92 +880,6 @@ mod tests {
         assert!((caption.center().x - px(600.0)).abs() < px(1.0), "centred: {caption:?}");
     }
 
-    // slopty: appshots removed.
-    #[test]
-    fn queue_images_have_a_small_retained_pixel_budget() {
-        let source = image::DynamicImage::new_rgba8(2400, 1600);
-        let mut bytes = std::io::Cursor::new(Vec::new());
-        source
-            .write_to(&mut bytes, image::ImageFormat::Png)
-            .unwrap();
-        let source = Image::from_bytes(ImageFormat::Png, bytes.into_inner());
-        let thumbnail = queue_thumbnail_image(&source).unwrap();
-        let (width, height) = png_dimensions(&thumbnail.bytes).unwrap();
-        assert!(width <= 160 && height <= 112);
-        assert!(thumbnail.bytes.len() < 160 * 112 * 4);
-    }
-
-    #[test]
-    fn any_regular_file_stages_with_its_exact_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        for (name, bytes) in [
-            ("notes.md", &b"# notes\n"[..]),
-            ("archive.tar.gz", &[0x1f, 0x8b, 0, 0xff][..]),
-            ("LICENSE", b"MIT"),
-            ("empty.txt", b""),
-        ] {
-            let path = dir.path().join(name);
-            std::fs::write(&path, bytes).unwrap();
-            let staged = stage_file(&path).unwrap();
-            assert_eq!(staged.name, name);
-            assert_eq!(staged.bytes(), bytes);
-            assert!(staged.image().is_none());
-        }
-        // An image still keeps its thumbnail.
-        let png = dir.path().join("a.png");
-        std::fs::write(&png, b"not decoded here").unwrap();
-        assert!(stage_file(&png).unwrap().image().is_some());
-    }
-
-    #[test]
-    fn folders_and_oversize_files_are_refused_with_a_message() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(stage_file(dir.path()).err().unwrap().contains("not a file"));
-        let large = dir.path().join("large.bin");
-        std::fs::File::create(&large)
-            .unwrap()
-            .set_len(MAX_ATTACHMENT_BYTES + 1)
-            .unwrap();
-        assert!(stage_file(&large).err().unwrap().contains("too large"));
-        assert!(stage_file(&dir.path().join("missing.md")).is_err());
-    }
-
-    #[test]
-    fn a_staged_name_cannot_add_attachment_lines() {
-        let staged = StagedAttachment::from_file("a\n- injected.md", Vec::new());
-        assert_eq!(staged.name, "a_- injected.md");
-    }
-
-    #[test]
-    fn file_attachments_round_trip_with_their_own_placeholder() {
-        let only_files = with_attachments("", &["/uploads/ab12cd34-notes.md".to_string()]);
-        assert!(only_files.starts_with(FILE_ATTACHMENT_ONLY_TEXT));
-        let parsed = parse_user_message_images(&only_files);
-        assert_eq!(parsed.text, "");
-        assert_eq!(parsed.attachments[0].path, "/uploads/ab12cd34-notes.md");
-        assert_eq!(user_message_rail_text(&only_files), "Attached file");
-
-        // A mixed send reads as files; an image-only send is unchanged.
-        let mixed = with_attachments("", &["/a/cat.png".to_string(), "/a/notes.md".to_string()]);
-        assert!(mixed.starts_with(FILE_ATTACHMENT_ONLY_TEXT));
-        assert_eq!(user_message_rail_text(&mixed), "2 attached files");
-        let images = with_attachments("", &["/a/cat.png".to_string()]);
-        assert!(images.starts_with(ATTACHMENT_ONLY_TEXT));
-        assert!(is_attachment_only_text(ATTACHMENT_ONLY_TEXT));
-        assert!(is_attachment_only_text(FILE_ATTACHMENT_ONLY_TEXT));
-    }
-
-    #[test]
-    fn upload_prefixes_are_not_part_of_the_displayed_name() {
-        assert_eq!(attachment_display_name("ab12cd34-notes.md"), "notes.md");
-        assert_eq!(attachment_display_name("my-notes.md"), "my-notes.md");
-        assert_eq!(
-            attachment_display_name("zzzzzzzz-notes.md"),
-            "zzzzzzzz-notes.md"
-        );
-        assert_eq!(attachment_display_name("notes.md"), "notes.md");
-    }
-
     #[test]
     fn with_attachments_round_trips_through_parse() {
         let paths = vec!["/data/uploads/ab-cat.png".to_string(), "/x/dog.jpg".into()];
@@ -1537,9 +894,8 @@ mod tests {
     }
 
     #[test]
-    fn image_only_send_hides_placeholder_body() {
+    fn a_message_of_only_pictures_has_no_words() {
         let content = with_attachments("", &["/a/b.png".to_string()]);
-        assert!(content.starts_with(ATTACHMENT_ONLY_TEXT));
         let parsed = parse_user_message_images(&content);
         assert_eq!(parsed.text, "");
         assert_eq!(parsed.attachments.len(), 1);
@@ -1570,31 +926,6 @@ mod tests {
     }
 
     #[test]
-    fn rail_text_summarizes_image_only_sends() {
-        let one = with_attachments("", &["/a/b.png".to_string()]);
-        assert_eq!(user_message_rail_text(&one), "Attached image");
-        let two = with_attachments("", &["/a/b.png".to_string(), "/c/d.png".into()]);
-        assert_eq!(user_message_rail_text(&two), "2 attached images");
-        let with_text = with_attachments("fix this", &["/a/b.png".to_string()]);
-        assert_eq!(user_message_rail_text(&with_text), "fix this");
-        assert_eq!(user_message_rail_text("plain"), "plain");
-    }
-
-    #[test]
-    fn ensure_extension_matches_browser_heuristic() {
-        assert_eq!(ensure_extension("shot.png", ImageFormat::Png), "shot.png");
-        assert_eq!(ensure_extension("image", ImageFormat::Png), "image.png");
-        assert_eq!(
-            ensure_extension("photo.j", ImageFormat::Jpeg),
-            "photo.j.jpg"
-        );
-        assert_eq!(
-            ensure_extension("archive.tar.gz", ImageFormat::Png),
-            "archive.tar.gz"
-        );
-    }
-
-    #[test]
     fn supported_formats_match_engine_jail() {
         for (ext, expect) in [
             ("png", Some(ImageFormat::Png)),
@@ -1612,72 +943,6 @@ mod tests {
         }
     }
 
-    /// A 1x1 32-bit BI_RGB bitmap as the Windows clipboard produces it: one
-    /// BGRX pixel, the fourth byte unused (zero).
-    fn clipboard_bmp() -> Vec<u8> {
-        let mut bmp = b"BM".to_vec();
-        // File size, reserved, pixel offset, header size, width, height.
-        for field in [58u32, 0, 54, 40, 1, 1] {
-            bmp.extend(field.to_le_bytes());
-        }
-        bmp.extend([1, 0, 32, 0]); // planes, bits per pixel
-        bmp.extend([0; 24]); // BI_RGB, image size, resolution, palette
-        bmp.extend([30, 20, 10, 0]);
-        bmp
-    }
-
-    #[test]
-    fn pasted_bmp_screenshot_is_staged_as_an_opaque_png() {
-        let staged = stage_clipboard_image(Image::from_bytes(ImageFormat::Bmp, clipboard_bmp()));
-        assert_eq!(staged.image().unwrap().format, ImageFormat::Png);
-        assert_eq!(staged.name, "image.png");
-        let png = image::load_from_memory(staged.bytes()).unwrap();
-        assert_eq!(png.into_rgba8().get_pixel(0, 0).0, [10, 20, 30, 255]);
-    }
-
-    #[test]
-    fn bmp_file_is_staged_as_png_but_wallpapers_keep_the_original() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("Screenshot 1.BMP");
-        std::fs::write(&path, clipboard_bmp()).unwrap();
-
-        let staged = stage_file(&path).unwrap();
-        assert_eq!(staged.image().unwrap().format, ImageFormat::Png);
-        assert_eq!(staged.name, "Screenshot 1.png");
-        assert!(image::load_from_memory(staged.bytes()).is_ok());
-
-        let verbatim = stage_file_verbatim(&path).unwrap();
-        assert_eq!(verbatim.image().unwrap().format, ImageFormat::Bmp);
-        assert_eq!(verbatim.name, "Screenshot 1.BMP");
-        assert_eq!(verbatim.bytes(), clipboard_bmp());
-    }
-
-    #[test]
-    fn non_bmp_files_are_staged_untouched() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("shot.png");
-        image::RgbImage::new(1, 1).save(&path).unwrap();
-        let staged = stage_file(&path).unwrap();
-        assert_eq!(staged.name, "shot.png");
-        assert_eq!(staged.bytes(), std::fs::read(&path).unwrap());
-    }
-
-    #[test]
-    fn undecodable_bmp_is_refused_for_files_and_kept_for_pastes() {
-        let broken = b"BM not really a bitmap".to_vec();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("broken.bmp");
-        std::fs::write(&path, &broken).unwrap();
-        assert_eq!(
-            stage_file(&path).err().unwrap(),
-            "broken.bmp is not a valid image."
-        );
-
-        let pasted = stage_clipboard_image(Image::from_bytes(ImageFormat::Bmp, broken));
-        assert_eq!(pasted.image().unwrap().format, ImageFormat::Bmp);
-        assert_eq!(pasted.name, "image.bmp");
-    }
-
     #[test]
     fn retry_ladder_is_2s_doubling_capped_at_15s() {
         assert_eq!(retry_delay(0), Duration::from_millis(2_000));
@@ -1687,49 +952,6 @@ mod tests {
         assert_eq!(retry_delay(9), Duration::from_millis(15_000));
     }
 
-    #[test]
-    fn upload_chunk_fits_the_relay_frame_ceiling() {
-        // Cloudflare caps a WebSocket message at 1 MiB; the chunk rides one
-        // relay frame with a small JSON envelope + uleb header.
-        assert!(UPLOAD_CHUNK_B64_CHARS + 1_024 < 1_048_576);
-        // A slice of the whole-file base64 must stay independently decodable.
-        assert_eq!(UPLOAD_CHUNK_B64_CHARS % 4, 0);
-    }
-
-    #[test]
-    fn chunk_ranges_cover_the_buffer_exactly() {
-        // Empty file: one empty chunk (the commit needs the id staged).
-        assert_eq!(chunk_ranges(0), vec![(0, 0..0)]);
-        // Exact multiple: no trailing empty chunk.
-        let exact = chunk_ranges(UPLOAD_CHUNK_B64_CHARS * 2);
-        assert_eq!(exact.len(), 2);
-        assert_eq!(
-            exact[1],
-            (1, UPLOAD_CHUNK_B64_CHARS..UPLOAD_CHUNK_B64_CHARS * 2)
-        );
-        // Partial tail.
-        let partial = chunk_ranges(UPLOAD_CHUNK_B64_CHARS + 7);
-        assert_eq!(partial.len(), 2);
-        assert_eq!(
-            partial[1],
-            (1, UPLOAD_CHUNK_B64_CHARS..UPLOAD_CHUNK_B64_CHARS + 7)
-        );
-        // Ranges tile the buffer: contiguous, in order, fully covering.
-        let mut expected_start = 0;
-        for (seq, range) in &partial {
-            assert_eq!(range.start, expected_start, "seq {seq} contiguous");
-            expected_start = range.end;
-        }
-        assert_eq!(expected_start, UPLOAD_CHUNK_B64_CHARS + 7);
-    }
-
-    #[test]
-    fn attachment_deadline_scales_and_caps() {
-        // A one-chunk screenshot fails within ~2 minutes, not hours.
-        assert_eq!(attachment_deadline(1), Duration::from_secs(135));
-        // A max-size upload is still bounded.
-        assert_eq!(attachment_deadline(1_000), Duration::from_secs(900));
-    }
 }
 
 #[cfg(test)]
@@ -1743,15 +965,9 @@ mod generated_image_tests {
         let png = AttachmentKey::new(owner, path, Some("image/png"));
         let gif = AttachmentKey::new(owner, path, Some("image/gif"));
         let raw = Arc::new(Image::from_bytes(ImageFormat::Gif, b"GIF89a".to_vec()));
-        seed_attachment(owner, path, "image.gif", raw.clone());
-        seed_attachment_alias(owner, "policy01", "image.gif", raw.clone());
+        store_loaded_for(&AttachmentKey::new(owner, path, None), "image.gif".into(), raw.clone());
         assert!(matches!(
             attachment_snapshot_for(&png),
-            AttachmentSnapshot::Loading
-        ));
-        let alias = AttachmentKey::new(owner, "/another/policy01-image.png", Some("image/png"));
-        assert!(matches!(
-            attachment_snapshot_for(&alias),
             AttachmentSnapshot::Loading
         ));
         assert!(begin_load_for(&png));
@@ -1917,58 +1133,17 @@ mod generated_image_tests {
         }
     }
 
-    #[test]
-    fn chips_stand_in_for_their_attachments() {
-        use slopty_view_proto::attachment_mentions::attachment_mention_link;
-        let paths: Vec<String> = [
-            "/uploads/ab12cd34-Image_1.png",
-            "pending://att-2/my notes.md",
-            "/uploads/ef56ab78-Image_3.png",
-            "/uploads/0a1b2c3d-Cargo.toml",
-        ]
-        .map(String::from)
-        .to_vec();
-        let text = format!(
-            "compare {} with {}",
-            attachment_mention_link(1, None),
-            attachment_mention_link(2, Some("my notes.md")),
-        );
-        // Image 3 and Cargo.toml have no chip, so they keep their tiles.
-        assert_eq!(unchipped_attachments(&text, &paths), [&paths[2], &paths[3]]);
-        // A committed upload sanitizes the name the chip still carries.
-        let committed = vec!["/uploads/12345678-my_notes.md".to_string()];
-        assert!(unchipped_attachments(&text, &committed).is_empty());
-        // Plain text keeps every tile.
-        assert_eq!(unchipped_attachments("Image 1", &paths).len(), 4);
-    }
-
     #[tokio::test]
     #[ignore = "slopty: gpui-fast makes its Mac platform on the main thread only, and a test runs on another"]
-    async fn a_queued_file_reads_back_with_its_bytes_and_display_name() {
+    async fn an_image_read_back_never_accepts_an_empty_body() {
         let executor = gpui_platform::background_executor();
-        for bytes in [b"# notes\n".to_vec(), Vec::new()] {
-            let engine = EngineHandle::from_test_client(slopty_view_rpc::memory_client(Arc::new(
-                FileRpc(bytes.clone()),
-            )));
-            let file = read_attachment_file(&engine, &executor, None, "/uploads/ab12cd34-notes.md")
-                .await
-                .unwrap();
-            assert_eq!(file.name, "notes.md");
-            assert_eq!(file.bytes(), bytes);
-            assert!(file.image().is_none());
-            // An image read-back never accepts an empty body.
-            if bytes.is_empty() {
-                let image = read_attachment_image(
-                    &engine,
-                    &executor,
-                    None,
-                    "/uploads/ab12cd34-notes.md",
-                    None,
-                )
+        let engine = EngineHandle::from_test_client(slopty_view_rpc::memory_client(Arc::new(
+            FileRpc(Vec::new()),
+        )));
+        let image =
+            read_attachment_image(&engine, &executor, None, "/uploads/ab12cd34-notes.md", None)
                 .await;
-                assert!(image.is_none());
-            }
-        }
+        assert!(image.is_none());
     }
 
     #[tokio::test]
@@ -2014,19 +1189,14 @@ mod generated_image_tests {
     fn generated_image_cancelled_load_releases_claim_without_losing_completed_images() {
         let owner = "cancelled-generated-owner";
         let path = "/fixture/cancelled-generated.png";
-        assert!(begin_load(owner, path));
-        drop(AttachmentLoadGuard(key(owner, path)));
-        assert!(matches!(
-            attachment_snapshot(owner, path),
-            AttachmentSnapshot::Error { .. }
-        ));
+        let plain = AttachmentKey::new(owner, path, None);
+        assert!(begin_load_for(&plain));
+        drop(AttachmentLoadGuard(plain.clone()));
+        assert!(matches!(attachment_snapshot_for(&plain), AttachmentSnapshot::Error { .. }));
         let image = Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new()));
-        store_loaded(owner, path, "generated.png".into(), image);
-        drop(AttachmentLoadGuard(key(owner, path)));
-        assert!(matches!(
-            attachment_snapshot(owner, path),
-            AttachmentSnapshot::Loaded(_)
-        ));
+        store_loaded_for(&plain, "generated.png".into(), image);
+        drop(AttachmentLoadGuard(plain.clone()));
+        assert!(matches!(attachment_snapshot_for(&plain), AttachmentSnapshot::Loaded(_)));
     }
 
     #[test]

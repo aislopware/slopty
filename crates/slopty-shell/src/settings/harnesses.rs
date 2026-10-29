@@ -42,8 +42,8 @@ use crate::theme::Theme;
 const DETAILS_INSET: f32 = 4.0 + 36.0 + 12.0;
 
 // slopty: how freely agents act (`[agents] autonomy`): the value, its label, and the note under
-// the row title for the chosen one. The names are the composer's mode menu's, Claude Code's own
-// (`slopty_agent::claude::offers`), so one choice reads alike in both places.
+// the row title for the chosen one. The names are Claude Code's own for its permission modes, so
+// the choice reads as its TUI says it.
 const AUTONOMY: [(&str, &str, &str); 3] = [
     ("auto", "Auto", "Asks only about what looks risky."),
     ("full", "Bypass permissions", "Asks nothing: agents act without stopping."),
@@ -461,9 +461,6 @@ impl HarnessesPage {
                     if let Some(list) = list {
                         page.harnesses = Loadable::Ready(list);
                     }
-                    if arrived {
-                        crate::pickers::bump_harness_catalog(cx);
-                    }
                     cx.notify();
                     !arrived && tries > 0 && page.install_run.is_some()
                 })
@@ -590,10 +587,6 @@ impl HarnessesPage {
                         if let Ok(list) = serde_json::from_value::<Vec<HarnessDescriptor>>(value) {
                             page.harnesses = Loadable::Ready(list);
                         }
-                        // The composer caches its catalog per space — poke
-                        // every Pickers to re-fetch, or the rail keeps the
-                        // old set until restart.
-                        crate::pickers::bump_harness_catalog(cx);
                     }
                     Err(err) => page.error = Some(err.to_string()),
                 }

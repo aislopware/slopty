@@ -1,35 +1,38 @@
-//! ptyd + worker + real client links on this machine: a driven Claude Code thread served over
-//! the link. The table and the thread are followed from a cursor, the link drops and comes back,
-//! and only what it missed is sent; an intent sent again after the drop is answered as the first
-//! time and acts on nothing. The worker restarts in the middle of a turn and the turn goes on.
-//! Claude Code is the stand-in (`slopty-stub-claude`) first on the daemons' `PATH`, whose record
-//! says how it was started and what it heard.
+//! ptyd + worker + real client links on this machine: Claude Code as its own TUI in a Slopty
+//! terminal, read as a thread (`docs/decisions/agents.md`, "TUI-first"). A start opens the
+//! terminal and names it on the thread; what the TUI writes to its transcript reaches the thread
+//! as the kernel reports the write; its hooks give the phase; words typed from the prompt box go
+//! as a paste with the Enter apart, and wait while the agent asks the person at a dialog; a
+//! `/clear` moves the terminal to the next thread; a worker started again reads the thread again
+//! from the terminal ptyd kept. Claude Code is the stand-in (`slopty-stub-claude`,
+//! `slopty_testkit::claude_tui`) first on the daemons' `PATH`, whose record says how it was
+//! started, what it read of its terminal and which hooks it ran.
 //!
 //! Each step waits for what it means to arrive, on no clock of its own: a runner that held their
 //! processes for 40 s only made these tests slower, and a test that never gets there is ended by
 //! nextest's slow-timeout (docs/decisions/testing.md, "A test waits on the event it means").
-
-#![cfg(target_vendor = "apple")]
+//! Nothing here is Apple's: it runs on Linux too, wherever ptyd and the worker run.
 
 #[cfg(test)]
 mod threads {
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use slopty_client::{LinkEvent, WorkerLink};
-    use slopty_core::ClientId;
+    use slopty_core::{ClientId, SessionId};
     use slopty_net::client::{bind_client, connect_addr};
     use slopty_net::{ClientMsg, WorkerMsg};
     use slopty_proto::handshake::Hello;
+    use slopty_proto::terminal::{OpenSession, TermError, TermEvent, TermRequest, TermSize};
     use slopty_proto::thread::wire::{
-        Expanded, Intent, IntentDone, NewWorktree, Outcome, PastSessions, Start, TableFrame,
-        ThreadFrame, ThreadRequest,
+        IntentDone, NewWorktree, Outcome, PastSessions, Start, ThreadFrame, ThreadRequest,
+        ThreadRow,
     };
     use slopty_proto::thread::{
-        AgentId, Cap, Cursor, IntentId, ItemBody, RequestState, TableState, ThreadId, ThreadState,
-        TurnState,
+        AgentId, Cursor, Drive, IntentId, ItemBody, Liveness, Phase, TableState, ThreadId,
+        ThreadMeta, ThreadState, TurnState,
     };
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -75,6 +78,8 @@ mod threads {
                 child.try_wait().is_ok_and(|status| status.is_some())
             });
             debug_assert!(ended, "a daemon's group outlived the test");
+            // Off macOS the worker's clipboard is its own and goes with it.
+            #[cfg(target_os = "macos")]
             slopty_input::MacBoard::named(&self.pasteboard).release();
         }
     }
@@ -155,32 +160,19 @@ mod threads {
         (worker, addr)
     }
 
-    /// A frame as it arrived, for judging what was sent.
-    #[derive(Debug, PartialEq, Eq)]
-    enum Got {
-        Snapshot(Cursor),
-        Page { turns: usize, older: bool },
-        Expanded(Expanded),
-        Review(Box<slopty_proto::thread::wire::Review>),
-        Actions { epoch: u64, first: u64, next: u64 },
-        App(u64, slopty_proto::visual::AppAnswer),
-    }
-
-    /// One client: its link, and its copies of the table and of one thread, kept from nothing
-    /// but what the link brings.
+    /// One client: its link, and its copies of the table and of the thread it follows, kept
+    /// from nothing but what the link brings.
     struct Client {
         endpoint: slopty_net::Endpoint,
         link: WorkerLink,
         events: mpsc::Receiver<LinkEvent>,
         table: TableState,
-        tables: Vec<TableFrame>,
         thread: Option<ThreadState>,
         cursor: Option<Cursor>,
-        got: Vec<Got>,
     }
 
     impl Client {
-        /// Client `id` connected to the daemons.
+        /// Client `id` connected to the daemons, the thread table followed.
         async fn connect(daemons: &Daemons, id: ClientId) -> Self {
             let endpoint = bind_client().unwrap();
             let hello = Hello { client: id, name: "threads".to_owned() };
@@ -195,20 +187,30 @@ mod threads {
             let conn = dialing.await.unwrap();
             let mut link = WorkerLink::start(conn);
             let events = link.events().unwrap();
-            Self {
+            let client = Self {
                 endpoint,
                 link,
                 events,
                 table: TableState::default(),
-                tables: Vec::new(),
                 thread: None,
                 cursor: None,
-                got: Vec::new(),
-            }
+            };
+            client.send(ThreadRequest::Table { have: None }).await;
+            client
         }
 
         async fn send(&self, req: ThreadRequest) {
             self.link.send(ClientMsg::Thread(req)).await.unwrap();
+        }
+
+        /// `req` for terminal `session`.
+        async fn term(&self, session: SessionId, req: TermRequest) {
+            self.link.send(ClientMsg::Term { session, req }).await.unwrap();
+        }
+
+        /// Type `text` into terminal `session` as the prompt box sends it.
+        async fn submit(&self, session: SessionId, text: &str) {
+            self.term(session, TermRequest::Submit { text: text.to_owned() }).await;
         }
 
         /// End this client's connection, as a client that quits does.
@@ -218,10 +220,13 @@ mod threads {
                 tokio::time::timeout(Duration::from_secs(1), self.endpoint.wait_idle()).await;
         }
 
-        /// Follow `thread` from where this copy stands.
-        async fn follow(&self, thread: ThreadId) {
-            let have = self.cursor;
-            self.send(ThreadRequest::Follow { thread, have, turns: 100, max_latency_ms: 0 }).await;
+        /// Follow `thread` from nothing, until its first state is here.
+        async fn follow(&mut self, thread: ThreadId) {
+            self.thread = None;
+            self.cursor = None;
+            self.send(ThreadRequest::Follow { thread, have: None, turns: 100, max_latency_ms: 0 })
+                .await;
+            self.until(|c| c.thread.is_some()).await;
         }
 
         /// The next event, its thread and table frames taken into the copies; a control
@@ -230,10 +235,7 @@ mod threads {
             let event = self.events.recv().await.expect("the link's events go on");
             match event {
                 LinkEvent::Thread { frame, .. } => self.take(frame),
-                LinkEvent::Control(WorkerMsg::Threads(frame)) => {
-                    self.table.apply(&frame);
-                    self.tables.push(frame);
-                }
+                LinkEvent::Control(WorkerMsg::Threads(frame)) => self.table.apply(&frame),
                 LinkEvent::Control(msg) => return Some(msg),
                 LinkEvent::Disconnected(why) => panic!("disconnected: {why}"),
                 _ => {}
@@ -244,13 +246,11 @@ mod threads {
         fn take(&mut self, frame: ThreadFrame) {
             match frame {
                 ThreadFrame::Snapshot { cursor, state } => {
-                    self.got.push(Got::Snapshot(cursor));
                     self.thread = Some(*state);
                     self.cursor = Some(cursor);
                 }
                 ThreadFrame::Actions { epoch, first, next, actions } => {
-                    self.got.push(Got::Actions { epoch, first, next });
-                    let at = self.cursor.expect("actions follow a cursor");
+                    let Some(at) = self.cursor else { return };
                     assert_eq!((epoch, first), (at.epoch, at.seq), "each frame follows on");
                     let state = self.thread.as_mut().expect("actions follow a state");
                     for action in &actions {
@@ -258,12 +258,7 @@ mod threads {
                     }
                     self.cursor = Some(Cursor { epoch, seq: next });
                 }
-                ThreadFrame::Page(page) => {
-                    self.got.push(Got::Page { turns: page.turns.len(), older: page.older });
-                }
-                ThreadFrame::Expanded { body, .. } => self.got.push(Got::Expanded(body)),
-                ThreadFrame::Review(review) => self.got.push(Got::Review(review)),
-                ThreadFrame::App { id, answer } => self.got.push(Got::App(id, answer)),
+                _ => {}
             }
         }
 
@@ -283,15 +278,9 @@ mod threads {
             }
         }
 
-        async fn intent(&mut self, id: IntentId, thread: ThreadId, intent: Intent) -> Outcome {
-            self.send(ThreadRequest::Intent { id, thread, intent }).await;
-            self.heard(|msg| match msg {
-                WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
-                    Some(outcome)
-                }
-                _ => None,
-            })
-            .await
+        /// Take events until thread `thread`'s row is there and `holds` of it.
+        async fn row_until(&mut self, thread: ThreadId, holds: impl Fn(&ThreadRow) -> bool) {
+            self.until(|c| c.table.rows.get(&thread).is_some_and(&holds)).await;
         }
 
         fn state(&self) -> &ThreadState {
@@ -299,37 +288,47 @@ mod threads {
         }
     }
 
-    /// What the stand-in recorded of how it was started, once it has.
-    async fn recorded(record: &Path) -> serde_json::Value {
+    /// Where the stand-in run in terminal `terminal` keeps its record, under `root`.
+    fn record_path(root: &Path, terminal: SessionId) -> PathBuf {
+        root.join("records").join(format!("{terminal}.json"))
+    }
+
+    /// What the stand-in run in terminal `terminal` recorded, once `holds` of it.
+    async fn record_of(
+        root: &Path,
+        terminal: SessionId,
+        holds: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let at = record_path(root, terminal);
         loop {
-            if let Some(seen) =
-                std::fs::read(record).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            {
+            let seen = std::fs::read(&at)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+            if let Some(seen) = seen.filter(|r| holds(r)) {
                 return seen;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
 
-    /// The person's `claude` and the stand-in's record of how it started, first on the
-    /// `PATH` of a worker whose home is `root`.
-    async fn with_claude(root: &Path) -> (Daemons, PathBuf) {
-        with_claude_and(root, &[]).await
+    /// The person's `claude` first on the `PATH` of daemons whose home is `root`, each with
+    /// `env` besides: the stand-in, keeping its record under `root/records` by its terminal.
+    async fn with_claude(root: &Path, env: &[(&str, &str)]) -> Daemons {
+        with_claude_as(root, &bin("slopty-stub-claude"), env).await
     }
 
-    /// [`with_claude`], the stand-in's knobs `knobs` (`slopty_testkit::claude_stream`) in the
-    /// daemons' environment.
-    async fn with_claude_and(root: &Path, knobs: &[(&str, &str)]) -> (Daemons, PathBuf) {
+    /// [`with_claude`], with `program` as the `claude` on the `PATH`.
+    async fn with_claude_as(root: &Path, program: &Path, env: &[(&str, &str)]) -> Daemons {
         let programs = root.join("programs");
         std::fs::create_dir_all(&programs).unwrap();
-        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
-        let record = root.join("record.json");
-        let mut env = vec![
+        std::os::unix::fs::symlink(program, programs.join("claude")).unwrap();
+        let record = root.join("records").join(concat!("{", "session", "}", ".json"));
+        let mut all = vec![
             ("PATH", slopty_testkit::env::path_with(&programs)),
-            ("STUB_RECORD", record.clone().into_os_string()),
+            ("STUB_RECORD", record.into_os_string()),
         ];
-        env.extend(knobs.iter().map(|(k, v)| (*k, std::ffi::OsString::from(v))));
-        (daemons_with(root, &env).await, record)
+        all.extend(env.iter().map(|(k, v)| (*k, std::ffi::OsString::from(v))));
+        daemons_with(root, &all).await
     }
 
     /// A Claude Code start in `cwd`, with `prompt` as its first message.
@@ -349,8 +348,13 @@ mod threads {
         }
     }
 
-    /// Start `start` from `a`: the thread it named.
-    async fn started(a: &mut Client, start: Start) -> ThreadId {
+    /// The terminal a start the person asked for as intent `id` opens.
+    fn terminal_of(id: IntentId) -> SessionId {
+        SessionId::from_uuid(*id.as_uuid())
+    }
+
+    /// Ask `a` for `start`: the intent, and how it ended.
+    async fn asked(a: &mut Client, start: Start) -> (IntentId, Outcome) {
         let id = IntentId::new();
         a.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
         let outcome = a
@@ -361,22 +365,17 @@ mod threads {
                 _ => None,
             })
             .await;
+        (id, outcome)
+    }
+
+    /// Start `start` from `a`: the thread it named, and its terminal.
+    async fn started(a: &mut Client, start: Start) -> (ThreadId, SessionId) {
+        let (id, outcome) = asked(a, start).await;
         let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
-        thread
+        (thread, terminal_of(id))
     }
 
-    /// The lines of `kind` (a message's type, or a control request's subtype) the stand-in
-    /// heard, by its record.
-    fn heard_lines(record: &serde_json::Value, kind: &str) -> Vec<serde_json::Value> {
-        record["received"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|l| l["type"] == kind || l["request"]["subtype"] == kind)
-            .cloned()
-            .collect()
-    }
-
+    /// Whether the followed thread has `n` turns, the last one done.
     fn turns_done(n: usize) -> impl Fn(&Client) -> bool {
         move |c: &Client| {
             c.thread.as_ref().is_some_and(|s| {
@@ -385,248 +384,452 @@ mod threads {
         }
     }
 
-    fn asking(c: &Client) -> bool {
-        c.thread.as_ref().is_some_and(|s| s.open_requests().count() == 1)
-    }
-
-    /// A driven Claude Code thread is found in the table and followed over a real client link;
-    /// the permission it asks is answered by an intent. The link drops while the agent goes on
-    /// (a second client, following throughout, sees it all land), and comes back as the same
-    /// client: the table and the thread resume from its cursors with only what it missed, and
-    /// the intent sent again is answered as before and acts on nothing, where a new one for the
-    /// same request finds it answered.
-    #[tokio::test]
-    async fn a_thread_resumes_from_its_cursor_and_an_intent_is_had_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (daemons, record) = with_claude(&root).await;
-        let me = ClientId::new();
-        let mut a = Client::connect(&daemons, me).await;
-        let thread = started(&mut a, claude_in(&root, Some("bash touch made"))).await;
-        a.send(ThreadRequest::Table { have: None }).await;
-        a.until(|c| c.table.rows.contains_key(&thread)).await;
-        assert!(matches!(a.tables.first(), Some(TableFrame::Snapshot { .. })), "{:?}", a.tables);
-        a.follow(thread).await;
-        a.until(asking).await;
-        assert!(matches!(a.got.first(), Some(Got::Snapshot(_))), "a first follow is a snapshot");
-
-        let request = a.state().open_requests().next().unwrap().id.clone();
-        let answer =
-            Intent::Answer { ask: request.clone(), choice: "allow".to_owned(), message: None };
-        let once = IntentId::new();
-        assert_eq!(a.intent(once, thread, answer.clone()).await, Outcome::Done);
-        a.until(turns_done(1)).await;
-        assert!(
-            a.state()
-                .requests
-                .iter()
-                .any(|r| r.id == request && matches!(r.state, RequestState::Answered { .. })),
-            "{:?}",
-            a.state().requests
-        );
-
-        // A witness follows throughout; the link drops, and the agent goes on.
-        let mut witness = Client::connect(&daemons, ClientId::new()).await;
-        witness.follow(thread).await;
-        // As far as `a` got, or further: a lease's stamp may land after `a` last read.
-        let reached = a.cursor.unwrap();
-        witness
-            .until(|c| {
-                c.cursor.is_some_and(|at| at.epoch == reached.epoch && at.seq >= reached.seq)
-            })
-            .await;
-        let (cursor, table, kept) = (a.cursor.unwrap(), a.table.clone(), a.thread.clone());
-        a.link.close();
-        drop(a);
-        let send = Intent::Send {
-            text: "Say more.".to_owned(),
-            delivery: slopty_proto::thread::Delivery::Steer,
-            attachments: vec![],
-        };
-        assert_eq!(witness.intent(IntentId::new(), thread, send).await, Outcome::Done);
-        witness.until(turns_done(2)).await;
-        let landed = witness.cursor.unwrap();
-        assert_eq!(landed.epoch, cursor.epoch, "the log went on, not over");
-
-        // Back as the same client, from its cursors: only what it missed comes.
-        let mut b = Client::connect(&daemons, me).await;
-        (b.table, b.thread, b.cursor) = (table.clone(), kept, Some(cursor));
-        b.send(ThreadRequest::Table { have: Some(table.cursor) }).await;
-        b.until(|c| !c.tables.is_empty()).await;
-        assert!(matches!(b.tables.first(), Some(TableFrame::Delta { .. })), "{:?}", b.tables);
-        b.follow(thread).await;
-        b.until(|c| c.cursor.is_some_and(|at| at.seq >= landed.seq)).await;
-        assert!(!b.got.iter().any(|g| matches!(g, Got::Snapshot(_))), "{:?}", b.got);
-        let resumed = b.got.first().unwrap();
-        assert!(
-            matches!(resumed, Got::Actions { epoch, first, .. } if *epoch == cursor.epoch && *first == cursor.seq),
-            "resumed {resumed:?}, not from {cursor:?}"
-        );
-        b.until(turns_done(2)).await;
-        assert!(b.table.rows.contains_key(&thread));
-
-        // The intent again, from before the drop: its first outcome, and nothing done; a new
-        // one for the same request finds it answered.
-        assert_eq!(b.intent(once, thread, answer.clone()).await, Outcome::Done);
-        assert_eq!(b.intent(IntentId::new(), thread, answer).await, Outcome::Done);
-        let seen = recorded(&record).await;
-        assert_eq!(heard_lines(&seen, "control_response").len(), 1, "acted on once");
-
-        // Pages and expansions come on the thread's stream, between its frames.
-        let last = b.state().last_turn().map(|t| t.id).unwrap();
-        b.send(ThreadRequest::Page { thread, before: last, turns: 1 }).await;
-        b.until(|c| c.got.iter().any(|g| matches!(g, Got::Page { .. }))).await;
-        let content = slopty_proto::thread::ContentRef("nothing of this thread".to_owned());
-        b.send(ThreadRequest::Expand { thread, content }).await;
-        b.until(|c| c.got.contains(&Got::Expanded(Expanded::Gone))).await;
-    }
-
-    /// The worker restarts while Claude Code is in the middle of a turn: Claude Code goes on in
-    /// ptyd's keeping, the next worker takes it up, reads the thread again, then what Claude
-    /// Code wrote while no worker held it, and the turn ends as Claude Code ended it, run by
-    /// the same process from start to end. A client back on the new worker sees it whole.
-    #[tokio::test]
-    async fn a_turn_survives_the_worker_restarting_mid_turn() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (mut daemons, record) = with_claude(&root).await;
-        let me = ClientId::new();
-        let mut a = Client::connect(&daemons, me).await;
-        // Twenty deltas 200 ms apart: four seconds of a turn for the restart to land in.
-        let thread = started(&mut a, claude_in(&root, Some("slow 20"))).await;
-        a.follow(thread).await;
-        a.until(|c| {
-            c.thread.as_ref().is_some_and(|s| {
-                s.turns.last().is_some_and(|t| t.state == TurnState::Active) && !s.items.is_empty()
-            })
-        })
-        .await;
-        let pid = recorded(&record).await["pid"].clone();
-        a.link.close();
-        drop(a);
-
-        let restarted = std::time::Instant::now();
-        daemons.restart_worker().await;
-        let mut b = Client::connect(&daemons, me).await;
-        b.follow(thread).await;
-        b.until(turns_done(1)).await;
-        println!("the turn ended {:?} after the restart began", restarted.elapsed());
-        let seen = recorded(&record).await;
-        assert_eq!(seen["pid"], pid, "the same Claude Code, start to end");
-        assert_eq!(heard_lines(&seen, "initialize").len(), 2, "asked again by the next worker");
-        assert_eq!(heard_lines(&seen, "user").len(), 1, "the message went once");
-        let state = b.state();
-        assert_eq!(state.turns.len(), 1, "one turn, read again whole");
-        assert_eq!(state.status.liveness, slopty_proto::thread::Liveness::Live);
-        let said: String = state
+    /// The texts of `state`'s items, the person's and the agent's, in order.
+    fn said(state: &ThreadState) -> Vec<String> {
+        state
             .items
             .iter()
-            .filter_map(|i| match &i.body {
+            .filter_map(|item| match &item.body {
+                ItemBody::User(user) => Some(user.text.text.clone()),
                 ItemBody::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect();
-        assert_eq!(said, ["Slowly"; 20].join(" "), "what it said while no worker held it too");
+            .collect()
     }
 
-    /// A review by the agent, on the person's word, goes to Claude Code as their turn: its own
-    /// `/code-review` over the change's range, sent as any command of theirs is. The thread can
-    /// review because Claude Code lists `code-review`; the range is two commits the worker made
-    /// of the trees the review showed.
-    #[tokio::test]
-    async fn a_review_by_claude_code_is_its_own_code_review_over_the_range() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let repo = root.join("repo");
-        let git = |args: &[&str]| {
-            let out =
-                std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
-            assert!(out.status.success(), "git {args:?}");
-            String::from_utf8_lossy(&out.stdout).trim().to_owned()
-        };
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&["init", "-q", "-b", "main"]);
-        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
-        git(&["add", "-A"]);
-        let from = git(&["write-tree"]);
-        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
-        git(&["add", "-A"]);
-        let to = git(&["write-tree"]);
-
-        let (daemons, record) = with_claude(&root).await;
-        let mut a = Client::connect(&daemons, ClientId::new()).await;
-        let thread = started(&mut a, claude_in(&repo, Some("Say hello."))).await;
-        a.follow(thread).await;
-        a.until(turns_done(1)).await;
-        a.until(|c| c.thread.as_ref().is_some_and(|t| t.meta.can(Cap::REVIEW))).await;
-
-        let review = Intent::Review {
-            from: slopty_proto::thread::TreeRef(from.clone()),
-            to: slopty_proto::thread::TreeRef(to.clone()),
-        };
-        assert_eq!(a.intent(IntentId::new(), thread, review).await, Outcome::Done);
-        let (base, head) = (
-            git(&["rev-parse", &format!("refs/slopty/threads/{thread}/review-base")]),
-            git(&["rev-parse", &format!("refs/slopty/threads/{thread}/review-head")]),
-        );
-        let sent = format!("/code-review {base}...{head}");
-        a.until(turns_done(2)).await;
-        let seen = recorded(&record).await;
-        let texts: Vec<String> = heard_lines(&seen, "user")
+    /// The person's prompts in `state`.
+    fn prompts(state: &ThreadState) -> Vec<String> {
+        state
+            .items
             .iter()
-            .map(|l| match &l["message"]["content"] {
-                serde_json::Value::String(text) => text.clone(),
-                blocks => blocks[0]["text"].as_str().unwrap_or_default().to_owned(),
+            .filter_map(|item| match &item.body {
+                ItemBody::User(user) => Some(user.text.text.clone()),
+                _ => None,
             })
-            .collect();
-        assert_eq!(texts, ["Say hello.".to_owned(), sent], "the review, as the person's turn");
-        assert_eq!(
-            (
-                git(&["rev-parse", &format!("{base}^{{tree}}")]),
-                git(&["rev-parse", &format!("{head}^{{tree}}")])
-            ),
-            (from, to)
-        );
+            .collect()
     }
 
-    /// A Claude Code thread started from a client runs the person's own `claude` (the
-    /// stand-in, first on the worker's `PATH`) driven over stream-json, on a session id chosen
-    /// for it, the first message its first user message. The start is answered with the thread
-    /// named by that id, which a client follows at once, and Claude Code's answer lands there.
+    /// The entries of the stand-in's record list `list`.
+    fn listed<'a>(record: &'a serde_json::Value, list: &str) -> Vec<&'a serde_json::Value> {
+        record[list].as_array().into_iter().flatten().collect()
+    }
+
+    /// The hooks of event `event` the stand-in ran for session `session`, each with how many
+    /// entries ran.
+    fn hooks_ran(record: &serde_json::Value, event: &str, session: &str) -> Vec<u64> {
+        listed(record, "hooks")
+            .into_iter()
+            .filter(|h| h["event"] == event && h["session"] == session)
+            .map(|h| h["ran"].as_u64().unwrap_or_default())
+            .collect()
+    }
+
+    fn now_us() -> u64 {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        u64::try_from(now.as_micros()).unwrap()
+    }
+
+    /// A Claude Code start opens the person's own `claude` as a TUI in a terminal ptyd keeps,
+    /// and its thread names that terminal. It runs on the session Slopty named, with Slopty's
+    /// tools and hooks, the first prompt as its own argument, and nothing of the Claude Code a
+    /// worker may itself run under. Its first turn reaches the thread from its transcript, and
+    /// its hooks give the phase. Words typed into it go as a paste and an Enter of its own the
+    /// 200 ms wait after it, two lines one message, and each record the TUI writes reaches the
+    /// thread in well under the second a look takes.
     #[tokio::test]
-    async fn a_claude_code_start_runs_claude_driven_and_names_its_thread() {
+    async fn a_claude_code_start_is_its_tui_in_a_terminal_its_thread_follows() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (daemons, record) = with_claude(&root).await;
+        // A worker run inside a Claude Code session has its markers: none reaches the agent.
+        let daemons =
+            with_claude(&root, &[("CLAUDECODE", "1"), ("CLAUDE_CODE_ENTRYPOINT", "cli")]).await;
         let mut a = Client::connect(&daemons, ClientId::new()).await;
-        let thread = started(&mut a, claude_in(&root, Some("Say hello."))).await;
-
-        let seen = recorded(&record).await;
-        let argv: Vec<&str> =
-            seen["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
-        let at = argv.iter().position(|a| *a == "--session-id").expect("a session id");
-        let native = argv[at + 1];
-        assert_eq!(thread, slopty_agent::claude::thread_of(native), "named by its session id");
-        assert!(argv.contains(&"--input-format") && argv.contains(&"stream-json"), "{argv:?}");
-        assert!(!argv.contains(&"--settings"), "no hooks: {argv:?}");
-        assert_eq!(seen["cwd"], root.to_string_lossy().as_ref());
+        let (thread, terminal) = started(&mut a, claude_in(&root, Some("Fix the login"))).await;
+        a.row_until(thread, |row| row.facts.contains_key(ThreadMeta::TERMINAL_FACT)).await;
+        let row = &a.table.rows[&thread];
+        assert_eq!(row.terminal(), Some(terminal), "the thread names its terminal");
+        assert_eq!(row.drive, Drive::named(Drive::OBSERVED));
 
         a.follow(thread).await;
         a.until(turns_done(1)).await;
+        assert_eq!(said(a.state()), ["Fix the login", "Done: Fix the login"]);
+        a.until(|c| c.state().status.phase == Phase::Done).await;
+
+        // The stand-in notes a hook once the relay has run, which may be after the worker took it.
+        let seen =
+            record_of(&root, terminal, |r| listed(r, "hooks").iter().any(|h| h["event"] == "Stop"))
+                .await;
+        let args: Vec<&str> = listed(&seen, "args").iter().filter_map(|a| a.as_str()).collect();
+        let at = args.iter().position(|a| *a == "--session-id").expect("a session id");
+        let native = args[at + 1];
         assert_eq!(a.state().meta.native, native);
-        assert!(a.state().meta.can(Cap::APPROVALS));
+        assert_eq!(thread, slopty_agent::claude::thread_of(native), "named by its session");
+        assert_eq!(args[args.len() - 2..], ["--", "Fix the login"], "the prompt is its own");
+        assert!(args.iter().any(|a| a.starts_with("--mcp-config")), "Slopty's tools: {args:?}");
+        let settings = args.iter().position(|a| *a == "--settings").expect("Slopty's hooks");
+        let settings: serde_json::Value = serde_json::from_str(args[settings + 1]).unwrap();
+        for event in slopty_agent::hooks::EVENTS {
+            let relay = &settings["hooks"][event][0]["hooks"][0];
+            assert_eq!(relay["args"], serde_json::json!(["hook"]), "{event}: {settings}");
+            assert!(relay["command"].as_str().unwrap().ends_with("/slopty"), "{relay}");
+        }
+        assert_eq!(seen["cwd"], root.to_string_lossy().as_ref());
+        assert_eq!(seen["seat"], terminal.to_string(), "it runs in its terminal");
+        let env = seen["env"].as_object().unwrap();
+        for marker in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"] {
+            assert!(!env.contains_key(marker), "{marker} reached the agent");
+        }
+        for (event, ran) in [("SessionStart", 1), ("UserPromptSubmit", 1), ("Stop", 1)] {
+            assert_eq!(hooks_ran(&seen, event, native), [ran], "{event} relayed");
+        }
+
+        // Typed in: a paste, then its Enter on its own.
+        a.submit(terminal, "Second\nline").await;
+        a.until(turns_done(2)).await;
+        assert_eq!(prompts(a.state()), ["Fix the login", "Second\nline"], "one message");
+        let seen = record_of(&root, terminal, |r| listed(r, "prompts").len() == 2).await;
+        let reads = listed(&seen, "reads");
+        let text = |r: &serde_json::Value| r["bytes"].as_str().unwrap_or_default().to_owned();
+        let start = reads.iter().position(|r| text(r).contains("\u{1b}[200~")).expect("a paste");
+        let end = reads.iter().position(|r| text(r).contains("\u{1b}[201~")).expect("its end");
+        let pasted: String = reads[start..=end].iter().map(|r| text(r)).collect();
+        assert_eq!(
+            pasted.replace('\r', "\n"),
+            "\u{1b}[200~Second\nline\u{1b}[201~",
+            "the words as one paste, bracketed as the TUI asked"
+        );
+        let enter = reads[end + 1];
+        assert_eq!(text(enter), "\r", "the Enter is a write of its own");
+        // Timed where the TUI reads, so with the way's jitter (ptyd, the pty, the reader's
+        // turn to run): the wait is proved, its length is the worker's own clock.
+        let gap = enter["at_us"].as_u64().unwrap() - reads[end]["at_us"].as_u64().unwrap();
+        let wait = slopty_proto::terminal::SUBMIT_ENTER_MS * 1000;
+        assert!(gap >= wait * 3 / 4, "the Enter came {gap} µs after the paste");
+
+        // Each record written reaches the thread at once.
+        let mut late = Vec::new();
+        for (n, words) in ["Third", "Fourth", "Fifth"].into_iter().enumerate() {
+            a.submit(terminal, words).await;
+            a.until(|c| prompts(c.state()).last().map(String::as_str) == Some(words)).await;
+            let arrived = now_us();
+            // The stand-in saves its record at its hooks, so the write is waited for.
+            let user = |r: &serde_json::Value| {
+                listed(r, "wrote").into_iter().filter(|w| w["type"] == "user").nth(n + 2).cloned()
+            };
+            let seen = record_of(&root, terminal, |r| user(r).is_some()).await;
+            let wrote = user(&seen).and_then(|w| w["at_us"].as_u64()).unwrap();
+            late.push(Duration::from_micros(arrived.saturating_sub(wrote)));
+            a.until(turns_done(n + 3)).await;
+        }
+        println!("a transcript record reached the client {late:?} after it was written");
+        assert!(late.iter().all(|l| *l < Duration::from_millis(500)), "{late:?}");
     }
+
+    /// A `/clear` in the TUI moves its terminal to the next session: that session's thread
+    /// begins naming the terminal, and the one before ends, resumable, naming none.
+    #[tokio::test]
+    async fn a_clear_moves_its_terminal_to_the_next_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let daemons = with_claude(&root, &[]).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let (first, terminal) = started(&mut a, claude_in(&root, Some("Fix the login"))).await;
+        a.follow(first).await;
+        a.until(turns_done(1)).await;
+
+        a.submit(terminal, "/clear").await;
+        let seen = record_of(&root, terminal, |r| listed(r, "sessions").len() == 2).await;
+        let next = slopty_agent::claude::thread_of(seen["sessions"][1].as_str().unwrap());
+        a.row_until(next, |row| row.terminal() == Some(terminal)).await;
+        a.row_until(first, |row| {
+            row.terminal().is_none() && row.status.liveness == Liveness::Exited { resumable: true }
+        })
+        .await;
+        let naming: Vec<ThreadId> = a
+            .table
+            .rows
+            .values()
+            .filter(|r| r.terminal() == Some(terminal))
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(naming, [next], "one thread names a terminal");
+
+        a.follow(next).await;
+        a.submit(terminal, "Now the logout").await;
+        a.until(turns_done(1)).await;
+        assert_eq!(said(a.state()), ["Now the logout", "Done: Now the logout"]);
+    }
+
+    /// While its agent asks the person at a dialog, words typed from the prompt box are refused,
+    /// with why, and nothing reaches its terminal: the dialog would take them as the answer. The
+    /// person answers in the terminal, the turn ends, and the next words go.
+    #[tokio::test]
+    async fn words_wait_while_the_agent_asks_the_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let daemons = with_claude(&root, &[]).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let (thread, terminal) = started(&mut a, claude_in(&root, Some("ask Which colour?"))).await;
+        a.row_until(thread, |row| row.status.phase == Phase::NeedsYou).await;
+        let wait = a.table.rows[&thread].status.wait.clone().expect("what it waits on");
+        assert_eq!(wait.kind, slopty_proto::thread::kind::QUESTION, "{wait:?}");
+
+        a.submit(terminal, "Blue, and more").await;
+        let why = a
+            .heard(|msg| match msg {
+                WorkerMsg::Term { session, event: TermEvent::Error(TermError::Refused(why)) }
+                    if session == terminal =>
+                {
+                    Some(why)
+                }
+                _ => None,
+            })
+            .await;
+        assert!(!why.is_empty(), "why, in words");
+        let seen = record_of(&root, terminal, |r| !listed(r, "prompts").is_empty()).await;
+        let typed: String =
+            listed(&seen, "reads").iter().filter_map(|r| r["bytes"].as_str()).collect();
+        assert!(!typed.contains("Blue"), "nothing typed: {typed:?}");
+
+        a.term(terminal, TermRequest::Raw(b"Red\r".to_vec())).await;
+        a.row_until(thread, |row| row.status.phase == Phase::Done).await;
+        a.submit(terminal, "Now blue").await;
+        a.follow(thread).await;
+        a.until(turns_done(2)).await;
+        assert_eq!(prompts(a.state()).last().map(String::as_str), Some("Now blue"));
+    }
+
+    /// A Claude Code typed by hand into a terminal runs with none of Slopty's hooks, and its
+    /// record of itself says when a dialog holds it: its thread waits on the person for the
+    /// question its transcript has open, words from the prompt box are refused meanwhile and
+    /// nothing reaches the terminal, and once the person answers there the record waits no more
+    /// and the turn ends.
+    #[tokio::test]
+    async fn a_claude_code_typed_by_hand_waits_on_the_person_as_its_record_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let daemons = with_claude(&root, &[]).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let spec = OpenSession {
+            size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
+            cwd: Some(root.to_string_lossy().into_owned()),
+            command: vec!["/bin/sh".to_owned()],
+            env: vec![("PS1".to_owned(), "$ ".to_owned())],
+            title: None,
+            attach: false,
+        };
+        a.link.send(ClientMsg::OpenSession { request: 1, spec }).await.unwrap();
+        let terminal = a
+            .heard(|msg| match msg {
+                WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
+                _ => None,
+            })
+            .await;
+        let claude = root.join("programs").join("claude");
+        let typed = format!("{}\r", claude.display());
+        a.term(terminal, TermRequest::Raw(typed.into_bytes())).await;
+        let runs_there = |c: &Client| {
+            c.table.rows.iter().find_map(|(id, row)| {
+                (row.terminal() == Some(terminal) && row.status.liveness == Liveness::Live)
+                    .then_some(*id)
+            })
+        };
+        a.until(|c| runs_there(c).is_some()).await;
+        let thread = runs_there(&a).expect("its thread");
+
+        a.term(terminal, TermRequest::Raw(b"ask Which colour?\r".to_vec())).await;
+        a.row_until(thread, |row| row.status.phase == Phase::NeedsYou).await;
+        let wait = a.table.rows[&thread].status.wait.clone().expect("what it waits on");
+        assert_eq!((wait.kind.as_str(), wait.text.as_str()), ("question", "Which colour?"));
+
+        a.submit(terminal, "Blue, and more").await;
+        let why = a
+            .heard(|msg| match msg {
+                WorkerMsg::Term { session, event: TermEvent::Error(TermError::Refused(why)) }
+                    if session == terminal =>
+                {
+                    Some(why)
+                }
+                _ => None,
+            })
+            .await;
+        assert!(!why.is_empty(), "why, in words");
+
+        a.term(terminal, TermRequest::Raw(b"Red\r".to_vec())).await;
+        a.row_until(thread, |row| row.status.phase == Phase::Done).await;
+        let seen = record_of(&root, terminal, |r| listed(r, "prompts").len() == 2).await;
+        let typed: String =
+            listed(&seen, "reads").iter().filter_map(|r| r["bytes"].as_str()).collect();
+        assert!(!typed.contains("Blue"), "nothing typed: {typed:?}");
+        let ran: Vec<&serde_json::Value> = listed(&seen, "hooks");
+        assert!(!ran.is_empty() && ran.iter().all(|h| h["ran"] == 0), "no hooks: {ran:?}");
+    }
+
+    /// A worker started again reads every Claude Code its terminals still run: the thread is
+    /// read again from the transcript, names its terminal and is live, and the session's hooks
+    /// reach the new worker, so a dialog it asks is heard.
+    #[tokio::test]
+    async fn a_worker_started_again_reads_the_thread_again_from_its_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let mut daemons = with_claude(&root, &[]).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let (thread, terminal) = started(&mut a, claude_in(&root, Some("Fix the login"))).await;
+        a.follow(thread).await;
+        a.until(turns_done(1)).await;
+        a.leave().await;
+
+        daemons.restart_worker().await;
+        let mut b = Client::connect(&daemons, ClientId::new()).await;
+        b.row_until(thread, |row| {
+            row.terminal() == Some(terminal) && row.status.liveness == Liveness::Live
+        })
+        .await;
+        b.follow(thread).await;
+        b.until(turns_done(1)).await;
+        assert_eq!(said(b.state()), ["Fix the login", "Done: Fix the login"]);
+
+        b.submit(terminal, "ask Red or blue?").await;
+        b.row_until(thread, |row| row.status.phase == Phase::NeedsYou).await;
+    }
+
+    /// A managed launcher in `claude`'s place, as an organisation installs one: the start runs
+    /// it, it runs the real client beneath it as its child, and the thread is that client's
+    /// session, read as any other. Nothing else is asked of it but whether it is one.
+    #[tokio::test]
+    async fn a_managed_launcher_s_client_is_read_as_its_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let artifacts = root.join(".local/share/claude-managed/artifacts");
+        let client = artifacts.join(slopty_testkit::claude_tui::VERSION).join("any-platform");
+        std::fs::create_dir_all(&client).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), client.join("claude")).unwrap();
+        let launched = root.join("managed.jsonl");
+        let log = launched.to_str().unwrap();
+        let launcher = bin("slopty-stub-managed-claude");
+        let daemons = with_claude_as(&root, &launcher, &[("STUB_MANAGED_LOG", log)]).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let (thread, terminal) = started(&mut a, claude_in(&root, Some("Fix the login"))).await;
+        a.follow(thread).await;
+        a.until(turns_done(1)).await;
+        assert_eq!(said(a.state()), ["Fix the login", "Done: Fix the login"]);
+
+        let seen = record_of(&root, terminal, |r| r["pid"].is_u64()).await;
+        let runs: Vec<serde_json::Value> = std::fs::read_to_string(&launched)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let words = |run: &serde_json::Value| -> Vec<String> {
+            listed(run, "argv").iter().filter_map(|a| a.as_str()).map(str::to_owned).collect()
+        };
+        let starts = |w: &[String]| w.iter().any(|a| a == "--session-id");
+        let start = runs.iter().position(|r| starts(&words(r)));
+        let start = start.unwrap_or_else(|| panic!("the start ran the launcher: {runs:?}"));
+        assert_eq!(runs[start]["client"], seen["pid"], "the session is its client's, beneath it");
+        let asked = |w: &[String]| starts(w) || w == ["--managed-help"];
+        assert!(runs.iter().all(|r| asked(&words(r))), "nothing else asked: {runs:?}");
+    }
+
+    /// An agent at work keeps the worker's machine awake with nobody linked, and Esc in its
+    /// terminal stops the turn, as its transcript records an interrupt with no hook: the thread
+    /// is stopped, and the machine let go.
+    #[tokio::test]
+    async fn an_agent_at_work_keeps_the_machine_awake_until_esc_stops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let daemons = with_claude(&root, &[]).await;
+        let client = ClientId::new();
+        let mut a = Client::connect(&daemons, client).await;
+        let (thread, terminal) = started(&mut a, claude_in(&root, Some("hold the line"))).await;
+        a.row_until(thread, |row| row.status.phase == Phase::Working).await;
+        a.leave().await;
+        let left = std::time::Instant::now();
+        // Linux's logind may refuse the system's hold (a CI runner's does): the hold itself is
+        // asked of macOS alone, the agent that wants it of both.
+        let system = |w: &slopty_proto::ctl::Awake| w.system || !cfg!(target_vendor = "apple");
+        let held = awake_until(&daemons, |w| w.clients == 0 && w.agents == 1 && system(w)).await;
+        let after = held.duration_since(left);
+        assert!(after <= TWO_TICKS, "held {after:?} after the client left");
+
+        let mut b = Client::connect(&daemons, client).await;
+        b.term(terminal, TermRequest::Raw(vec![0x1b])).await;
+        b.row_until(thread, |row| row.status.phase == Phase::Stopped).await;
+        b.leave().await;
+        let let_go =
+            |w: &slopty_proto::ctl::Awake| (w.clients, w.agents, w.system) == (0, 0, false);
+        let released = tokio::time::timeout(TWO_TICKS, awake_until(&daemons, let_go)).await;
+        assert!(released.is_ok(), "{:?}", awake(&daemons).await);
+        let seen = record_of(&root, terminal, |r| !listed(r, "reads").is_empty()).await;
+        let native = seen["sessions"][0].as_str().unwrap();
+        assert_eq!(hooks_ran(&seen, "Stop", native), Vec::<u64>::new(), "no hook for an Esc");
+    }
+
+    /// The palette's start: no first message and a folder under the worker's home spelled
+    /// with `~`, as a client that knows no home writes it. Claude Code runs in the home with
+    /// nothing typed, waiting for the person, and the thread is live.
+    #[tokio::test]
+    async fn a_claude_code_start_with_no_prompt_runs_in_the_home_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let daemons = with_claude(&root, &[]).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let (thread, terminal) = started(&mut a, claude_in(Path::new("~"), None)).await;
+        let seen = record_of(&root, terminal, |r| !listed(r, "hooks").is_empty()).await;
+        assert_eq!(seen["cwd"], root.to_string_lossy().as_ref(), "`~` is the worker's home");
+        assert!(!listed(&seen, "args").iter().any(|a| *a == "--"), "no prompt: {seen}");
+        a.follow(thread).await;
+        let state = a.state();
+        assert_eq!(state.status.liveness, Liveness::Live);
+        assert!(state.turns.is_empty(), "nothing sent: {:?}", state.turns);
+        assert!(listed(&seen, "prompts").is_empty(), "nothing typed");
+    }
+
+    /// What keeps the worker's machine awake, from its control socket (`slopty worker awake`).
+    async fn awake(daemons: &Daemons) -> slopty_proto::ctl::Awake {
+        use tokio::io::AsyncWriteExt as _;
+        let socket = daemons.dir.join("worker.sock");
+        let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        let (rd, mut wr) = stream.into_split();
+        let mut line = serde_json::to_vec(&slopty_proto::ctl::CtlRequest::Wake).unwrap();
+        line.push(b'\n');
+        wr.write_all(&line).await.unwrap();
+        // The worker may close first; the reply is read below either way.
+        let _closed = wr.shutdown().await;
+        let mut reply = String::new();
+        BufReader::new(rd).read_line(&mut reply).await.unwrap();
+        match serde_json::from_str(reply.trim()).unwrap() {
+            slopty_proto::ctl::CtlReply::Wake(awake) => awake,
+            other => panic!("not what keeps it awake: {other:?}"),
+        }
+    }
+
+    /// Ask what keeps the machine awake until `holds` says it, every 50 ms: when it did.
+    async fn awake_until(
+        daemons: &Daemons,
+        holds: impl Fn(&slopty_proto::ctl::Awake) -> bool,
+    ) -> std::time::Instant {
+        loop {
+            if holds(&awake(daemons).await) {
+                return std::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// How often the worker looks its threads over with nothing changed (`TICK` of the daemon's
+    /// `threads::awake`, private to its crate), twice: the latest a sample after a change is
+    /// taken, though a change of the threads' table is looked at at once.
+    const TWO_TICKS: Duration = Duration::from_secs(10);
 
     /// A start naming a worktree opens its agent in it: the worker makes it from the clone the
     /// start's folder is in, where Claude Code would, and the agent starts there. A start in a
-    /// folder that is in no repository is refused in words, and nothing opens. Closed for good
-    /// (a run the person did not keep), the thread goes and its worktree with it, the work in
-    /// it not committed and all.
+    /// folder that is in no repository is refused in words, and nothing opens.
     #[tokio::test]
-    async fn a_start_in_a_worktree_opens_its_agent_there_and_a_close_takes_it_away() {
+    async fn a_start_in_a_worktree_opens_its_agent_there() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (daemons, record) = with_claude(&root).await;
+        let daemons = with_claude(&root, &[]).await;
         let clone = root.join("atlas");
         std::fs::create_dir_all(&clone).unwrap();
         for args in
@@ -657,47 +860,20 @@ mod threads {
             options: std::collections::BTreeMap::new(),
             worktree: Some(NewWorktree::named("claude-c0ffee")),
         };
-        let answer = async |a: &mut Client, start: Start| {
-            let id = IntentId::new();
-            a.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
-            a.heard(|msg| match msg {
-                WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
-                    Some(outcome)
-                }
-                _ => None,
-            })
-            .await
-        };
-
         let notes = root.join("notes");
         std::fs::create_dir_all(&notes).unwrap();
-        let refused = answer(&mut a, start(&notes)).await;
+        let (_, refused) = asked(&mut a, start(&notes)).await;
         assert!(
             matches!(&refused, Outcome::Refused { reason } if reason.contains("no git repository")),
             "{refused:?}"
         );
 
-        let outcome = answer(&mut a, start(&clone)).await;
-        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        let (id, outcome) = asked(&mut a, start(&clone)).await;
+        assert!(matches!(outcome, Outcome::Started { .. }), "{outcome:?}");
         let tree = clone.join(".claude/worktrees/claude-c0ffee");
         assert!(tree.join(".git").is_file(), "a worktree of the clone");
-        let seen = recorded(&record).await;
+        let seen = record_of(&root, terminal_of(id), |r| r["cwd"].is_string()).await;
         assert_eq!(seen["cwd"], tree.to_string_lossy().as_ref(), "the agent works in it");
-
-        std::fs::write(tree.join("draft.txt"), "half done").unwrap();
-        let id = IntentId::new();
-        a.send(ThreadRequest::Intent { id, thread, intent: Intent::Discard }).await;
-        let closed = a
-            .heard(|msg| match msg {
-                WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
-                    Some(outcome)
-                }
-                _ => None,
-            })
-            .await;
-        assert_eq!(closed, Outcome::Done);
-        assert!(!tree.exists(), "its worktree went with it");
-        assert!(clone.join(".git").is_dir(), "the clone stays");
     }
 
     /// A start outlives the link that asked for it: its worktree's setup goes on while the
@@ -707,7 +883,7 @@ mod threads {
     async fn a_start_outlives_its_link_and_the_relinked_client_takes_it_up() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (daemons, record) = with_claude(&root).await;
+        let daemons = with_claude(&root, &[]).await;
         let clone = root.join("atlas");
         std::fs::create_dir_all(&clone).unwrap();
         // The setup says it is under way, then waits on a pipe the test writes to once the
@@ -776,7 +952,7 @@ mod threads {
         let runs = std::fs::read_to_string(clone.join("runs")).unwrap();
         assert_eq!(runs, "run\n", "the setup ran once, through the drop");
         let tree = clone.join(".claude/worktrees/claude-5ea7ed");
-        let seen = recorded(&record).await;
+        let seen = record_of(&root, terminal_of(id), |r| r["cwd"].is_string()).await;
         assert_eq!(seen["cwd"], tree.to_string_lossy().as_ref(), "the agent works in it");
     }
 
@@ -789,7 +965,7 @@ mod threads {
     async fn a_start_the_worker_restarts_during_is_finished_by_the_next() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (mut daemons, record) = with_claude(&root).await;
+        let mut daemons = with_claude(&root, &[]).await;
         let clone = root.join("atlas");
         std::fs::create_dir_all(&clone).unwrap();
         // The setup names its group and says it is under way, then waits on a pipe the test
@@ -875,29 +1051,8 @@ mod threads {
         let ran = std::fs::read_to_string(&runs).unwrap();
         assert_eq!(ran.lines().count(), 2, "set up again once, by the next worker: {ran}");
         let tree = clone.join(".claude/worktrees/claude-4e57a7");
-        let seen = recorded(&record).await;
+        let seen = record_of(&root, terminal_of(id), |r| r["cwd"].is_string()).await;
         assert_eq!(seen["cwd"], tree.to_string_lossy().as_ref(), "the agent works in it");
-    }
-
-    /// The palette's start: no first message and a folder under the worker's home spelled
-    /// with `~`, as a client that knows no home writes it. Claude Code runs in the home with
-    /// nothing sent, waiting for the person, and the thread is live.
-    #[tokio::test]
-    async fn a_claude_code_start_with_no_prompt_runs_in_the_home_it_names() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (daemons, record) = with_claude(&root).await;
-        let mut a = Client::connect(&daemons, ClientId::new()).await;
-        let thread = started(&mut a, claude_in(Path::new("~"), None)).await;
-        let seen = recorded(&record).await;
-        assert_eq!(seen["cwd"], root.to_string_lossy().as_ref(), "`~` is the worker's home");
-        a.follow(thread).await;
-        a.until(|c| c.thread.is_some()).await;
-        let state = a.state();
-        assert_eq!(state.status.liveness, slopty_proto::thread::Liveness::Live);
-        assert!(state.turns.is_empty(), "nothing sent: {:?}", state.turns);
-        let heard = heard_lines(&recorded(&record).await, "user");
-        assert!(heard.is_empty(), "nothing sent: {heard:?}");
     }
 
     /// A folder's past Claude Code sessions are listed from the names and times of the
@@ -913,7 +1068,7 @@ mod threads {
         std::fs::create_dir_all(&project).unwrap();
         for (name, secs) in [("older-1", 100_u64), ("newer-2", 200)] {
             let file = std::fs::File::create(project.join(format!("{name}.jsonl"))).unwrap();
-            let at = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+            let at = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
             file.set_modified(at).unwrap();
         }
         let daemons = daemons(&root).await;
@@ -1086,415 +1241,4 @@ mod threads {
         })
         .await
     }
-
-    /// An ACP agent's picture reaches the client by its digest: the stand-in replays `opencode`
-    /// reading a PNG (`crates/slopty-agent/tests/fixtures/acp/media.jsonl`), the call carries
-    /// the picture, and the client's `Expand` of it brings back the very bytes. A page's ask
-    /// of that thread's agent, which has no door to its MCP servers, is refused in words.
-    #[tokio::test]
-    async fn an_acp_agents_picture_comes_back_whole_by_its_digest() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (programs, work) = (root.join("programs"), root.join("work"));
-        for made in [&programs, &work] {
-            std::fs::create_dir_all(made).unwrap();
-        }
-        std::os::unix::fs::symlink(bin("slopty-stub-acp"), programs.join("opencode")).unwrap();
-        // The recording's prompt carried the picture; this one sends the words alone, so the
-        // stand-in is given the recording with its prompt as this one goes.
-        let recorded = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../crates/slopty-agent/tests/fixtures/acp/media.jsonl"),
-        )
-        .unwrap();
-        let mut fixture = String::new();
-        for line in recorded.lines() {
-            let mut line: serde_json::Value = serde_json::from_str(line).unwrap();
-            if line["msg"]["method"] == "session/prompt" {
-                line["msg"]["params"]["prompt"] =
-                    serde_json::json!([{ "type": "text", "text": "Look at dot.png." }]);
-            }
-            fixture.push_str(&line.to_string());
-            fixture.push('\n');
-        }
-        let fixture_at = root.join("media.jsonl");
-        std::fs::write(&fixture_at, fixture).unwrap();
-        let config =
-            serde_json::json!({ "fixture": fixture_at, "record": root.join("record.json") });
-        std::fs::write(programs.join("stub-acp.json"), config.to_string()).unwrap();
-        let env = [("PATH", slopty_testkit::env::path_with(&programs))];
-        let daemons = daemons_with(&root, &env).await;
-        let mut a = Client::connect(&daemons, ClientId::new()).await;
-
-        let mut start = claude_in(&work, Some("Look at dot.png."));
-        start.agent = AgentId::named("acp:opencode");
-        let thread = started(&mut a, start).await;
-        a.follow(thread).await;
-        let pictured = |c: &Client| {
-            c.thread.as_ref().and_then(|s| {
-                s.items.iter().find_map(|i| match &i.body {
-                    ItemBody::Tool(call) if !call.images.is_empty() => Some(call.images.clone()),
-                    _ => None,
-                })
-            })
-        };
-        a.until(|c| pictured(c).is_some()).await;
-        let images = pictured(&a).unwrap();
-        assert_eq!(images.len(), 1, "{images:?}");
-        let image = &images[0];
-        a.send(ThreadRequest::Expand { thread, content: image.at.clone() }).await;
-        a.until(|c| c.got.iter().any(|g| matches!(g, Got::Expanded(_)))).await;
-        let bytes = a
-            .got
-            .iter()
-            .find_map(|g| match g {
-                Got::Expanded(Expanded::Bytes(bytes)) => Some(bytes.clone()),
-                _ => None,
-            })
-            .expect("the picture's bytes");
-        assert_eq!(blake3::hash(&bytes).to_hex().to_string(), image.digest);
-        assert_eq!(u64::try_from(bytes.len()).unwrap(), image.bytes);
-        let kept = root.join("data/media").join(&image.digest);
-        assert!(kept.is_file(), "kept in the worker's data, by its digest");
-
-        let ask = slopty_proto::visual::AppAsk::Read {
-            server: "apps".to_owned(),
-            uri: "ui://apps/echo".to_owned(),
-        };
-        a.send(ThreadRequest::App { thread, id: 7, ask }).await;
-        a.until(|c| c.got.iter().any(|g| matches!(g, Got::App(7, _)))).await;
-        let refused = a.got.iter().any(|g| {
-            matches!(g, Got::App(7, slopty_proto::visual::AppAnswer::Refused(why)) if !why.is_empty())
-        });
-        assert!(refused, "{:?}", a.got.last());
-    }
-
-    /// A page of a Claude Code thread asks its MCP App through Claude Code, which holds the
-    /// connection: the app's page is read (`mcp_read_resource`) and its tool called for the page
-    /// alone (`mcp_call` with `result_not_for_model`), each answer whole; a page Claude Code's
-    /// server does not have is refused with why, and a URI that is no app's page never reaches
-    /// Claude Code.
-    #[tokio::test]
-    async fn a_claude_code_page_asks_its_app_through_claude_code() {
-        use slopty_proto::visual::{AppAnswer, AppAsk, AppBody};
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let work = root.join("work");
-        std::fs::create_dir_all(&work).unwrap();
-        let log = root.join("apps.log");
-        let servers = serde_json::json!({ "mcpServers": { "apps": {
-            "command": bin("slopty-stub-mcp-apps"), "args": ["--log", log],
-        } } });
-        std::fs::write(work.join(".mcp.json"), servers.to_string()).unwrap();
-        let (daemons, record) = with_claude(&root).await;
-        let mut a = Client::connect(&daemons, ClientId::new()).await;
-        let thread = started(&mut a, claude_in(&work, Some("Say hello."))).await;
-        a.follow(thread).await;
-        a.until(turns_done(1)).await;
-
-        let asks = [
-            (1, AppAsk::Read { server: "apps".to_owned(), uri: "ui://apps/echo".to_owned() }),
-            (
-                2,
-                AppAsk::Call {
-                    server: "apps".to_owned(),
-                    tool: "echo".to_owned(),
-                    arguments: r#"{"text":"hi"}"#.to_owned(),
-                },
-            ),
-            (3, AppAsk::Read { server: "apps".to_owned(), uri: "ui://apps/none".to_owned() }),
-            (4, AppAsk::Read { server: "apps".to_owned(), uri: "https://example.com/".to_owned() }),
-        ];
-        for (id, ask) in asks {
-            a.send(ThreadRequest::App { thread, id, ask }).await;
-        }
-        a.until(|c| {
-            (1..=4).all(|n| c.got.iter().any(|g| matches!(g, Got::App(id, _) if *id == n)))
-        })
-        .await;
-        let answer = |n: u64| {
-            a.got
-                .iter()
-                .find_map(|g| match g {
-                    Got::App(id, answer) if *id == n => Some(answer.clone()),
-                    _ => None,
-                })
-                .unwrap()
-        };
-        let AppAnswer::Resource { uri, mime_type, body: AppBody::Text(html), .. } = answer(1)
-        else {
-            panic!("{:?}", answer(1))
-        };
-        assert_eq!(uri, "ui://apps/echo");
-        assert_eq!(mime_type.as_deref(), Some("text/html;profile=mcp-app"));
-        assert!(html.contains("echo"), "{html}");
-        let AppAnswer::Called { result } = answer(2) else { panic!("{:?}", answer(2)) };
-        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(result["structuredContent"]["echo"], "hi", "{result}");
-        assert!(matches!(answer(3), AppAnswer::Refused(why) if why.contains("no resource")));
-        assert!(matches!(answer(4), AppAnswer::Refused(why) if why.contains("ui://")));
-
-        let seen = recorded(&record).await;
-        let calls = heard_lines(&seen, "mcp_call");
-        assert_eq!(calls.len(), 1, "{calls:#?}");
-        assert_eq!(calls[0]["request"]["tool"], "mcp__apps__echo");
-        assert_eq!(calls[0]["request"]["result_not_for_model"], true);
-        let reads = heard_lines(&seen, "mcp_read_resource");
-        assert_eq!(reads.len(), 2, "the page that is no app's never went: {reads:#?}");
-        let logged = std::fs::read_to_string(&log).unwrap();
-        assert!(!logged.contains("example.com"), "{logged}");
-    }
-
-    /// A rewind of the files can be undone: the worker takes the folder before Claude Code puts
-    /// the files back (`rewind_files`), so the file a later turn wrote, gone with the rewind,
-    /// comes back with the undo. An undo once done, or of a tree that is not the last rewind's,
-    /// is refused.
-    #[tokio::test]
-    async fn a_rewind_of_the_files_is_undone() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let work = root.join("work");
-        std::fs::create_dir_all(&work).unwrap();
-        for args in
-            [&["init", "-q", "-b", "main"][..], &["commit", "-q", "--allow-empty", "-m", "c0"]]
-        {
-            let done = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&work)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .status()
-                .unwrap();
-            assert!(done.success(), "git {args:?}");
-        }
-        let (daemons, _record) = with_claude(&root).await;
-        let mut a = Client::connect(&daemons, ClientId::new()).await;
-        let thread = started(&mut a, claude_in(&work, Some("write a.txt one"))).await;
-        a.follow(thread).await;
-        a.until(turns_done(1)).await;
-        let send = Intent::Send {
-            text: "write b.txt two".to_owned(),
-            delivery: slopty_proto::thread::Delivery::Steer,
-            attachments: Vec::new(),
-        };
-        assert_eq!(a.intent(IntentId::new(), thread, send).await, Outcome::Done);
-        a.until(turns_done(2)).await;
-        let (a_txt, b_txt) = (work.join("a.txt"), work.join("b.txt"));
-        assert_eq!(std::fs::read_to_string(&b_txt).unwrap(), "two\n");
-        let second = a.state().turns[1].id;
-
-        let rewind = Intent::Rewind { turn: second };
-        assert_eq!(a.intent(IntentId::new(), thread, rewind).await, Outcome::Done);
-        a.until(|c| c.thread.as_ref().is_some_and(|s| s.rewound.is_some())).await;
-        let rewound = a.state().rewound.clone().unwrap();
-        assert_eq!(rewound.turn, second);
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while b_txt.exists() {
-            assert!(std::time::Instant::now() < deadline, "b.txt put back");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert_eq!(std::fs::read_to_string(&a_txt).unwrap(), "one\n", "turn 1's file stays");
-
-        let stale = Intent::Unrewind { tree: slopty_proto::thread::TreeRef("0".repeat(40)) };
-        assert!(matches!(a.intent(IntentId::new(), thread, stale).await, Outcome::Refused { .. }));
-        let undo = Intent::Unrewind { tree: rewound.tree.clone() };
-        assert_eq!(a.intent(IntentId::new(), thread, undo.clone()).await, Outcome::Done);
-        assert_eq!(std::fs::read_to_string(&b_txt).unwrap(), "two\n", "back with the undo");
-        a.until(|c| c.thread.as_ref().is_some_and(|s| s.rewound.is_none())).await;
-        let again = a.intent(IntentId::new(), thread, undo).await;
-        assert!(matches!(again, Outcome::Refused { .. }), "{again:?}");
-    }
-
-    /// A rewind of the code and the conversation is undone in a folder outside git, as the
-    /// dock's "Undo rewind" does it: the rewind and the fork go at once, the worker keeps the file
-    /// the rewind takes away as Claude Code names it first (`rewind_files` with `dry_run`), and the
-    /// undo, sent with the branch's discard, writes it back.
-    #[tokio::test]
-    async fn a_branched_rewind_outside_git_is_undone() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let work = root.join("work");
-        std::fs::create_dir_all(&work).unwrap();
-        // One record per process: the branch's Claude Code is one of its own.
-        let programs = root.join("programs");
-        std::fs::create_dir_all(&programs).unwrap();
-        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
-        let records = root.join("records");
-        std::fs::create_dir_all(&records).unwrap();
-        let env = [
-            ("PATH", slopty_testkit::env::path_with(&programs)),
-            ("STUB_RECORD", records.join(concat!("{", "pid", "}.json")).into_os_string()),
-        ];
-        let daemons = daemons_with(&root, &env).await;
-        let mut a = Client::connect(&daemons, ClientId::new()).await;
-        let thread = started(&mut a, claude_in(&work, Some("write notes.txt first words"))).await;
-        a.follow(thread).await;
-        a.until(turns_done(1)).await;
-        let notes = work.join("notes.txt");
-        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "first words\n");
-        let first = a.state().turns[0].id;
-
-        // Both at once, as `slopty.Rewind` sends them.
-        let (rewind, fork) = (IntentId::new(), IntentId::new());
-        a.send(ThreadRequest::Intent {
-            id: rewind,
-            thread,
-            intent: Intent::Rewind { turn: first },
-        })
-        .await;
-        let after = Some(slopty_proto::thread::TurnId(first.0.saturating_sub(1)));
-        a.send(ThreadRequest::Intent { id: fork, thread, intent: Intent::Fork { after } }).await;
-        let dones = both_done(&mut a, [rewind, fork]).await;
-        assert_eq!(dones[&rewind], Outcome::Done);
-        let Outcome::Started { thread: branch } = dones[&fork] else { panic!("{dones:?}") };
-        let kept = a.until(|c| c.thread.as_ref().is_some_and(|s| s.rewound.is_some()));
-        tokio::time::timeout(Duration::from_secs(30), kept)
-            .await
-            .expect("the files the rewind takes back were kept, outside git too");
-        let rewound = a.state().rewound.clone().unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while notes.exists() {
-            assert!(std::time::Instant::now() < deadline, "notes.txt taken back");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        // The undo and the branch's delete at once, as `slopty.UndoRewind` sends them.
-        let (undo, discard) = (IntentId::new(), IntentId::new());
-        let unrewind = Intent::Unrewind { tree: rewound.tree.clone() };
-        a.send(ThreadRequest::Intent { id: undo, thread, intent: unrewind }).await;
-        a.send(ThreadRequest::Intent { id: discard, thread: branch, intent: Intent::Discard })
-            .await;
-        let dones = both_done(&mut a, [undo, discard]).await;
-        assert_eq!(dones[&undo], Outcome::Done, "{dones:?}");
-        assert_eq!(dones[&discard], Outcome::Done, "{dones:?}");
-        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "first words\n", "back with the undo");
-        a.until(|c| c.thread.as_ref().is_some_and(|s| s.rewound.is_none())).await;
-
-        let dry: Vec<Vec<bool>> = std::fs::read_dir(&records)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|e| e == "json"))
-            .map(|path| {
-                let seen: serde_json::Value =
-                    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-                heard_lines(&seen, "rewind_files")
-                    .iter()
-                    .map(|l| l["request"]["dry_run"].as_bool().unwrap_or(false))
-                    .collect()
-            })
-            .filter(|dry: &Vec<bool>| !dry.is_empty())
-            .collect();
-        assert_eq!(dry, [[true, false]], "asked what it would put back, then put it back");
-    }
-
-    /// The outcomes of intents `ids`, once each is done.
-    async fn both_done(
-        a: &mut Client,
-        ids: [IntentId; 2],
-    ) -> std::collections::HashMap<IntentId, Outcome> {
-        let mut dones = std::collections::HashMap::new();
-        a.heard(|msg| {
-            if let WorkerMsg::IntentDone(IntentDone { id, outcome }) = msg
-                && ids.contains(&id)
-            {
-                dones.insert(id, outcome);
-            }
-            (dones.len() == ids.len()).then_some(())
-        })
-        .await;
-        dones
-    }
-
-    /// What keeps the worker's machine awake, from its control socket (`slopty worker awake`).
-    async fn awake(daemons: &Daemons) -> slopty_proto::ctl::Awake {
-        use tokio::io::AsyncWriteExt as _;
-        let socket = daemons.dir.join("worker.sock");
-        let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
-        let (rd, mut wr) = stream.into_split();
-        let mut line = serde_json::to_vec(&slopty_proto::ctl::CtlRequest::Wake).unwrap();
-        line.push(b'\n');
-        wr.write_all(&line).await.unwrap();
-        // The worker may close first; the reply is read below either way.
-        let _closed = wr.shutdown().await;
-        let mut reply = String::new();
-        BufReader::new(rd).read_line(&mut reply).await.unwrap();
-        match serde_json::from_str(reply.trim()).unwrap() {
-            slopty_proto::ctl::CtlReply::Wake(awake) => awake,
-            other => panic!("not what keeps it awake: {other:?}"),
-        }
-    }
-
-    /// Ask what keeps the machine awake until `holds` says it, every 50 ms: when it did.
-    async fn awake_until(
-        daemons: &Daemons,
-        holds: impl Fn(&slopty_proto::ctl::Awake) -> bool,
-    ) -> std::time::Instant {
-        loop {
-            if holds(&awake(daemons).await) {
-                return std::time::Instant::now();
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
-    /// A driven turn keeps the worker's machine awake with nobody linked, as the thread host
-    /// holds it (no terminal shows it): from within one sampling tick of the client leaving,
-    /// for as long as the turn runs, and no longer.
-    #[tokio::test]
-    async fn a_driven_turn_keeps_the_machine_awake_with_nobody_linked() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (daemons, _record) = with_claude(&root).await;
-        let mut a = Client::connect(&daemons, ClientId::new()).await;
-        // Twenty-five deltas 200 ms apart: five seconds of a turn, held from its start and let
-        // go at its end, each a change of the thread's table the worker looks over at once.
-        let thread = started(&mut a, claude_in(&root, Some("slow 25"))).await;
-        a.follow(thread).await;
-        a.until(|c| c.thread.as_ref().is_some_and(|s| !s.items.is_empty())).await;
-        a.leave().await;
-        let left = std::time::Instant::now();
-
-        let held = awake_until(&daemons, |w| w.clients == 0 && w.agents == 1 && w.system).await;
-        let after = held.duration_since(left);
-        assert!(after <= TWO_TICKS, "held {after:?} after the client left");
-        let released = awake_until(&daemons, |w| w.agents == 0 && !w.system).await;
-        println!(
-            "held {:?} after the client left, released {:?} after",
-            held.duration_since(left),
-            released.duration_since(left)
-        );
-    }
-
-    /// A turn whose agent died holds nothing: the thread's process is gone, whatever its phase
-    /// last said.
-    #[tokio::test]
-    async fn a_turn_whose_agent_died_lets_the_machine_sleep() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (daemons, _record) = with_claude_and(&root, &[("STUB_CRASH_MID_TURN", "1")]).await;
-        let mut a = Client::connect(&daemons, ClientId::new()).await;
-        let thread = started(&mut a, claude_in(&root, Some("slow 75"))).await;
-        a.follow(thread).await;
-        a.until(|c| {
-            c.thread.as_ref().is_some_and(|s| {
-                matches!(s.status.liveness, slopty_proto::thread::Liveness::Exited { .. })
-            })
-        })
-        .await;
-        a.leave().await;
-        // Let go within two ticks of the exit, at the latest: the exit changes the thread's table,
-        // which the worker looks over at once.
-        let let_go =
-            |w: &slopty_proto::ctl::Awake| (w.clients, w.agents, w.system) == (0, 0, false);
-        let released = tokio::time::timeout(TWO_TICKS, awake_until(&daemons, let_go)).await;
-        let now = awake(&daemons).await;
-        assert!(released.is_ok(), "{now:?}");
-    }
-
-    /// How often the worker looks its threads over with nothing changed (`TICK` of the daemon's
-    /// `threads::awake`, private to its crate), twice: the latest a sample after a change is
-    /// taken, though a change of the threads' table is looked at at once.
-    const TWO_TICKS: Duration = Duration::from_secs(10);
 }

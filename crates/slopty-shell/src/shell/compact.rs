@@ -1,6 +1,6 @@
 //! slopty: the phone's anatomy, after zeron's iOS app (`apps/ios`), built from the shell's own
 //! parts. A phone shows one page at a time: Chats (the large title, the sidebar's list at the
-//! page's width, the "New chat" capsule with what is running, and the tab bar of Chats,
+//! page's width, the "New session" capsule with what is running, and the tab bar of Chats,
 //! Settings and Search) or the chat that was opened from it, whose sidebar button goes back.
 //! Every page keeps clear of the system's edges (the status bar, the home indicator) and of the
 //! keyboard. Wider windows (an iPad's, a Mac's) keep the shell's columns.
@@ -8,7 +8,7 @@
 //! The chat or the new-session page wears no desktop chrome there: the titlebar's sidebar and
 //! history cluster give way to a navigation bar (zeron iOS's `SessionViewController`: a back
 //! chevron to Chats and the chat's title over "project @ device"; `NewSessionViewController`:
-//! "New chat" with a close button). A chat row takes zeron iOS's gestures
+//! "New session" with a close button). A chat row takes zeron iOS's gestures
 //! (`SessionListController`): a leading swipe pins it, a trailing swipe archives it (or brings it
 //! back from Archived), and a long press opens its menu.
 
@@ -31,7 +31,7 @@ const PHONE_BELOW: f32 = 700.0;
 const TITLE_ROW: f32 = 52.0;
 /// The large title's size (zeron's navigation bar: Geist semibold 30).
 const TITLE_SIZE: f32 = 30.0;
-/// The "New chat" capsule: its height, the plus's plate and inset.
+/// The "New session" capsule: its height, the plus's plate and inset.
 const CAPSULE: f32 = 48.0;
 /// The room between the capsule and the tab bar.
 const CAPSULE_BELOW: f32 = 8.0;
@@ -48,14 +48,31 @@ const NAV_TARGET: f32 = 34.0;
 /// The navigation bar's title and subtitle lines, at the default text size.
 const NAV_TITLE_LINE: f32 = 20.0;
 const NAV_SUBTITLE_LINE: f32 = 15.0;
-/// The room between the bar's last line and a drilled subagent's breadcrumb under it.
-const NAV_BREADCRUMB_GAP: f32 = 8.0;
 /// A row's swipe: travel before its axis is decided, travel that commits on release, the reach
 /// past which it resists, and the return to rest.
 const SWIPE_DECIDE: f32 = 10.0;
 const SWIPE_COMMIT: f32 = 76.0;
 const SWIPE_REACH: f32 = 112.0;
 const SWIPE_SETTLE: Duration = Duration::from_millis(220);
+/// slopty: the inspector's sheet on a phone, UIKit's sheet with its medium and large detents:
+/// the large detent's gap under the status bar, the share of the screen the medium detent
+/// leaves above it, the top corners, the grabber's pill and the header row it heads.
+const SHEET_LARGE_GAP: f32 = 10.0;
+const SHEET_MEDIUM: f32 = 0.5;
+const SHEET_RADIUS: f32 = 24.0;
+const SHEET_GRABBER: (f32, f32) = (36.0, 5.0);
+const SHEET_HEADER: f32 = 52.0;
+/// How far past the medium detent, as a share of what it covers there, a sheet let go is put
+/// away; and the last step of a finger's travel read as a flick, which moves it one detent its
+/// way whatever the travel.
+const SHEET_DISMISS: f32 = 0.3;
+const SHEET_FLICK: f32 = 9.0;
+/// The glide to rest: the theme's sheet pace on the drawer's curve, which follows a flick.
+const SHEET_GLIDE: Duration = Duration::from_millis(300);
+const SHEET_CURVE: crate::motion::CubicBezier = crate::motion::CubicBezier::new(0.32, 0.72, 0.0, 1.0);
+/// The scrim over what the full sheet leaves above it, in dark-mode terms
+/// ([`crate::theme::scrim`]); it deepens as the sheet rises from the medium detent.
+const SHEET_DIM: f32 = 0.3;
 
 /// Which page the phone shows.
 #[derive(Default)]
@@ -161,6 +178,89 @@ fn swipe_offset(travel: f32) -> f32 {
     at.copysign(travel)
 }
 
+/// slopty: where the phone's inspector sheet rests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Detent {
+    /// Half the screen, the session's terminal above it: where it comes up.
+    #[default]
+    Medium,
+    /// The whole screen under the status bar.
+    Large,
+}
+
+/// slopty: the phone's inspector sheet: where it rests, a finger's travel while it holds it,
+/// and its glide to rest or away.
+#[derive(Default)]
+struct Sheet {
+    detent: Detent,
+    drag: Option<SheetDrag>,
+    glide: Option<Glide>,
+    /// Whether the last frame had it up: a sheet put up rises from the screen's foot and one
+    /// put away sinks there, whatever put it up or away (⌘I, the bar's button, its own close).
+    up: bool,
+    /// Its top in the last frame, where a glide or a drag starts.
+    top: Option<f32>,
+    /// A finger let go of it: the momentum the platform carries on with is its own, not the
+    /// scroll of what is now under where the pan started.
+    fling: bool,
+}
+
+impl Global for Sheet {}
+
+/// A finger on the sheet's header: its travel from the detent, and its last step.
+#[derive(Clone, Copy, Debug)]
+struct SheetDrag {
+    travel: f32,
+    last: f32,
+}
+
+/// The sheet gliding from `from` since `at`, to its detent, or off the screen when `away`.
+#[derive(Clone, Copy, Debug)]
+struct Glide {
+    from: f32,
+    at: Instant,
+    away: bool,
+}
+
+/// Where the sheet's top rests at `detent`, in a window `height` tall whose safe area starts
+/// `safe_top` down.
+fn detent_top(detent: Detent, height: f32, safe_top: f32) -> f32 {
+    let large = safe_top + SHEET_LARGE_GAP;
+    match detent {
+        Detent::Large => large,
+        Detent::Medium => (height * SHEET_MEDIUM).round().max(large),
+    }
+}
+
+/// Where the sheet's top follows a finger's `travel` from `detent`: with it below the large
+/// detent, a quarter as far above it.
+fn dragged_top(detent: Detent, travel: f32, height: f32, safe_top: f32) -> f32 {
+    let large = detent_top(Detent::Large, height, safe_top);
+    let top = detent_top(detent, height, safe_top) + travel;
+    if top < large { large - (large - top) * 0.25 } else { top }
+}
+
+/// Where a sheet let go at `top` rests, its last step `last` down: a flick moves it one detent
+/// its way, else it takes the nearer detent, or `None` (put away) past the medium detent by
+/// [`SHEET_DISMISS`] of what it covers there.
+fn sheet_rest(top: f32, last: f32, height: f32, safe_top: f32) -> Option<Detent> {
+    let large = detent_top(Detent::Large, height, safe_top);
+    let medium = detent_top(Detent::Medium, height, safe_top);
+    if last >= SHEET_FLICK {
+        return (top < medium).then_some(Detent::Medium);
+    }
+    if last <= -SHEET_FLICK {
+        return Some(Detent::Large);
+    }
+    if top > (height - medium).mul_add(SHEET_DISMISS, medium) {
+        None
+    } else if top - large <= medium - top {
+        Some(Detent::Large)
+    } else {
+        Some(Detent::Medium)
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Tests lay the phone out on a Mac.
@@ -234,6 +334,11 @@ fn summary(working: usize, waiting: usize) -> String {
 /// slopty: one of the phone's navigation bar's icon buttons, a finger's target, named for a
 /// screen reader.
 fn nav_icon(id: &'static str, glyph: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    nav_button(id, icon(glyph).size(px(19.0)).text_color(theme.text), label)
+}
+
+/// slopty: [`nav_icon`] around a drawn glyph.
+fn nav_button(id: &'static str, glyph: impl IntoElement, label: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .debug_selector(move || id.into())
@@ -247,7 +352,7 @@ fn nav_icon(id: &'static str, glyph: &'static str, label: &'static str, theme: &
         .justify_center()
         .hover(|el| el.bg(crate::theme::wash(0.06)))
         .cursor_pointer()
-        .child(icon(glyph).size(px(19.0)).text_color(theme.text))
+        .child(glyph)
 }
 
 impl Shell {
@@ -269,8 +374,8 @@ impl Shell {
     }
 
     /// slopty: how much of the window's floor a phone's chrome holds, for the toasts to stand
-    /// above: the Chats page's tab bar and capsule, or a chat's composer over the home
-    /// indicator or the keyboard; 0 off a phone.
+    /// above: the Chats page's tab bar and capsule, or the home indicator or the keyboard under
+    /// a session; 0 off a phone.
     pub(super) fn compact_toast_lift(&self, window: &Window, cx: &mut App) -> f32 {
         if !self.compact() {
             return 0.0;
@@ -281,7 +386,7 @@ impl Shell {
         }
         let floor =
             if self.keyboard_band_held(window) { insets.effective().bottom } else { insets.safe_area.bottom };
-        f32::from(floor) + self.bottom_stack.get()
+        f32::from(floor)
     }
 
     /// Bring the phone's Chats page up, or take it down for the chat page.
@@ -395,7 +500,7 @@ impl Shell {
         )
     }
 
-    /// The capsule over the tab bar: a plus, "New chat", and what is running, on the glass
+    /// The capsule over the tab bar: a plus, "New session", and what is running, on the glass
     /// zeron's accessory sits on (`AskAnythingAccessory`), the status glyph before the words.
     fn render_compact_capsule(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let (working, waiting) = {
@@ -416,7 +521,7 @@ impl Shell {
         // slopty: before the first chat can start, the capsule offers the step it needs, as the
         // desktop's canvas does, never a new chat that has nowhere to go.
         let step = self.first_step(cx);
-        let words = step.map_or("New chat", super::spaces::FirstStep::action);
+        let words = step.map_or("New session", super::spaces::FirstStep::action);
         let label: SharedString = if said.is_empty() {
             words.into()
         } else {
@@ -594,7 +699,7 @@ impl Shell {
         match state.selected_chat_row() {
             Some(chat) => {
                 let title = crate::transcript::single_line(
-                    chat.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("New chat"),
+                    chat.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("New session"),
                 );
                 let project = state.space_for_chat(chat).map(|space| space.display_name().to_owned());
                 let device = state.device_name(&chat.device_id).map(str::to_owned);
@@ -606,30 +711,13 @@ impl Shell {
                 };
                 (title.into(), subtitle.map(SharedString::from))
             }
-            None => ("New chat".into(), None),
+            None => ("New session".into(), None),
         }
-    }
-
-    /// slopty: where a drilled subagent's breadcrumb stands on a phone, from the page's top: its
-    /// [`NAV_BREADCRUMB_GAP`] under the navigation bar's last line, so the pill never touches
-    /// the subtitle; `None` off a phone (the breadcrumb keeps the titlebar's edge).
-    pub(super) fn compact_breadcrumb_top(&self, window: &Window, cx: &App) -> Option<f32> {
-        if !self.compact() {
-            return None;
-        }
-        let lines = if self.compact_nav_words(cx).1.is_some() {
-            NAV_TITLE_LINE + NAV_SUBTITLE_LINE
-        } else {
-            NAV_TITLE_LINE
-        };
-        let scale = f32::from(window.rem_size()) / 16.0;
-        let bar = Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD;
-        Some(bar / 2.0 + lines * scale / 2.0 + NAV_BREADCRUMB_GAP)
     }
 
     /// The phone's navigation bar over a chat or the new-session page, in place of the
     /// titlebar and its sidebar and history cluster; `None` off a phone. A chat: a back
-    /// chevron to Chats, its title over "project @ device". The new-chat page: "New chat"
+    /// chevron to Chats, its title over "project @ device". The new-chat page: "New session"
     /// and a close button.
     pub(super) fn render_compact_nav_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.compact() {
@@ -641,6 +729,10 @@ impl Shell {
         let back = |this: &mut Self, cx: &mut Context<Self>| {
             Self::set_compact_sessions(true, cx);
             this.close_chat_menu(cx);
+            // slopty: the inspector's sheet is the session's, and goes with it.
+            if this.inspector_shown(cx) {
+                this.set_surfaces_open(false, cx);
+            }
             cx.notify();
         };
         let lead = if on_canvas {
@@ -717,10 +809,17 @@ impl Shell {
                     .text_color(theme.text_muted)
                     .child(subtitle)
             }));
-        // slopty: a chat's files and its terminal, a finger's reach away (an iPad's titlebar
-        // has them; a phone's bar stands in for it).
+        // slopty: a session's files and its inspector, a finger's reach away (an iPad's titlebar
+        // has them; a phone's bar stands in for it). The session is its terminal, so the bar
+        // has no terminal of its own to show.
+        let inspects = crate::inspector::inspects(self.state.read(cx), &self.active_chat);
+        let inspector_up = self.inspector_shown(cx);
+        let running_lanes = {
+            let state = self.state.read(cx);
+            let now = crate::clock::utc(cx);
+            state.selected_chat.as_deref().map_or(0, |chat| state.running_subagents_for(chat, now))
+        };
         let trail = (!on_canvas).then(|| {
-            let terminal_open = self.terminal_open(cx);
             div()
                 .absolute()
                 .top_0()
@@ -739,20 +838,26 @@ impl Shell {
                         },
                     )),
                 )
-                .child(
-                    nav_icon(
-                        "compact-terminal",
-                        icons::TERMINAL,
-                        if terminal_open { "Hide terminal" } else { "Show terminal" },
-                        &theme,
+                .when(inspects, |trail| {
+                    trail.child(
+                        nav_button(
+                            "compact-inspector",
+                            icons::corner_card_glyph(19.0, theme.text),
+                            if inspector_up { "Hide inspector" } else { "Show inspector" },
+                        )
+                        .aria_toggled(if inspector_up {
+                            gpui::accesskit::Toggled::True
+                        } else {
+                            gpui::accesskit::Toggled::False
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_inspector(window, cx)))
+                        // The session's running subagents, counted as the titlebar's toggle counts
+                        // them.
+                        .when(running_lanes > 0, |button| {
+                            crate::running_pill::mark_titlebar_button(button, running_lanes, &theme)
+                        }),
                     )
-                    .aria_toggled(if terminal_open {
-                        gpui::accesskit::Toggled::True
-                    } else {
-                        gpui::accesskit::Toggled::False
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_terminal(window, cx))),
-                )
+                })
         });
         // slopty: zeron's backdrop for what scrolls under a bar: frosted glass in the window's
         // tint (opaque where nothing is frosted), so a card under the title never reads through.
@@ -774,9 +879,11 @@ impl Shell {
         Some(crate::frost::frosted(0.0, crate::frost::MENU_BLUR, bar).into_any_element())
     }
 
-    /// slopty: a phone's page over its chat for what an iPad shows beside it: the right pane's
-    /// surface (a file, the changes, a page) when it is open, else the files explorer, under a
-    /// bar whose back goes to the chat, or to the files a file was opened from. `None` off a
+    /// slopty: a phone's page over its session for what an iPad shows beside it: the right
+    /// pane's surface (a file, the changes, a page) when it is open, else the files explorer,
+    /// under a bar whose back goes to the files a file was opened from, else to the inspector
+    /// the session's strip holds (a change opened from it), else to the session. The inspector
+    /// itself is a sheet over the session ([`Self::render_compact_inspector`]). `None` off a
     /// phone or with neither open.
     pub(super) fn render_compact_side(
         &mut self,
@@ -786,14 +893,19 @@ impl Shell {
         if !self.compact() || self.compact_sessions_up(cx) || self.active_chat.is_empty() {
             return None;
         }
-        let surface = self.right_pane_open(cx);
+        let active = self.resolved_right_active(cx);
+        let surface = self.right_pane_open(cx) && active != super::RightSurface::Inspector;
         let files = self.files_panel_open(cx);
         if !surface && !files {
             return None;
         }
+        let to_inspector = surface
+            && !files
+            && crate::inspector::inspects(self.state.read(cx), &self.active_chat)
+            && self.right_surface_rows(cx).iter().any(|(s, ..)| *s == super::RightSurface::Inspector);
         let theme = Theme::of(cx).clone();
         let (title, body, back_to): (SharedString, AnyElement, &'static str) = if surface {
-            let title = match self.resolved_right_active(cx) {
+            let title = match active {
                 super::RightSurface::File(id) => self
                     .file_surfaces
                     .get(&id)
@@ -801,12 +913,19 @@ impl Shell {
                 super::RightSurface::Diff(_) => "Changes".into(),
                 super::RightSurface::Terminal(_) => "Terminal".into(),
                 super::RightSurface::Browser(_) => "Browser".into(),
-                super::RightSurface::SideChat(_) => "Side chat".into(),
+                super::RightSurface::Inspector => "Inspector".into(),
                 super::RightSurface::Screen(_) => "Screen".into(),
-                super::RightSurface::ModPane(_) | super::RightSurface::Page(_) => "Page".into(),
+                super::RightSurface::Page(_) => "Page".into(),
                 super::RightSurface::Picker => "Open".into(),
             };
-            (title, self.right_surface_content(cx), if files { "Files" } else { "Chat" })
+            let back_to = if to_inspector {
+                "Inspector"
+            } else if files {
+                "Files"
+            } else {
+                "Chat"
+            };
+            (title, self.right_surface_content(cx), back_to)
         } else {
             let key = self.panel_key(cx);
             let Some(explorer) = self.files.get(&key).cloned() else {
@@ -835,7 +954,9 @@ impl Shell {
             .gap(px(2.0))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
-                if surface {
+                if to_inspector {
+                    this.set_right_active(super::RightSurface::Inspector, cx);
+                } else if surface {
                     this.set_surfaces_open(false, cx);
                 } else {
                     this.close_files_panel(cx);
@@ -903,6 +1024,271 @@ impl Shell {
                 .children(overlays)
                 .into_any_element(),
         )
+    }
+
+    /// slopty: the sheet's pan, which a finger starts on its header (`on`): from then on the
+    /// gesture is the sheet's, wherever the header has moved from the place the pan started,
+    /// which a touch pan's every step is hit-tested at, through the momentum after it is let go.
+    fn sheet_pan(&self, on: bool, height: f32, safe_top: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let shell = cx.weak_entity();
+        gpui::canvas(
+            move |bounds, window, _| on.then(|| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)),
+            move |_, hitbox, window, _| {
+                window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Capture {
+                        return;
+                    }
+                    let sheet = cx.default_global::<Sheet>();
+                    let owned = sheet.drag.is_some() || (sheet.fling && event.momentum_phase.is_some());
+                    let starts = event.momentum_phase.is_none()
+                        && event.touch_phase == TouchPhase::Started
+                        && hitbox.as_ref().is_some_and(|hitbox| hitbox.should_handle_scroll(window));
+                    if !owned && !starts {
+                        if event.momentum_phase.is_none() {
+                            sheet.fling = false;
+                        }
+                        return;
+                    }
+                    let _ = shell.update(cx, |this, cx| this.pan_compact_inspector(event, height, safe_top, cx));
+                    cx.stop_propagation();
+                    window.refresh();
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
+
+    /// One step of a finger on the phone's inspector sheet ([`Self::sheet_pan`]): the sheet
+    /// follows it, and comes to rest where [`sheet_rest`] says when let go.
+    fn pan_compact_inspector(&mut self, event: &ScrollEvent, height: f32, safe_top: f32, cx: &mut Context<Self>) {
+        let (at, glide) = (crate::clock::now(cx), !cx.reduce_motion());
+        let sheet = cx.default_global::<Sheet>();
+        if let Some(momentum) = event.momentum_phase {
+            sheet.fling = momentum != TouchPhase::Ended;
+            return;
+        }
+        let step = f32::from(event.delta.pixel_delta(px(16.0)).y);
+        match event.touch_phase {
+            TouchPhase::Started | TouchPhase::Moved => {
+                if event.touch_phase == TouchPhase::Started {
+                    sheet.drag = None;
+                }
+                // From where it is, mid-glide or at rest.
+                let travel = sheet.top.map_or(0.0, |top| top - detent_top(sheet.detent, height, safe_top));
+                let drag = sheet.drag.get_or_insert(SheetDrag { travel, last: 0.0 });
+                drag.travel += step;
+                drag.last = step;
+                sheet.glide = None;
+                sheet.fling = false;
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                let Some(drag) = sheet.drag.take() else { return };
+                let from = dragged_top(sheet.detent, drag.travel + step, height, safe_top);
+                let last = if step == 0.0 { drag.last } else { step };
+                let rest = if event.touch_phase == TouchPhase::Cancelled {
+                    Some(sheet.detent)
+                } else {
+                    sheet_rest(from, last, height, safe_top)
+                };
+                sheet.top = Some(from);
+                sheet.fling = true;
+                if let Some(detent) = rest {
+                    sheet.detent = detent;
+                    sheet.glide = glide.then_some(Glide { from, at, away: false });
+                } else {
+                    // Sinking from where the finger left it.
+                    sheet.up = false;
+                    sheet.glide = glide.then_some(Glide { from, at, away: true });
+                    self.set_surfaces_open(false, cx);
+                }
+            }
+        }
+        self.motion_active.set(true);
+        cx.notify();
+    }
+
+    /// slopty: the inspector on a phone, a sheet up from the screen's foot over the session's
+    /// terminal, as UIKit puts an inspector at a compact width. It comes up at half the screen,
+    /// the terminal above it, and its header follows a finger to the whole screen under the
+    /// status bar or down out of the way; a press on its grabber changes detent. Its close,
+    /// ⌘I, the bar's button or a press on what the full sheet dims put it away. Drawn in the
+    /// page's own box, which on iOS starts at the safe area, so it reaches the screen's edges
+    /// past it. `None` off a phone, or with the inspector neither up nor sinking.
+    pub(super) fn render_compact_inspector(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.compact() || self.compact_sessions_up(cx) || self.active_chat.is_empty() {
+            let sheet = cx.default_global::<Sheet>();
+            (sheet.up, sheet.glide, sheet.drag, sheet.top) = (false, None, None, None);
+            return None;
+        }
+        let up = self.inspector_shown(cx);
+        let now = crate::clock::now(cx);
+        let reduced = cx.reduce_motion();
+        let insets = window.insets();
+        let safe = insets.safe_area;
+        let ios = cfg!(target_os = "ios");
+        let height = f32::from(window.viewport_size().height);
+        let safe_top = if ios { f32::from(safe.top) } else { 0.0 };
+        // The page's own box on iOS: inside the safe area, and above the keyboard while a
+        // field holds it (`compact_frame`).
+        let (page_top, page_bottom, page_left, page_right) = if ios {
+            let bottom = if self.keyboard_band_held(window) { insets.effective().bottom } else { safe.bottom };
+            (safe.top, bottom, safe.left, safe.right)
+        } else {
+            (px(0.0), px(0.0), px(0.0), px(0.0))
+        };
+        let sheet = cx.default_global::<Sheet>();
+        if up && !sheet.up {
+            // Up from the foot, or back up from wherever it was sinking.
+            let from = sheet.top.filter(|_| sheet.glide.is_some_and(|glide| glide.away)).unwrap_or(height);
+            sheet.detent = Detent::Medium;
+            sheet.drag = None;
+            sheet.glide = (!reduced).then_some(Glide { from, at: now, away: false });
+        } else if !up && sheet.up {
+            sheet.drag = None;
+            sheet.glide = (!reduced).then(|| Glide { from: sheet.top.unwrap_or(height), at: now, away: true });
+        }
+        sheet.up = up;
+        let rest = detent_top(sheet.detent, height, safe_top);
+        let top = if let Some(drag) = sheet.drag {
+            dragged_top(sheet.detent, drag.travel, height, safe_top)
+        } else if let Some(glide) = sheet.glide {
+            let to = if glide.away { height } else { rest };
+            let t = now.saturating_duration_since(glide.at).as_secs_f32()
+                / SHEET_GLIDE.mul_f32(crate::motion::speed_scale()).as_secs_f32();
+            if t >= 1.0 {
+                sheet.glide = None;
+                to
+            } else {
+                (to - glide.from).mul_add(SHEET_CURVE.eval(t), glide.from)
+            }
+        } else {
+            rest
+        };
+        if !up && sheet.glide.is_none() {
+            sheet.top = None;
+            // A flick that put it away keeps its momentum from what was under it.
+            let fling = sheet.fling;
+            return fling.then(|| self.sheet_pan(false, height, safe_top, cx).into_any_element());
+        }
+        sheet.top = Some(top);
+        let detent = sheet.detent;
+        if sheet.glide.is_some() {
+            self.motion_active.set(true);
+        }
+        let large = detent_top(Detent::Large, height, safe_top);
+        let medium = detent_top(Detent::Medium, height, safe_top);
+        let dim = if medium > large { ((medium - top) / (medium - large)).clamp(0.0, 1.0) } else { 0.0 };
+        let theme = Theme::of(cx).clone();
+        let put_away = |this: &mut Self, cx: &mut Context<Self>| {
+            this.set_surfaces_open(false, cx);
+            cx.notify();
+        };
+        // What the full sheet dims takes no press but the one that puts it away.
+        let scrim = (up && dim > 0.01).then(|| {
+            div()
+                .id("compact-inspector-scrim")
+                .debug_selector(|| "compact-inspector-scrim".into())
+                .absolute()
+                .top(-page_top)
+                .bottom(-page_bottom)
+                .left(-page_left)
+                .right(-page_right)
+                .bg(crate::theme::scrim(SHEET_DIM * dim))
+                .occlude()
+                .on_click(cx.listener(move |this, _, _, cx| put_away(this, cx)))
+        });
+        let grabber = div()
+            .id("compact-inspector-grabber")
+            .debug_selector(|| "compact-inspector-grabber".into())
+            .role(gpui::Role::Button)
+            .aria_label(if detent == Detent::Large { "Collapse inspector" } else { "Expand inspector" })
+            .absolute()
+            .top_0()
+            .left(px(0.0))
+            .right(px(0.0))
+            .mx_auto()
+            .w(px(SHEET_GRABBER.0 * 3.0))
+            .h(px(26.0))
+            .flex()
+            .justify_center()
+            .pt(px(6.0))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let (at, glide) = (crate::clock::now(cx), !cx.reduce_motion());
+                let sheet = cx.default_global::<Sheet>();
+                let from = sheet.top.unwrap_or(medium);
+                sheet.detent = if sheet.detent == Detent::Large { Detent::Medium } else { Detent::Large };
+                sheet.glide = glide.then_some(Glide { from, at, away: false });
+                this.motion_active.set(true);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .w(px(SHEET_GRABBER.0))
+                    .h(px(SHEET_GRABBER.1))
+                    .rounded_full()
+                    .bg(theme.text_muted.opacity(0.35)),
+            );
+        let close = nav_icon("compact-inspector-close", icons::CLOSE, "Close inspector", &theme)
+            .bg(crate::theme::wash(0.07))
+            .on_click(cx.listener(move |this, _, _, cx| put_away(this, cx)));
+        let header = div()
+            .id("compact-inspector-header")
+            .debug_selector(|| "compact-inspector-header".into())
+            .relative()
+            .flex_none()
+            .w_full()
+            .h(px(SHEET_HEADER))
+            .flex()
+            .items_center()
+            .justify_center()
+            // The header follows a finger: up to the whole screen, down to half or away.
+            .child(self.sheet_pan(true, height, safe_top, cx))
+            .child(grabber)
+            .child(
+                div()
+                    .id("compact-inspector-title")
+                    .role(gpui::Role::Heading)
+                    .aria_label("Inspector")
+                    .text_size(ui_rems(17.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child("Inspector"),
+            )
+            .child(div().absolute().top_0().bottom_0().right(px(12.0)).flex().items_center().child(close));
+        let fill = if theme.is_frost() { theme.glass() } else { gpui::Hsla { a: 1.0, ..theme.glass() } };
+        let body = div()
+            .id("compact-inspector-sheet")
+            .debug_selector(|| "compact-inspector-sheet".into())
+            .role(gpui::Role::Dialog)
+            .aria_label("Inspector")
+            .size_full()
+            .flex()
+            .flex_col()
+            .rounded_t(px(SHEET_RADIUS))
+            .bg(fill)
+            .border_t_1()
+            .border_color(theme.border)
+            .shadow(theme.elevation(crate::theme::Elevation::Floating))
+            // Its own presses are its own: nothing under it takes them.
+            .occlude()
+            .child(header)
+            .child(div().flex_1().min_h_0().w_full().child(self.inspector.clone()))
+            // The home indicator's room.
+            .when(ios, |el| el.pb(safe.bottom));
+        let sheet = div()
+            .absolute()
+            .top(px(top) - page_top)
+            .bottom(-page_bottom)
+            .left(-page_left)
+            .right(-page_right)
+            .child(crate::frost::frosted(SHEET_RADIUS, crate::frost::MENU_BLUR, body));
+        Some(div().absolute().inset_0().children(scrim).child(sheet).into_any_element())
     }
 
     /// `row`, as a phone's session row: it follows a sideways finger with the action it would
@@ -1263,7 +1649,7 @@ mod tests {
                 .into_iter()
                 .filter(|(role, label)| {
                     *role == gpui::Role::Button
-                        && ["Add a", "New chat"].iter().any(|start| label.starts_with(start))
+                        && ["Add a", "New session"].iter().any(|start| label.starts_with(start))
                 })
                 .map(|(_, label)| label)
                 .collect::<Vec<_>>()
@@ -1310,40 +1696,15 @@ mod tests {
             assert!(!shell.compact_sessions_up(cx), "on the new chat's page");
             Shell::set_compact_sessions(true, cx);
         });
-        assert_eq!(offers(cx), ["New chat"], "back on Chats, a chat can start");
+        assert_eq!(offers(cx), ["New session"], "back on Chats, a chat can start");
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
                 state.spaces.clear();
                 state.no_project = true;
             });
         });
-        assert_eq!(offers(cx), ["New chat"], "and outside any project");
+        assert_eq!(offers(cx), ["New session"], "and outside any project");
         FORCE_COMPACT.with(|force| force.set(false));
-    }
-
-    // slopty: on a touch screen, an iPad's as much as a phone's, opening or landing on a chat
-    // leaves the composer unfocused, so no software keyboard rises over it; a Mac's window
-    // still lands in the composer.
-    #[gpui::test]
-    fn opening_a_chat_on_touch_leaves_the_keyboard_down(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = phone(cx);
-        cx.simulate_resize(gpui::size(gpui::px(1366.0), gpui::px(1024.0)));
-        let pending = |shell: &gpui::Entity<Shell>, cx: &mut gpui::VisualTestContext| {
-            shell.read_with(cx, |shell, cx| shell.composer.read(cx).focus_pending)
-        };
-        assert!(!pending(&shell, cx), "a new composer waits for a tap");
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| state.chats_synced = true);
-            shell.boot_select_chat(cx);
-        });
-        let landed = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
-        assert_eq!(landed.as_deref(), Some("fix"), "the boot lands on the chat");
-        assert!(!pending(&shell, cx), "the boot's landing raises no keyboard");
-        shell.update(cx, |shell, cx| shell.open_chat("fix".into(), cx));
-        assert!(!pending(&shell, cx), "nor does opening a chat");
-        FORCE_COMPACT.with(|force| force.set(false));
-        shell.update(cx, |shell, cx| shell.open_chat("fix".into(), cx));
-        assert!(pending(&shell, cx), "a Mac's window lands in the composer");
     }
 
     /// The full shell on a touch screen laid out as an iPad's: the sidebar beside the chat.
@@ -1390,72 +1751,6 @@ mod tests {
             crate::motion::set_reduced_motion(cx, true);
         });
         (shell, cx)
-    }
-
-    // slopty: on an iPad a tap on a chat's row in the sidebar opens it with the keyboard down: no
-    // frame after the tap hands the composer the keyboard, whatever the tap left focused.
-    #[gpui::test]
-    fn tapping_a_chat_in_an_ipads_sidebar_leaves_the_keyboard_down(cx: &mut gpui::TestAppContext) {
-        use gpui::Focusable as _;
-        let (shell, cx) = ipad(cx);
-        let frames = |cx: &mut gpui::VisualTestContext| {
-            for _ in 0..4 {
-                cx.run_until_parked();
-                cx.update(|window, cx| {
-                    window.draw(cx).clear(cx);
-                    window.simulate_next_frame(cx);
-                });
-            }
-        };
-        frames(cx);
-        assert!(!shell.read_with(cx, |shell, _| shell.compact()), "the iPad's own layout");
-        let at = cx.debug_bounds("chat-docs").expect("the chat's row").center();
-        cx.simulate_click(at, gpui::Modifiers::default());
-        let pending = shell.read_with(cx, |shell, cx| shell.composer.read(cx).focus_pending);
-        frames(cx);
-        let opened = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
-        let typing = cx.update(|window, cx| {
-            shell.read(cx).composer.focus_handle(cx).contains_focused(window, cx)
-        });
-        FORCE_COMPACT.with(|force| force.set(false));
-        assert_eq!(opened.as_deref(), Some("docs"), "the tap opens the chat");
-        assert!(!typing, "the composer waits for a tap of its own (asked after the tap: {pending})");
-    }
-
-    // slopty: the keyboard's band is held only while a text field holds the focus: a send lets
-    // the composer go, and a pressed button that keeps the focus (Send) takes no keyboard, so the
-    // page reaches the safe area again.
-    #[gpui::test]
-    fn the_keyboards_band_goes_with_the_field(cx: &mut gpui::TestAppContext) {
-        use gpui::Focusable as _;
-        let (shell, cx) = ipad(cx);
-        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
-        shell.update(cx, |shell, cx| shell.open_chat("docs".into(), cx));
-        redraw(cx);
-        assert!(shell.read_with(cx, |shell, _| shell.compact()), "the phone's own layout");
-        let held = |cx: &mut gpui::VisualTestContext| {
-            redraw(cx);
-            cx.update(|window, cx| shell.read(cx).keyboard_band_held(window))
-        };
-        cx.update(|window, cx| {
-            let field = shell.read(cx).composer.read(cx).input.focus_handle(cx);
-            window.focus(&field, cx);
-        });
-        assert!(held(cx), "the composer holds the keyboard");
-        let _button = cx.update(|window, cx| {
-            let button = cx.focus_handle();
-            window.focus(&button, cx);
-            button
-        });
-        assert!(!held(cx), "a pressed button holds the focus, not the keyboard");
-        cx.update(|window, cx| window.blur(cx));
-        assert!(!held(cx), "a send lets the composer go");
-        cx.update(|window, cx| {
-            let neutral = shell.read(cx).unfocused.clone();
-            window.focus(&neutral, cx);
-        });
-        assert!(!held(cx), "the shell's own neutral holds no field");
-        FORCE_COMPACT.with(|force| force.set(false));
     }
 
     // slopty: the phone's navigation bar paints a backdrop over its whole width and height, so
@@ -1516,7 +1811,7 @@ mod tests {
             "Hide sidebar",
             "Back",
             "Forward",
-            "New chat",
+            "New session",
             "Sidebar view options",
             "Show chat details",
             "Show files panel",
@@ -1544,63 +1839,7 @@ mod tests {
         assert_eq!(summary(2, 3), "2 working · 3 need you");
     }
 
-    // slopty: on a phone a subagent's card drills in: the event its tap sends opens the run on
-    // the phone's chat page, under "parent › subagent" with its way back.
-    #[gpui::test]
-    fn a_phones_subagent_card_drills_in(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = ipad(cx);
-        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state.chats.push(
-                    serde_json::from_value(serde_json::json!({
-                        "id": "look", "title": "Look", "parentChatId": "docs",
-                        "subagent": true, "inParent": true, "deviceId": "local",
-                        "archived": false, "createdAt": chrono::Utc::now(),
-                    }))
-                    .unwrap(),
-                );
-            });
-            shell.open_chat("docs".into(), cx);
-        });
-        let labels = |cx: &mut gpui::VisualTestContext| {
-            for _ in 0..3 {
-                cx.run_until_parked();
-                cx.update(|window, cx| {
-                    window.set_a11y_active(true);
-                    window.refresh();
-                    window.draw(cx).clear(cx);
-                });
-            }
-            cx.update(|window, _| {
-                let tree = window.a11y_tree().expect("a tree");
-                tree.nodes
-                    .iter()
-                    .map(|(_, node)| (node.role(), node.label().unwrap_or_default().to_owned()))
-                    .collect::<Vec<_>>()
-            })
-        };
-        let before = labels(cx);
-        assert!(shell.read_with(cx, |shell, _| shell.compact()), "the phone's own layout");
-        assert!(
-            before.iter().any(|(_, label)| label == "Back to Chats"),
-            "the phone's chat page: {before:?}"
-        );
-        let transcript = shell.read_with(cx, |shell, _| shell.transcript.clone());
-        transcript.update(cx, |_, cx| {
-            cx.emit(crate::transcript::TranscriptEvent::OpenSubagent { chat_id: "look".into() });
-        });
-        let nodes = labels(cx);
-        FORCE_COMPACT.with(|force| force.set(false));
-        use gpui::accesskit::Role as A11y;
-        assert!(
-            nodes.contains(&(A11y::Navigation, "Chat docs › Look".to_owned())),
-            "the breadcrumb: {nodes:?}"
-        );
-        assert!(nodes.contains(&(A11y::Link, "Back to Chat docs".to_owned())), "{nodes:?}");
-    }
-
-    // slopty: on a phone a toast stands above the tab bar and the New chat capsule, hiding
+    // slopty: on a phone a toast stands above the tab bar and the New session capsule, hiding
     // neither; off a phone it keeps the window's corner.
     #[gpui::test]
     fn a_phones_toast_stands_over_its_tabs_and_capsule(cx: &mut gpui::TestAppContext) {
@@ -1635,7 +1874,7 @@ mod tests {
                 (
                     find(gpui::Role::Status, "Link copied"),
                     // The capsule: before any device, it offers to add one.
-                    find(gpui::Role::Button, "New chat").or_else(|| find(gpui::Role::Button, "Add a ")),
+                    find(gpui::Role::Button, "New session").or_else(|| find(gpui::Role::Button, "Add a ")),
                     find(gpui::Role::TabList, "Tabs"),
                     f32::from(window.viewport_size().height),
                 )
@@ -1650,38 +1889,6 @@ mod tests {
         let (toast, _, _, height) = bounds(cx);
         let toast = toast.expect("the toast on a Mac");
         assert!((height - toast.1 - 24.0).abs() < 0.5, "the window's corner: {toast:?} in {height}");
-    }
-
-    // slopty: on a touch screen a tap on Send lets the field go (the pill takes no focus for a
-    // control's press), so the keyboard drops and the page reaches the safe area again.
-    #[gpui::test]
-    fn a_tap_on_send_lets_the_phones_field_go(cx: &mut gpui::TestAppContext) {
-        use gpui::Focusable as _;
-        let (shell, cx) = ipad(cx);
-        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
-        shell.update(cx, |shell, cx| shell.open_chat("docs".into(), cx));
-        redraw(cx);
-        let field = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.focus_handle(cx));
-        let tap_send = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| window.focus(&field, cx));
-            shell.update(cx, |shell, cx| {
-                let input = shell.composer.read(cx).input.clone();
-                input.update(cx, |input, cx| input.set_text("hello", cx));
-            });
-            redraw(cx);
-            redraw(cx);
-            let send = cx.debug_bounds("composer-send").expect("send").center();
-            cx.simulate_click(send, gpui::Modifiers::default());
-            for _ in 0..3 {
-                cx.run_until_parked();
-                redraw(cx);
-            }
-            cx.update(|window, cx| {
-                (field.is_focused(window), shell.read(cx).keyboard_band_held(window))
-            })
-        };
-        assert_eq!(tap_send(cx), (false, false), "the phone's field and the keyboard's band go");
-        FORCE_COMPACT.with(|force| force.set(false));
     }
 
     /// The last frame's accessibility tree as (role, label), drawn with the tree on.
@@ -1768,92 +1975,13 @@ mod tests {
         assert!(!statuses.iter().any(|label| *label == "Input" || *label == "Waiting"), "{statuses:?}");
     }
 
-    // slopty: on a phone a drilled subagent's breadcrumb stands 8 pt under the navigation bar's
-    // subtitle, never touching it.
+    // slopty: a phone's session reaches its files and its inspector by touch, as an iPad's
+    // titlebar does: the bar's Files opens a page of them whose back returns to the session,
+    // and its Inspector puts up a sheet over the session, at half the screen, that a finger
+    // takes to the whole screen and down out of the way, and its close puts away. The prompt
+    // box is docked there from the start.
     #[gpui::test]
-    fn a_phones_breadcrumb_stands_clear_of_the_subtitle(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = ipad(cx);
-        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state.devices = vec![slopty_view_proto::Device {
-                    id: "local".into(),
-                    name: "studio".into(),
-                    platform: "macos".into(),
-                    last_seen_at: None,
-                    created_at: None,
-                    version: None,
-                    cursor_sdk_version: None,
-                    capabilities: Vec::new(),
-                    actions: Vec::new(),
-                    ssh_host: None,
-                }];
-                state.chats.push(
-                    serde_json::from_value(serde_json::json!({
-                        "id": "look", "title": "Look", "parentChatId": "docs",
-                        "subagent": true, "inParent": true, "deviceId": "local",
-                        "archived": false, "createdAt": chrono::Utc::now(),
-                    }))
-                    .unwrap(),
-                );
-            });
-            shell.open_chat("look".into(), cx);
-        });
-        let _ = a11y(cx);
-        let subtitle = cx.debug_bounds("compact-nav-subtitle");
-        let crumb = cx.update(|window, _| {
-            let scale = f64::from(window.scale_factor());
-            let tree = window.a11y_tree().expect("a tree");
-            tree.nodes
-                .iter()
-                .find(|(_, node)| node.role() == gpui::Role::Navigation && node.label().is_some_and(|l| l.contains('›')))
-                .and_then(|(_, node)| node.bounds())
-                .map(|rect| (rect.y0 / scale) as f32)
-        });
-        FORCE_COMPACT.with(|force| force.set(false));
-        let subtitle = subtitle.expect("the bar's subtitle");
-        let crumb = crumb.expect("the breadcrumb");
-        let gap = crumb - f32::from(subtitle.bottom());
-        assert!((gap - NAV_BREADCRUMB_GAP).abs() < 0.5, "the pill {crumb} under the subtitle {subtitle:?}: {gap}");
-    }
-
-    // slopty: the transcript is gone by the composer pill's bottom: its fade ends where the pill
-    // does, so nothing that scrolls under the footer below (the mode, the context) is drawn
-    // beside that footer's words; above the pill it reads whole.
-    #[gpui::test]
-    fn the_transcript_is_gone_by_the_pills_bottom(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = ipad(cx);
-        FORCE_COMPACT.with(|force| force.set(false));
-        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| state.no_project = true);
-            shell.open_chat("docs".into(), cx);
-        });
-        let _ = a11y(cx);
-        let floor = shell.read_with(cx, |shell, _| shell.pill_floor.get());
-        let pill = shell
-            .read_with(cx, |shell, cx| shell.composer.read(cx).surface_bounds().get())
-            .expect("the composer's pill");
-        let stack = cx.debug_bounds("bottom-stack").expect("the bottom stack");
-        let term_h = shell.read_with(cx, |shell, _| shell.terminal_geometry.get().height);
-        let under = f32::from(stack.bottom() - pill.bottom()) - term_h;
-        assert!(floor >= 20.0, "the footer reaches under the pill: {floor}");
-        assert!((floor - under).abs() < 0.5, "measured {floor}, drawn {under}");
-        let stack_h = f32::from(stack.size.height) - term_h;
-        let (inset, band) = super::super::transcript_floor_fade(stack_h, floor);
-        assert_eq!(inset, floor, "nothing under the footer");
-        assert!(
-            (band - (stack_h - Theme::STATUS_STRIP_HEIGHT - floor)).abs() < 0.01,
-            "the ramp spans the pill: {band}"
-        );
-        assert_eq!(super::super::transcript_floor_fade(60.0, 500.0), (36.0, 1.0), "never past the pill's top");
-    }
-
-    // slopty: a phone's chat reaches its files and its terminal by touch, as an iPad's titlebar
-    // does: the bar's Files opens a page of them whose back returns to the chat, and its
-    // Terminal shows the chat's terminal and says so.
-    #[gpui::test]
-    fn a_phones_chat_reaches_its_files_and_terminal(cx: &mut gpui::TestAppContext) {
+    fn a_phones_session_reaches_its_files_and_its_inspector_sheet(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = ipad(cx);
         cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
         shell.update(cx, |shell, cx| shell.open_chat("docs".into(), cx));
@@ -1865,22 +1993,91 @@ mod tests {
             let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}")).center();
             cx.simulate_click(at, gpui::Modifiers::default());
         };
+        let top = |cx: &mut gpui::VisualTestContext| {
+            a11y(cx);
+            cx.debug_bounds("compact-inspector-sheet").map(|bounds| f32::from(bounds.origin.y))
+        };
+        let pan = |cx: &mut gpui::VisualTestContext, steps: &[f32]| {
+            let at = cx.debug_bounds("compact-inspector-header").expect("the sheet's header").center();
+            let last = steps.len() - 1;
+            for (ix, y) in steps.iter().enumerate() {
+                cx.simulate_event(ScrollEvent {
+                    position: at,
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(*y))),
+                    modifiers: gpui::Modifiers::default(),
+                    touch_phase: match ix {
+                        0 => TouchPhase::Started,
+                        ix if ix == last => TouchPhase::Ended,
+                        _ => TouchPhase::Moved,
+                    },
+                    momentum_phase: None,
+                    source: gpui::ScrollSource::Touch,
+                });
+            }
+        };
         tap(cx, "compact-files");
         let files = a11y(cx);
         tap(cx, "compact-side-back");
         let back = a11y(cx);
-        tap(cx, "compact-terminal");
-        let terminal = a11y(cx);
-        let open = shell.read_with(cx, |shell, cx| shell.terminal_open(cx));
+        tap(cx, "compact-inspector");
+        let sheet = a11y(cx);
+        let medium = top(cx);
+        // A flick up takes it to the whole screen, and dims what it leaves above.
+        pan(cx, &[0.0, -150.0, -150.0, 0.0]);
+        let large = top(cx);
+        let full = a11y(cx);
+        let dims = cx.debug_bounds("compact-inspector-scrim").is_some();
+        // Its grabber takes it back to half.
+        tap(cx, "compact-inspector-grabber");
+        let again = top(cx);
+        // A slow pull well past half puts it away.
+        pan(cx, &[0.0, 150.0, 150.0, 2.0, 0.0]);
+        let pulled = top(cx);
+        let shown_after_pull = shell.read_with(cx, |shell, cx| shell.inspector_shown(cx));
+        tap(cx, "compact-inspector");
+        let reopened = top(cx);
+        tap(cx, "compact-inspector-close");
+        let closed = top(cx);
+        let shown_after_close = shell.read_with(cx, |shell, cx| shell.inspector_shown(cx));
         FORCE_COMPACT.with(|force| force.set(false));
         assert!(has(&chat, gpui::Role::Button, "Show files"), "{chat:?}");
-        assert!(has(&chat, gpui::Role::Button, "Show terminal"), "{chat:?}");
+        assert!(has(&chat, gpui::Role::Button, "Show inspector"), "{chat:?}");
+        assert!(!has(&chat, gpui::Role::Button, "Show terminal"), "the session is its terminal: {chat:?}");
         assert!(has(&files, gpui::Role::Heading, "Files"), "the files page: {files:?}");
         assert!(has(&files, gpui::Role::Button, "Back to Chat"), "{files:?}");
         assert!(!has(&files, gpui::Role::Button, "Back to Chats"), "the chat's page gives way: {files:?}");
         assert!(has(&back, gpui::Role::Button, "Back to Chats"), "back on the chat: {back:?}");
         assert!(!has(&back, gpui::Role::Heading, "Files"), "{back:?}");
-        assert!(open, "the terminal opens");
-        assert!(has(&terminal, gpui::Role::Button, "Hide terminal"), "{terminal:?}");
+        assert!(has(&sheet, gpui::Role::Dialog, "Inspector"), "the sheet: {sheet:?}");
+        assert!(has(&sheet, gpui::Role::Button, "Hide inspector"), "{sheet:?}");
+        assert!(has(&sheet, gpui::Role::Button, "Back to Chats"), "over the session's page: {sheet:?}");
+        assert!(has(&sheet, gpui::Role::Button, "Expand inspector"), "{sheet:?}");
+        assert_eq!(medium, Some(422.0), "up at half the screen");
+        assert_eq!(large, Some(SHEET_LARGE_GAP), "the whole screen");
+        assert!(has(&full, gpui::Role::Button, "Collapse inspector"), "{full:?}");
+        assert!(dims, "what the full sheet leaves above is dimmed");
+        assert_eq!(again, Some(422.0), "the grabber's press takes it back to half");
+        assert_eq!((pulled, shown_after_pull), (None, false), "pulled away");
+        assert_eq!(reopened, Some(422.0), "up again at half");
+        assert_eq!((closed, shown_after_close), (None, false), "closed");
+    }
+
+    // slopty: a sheet let go rests at the nearer detent, or one detent the way it was flicked,
+    // and goes when pulled well past half; above the whole screen it resists.
+    #[test]
+    fn an_inspector_sheet_rests_where_a_finger_leaves_it() {
+        let (height, safe) = (844.0, 47.0);
+        let large = detent_top(Detent::Large, height, safe);
+        let medium = detent_top(Detent::Medium, height, safe);
+        assert_eq!((large, medium), (57.0, 422.0));
+        assert_eq!(sheet_rest(200.0, 1.0, height, safe), Some(Detent::Large), "nearer the top");
+        assert_eq!(sheet_rest(300.0, -1.0, height, safe), Some(Detent::Medium), "nearer half");
+        assert_eq!(sheet_rest(500.0, 1.0, height, safe), Some(Detent::Medium), "short of the pull");
+        assert_eq!(sheet_rest(600.0, 1.0, height, safe), None, "pulled away");
+        assert_eq!(sheet_rest(400.0, -12.0, height, safe), Some(Detent::Large), "flicked up");
+        assert_eq!(sheet_rest(100.0, 12.0, height, safe), Some(Detent::Medium), "flicked down from the top");
+        assert_eq!(sheet_rest(430.0, 12.0, height, safe), None, "flicked down from half");
+        assert_eq!(dragged_top(Detent::Medium, 100.0, height, safe), 522.0, "with the finger");
+        assert_eq!(dragged_top(Detent::Large, -40.0, height, safe), 47.0, "a quarter as far above the top");
     }
 }

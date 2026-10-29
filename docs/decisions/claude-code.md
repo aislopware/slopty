@@ -19,7 +19,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `WorkerMsg::Agent` already existed). Observed cycle: Idle → Working → Tool{Bash} → Working →
   Done → None.
 
-- ✅ Answering a permission prompt from the badge (verified 2026-09-05 against Claude Code
+- ❌ Answering a permission prompt from the badge *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the person answers every dialog in the TUI, and Slopty answers none.* (verified 2026-09-05 against Claude Code
   2.1.261 driven under a pty in `default` permission mode): the prompt is a numbered menu with
   the first entry highlighted — `❯ 1. Yes · 2. Yes, and always allow access to <dir> from this
   project · 3. Yes, and switch to auto mode · 4. No — Esc to cancel · Tab to amend`. Enter
@@ -334,7 +334,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the fold, the labels), and the app self-test's `edit` turn against the fake (an `Edit` and
   a `TodoWrite` the settings allow, golden `conversation-tools`).
 
-- ✅ **A question is answered on the card, not allowed, protocol 18** (2026-09-12).
+- ❌ **A question is answered on the card, not allowed, protocol 18** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the person answers every dialog in the TUI, and Slopty answers none.* (2026-09-12).
   Probed on CLI 2.1.269 over stdio: `AskUserQuestion` arrives as an ordinary `can_use_tool`
   control request (`tool_name: "AskUserQuestion"`, `requires_user_interaction: true`, the
   input `{questions: [{question, header, options: [{label, description}], multiSelect}]}`),
@@ -367,7 +367,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   in the accessibility tree, no Allow, the tap on "Blue", the result's wording, golden
   `conversation-question`).
 
-- ✅ **"Always" is the agent's own suggestion echoed back, protocol 19** (2026-09-12).
+- ❌ **"Always" is the agent's own suggestion echoed back, protocol 19** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the person answers every dialog in the TUI, and Slopty answers none.* (2026-09-12).
   Probed on CLI 2.1.269: a `can_use_tool` for `Write` carries
   `permission_suggestions: [{type: "setMode", mode: "acceptEdits", destination: "session"}]`;
   an allow whose response adds `updatedPermissions: <those suggestions>` made the next
@@ -695,7 +695,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   writes "fake: not logged in" to stderr and exits 3; the card is gone and the dump's
   `notice` reads the status and the line).
 
-- ✅ **Slash completions say what a command does and takes, protocol 29** (2026-09-12).
+- ❌ **Slash completions say what a command does and takes, protocol 29** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the prompt box is dropped, and its menus with it ("The prompt box's menus go, and the `initialize` probe with them", below).* (2026-09-12).
   The list was bare names in chips; Claude Code has forty-odd commands and skills, and a name
   like `/compact` says nothing about its optional instructions. Read from the CLI (2.1.269):
   `system/init` carries `slash_commands` as names alone, and `system/commands_changed` (sent
@@ -718,8 +718,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   app self-test's driven scenario, where the fake describes its three commands after its
   init and the dump's a11y carries the described line.
 
-- ✅ **The composer completes `@file` from the host's working directory, protocol 30**
-  (2026-09-12). Claude Code expands `@path` in a prompt into the file's contents, which is
+- ❌ **The composer completes `@file` from the host's working directory, protocol 30**
+  *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the prompt box is dropped, and its menus with it ("The prompt box's menus go, and the `initialize` probe with them", below).* (2026-09-12). Claude Code expands `@path` in a prompt into the file's contents, which is
   how a human points the agent at a file; the composer took the text as typed, so the path
   had to be known and spelled out — on a phone, from memory. Rulings: (1) the word the text
   ends in, when it starts with `@`, is asked of the host as it is typed (`ListFiles {
@@ -915,7 +915,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_report_is_a_hook_payload_the_tracker_reads`.
 
 - ❌ **Deleted 2026-10-16: the TUI-only ruling below.** Claude Code is driven ("Claude Code is driven,
-  and its observed lane is gone", at the end): the ruling is kept as the record.
+  and its observed lane is gone", at the end): the ruling is kept as the record. Its core is back since 2026-10-29: "TUI-first" (`agents.md`).
 - ✅ **The agent is used through its TUI; Slopty only reads its status** (2026-09-15, protocol
   48). Claude Code has no public API and its stream-json shape, slash commands, transcript
   records and prompt menus move between releases; a GUI of Slopty's own over it was a second
@@ -1033,8 +1033,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   client follows, the worker tails the transcript, each subagent's `agent_transcript_path` and
   each background command's output file, and sends typed entries on a low-priority uni stream,
   never the control stream. Hooks give the live moments; the transcript fills in text and
-  thinking as blocks complete. The composer types into the same PTY (bracketed paste, then
-  Enter), and approvals go through the blocking `PermissionRequest` hook.
+  thinking as blocks complete. Words typed in for the person (or an orchestrating agent's
+  `agent_tell`) go into the same PTY (bracketed paste, then Enter), and every dialog stays the
+  TUI's, answered there by the person.
 - **The drift risk has one owner.** `slopty_agent::conversation` is the only code that reads
   the JSONL. Clients get typed entries. It skips unknown record types, fields and lines that
   do not parse, and keeps an unknown tool as its name and clipped input.
@@ -1044,11 +1045,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     recaptures them. It runs the installed `claude` on haiku in a scratch directory with no
     user or project settings, takes the records from the `transcript_mirror` frames of
     `--session-mirror` (never from files under `~/.claude`), registers itself as the hook to
-    record payloads and answer permission requests, and scrubs paths, the user name, e-mail
-    addresses and every id to numbered placeholders. Attachments keep only their type. Five
-    scenarios: `edit` (read, edit, overwrite, ranged read), `tools` (tasks, glob, grep, bash,
-    a failing bash, a background bash, a create, a subagent), `interrupt`, `compact`,
-    `permission`. A snapshot that moves after a recapture is the format moving.
+    record payloads, and scrubs paths, the user name, e-mail addresses and every id to
+    numbered placeholders. Attachments keep only their type. In those scratch runs alone its
+    sink stands in for the person at the permission dialogs `-p` would otherwise refuse
+    (`permission`: one command refused, the rest allowed); in a Slopty session nothing answers
+    one. Nine scenarios as of 2.1.312: `edit` (read, edit, overwrite, ranged read), `tools`
+    (tasks, glob, grep, bash, a failing bash, a background bash, a create, a subagent),
+    `interrupt`, `compact`, `permission` (a command refused, then a command, an edit and a
+    write allowed), `background` (canned), `auto`, `fork` and `notebook`. A snapshot that moves
+    after a recapture is the format moving.
   - Entries: prompt (a slash command or `!` keeps its name), answer text, thinking, a tool call
     paired with its result, compaction with its summary, Esc, and Claude Code's notes (API
     errors, command output, informational lines). Tool details are typed for Edit/MultiEdit
@@ -1068,9 +1073,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and inputs at 40 lines or 4 000 characters (Bash keeps the tail), a diff at 400 lines. A
     clipped text says how long the whole was and carries a `TextRef` (record uuid and part)
     that `full_text` resolves against the transcript later.
-- **The relay forwards what the face needs.** `HOOK_EVENTS` grows from 12 to 19: `StopFailure`,
-  `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `PreCompact`,
-  `PostCompact`. This reverses "forwards only what the tracker reads" (2026-09-26) for these
+- **The relay forwards what the face needs.** The relay registers 15 events
+  (`slopty_agent::hooks::EVENTS`, as of 2026-10-29): `SessionStart`, `SessionEnd`,
+  `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`,
+  `PermissionDenied`, `Notification`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`,
+  `PreCompact` and `PostCompact`, each `async`, so none holds Claude Code. `TaskCreated` and
+  `TaskCompleted` are not among them: the task list is read from the transcript's own records.
+  This reverses "forwards only what the tracker reads" (2026-09-26) for these
   fields: `tool_response` and `duration_ms`, the subagent's id, type, transcript and last
   message, the task, the compaction trigger and summary, the error, and the permission
   request's input and `permission_suggestions`. `Hook::trimmed` keeps it small. A tool's input
@@ -1080,22 +1089,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - **`MessageDisplay` is not registered.** Claude Code holds each batch of the TUI's paint until
   that hook returns (10 s default timeout), so it goes on the input path. It is measured before
   anyone registers it.
-- **Approvals: a blocking `PermissionRequest`.** Its entry is the one without `async`, with
-  `timeout: 600` (Claude Code's own default). The relay posts the hook as before, then sends
-  `{"cmd":"permission","session","payload","wait_ms"}` on the control socket
-  (`slopty_agent::permission::RelayRequest`) and waits up to 595 s for
-  `{"reply":"permission","decision":{"kind":"pass"|"allow"|"allow_always"|"deny",…}}`. It
-  prints the output the hooks reference defines (`hookSpecificOutput.decision.behavior`, with
-  `updatedPermissions` for always and `message`/`interrupt` for deny) and nothing for `pass`.
-  Today's worker cannot read the request and closes the connection, so the relay reads no
-  decision at once and the TUI shows its dialog as before. Phase 1b adds
-  `CtlRequest::Permission(PermissionAsk)` and `CtlReply::Permission(PermissionAnswer)`, which
-  tag the same way. It answers `pass` at once unless a client shows the face, and must not
-  apply the payload to the tracker a second time.
-  - Checked in the `permission` capture: 2.1.283 obeyed a deny (the file was not made), an
-    allow, and an allow-always that handed back the suggestions. For `touch` those were
-    `addDirectories` and `setMode acceptEdits`, so after it the next command needed no
-    permission. The payload has no `tool_use_id`.
+- **Approvals stay the person's.** (Amended 2026-10-29 by "TUI-first", `agents.md`: the
+  blocking `PermissionRequest`, its control-socket request and its `pass` / `allow` /
+  `allow_always` / `deny` decisions are gone, with the `updatedPermissions` an "always" handed
+  back.) `PermissionRequest` is relayed `async` like every other event and prints nothing, so
+  Claude Code shows its own dialog and the person answers it in the TUI. The hook only says the
+  session waits on them (`Signal::Asks`, worded from the call's input: "Run touch allowed.txt",
+  "Edit /work/notes.txt"). The payload names no call (no `tool_use_id`); the `PreToolUse`
+  before it names the call with the same tool and input, which the `permission` capture pins
+  for a command, an edit and a write (`tests/hooks.rs`).
 - **Meters: a status-line wrapper.** `with_relay` also sets `statusLine` to
   `'<slopty>' hook statusline`. It forwards the model, context used, cost and rate limits to
   the worker as a `Statusline` hook (the tracker ignores it), then runs the person's own
@@ -1127,13 +1129,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`a_result_pairs_with_its_call_whenever_it_arrives`,
   `a_background_command_finishes_on_its_notice`, `a_subagent_talks_in_its_own_thread`,
   `a_long_text_is_clipped_and_can_be_had_whole`, `what_it_does_not_know_is_passed_over`,
-  `a_branch_abandons_what_followed_its_fork`, …), the hook fixtures (`tests/hooks.rs`,
-  including `a_permission_decision_is_the_output_claude_code_acted_on`), the relay against a
-  stand-in socket (`a_permission_request_prints_the_workers_decision`,
-  `a_worker_that_does_not_decide_leaves_the_dialog_to_claude_code`,
-  `the_wait_for_a_decision_is_bounded`), and the wrapper
-  (`the_persons_line_passes_through_unchanged`, `the_meters_are_forwarded_as_a_hook`,
-  `a_run_gets_the_status_line_wrapper_in_front_of_the_persons_own`).
+  `a_branch_abandons_what_followed_its_fork`, …) and the hook fixtures (`tests/hooks.rs`,
+  `hooks_say_the_status`: each recorded event is one the relay registers, and
+  each `PermissionRequest` says the session waits on the person). The relay's decision tests
+  went with its decisions, and the status-line wrapper's with the wrapper.
 
 - ❌ **A followed conversation streams from the worker; a permission prompt waits for its
   followers** (2026-09-27, phase 1b of "Claude Code gets a conversation face"; superseded
@@ -1177,7 +1176,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     permission updates typed (`Grant::{Rules, Mode, Directories, Other}`). The first
     `ConversationRequest::Answer` from a follower takes it: allow, allow always (every
     suggestion handed back as `updatedPermissions`, as Claude Code's own "Yes, and always …"),
-    or deny with a message. The last follower leaving, the wait running out a second before
+    or deny with a message. (Gone with TUI-first, 2026-10-29: no follower answers a dialog;
+    the person answers it in the TUI.) The last follower leaving, the wait running out a second before
     the relay's, or the relay's end closing (it now keeps the socket open while it waits, so its
     end closes when the relay is gone) hands it back undecided and the TUI's own dialog shows. The followers hear `Settled { Answered | Released | Withdrawn }`. An answer
     after that, a second answer, one for another session and one from a client that does not
@@ -1578,7 +1578,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `blocked_and_done_say_what_they_want`, `recognises_our_command`,
     `install_is_idempotent_and_uninstall_restores`,
     `every_captured_event_is_one_the_relay_registers`.
-- ✅ **A permission request goes to the worker once** (2026-09-28). The relay used to post a
+- ❌ **A permission request goes to the worker once** *Superseded 2026-10-29 by "TUI-first" (`agents.md`).* (2026-09-28). The relay used to post a
   `PermissionRequest` as `CtlRequest::Hook`, wait for its reply, then open a second connection
   with `CtlRequest::Permission` carrying the same payload, and the worker read that JSON twice,
   once per request. Now `CtlRequest::Permission` is the only request for that hook. The control
@@ -1594,7 +1594,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `a_permission_request_prints_the_workers_decision` sees one request, the ask;
     `a_worker_that_does_not_decide_leaves_the_dialog_to_claude_code` and
     `the_wait_for_a_decision_is_bounded` answer that one connection.
-- ✅ **The composer answers questions, lists commands and mentions files** (2026-09-28, read
+- ❌ **The composer answers questions, lists commands and mentions files** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the person answers every dialog in the TUI, and Slopty answers none.* (2026-09-28, read
   out of the Claude Code 2.1.283 bundle; wire change, goldens below). The face could show an
   `AskUserQuestion` but not answer it, and the person had to know every command's name and
   every path by heart. The composer now finishes those loops itself, still without typing
@@ -1757,7 +1757,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     kills ptyd, and checks that the next worker runs the script again with `--resume <id>
     --model … --permission-mode plan` in the same directory, and that the system prompt given
     at the start is in neither the recipe nor the new command line.
-- ✅ **A yes or no is answered from the notification and the inbox** (2026-09-29; wire change,
+- ❌ **A yes or no is answered from the notification and the inbox** *Superseded 2026-10-29 by "TUI-first" (`agents.md`).* (2026-09-29; wire change,
   goldens below). A permission prompt was held only while a client followed the session, so a
   person away from the conversation face could only go to the terminal. Now any client may
   answer approvals, without typing into the TUI and still only through the `PermissionRequest`
@@ -1811,7 +1811,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     No test posts a real notification. Goldens: new `conversation__client_approvals_on` and
     `conversation__client_release`.
 
-- ✅ **A note's verdict waits for its prompt, and an answered prompt takes its note away**
+- ❌ **A note's verdict waits for its prompt, and an answered prompt takes its note away** *Superseded 2026-10-29 by "TUI-first" (`agents.md`).*
   (2026-09-29). "Allow" on a note can arrive before its prompt: the tap launched the app, or
   the link is new and the worker has not yet sent what it holds. The verdict now waits for the
   prompt, answering it as it arrives, until the worker has had three seconds since it was asked
@@ -2101,7 +2101,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     worktree.
   - Test: `a_worktree_is_entered_again_by_claude_code_not_made_again`.
 
-- ✅ **Claude Code's own command list and model aliases come from the mod** (2026-10-04, prune
+- ❌ **Claude Code's own command list and model aliases come from the mod** *Superseded 2026-10-29 by "TUI-first" (`agents.md`).* (2026-10-04, prune
   FIX 2 and FIX 3). The slash menu came from a table of 2.1.283's commands compiled into
   Slopty, and the model menu from four aliases written in `observed::MODELS`. Both went stale
   with each Claude Code release.
@@ -2191,6 +2191,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - an agent in a tile is matched to its registry entry through the launcher's direct child.
     A launcher that does not answer in time is taken for one that once, and asked again next
     time.
+  - **Since TUI-first (2026-10-29, `agents.md`) nothing but the start runs it.** The prompt
+    box's menus, Claude Code's answer to `initialize` on a `-p` run through the launcher, went
+    with the prompt box the same day ("The prompt box's menus go, and the `initialize` probe
+    with them", below), so the worker never runs the launcher beside a session for them. The
+    session itself is found through the launcher's direct child, whose registry record it
+    is. Test: `a_managed_launcher_s_client_is_read_as_its_session`
+    (`apps/slopty-worker/tests/threads.rs`), which replaces the driven
+    `a_managed_claude_is_followed_through_its_launcher`.
   - **The mod posts to `http://slopty.localhost/v1/events`** over its Unix socket: a reserved
     name every egress proxy exempts (`the_mod_posts_to_a_host_no_proxy_takes`). The owner is
     also narrowing the managed egress to Anthropic's own domains.
@@ -2268,7 +2276,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     adapter keeps one writer again (`agents.md`, "Past Claude Code sessions are seen and
     continued in the GUI", a session running elsewhere).
 
-- ✅ **An approval names its call, and a plan may be approved with edits accepted** (2026-10-11,
+- ❌ **An approval names its call, and a plan may be approved with edits accepted** *Superseded 2026-10-29 by "TUI-first" (`agents.md`).* (2026-10-11,
   readiness 10-11 ranks 1 and 3, the agent's half).
   - **The call.** Claude Code's `PermissionRequest` names no call. The `approve-edit` capture
     (2.1.295) shows the `PreToolUse` before it naming the call (`tool_use_id`) with the same
@@ -2383,7 +2391,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     arguments. The table must be the pinned mod version's. A snapshot of the TUI-rendered
     commands makes a bump that adds one, or turns one into plain text, show in review.
 
-- ✅ **Claude Code is driven, and its observed lane is gone** (2026-10-16; the drive itself is
+- ❌ **Claude Code is driven, and its observed lane is gone** *Superseded 2026-10-29 by "TUI-first" (`agents.md`).* (2026-10-16; the drive itself is
   `agents.md`, "Each agent's drive" and "Why Claude is driven"). The worker runs the person's
   own `claude` as Claude's desktop app runs it, `claude -p` over stream-json with the control
   protocol, in ptyd's custody, and nothing else of Claude Code's: its hooks and the relay
@@ -2418,7 +2426,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     named) and `FromServer::Pushes` (the word by which a worker held a prompt for a pocketed
     phone) are deleted; an agent's branch is its thread's `branch` fact.
 
-- ✅ **A driven Claude Code never holds its thread, and a stop always lands** (2026-10-16;
+- ❌ **A driven Claude Code never holds its thread, and a stop always lands** *Superseded 2026-10-29 by "TUI-first" (`agents.md`).* (2026-10-16;
   stability, after t3code's, Orca's and Claude desktop's failures). Every way a `claude -p` can
   wedge has a bound, each proved against the stand-in's scripted fault
   (`crates/slopty-worker/tests/claude.rs`, `slopty_agent::claude::driven` tests).
@@ -2471,8 +2479,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     then the person's `~/.claude/settings.json`, else auto (`offers::starting_mode_in`). A
     past session taken up again runs in it too, as shown, where it ran in Manual before. The
     recordings and the stand-in are 2.1.302's; its control and stream messages are 2.1.301's.
-- ✅ **A rewind stays in its chat, a command's words are its own turn, and a full model id
-  is taken (2026-10-19, Claude Code 2.1.302).** On the person's Mac, "Code and conversation"
+- ❌ **A rewind stays in its chat, a command's words are its own turn, and a full model id
+  is taken (2026-10-19, Claude Code 2.1.302).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`).* On the person's Mac, "Code and conversation"
   refused with "No file checkpoint found for this message" and opened the branch as a second
   chat, and that chat was empty; `/mcp`'s answer landed in the turn before it; and the picker's
   `claude-opus-5-5` was refused as "no model here".
@@ -2516,3 +2524,94 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_model_goes_by_its_full_id_or_its_alias`, and the fork's shared turn in
     `files_go_back_before_a_turn_and_a_fork_shares_the_turns_before`; `slopty-ui`
     `a_rewind_in_place_keeps_the_chat`.
+
+- ✅ **Claude Code 2.1.312 is the version recorded** (2026-10-29, from 2.1.303). The recordings,
+  the stand-in (`slopty_testkit::claude_tui::VERSION`) and `xtask::claude::VERSION` are its.
+  What changed between them that reaches Slopty, by the changelog and the recordings:
+  - **A tools-used line opens what Claude Code hands the model in place of work it did not
+    show.** 2.1.304 "Added the names of the tools called earlier to the compaction summary in
+    the transcript view (Ctrl+O)": a compaction summary, a subagent's report and a forked skill's
+    result now open with `<tools-used-before-summary>` naming the tools called before it, alone
+    or in a `<system-reminder>` that holds nothing else. It is for the model. The decoder drops
+    it from an `Agent` or skill result, and says it in a compaction summary as its own line,
+    "Tools called before this summary: …", the way the TUI's transcript view names them; a
+    reminder that says more keeps the rest. Test:
+    `conversation::tests::the_tools_used_manifest_is_the_models`.
+  - **An interrupt comes later in the recording.** From 2.1.312 the call's frame arrives while
+    the reply still streams, and an interrupt sent at that frame stops the reply and refuses
+    the call before it runs, which is no interrupt of a running command. The recorder now sends
+    it 3 s after the call (`fixtures::RUNNING`), into the command the scenario runs, and the
+    transcript again says "[Request interrupted by user for tool use]" after a `tool_use`
+    stop.
+  - **Fixes only, otherwise.** 2.1.311 runs `SubagentStop` once per subagent (it ran about
+    twice a minute while one ran), keeps `-p` transcripts in order, and escapes control and
+    format characters in stream-json strings (`\uXXXX`; the values parse the same); 2.1.312
+    names the effort in force in transcripts and stops reading a mention of waiting as the
+    session waiting. No record type, field or hook payload the decoder reads moved.
+  - **`approve-edit` is `permission` now.** The `permission` scenario puts a command refused,
+    a command allowed, an edit and a write to the person in one turn, so it pins what
+    `approve-edit` did (each `PreToolUse` naming the call its `PermissionRequest` asks about
+    with the same input, "Edit /work/notes.txt", "Write /work/todo.txt"), and `approve-edit`
+    went.
+  - **A refusal by auto mode reads as the TUI's line.** The TUI draws a call its classifier
+    refused as one dim line, "Denied by auto mode classifier ∙ [Data Exfiltration] ∙ see
+    <its docs>", from the words the model is told ("Permission for this action was denied by
+    the Claude Code auto mode classifier. Reason: [Data Exfiltration]. If you have other
+    tasks …", or "Permission for this action has been denied. Reason: …" with no reason
+    drawn). The decoder says that line under the call, the reason without its brackets
+    ("Denied by auto mode classifier · Data Exfiltration"), and shows none of the paragraph,
+    whatever the tool. Tests: `said::tests::a_refusal_by_auto_mode_is_the_tuis_line_alone`,
+    the `auto` snapshot.
+
+- ✅ **A session with no Slopty hooks waits on the person as its record says** (2026-10-29).
+  A Claude Code typed by hand into a Slopty terminal runs without Slopty's hooks, so its phase
+  came from its transcript alone, and a transcript says nothing while a dialog is up: a session
+  holding a permission or a question read as at work, and words could be typed at the dialog.
+  Its record of itself (`<config>/sessions/<pid>.json`) says it. Measured on 2.1.312 in tmux:
+  - **At rest** `"status":"idle"`, **at work** `"status":"busy"`, **at a dialog**
+    `"status":"waiting"` with `waitingFor`: `permission prompt` for a tool's permission (and a
+    plan's approval, and any dialog that names nothing else: Claude Code's default),
+    `input needed` for a question; its build adds `sandbox request`, `goal proposal` and
+    `dialog open` (its own dialogs that hold the session: a fallback model, a usage limit, a
+    notice), and `needs` where a dialog says what the person is to do ("choose: allow or deny
+    the computer-use action"). `statusUpdatedAt` (and `updatedAt`) say since when, in ms. The
+    record is rewritten as the status changes. Scrubbed samples:
+    `crates/slopty-agent/tests/fixtures/registry/` (`idle`, `busy`, `waiting-permission`,
+    `waiting-question`).
+  - **Read.** `sessions::Live` keeps `status`, `waiting_for`, `needs` and `status_at`, and
+    `Live::waiting` says the wait: `permission` for a permission prompt or a sandbox request,
+    `question` for input needed, else `input`, worded by `needs` when it says ("Choose: …"),
+    else by what it waits for ("Wants permission", "Has a question", "Has a dialog open").
+  - **Precedence: hooks, then the record, then the transcript.** The observer reads the record
+    at each tick (750 ms) already, for the session it names, and tells the session's reader
+    when its wait changes. A reader that has heard none of the session's hooks takes the
+    record's wait as `Phase::NeedsYou`, and the transcript leaves that phase alone until the
+    record no longer waits (an interrupt still stops it); then the phase is what the
+    transcript says, or at rest before a first turn. A hook, once heard, decides alone: hooks
+    are exact and come at once, the record a tick late.
+  - **Said of its call.** The record names no call, so a permission or a question is worded
+    from the call the transcript has open, the latest (`conversation::call_input`,
+    `history::asks_for`): "Run touch allowed.txt", the question itself, and a plan's approval
+    as a plan. A dialog of Claude Code's own keeps the record's words.
+  - **The stand-in writes it.** `slopty-stub-claude` records `status`, `waitingFor` (`input
+    needed` while it asks) and `statusUpdatedAt` as 2.1.312 does, so a test sees a typed
+    session's dialog: `a_claude_code_typed_by_hand_waits_on_the_person_as_its_record_says`
+    (`slopty-workerd`: no hook runs, the thread waits on the person for "Which colour?", words
+    for its terminal are refused meanwhile and nothing reaches it, and the turn ends once the
+    person answers there). Also `sessions::tests::a_live_claude_code_says_when_it_waits_on_the_person`.
+
+- ✅ **The prompt box's menus go, and the `initialize` probe with them** (2026-10-29, with the
+  prompt box). The person works in the TUI, whose own `/` and `@` menus are complete, so the
+  GUI's prompt box is dropped, and nothing is left to show the commands, skills and subagent
+  kinds the worker read for it.
+  - **Gone:** the probe (`slopty_agent::claude::probe`, the worker's
+    `thread::claude::probe` and its answers kept per folder and version), the scan of custom
+    commands and skills on disk (`slopty_agent::commands`, the decoder's `SlashCommand`), the
+    `Action::CommandsSet` and `Action::AgentsSet` an observed thread was told, and the
+    `Cap::REVIEW` that came with Claude Code listing `code-review`. No `claude -p` runs beside
+    a session any more, so a managed launcher is run only by the start. The stand-in no longer
+    answers `-p`, and `STUB_PROBES` went with the tests of it.
+  - **Kept:** the worker's writer that types into the terminal for `agent_tell`, `SendMessage`
+    and `agent_stop`, with its refusal while the agent waits on the person
+    (`thread::submit_refused`). `TermRequest::Submit` keeps the worker's side until the wire
+    drops it; the client's prompt box was its last sender.

@@ -26,6 +26,7 @@
 //! run on the snapshot of the index, and a lane that is not run passed on the same inputs.
 
 mod pass;
+pub mod warm;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -619,19 +620,20 @@ fn clippy_affected(sh: &Shell, names: &[&str]) -> Result<()> {
 fn affected_lane(sh: &Shell, packages: &[String]) -> Result<()> {
     let names: Vec<&str> = packages.iter().map(String::as_str).collect();
     let p = &selected(names.iter().copied().chain([WORKSPACE_HACK]));
-    quiet_step("nextest build", cmd!(sh, "cargo nextest run {p...} --no-run"))?;
+    let target = mac_target();
+    quiet_step("nextest build", cmd!(sh, "cargo nextest run {p...} {target...} --no-run"))?;
     if let Some(spawned) = spawned_selection(Some(&names)) {
         let bins = spawned_bin_args();
         quiet_step(
             "spawned binaries",
-            cmd!(sh, "cargo build --profile test {spawned...} {bins...}"),
+            cmd!(sh, "cargo build --profile test {target...} {spawned...} {bins...}"),
         )?;
     }
     let _fresh = sh.push_env(BINS_FRESH, "1");
     let runner = crate::runner::command()?;
     quiet_step(
         "nextest",
-        cmd!(sh, "cargo nextest run {p...} --profile {NEXTEST_LAND_PROFILE}")
+        cmd!(sh, "cargo nextest run {p...} {target...} --profile {NEXTEST_LAND_PROFILE}")
             .env(crate::runner::RUNNER_VAR, &runner),
     )
 }
@@ -1075,22 +1077,30 @@ fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 pub const BINS_FRESH: &str = "SLOPTY_BINS_FRESH";
 
 /// `slopty_testkit::bins::NAMES`, each with the package that builds it.
-const SPAWNED_BINS: [(&str, &str); 10] = [
+const SPAWNED_BINS: [(&str, &str); 7] = [
     ("slopty-ptyd", "slopty-ptyd"),
     ("slopty-worker", "slopty-workerd"),
     ("slopty-server", "slopty-serverd"),
     ("slopty", "slopty-cli"),
     ("slopty-stub-claude", "slopty-testkit"),
     ("slopty-stub-managed-claude", "slopty-testkit"),
-    ("slopty-stub-pi", "slopty-testkit"),
-    ("slopty-stub-acp", "slopty-testkit"),
-    ("slopty-stub-mcp-apps", "slopty-testkit"),
     ("slopty-stub-window", "slopty-testkit"),
 ];
 
 /// `--bin <name>` for each of [`SPAWNED_BINS`].
 pub fn spawned_bin_args() -> Vec<String> {
     SPAWNED_BINS.iter().flat_map(|(bin, _)| ["--bin".to_owned(), (*bin).to_owned()]).collect()
+}
+
+/// `--target` and the Mac's triple on a Mac, nothing elsewhere: every cargo call on a Mac names
+/// the triple clippy and rustdoc name, tests and the binaries they spawn too, so a target dir
+/// builds its proc macros and build scripts once, in cross mode without the triple's rustflags.
+/// A test build without it built them a second time with `-C target-cpu`: 411 units and 985
+/// CPU-s in every cold target dir, ghostty's zig build and Luau's among them
+/// (`docs/decisions/tooling.md`, "One triple for every cargo call on a Mac").
+#[must_use]
+pub const fn mac_target() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") { &["--target", TRIPLES[0]] } else { &[] }
 }
 
 /// `-p <name>` for each name.
@@ -1174,7 +1184,11 @@ fn test_lane(
     let timings: &[&str] = if profile == NEXTEST_CI_PROFILE { &["--timings"] } else { &[] };
     // What each step does to a runner Mac's memory (`crate::memstat`); nothing elsewhere.
     let memory = crate::memstat::read(sh);
-    quiet_step("nextest build", cmd!(sh, "cargo nextest run {p...} --no-run {timings...}"))?;
+    let target = mac_target();
+    quiet_step(
+        "nextest build",
+        cmd!(sh, "cargo nextest run {p...} {target...} --no-run {timings...}"),
+    )?;
     let memory = crate::memstat::report(sh, "the test build", memory);
     // Every binary a test spawns, so no test shells out to cargo and waits on its locks while
     // another build on the machine holds them. With the tests selected that were built just now,
@@ -1187,7 +1201,7 @@ fn test_lane(
         let bins = spawned_bin_args();
         quiet_step(
             "spawned binaries",
-            cmd!(sh, "cargo build --profile test {spawned...} {bins...}"),
+            cmd!(sh, "cargo build --profile test {target...} {spawned...} {bins...}"),
         )?;
     }
     let memory = crate::memstat::report(sh, "the spawned binaries", memory);
@@ -1232,7 +1246,7 @@ fn test_lane(
             let ran = videotoolbox_step(
                 cmd!(
                     side,
-                    "cargo nextest run {p...} --profile {VIDEOTOOLBOX_PROFILE} --no-tests=pass -E {expr}"
+                    "cargo nextest run {p...} {target...} --profile {VIDEOTOOLBOX_PROFILE} --no-tests=pass -E {expr}"
                 )
                 .env(crate::runner::RUNNER_VAR, runner_ref),
                 &Probe { sh: &side, packages: p, runner: runner_ref },
@@ -1247,7 +1261,7 @@ fn test_lane(
                 _ => ran,
             }
         });
-        let main = cmd!(sh, "cargo nextest run {p...} --profile {profile} {filter...}")
+        let main = cmd!(sh, "cargo nextest run {p...} {target...} --profile {profile} {filter...}")
             .env(crate::runner::RUNNER_VAR, &runner);
         // No VideoToolbox session in a main run the group runs apart from: a process that
         // opened one on a guest whose codec wedged sticks in the kernel as it exits and holds a
@@ -1432,9 +1446,10 @@ impl Probe<'_> {
     fn answers(&self) -> bool {
         let Self { sh, packages: p, runner } = *self;
         let expr = format!("package(=slopty-codec) & test(={ENCODER_PROBE})");
+        let target = mac_target();
         let run = cmd!(
             sh,
-            "cargo nextest run {p...} --profile {PROBE_PROFILE} --no-tests=fail -E {expr}"
+            "cargo nextest run {p...} {target...} --profile {PROBE_PROFILE} --no-tests=fail -E {expr}"
         )
         .env(crate::runner::RUNNER_VAR, runner);
         within(std::process::Command::from(run), PROBE_DEADLINE) == Some(true)
@@ -1521,7 +1536,7 @@ const NEXTEST_HANG_AFTER: Duration = Duration::from_mins(15);
 fn nextest_step(profile: &str, command: xshell::Cmd<'_>) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
 
-    if profile != NEXTEST_CI_PROFILE {
+    if profile != NEXTEST_CI_PROFILE && profile != warm::PROFILE {
         return quiet_step("nextest", command);
     }
     println!("▶ nextest");

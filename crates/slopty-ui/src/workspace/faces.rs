@@ -186,8 +186,6 @@ impl WorkspaceView {
                 }
             }
             HubEvent::Table => this.threads_heard(key, cx),
-            HubEvent::Thread(_) => this.answers_heard(cx),
-            _ => {}
         });
         self.faces.threads.hearing.insert(key, hearing);
         self.faces.threads.hubs.insert(key, hub.clone());
@@ -214,7 +212,7 @@ impl WorkspaceView {
     pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
-        self.view_resend(key, None);
+        self.view_resend(key);
         // slopty: the pages waiting for this machine ask again.
         #[cfg(target_vendor = "apple")]
         self.pages_linked(key, cx);
@@ -268,9 +266,6 @@ impl WorkspaceView {
     /// opens the thread as a tile there; one refused says why.
     pub fn thread_done(&mut self, key: WorkerKey, done: &IntentDone, cx: &mut Context<Self>) {
         self.view_intent_done(done);
-        if self.view_start_done(key, done, cx) {
-            return;
-        }
         if let Some(hub) = self.faces.threads.hubs.get(&key) {
             hub.update(cx, |hub, cx| hub.done(done, cx));
         }
@@ -327,10 +322,6 @@ impl WorkspaceView {
             self.update_awake(cx);
             self.agents_moved(cx);
         }
-        // A note's verdict that waited for its request answers it as the table brings it.
-        if self.approvals.taps_waiting() {
-            self.settle_taps(cx);
-        }
         if self.faces.threads.meters != meters_before {
             cx.notify();
         }
@@ -340,13 +331,6 @@ impl WorkspaceView {
     /// Whether any agent works, by its worker's own table.
     pub(super) fn any_working(&self) -> bool {
         self.faces.threads.stands.values().any(|s| s.rung == Rung::Working)
-    }
-
-    /// The request `thread` waits on as its worker's table says, while that worker is linked.
-    pub(super) fn thread_request(&self, thread: ThreadId) -> Option<&RequestCard> {
-        let stand = self.faces.threads.stands.get(&thread)?;
-        self.workers.get(&stand.worker).and_then(|w| w.link.as_ref())?;
-        stand.asks.as_ref()
     }
 
     /// The server's ladder: where the threads of every worker stand, for those whose own link

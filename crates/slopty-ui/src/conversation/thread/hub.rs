@@ -12,11 +12,10 @@
 //! An intent the worker turns down is said in words where its thread shows. A message and a
 //! change to one hold the person's words and stand on their own lines; every other refusal
 //! (an answer, a stop, a model, a keep) is kept here as a [`Refusal`] until the person lets it
-//! go, since the thread's own state would otherwise show nothing happened. A thread's agent
-//! that exited is taken up again from here too ([`ThreadHub::resume`]): a start of its own
-//! session, answered as any start is.
+//! go, since the thread's own state would otherwise show nothing happened. An agent that
+//! exited is taken up again in a terminal of its own (`docs/decisions/agents.md`), never here.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,9 +23,9 @@ use gpui::{Context, EventEmitter, Task};
 use slopty_client::threads::{Cache, Cached, Changed, Outbox, Threads};
 use slopty_proto::git::GitOutcome;
 use slopty_proto::thread::wire::{
-    Intent, IntentDone, Outcome, Review, ReviewScope, Start, TableFrame, ThreadFrame, ThreadRequest,
+    Intent, IntentDone, Outcome, Review, ReviewScope, TableFrame, ThreadFrame,
 };
-use slopty_proto::thread::{AgentId, ContentRef, IntentId, ThreadId, ThreadState};
+use slopty_proto::thread::{AgentId, ContentRef, IntentId, ThreadId};
 use slopty_proto::{ClientMsg, RequestId};
 
 use super::git::GitBook;
@@ -42,12 +41,12 @@ const REFUSALS: usize = 32;
 /// until the person lets it go.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Refusal {
-    /// The intent, or the start that took the thread up again.
+    /// The intent.
     pub id: IntentId,
     /// Its thread.
     pub thread: ThreadId,
-    /// What was asked; `None` for a start.
-    pub intent: Option<Intent>,
+    /// What was asked.
+    pub intent: Intent,
     /// What was turned down and why, as the person reads it.
     pub words: String,
 }
@@ -57,28 +56,8 @@ pub struct Refusal {
 pub enum HubEvent {
     /// Send these to the worker, in order.
     Send(Vec<ClientMsg>),
-    /// `thread` moved on, or this client's intents for it did.
-    Thread(ThreadId),
     /// The table changed.
     Table,
-    /// The whole of some clipped content came.
-    Expanded(ContentRef),
-    /// `thread`'s review came.
-    Review(ThreadId),
-    /// A git op on the repository holding this folder was asked or answered.
-    Git(String),
-    /// An intent on `from` started `thread`: a fork, a go in another agent, an edit from a
-    /// turn. The workspace opens it, unless it is an aside, which its view shows.
-    Started {
-        /// The thread the person acted on.
-        from: ThreadId,
-        /// The thread it started.
-        thread: ThreadId,
-        /// The intent that started it.
-        intent: IntentId,
-        /// It is an aside (`Intent::Aside`), shown in a sheet over `from`'s view.
-        aside: bool,
-    },
 }
 
 /// Writes waiting for the disk, the newest of each.
@@ -109,20 +88,10 @@ pub struct ThreadHub {
     writing: Option<Task<()>>,
     /// Intents turned down that their threads would not show, oldest first.
     refusals: Vec<Refusal>,
-    /// Starts that take an exited thread's session up again, not yet answered: each goes again
-    /// under its id when the link comes back.
-    resuming: HashMap<IntentId, (ThreadId, Start)>,
-    /// Threads to take up again as soon as they are known here and their agent has exited:
-    /// a closed agent tile reopened after its session ended.
-    waking: HashSet<ThreadId>,
     /// The git ops asked of this worker's repositories, and what each last said.
     git: GitBook,
     /// The agents this worker can start a thread of, as its link says.
     agents: Vec<AgentId>,
-    /// The words a new thread's composer opens with, by the intent that starts it.
-    seeds: HashMap<IntentId, String>,
-    /// The same, by the thread it started, until a view takes them.
-    seeded: HashMap<ThreadId, String>,
 }
 
 impl std::fmt::Debug for ThreadHub {
@@ -151,12 +120,8 @@ impl ThreadHub {
             writes: Writes::default(),
             writing: None,
             refusals: Vec::new(),
-            resuming: HashMap::new(),
-            waking: HashSet::new(),
             git: GitBook::default(),
             agents: Vec::new(),
-            seeds: HashMap::new(),
-            seeded: HashMap::new(),
         }
     }
 
@@ -178,8 +143,7 @@ impl ThreadHub {
 
     /// The link came up.
     pub fn connected(&mut self, cx: &mut Context<Self>) {
-        let mut out = self.threads.connected();
-        out.extend(self.resuming.iter().map(|(id, (_, start))| start_msg(*id, start)));
+        let out = self.threads.connected();
         cx.notify();
         cx.emit(HubEvent::Send(out));
     }
@@ -188,9 +152,6 @@ impl ThreadHub {
     pub fn disconnected(&mut self, cx: &mut Context<Self>) {
         self.threads.disconnected();
         self.git.lost();
-        for thread in self.threads.open() {
-            cx.emit(HubEvent::Thread(thread));
-        }
         cx.notify();
     }
 
@@ -208,77 +169,34 @@ impl ThreadHub {
         match changed {
             Changed::Nothing => {}
             Changed::Thread => {
-                self.wake(thread, cx);
                 self.rest(thread, cx);
                 self.keep_outbox(cx);
-                cx.emit(HubEvent::Thread(thread));
                 cx.notify();
             }
-            Changed::Expanded(content) => {
-                cx.emit(HubEvent::Expanded(content));
-                cx.notify();
-            }
-            Changed::Review => {
-                cx.emit(HubEvent::Review(thread));
-                cx.notify();
-            }
+            Changed::Expanded(_) | Changed::Review => cx.notify(),
         }
         if !out.is_empty() {
             cx.emit(HubEvent::Send(out));
         }
     }
 
-    /// The worker's answer to an intent, or to a start that takes a thread up again. One it
-    /// turned down that the thread would not show is kept, in words, as a [`Refusal`].
+    /// The worker's answer to an intent. One it turned down that the thread would not show is
+    /// kept, in words, as a [`Refusal`].
     pub fn done(&mut self, done: &IntentDone, cx: &mut Context<Self>) {
-        if let Some((thread, _start)) = self.resuming.remove(&done.id) {
-            if let Some(why) = turned_down(&done.outcome) {
-                let words = format!("Couldn't resume: {why}");
-                self.refuse(Refusal { id: done.id, thread, intent: None, words });
-            }
-            cx.emit(HubEvent::Thread(thread));
-            cx.notify();
-            return;
-        }
         let sent = self.threads.outbox().all().iter().find(|s| s.id == done.id).cloned();
         if self.threads.done(done) {
             self.keep_outbox(cx);
-            let seed = self.seeds.remove(&done.id);
-            if let Some(sent) = sent {
-                let why = turned_down(&done.outcome).filter(|_| !speaks_for_itself(&sent.intent));
-                if let Outcome::Started { thread } = done.outcome {
-                    if let Some(seed) = seed {
-                        self.seeded.insert(thread, seed);
-                    }
-                    let aside = matches!(sent.intent, Intent::Aside);
-                    cx.emit(HubEvent::Started {
-                        from: sent.thread,
-                        thread,
-                        intent: sent.id,
-                        aside,
-                    });
-                }
-                // An aside kept is a thread of its own now: the workspace opens it as it opens
-                // a fork.
-                if matches!(sent.intent, Intent::KeepAside) && done.outcome == Outcome::Done {
-                    let thread = sent.thread;
-                    cx.emit(HubEvent::Started {
-                        from: thread,
-                        thread,
-                        intent: sent.id,
-                        aside: false,
-                    });
-                }
-                if let Some(why) = why {
-                    let words = refused_words(&sent.intent, &why);
-                    self.refuse(Refusal {
-                        id: sent.id,
-                        thread: sent.thread,
-                        intent: Some(sent.intent),
-                        words,
-                    });
-                }
-                cx.emit(HubEvent::Thread(sent.thread));
+            if let Some(sent) = sent
+                && let Some(why) =
+                    turned_down(&done.outcome).filter(|_| !speaks_for_itself(&sent.intent))
+            {
+                let words = refused_words(&sent.intent, &why);
+                self.refuse(Refusal {
+                    id: sent.id,
+                    thread: sent.thread,
+                    intent: sent.intent,
+                    words,
+                });
             }
             cx.notify();
         }
@@ -306,7 +224,6 @@ impl ThreadHub {
         }
         let cached = self.cache.as_ref().and_then(|c| c.thread(thread));
         let out = self.threads.open_thread(thread, cached);
-        cx.emit(HubEvent::Thread(thread));
         cx.notify();
         if let Some(msg) = out {
             cx.emit(HubEvent::Send(vec![msg]));
@@ -349,7 +266,6 @@ impl ThreadHub {
     ) {
         let out = self.threads.intent_as(id, thread, intent);
         self.keep_outbox(cx);
-        cx.emit(HubEvent::Thread(thread));
         cx.notify();
         if let Some(msg) = out {
             cx.emit(HubEvent::Send(vec![msg]));
@@ -361,72 +277,10 @@ impl ThreadHub {
         self.refusals.iter().filter(move |r| r.thread == thread)
     }
 
-    /// Take `thread`'s exited agent up again on its own session, as `start` says: it shows
-    /// as resuming at once, and goes now or once the link is back. A refusal is kept in words.
-    pub fn resume(&mut self, thread: ThreadId, start: Start, cx: &mut Context<Self>) -> IntentId {
-        let id = IntentId::new();
-        self.resume_as(id, thread, start, cx);
-        id
-    }
-
-    /// Take `thread`'s agent up again under `id`, the one its first message was given: as
-    /// [`Self::resume`].
-    pub fn resume_as(
-        &mut self,
-        id: IntentId,
-        thread: ThreadId,
-        start: Start,
-        cx: &mut Context<Self>,
-    ) {
-        let msg = self.threads.linked().then(|| start_msg(id, &start));
-        self.resuming.insert(id, (thread, start));
-        cx.emit(HubEvent::Thread(thread));
-        cx.notify();
-        if let Some(msg) = msg {
-            cx.emit(HubEvent::Send(vec![msg]));
-        }
-    }
-
-    /// Whether anything was asked under `id` here: an intent, or a resume on its way.
-    pub fn asked(&self, id: IntentId) -> bool {
-        self.threads.asked(id) || self.resuming.contains_key(&id)
-    }
-
-    /// `thread` is known now: take it up again if it was asked to be.
-    fn wake(&mut self, thread: ThreadId, cx: &mut Context<Self>) {
-        if !self.waking.contains(&thread) {
-            return;
-        }
-        let Some(state) = self.threads.mirror(thread).and_then(|m| m.state()) else { return };
-        self.waking.remove(&thread);
-        let gone = gone(state);
-        if let Some(Gone::Resume(start)) = gone
-            && !self.resuming(thread)
-        {
-            let _id = self.resume(thread, *start, cx);
-        }
-    }
-
-    /// How `thread`'s agent, exited, is taken up again on its own session: the start that does
-    /// it; `Err` with why it cannot be. `Ok(None)` while the agent runs, or when the next message
-    /// takes it up by itself.
-    pub fn resume_start(&self, thread: ThreadId) -> Result<Option<Start>, String> {
-        let Some(state) = self.threads.mirror(thread).and_then(|m| m.state()) else {
-            return Ok(None);
-        };
-        match gone(state) {
-            Some(Gone::Resume(start)) => Ok(Some(*start)),
-            Some(Gone::Over) => {
-                Err(format!("{} can't take this session up again", agent_label(&state.meta.agent)))
-            }
-            Some(Gone::ByMessage) | None => Ok(None),
-        }
-    }
-
-    /// Whether a start taking `thread` up again is on its way.
+    /// Whether anything was asked under `id` here.
     #[must_use]
-    pub fn resuming(&self, thread: ThreadId) -> bool {
-        self.resuming.values().any(|(t, _)| *t == thread)
+    pub fn asked(&self, id: IntentId) -> bool {
+        self.threads.asked(id)
     }
 
     /// Ask what `thread` changed over `scope`.
@@ -442,8 +296,8 @@ impl ThreadHub {
         self.threads.review(thread, scope)
     }
 
-    /// Ask for the whole of `content` in `thread`, unless it is held or on its way; it comes as
-    /// [`HubEvent::Expanded`].
+    /// Ask for the whole of `content` in `thread`, unless it is held or on its way; the hub
+    /// notifies once it came ([`Self::whole`]).
     pub fn expand(&mut self, thread: ThreadId, content: &ContentRef, cx: &mut Context<Self>) {
         if let Some(msg) = self.threads.expand(thread, content) {
             cx.emit(HubEvent::Send(vec![msg]));
@@ -472,13 +326,12 @@ impl ThreadHub {
     /// The worker answered git op `request`: what the repository said shows, and what goes
     /// after it (a push, a fresh status) is sent.
     pub fn git_done(&mut self, request: RequestId, outcome: GitOutcome, cx: &mut Context<Self>) {
-        if let Some((repo, then)) = self.git.answer(request, outcome) {
-            self.git_sent(&repo, then, cx);
+        if let Some((_repo, then)) = self.git.answer(request, outcome) {
+            self.git_sent(then, cx);
         }
     }
 
-    fn git_sent(&self, repo: &str, msgs: Vec<ClientMsg>, cx: &mut Context<Self>) {
-        cx.emit(HubEvent::Git(repo.to_owned()));
+    fn git_sent(&self, msgs: Vec<ClientMsg>, cx: &mut Context<Self>) {
         cx.notify();
         if self.threads.linked() && !msgs.is_empty() {
             cx.emit(HubEvent::Send(msgs));
@@ -559,10 +412,6 @@ impl ThreadHub {
     pub const fn git(&self) -> &GitBook {
         &self.git
     }
-}
-
-fn start_msg(id: IntentId, start: &Start) -> ClientMsg {
-    ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start.clone()) })
 }
 
 /// Why the worker turned an intent down, when it did, in words.
@@ -650,54 +499,7 @@ fn write(cache: &Cache, batch: Writes) {
     }
 }
 
-/// What a start of a Codex thread takes to take it up again: `resume <thread>`
-/// (`slopty_agent::codex::shared::RESUME`).
-const CODEX_RESUME: &str = "resume";
-
-/// How a thread whose agent exited goes on.
-#[derive(Clone, PartialEq, Eq, Debug)]
-enum Gone {
-    /// By this start of the agent's own session.
-    Resume(Box<Start>),
-    /// With the next message.
-    ByMessage,
-    /// It does not: the agent cannot take the session up again.
-    Over,
-}
-
-/// How `state`'s thread goes on, when its agent has exited; `None` while it runs.
-fn gone(state: &ThreadState) -> Option<Gone> {
-    use slopty_proto::thread::{Drive, Liveness};
-    let Liveness::Exited { resumable } = state.status.liveness else { return None };
-    let meta = &state.meta;
-    if !resumable {
-        return Some(Gone::Over);
-    }
-    // A shared Codex is taken up by a start of its own; every other agent's adapter takes
-    // its session up again with the next message.
-    if !(meta.agent.is(AgentId::CODEX) && meta.drive.is(Drive::SHARED)) {
-        return Some(Gone::ByMessage);
-    }
-    if meta.native.trim().is_empty() {
-        return Some(Gone::Over);
-    }
-    Some(Gone::Resume(Box::new(Start {
-        agent: meta.agent.clone(),
-        cwd: meta.cwd.clone(),
-        drive: Some(meta.drive.clone()),
-        prompt: None,
-        model: None,
-        mode: None,
-        effort: None,
-        attachments: Vec::new(),
-        args: vec![CODEX_RESUME.to_owned(), meta.native.clone()],
-        options: std::collections::BTreeMap::new(),
-        worktree: None,
-    })))
-}
-
-/// An agent's name as a menu lists it: Claude Code, Codex, pi, an ACP agent by its registry's
-/// name.
+/// An agent's name as a menu lists it: Claude Code, Codex, pi, or another by its own name.
 #[must_use]
 pub fn agent_label(agent: &AgentId) -> String {
     match agent.0.as_str() {

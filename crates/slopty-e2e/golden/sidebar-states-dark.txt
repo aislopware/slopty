@@ -1,23 +1,14 @@
 Window
 Button │ Filter projects: All projects
-Button │ Needs you, 4
-Button │ bash cargo test --workspace
-Status │ Needs you
-Label │ Needs your approval · Run cargo test --workspace
+Button │ Needs you, 1
 Button │ ask which accent reads best on glass
 Status │ Needs you
 Label │ Waiting for your answer
-Button │ plan the settings split into pages
-Status │ Needs you
-Label │ Needs your approval · Wants to leave plan mode
-Button │ limit the sidebar to ten rows per group
-Status │ Failed
 Button │ Working, 2
-Button │ agent survey the crates for dead code
+Button │ hold a survey of the crates for dead code
 Status │ Working
-Button │ background cargo build --release
-Status │ Background work
-Label │ Background work
+Button │ hold the settings split into pages
+Status │ Working
 Button │ Done, 4
 Button │ Refactor the pairing handshake so a phone that scans an expired code learns why…
 Status │ Done
@@ -31,22 +22,24 @@ Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group (focused)
+Terminal │ shell │ >
+Heading │ Tidy the README's install section
 Article │ You
 Paragraph │ Tidy the README's install section
 Button │ Copy message
-Button │ Rewind…
+Article │ Claude Code
 Paragraph │ Done: Tidy the README's install section
-Button │ Copy message
-Button │ Attach images
-MultilineTextInput │ Do anything… (focused)
-Button │ Model: Opus 5.5, High
-Button │ Send message
-Button │ Mode: Auto
+Splitter │ Resize side pane
 Button │ Open in…
-Button │ Show chat details
+Button │ Hide inspector
+Button │ Inspector
+Button │ Close Inspector
+Button │ New tab
+Button │ Expand side pane
 Button │ Show files panel
-Button │ Show side pane
+Button │ Hide side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ New chat
+Button │ New session

@@ -17,15 +17,15 @@
 //! When a notice finds the person at none of their clients, it is pushed as well to every phone
 //! that gave the server a device and is not listening on a live link ([`Phones`],
 //! `slopty_proto::push`): sealed to the phone, through the relay or straight to APNs
-//! ([`crate::push`]). Once a thread a phone was pushed an ask about stops needing the person
-//! (answered at another client, or in its terminal), the note is taken back with a background
+//! ([`crate::push`]). Once a thread a phone was told needs the person stops needing them
+//! (answered in its terminal, from whichever client), the note is taken back with a background
 //! push ([`Phones::take_back`]). A take-back the push queue cannot take now is owed, and tried
 //! again after [`TAKE_BACK_RETRY`] unless a newer note about the same thread replaced it. What
 //! each phone shows and what is owed it are kept with the phones ([`PushKept`]), so a server
 //! that restarts still takes them back. A notice every link it went to could not take is pushed
-//! as well, as though the person were away. A note that a thread needs the person follows the
-//! request its buttons answer, pushed again quietly when that moves ([`Phones::follow`]); one
-//! that a turn finished is taken back once the person has seen the turn ([`Shown::finished`]).
+//! as well, as though the person were away. A note answers nothing: it opens its session, where
+//! the person answers in the agent's terminal. One that a turn finished is taken back once the
+//! person has seen the turn ([`Shown::finished`]).
 //! A thread first seen already needing the person is pushed to a phone not showing it
 //! ([`Told::first`]).
 //!
@@ -48,7 +48,7 @@ use slopty_proto::thread::attention::{
     ThreadAt, Via,
 };
 use slopty_proto::thread::wire::{PullSeen, TableFrame, ThreadRow};
-use slopty_proto::thread::{AskId, Liveness, Phase, ThreadId, TurnId};
+use slopty_proto::thread::{Liveness, Phase, ThreadId, TurnId};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 
 use super::awake::{Awake, Hold, Policy as KeepAwake};
@@ -165,26 +165,16 @@ struct Shown {
     /// The notes about what needs the person, taken back once it no longer does
     /// ([`Phones::take_back`], [`Phones::program_answered`]).
     asked: BTreeMap<ClientId, HashSet<Asked>>,
-    /// The request each of [`Self::asked`] answers with its buttons, as last pushed, so a
-    /// request that opens or goes while the thread still needs the person moves them quietly
-    /// ([`Phones::follow`]). Not kept: a server started again moves each note once.
-    asks: HashMap<(ClientId, Asked), Option<AskId>>,
     /// The notes about a finished turn, with the turn, taken back once the person has seen it
     /// on any device ([`ThreadRow::seen`]).
     finished: BTreeMap<ClientId, HashSet<(ThreadAt, TurnId)>>,
 }
 
 impl Shown {
-    /// The push queue took `notice` for `client`'s phone, its buttons answering `ask`, about
-    /// `turn` when it says a turn finished. The phone shows one note per thread or terminal, so
-    /// this one replaced whatever was up there.
-    fn noted(
-        &mut self,
-        client: ClientId,
-        notice: &Notice,
-        ask: Option<&AskId>,
-        turn: Option<TurnId>,
-    ) {
+    /// The push queue took `notice` for `client`'s phone, about `turn` when it says a turn
+    /// finished. The phone shows one note per thread or terminal, so this one replaced whatever
+    /// was up there.
+    fn noted(&mut self, client: ClientId, notice: &Notice, turn: Option<TurnId>) {
         let about = asked_about(&notice.about);
         let finished = self.finished.entry(client).or_default();
         if let Asked::Thread(at) = about {
@@ -193,37 +183,30 @@ impl Shown {
         let asked = self.asked.entry(client).or_default();
         if notice.kind == NoticeKind::NeedsYou {
             asked.insert(about);
-            self.asks.insert((client, about), ask.cloned());
             return;
         }
         asked.remove(&about);
-        self.asks.remove(&(client, about));
         if let (NoticeKind::Finished, Asked::Thread(at), Some(turn)) = (notice.kind, about, turn) {
             finished.insert((at, turn));
         }
     }
 
-    /// Forget every phone's empty sets, and the requests of notes no longer up.
+    /// Forget every phone's empty sets.
     fn tidy(&mut self) {
         self.asked.retain(|_, asked| !asked.is_empty());
         self.finished.retain(|_, finished| !finished.is_empty());
-        let asked = &self.asked;
-        self.asks.retain(|(client, about), _| asked.get(client).is_some_and(|a| a.contains(about)));
     }
 
     /// Forget what the phone of `client` shows.
     fn forget(&mut self, client: ClientId) {
         self.asked.remove(&client);
         self.finished.remove(&client);
-        self.asks.retain(|(c, _), _| *c != client);
     }
 }
 
 /// How a notice is pushed ([`Phones::send`]).
 #[derive(Clone, Copy, Debug, Default)]
 struct Pushing<'a> {
-    /// The request its note's buttons answer.
-    ask: Option<&'a Ask>,
     /// The links that could not take it, so their phones do not count as listening.
     unheard: &'a [u64],
     /// Only to the phones not already showing a note about its subject that needs the person.
@@ -250,11 +233,11 @@ impl Phones {
         }
     }
 
-    /// Push `notice` to every phone not listening on a live link among `seats`, as `how` says:
-    /// with the request its note's buttons answer, skipping the phones already showing it when
-    /// only new ones are to hear. A finished turn shorter than a phone's quiet time is not
-    /// pushed to it, as that phone would not post it. A link among those `how` names unheard
-    /// could not take the notice, so its phone is not counted as listening.
+    /// Push `notice` to every phone not listening on a live link among `seats`, as `how` says,
+    /// skipping the phones already showing it when only new ones are to hear. A finished turn
+    /// shorter than a phone's quiet time is not pushed to it, as that phone would not post it. A
+    /// link among those `how` names unheard could not take the notice, so its phone is not counted
+    /// as listening.
     fn send(&mut self, seats: &BTreeMap<u64, Sitting>, notice: &Notice, how: Pushing<'_>) {
         let Some(out) = &self.out else { return };
         let about = asked_about(&notice.about);
@@ -274,12 +257,9 @@ impl Phones {
             if listening || short {
                 continue;
             }
-            let body = PushBody {
-                notice: notice.clone(),
-                ask: how.ask.map(|a| a.id.clone()),
-                picks: how.ask.map(|a| a.picks.clone()).unwrap_or_default(),
-                quiet: false,
-            };
+            // A note answers nothing: no request, no buttons.
+            let body =
+                PushBody { notice: notice.clone(), ask: None, picks: Vec::new(), quiet: false };
             // A note waiting for room, or a take-back owed, about the same subject is older
             // than this one, which replaces it on the phone.
             self.owed_notes
@@ -287,11 +267,10 @@ impl Phones {
             if let Some(owed) = self.owed.get_mut(client) {
                 owed.remove(&about);
             }
-            let ask = body.ask.clone();
             let push =
                 Outgoing { client: *client, device: device.clone(), what: Sending::Note(body) };
             match out.try_send(push) {
-                Ok(()) => self.shown.noted(*client, notice, ask.as_ref(), how.turn),
+                Ok(()) => self.shown.noted(*client, notice, how.turn),
                 Err(mpsc::error::TrySendError::Full(push)) => {
                     tracing::debug!(%client, "a push found its queue full; owed");
                     let Sending::Note(body) = push.what else { continue };
@@ -304,49 +283,6 @@ impl Phones {
         }
         self.shown.tidy();
         self.owed.retain(|_, owed| !owed.is_empty());
-        self.keep();
-    }
-
-    /// The threads whose notes each phone shows as needing the person, for [`Self::follow`].
-    fn asking(&self) -> Vec<(ClientId, ThreadAt)> {
-        let threads = self.shown.asked.iter().flat_map(|(client, asked)| {
-            asked.iter().filter_map(|a| match a {
-                Asked::Thread(at) => Some((*client, *at)),
-                Asked::Terminal(_) => None,
-            })
-        });
-        threads.collect()
-    }
-
-    /// The phone of `client` shows a note that `notice`'s thread needs the person: when the
-    /// request its buttons answer is no longer `ask` (one opened after the note went, or the
-    /// one it showed went), the note is pushed again quietly, `ask` its buttons' now, to
-    /// replace it under the same collapse id with no sound and no banner.
-    fn follow(&mut self, client: ClientId, notice: &Notice, ask: Option<&Ask>) {
-        let about = asked_about(&notice.about);
-        let now = ask.map(|a| a.id.clone());
-        if self.shown.asks.get(&(client, about)) == Some(&now) {
-            return;
-        }
-        let (Some(out), Some(device)) = (&self.out, self.devices.get(&client)) else { return };
-        let body = PushBody {
-            notice: notice.clone(),
-            ask: now.clone(),
-            picks: ask.map(|a| a.picks.clone()).unwrap_or_default(),
-            quiet: true,
-        };
-        self.owed_notes.retain(|(c, owed, _)| *c != client || owed.notice.about != notice.about);
-        let push = Outgoing { client, device: device.clone(), what: Sending::Note(body) };
-        match out.try_send(push) {
-            Ok(()) => self.shown.noted(client, notice, now.as_ref(), None),
-            Err(mpsc::error::TrySendError::Full(push)) => {
-                tracing::debug!(%client, "a quiet push found its queue full; owed");
-                if let Sending::Note(body) = push.what {
-                    self.owed_notes.push((client, body, None));
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
-        }
         self.keep();
     }
 
@@ -390,10 +326,10 @@ impl Phones {
             let mut waiting = std::mem::take(&mut self.owed_notes).into_iter();
             for (client, body, turn) in waiting.by_ref() {
                 let Some(device) = devices.get(&client) else { continue };
-                let (notice, ask) = (body.notice.clone(), body.ask.clone());
+                let notice = body.notice.clone();
                 let push = Outgoing { client, device: device.clone(), what: Sending::Note(body) };
                 match out.try_send(push) {
-                    Ok(()) => self.shown.noted(client, &notice, ask.as_ref(), turn),
+                    Ok(()) => self.shown.noted(client, &notice, turn),
                     Err(mpsc::error::TrySendError::Full(push)) => {
                         if let Sending::Note(body) = push.what {
                             self.owed_notes.push((client, body, turn));
@@ -515,7 +451,7 @@ impl Board {
     /// so again, once per wait, where the person is now: "Still needs you after 30m". A wait
     /// first seen already that old is no news, as its need was not ([`Told::first`]). A wake is
     /// set for the next one due.
-    fn remind(&mut self, ladder: &Ladder, now: WallMs) -> Vec<(Notice, Option<Ask>)> {
+    fn remind(&mut self, ladder: &Ladder, now: WallMs) -> Vec<Notice> {
         let waits: HashMap<ThreadAt, WallMs> = ladder
             .threads
             .iter()
@@ -547,12 +483,12 @@ impl Board {
             if !seen.contains(&at) {
                 continue;
             }
-            let Some((mut notice, ask)) = notice_of(self, at, (NoticeKind::NeedsYou, None)) else {
+            let Some(mut notice) = notice_of(self, at, (NoticeKind::NeedsYou, None)) else {
                 continue;
             };
             let waited = now.as_millis().saturating_sub(since.as_millis());
             notice.text = still_words(waited, &notice.text);
-            told.push((notice, ask));
+            told.push(notice);
         }
         if let Some(due) = next {
             self.wake_at(WallMs::from_millis(due), now);
@@ -719,20 +655,6 @@ impl Board {
                 .any(|r| seat_of(r) == Some(session))
                 .then_some(TermRef { worker: *worker, session })
         })
-    }
-
-    /// Every seated thread whose agent runs, by its seat: it counts as a live terminal does. One
-    /// asleep does not, since its agent ended.
-    pub(super) fn live_seats(&self) -> Vec<TermRef> {
-        self.tables
-            .iter()
-            .flat_map(|(worker, table)| {
-                table
-                    .values()
-                    .filter(|r| there(r))
-                    .filter_map(|r| Some(TermRef { worker: *worker, session: seat_of(r)? }))
-            })
-            .collect()
     }
 
     /// The agent at work or seated at `term`, as its thread's row says; `None` with none there
@@ -911,7 +833,7 @@ impl Hub {
         let phones = &mut state.board.phones;
         let PushKept { devices, asked, finished, owed } = kept.clone();
         (phones.devices, phones.owed) = (devices, owed);
-        phones.shown = Shown { asked, finished, asks: HashMap::new() };
+        phones.shown = Shown { asked, finished };
         let (sender, changes) = watch::channel(kept);
         phones.kept = Some(sender);
         say_pushes(&state);
@@ -988,10 +910,9 @@ impl Hub {
         let ladder = ladder(&state.board.tables);
         let board = &mut state.board;
         board.phones.take_back(&ladder, &board.tables);
-        follow_asks(board);
         board.retry_owed();
-        for (notice, ask) in board.remind(&ladder, WallMs::now()) {
-            tell_pushing(board, &notice, Pushing { ask: ask.as_ref(), ..Pushing::default() });
+        for notice in board.remind(&ladder, WallMs::now()) {
+            tell_pushing(board, &notice, Pushing::default());
         }
         if ladder == board.published {
             return;
@@ -999,9 +920,9 @@ impl Hub {
         let notices = moved(board, &ladder);
         self.announce(FromServer::Ladder(Box::new(ladder.clone())));
         state.board.published = ladder;
-        for Told { notice, ask, turn, first } in notices {
+        for Told { notice, turn, first } in notices {
             let board = &mut state.board;
-            let how = Pushing { ask: ask.as_ref(), turn, ..Pushing::default() };
+            let how = Pushing { turn, ..Pushing::default() };
             if !first {
                 tell_pushing(board, &notice, how);
             } else if route(board, &notice).away {
@@ -1084,20 +1005,9 @@ pub(super) fn programs_back(board: &mut Board, worker: WorkerId, waiting: &[Sess
     board.retry_owed();
 }
 
-/// The request a pushed note's buttons answer, and the labels of the answers it offers as
-/// buttons of their own: a small question's options; none for a yes or no, which Allow and Deny
-/// answer.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(super) struct Ask {
-    /// The request.
-    id: AskId,
-    /// Its buttons' labels ([`slopty_proto::thread::wire::RequestCard::buttons`]).
-    picks: Vec<String>,
-}
-
 /// Send `notice` to the links [`route`] picks among the board's seats, and push it to the
-/// phones when it finds the person at none of them, as `how` says: with the request its
-/// note's buttons answer, or a finished turn's note to take back once the turn is seen.
+/// phones when it finds the person at none of them, as `how` says: a finished turn's note to
+/// take back once the turn is seen.
 fn tell_pushing(board: &mut Board, notice: &Notice, how: Pushing<'_>) {
     let reach = route(board, notice);
     let mut unheard = Vec::new();
@@ -1267,8 +1177,6 @@ fn ladder(tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>) -> Ladder {
 struct Told {
     /// The notice.
     notice: Notice,
-    /// The request its note's buttons answer.
-    ask: Option<Ask>,
     /// The turn it says finished.
     turn: Option<TurnId>,
     /// It is about a thread first seen already needing the person: after the server started,
@@ -1278,12 +1186,8 @@ struct Told {
 }
 
 /// The notices `ladder` makes against the one `board` published, keeping how long each
-/// thread has been busy, each with the request its note's buttons answer: a thread's own
-/// first, when it needs the person for a plain yes or no ([`RequestCard::answerable`]). A
-/// thread first seen needing the person counts too ([`Told::first`]). An agent another started
-/// that finished says nothing: its parent hears of it.
-///
-/// [`RequestCard::answerable`]: slopty_proto::thread::wire::RequestCard::answerable
+/// thread has been busy. A thread first seen needing the person counts too ([`Told::first`]).
+/// An agent another started that finished says nothing: its parent hears of it.
 fn moved(board: &mut Board, ladder: &Ladder) -> Vec<Told> {
     let before: HashMap<ThreadAt, Rung> =
         board.published.threads.iter().map(|r| (r.at, r.rung)).collect();
@@ -1316,11 +1220,11 @@ fn moved(board: &mut Board, ladder: &Ladder) -> Vec<Told> {
             continue;
         }
         let worked_ms = finished.then_some(worked_ms).flatten();
-        let Some((notice, ask)) = notice_of(board, now.at, (kind, worked_ms)) else {
+        let Some(notice) = notice_of(board, now.at, (kind, worked_ms)) else {
             continue;
         };
         let turn = row.and_then(|r| r.ended.as_ref()).map(|e| e.turn).filter(|_| finished);
-        notices.push(Told { notice, ask, turn, first: was.is_none() });
+        notices.push(Told { notice, turn, first: was.is_none() });
     }
     let standing: Vec<ThreadAt> = ladder.threads.iter().map(|r| r.at).collect();
     board.busy.retain(|at, _| standing.binary_search(at).is_ok());
@@ -1332,14 +1236,14 @@ fn answered_since(row: &ThreadRow, since: Option<WallMs>) -> bool {
     row.ended.is_some_and(|e| e.answered && since.is_none_or(|since| e.at_ms >= since))
 }
 
-/// The notice of `kind` about the thread at `at`, with how long it worked when it finished,
-/// and the request its note's buttons answer; `None` for a thread no table holds, and for
-/// the finish of an agent another started, which its parent hears of instead.
+/// The notice of `kind` about the thread at `at`, with how long it worked when it finished;
+/// `None` for a thread no table holds, and for the finish of an agent another started, which
+/// its parent hears of instead.
 fn notice_of(
     board: &Board,
     at: ThreadAt,
     (kind, worked_ms): (NoticeKind, Option<u64>),
-) -> Option<(Notice, Option<Ask>)> {
+) -> Option<Notice> {
     let table = board.tables.get(&at.worker)?;
     let row = table.get(&at.thread)?;
     if kind == NoticeKind::Finished && parent_of(row).is_some() {
@@ -1349,41 +1253,14 @@ fn notice_of(
         table.values().filter(|r| r.id != row.id && root_of(table, r) == row.id).collect();
     let (_, from) = source(row, &family);
     let via = (from.id != row.id).then(|| Via { thread: from.id, title: from.title.clone() });
-    let ask = row
-        .requests
-        .first()
-        .filter(|_| kind == NoticeKind::NeedsYou && via.is_none())
-        .filter(|r| r.answerable() || !r.buttons.is_empty())
-        .map(|r| Ask {
-            id: r.id.clone(),
-            picks: r.buttons.iter().map(|b| b.label.clone()).collect(),
-        });
-    let notice = Notice {
+    Some(Notice {
         kind,
         about: Subject::Thread(at),
         title: row.title.clone(),
         text: text(kind, from),
         worked_ms,
         via,
-    };
-    Some((notice, ask))
-}
-
-/// Each note a phone shows that its thread needs the person follows the request the thread asks
-/// now ([`Phones::follow`]), for a thread that needed them at the last ranking too; one that
-/// came to need them since is told anew ([`moved`]).
-fn follow_asks(board: &mut Board) {
-    for (client, at) in board.phones.asking() {
-        let threads = &board.published.threads;
-        let before = threads.binary_search_by_key(&at, |r| r.at).ok().and_then(|i| threads.get(i));
-        if before.is_none_or(|r| r.rung != Rung::NeedsYou) {
-            continue;
-        }
-        let Some((notice, ask)) = notice_of(board, at, (NoticeKind::NeedsYou, None)) else {
-            continue;
-        };
-        board.phones.follow(client, &notice, ask.as_ref());
-    }
+    })
 }
 
 /// Whether `presence` has the person at a desk: one whose notices stay there when they leave.
@@ -1401,11 +1278,11 @@ fn left(board: &mut Board) {
     let waiting: Vec<ThreadAt> =
         board.published.threads.iter().filter(|r| r.rung == Rung::NeedsYou).map(|r| r.at).collect();
     for at in waiting {
-        let Some((notice, ask)) = notice_of(board, at, (NoticeKind::NeedsYou, None)) else {
+        let Some(notice) = notice_of(board, at, (NoticeKind::NeedsYou, None)) else {
             continue;
         };
         if route(board, &notice).away {
-            let how = Pushing { ask: ask.as_ref(), new_only: true, ..Pushing::default() };
+            let how = Pushing { new_only: true, ..Pushing::default() };
             board.phones.send(&board.seats, &notice, how);
         }
     }

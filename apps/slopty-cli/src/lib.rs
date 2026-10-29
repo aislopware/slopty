@@ -14,6 +14,7 @@
 //! * `slopty browse` and `slopty edit` hand a shell's web pages and files to the client in front of
 //!   it; a Slopty session's `BROWSER`, `EDITOR` and `open` are this binary under other names.
 //! * `slopty ui` reads and drives the person's window for an agent in a shell (`ui`).
+//! * `slopty hook` relays a Claude Code's hooks to the worker, which reads its status from them.
 //! * `slopty attach` is a real client over QUIC straight to a worker the server lists, or any
 //!   `host:port`: a raw-mode terminal that renders frames locally, without the GPUI apps.
 //!
@@ -29,6 +30,7 @@ mod client;
 mod clipboard;
 mod deploy;
 mod handoff;
+mod hook;
 mod link;
 mod mcp;
 mod probe;
@@ -124,6 +126,10 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<ui::UiCmd>,
     },
+    /// Relay one of Claude Code's hooks, its JSON on stdin, to this machine's worker: what a
+    /// Claude Code Slopty starts runs for each (`slopty_agent::hooks`).
+    #[command(hide = true)]
+    Hook,
     /// The app's `settings.toml`.
     Settings {
         #[command(subcommand)]
@@ -337,6 +343,7 @@ async fn run() -> Result<ExitCode> {
         Cmd::Browse { targets } => return handoff::browse(&data_dir, &targets).await,
         Cmd::Edit { wait, args } => return handoff::edit(&data_dir, wait, args).await,
         Cmd::Ui { cmd } => return ui::run(cmd, &data_dir).await,
+        Cmd::Hook => return Ok(hook::run(&data_dir).await),
         Cmd::Crashes { last, all_frames } => crashes(&data_dir, last, all_frames, cli.json),
         Cmd::Settings { cmd } => {
             let path = slopty_settings::path_in(&data_dir);

@@ -35,7 +35,6 @@ mod server;
 pub mod settings;
 pub mod ssh;
 pub mod this_mac;
-pub mod verdict;
 pub mod workers;
 
 use std::rc::Rc;
@@ -44,7 +43,7 @@ use gpui::{App, AppContext as _, Context, Entity, WeakEntity};
 pub use invite::open_link;
 use slopty_client::{LinkEvent, WorkerKey};
 use slopty_core::{SessionId, WorkerId};
-use slopty_platform::notify::{Notifier, Tap};
+use slopty_platform::notify::Notifier;
 use slopty_proto::WorkerMsg;
 use slopty_proto::terminal::{Progress, ProgressState};
 use slopty_settings::{Loaded, Settings};
@@ -53,9 +52,6 @@ use slopty_theme::Theme;
 use slopty_ui::workspace::attention::Attention;
 use slopty_ui::workspace::{Finished, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView};
 use workers::{Supervisor, Tick, WorkerSlot};
-
-/// What a terminal's block or selection sent to a chat that is not open says.
-const ATTACH_NEEDS_CHAT: &str = "Open the chat to attach to it";
 
 /// What a forgotten worker's confirmation says, as a success toast.
 fn forgot(name: &str) -> String {
@@ -102,9 +98,6 @@ pub struct Workspace {
     motion_watch: Option<slopty_platform::motion::Watch>,
     /// The system's wakes, unlocks, returns to the front and path changes ([`watch_resumes`]).
     resume_watch: Option<slopty_platform::resume::Watch>,
-    /// A hardware keyboard heard as it comes and goes ([`watch_hardware_keyboard`]).
-    #[cfg(target_os = "ios")]
-    keyboard_watch: Option<slopty_platform::keyboard_presence::Watch>,
     /// The person leaving this Mac: its lock, its sleep, another session
     /// (`Workspace::watch_leaving`).
     #[cfg(target_os = "macos")]
@@ -164,14 +157,6 @@ pub struct Workspace {
     /// What the server may push to while the phone is pocketed, and when it stops listening.
     #[cfg(target_os = "ios")]
     pushing: push::Pushing,
-    /// The time iOS grants an app woken in the background by a note's "Allow" or "Deny", held
-    /// until the answer is taken ([`WorkspaceEvent::TapsSettled`]), so it is not suspended
-    /// while the answer waits for its link.
-    #[cfg(target_os = "ios")]
-    answer_grace: Option<slopty_platform::notify::BackgroundGrace>,
-    /// The notes whose button the workspace is answering, by id: each is told done to the
-    /// system once the answers settle, and a press handed on since is not.
-    answering: Vec<String>,
 }
 
 /// A terminal the app follows: its finished commands and notes, and its redraws, which carry
@@ -230,14 +215,9 @@ impl Workspace {
                     alert();
                 }
             }
-            WorkspaceEvent::Unanswered { route, why } => {
-                let title = ws.view.read(cx).route_title(*route);
-                ws.attention.unanswered(*route, title, why);
-            }
             WorkspaceEvent::ClipboardShared { worker, share } => {
                 ws.keep_clipboard_shared(*worker, *share, cx);
             }
-            WorkspaceEvent::TapsSettled => ws.answers_out(),
             WorkspaceEvent::AddDevice => ws.add_device(cx),
             WorkspaceEvent::LookOnTailnet => ws.look_on_tailnet_for_devices(cx),
             WorkspaceEvent::DeviceAction { worker, action } => {
@@ -276,14 +256,6 @@ impl Workspace {
                     }
                 });
             }
-            WorkspaceEvent::Attach { chat, text } => {
-                let (chat, text) = (chat.clone(), text.clone());
-                cx.defer(move |cx| {
-                    if !slopty_shell::live::attach(&chat, &text, cx) {
-                        slopty_shell::toast::error(cx, ATTACH_NEEDS_CHAT);
-                    }
-                });
-            }
             WorkspaceEvent::Withdrawn { worker, id } => {
                 if let Some(toast) = offered.remove(&(*worker, *id)) {
                     slopty_shell::toast::withdraw(cx, toast);
@@ -318,8 +290,6 @@ impl Workspace {
             interface_feed: None,
             motion_watch: None,
             resume_watch: None,
-            #[cfg(target_os = "ios")]
-            keyboard_watch: None,
             #[cfg(target_os = "macos")]
             leaving_watch: None,
             runtime,
@@ -348,9 +318,6 @@ impl Workspace {
             grace: None,
             #[cfg(target_os = "ios")]
             pushing: push::Pushing::default(),
-            #[cfg(target_os = "ios")]
-            answer_grace: None,
-            answering: Vec::new(),
         };
         this.publish_device_actions(cx);
         this.repoint_this_mac(cx);
@@ -611,34 +578,6 @@ impl Workspace {
 
     fn slot_mut(&mut self, id: WorkerId) -> Option<&mut WorkerSlot> {
         self.workers.iter_mut().find(|w| w.id == id)
-    }
-
-    /// A note was tapped: its chat or terminal comes forward, on whichever worker it lives. A
-    /// note's "Allow" or "Deny" may have woken the app in the background: the system is told
-    /// the tap is done only once the worker took the answer ([`Self::answers_out`]), and on iOS
-    /// the app holds the grace the system grants until then too.
-    fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
-        if slopty_ui::workspace::attention::answers(tap) {
-            self.answering.push(tap.id.clone());
-            #[cfg(target_os = "ios")]
-            if self.answer_grace.is_none() {
-                self.answer_grace =
-                    slopty_platform::notify::BackgroundGrace::begin("Slopty sends your answer");
-            }
-        }
-        self.view.update(cx, |v, cx| v.open_notification(tap, cx));
-    }
-
-    /// Every tapped answer is taken by its worker, or said to have found nothing or not to
-    /// have gone: the system hears each of those taps is done, and the grace held for them goes.
-    fn answers_out(&mut self) {
-        for id in std::mem::take(&mut self.answering) {
-            slopty_platform::notify::tap_finished(&id);
-        }
-        #[cfg(target_os = "ios")]
-        {
-            self.answer_grace = None;
-        }
     }
 
     /// Start (or refresh) a worker the directory lists: its items wait in the workspace and a
@@ -1354,30 +1293,6 @@ fn hold_uploads(link: &slopty_client::WorkerLink) {
 #[cfg(not(feature = "e2e"))]
 const fn hold_uploads(_link: &slopty_client::WorkerLink) {}
 
-/// The press a self-test launches the iOS app as woken by ([`slopty_e2e::LAUNCH_TAP_ENV`]).
-///
-/// It stands in for a finger on a killed app's note. `None` when none is named, or what is
-/// named does not read, said in the log.
-#[cfg(feature = "e2e")]
-#[must_use]
-pub fn e2e_launch_tap() -> Option<Tap> {
-    use serde_json::Value;
-    let json = std::env::var(slopty_e2e::LAUNCH_TAP_ENV).ok()?;
-    let pressed: Value = serde_json::from_str(&json)
-        .inspect_err(|e| tracing::warn!(error = %e, "the launching press does not read"))
-        .ok()?;
-    let text = |key: &str| pressed.get(key).and_then(Value::as_str).map(str::to_owned);
-    let info = pressed.get("info").and_then(Value::as_object).map(|info| {
-        info.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned()))).collect()
-    });
-    Some(Tap {
-        id: text("id")?,
-        info: info.unwrap_or_default(),
-        action: text("action"),
-        text: text("text"),
-    })
-}
-
 /// Whether this launch is `cargo xtask e2e`'s, driven over its socket.
 #[cfg(feature = "e2e")]
 #[must_use]
@@ -1469,33 +1384,18 @@ pub fn open_workspace(cx: &mut App, handle: tokio::runtime::Handle) {
     cx.set_reduce_motion(slopty_platform::reduce_motion());
     watch_reduce_motion(&workspace, cx);
     watch_resumes(&workspace, &slopty_platform::resume::System, cx);
-    tell_hardware_keyboard(slopty_platform::hardware_keyboard_attached(), cx);
-    #[cfg(target_os = "ios")]
-    watch_hardware_keyboard(&workspace, cx);
     hangs::watch(cx);
     watch_settings(workspace.clone(), cx);
-    // A tapped note brings the app forward on its chat or terminal, on whichever worker it lives.
-    // The tap that launched the app waited for `taps` above and arrives first, once the window
-    // is up.
-    let for_notifications = workspace.clone();
+    // A tapped note brings the app forward on the session it is about: a note answers nothing
+    // (TUI-first), the person answers in the session's TUI. The tap that launched the app
+    // waited for `taps` above and arrives first, once the window is up.
     cx.spawn(async move |cx| {
         while let Some(tap) = tapped.recv().await {
-            // "Allow", "Deny", a pick and a reply answer where the note is, leaving the app
-            // where it was.
-            let verdict = tap.finished_later();
+            tracing::debug!(id = tap.id, "note opened");
             cx.update(|cx| {
-                if !verdict {
-                    // The window comes back to show it, if it was closed.
-                    slopty_shell::activate_main_window(cx);
-                }
-                let Some(window) = for_notifications.read(cx).window else { return };
-                let _handled = window.update(cx, |_root, _window, cx| {
-                    for_notifications.update(cx, |ws, cx| ws.open_notification(&tap, cx));
-                });
-                // "Show" opens the chat the note is about.
-                if !verdict
-                    && let Some(chat) = for_notifications.read(cx).view.read(cx).tapped_chat(&tap)
-                {
+                // The window comes back to show it, if it was closed.
+                slopty_shell::activate_main_window(cx);
+                if let Some(chat) = WorkspaceView::tapped_chat(&tap) {
                     slopty_shell::open_chat(chat, cx);
                 }
             });
@@ -1584,42 +1484,8 @@ fn watch_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     .detach();
 }
 
-/// Tell the shell whether a hardware keyboard is attached, so a card's choices wear the digits
-/// that press them only where a key can ([`slopty_shell::composer::set_hardware_keyboard`]). The
-/// e2e build lets `SLOPTY_HARDWARE_KEYBOARD=0|1` decide instead of the platform: on the
-/// simulator `GameController` reports the Mac's keyboard about a second after launch, and a
-/// golden must not depend on which side of that its frame landed.
-fn tell_hardware_keyboard(attached: bool, cx: &mut App) {
-    #[cfg(feature = "e2e")]
-    let attached =
-        std::env::var_os("SLOPTY_HARDWARE_KEYBOARD").map_or(attached, |forced| forced == "1");
-    slopty_shell::composer::set_hardware_keyboard(attached, cx);
-}
-
-/// Tell the shell each time `GameController` hears the first hardware keyboard connect or the
-/// last one go; one that came or went while the app was away is read again on its return
-/// ([`watch_resumes`]).
-#[cfg(target_os = "ios")]
-fn watch_hardware_keyboard(workspace: &Entity<Workspace>, cx: &mut App) {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let watch = slopty_platform::keyboard_presence::watch(move |attached| {
-        let _closed = tx.send(attached);
-    });
-    workspace.update(cx, |ws, _cx| ws.keyboard_watch = Some(watch));
-    let workspace = workspace.downgrade();
-    cx.spawn(async move |cx| {
-        while let Some(attached) = rx.recv().await {
-            if workspace.update(cx, |_ws, cx| tell_hardware_keyboard(attached, cx)).is_err() {
-                return;
-            }
-        }
-    })
-    .detach();
-}
-
 /// Hear what may have killed the links under the app (the Mac waking, an unlock, a return to
-/// the front, a path change) from `source`, on the main thread ([`Workspace::resume`]). On iOS
-/// a keyboard that came or went while the app was away went unheard, so it is read again.
+/// the front, a path change) from `source`, on the main thread ([`Workspace::resume`]).
 fn watch_resumes(
     workspace: &Entity<Workspace>,
     source: &dyn slopty_platform::resume::Source,
@@ -1639,10 +1505,7 @@ fn watch_resumes(
                 ws.person_back(resume, cx);
             });
             #[cfg(not(target_os = "macos"))]
-            let heard = workspace.update(cx, |ws, cx| {
-                ws.resume(resume);
-                tell_hardware_keyboard(slopty_platform::hardware_keyboard_attached(), cx);
-            });
+            let heard = workspace.update(cx, |ws, _cx| ws.resume(resume));
             if heard.is_err() {
                 return;
             }
@@ -1799,7 +1662,6 @@ mod tests {
                 assert_eq!(words.as_ref(), forgot(&id.to_string()));
             }
         }
-        assert!(!ATTACH_NEEDS_CHAT.contains("shell"), "{ATTACH_NEEDS_CHAT}");
     }
 
     /// A dial a worker answers from another build shows as its status, with both builds and the

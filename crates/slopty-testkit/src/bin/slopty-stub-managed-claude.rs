@@ -10,8 +10,9 @@
 //!   `SCC_MANAGED_ARTIFACT` (the client's path) put in. It waits for the client and exits as it
 //!   did, so the terminal's foreground process stays the launcher.
 //!
-//! Every run appends one JSON line to `STUB_MANAGED_LOG`: its pid, its arguments, and the
-//! client's pid once it started one. A test reads it to see what a worker asked of `claude`.
+//! Every run appends one JSON line to `STUB_MANAGED_LOG`: its pid, when it began (`at_us`,
+//! microseconds since the epoch), its arguments, and the client's pid once it started one. A test
+//! reads it to see what a worker asked of `claude`, and when.
 
 #![allow(
     clippy::print_stdout,
@@ -52,24 +53,31 @@ const STRIPPED: [&str; 16] = [
 ];
 
 fn main() -> ExitCode {
+    let began = now_us();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--managed-help") {
-        log(&args, None);
+        log(began, &args, None);
         print!("{USAGE}");
         return ExitCode::SUCCESS;
     }
-    match launch(&args) {
+    match launch(began, &args) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
-            log(&args, None);
+            log(began, &args, None);
             eprintln!("stub managed claude: {e}");
             ExitCode::FAILURE
         }
     }
 }
 
+/// Microseconds since the epoch.
+fn now_us() -> u64 {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    since.map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+}
+
 /// Start the newest client with `args`, wait for it, and say how it exited.
-fn launch(args: &[String]) -> Fallible<u8> {
+fn launch(began: u64, args: &[String]) -> Fallible<u8> {
     let home = std::env::var_os("HOME").ok_or("no HOME")?;
     let client = newest_client(&Path::new(&home).join(".local/share/claude-managed/artifacts"))?;
     let mut command = Command::new(&client);
@@ -82,7 +90,7 @@ fn launch(args: &[String]) -> Fallible<u8> {
     }
     command.env("DISABLE_TELEMETRY", "1").env("SCC_MANAGED_ARTIFACT", &client);
     let mut child = command.spawn()?;
-    log(args, Some(child.id()));
+    log(began, args, Some(child.id()));
     let status = child.wait()?;
     Ok(status.code().and_then(|code| u8::try_from(code).ok()).unwrap_or(1))
 }
@@ -118,12 +126,13 @@ fn newest_client(artifacts: &Path) -> Fallible<PathBuf> {
         .ok_or_else(|| "no client for any platform".into())
 }
 
-/// One line in `STUB_MANAGED_LOG`, when it is set.
-fn log(args: &[String], client: Option<u32>) {
+/// One line in `STUB_MANAGED_LOG`, when it is set: the run that `began`. The line is one write,
+/// so the runs a worker makes at once never interleave theirs.
+fn log(began: u64, args: &[String], client: Option<u32>) {
     let Some(at) = std::env::var_os("STUB_MANAGED_LOG") else { return };
-    let line = json!({ "pid": std::process::id(), "argv": args, "client": client });
+    let line = json!({ "pid": std::process::id(), "at_us": began, "argv": args, "client": client });
     let file = std::fs::OpenOptions::new().create(true).append(true).open(at);
     if let Ok(mut file) = file {
-        let _written = writeln!(file, "{line}");
+        let _written = file.write_all(format!("{line}\n").as_bytes());
     }
 }

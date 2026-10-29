@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
+use slopty_core::SessionId;
 use slopty_proto::ctl::{CtlReply, CtlRequest, Health, PasteboardAccess, Tailscale};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -82,12 +83,32 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
             Ok(done) => CtlReply::UiDone(Box::new(done)),
             Err(failure) => CtlReply::UiFailed(failure),
         },
+        // A Claude Code hook, relayed by `slopty hook` from the terminal it runs in.
+        CtlRequest::Hook { session, token, at_us, payload } => {
+            hook(&daemon, session, &token, at_us, payload)
+        }
     };
     let mut out = serde_json::to_vec(&reply)?;
     out.push(b'\n');
     wr.write_all(&out).await?;
     wr.shutdown().await?;
     Ok(())
+}
+
+/// Hand a hook relayed from `session` to the Claude Code observer, once `token` proves the
+/// relay runs there: a program elsewhere cannot speak for another terminal's agent.
+fn hook(daemon: &Daemon, session: SessionId, token: &str, at_us: u64, payload: String) -> CtlReply {
+    if !daemon.session_key.vouches(session, token) {
+        tracing::info!(%session, "a hook whose token does not vouch for its session");
+        return CtlReply::Error { message: "the token does not vouch for that session".to_owned() };
+    }
+    match &daemon.threads {
+        Some(threads) => {
+            threads.claude().hook(session, at_us, payload);
+            CtlReply::Ok { changed: false }
+        }
+        None => CtlReply::Error { message: "this machine keeps no threads".to_owned() },
+    }
 }
 
 /// Finishes when the peer closes its end (or it fails); anything more it sends is passed over.
@@ -141,7 +162,8 @@ async fn doctor(daemon: &Daemon) -> Health {
         pasteboard: pasteboard_access(daemon.clip.access()),
         clients: daemon.wake.lock().counts().0,
         sessions: daemon.worker.session_count(),
-        turns: daemon.threads.as_ref().map_or(0, crate::threads::Threads::driven_turns),
+        // Every agent runs in a terminal ptyd keeps, which an update of the daemon ends none of.
+        turns: 0,
         uptime_secs: daemon.started_at.elapsed().as_secs(),
     }
 }

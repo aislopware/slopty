@@ -515,7 +515,7 @@ impl Conversation {
             self.add(ctx, format!("{}:origin", ctx.uuid), Body::Note(note), batch);
         }
         if bool_at(record, "isCompactSummary") {
-            let text = content_text(content);
+            let text = summary_text(&joined_text(content));
             self.summary(ctx, &text, batch);
             return;
         }
@@ -552,13 +552,6 @@ impl Conversation {
                 text.trim().strip_prefix("[Request interrupted by user")
             {
                 Body::Interrupted { during_tool: marker.contains("for tool use") }
-            } else if let Some(reports) = tag(text, crate::reports::TAG) {
-                Body::Note(Note {
-                    kind: NoteKind::Report,
-                    text: Clipped::head(reports.trim(), OUTPUT, Some(reference())),
-                    retry: None,
-                    stop: None,
-                })
             } else if let Some(mut notice) = parse_notice(text) {
                 notice.at_ms = ctx.at_ms;
                 self.task_row(ctx.thread, Some(ctx.made_at), &notice, batch);
@@ -642,9 +635,13 @@ impl Conversation {
             };
             let id = if index == 0 { ctx.uuid.to_owned() } else { format!("{}:{index}", ctx.uuid) };
             let opens_turn = matches!(body, Body::Prompt(_));
+            // An Esc ends the turn there: Claude Code writes no end of its own for it.
+            let ends_turn = matches!(body, Body::Interrupted { .. });
             self.add(ctx, id.clone(), body, batch);
             if opens_turn {
                 self.start_turn(ctx, &id, string_at(record, "permissionMode"), batch);
+            } else if ends_turn {
+                self.end_turn(ctx, batch);
             }
         }
         // Pictures pasted with no words are a prompt still.
@@ -1027,9 +1024,12 @@ impl Conversation {
             record: ctx.uuid.to_owned(),
             part: Part::Result { tool_use_id: id.to_owned() },
         });
-        // A list the TUI draws under the call stands for the text the model read.
+        // A list the TUI draws under the call stands for the text the model read, and a line
+        // drawn alone (a refusal by auto mode) for all of it.
         let text = match said.body {
-            Some(body) => Some(Clipped::head(body.trim(), OUTPUT, full)),
+            Some(body) => {
+                (!body.trim().is_empty()).then(|| Clipped::head(body.trim(), OUTPUT, full))
+            }
             None => (!shown || status != ResultStatus::Ok)
                 .then(|| Clipped::head(text.trim(), OUTPUT, full)),
         };
@@ -1563,6 +1563,32 @@ fn question(q: &Value) -> Question {
             })
             .unwrap_or_default(),
         multi_select: bool_at(q, "multiSelect"),
+    }
+}
+
+/// The input of a call as far as its detail keeps it, in the tool's own fields.
+///
+/// That is the command, file, address, query or pattern it acts on, a subagent's description,
+/// an MCP or untyped tool's whole input, a question's questions, a plan's text: what a dialog
+/// about the call is worded from (`crate::claude::history::asks_for`) when only the transcript
+/// names the call.
+#[must_use]
+pub fn call_input(detail: &ToolDetail) -> Value {
+    use serde_json::json;
+    match detail {
+        ToolDetail::Bash(bash) => json!({ "command": bash.command.text }),
+        ToolDetail::Edit(EditDetail { path, .. })
+        | ToolDetail::Write(WriteDetail { path, .. })
+        | ToolDetail::Read(ReadDetail { path, .. }) => json!({ "file_path": path }),
+        ToolDetail::Grep(GrepDetail { pattern, .. })
+        | ToolDetail::Glob(GlobDetail { pattern, .. }) => {
+            json!({ "pattern": pattern })
+        }
+        ToolDetail::WebFetch(fetch) => json!({ "url": fetch.url }),
+        ToolDetail::WebSearch(search) => json!({ "query": search.query }),
+        ToolDetail::Agent(agent) => json!({ "description": agent.description }),
+        ToolDetail::Mcp(mcp) => serde_json::from_str(&mcp.input.text).unwrap_or(Value::Null),
+        other => said_input(other).unwrap_or(Value::Null),
     }
 }
 
@@ -2204,8 +2230,65 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// A message content's text: the string, or its text blocks joined.
+/// A message content's text: the string, or its text blocks joined, without the tools-used
+/// manifest Claude Code opens a subagent's or a forked skill's result with for the model
+/// ([`TOOLS_USED`]).
 fn content_text(content: &Value) -> String {
+    let text = joined_text(content);
+    manifest(&text, None).unwrap_or(text)
+}
+
+/// Claude Code's manifest of the tools a part of the conversation called that its requests did
+/// not name yet (`<tools-used-before-summary>Read, Bash</tools-used-before-summary>`, a line of
+/// its own): it opens a subagent's or a forked skill's result and a compaction summary, and is
+/// the model's, not the person's (2.1.304 on).
+const TOOLS_USED: &str = "tools-used-before-summary";
+
+/// A compaction summary as the TUI's transcript view shows it: the tools called before it said
+/// in a line of their own, and nothing of an empty manifest.
+fn summary_text(text: &str) -> String {
+    manifest(text, Some("Tools called before this summary: ")).unwrap_or_else(|| text.to_owned())
+}
+
+/// `text` with each tools-used manifest line said after `say` when it names tools, or dropped,
+/// and the `<system-reminder>` around it when it held nothing else; `None` when it holds none.
+fn manifest(text: &str, say: Option<&str>) -> Option<String> {
+    let open = format!("<{TOOLS_USED}>");
+    if !text.contains(&open) {
+        return None;
+    }
+    let close = format!("</{TOOLS_USED}>");
+    // The tools a line names, when it is a manifest.
+    let named = |line: &str| {
+        let tools = line.trim().strip_prefix(open.as_str())?.strip_suffix(close.as_str())?;
+        (!tools.contains('<')).then(|| tools.trim().to_owned())
+    };
+    // What a manifest becomes: its tools said, or nothing.
+    let said = |tools: String| say.filter(|_| !tools.is_empty()).map(|say| format!("{say}{tools}"));
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut kept = Vec::with_capacity(lines.len());
+    let mut at = 0_usize;
+    while let Some(&line) = lines.get(at) {
+        // A reminder that holds only a manifest is the manifest.
+        if line.trim() == "<system-reminder>"
+            && let Some(tools) = lines.get(at.saturating_add(1)).copied().and_then(named)
+            && lines.get(at.saturating_add(2)).is_some_and(|l| l.trim() == "</system-reminder>")
+        {
+            kept.extend(said(tools));
+            at = at.saturating_add(3);
+            continue;
+        }
+        match named(line) {
+            Some(tools) => kept.extend(said(tools)),
+            None => kept.push(line.to_owned()),
+        }
+        at = at.saturating_add(1);
+    }
+    Some(kept.join("\n"))
+}
+
+/// The text of `content` as Claude Code wrote it, its text blocks joined.
+fn joined_text(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
         Value::Array(blocks) => {
@@ -2373,6 +2456,10 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
     let blocks = || content.and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
     let result = record.get("toolUseResult");
     match part {
+        // A compaction summary reads as the decoder said it ([`summary_text`]).
+        Part::Block { index: 0 } if bool_at(record, "isCompactSummary") => {
+            Some(summary_text(&joined_text(content?)))
+        }
         Part::Block { index } => match content? {
             Value::String(s) if *index == 0 => Some(s.clone()),
             Value::Array(blocks) => {

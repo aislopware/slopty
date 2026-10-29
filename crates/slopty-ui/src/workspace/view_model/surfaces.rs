@@ -107,10 +107,6 @@ pub(super) struct Surfaces {
     projects: projects::Projects,
     /// The person's own project actions, and the worktree actions waiting for their chats.
     actions: actions::Actions,
-    /// The files being attached to a message.
-    uploads: composer::Uploads,
-    /// The model and effort the person picked for each chat.
-    configs: composer::Configs,
     /// The attached files read back, while they are read.
     read_back: composer::ReadBack,
     /// The sidebar's pins and sections.
@@ -607,12 +603,9 @@ impl WorkspaceView {
         Ok((key, param(params, "checkoutPath").map_or(root, str::to_owned)))
     }
 
-    /// The worker and folder of the chat `chat`: a minted chat's folder, else where its thread
-    /// works (the shell roots a chat's files there and joins its paths to it).
+    /// The worker and folder of the chat `chat`: where its thread works (the shell roots a
+    /// chat's files there and joins its paths to it).
     fn chat_place(&self, chat: &str, cx: &gpui::App) -> Option<(WorkerKey, String)> {
-        if let Some(minted) = self.view_model.minted.get(chat) {
-            return Some((minted.worker, minted.cwd.clone()));
-        }
         let (key, thread) = self.chat_thread_in(chat, cx)?;
         let hub = self.held_hub(key)?.read(cx);
         let row = hub.threads().rows().rows.get(&thread)?;
@@ -626,13 +619,7 @@ impl WorkspaceView {
         chat: &str,
         cx: &gpui::App,
     ) -> Option<(WorkerKey, slopty_proto::thread::ThreadId)> {
-        let thread = self
-            .view_model
-            .aliases
-            .iter()
-            .find(|(_, alias)| alias.as_str() == chat)
-            .map(|(thread, _)| *thread)
-            .or_else(|| chat.parse().ok())?;
+        let thread = chat.parse().ok()?;
         Some((self.worker_of_thread(thread, cx)?, thread))
     }
 }

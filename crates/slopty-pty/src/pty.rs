@@ -16,7 +16,7 @@ use tokio::io::unix::AsyncFd;
 
 use crate::PtyError;
 use crate::shell_integration::{self, ShellIntegration};
-use crate::spawn::{Child, Launch, Stdio};
+use crate::spawn::{Child, Launch};
 
 /// What to run on the PTY.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -106,28 +106,18 @@ impl Pty {
         spec: &SpawnSpec,
         integration: Option<&ShellIntegration>,
     ) -> Result<Spawned, PtyError> {
-        let (launch, term) = prepare(spec, integration, Terminal::Yes)?;
-        let child = launch.spawn(Stdio::Tty(self.slave())).map_err(|e| PtyError::os("spawn", e))?;
+        let (launch, term) = prepare(spec, integration)?;
+        let child = launch.spawn(self.slave()).map_err(|e| PtyError::os("spawn", e))?;
         Ok(Spawned { child, term })
     }
 }
 
-/// Whether a child gets a terminal: what [`prepare`] puts into its environment for one.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Terminal {
-    /// A PTY: `TERM` and the rest of a terminal's variables.
-    Yes,
-    /// A pipe: none of them, inherited ones dropped.
-    No,
-}
-
 /// Everything the child of `spec` gets (its program, arguments, environment, directory),
 /// settled before [`crate::spawn`] forks so the child only makes system calls on it; and its
-/// `TERM`, empty without a terminal.
+/// `TERM`.
 fn prepare(
     spec: &SpawnSpec,
     integration: Option<&ShellIntegration>,
-    terminal: Terminal,
 ) -> Result<(Launch, String), PtyError> {
     let cwd = spec.cwd.clone().unwrap_or_else(home);
     let (program, args, arg0) = resolve_command(&spec.command, &cwd);
@@ -137,45 +127,32 @@ fn prepare(
         None => (args, arg0, Vec::new()),
     };
     let mut env = Env::inherited();
-    let term = match terminal {
-        Terminal::Yes => {
-            // Decided once: `default_term` changes when the terminfo is installed, and the
-            // child's `TERM` and the name reported with it must be the same. The spec's own
-            // variables come last, so a `TERM` among them is the child's.
-            let term = spec
-                .env
-                .iter()
-                .rev()
-                .find(|(k, _)| k == "TERM")
-                .map_or_else(|| default_term().to_owned(), |(_, v)| v.clone());
-            if term.len() > MAX_TERM_BYTES {
-                return Err(PtyError::os(
-                    "TERM",
-                    io::Error::new(io::ErrorKind::InvalidInput, "longer than a terminfo name"),
-                ));
-            }
-            env.set("TERM", &term);
-            env.set("COLORTERM", "truecolor");
-            env.set("TERM_PROGRAM", "slopty");
-            env.set("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-            // `TERM` and the search path have to agree: when the database is ours, point the
-            // child at it; otherwise clear whatever we inherited and let ncurses use the usual
-            // places.
-            match crate::terminfo::child_database() {
-                Some(dir) => env.set("TERMINFO", dir),
-                None => env.remove("TERMINFO"),
-            }
-            term
-        }
-        Terminal::No => {
-            // No terminal, so nothing may say there is one: a program that sees `TERM` paints
-            // for it.
-            for name in TERMINAL_ENV {
-                env.remove(name);
-            }
-            String::new()
-        }
-    };
+    // Decided once: `default_term` changes when the terminfo is installed, and the child's
+    // `TERM` and the name reported with it must be the same. The spec's own variables come
+    // last, so a `TERM` among them is the child's.
+    let term = spec
+        .env
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "TERM")
+        .map_or_else(|| default_term().to_owned(), |(_, v)| v.clone());
+    if term.len() > MAX_TERM_BYTES {
+        return Err(PtyError::os(
+            "TERM",
+            io::Error::new(io::ErrorKind::InvalidInput, "longer than a terminfo name"),
+        ));
+    }
+    env.set("TERM", &term);
+    env.set("COLORTERM", "truecolor");
+    env.set("TERM_PROGRAM", "slopty");
+    env.set("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    // `TERM` and the search path have to agree: when the database is ours, point the
+    // child at it; otherwise clear whatever we inherited and let ncurses use the usual
+    // places.
+    match crate::terminfo::child_database() {
+        Some(dir) => env.set("TERMINFO", dir),
+        None => env.remove("TERMINFO"),
+    }
     forget_parent_agent(&mut env);
     // Web pages and editors go to the client, unless the session's own variables say
     // otherwise (they come after).
@@ -207,63 +184,6 @@ fn prepare(
         })
         .map_err(|e| PtyError::os("spawn", e))?;
     Ok((launch, term))
-}
-
-/// What a terminal's child is told of it, none of which a piped child is given.
-const TERMINAL_ENV: [&str; 5] =
-    ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERMINFO"];
-
-/// A child spawned on a pipe rather than a PTY ([`spawn_piped`]): its end of the pair is its
-/// standard input and output, `io` is the other.
-#[derive(Debug)]
-pub struct Piped {
-    /// This side of the socket pair: what the child writes reads here, and what is written
-    /// here is its standard input. Close-on-exec.
-    pub io: OwnedFd,
-    /// The child.
-    pub child: Child,
-}
-
-/// Spawn `spec` with no terminal, on one end of a Unix stream socket pair.
-///
-/// That end is its standard input and output, `stderr` (appended to, made `0600`) or
-/// `/dev/null` its standard error, and it runs in a session and process group of its own. A
-/// program driven over its standard streams (a `claude -p` speaking stream-json) runs so, and
-/// the other end goes wherever a PTY's master would: `spec.size` means nothing here, and the
-/// child gets none of a terminal's variables.
-///
-/// # Errors
-///
-/// When the pair, the error file or the spawn fails.
-pub fn spawn_piped(spec: &SpawnSpec, stderr: Option<&Path>) -> Result<Piped, PtyError> {
-    use rustix::net::{AddressFamily, SocketFlags, SocketType};
-    let (launch, _term) = prepare(spec, None, Terminal::No)?;
-    let (io, theirs) = rustix::net::socketpair(
-        AddressFamily::UNIX,
-        SocketType::STREAM,
-        SocketFlags::empty(),
-        None,
-    )
-    .map_err(|e| PtyError::os("socketpair", e))?;
-    // macOS has no `SOCK_CLOEXEC`: set at once, so as short a window as there can be.
-    for fd in [&io, &theirs] {
-        rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)
-            .map_err(|e| PtyError::os("FD_CLOEXEC", e))?;
-    }
-    let err = match stderr {
-        Some(path) => rustix::fs::open(
-            path,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::APPEND | OFlags::CLOEXEC,
-            Mode::RUSR | Mode::WUSR,
-        )
-        .map_err(|e| PtyError::os("open the error file", e))?,
-        None => rustix::fs::open(c"/dev/null", OFlags::WRONLY | OFlags::CLOEXEC, Mode::empty())
-            .map_err(|e| PtyError::os("open /dev/null", e))?,
-    };
-    let child = launch
-        .spawn(Stdio::Piped { io: theirs.as_fd(), err: err.as_fd() })
-        .map_err(|e| PtyError::os("spawn", e))?;
-    Ok(Piped { io, child })
 }
 
 /// XNU's `EREDRIVEOPEN`: an open of a cloning device such as `/dev/ptmx` that raced another
@@ -591,9 +511,8 @@ impl PtyMaster {
 fn read_fd(fd: &OwnedFd, buf: &mut [u8]) -> io::Result<usize> {
     match rustix::io::read(fd, buf) {
         Ok(n) => Ok(n),
-        // macOS reports the slave hangup as EIO on read; treat it as EOF. A piped child's end
-        // of its socket pair closed with input unread resets it: the same end.
-        Err(rustix::io::Errno::IO | rustix::io::Errno::CONNRESET) => Ok(0),
+        // macOS reports the slave hangup as EIO on read; treat it as EOF.
+        Err(rustix::io::Errno::IO) => Ok(0),
         Err(e) => Err(e.into()),
     }
 }
@@ -602,28 +521,60 @@ fn write_fd(fd: &OwnedFd, data: &[u8]) -> io::Result<usize> {
     rustix::io::write(fd, data).map_err(Into::into)
 }
 
-/// What a Claude Code session sets for the programs it starts, naming itself. A daemon started
-/// from inside one (a developer's session, a test run by an agent) would hand them to every
-/// shell, and a `claude` there then takes itself for that session's child: it saves no
-/// transcript (`CLAUDE_CODE_CHILD_SESSION`) and reports to the parent's inbox.
-const PARENT_AGENT_ENV: [&str; 9] = [
+/// What a Claude Code session sets for the programs it starts, naming itself or its own run. A
+/// daemon started from inside one (a developer's session, a test run by an agent) would hand
+/// them to every shell, and a `claude` there then takes itself for that session's child: it
+/// saves no transcript (`CLAUDE_CODE_CHILD_SESSION`), reports to the parent's inbox, starts at
+/// the parent's effort (`CLAUDE_EFFORT`) and through the parent's launcher's wrapper
+/// (`CLAUDE_CODE_PROCESS_WRAPPER`). None of them is ever the person's choice for a terminal.
+const PARENT_AGENT_ENV: [&str; 11] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_EXECPATH",
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_PROCESS_WRAPPER",
     "CLAUDE_CODE_SESSION_ATTENDED",
     "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT",
     "CLAUDE_PID",
 ];
 
+/// What a Claude Code sets for the commands its Bash tool runs, so they suit an agent: no editor
+/// for git (`GIT_EDITOR=true` would commit every message unread), no pinning by corepack, the
+/// agent's name, and no program found in the current directory on Windows. Each is a name others
+/// may set too, so it is dropped only from an environment a Claude Code's marks show it made
+/// ([`PARENT_AGENT_ENV`]'s first two).
+const PARENT_AGENT_SHAPED_ENV: [&str; 4] =
+    ["AI_AGENT", "COREPACK_ENABLE_AUTO_PIN", "GIT_EDITOR", "NoDefaultCurrentDirectoryInExePath"];
+
 /// Start the child outside any Claude Code session the daemon was started from; a session's own
-/// environment (`SpawnSpec::env`) is applied after, so it can still set any of them.
+/// environment (`SpawnSpec::env`) is applied after, so it can still set any of them. What the
+/// person's settings put in Claude Code's environment, and an organization's managed launcher's
+/// own variables, pass: they are the person's or the organization's, not a session's.
 fn forget_parent_agent(env: &mut Env) {
+    let under_agent = PARENT_AGENT_ENV.iter().take(2).any(|name| env.get(name).is_some());
     for name in PARENT_AGENT_ENV {
         env.remove(name);
     }
+    if under_agent {
+        for name in PARENT_AGENT_SHAPED_ENV {
+            env.remove(name);
+        }
+    }
+}
+
+/// The names a Claude Code this process runs under set in its environment.
+///
+/// What every terminal's child is started without (the variables of a Claude Code the daemon
+/// was started from), for a program Slopty runs outside any terminal to drop too (Claude
+/// Code's own `initialize`, asked of it in a folder).
+#[must_use]
+pub fn inherited_agent_env() -> Vec<&'static str> {
+    let under_agent = PARENT_AGENT_ENV.iter().take(2).any(|name| std::env::var_os(name).is_some());
+    let shaped = PARENT_AGENT_SHAPED_ENV.iter().filter(|_| under_agent);
+    PARENT_AGENT_ENV.iter().chain(shaped).copied().collect()
 }
 
 /// `(program, args, arg0)` for a child that starts in `cwd`: an empty command means the login shell
@@ -946,7 +897,7 @@ mod tests {
 
             let pty = Pty::open(size()).unwrap();
             let started = Instant::now();
-            let mut child = launch.spawn(Stdio::Tty(pty.slave())).unwrap();
+            let mut child = launch.spawn(pty.slave()).unwrap();
             fork_only.push(started.elapsed());
             child.wait().await.unwrap();
 
@@ -996,21 +947,28 @@ mod tests {
         assert_eq!(get_size(pty.master()).unwrap(), (100, 30));
     }
 
-    /// A shell never inherits the identity of a Claude Code session the daemon ran under, while
-    /// the user's own Claude Code settings in the environment pass through.
+    /// A shell never inherits the identity of a Claude Code session the daemon ran under, nor
+    /// what that session set for its own tools (`GIT_EDITOR`); the person's own Claude Code
+    /// settings in the environment pass through, and the same tool variables outside a Claude
+    /// Code are the person's and pass too.
     #[test]
     fn a_shell_forgets_the_claude_session_the_daemon_ran_in() {
-        let names = ["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDECODE"];
-        let mut env = Env(names
-            .iter()
-            .chain(&["CLAUDE_CODE_USE_BEDROCK"])
-            .map(|name| (OsString::from(name), OsString::from("1")))
-            .collect());
+        let env_of = |names: &[&str]| {
+            Env(names.iter().map(|name| (OsString::from(name), OsString::from("1"))).collect())
+        };
+        let marks = ["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDECODE"];
+        let shaped = ["CLAUDE_EFFORT", "CLAUDE_CODE_PROCESS_WRAPPER", "GIT_EDITOR", "AI_AGENT"];
+        let mut env = env_of(&[&marks[..], &shaped[..], &["CLAUDE_CODE_USE_BEDROCK"][..]].concat());
         forget_parent_agent(&mut env);
-        for name in names {
+        for name in marks.iter().chain(&shaped) {
             assert_eq!(env.get(name), None, "{name} kept");
         }
         assert_eq!(env.get("CLAUDE_CODE_USE_BEDROCK"), Some("1"), "settings pass");
+
+        let mut own = env_of(&["GIT_EDITOR", "AI_AGENT", "CLAUDE_EFFORT"]);
+        forget_parent_agent(&mut own);
+        assert_eq!(own.get("GIT_EDITOR"), Some("1"), "the person's own editor stays");
+        assert_eq!(own.get("CLAUDE_EFFORT"), None, "only a Claude Code sets its effort so");
     }
 
     #[test]

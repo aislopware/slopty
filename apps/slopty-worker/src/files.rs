@@ -322,15 +322,6 @@ pub async fn git_op(
             | GitOp::PullComments { .. }
             | GitOp::Scripts
     );
-    // An op that moves the pull request has its watch read it again once it is done.
-    let moves_pull = matches!(
-        op,
-        GitOp::Push
-            | GitOp::PullRequest { .. }
-            | GitOp::Merge { .. }
-            | GitOp::PullReview { .. }
-            | GitOp::MarkReady
-    );
     let terminals = if matches!(op, GitOp::RemoveWorktree | GitOp::Worktrees) {
         terminal_dirs(worker).await
     } else {
@@ -344,9 +335,6 @@ pub async fn git_op(
     )
     .await;
     let done = matches!(outcome, GitOutcome::Done(_));
-    if moves_pull && done {
-        slopty_worker::thread::pulls::nudge(std::path::Path::new(&repo));
-    }
     // A look, which a status or a diff on screen asks again at each change, is no event of the
     // log's; a change the person made is.
     if reads {

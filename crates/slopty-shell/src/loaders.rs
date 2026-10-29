@@ -396,39 +396,8 @@ const RING_STROKE: f32 = 2.5;
 /// Polyline segments for a full circle — plenty for a ≤40px ring.
 const RING_SEGMENTS: f32 = 64.0;
 
-/// Radial upload-progress ring with the percent centered — overlaid on a
-/// sending echo's attachment thumbnail while its bytes cross the relay
-/// (2026-08-18 "Sending… forever" report; the thumbnail is where the wait
-/// visibly belongs). A faint full track plus a bright arc growing clockwise
-/// from 12 o'clock; gpui paths have no arc primitive, so both are stroked
-/// polylines. Fixed white-on-wash palette: the caller dims the image behind
-/// it, which reads in both themes.
-pub fn upload_progress_ring(percent: u8, diameter: f32) -> AnyElement {
-    let ring = progress_arc(
-        percent,
-        diameter,
-        gpui::hsla(0.0, 0.0, 1.0, 0.22),
-        gpui::hsla(0.0, 0.0, 1.0, 0.95),
-    );
-    div()
-        .relative()
-        .size(px(diameter))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(ring)
-        .child(
-            div()
-                .text_size(px(9.0))
-                .font_weight(gpui::FontWeight::MEDIUM) // slopty: two weights (item 23).
-                .text_color(gpui::hsla(0.0, 0.0, 1.0, 0.95))
-                .child(SharedString::from(format!("{percent}%"))),
-        )
-        .into_any_element()
-}
-
-/// [`upload_progress_ring`] without the percent, in the caller's colors: for
-/// a spot too small to label, such as a sent chip's icon well.
+/// A faint full track and a bright arc growing clockwise from 12 o'clock,
+/// in the caller's colors, for a spot too small to label.
 pub fn upload_progress_arc(
     percent: u8,
     diameter: f32,

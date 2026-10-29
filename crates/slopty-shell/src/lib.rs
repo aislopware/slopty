@@ -22,19 +22,12 @@ mod account_usage;
 pub mod app_menus;
 pub mod appearance;
 pub mod attachments;
-pub mod background_tray; // slopty: a chat's background work, above its composer
-pub mod badges;
 pub mod browser;
 pub mod change_requests;
 pub mod catalog;
 pub mod changes;
 pub mod clock; // slopty: the frame's moment, the shell's one clock
-mod comment_ui;
-pub mod comments;
 pub mod composer;
-mod composer_dock;
-mod composer_markdown;
-mod context_usage;
 pub mod edge_fade;
 pub mod file_icons;
 pub mod files;
@@ -43,6 +36,7 @@ mod glass;
 mod haptics;
 // slopty: no History surface (ruled out).
 pub mod icons;
+pub mod inspector; // slopty: the read-only inspector of an agent session, in the right pane
 pub mod keys; // slopty: how a key reads in tooltips, menus, the palette and the a11y tree
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
@@ -52,13 +46,6 @@ pub mod live; // slopty: Slopty's terminals and remote screens in the shell's ch
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
-mod new_thread_background_backdrop; // slopty: the warm and cool light beneath the glyph field
-mod new_thread_background_effects;
-mod new_thread_background_field; // slopty: the hero's glyph field, its wind
-mod new_thread_background_glyphs; // slopty: the hero's glyph field, drawn
-mod new_thread_background_image;
-mod new_thread_background_mask;
-mod new_thread_background_schedule; // slopty: when the hero's glyph field shows and rests
 mod notice;
 pub mod notify;
 pub mod invariants; // slopty: what the shell's state must hold, checked as it runs
@@ -67,7 +54,6 @@ pub mod page; // slopty: a page an agent shows inline, as its card
 pub mod pickers;
 pub mod popover;
 pub mod project_actions;
-pub mod queue;
 pub mod rail;
 mod roll_text;
 pub mod running_pill;
@@ -78,7 +64,6 @@ pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
-mod todo_panel;
 pub(crate) mod tool_images;
 pub mod theme;
 pub mod toast;
@@ -237,7 +222,7 @@ pub fn start(
             ui_settings.pause_animations_in_background,
             cx,
         );
-        composer::init(cx, ui_settings.composer_send_behavior);
+        composer::init(cx);
         terminal::panel::init(cx);
         app_menus::init(cx);
         // slopty: no self-updater; Slopty updates through its own builds.
@@ -509,23 +494,6 @@ fn open_main_window(
                     .ok()
                     .and_then(Result::ok)
                     .unwrap_or(false)
-                });
-                // slopty: a terminal's block or selection goes to its chat's draft.
-                let (drafter, here) = (shell.downgrade(), window.window_handle());
-                live::serve_drafts(cx, move |chat, text, cx| {
-                    here.update(cx, |_, window, cx| {
-                        drafter.update(cx, |shell, cx| shell.attach_to_chat(chat, text, window, cx))
-                    })
-                    .ok()
-                    .and_then(Result::ok)
-                    .unwrap_or(false)
-                });
-                // slopty: a transcript's Run types its line into the chat's shell terminal.
-                let runner = shell.downgrade();
-                transcript::serve_terminal_runs(cx, move |chat, line, window, cx| {
-                    runner
-                        .update(cx, |shell, cx| shell.run_in_terminal(chat, line, window, cx))
-                        .unwrap_or(false)
                 });
                 let weak_shell = shell.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {

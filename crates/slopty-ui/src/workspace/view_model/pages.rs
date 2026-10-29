@@ -356,23 +356,6 @@ fn declared_network(meta: &str) -> Option<Network> {
     (!network.connect.is_empty() || !network.resources.is_empty()).then_some(network)
 }
 
-/// The words of MCP content blocks: their text, one block a paragraph.
-fn content_words(content: &serde_json::Value) -> String {
-    let blocks = match content {
-        serde_json::Value::Array(blocks) => blocks.iter().collect(),
-        other => vec![other],
-    };
-    blocks
-        .into_iter()
-        .filter_map(|block| match block {
-            serde_json::Value::String(text) => Some(text.clone()),
-            block => block.get("text").and_then(serde_json::Value::as_str).map(str::to_owned),
-        })
-        .filter(|text| !text.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 /// A tool call's arguments as the card shows them: a few lines of JSON.
 fn arguments_words(arguments: &serde_json::Value) -> String {
     let text = serde_json::to_string_pretty(arguments).unwrap_or_default();
@@ -1419,20 +1402,16 @@ impl WorkspaceView {
             let _answered = host.answer(id, &request.id, Err(Declined::by_the_person()));
             return;
         };
-        let chat = self.chat_id(thread);
         let app = page.app.clone();
         match &request.ask {
-            // Words for the chat, and context offered for its next turn, become the person's
-            // draft: theirs to send, edit or drop.
-            Ask::Message { content, .. } | Ask::UpdateContext { params: content } => {
-                let words = content_words(content.get("content").unwrap_or(content));
-                let put = !words.is_empty() && slopty_shell::live::attach(&chat, &words, cx);
-                let answer = if put {
-                    Ok(serde_json::json!({}))
-                } else {
-                    Err(declined("The chat is not open"))
-                };
-                let _answered = host.answer(id, &request.id, answer);
+            // slopty: words for the chat, and context for its next turn, are declined: the window
+            // is read-only toward the agent, which hears only what the person types into its TUI.
+            Ask::Message { .. } | Ask::UpdateContext { .. } => {
+                let _answered = host.answer(
+                    id,
+                    &request.id,
+                    Err(declined("Slopty passes no words from a page to the agent")),
+                );
             }
             Ask::OpenLink { url } => {
                 let web = url.starts_with("https://") || url.starts_with("http://");
@@ -1649,7 +1628,7 @@ impl WorkspaceView {
         };
         let path = format!("{}-{}.html", file_stem(&title), file_stem(&call.item));
         let params = serde_json::json!({
-            "chatId": self.chat_id(call.thread),
+            "chatId": call.thread.to_string(),
             "expectedCheckoutId": "",
             "path": path,
             "text": html,
@@ -1833,18 +1812,6 @@ mod tests {
         assert_eq!(network.connect, ["https://api.example"]);
         assert!(declared_network(r#"{"ui":{}}"#).is_none());
         assert!(declared_network("not json").is_none());
-    }
-
-    /// What a page would say becomes words for the draft; blocks with none say nothing.
-    #[test]
-    fn a_pages_words_are_its_text_blocks() {
-        let content = serde_json::json!([
-            { "type": "text", "text": "Plot p99 by region" },
-            { "type": "image", "data": "…" },
-            { "type": "text", "text": "  " },
-        ]);
-        assert_eq!(content_words(&content), "Plot p99 by region");
-        assert_eq!(content_words(&serde_json::json!("hi")), "hi");
     }
 
     /// A tool's arguments show as a few lines on the card, cut with an ellipsis.

@@ -1,6 +1,7 @@
 //! Agents end to end with stand-ins: a real server in this process, a real ptyd and worker
-//! registered with it, and `slopty-stub-claude` on the worker's `PATH` as `claude`. No real
-//! Claude Code runs, and nobody's plan is spent.
+//! registered with it, and `slopty-stub-claude` on the worker's `PATH` as `claude`, each agent its
+//! own TUI in a terminal (`docs/decisions/agents.md`, "TUI-first"). No real Claude Code runs, and
+//! nobody's plan is spent.
 
 #[cfg(test)]
 mod tests {
@@ -68,9 +69,10 @@ mod tests {
             }
         };
         tokio::time::timeout(STEP, ready).await.expect("ptyd socket");
+        // What the observer did is in a failure's output.
         let mut worker = scrubbed(bin("slopty-worker"), &dir.join("home"))
             .env("PATH", &path)
-            .env("RUST_LOG", "warn")
+            .env("RUST_LOG", "warn,slopty_worker::thread::claude=debug")
             .env("SLOPTY_WORKER_NAME", MACHINE)
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
@@ -127,22 +129,24 @@ mod tests {
         serde_json::from_slice(&out.stdout).unwrap()
     }
 
-    /// The texts of the user messages a stand-in's record says it was sent, in order.
-    fn messages(record: &Value) -> Vec<String> {
-        let received = record["received"].as_array().into_iter().flatten();
-        received
-            .filter(|line| line["type"] == "user")
-            .filter_map(|line| match &line["message"]["content"] {
-                Value::String(text) => Some(text.clone()),
-                Value::Array(blocks) => {
-                    Some(blocks.iter().filter_map(|b| b["text"].as_str()).collect())
-                }
-                _ => None,
-            })
-            .collect()
+    /// The lines the stand-in at seat `seat` was typed, from its record.
+    fn typed_at(dir: &Path, seat: &str) -> Vec<String> {
+        let at = dir.join(format!("{seat}.record.json"));
+        let record = std::fs::read(at)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .unwrap_or_default();
+        prompts(&record)
     }
 
-    /// What the stand-in whose first message was `prompt` recorded, once it has.
+    /// The lines a stand-in's record says it took, in order: its first prompt, then what was
+    /// typed.
+    fn prompts(record: &Value) -> Vec<String> {
+        let taken = record["prompts"].as_array().into_iter().flatten();
+        taken.filter_map(|p| p["text"].as_str().map(str::to_owned)).collect()
+    }
+
+    /// What the stand-in whose first line was `prompt` recorded, once it has.
     fn record_of(dir: &Path, prompt: &str) -> Option<Value> {
         std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -150,18 +154,33 @@ mod tests {
                 return None;
             }
             let record: Value = serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok()?;
-            (messages(&record).first()? == prompt).then_some(record)
+            (prompts(&record).first()? == prompt).then_some(record)
         })
     }
 
-    /// The messages the agent seated at `seat` was sent, from its record.
-    fn told_to(dir: &Path, seat: &str) -> Vec<String> {
-        let at = dir.join(format!("{seat}.record.json"));
-        std::fs::read(at)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .map(|record| messages(&record))
-            .unwrap_or_default()
+    /// What a failure shows beside its own words: every file Claude Code's stand-ins wrote under
+    /// the test's home, and what each stand-in recorded.
+    fn evidence(root: &Path) -> String {
+        let mut files = Vec::new();
+        let mut dirs = vec![root.join("home").join(".claude")];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    files.push(path.display().to_string());
+                }
+            }
+        }
+        files.sort();
+        let records: Vec<String> = std::fs::read_dir(root.join("agents"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .collect();
+        format!("files: {files:#?}\nrecords: {}", records.join("\n"))
     }
 
     /// The JSON an MCP tool result carries as its text.
@@ -175,11 +194,12 @@ mod tests {
     const STARTED: &str = concat!("{", "started", "}");
 
     /// The person starts a lead agent; the lead, through Slopty's tools, starts a child on the
-    /// machine, waits until it comes to rest, reads its turn and tells it more. The child takes
-    /// the words as a message of its own, marked as an agent's, and once it rests again the lead
-    /// hears it as a message, unasked. The fleet's list names the lead as the child's parent.
+    /// machine, waits until it comes to rest, reads its turn and tells it more: the words are
+    /// typed into the child's terminal as one message, marked as an agent's. The lead stops the
+    /// child's next turn, which presses Esc in its terminal, and waits for it to rest again. The
+    /// fleet's list names the lead as the child's parent.
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_agent_starts_a_child_waits_reads_it_and_hears_it_as_messages() {
+    async fn an_agent_starts_a_child_waits_reads_tells_and_stops_it() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let agents = root.join("agents");
@@ -188,25 +208,29 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         let folder = folder.to_string_lossy().into_owned();
         let at = |what: &str| agents.join(what).to_string_lossy().into_owned();
+        let wait = json!({
+            "name": "agent_wait",
+            "arguments": { "agents": [STARTED], "all": true, "timeout_ms": 50_000 },
+        });
         let turns = json!({
             "Lead": [
                 {
                     "name": "agent_start",
                     "arguments": { "machine": MACHINE, "folder": folder, "prompt": "Fix the login" },
                 },
-                {
-                    "name": "agent_wait",
-                    "arguments": { "agents": [STARTED], "all": true, "timeout_ms": 50_000 },
-                },
+                wait,
                 { "name": "agent_read", "arguments": { "agent": STARTED } },
                 {
                     "name": "agent_tell",
-                    "arguments": { "agent": STARTED, "text": "Now the logout too." },
+                    "arguments": { "agent": STARTED, "text": "hold the logout too." },
                 },
+                // Made again until the child's turn is under way: an Esc at rest stops nothing.
+                { "name": "agent_stop", "arguments": { "agent": STARTED }, "until_ok": true },
+                wait,
             ],
         });
         let env = [
-            ("STUB_RECORD".to_owned(), at("{session}.record.json")),
+            ("STUB_RECORD".to_owned(), at(concat!("{", "session", "}", ".record.json"))),
             ("STUB_TURNS".to_owned(), turns.to_string()),
         ];
 
@@ -239,9 +263,9 @@ mod tests {
             slopty(&root, quic, &["agent", "start", MACHINE, "--folder", &folder, "Lead"]).await;
         let lead = started["agent"].as_str().unwrap().to_owned();
 
-        // The lead's turn: start, wait, read, tell, each answered.
-        let record = until("the lead's four calls answered", || {
-            record_of(&agents, "Lead").filter(|r| r["mcp"].as_array().is_some_and(|m| m.len() == 4))
+        // The lead's turn: start, wait, read, tell, stop, wait, each answered.
+        let record = until("the lead's six calls answered", || {
+            record_of(&agents, "Lead").filter(|r| r["mcp"].as_array().is_some_and(|m| m.len() == 6))
         })
         .await;
         let calls = record["mcp"].as_array().unwrap();
@@ -252,31 +276,36 @@ mod tests {
         assert_eq!((seen["id"].as_str(), seen["parent"].as_str()), (Some(&*child), Some(&*lead)));
         assert_eq!(seen["rests"], json!(true), "{waited}");
         let read = calls[2].pointer("/content/0/text").and_then(Value::as_str).unwrap();
-        assert!(read.contains("Fix the login") && read.contains("Done: Fix the login"), "{read}");
+        assert!(
+            read.contains("Fix the login") && read.contains("Done: Fix the login"),
+            "{read}\n{}",
+            evidence(&root)
+        );
         assert_eq!(tool_answer(&calls[3]), json!({ "ok": true }));
+        assert_ne!(calls[4]["isError"], json!(true), "the stop: {}", calls[4]);
+        let rested = tool_answer(&calls[5]);
+        let phase = rested["agents"][0]["phase"].as_str().unwrap_or_default();
+        assert!(
+            phase.eq_ignore_ascii_case("stopped"),
+            "the Esc stopped its turn: {rested}\n{}",
+            evidence(&root)
+        );
         let lead_turn = begun.elapsed();
 
-        // The child took the words as a message, marked as the lead's.
+        // The child was typed the words as one message, marked as the lead's, and pressed Esc.
         let child_record = record_of(&agents, "Fix the login").expect("the child's record");
-        let child_seat = child_record["env"]["SLOPTY_SESSION"].as_str().unwrap().to_owned();
-        let told = until("the child takes the lead's words", || {
-            told_to(&agents, &child_seat).into_iter().find(|m| m.contains("Now the logout too."))
-        })
-        .await;
+        let child_seat = child_record["seat"].as_str().unwrap().to_owned();
+        let told = typed_at(&agents, &child_seat);
+        let told = told.iter().find(|m| m.contains("hold the logout too.")).expect("told");
         assert!(told.contains("an agent, not the person") && told.contains(&lead), "{told}");
-
-        // Once the child rests again, the lead hears it as a message of its own.
-        let lead_record = record_of(&agents, "Lead").unwrap();
-        let lead_seat = lead_record["env"]["SLOPTY_SESSION"].as_str().unwrap().to_owned();
-        let heard_at = Instant::now();
-        let heard = until("the lead hears the child rest", || {
-            told_to(&agents, &lead_seat)
-                .into_iter()
-                .find(|m| m.contains("came to rest") && m.contains("Now the logout too."))
-        })
-        .await;
-        assert!(heard.contains(&child) && heard.contains("Now the logout too."), "{heard}");
-        let heard_after = heard_at.elapsed();
+        let child_record = record_of(&agents, "Fix the login").unwrap();
+        let typed: String = child_record["reads"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r["bytes"].as_str())
+            .collect();
+        assert!(typed.ends_with('\u{1b}'), "Esc came last: {typed:?}");
 
         // The fleet's list names the lead as the child's parent.
         let listed = slopty(&root, quic, &["agents"]).await;
@@ -286,10 +315,7 @@ mod tests {
         assert_eq!(parent_of(&child), Some(json!(lead)), "{listed}");
         assert_eq!(parent_of(&lead), Some(Value::Null), "the person's lead: {listed}");
 
-        println!(
-            "lead's turn (start, wait, read, tell) {lead_turn:?}; heard the child rest {heard_after:?} \
-             after it took the words"
-        );
+        println!("lead's turn (start, wait, read, tell, stop, wait) {lead_turn:?}");
         server.shutdown().await;
     }
 }

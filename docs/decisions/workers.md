@@ -1115,8 +1115,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - The worker: `allow` sets admission's ranges, shared by every clone, from the next peer
     on. `server` drops its registration and joins the new one, and new shells get the new
     environment. `keep_awake` takes and releases the sleep holds at once (`Wake::set_policy`).
-    (`input_source_sync` and `display_linger_mins` were cut on 2026-10-10.) `[worker.acp]` is probed again into the capabilities at once,
-    and a thread's ACP start already read it per start.
+    (`input_source_sync` and `display_linger_mins` were cut on 2026-10-10.) `[worker.acp]`
+    was probed again into the capabilities at once until it went with the ACP adapter
+    (2026-10-29, `settings.md`).
   - The server applies `allow` and the project bounds.
   - Every key applying live left nothing to wait for a restart, so the `x-restarts` schema
     marker, `schema::restart_keys`, the app's "takes effect when slopty-worker restarts"
@@ -1339,6 +1340,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **An update asks before it ends a pi or ACP turn, and a worker's restart alarms nobody**
   (2026-10-12, readiness audit item 12).
+  - ❌ *The driven-turns half is superseded 2026-10-29 by "TUI-first" (`agents.md`):* every
+    agent is a TUI in ptyd's custody, so no turn ends with the worker, and the doctor counts
+    none (`Health::turns` is 0).
   - **Driven turns.** pi and ACP agents run as the worker's own children, so they end with it.
     Claude Code goes on in ptyd and Codex in its own daemon. The update plan counted only
     ptyd's sessions. The worker's doctor now says the turns its driven threads have running
@@ -1418,6 +1422,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     when only the succession is, and restarts it otherwise. The running ptyd checks `program
     --custody` itself before it runs it. `--succeed` returns once the custody file says the new
     custody under the same pid.
+  - **The TUI-first deploy starts ptyd afresh (2026-10-29).** Piped sessions went with the
+    driven agents (`PtydRequest::SpawnPiped`, and `piped` on `Adopt`, `Heir` and `SessionInfo`),
+    and `Heir` losing its field moved the succession, so the install that brings TUI-first
+    restarts ptyd once and every session it holds ends. Nothing bridges the old succession: the
+    person runs nothing on Slopty until it is finished, so there is nothing to keep, and the next
+    builds hand over to each other again.
   - **The install stops the worker before it hands ptyd over.** A handover happens only when
     the custody moved, so the running worker would be refused by the new image. Were it still
     holding sessions, the new image would drain them after the 30 s grace beside the worker's
@@ -1595,6 +1605,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     moved by the 10 s lease stamp. The cap is 1 hour, up from 15 minutes: the spinner used to
     repaint every second, but a stream-json turn says nothing while a long tool call runs, and
     Claude desktop gives a turn without progress the same hour.
+  - **TUI-first** (2026-10-29, `agents.md`): every thread is a TUI in a terminal again, read
+    from its hooks and transcript; a thread at work holds the machine on the same rule, until
+    Esc or its end lets it go (`threads::an_agent_at_work_keeps_the_machine_awake_until_esc_stops_it`).
   - **Paused turns keep their ceiling.** A `Waiting` thread holds for `PAUSED_CEILING` = 2 hours
     from the pause (`Status::since_ms`), whatever its commands do. The descendant-CPU sign was
     never fed once the title path went quiet, so it goes, and `ports::descendants_cpu` with it

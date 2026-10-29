@@ -620,7 +620,7 @@ pub fn tool_facts(
         retry_line(&notice, at(note.at_ms))
     });
     let spawn = matches!(call.detail, Some(ToolDetail::Agent(_))) || call.kind == kind::AGENT;
-    let subagent_progress = spawn.then(|| progress(call, state, task, child));
+    let subagent_progress = spawn.then(|| progress(call, task, child));
     let facts = ToolFacts {
         title: note.and_then(|n| n.title.clone()).or_else(|| title(call, input.as_ref())),
         result: result_line,
@@ -777,7 +777,6 @@ fn file_path(call: &ToolCall) -> Option<&str> {
 /// goes, its run's step and whether it waits on the person.
 fn progress(
     call: &ToolCall,
-    state: &ThreadState,
     task: Option<&BackgroundTask>,
     child: Option<&ChildRun>,
 ) -> SubagentProgress {
@@ -797,9 +796,6 @@ fn progress(
     let agent_type = agent
         .and_then(|a| a.agent_type.clone())
         .or_else(|| task.and_then(|t| t.agent_type.clone()));
-    let model = agent_type.as_deref().and_then(|name| {
-        state.agents.iter().find(|kind| kind.name == name).and_then(|kind| kind.model.clone())
-    });
     let needs_you = child.and_then(|c| c.needs_you.clone());
     let task_live = task.is_some_and(BackgroundTask::is_live);
     let child_running = child.is_some_and(|c| c.running);
@@ -857,7 +853,6 @@ fn progress(
     let row = task.map(|t| task_row(&t.id)).or_else(|| child.map(|c| chat_row(&c.chat)));
     SubagentProgress {
         agent_type,
-        model,
         running,
         state: state_now.to_owned(),
         step,

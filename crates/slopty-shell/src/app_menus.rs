@@ -225,7 +225,7 @@ pub(crate) const VIEW_COMMANDS: [WindowCommand; 6] = [
     command!("Expand side pane", crate::icons::EXPAND_ARROWS, shell::ToggleExpandPane),
     command!("Toggle files panel", crate::icons::FOLDER_TREE, shell::ToggleFiles),
     command!("Toggle terminal", crate::icons::TERMINAL, crate::terminal::panel::ToggleTerminal),
-    command!("Chat details", crate::icons::INFO_CIRCLE, shell::ToggleSessionInfo),
+    command!("Inspector", crate::icons::EYE, shell::ToggleInspector),
 ];
 
 /// slopty: the Go menu's moves.

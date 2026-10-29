@@ -211,6 +211,17 @@ impl Transcripts {
         self.outputs.read(&self.conversation)
     }
 
+    /// The files read so far: the main transcript, then each subagent's, for the caller to
+    /// follow.
+    #[must_use]
+    pub fn read_files(&self) -> Vec<PathBuf> {
+        self.main
+            .iter()
+            .map(|(path, _)| path.clone())
+            .chain(self.subagents.keys().cloned())
+            .collect()
+    }
+
     /// The conversation as read so far.
     #[must_use]
     pub const fn conversation(&self) -> &Conversation {

@@ -420,8 +420,6 @@ async fn a_merge_request_is_read_in_a_pull_request_s_words() {
         ]
     );
     assert_eq!(pull.standing(), PullStands::ChecksFailed);
-    let seen = crate::thread::pulls::seen(&pull);
-    assert_eq!(seen.line(), "!12: lint failed");
     assert_eq!(
         asked(dir.path()),
         ["mr view --output json", "api projects/:id/pipelines/77/jobs?per_page=100"],

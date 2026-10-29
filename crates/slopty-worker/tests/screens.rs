@@ -7,8 +7,7 @@ mod screens {
     use std::time::Duration;
 
     use parking_lot::Mutex;
-    use slopty_agent::claude::driven::Driven;
-    use slopty_agent::claude::history::Out;
+    use slopty_agent::claude::history::{History, Out};
     use slopty_core::{DisplayId, WallMs, WindowId};
     use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
     use slopty_proto::thread::detail::McpDetail;
@@ -33,8 +32,8 @@ mod screens {
         fn new(dir: &std::path::Path, world: Arc<Mutex<World>>) -> Self {
             let host = Host::open(&dir.join("threads"), Limits::default()).unwrap();
             let session = "11111111-2222-4333-8444-555555555555";
-            let mut driven = Driven::new(session, "/work", WallMs::ZERO);
-            let Some(Out::Begin(meta)) = driven.drain().into_iter().next() else { panic!() };
+            let mut history = History::new(session, "2.1.312", "/work", &[], WallMs::ZERO);
+            let Some(Out::Begin(meta)) = history.drain().into_iter().next() else { panic!() };
             let thread = meta.id;
             host.create(*meta).unwrap();
             let screens = Screens::among(host.clone(), world).spawn();

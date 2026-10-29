@@ -1,10 +1,10 @@
-//! The conversation holds still where the person looks, on a real stack: a stand-in Claude Code
-//! (`slopty-stub-claude`) answers with long words, then runs a foreground command (`wait`) that
-//! Stop ends, and another that ends on its own; a code block's Copy turns to Copied in place;
-//! terminal output in an ```` ```ansi ```` fence draws in its colours, no escape shown. Each is
-//! judged by numbers from the accessibility tree: where the person's own message sits before and
-//! after, where the Copy button sits. (What a copy holds is the shell's unit tests': GPUI copies
-//! to the general pasteboard, which no test reads.)
+//! A session's turn holds still where the person looks in its inspector, on a real stack: a
+//! stand-in Claude Code (`slopty-stub-claude`) answers in its terminal, and the inspector beside
+//! it reads the answer from the transcript. A code block's Copy turns to Copied in place;
+//! terminal output in an ```` ```ansi ```` fence draws in its colours, no escape shown; a link
+//! shows where it goes on hover. Each is judged by numbers from the accessibility tree: where the
+//! Copy button sits. (What a copy holds is the shell's unit tests': GPUI copies to the general
+//! pasteboard, which no test reads.) Stop is the TUI's (Esc), so the inspector has none.
 
 #![cfg(target_os = "macos")]
 
@@ -12,7 +12,7 @@ use slopty_e2e::harness::ServedApp;
 use slopty_e2e::{A11yNode, Driver, Dump};
 
 use crate::served::{
-    SETTLE, STEP, goldens, hover, middle, node, open_thread, says, seen, start, tell, thread_until,
+    SETTLE, STEP, goldens, hover, middle, node, open_thread, says, seen, start, thread_until,
 };
 
 /// The worker's name, as the CLI names the machine.
@@ -23,84 +23,13 @@ async fn stack() -> ServedApp {
     ServedApp::launch(MACHINE).await.unwrap()
 }
 
-/// The person's own message `words`, as the transcript names it.
-/// Open the one chat once the app holds its finished turn, and wait until it reads as seen: its
-/// row says nothing more, whether or not the guest's window is the active one, so a golden of
-/// it never catches the row before or after the look.
+/// Open the one session once the app holds its finished turn, and wait until it reads as seen:
+/// its row says nothing more, whether or not the guest's window is the active one, so a golden
+/// of it never catches the row before or after the look.
 async fn open_read(drv: &mut Driver) {
-    seen(drv, "the finished chat's row", STEP, |d| node(d, "Status", "Done").is_some()).await;
+    seen(drv, "the finished session's row", STEP, |d| node(d, "Status", "Done").is_some()).await;
     open_thread(drv, 1).await;
-    seen(drv, "the chat read", STEP, |d| node(d, "Status", "Done").is_none()).await;
-}
-
-fn said<'a>(dump: &'a Dump, words: &str) -> Option<&'a A11yNode> {
-    node(dump, "Paragraph", words)
-}
-
-/// Where the person's message `words` sits now, once it is drawn and the frame settled.
-async fn y_of(drv: &mut Driver, words: &str) -> f32 {
-    tokio::time::sleep(SETTLE).await;
-    let dump =
-        seen(drv, &format!("the message {words:?}"), STEP, |d| said(d, words).is_some()).await;
-    said(&dump, words).map(|n| n.bounds[1]).unwrap_or_default()
-}
-
-/// A reply long enough to pin the transcript to its bottom: what sits above the last row moves
-/// whenever the last row's height does.
-fn long_reply() -> String {
-    use std::fmt::Write as _;
-    let mut reply = "Notes:\n\n".to_owned();
-    for n in 1..=24 {
-        write!(reply, "Paragraph {n}: the reply runs on so the chat scrolls.\n\n").unwrap();
-    }
-    reply
-}
-
-/// Stop and a turn's end move nothing in the chat: with the transcript pinned to its bottom, the
-/// person's message above a running command sits at the same y, within a pixel, while the
-/// command runs, once Stop ended it, and across a turn that ends on its own. The person's own
-/// message is in the accessibility tree, a group labelled with its words.
-#[tokio::test]
-#[ignore = "live: cargo xtask e2e app"]
-async fn stop_and_a_turns_end_leave_the_chat_still() {
-    let mut stack = stack().await;
-    let repo = stack.path("repo");
-    let agent = start(&stack, MACHINE, &repo, &long_reply()).await;
-    thread_until(&stack, &agent, "answered", |r| says(r, "Done: Notes:")).await;
-
-    // Stop: the command runs, then Stop ends it.
-    tell(&mut stack, "wait 60").await;
-    let drv = &mut stack.driver;
-    seen(drv, "the Stop button", STEP, |d| node(d, "Button", "Stop").is_some()).await;
-    let running = y_of(drv, "wait 60").await;
-    let dump = drv.dump().await.unwrap();
-    let stop = node(&dump, "Button", "Stop").cloned().unwrap();
-    let (x, y) = middle(&stop);
-    drv.click(x, y).await.unwrap();
-    seen(drv, "the turn stopped", STEP, |d| node(d, "Button", "Stop").is_none()).await;
-    let stopped = y_of(drv, "wait 60").await;
-    println!("MEASURE stop-no-shift: the message at {running:.1} running, {stopped:.1} stopped");
-    assert!((running - stopped).abs() <= 1.0, "Stop moved the chat: {running} → {stopped}");
-    // The pointer off the window: Send takes Stop's place under it, and its tooltip, shown once
-    // the pointer rests long enough, is no part of the golden.
-    let drv = &mut stack.driver;
-    drv.ok(&slopty_e2e::Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
-    seen(drv, "no tooltip", STEP, |d| d.a11y.iter().all(|n| n.role != "Tooltip")).await;
-    let renders = stack.path("");
-    goldens(&mut stack.driver, &renders, "composer-stop-no-shift", &[]).await;
-
-    // A turn that ends on its own.
-    tell(&mut stack, "wait 3").await;
-    let drv = &mut stack.driver;
-    seen(drv, "the Stop button", STEP, |d| node(d, "Button", "Stop").is_some()).await;
-    let working = y_of(drv, "wait 3").await;
-    thread_until(&stack, &agent, "ended the wait", |r| says(r, "Done: waited.")).await;
-    let drv = &mut stack.driver;
-    seen(drv, "the turn ended", STEP, |d| node(d, "Button", "Stop").is_none()).await;
-    let ended = y_of(drv, "wait 3").await;
-    println!("MEASURE end-no-shift: the message at {working:.1} working, {ended:.1} ended");
-    assert!((working - ended).abs() <= 1.0, "a turn's end moved the chat: {working} → {ended}");
-    stack.shutdown().await;
+    seen(drv, "the session read", STEP, |d| node(d, "Status", "Done").is_none()).await;
 }
 
 /// A code block's Copy says Copied in place, the button and the block unmoved; terminal output

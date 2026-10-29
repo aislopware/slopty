@@ -5,8 +5,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-const FILE_MENTION_SCHEME: &str = "slopty-file:";
-
 /// Where a classified file link sits relative to a surface's ordered roots.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FileLinkResolution {
@@ -37,18 +35,6 @@ pub(crate) fn first_root_owning<'a>(
         ClassifiedKind::Relative => roots.into_iter().next().map(|_| FileLinkResolution::Owned {
             root: 0,
             link: classified.link,
-        }),
-        // Mentions resolve inside a root or not at all, exactly like before.
-        ClassifiedKind::Mention => roots.into_iter().enumerate().find_map(|(ix, root)| {
-            resolve_decoded_path(&classified.link.path, root).map(|path| {
-                FileLinkResolution::Owned {
-                    root: ix,
-                    link: WorkspaceFileLink {
-                        path,
-                        ..classified.link.clone()
-                    },
-                }
-            })
         }),
         ClassifiedKind::Absolute => {
             for (ix, root) in roots.into_iter().enumerate() {
@@ -262,8 +248,6 @@ struct ClassifiedLink {
 }
 
 enum ClassifiedKind {
-    /// `slopty-file:` mention — resolution stays inside-or-unresolved.
-    Mention,
     /// Root-relative path.
     Relative,
     /// POSIX-absolute path — inside a root when one owns it, a host file
@@ -286,7 +270,7 @@ pub(crate) fn resolve_workspace_file_link(
 ) -> Option<WorkspaceFileLink> {
     let classified = classify_file_link(target)?;
     match classified.kind {
-        ClassifiedKind::Mention | ClassifiedKind::Relative => {
+        ClassifiedKind::Relative => {
             let path = resolve_decoded_path(&classified.link.path, workspace_root)?;
             Some(WorkspaceFileLink {
                 path,
@@ -316,28 +300,6 @@ fn classify_file_link(target: &str) -> Option<ClassifiedLink> {
     let target = target.trim();
     if target.is_empty() {
         return None;
-    }
-
-    // `slopty-file:` mentions keep their strict canonical spelling: the whole
-    // path decodes once and must re-encode to the identical string.
-    if let Some(encoded) = target.strip_prefix(FILE_MENTION_SCHEME) {
-        let decoded = percent_decode_path(encoded)?;
-        if percent_encode_path(&decoded) != encoded
-            || decoded.ends_with('/')
-            || decoded.contains(':')
-            || !clean_path(&decoded)
-        {
-            return None;
-        }
-        return Some(ClassifiedLink {
-            kind: ClassifiedKind::Mention,
-            link: WorkspaceFileLink {
-                path: decoded,
-                line: None,
-                column: None,
-                outside: false,
-            },
-        });
     }
 
     let file_url = target.starts_with("file://");
@@ -1081,25 +1043,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn resolves_canonical_file_mentions() {
-        assert_eq!(
-            resolve_workspace_file_link("slopty-file:src/a%20file.rs", "/work/comet"),
-            Some(link("src/a file.rs", None, None))
-        );
-        assert!(resolve_workspace_file_link("slopty-file:src/%61.rs", "/work/comet").is_none());
-        assert!(resolve_workspace_file_link("slopty-file:src/", "/work/comet").is_none());
-        // Mentions with dotted-less names keep resolving like before.
-        assert_eq!(
-            resolve_workspace_file_link("slopty-file:Makefile", "/work/comet"),
-            Some(link("Makefile", None, None))
-        );
-        // An absolute mention resolves inside its root or not at all — it is
-        // never an outside link.
-        assert_eq!(
-            resolve_workspace_file_link("slopty-file:/work/comet/a.md", "/work/comet"),
-            Some(link("a.md", None, None))
-        );
-        assert!(resolve_workspace_file_link("slopty-file:/tmp/a.md", "/work/comet").is_none());
-    }
 }

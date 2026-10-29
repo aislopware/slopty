@@ -14,7 +14,7 @@ use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
 use slopty_proto::server::WorkerInfo;
 use slopty_proto::terminal::SessionSummary;
-use slopty_proto::thread::{AgentId, AskId, ThreadId, TurnId};
+use slopty_proto::thread::{AgentId, ThreadId, TurnId};
 
 use crate::resolve::Resolver;
 use crate::view::Overview;
@@ -454,9 +454,7 @@ async fn thread_of<D: Dispatch>(
 
 /// What a thread did after turn `after`, whatever its agent: whole turns, bounded.
 ///
-/// The requests open on it come too. Read by the person (the CLI outside an agent's terminal),
-/// a Claude Code TUI's prompts wait for [`answer_request`] from then on; read by an agent,
-/// nothing changes.
+/// The requests open on it come too, and what it waits on.
 pub async fn read_thread<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     arg: ThreadArg<'_>,
@@ -470,18 +468,6 @@ pub async fn read_thread<D: Dispatch>(
         Outcome::Thread(read) => Ok(*read),
         other => Err(ToolError::unexpected(other)),
     }
-}
-
-/// Answer a request open on a thread by one of its choices: the person's alone.
-pub async fn answer_request<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    arg: ThreadArg<'_>,
-    (ask, choice, message): (String, String, Option<String>),
-    key: Option<IdempotencyKey>,
-) -> Result<(), ToolError> {
-    let of = thread_of(res, arg).await?;
-    let verb = Verb::AnswerRequest { of, ask: AskId(ask), choice, message };
-    done(res.dispatch(), key, verb).await
 }
 
 /// A still picture, as PNG.
@@ -508,15 +494,18 @@ pub async fn capture_still<D: Dispatch>(
     }
 }
 
-/// The agent a name means: `claude` or Claude Code's id, `codex`, `pi`, an ACP agent by the
-/// registry's name or `acp:<name>`.
-#[must_use]
-pub fn agent_id(name: &str) -> AgentId {
+/// The agent a name means: `claude` or Claude Code's id, `codex` or `pi`, each of which Slopty
+/// starts as its own TUI in a terminal.
+///
+/// # Errors
+/// It names no agent Slopty starts.
+pub fn agent_id(name: &str) -> Result<AgentId, ToolError> {
     match name.trim() {
-        "claude" | AgentId::CLAUDE_CODE => AgentId::named(AgentId::CLAUDE_CODE),
-        name @ (AgentId::CODEX | AgentId::PI) => AgentId::named(name),
-        name if name.starts_with(AgentId::ACP_PREFIX) => AgentId::named(name),
-        name => AgentId::acp(name),
+        "claude" | AgentId::CLAUDE_CODE => Ok(AgentId::named(AgentId::CLAUDE_CODE)),
+        name @ (AgentId::CODEX | AgentId::PI) => Ok(AgentId::named(name)),
+        name => Err(ToolError::invalid(format!(
+            "{name:?} is no agent Slopty starts: claude, codex or pi"
+        ))),
     }
 }
 
@@ -557,24 +546,17 @@ pub struct AgentWanted {
 /// when it was given one.
 ///
 /// # Errors
-/// The machine does not resolve, or the server refused the start.
+/// The agent is none Slopty starts, the machine does not resolve, or the server refused the
+/// start.
 pub async fn agent_start<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     wanted: AgentWanted,
     key: Option<IdempotencyKey>,
 ) -> Result<(ThreadId, Option<Worktree>), ToolError> {
     let AgentWanted { worker, folder, prompt, agent, model, effort, worktree, repo } = wanted;
+    let agent = agent.as_deref().map(agent_id).transpose()?;
     let worker = res.worker(Some(&worker)).await?;
-    let start = AgentStart {
-        worker,
-        folder,
-        prompt,
-        agent: agent.as_deref().map(agent_id),
-        model,
-        effort,
-        worktree,
-        repo,
-    };
+    let start = AgentStart { worker, folder, prompt, agent, model, effort, worktree, repo };
     match res.dispatch().send(key, Verb::AgentStart(Box::new(start))).await {
         Outcome::ThreadStarted { thread, worktree } => Ok((thread, worktree.map(|w| *w))),
         other => Err(ToolError::unexpected(other)),

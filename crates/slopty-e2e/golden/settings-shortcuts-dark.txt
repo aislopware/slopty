@@ -2,26 +2,21 @@ Window
 Group │ Settings
 Button │ Back
 TabList │ Settings sections
-Tab │ General
 Tab │ Appearance
 Tab │ Notifications
 Tab │ Shortcuts (focused)
 Tab │ Providers
-Tab │ Permissions
 Tab │ Devices
 Tab │ Files
-Tab │ Archived chats
+Tab │ Archived sessions
 Button │ Server: e2e-server, Connected
 Button │ Close settings
 Button │ Restore defaults
-Button │ Change New chat shortcut: ⌘N
+Button │ Change New session shortcut: ⌘N
 Button │ Change New project shortcut: ⇧⌘N
-Button │ Change Open model picker shortcut: ⌘/
 Button │ Change Next chat or side pane tab shortcut: ⌃⇥
 Button │ Change Previous chat or side pane tab shortcut: ⌃⇧⇥
 Button │ Change Archive chat shortcut: ⇧⌘A
-Button │ Change Open branch picker shortcut: ⌥⌘B
-Button │ Change Next effort level shortcut: ⇧⌘E
 Button │ Change Resume a Claude Code session shortcut: ⇧⌘O
 Button │ Change Next chat that needs you shortcut: ⌘.
 Button │ Change Toggle sidebar shortcut: ⌘B

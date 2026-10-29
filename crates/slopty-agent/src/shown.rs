@@ -4,8 +4,8 @@
 //! content, and a call of Slopty's own `show_visual` or `show_page` as the visual or page it
 //! shows.
 //!
-//! The decoders of Codex, ACP agents and pi use these on their own records; Claude Code's
-//! decoder reads its own blocks ([`crate::conversation`]).
+//! Claude Code's decoder ([`crate::conversation`]) reads its MCP results and Slopty's own calls
+//! through these.
 
 use std::collections::BTreeMap;
 use std::path::Path;

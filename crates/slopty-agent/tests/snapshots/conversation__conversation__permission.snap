@@ -6,18 +6,18 @@ expression: "decode(\"permission\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1792374431846
+      at_ms: 1793276993822
       body:
         Prompt:
           text:
-            text: "Run these three Bash commands one at a time, in order, each as its own call, then reply \"done\": `touch refused.txt`, `touch allowed.txt`, `touch always.txt`. If one is refused, go on with the next."
+            text: "Run these two Bash commands one at a time, in order, each as its own call: `touch refused.txt`, `touch allowed.txt`. If one is refused, go on with the next. Then Read notes.txt and use the Edit tool to change beta to BETA in it, then use the Write tool to create todo.txt containing the single line \"ship\", then reply \"done\"."
             lines: 1
-            chars: 197
+            chars: 325
             full: ~
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1792374433340
+      at_ms: 1793276996305
       body:
         Tool:
           name: Bash
@@ -28,7 +28,7 @@ expression: "decode(\"permission\").snapshot()"
                 lines: 1
                 chars: 17
                 full: ~
-              description: Create refused.txt file
+              description: Create refused.txt in the working directory
               background: false
               task_id: ~
               status: Failed
@@ -44,12 +44,12 @@ expression: "decode(\"permission\").snapshot()"
               lines: 1
               chars: 23
               full: ~
-            at_ms: 1792374433418
+            at_ms: 1793276996383
             images: []
             said: ~
           title: ~
     - id: toolu_02
-      at_ms: 1792374434543
+      at_ms: 1793276998015
       body:
         Tool:
           name: Bash
@@ -60,7 +60,7 @@ expression: "decode(\"permission\").snapshot()"
                 lines: 1
                 chars: 17
                 full: ~
-              description: Create allowed.txt file
+              description: Create allowed.txt in the working directory
               background: false
               task_id: ~
               status: Done
@@ -72,60 +72,107 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1792374434938
+            at_ms: 1793276998631
             images: []
             said: Done
           title: ~
     - id: toolu_03
-      at_ms: 1792374436031
+      at_ms: 1793277000167
       body:
         Tool:
-          name: Bash
+          name: Read
           detail:
-            Bash:
-              command:
-                text: touch always.txt
-                lines: 1
-                chars: 16
-                full: ~
-              description: Create always.txt file
-              background: false
-              task_id: ~
-              status: Done
-              exit_code: 0
-              stdout: ~
-              stderr: ~
-              output_file: ~
-              finished_ms: ~
+            Read:
+              path: /work/notes.txt
+              offset: ~
+              limit: ~
+              start_line: 1
+              lines: 3
+              total_lines: 3
           result:
             status: Ok
             text: ~
-            at_ms: 1792374436116
+            at_ms: 1793277000224
             images: []
-            said: Done
+            said: ~
           title: ~
-    - id: "00000000-0000-4000-8000-000000000034:0"
-      at_ms: 1792374438004
+    - id: toolu_04
+      at_ms: 1793277002041
+      body:
+        Tool:
+          name: Edit
+          detail:
+            Edit:
+              path: /work/notes.txt
+              edits: 1
+              replace_all: false
+              patch:
+                hunks:
+                  - old_start: 1
+                    old_lines: 2
+                    new_start: 1
+                    new_lines: 2
+                    heading: ~
+                    lines:
+                      - " alpha"
+                      - "-beta"
+                      - +BETA
+                added: 1
+                removed: 1
+                clipped_lines: 0
+                full: ~
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1793277002124
+            images: []
+            said: ~
+          title: ~
+    - id: toolu_05
+      at_ms: 1793277003376
+      body:
+        Tool:
+          name: Write
+          detail:
+            Write:
+              path: /work/todo.txt
+              lines: 1
+              created: true
+              patch:
+                hunks: []
+                added: 1
+                removed: 0
+                clipped_lines: 0
+                full: ~
+          result:
+            status: Ok
+            text: ~
+            at_ms: 1793277003444
+            images: []
+            said: ~
+          title: ~
+    - id: "00000000-0000-4000-8000-000000000044:0"
+      at_ms: 1793277004708
       body:
         Text:
-          text: "done\n\n`refused.txt` was refused by the fixture, so it was not created. `allowed.txt` and `always.txt` were created."
-          lines: 3
-          chars: 115
+          text: done
+          lines: 1
+          chars: 4
           full: ~
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1792374431846
-      ended_ms: 1792374438034
+      started_ms: 1793276993822
+      ended_ms: 1793277004732
       models:
         - claude-haiku-5-5
-      requests: 4
+      requests: 6
       usage:
-        input: 8
-        cache_read: 67479
-        cache_write: 7799
-        output: 425
-        thinking: 138
-      context_tokens: 19030
+        input: 12
+        cache_read: 106070
+        cache_write: 8061
+        output: 627
+        thinking: 167
+      context_tokens: 19447
       mode: default
       stop: end_turn

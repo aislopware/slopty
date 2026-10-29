@@ -8,14 +8,13 @@ mod threads {
     use std::path::Path;
 
     use slopty_core::WallMs;
-    use slopty_proto::thread::wire::{Intent, Outcome, TableFrame, ThreadFrame};
+    use slopty_proto::thread::wire::{Outcome, TableFrame, ThreadFrame};
     use slopty_proto::thread::{
-        Action, AgentId, Cap, Changed, Clipped, Cursor, Delivery, Drive, Edge, IntentId, Item,
-        ItemBody, ItemId, PartKey, Pending, PendingState, TableState, ThreadId, ThreadMeta,
-        ThreadState, TreeRef, Turn, TurnId, TurnState, Usage, UserMessage,
+        Action, AgentId, Cap, Changed, Clipped, Cursor, Drive, IntentId, Item, ItemBody, ItemId,
+        PartKey, TableState, ThreadId, ThreadMeta, ThreadState, Turn, TurnId, TurnState, Usage,
     };
     use slopty_worker::thread::log::Limits;
-    use slopty_worker::thread::{Follower, Host, Seated, schedule};
+    use slopty_worker::thread::{Follower, Host, Seated};
 
     fn meta() -> ThreadMeta {
         ThreadMeta {
@@ -201,10 +200,6 @@ mod threads {
         assert_eq!(working.status.phase, Phase::Working, "as its log left it, read whole");
         let looked = host.visit(|s| Some((s.meta.id, s.turns.len(), s.items.len())));
         assert!(looked.contains(&(rests, 1, 0)), "by its head, the items left: {looked:?}");
-        let said = host.visit_whole(|s| {
-            s.items.iter().any(|i| i.id == ItemId("a2".to_owned())).then_some(s.meta.id)
-        });
-        assert_eq!(said, [works], "a search reads the items");
         assert_eq!(host.opened(), 0, "and opens nothing");
         assert_eq!(state(&host, rests).0, before[0], "a first use reads it whole");
         assert_eq!(state(&host, works).0, before[1]);
@@ -540,127 +535,33 @@ mod threads {
         assert_eq!(host.start(id, || panic!("started twice")), Outcome::Started { thread });
     }
 
-    fn prompt(id: &str, n: u32, words: &str) -> Action {
-        Action::ItemStarted(Item {
-            id: ItemId(id.to_owned()),
-            turn: TurnId(n),
-            at_ms: WallMs::ZERO,
-            body: ItemBody::User(UserMessage {
-                text: Clipped::whole(words),
-                images: vec![],
-                command: None,
-                intent: None,
-            }),
-        })
-    }
-
-    /// `action`, the person's item, marked as sent for `intent`.
-    fn sent_as(action: Action, intent: IntentId) -> Action {
-        let Action::ItemStarted(mut item) = action else { return action };
-        if let ItemBody::User(message) = &mut item.body {
-            message.intent = Some(intent);
-        }
-        Action::ItemStarted(item)
-    }
-
-    fn intent_of(state: &ThreadState, id: &str) -> Option<IntentId> {
-        state.items.iter().find(|i| i.id.0 == id).and_then(|i| match &i.body {
-            ItemBody::User(message) => message.intent,
-            _ => None,
-        })
-    }
-
-    /// What the worker adds to a thread and its agent never tells (the intent a message came
-    /// from, each turn's snapshots, what waits to be sent) outlives the thread being read again
-    /// from the agent's session, after a worker restart too. A message that was being sent
-    /// waits to go again: its adapter says once it went.
+    /// The person's own marks on a thread (their name for it, their words for a message)
+    /// outlive the thread being read again from the agent's session, after a worker restart
+    /// too.
     #[tokio::test]
-    async fn what_the_worker_owns_outlives_a_read_again() {
+    async fn the_persons_marks_outlive_a_read_again() {
         let dir = tempfile::tempdir().unwrap();
         let host = open(dir.path());
         let meta = meta();
         let thread = meta.id;
         host.create(meta.clone()).unwrap();
-        let (sent, waiting, sending) = (IntentId::new(), IntentId::new(), IntentId::new());
-        let tree = TreeRef("4b825dc6".to_owned());
-        let pending = |intent, state| Pending {
-            intent,
-            text: "later".to_owned(),
-            attachments: vec![],
-            delivery: Delivery::Queue,
-            state,
-        };
+        let message = IntentId::new();
         host.apply(
             thread,
             vec![
                 turn(1),
-                sent_as(prompt("p1", 1, "  hello there\n"), sent),
-                Action::Snapshot { turn: TurnId(1), edge: Edge::Before, tree: tree.clone() },
-                Action::PendingSet(vec![
-                    pending(waiting, PendingState::Waiting),
-                    pending(sending, PendingState::Sending),
-                ]),
                 Action::NameSet("Greetings".to_owned()),
-                Action::Said { message: sent, words: "hello @there".to_owned() },
+                Action::Said { message, words: "hello @there".to_owned() },
             ],
-        );
-        assert_eq!(
-            intent_of(&state(&host, thread).0, "p1"),
-            Some(sent),
-            "the item is the intent's"
         );
         drop(host);
 
         let host = open(dir.path());
         host.reset(thread, ThreadState::new(meta)).unwrap();
-        host.apply(thread, vec![turn(1), prompt("p1", 1, "hello there")]);
+        host.apply(thread, vec![turn(1)]);
         let (again, _) = state(&host, thread);
-        assert_eq!(intent_of(&again, "p1"), Some(sent));
-        assert_eq!(again.turns.first().and_then(|t| t.before.clone()), Some(tree));
         assert_eq!(again.named, "Greetings", "the person's name for it stays");
-        assert_eq!(again.said.get(&sent).map(String::as_str), Some("hello @there"));
-        let states: Vec<_> = again.pending.iter().map(|p| (p.intent, p.state.clone())).collect();
-        assert_eq!(
-            states,
-            [(waiting, PendingState::Waiting), (sending, PendingState::Waiting)],
-            "the one being sent goes again, under its own delivery"
-        );
-    }
-
-    /// Where a thread was branched from outlives the agent's own account of it: a meta that
-    /// does not say, a read again from nothing, and a worker that starts again. An agent that
-    /// names the thread but not the turn has the turn put back.
-    #[tokio::test]
-    async fn where_a_fork_came_from_outlives_a_read_again_and_a_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open(dir.path());
-        let branch = meta();
-        let thread = branch.id;
-        host.create(branch.clone()).unwrap();
-        let from = slopty_proto::thread::Fork { thread: ThreadId::new(), turn: Some(TurnId(3)) };
-        host.forked(thread, from);
-        let kept = |host: &Host| {
-            let (state, _) = state(host, thread);
-            assert_eq!(state.meta.forked_from, Some(from));
-            assert_eq!(state.meta.origin, ThreadMeta::FORK);
-        };
-        kept(&host);
-        host.apply(thread, vec![Action::Meta(Box::new(branch.clone()))]);
-        kept(&host);
-        let mut named = branch.clone();
-        named.forked_from = Some(slopty_proto::thread::Fork { thread: from.thread, turn: None });
-        host.apply(thread, vec![Action::Meta(Box::new(named))]);
-        kept(&host);
-        let mut fresh = ThreadState::new(branch.clone());
-        fresh.meta.forked_from = None;
-        host.reset(thread, fresh).unwrap();
-        kept(&host);
-        drop(host);
-
-        let host = open(dir.path());
-        kept(&host);
-        host.apply(thread, vec![Action::Meta(Box::new(branch))]);
-        kept(&host);
+        assert_eq!(again.said.get(&message).map(String::as_str), Some("hello @there"));
     }
 
     /// The seat an agent's thread was started at outlives the agent's own account of the
@@ -688,7 +589,6 @@ mod threads {
             let fact = state.meta.facts.get(slopty_proto::agent::SEAT_FACT);
             assert_eq!(fact, Some(&seat.to_string()));
             assert_eq!(state.meta.facts.get(PARENT_FACT), Some(&parent.to_string()));
-            assert_eq!(host.seated_of(thread).as_ref(), Some(&seated));
             assert_eq!(host.seated_at(seat), Some(thread));
         };
         kept(&host);
@@ -700,61 +600,9 @@ mod threads {
 
         let host = open(dir.path());
         kept(&host);
-        assert!(host.env_of(&seated).is_empty(), "nothing until the daemon says");
-        host.set_seat_env(std::sync::Arc::new(|seat| {
-            vec![("SLOPTY_SESSION_TOKEN".to_owned(), format!("token-for-{seat}"))]
-        }));
-        let env = host.env_of(&seated);
-        assert_eq!(env, [("SLOPTY_SESSION_TOKEN".to_owned(), format!("token-for-{seat}"))]);
         let file =
             std::fs::read_to_string(dir.path().join(thread.to_string()).join("seat.json")).unwrap();
         assert!(!file.contains("token"), "no token is kept: {file}");
-    }
-
-    /// An aside keeps its mark through its agent's own account of the thread, a read again and
-    /// a restart, and its row names the thread it was asked beside; kept, it is an ordinary
-    /// thread again; forgotten, it leaves no log behind.
-    #[tokio::test]
-    async fn an_aside_keeps_its_mark_until_it_is_kept_or_forgotten() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open(dir.path());
-        let parent = ThreadId::new();
-        let started = meta();
-        let thread = started.id;
-        host.create(started.clone()).unwrap();
-        assert!(!host.aside(ThreadId::new(), Some(parent)), "no such thread");
-        assert!(host.aside(thread, Some(parent)));
-        let marked = |host: &Host| {
-            let (state, _) = state(host, thread);
-            let row = state.row(WallMs::ZERO);
-            assert_eq!(row.facts.get(ThreadMeta::ASIDE_FACT), Some(&parent.to_string()));
-            state.meta.aside_of()
-        };
-        assert_eq!(marked(&host), Some(parent));
-        host.apply(thread, vec![Action::Meta(Box::new(started.clone()))]);
-        assert_eq!(marked(&host), Some(parent), "the agent's account knows nothing of it");
-        host.reset(thread, ThreadState::new(started.clone())).unwrap();
-        assert_eq!(marked(&host), Some(parent), "read again");
-        drop(host);
-
-        let host = open(dir.path());
-        assert_eq!(marked(&host), Some(parent), "after a restart");
-        assert!(host.aside(thread, None));
-        host.apply(thread, vec![Action::Meta(Box::new(started))]);
-        assert_eq!(state(&host, thread).0.meta.aside_of(), None, "kept: an ordinary thread");
-        assert!(host.aside(thread, Some(parent)));
-        host.remove(thread).unwrap();
-        assert!(host.state(thread).is_none());
-        assert!(!dir.path().join(thread.to_string()).exists(), "no log left behind");
-    }
-
-    fn scheduled(text: &str, delivery: Delivery) -> Intent {
-        Intent::Send { text: text.to_owned(), delivery, attachments: vec![] }
-    }
-
-    fn pending_of(host: &Host, thread: ThreadId) -> Vec<(String, Delivery, PendingState)> {
-        let (state, _) = state(host, thread);
-        state.pending.iter().map(|p| (p.text.clone(), p.delivery, p.state.clone())).collect()
     }
 
     /// A thread whose log no longer reads (an older build wrote it) goes with its directory, so
@@ -803,139 +651,6 @@ mod threads {
         assert_eq!(again.meta.parent, Some(link), "read again from nothing");
     }
 
-    /// A message the person schedules waits in the thread's pending list on the worker, once
-    /// per intent, whatever list the agent's adapter tells, and outlives a restart; it is taken
-    /// back or changed there, and one being sent as the worker stopped comes back held, never
-    /// sent twice. A message cannot be scheduled on a thread that cannot take it.
-    #[tokio::test]
-    async fn a_scheduled_message_waits_on_the_worker_and_outlives_a_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open(dir.path());
-        let mut plan = meta();
-        plan.caps.push(Cap::named(Cap::SCHEDULE));
-        let thread = plan.id;
-        host.create(plan.clone()).unwrap();
-        let at = Delivery::At { at_ms: WallMs::from_millis(u64::MAX) };
-        let after = at;
-        let (first, second) = (IntentId::new(), IntentId::new());
-        let act = |id, intent: &Intent| schedule::act(&host, thread, id, intent);
-        assert_eq!(act(first, &scheduled("Run the checks", at)), Some(Outcome::Accepted));
-        assert_eq!(act(first, &scheduled("Run the checks", at)), Some(Outcome::Accepted), "once");
-        assert_eq!(act(second, &scheduled("Review it", after)), Some(Outcome::Accepted));
-        let waiting = |text: &str, delivery| (text.to_owned(), delivery, PendingState::Waiting);
-        let both = vec![waiting("Run the checks", at), waiting("Review it", after)];
-        assert_eq!(pending_of(&host, thread), both);
-        assert!(host.is_scheduled(thread, first));
-        let now =
-            Intent::Send { text: "Now".to_owned(), delivery: Delivery::Steer, attachments: vec![] };
-        assert_eq!(act(IntentId::new(), &now), None, "a message now is the agent's");
-
-        // The adapter tells its own queue, which knows nothing of them: they stay.
-        let queued = Pending {
-            intent: IntentId::new(),
-            text: "Then this".to_owned(),
-            attachments: vec![],
-            delivery: Delivery::Queue,
-            state: PendingState::Waiting,
-        };
-        host.apply(thread, vec![Action::PendingSet(vec![queued])]);
-        let mut three = vec![waiting("Then this", Delivery::Queue)];
-        three.extend(both.iter().cloned());
-        assert_eq!(pending_of(&host, thread), three);
-        host.apply(thread, vec![Action::PendingSet(Vec::new())]);
-        assert_eq!(pending_of(&host, thread), both);
-
-        let edit = Intent::Edit {
-            pending: second,
-            text: "Review it all".to_owned(),
-            attachments: Vec::new(),
-        };
-        assert_eq!(act(IntentId::new(), &edit), Some(Outcome::Done));
-        let edited = vec![waiting("Run the checks", at), waiting("Review it all", after)];
-        assert_eq!(pending_of(&host, thread), edited);
-        drop(host);
-
-        let host = open(dir.path());
-        assert_eq!(pending_of(&host, thread), edited, "kept through a restart");
-        let (due, next) = host.due(WallMs::now());
-        assert_eq!((due, next), (Vec::new(), Some(WallMs::from_millis(u64::MAX))));
-        let promote = Intent::Promote { pending: first };
-        assert_eq!(schedule::act(&host, thread, IntentId::new(), &promote), Some(Outcome::Done));
-        let (due, _) = host.due(WallMs::now());
-        assert_eq!(due.len(), 1, "sent now: {due:?}");
-        assert_eq!(due[0].intent, first);
-        let send = Intent::Send {
-            text: "Run the checks".to_owned(),
-            attachments: vec![],
-            delivery: Delivery::Queue,
-        };
-        assert_eq!(due[0].send, send, "queued, as the agent queues");
-        assert_eq!(pending_of(&host, thread)[0].2, PendingState::Sending);
-        assert_eq!(host.due(WallMs::now()).0, Vec::new(), "never twice");
-        drop(host);
-
-        // The worker stopped while it went: held, saying it may have gone.
-        let host = open(dir.path());
-        let cut = PendingState::Held { reason: schedule::CUT_OFF.to_owned() };
-        assert_eq!(pending_of(&host, thread)[0].2, cut);
-        assert_eq!(host.due(WallMs::now()).0, Vec::new(), "never sent again");
-        let withdraw = Intent::Withdraw { pending: first };
-        assert_eq!(schedule::act(&host, thread, IntentId::new(), &withdraw), Some(Outcome::Done));
-        // One whose moment has not come waits for it.
-        assert_eq!(host.due(WallMs::now()).0, Vec::new());
-        assert_eq!(pending_of(&host, thread), [waiting("Review it all", after)]);
-
-        let mut plain = meta();
-        plain.caps.clear();
-        let other = plain.id;
-        host.create(plain).unwrap();
-        let cannot = schedule::act(&host, other, IntentId::new(), &scheduled("Hi", at)).unwrap();
-        assert_eq!(cannot, Outcome::Unsupported { cap: Cap::named(Cap::SCHEDULE) });
-    }
-
-    /// The worker sends each scheduled message at its time, once. One its agent takes leaves
-    /// the list; one it turns down stays, held with the reason.
-    #[tokio::test]
-    async fn the_worker_sends_a_scheduled_message_at_its_moment() {
-        let dir = tempfile::tempdir().unwrap();
-        let host = open(dir.path());
-        let mut plan = meta();
-        plan.caps.push(Cap::named(Cap::SCHEDULE));
-        let thread = plan.id;
-        host.create(plan).unwrap();
-
-        let (tx, mut sent) = tokio::sync::mpsc::unbounded_channel();
-        let fire: schedule::Fire = std::sync::Arc::new(move |thread, id, intent| {
-            let Intent::Send { text, .. } = &intent else { panic!("{intent:?}") };
-            let outcome = if text == "Turned down" {
-                Outcome::Refused { reason: "The agent is gone".to_owned() }
-            } else {
-                Outcome::Done
-            };
-            tx.send((thread, id, intent)).unwrap();
-            outcome
-        });
-        let _scheduler = schedule::spawn(host.clone(), fire);
-        let soon = WallMs::from_millis(WallMs::now().as_millis() + 150);
-        let (timed, down) = (IntentId::new(), IntentId::new());
-        let act = |id, intent: &Intent| schedule::act(&host, thread, id, intent);
-        act(timed, &scheduled("On time", Delivery::At { at_ms: soon }));
-        act(down, &scheduled("Turned down", Delivery::At { at_ms: WallMs::ZERO }));
-
-        let (_, id, _) = next(&mut sent).await;
-        assert_eq!(id, schedule::sent_as(down), "the one already due first");
-        let (to, id, intent) = next(&mut sent).await;
-        assert!(WallMs::now() >= soon, "not before its time");
-        assert_eq!((to, id), (thread, schedule::sent_as(timed)));
-        assert!(matches!(intent, Intent::Send { delivery: Delivery::Queue, .. }));
-        let held = PendingState::Held { reason: "The agent is gone".to_owned() };
-        let left: Vec<(String, PendingState)> =
-            pending_of(&host, thread).into_iter().map(|(text, _, state)| (text, state)).collect();
-        assert_eq!(left, [("Turned down".to_owned(), held)], "taken ones leave; that one stays");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(sent.try_recv().is_err(), "each once");
-    }
-
     /// A start is kept from when it is taken up until its outcome is recorded, across a
     /// restart: as asked, then marked once its agent opens, and gone with its outcome, which a
     /// repeat of the id gets back. One already answered is not kept again.
@@ -979,15 +694,5 @@ mod threads {
         let refused = Outcome::Refused { reason: "no".to_owned() };
         assert_eq!(host.record_start(other, refused.clone()), refused);
         assert!(open(dir.path()).starts_under_way().is_empty(), "a refusal settles it too");
-    }
-
-    type Sent = (ThreadId, IntentId, Intent);
-
-    /// What the scheduler sent next.
-    async fn next(sent: &mut tokio::sync::mpsc::UnboundedReceiver<Sent>) -> Sent {
-        tokio::time::timeout(std::time::Duration::from_secs(10), sent.recv())
-            .await
-            .expect("sent in time")
-            .expect("the scheduler runs")
     }
 }

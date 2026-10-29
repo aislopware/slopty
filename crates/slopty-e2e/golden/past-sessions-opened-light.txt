@@ -11,28 +11,30 @@ Button │ Past session: Profile the startup path, 1d
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group (focused)
+Terminal │ shell │ >
+Heading │ Explain the parser
 Article │ You
 Paragraph │ Explain the parser
 Button │ Copy message
-Button │ Rewind…
 Article │ Claude Code
 Paragraph │ The parser reads tokens one by one.
 Article │ You
 Paragraph │ Now add tests for it
 Button │ Copy message
-Button │ Rewind…
 Article │ Claude Code
 Paragraph │ Tests added for the parser.
-Button │ Attach images
-MultilineTextInput │ Do anything… (focused)
-Button │ Model: Opus 5.5, High
-Button │ Send message
-Button │ Mode: Auto
+Button │ Copy message
+Splitter │ Resize side pane
 Button │ Open in…
-Button │ Show chat details
+Button │ Hide inspector
+Button │ Inspector
+Button │ Close Inspector
+Button │ New tab
+Button │ Expand side pane
 Button │ Show files panel
-Button │ Show side pane
+Button │ Hide side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ New chat
+Button │ New session

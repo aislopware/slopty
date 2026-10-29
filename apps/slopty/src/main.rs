@@ -30,7 +30,7 @@ pub fn main() -> Result<()> {
     // The shell's application: its icons and fonts, its image fetches and its Dock-icon reopen.
     let app = slopty_shell::application(handle.clone());
     // A `slopty://` link the system opened the app with goes to the workspace, held until it
-    // listens (`slopty_app::open_link`): a server to connect to, or a session to start.
+    // listens (`slopty_app::open_link`): a server to connect to.
     app.on_open_urls(|urls| urls.into_iter().for_each(slopty_app::open_link));
     app.run(move |cx| {
         gpui_kit::init(cx);
@@ -42,12 +42,17 @@ pub fn main() -> Result<()> {
 /// The size past which the app's log file is begun afresh at launch.
 const LOG_CAP: u64 = 32 << 20;
 
-/// Where the log goes when the app has no terminal, opened from the Finder or the Dock: beside
-/// the server's and the worker's (`~/Library/Logs/Slopty/slopty-app.log`), so what the app saw
-/// of a link that went quiet can be read afterwards. Begun afresh once it passes [`LOG_CAP`].
+/// Where the log goes when nothing reads the app's standard error, as when it was opened from
+/// the Finder or the Dock (`/dev/null`): beside the server's and the worker's
+/// (`~/Library/Logs/Slopty/slopty-app.log`), so what the app saw of a link that went quiet can be
+/// read afterwards. A terminal, or a pipe or file the app was started with (an e2e run's
+/// harness), reads it there instead. Begun afresh once it passes [`LOG_CAP`].
 fn log_file() -> Option<std::fs::File> {
     use std::io::IsTerminal as _;
-    if std::io::stderr().is_terminal() {
+    use std::os::unix::fs::FileTypeExt as _;
+    let unread = !std::io::stderr().is_terminal()
+        && std::fs::metadata("/dev/fd/2").is_ok_and(|meta| meta.file_type().is_char_device());
+    if !unread {
         return None;
     }
     let dir = slopty_platform::dirs::home().join("Library").join("Logs").join("Slopty");

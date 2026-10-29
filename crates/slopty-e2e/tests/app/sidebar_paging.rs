@@ -58,25 +58,20 @@ const STATES: &str = "states";
 /// A title longer than the sidebar is wide.
 const LONG: &str = "Refactor the pairing handshake so a phone that scans an expired code learns why instead of waiting";
 
-/// What the stand-in is asked, and in which project: each prompt's first word picks its turn
-/// (`slopty_testkit::claude_stream`). Started oldest first.
+/// What the stand-in TUI is asked, and in which project: each prompt's first word picks its
+/// turn (`slopty_testkit::claude_tui`). Started oldest first.
 const AT_REST: [(&str, &str); 4] = [
     ("slopty", "Tidy the README's install section"),
     ("better-update", "hello"),
     ("slopty", "hello"),
     ("slopty", LONG),
 ];
-const LIVE: [&str; 6] = [
-    // A rate limit: the turn fails.
-    "limit the sidebar to ten rows per group",
-    // A command left in the background: at work on its own.
-    "background cargo build --release",
-    // A plan, a question and an approval: each waits on the person.
-    "plan the settings split into pages",
+const LIVE: [&str; 3] = [
+    // Turns that go on until interrupted: at work.
+    "hold the settings split into pages",
+    "hold a survey of the crates for dead code",
+    // A question: it waits on the person.
     "ask which accent reads best on glass",
-    "bash cargo test --workspace",
-    // A subagent that holds: at work.
-    "agent survey the crates for dead code",
 ];
 
 /// The masks over every sidebar row's time, which says the run's own moment ("now", "1m"):
@@ -100,19 +95,13 @@ fn row_times(
         .collect()
 }
 
-/// Every state at once: Needs you holds the failed turn and the three that wait on the person,
-/// each saying why; Working holds the agent at work and the one at work on its own; Done holds
-/// the rest, the two "hello" rows told apart by their projects; the open chat is read.
+/// Every state at once: Needs you holds the session whose question waits on the person, saying
+/// why; Working holds the two at work; Done holds the rest, the two "hello" rows told apart by
+/// their projects; the open session is read.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn every_state_reads_at_a_glance() {
-    let mut stack = ServedApp::launch_with(
-        STATES,
-        &[],
-        &[("STUB_AGENT_HOLD_MS", "900000"), ("STUB_LIMIT_RESET_S", "1")],
-    )
-    .await
-    .unwrap();
+    let mut stack = ServedApp::launch(STATES).await.unwrap();
     let project = |name: &str| {
         let path = stack.path(name);
         std::fs::create_dir_all(&path).unwrap();
@@ -133,7 +122,7 @@ async fn every_state_reads_at_a_glance() {
         d.a11y.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some(words))
     };
     let grouped = seen(drv, "every group", TURN, |d| {
-        header(d, "Needs you, 4") && header(d, "Working, 2") && header(d, "Done, 4")
+        header(d, "Needs you, 1") && header(d, "Working, 2") && header(d, "Done, 4")
     })
     .await;
     // The read chat: open it.
@@ -157,17 +146,10 @@ async fn every_state_reads_at_a_glance() {
             .iter()
             .any(|n| n.role == role && n.label.as_deref().is_some_and(|l| l.starts_with(words)))
     };
-    for status in ["Needs you", "Failed", "Working", "Background work"] {
+    for status in ["Needs you", "Working"] {
         assert!(said("Status", status), "a row says {status}:\n{text}");
     }
-    for why in [
-        "Waiting for your answer",
-        "Needs your approval · Run cargo",
-        "Needs your approval · Wants to leave plan mode",
-        "Background work",
-    ] {
-        assert!(said("Label", why), "a row says why: {why}:\n{text}");
-    }
+    assert!(said("Label", "Waiting for your answer"), "the asking row says why:\n{text}");
     assert!(crate::served::unread(&dump, "hello, slopty"), "an answer nobody read:\n{text}");
     // The pointer off the sidebar, so no row is lit and no hover card floats.
     drv.ok(&slopty_e2e::Command::Move { x: 800.0, y: 400.0 }).await.unwrap();

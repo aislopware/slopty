@@ -10,12 +10,11 @@
 //! over every thread ([`Host::visit`]). A thread whose head is missing or behind its log is
 //! opened then, and its head written, so the next start reads the head alone.
 //!
-//! A thread opened goes back to its head once it has rested ([`Host::rest`]): nobody follows it,
-//! nothing used it for a while, and it holds nothing the worker alone knows (a message
-//! scheduled). Its next use opens it again, the same, so a
-//! worker that runs for weeks holds the threads in use and not every thread ever opened.
+//! A thread opened goes back to its head once it has rested ([`Host::rest`]): nobody follows it
+//! and nothing used it for a while. Its next use opens it again, the same, so a worker that runs
+//! for weeks holds the threads in use and not every thread ever opened.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,42 +23,18 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, Page, Start, TableFrame};
 use slopty_proto::thread::{
-    Action, AgentId, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, Link, Pending, PendingState,
-    Phase, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId,
+    Action, AgentId, Cursor, IntentId, ItemBody, Link, Phase, Status, ThreadId, ThreadMeta,
+    ThreadState, ToolCall, ToolState, TurnId,
 };
 use tokio::sync::{broadcast, watch};
 
+use super::Seated;
 use super::intents::Intents;
 use super::log::{Catchup, Head, Limits, Log};
 use super::table::Table;
-use super::{SeatEnv, Seated};
 
 /// Batches a slow follower may fall behind by before it catches up from the log instead.
 const FEED_BATCHES: usize = 1024;
-
-/// Turn edges a slow listener may fall behind by; one that lags misses those snapshots.
-const EDGES: usize = 256;
-
-/// A moment of a thread's work a snapshot is taken at ([`Host::edges`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TurnEdge {
-    /// The thread.
-    pub thread: ThreadId,
-    /// What happened.
-    pub moment: Moment,
-}
-
-/// What a [`TurnEdge`] is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Moment {
-    /// The agent started working: the earliest word of a turn, which some adapters have
-    /// before the turn itself shows.
-    Busy,
-    /// A turn began, as the thread's last.
-    Began(TurnId),
-    /// A turn ended, as the thread's last.
-    Ended(TurnId),
-}
 
 /// Tool calls a slow listener may fall behind by; one that lags misses those calls.
 const TOOLS: usize = 256;
@@ -76,8 +51,6 @@ pub struct ToolSeen {
 /// What the host tells beside the actions themselves.
 #[derive(Debug)]
 struct Heard {
-    /// Turn edges ([`Host::edges`]).
-    edges: broadcast::Sender<TurnEdge>,
     /// Tool calls ([`Host::tools`]).
     tools: broadcast::Sender<ToolSeen>,
 }
@@ -121,25 +94,10 @@ struct Inner {
     /// Intents that start a thread, which have no thread of their own to be kept with yet.
     starts: Intents,
     heard: Heard,
-    /// What the worker adds to a seat's variables, once the daemon says.
-    seat_env: Option<EnvOf>,
     /// Slopty's CLI, whose `mcp` serves Slopty's tools, once the daemon found it.
     tools_cli: Option<String>,
-    /// Told whenever a scheduled message is added or changed ([`Host::schedule_changed`]).
-    scheduling: Arc<tokio::sync::Notify>,
     /// The starts under way, as kept ([`Host::start_under_way`]).
     under_way: Vec<UnderWay>,
-    /// How often a lease stamps its thread ([`Host::set_lease_every`]).
-    lease_every: std::time::Duration,
-}
-
-/// A [`SeatEnv`], which shows as nothing more.
-struct EnvOf(SeatEnv);
-
-impl std::fmt::Debug for EnvOf {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SeatEnv")
-    }
 }
 
 /// The file in a thread's directory that keeps the seat it was started at ([`Seated`]).
@@ -175,35 +133,14 @@ struct Hosted {
 }
 
 impl Hosted {
-    /// Whether it can go back to its head: nobody follows it, nothing used it since `before`,
-    /// and its log and files hold all of it, since nothing waits on what only the worker knows.
+    /// Whether it can go back to its head: nobody follows it and nothing used it since
+    /// `before`. Its log and files hold all of it.
     fn resting(&self, before: std::time::Instant) -> bool {
-        self.used <= before
-            && self.feed.receiver_count() == 0
-            && self.own.scheduled.is_empty()
-            && self.trees_kept()
+        self.used <= before && self.feed.receiver_count() == 0
     }
 
-    /// Whether every snapshot the worker took is on a turn of the state, where the log keeps
-    /// it: one taken as the agent got busy waits in [`Own`] for its turn to begin.
-    fn trees_kept(&self) -> bool {
-        if self.own.trees.is_empty() {
-            return true;
-        }
-        let turns: HashSet<TurnId> = self.log.state().turns.iter().map(|turn| turn.id).collect();
-        self.own.trees.keys().all(|turn| turns.contains(turn))
-    }
-}
-
-impl Hosted {
     fn open(dir: &Path, log: Log) -> io::Result<Self> {
-        let mut log = log;
         let mut own = Own::of(log.state());
-        let mut pending = log.state().pending.clone();
-        own.pending(&mut pending);
-        if pending != log.state().pending {
-            log.append(&[Action::PendingSet(pending)])?;
-        }
         own.seated = match std::fs::read(dir.join(SEAT_FILE)) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .inspect_err(|e| tracing::warn!(dir = %dir.display(), "a seat is unreadable: {e}"))
@@ -220,79 +157,29 @@ impl Hosted {
     }
 }
 
-/// What the worker adds to a thread that its adapter never tells: which message an intent
-/// sent, and each turn's snapshots. A thread read again from its agent's session
-/// ([`Host::reset`]) gets them back as the adapter tells its items and turns again.
+/// What the worker adds to a thread that its agent's records never tell. A thread read again
+/// from its agent's session ([`Host::reset`]) keeps it.
 #[derive(Debug, Default)]
 struct Own {
-    /// The intent each of the person's items came from.
-    sent: HashMap<ItemId, IntentId>,
-    /// Each turn's snapshots.
-    trees: HashMap<TurnId, (Option<TreeRef>, Option<TreeRef>)>,
-    /// Where the thread branched, when the worker forked it: an agent that records a fork names
-    /// only the thread it came from, or nothing.
-    fork: Option<Fork>,
-    /// The seat the server started it at ([`slopty_proto::agent::SEAT_FACT`]): an adapter
-    /// that tells the thread's metadata again knows nothing of it.
+    /// The seat the server started it at ([`slopty_proto::agent::SEAT_FACT`]): an agent's
+    /// records that tell the thread's metadata again know nothing of it.
     seat: Option<String>,
     /// The seat it was started at, all of it, kept in its directory ([`SEAT_FILE`]).
     seated: Option<Seated>,
-    /// The thread it is an aside of, while it is one ([`ThreadMeta::ASIDE_FACT`]).
-    aside: Option<ThreadId>,
-    /// The call it hangs off, once its adapter said: an adapter that reads a subagent again from
-    /// nothing may know its parent only later, and a thread never moves to another.
+    /// The call it hangs off, once its records said: a subagent read again from nothing may
+    /// name its parent only later, and a thread never moves to another.
     parent: Option<Link>,
-    /// The messages the worker holds until their moment ([`super::schedule`]), which no
-    /// adapter knows: put back in every pending list an adapter tells.
-    scheduled: Vec<Pending>,
 }
 
 impl Own {
     fn of(state: &ThreadState) -> Self {
-        let sent = state
-            .items
-            .iter()
-            .filter_map(|item| match &item.body {
-                ItemBody::User(message) => message.intent.map(|intent| (item.id.clone(), intent)),
-                _ => None,
-            })
-            .collect();
-        let trees = state
-            .turns
-            .iter()
-            .filter(|t| t.before.is_some() || t.after.is_some())
-            .map(|t| (t.id, (t.before.clone(), t.after.clone())))
-            .collect();
-        let fork = state.meta.forked_from;
         let seat = state.meta.facts.get(slopty_proto::agent::SEAT_FACT).cloned();
-        let aside = state.meta.aside_of();
-        let parent = state.meta.parent.clone();
-        // One going as the worker stopped is never sent again.
-        let scheduled = state
-            .pending
-            .iter()
-            .filter(|p| p.delivery.is_kept())
-            .map(|p| match p.state {
-                PendingState::Sending => Pending {
-                    state: PendingState::Held { reason: super::schedule::CUT_OFF.to_owned() },
-                    ..p.clone()
-                },
-                _ => p.clone(),
-            })
-            .collect();
-        Self { sent, trees, fork, seat, seated: None, aside, parent, scheduled }
+        Self { seat, seated: None, parent: state.meta.parent.clone() }
     }
 
-    /// `pending`, an adapter's list, with the messages the worker holds put back after it.
-    fn pending(&self, pending: &mut Vec<Pending>) {
-        pending.retain(|p| !p.delivery.is_kept());
-        pending.extend(self.scheduled.iter().cloned());
-    }
-
-    /// `meta` with what the worker knows of it: where it branched, the seat it was started at,
-    /// whether it is an aside, the call it hangs off.
+    /// `meta` with what the worker knows of it: the seat it was started at, the call it hangs
+    /// off.
     fn meta(&mut self, meta: &mut ThreadMeta) {
-        self.branched(meta);
         match &meta.parent {
             Some(parent) => self.parent = Some(parent.clone()),
             None => meta.parent.clone_from(&self.parent),
@@ -303,53 +190,13 @@ impl Own {
         for (name, value) in self.seated.iter().flat_map(|seated| &seated.facts) {
             meta.facts.insert(name.clone(), value.clone());
         }
-        match self.aside {
-            Some(of) => meta.facts.insert(ThreadMeta::ASIDE_FACT.to_owned(), of.to_string()),
-            None => meta.facts.remove(ThreadMeta::ASIDE_FACT),
-        };
     }
 
-    /// `meta` with where the worker branched it, unless its agent says more: an agent that
-    /// records a fork knows the thread it came from, not the turn.
-    fn branched(&self, meta: &mut ThreadMeta) {
-        let Some(fork) = self.fork else { return };
-        if meta.forked_from.is_none_or(|t| t.thread == fork.thread && t.turn.is_none()) {
-            meta.forked_from = Some(fork);
-            ThreadMeta::FORK.clone_into(&mut meta.origin);
-        }
-    }
-
-    /// `actions` with what the worker knows put back in: an item's intent, a turn's trees,
-    /// where the thread branched.
+    /// `actions` with what the worker knows put back in.
     fn mark(&mut self, actions: &mut [Action]) {
         for action in actions {
-            match action {
-                Action::Meta(meta) => self.meta(meta),
-                Action::PendingSet(pending) => self.pending(pending),
-                Action::ItemStarted(item)
-                | Action::ItemUpdated(item)
-                | Action::ItemCompleted(item) => {
-                    let ItemBody::User(message) = &mut item.body else { continue };
-                    if let Some(intent) = message.intent {
-                        self.sent.insert(item.id.clone(), intent);
-                        continue;
-                    }
-                    message.intent = self.sent.get(&item.id).copied();
-                }
-                Action::TurnStarted(turn) => {
-                    if let Some((before, after)) = self.trees.get(&turn.id) {
-                        turn.before = turn.before.take().or_else(|| before.clone());
-                        turn.after = turn.after.take().or_else(|| after.clone());
-                    }
-                }
-                Action::Snapshot { turn, edge, tree } => {
-                    let trees = self.trees.entry(*turn).or_default();
-                    match edge {
-                        Edge::Before => trees.0 = Some(tree.clone()),
-                        Edge::After => trees.1 = Some(tree.clone()),
-                    }
-                }
-                _ => {}
+            if let Action::Meta(meta) = action {
+                self.meta(meta);
             }
         }
     }
@@ -430,15 +277,9 @@ impl Host {
                 cold,
                 table,
                 starts,
-                heard: Heard {
-                    edges: broadcast::Sender::new(EDGES),
-                    tools: broadcast::Sender::new(TOOLS),
-                },
-                seat_env: None,
+                heard: Heard { tools: broadcast::Sender::new(TOOLS) },
                 tools_cli: None,
-                scheduling: Arc::default(),
                 under_way,
-                lease_every: LEASE_EVERY,
             })),
         };
         Ok(host)
@@ -513,7 +354,7 @@ impl Host {
     /// taken for one thread at a time, so an adapter waits on no more than one thread's look.
     ///
     /// A thread not opened yet is seen by its head: everything but its items, which stay on
-    /// disk ([`Self::visit_whole`] reads them).
+    /// disk.
     pub fn visit<T>(&self, mut see: impl FnMut(&ThreadState) -> Option<T>) -> Vec<T> {
         self.threads()
             .into_iter()
@@ -527,27 +368,25 @@ impl Host {
             .collect()
     }
 
-    /// [`Self::visit`] with every thread whole, its items too: a thread not opened yet is read
-    /// from its log for the look alone and stays unopened. The reading is done off the lock.
-    pub fn visit_whole<T>(&self, mut see: impl FnMut(&ThreadState) -> Option<T>) -> Vec<T> {
-        self.threads()
-            .into_iter()
-            .filter_map(|thread| {
-                let inner = self.inner.lock();
-                if let Some(hosted) = inner.threads.get(&thread) {
-                    return see(hosted.log.state());
-                }
-                let dir = inner.dir.join(thread.to_string());
-                drop(inner);
-                match Log::read(&dir) {
-                    Ok(state) => see(&state),
-                    Err(e) => {
-                        tracing::debug!(%thread, "a thread's log did not read: {e}");
-                        None
-                    }
-                }
-            })
-            .collect()
+    /// What `thread` is (its meta) and how it stands, without its items, if it is held.
+    #[must_use]
+    pub fn meta(&self, thread: ThreadId) -> Option<(ThreadMeta, Status)> {
+        let inner = self.inner.lock();
+        let state = match inner.threads.get(&thread) {
+            Some(hosted) => hosted.log.state(),
+            None => &inner.cold.get(&thread)?.state,
+        };
+        Some((state.meta.clone(), state.status.clone()))
+    }
+
+    /// The thread whose agent runs in terminal `terminal` now, as its
+    /// [`ThreadMeta::TERMINAL_FACT`] says, and its status.
+    #[must_use]
+    pub fn at_terminal(&self, terminal: SessionId) -> Option<(ThreadId, Status)> {
+        let mut found = self.visit(|s| {
+            (s.meta.terminal() == Some(terminal)).then(|| (s.meta.id, s.status.clone()))
+        });
+        found.pop()
     }
 
     /// Apply `actions` to `thread`, log them and send them to its followers; the cursor after
@@ -601,23 +440,15 @@ impl Host {
         let inner = &mut *guard;
         inner.load(thread);
         let Some(hosted) = inner.threads.get_mut(&thread) else { return Ok(None) };
-        // What waits to be sent, whether the tree is to review and the person's own marks
-        // (how far they have seen it, what they were writing, their name for it and their own
-        // words for its messages) are the worker's, which no agent's session has: they stay.
-        // One that was being sent waits to go again: its adapter says once it went.
+        // The person's own marks (how far they have seen it, what they were writing, their name
+        // for it and their own words for its messages) are the worker's, which no agent's
+        // session has: they stay.
         let mut state = state;
         hosted.own.meta(&mut state.meta);
-        state.pending.clone_from(&hosted.log.state().pending);
-        state.to_review = hosted.log.state().to_review;
         state.seen = hosted.log.state().seen;
         state.draft.clone_from(&hosted.log.state().draft);
         state.named.clone_from(&hosted.log.state().named);
         state.said.clone_from(&hosted.log.state().said);
-        for pending in &mut state.pending {
-            if pending.state == PendingState::Sending {
-                pending.state = PendingState::Waiting;
-            }
-        }
         hosted.log.reset(state)?;
         let cursor = hosted.log.cursor();
         let row = hosted.log.state().row(WallMs::now());
@@ -649,38 +480,11 @@ impl Host {
         }
     }
 
-    /// `thread` is an aside of thread `of` from now on, across a restart and a read again from
-    /// its agent; with `None`, an ordinary thread again. Whether it is held.
-    pub fn aside(&self, thread: ThreadId, of: Option<ThreadId>) -> bool {
-        let meta = {
-            let mut inner = self.inner.lock();
-            inner.load(thread);
-            let Some(hosted) = inner.threads.get_mut(&thread) else { return false };
-            hosted.own.aside = of;
-            hosted.log.state().meta.clone()
-        };
-        self.apply(thread, vec![Action::Meta(Box::new(meta))]);
-        true
-    }
-
-    /// `thread` was branched off another as `fork` says, by the worker: kept with it from now on,
-    /// whatever its adapter tells of it, across a restart and a read again from its agent.
-    pub fn forked(&self, thread: ThreadId, fork: Fork) {
-        let meta = {
-            let mut inner = self.inner.lock();
-            inner.load(thread);
-            let Some(hosted) = inner.threads.get_mut(&thread) else { return };
-            hosted.own.fork = Some(fork);
-            hosted.log.state().meta.clone()
-        };
-        self.apply(thread, vec![Action::Meta(Box::new(meta))]);
-    }
-
     /// `thread` was started at `seated`'s seat: its row says so
     /// ([`slopty_proto::agent::SEAT_FACT`], and its facts) from now on, whatever its adapter
     /// tells of it,
     /// and the seat is kept in its directory, so the thread taken up again after a restart is
-    /// given the same ([`Self::seated_of`]). A seat that cannot be written is warned of.
+    /// given the same. A seat that cannot be written is warned of.
     pub fn seated(&self, thread: ThreadId, seated: &Seated) {
         let meta = {
             let mut guard = self.inner.lock();
@@ -698,30 +502,6 @@ impl Host {
         self.apply(thread, vec![Action::Meta(Box::new(meta))]);
     }
 
-    /// `agent`'s threads in folder `cwd`, by their own sessions' ids, each with when it began:
-    /// as their heads say, so no log is opened.
-    #[must_use]
-    pub fn begun_in(&self, agent: &AgentId, cwd: &str) -> Vec<(String, WallMs)> {
-        let inner = self.inner.lock();
-        let open = inner.threads.values().map(|hosted| &hosted.log.state().meta);
-        let cold = inner.cold.values().map(|head| &head.state.meta);
-        open.chain(cold)
-            .filter(|meta| meta.agent == *agent && meta.cwd == cwd)
-            .map(|meta| (meta.native.clone(), meta.created_ms))
-            .collect()
-    }
-
-    /// The seat `thread` was started at, if it was ([`Self::seated`]).
-    #[must_use]
-    pub fn seated_of(&self, thread: ThreadId) -> Option<Seated> {
-        self.inner.lock().hosted(thread)?.own.seated.clone()
-    }
-
-    /// Give the worker's own variables for a seat to every seated agent from now on.
-    pub fn set_seat_env(&self, env: SeatEnv) {
-        self.inner.lock().seat_env = Some(EnvOf(env));
-    }
-
     /// Serve Slopty's tools through `cli mcp` to every agent started from now on, the person's
     /// own and seated ones alike.
     pub fn set_tools_cli(&self, cli: Option<String>) {
@@ -732,14 +512,6 @@ impl Host {
     #[must_use]
     pub fn tools_cli(&self) -> Option<String> {
         self.inner.lock().tools_cli.clone()
-    }
-
-    /// Every variable `seated`'s agent and its Slopty tools run with: the worker's own for the
-    /// seat ([`Self::set_seat_env`]), once the daemon gave them.
-    #[must_use]
-    pub fn env_of(&self, seated: &Seated) -> Vec<(String, String)> {
-        let env = self.inner.lock().seat_env.as_ref().map(|EnvOf(env)| Arc::clone(env));
-        env.map_or_else(Vec::new, |env| env(seated.seat))
     }
 
     /// The thread started at `seat`, if one is.
@@ -754,12 +526,6 @@ impl Host {
             })
         };
         open.map(|(thread, _)| *thread).or_else(|| cold().map(|(thread, _)| *thread))
-    }
-
-    /// Every turn edge any thread reaches from now on.
-    #[must_use]
-    pub fn edges(&self) -> broadcast::Receiver<TurnEdge> {
-        self.inner.lock().heard.edges.subscribe()
     }
 
     /// Every tool call any thread's agent makes from now on, as it runs and once it ran.
@@ -843,122 +609,6 @@ impl Host {
         Some(outcome)
     }
 
-    /// Change `thread`'s scheduled messages for intent `id` once ([`super::schedule::act`]):
-    /// `change` decides from the thread's state what comes of it and edits the list the worker
-    /// holds, which goes into the thread's pending list and log. `None` for a thread not held.
-    pub fn schedule<F>(&self, thread: ThreadId, id: IntentId, change: F) -> Option<Outcome>
-    where
-        F: FnOnce(&ThreadState, &mut Vec<Pending>) -> Outcome,
-    {
-        let mut guard = self.inner.lock();
-        let inner = &mut *guard;
-        inner.load(thread);
-        let hosted = inner.threads.get_mut(&thread)?;
-        if let Some(outcome) = hosted.intents.outcome(&id) {
-            return Some(outcome.clone());
-        }
-        let mut scheduled = hosted.own.scheduled.clone();
-        let outcome = change(hosted.log.state(), &mut scheduled);
-        if scheduled != hosted.own.scheduled {
-            hosted.own.scheduled = scheduled;
-            let pending = hosted.log.state().pending.clone();
-            apply(hosted, &mut inner.table, &inner.heard, vec![Action::PendingSet(pending)]);
-            inner.scheduling.notify_one();
-        }
-        if let Err(e) = hosted.intents.record(id, outcome.clone()) {
-            tracing::warn!(%thread, "an intent could not be recorded: {e}");
-        }
-        Some(outcome)
-    }
-
-    /// Whether message `intent` waits on the worker in `thread` ([`Self::schedule`]).
-    #[must_use]
-    pub fn is_scheduled(&self, thread: ThreadId, intent: IntentId) -> bool {
-        self.inner
-            .lock()
-            .hosted(thread)
-            .is_some_and(|h| h.own.scheduled.iter().any(|p| p.intent == intent))
-    }
-
-    /// Told whenever a scheduled message is added or changed.
-    #[must_use]
-    pub fn schedule_changed(&self) -> Arc<tokio::sync::Notify> {
-        Arc::clone(&self.inner.lock().scheduling)
-    }
-
-    /// The scheduled messages whose moment has come at `now`, each marked as going, and when
-    /// the next one may come. Each goes queued where its thread's agent queues, else as a steer.
-    pub fn due(&self, now: WallMs) -> (Vec<super::schedule::Due>, Option<WallMs>) {
-        use super::schedule::{Due, When, when};
-        let mut guard = self.inner.lock();
-        let inner = &mut *guard;
-        // A thread not opened yet that holds a message for later is opened to send it.
-        let holding: Vec<ThreadId> = inner
-            .cold
-            .iter()
-            .filter(|(_, head)| head.state.pending.iter().any(|p| p.delivery.is_kept()))
-            .map(|(thread, _)| *thread)
-            .collect();
-        for thread in holding {
-            inner.load(thread);
-        }
-        let mut next: Option<WallMs> = None;
-        let mut moved: Vec<(ThreadId, IntentId, PendingState)> = Vec::new();
-        let mut due = Vec::new();
-        for (thread, hosted) in &inner.threads {
-            for pending in hosted.own.scheduled.iter().filter(|p| p.state == PendingState::Waiting)
-            {
-                match when(pending, now) {
-                    When::Now => {
-                        let meta = &hosted.log.state().meta;
-                        let delivery = meta.delivery_after_turn();
-                        let send = slopty_proto::thread::wire::Intent::Send {
-                            text: pending.text.clone(),
-                            attachments: pending.attachments.clone(),
-                            delivery,
-                        };
-                        due.push(Due { thread: *thread, intent: pending.intent, send });
-                        moved.push((*thread, pending.intent, PendingState::Sending));
-                    }
-                    When::At(at) => next = Some(next.map_or(at, |n| n.min(at))),
-                    When::Later => {}
-                }
-            }
-        }
-        for (thread, intent, state) in moved {
-            set_scheduled(inner, thread, intent, |p| p.state = state);
-        }
-        (due, next)
-    }
-
-    /// Scheduled message `intent` of `thread` went with `outcome`: gone from the list once
-    /// its agent took it, else held there with why not.
-    pub fn fired(&self, thread: ThreadId, intent: IntentId, outcome: &Outcome) {
-        let mut inner = self.inner.lock();
-        match outcome {
-            Outcome::Done | Outcome::Accepted | Outcome::Started { .. } => {
-                if let Some(hosted) = inner.hosted(thread) {
-                    hosted.own.scheduled.retain(|p| p.intent != intent);
-                }
-                set_scheduled(&mut inner, thread, intent, |_| {});
-            }
-            Outcome::Refused { reason } => {
-                let held = PendingState::Held { reason: reason.clone() };
-                set_scheduled(&mut inner, thread, intent, |p| p.state = held);
-            }
-            Outcome::Unsupported { cap } => {
-                let held = PendingState::Held { reason: format!("Its agent cannot {}", cap.0) };
-                set_scheduled(&mut inner, thread, intent, |p| p.state = held);
-            }
-            Outcome::SetupFailed { setup, .. } => {
-                let reason = format!("Its setup from {} failed", setup.from);
-                set_scheduled(&mut inner, thread, intent, |p| {
-                    p.state = PendingState::Held { reason }
-                });
-            }
-        }
-    }
-
     /// The outcome intent `id` had as a start, if it was acted on.
     #[must_use]
     pub fn started(&self, id: IntentId) -> Option<Outcome> {
@@ -1035,23 +685,6 @@ impl Host {
         inner.settle_under_way(id);
         outcome
     }
-}
-
-/// Change scheduled message `intent` of `thread` as `change` says, and tell the thread's
-/// pending list.
-fn set_scheduled(
-    inner: &mut Inner,
-    thread: ThreadId,
-    intent: IntentId,
-    change: impl FnOnce(&mut Pending),
-) {
-    inner.load(thread);
-    let Some(hosted) = inner.threads.get_mut(&thread) else { return };
-    if let Some(pending) = hosted.own.scheduled.iter_mut().find(|p| p.intent == intent) {
-        change(pending);
-    }
-    let pending = hosted.log.state().pending.clone();
-    apply(hosted, &mut inner.table, &inner.heard, vec![Action::PendingSet(pending)]);
 }
 
 /// The log in thread directory `path` did not read, for `e`. One that no longer decodes (an
@@ -1169,10 +802,8 @@ fn apply(
     heard: &Heard,
     mut actions: Vec<Action>,
 ) -> Cursor {
-    let edges = &heard.edges;
     hosted.own.mark(&mut actions);
     let first = hosted.log.cursor();
-    let was_working = hosted.log.state().status.phase == Phase::Working;
     match hosted.log.append(&actions) {
         Ok(()) => crate::caps::wrote(LOGS),
         Err(e) => {
@@ -1191,25 +822,7 @@ fn apply(
     table.put(row);
     let thread = hosted.log.id();
     let state = hosted.log.state();
-    if !was_working && state.status.phase == Phase::Working {
-        let _nobody = edges.send(TurnEdge { thread, moment: Moment::Busy });
-    }
-    // Only the last turn's edges are the agent's now: a log read again from the start (a
-    // restart) tells every old turn too, and the tree is long past those.
     let last = state.last_turn().map(|t| t.id);
-    for action in &actions {
-        let moment = match action {
-            Action::TurnStarted(turn) => Some(Moment::Began(turn.id)),
-            Action::TurnEnded { turn, .. } => Some(Moment::Ended(*turn)),
-            _ => None,
-        };
-        let live = |turn: TurnId| Some(turn) == last;
-        if let Some(moment) =
-            moment.filter(|m| matches!(m, Moment::Began(t) | Moment::Ended(t) if live(*t)))
-        {
-            let _nobody = edges.send(TurnEdge { thread, moment });
-        }
-    }
     if heard.tools.receiver_count() > 0 {
         for call in actions.iter().filter_map(|action| live_call(action, last)) {
             let _nobody = heard.tools.send(ToolSeen { thread, call: Arc::new(call.clone()) });
@@ -1218,66 +831,4 @@ fn apply(
     let _no_follower =
         hosted.feed.send(Arc::new(Batch { epoch: first.epoch, seq: first.seq, actions }));
     hosted.log.cursor()
-}
-
-/// How often a thread whose agent's process runs is stamped alive ([`Host::lease`]).
-///
-/// Well inside the time a client waits before it shows the turn as no longer known to run; a
-/// test sets its own ([`Host::set_lease_every`]).
-pub const LEASE_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// A thread stamped alive for as long as this is held ([`Host::lease`]).
-#[derive(Debug)]
-pub struct Lease {
-    task: tokio::task::AbortHandle,
-    /// Set once let go: a stamp under way when it is let go is the last.
-    over: Arc<Mutex<bool>>,
-}
-
-impl Lease {
-    /// Stamp no more: the agent's process is gone. A stamp under way finishes first, so the
-    /// end told after this comes after the last stamp.
-    pub fn stop(&self) {
-        *self.over.lock() = true;
-        self.task.abort();
-    }
-}
-
-impl Drop for Lease {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-impl Host {
-    /// Stamp every lease taken from now on each `every` instead of [`LEASE_EVERY`]: a test
-    /// that proves the stamps and their end waits on its own scale, not the client's.
-    pub fn set_lease_every(&self, every: std::time::Duration) {
-        self.inner.lock().lease_every = every;
-    }
-
-    /// Stamp `thread` alive ([`Action::Lease`]) now and every [`LEASE_EVERY`] (or as set) for
-    /// as long as the lease is held: its agent's process runs. Every drive holds one while its
-    /// agent's process lives and lets it go the moment the process is gone, before it tells the
-    /// thread how it ended, so no stamp comes after the end.
-    #[must_use]
-    pub fn lease(&self, thread: ThreadId) -> Lease {
-        let over = Arc::new(Mutex::new(false));
-        let (host, ended) = (self.clone(), Arc::clone(&over));
-        let every = self.inner.lock().lease_every;
-        let task = tokio::spawn(async move {
-            let mut every = tokio::time::interval(every);
-            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                every.tick().await;
-                let ended = ended.lock();
-                if *ended {
-                    return;
-                }
-                host.apply(thread, vec![Action::Lease(WallMs::now())]);
-                drop(ended);
-            }
-        });
-        Lease { task: task.abort_handle(), over }
-    }
 }

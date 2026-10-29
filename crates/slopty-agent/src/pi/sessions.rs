@@ -1,5 +1,5 @@
 //! pi's own sessions: where they are, what each is called, and the words that take one up
-//! again or branch a new one off it.
+//! again.
 //!
 //! pi keeps one file per session in a directory per folder
 //! (`<pi dir>/sessions/--<folder>--/<time>_<id>.jsonl`).
@@ -14,15 +14,10 @@ use serde_json::Value;
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::PastSession;
 
-use super::rpc::{Message, UserContent};
-use crate::driven::title_of;
+use crate::title::title_of;
 
 /// The flag that takes pi session `<id>` up again, as the person's own pi spells it.
 pub const SESSION_FLAG: &str = "--session";
-
-/// The flag that branches a new session off session `<id>`; with `--session-id` it names the new
-/// one.
-pub const FORK_FLAG: &str = "--fork";
 
 /// How much of a session's file is read from each end to name it: its first message is near
 /// the head, and a name given late is near the tail.
@@ -76,10 +71,25 @@ pub fn resumed(args: &[String]) -> Option<(&str, &[String])> {
     }
 }
 
-/// The flags that branch the new session off session `from`, for its first run only.
+/// What the person said in pi message `message`: a `user` message's text, its text blocks
+/// joined by blank lines; `None` for anyone else's.
 #[must_use]
-pub fn fork_args(from: &str) -> [String; 2] {
-    [FORK_FLAG.to_owned(), from.to_owned()]
+pub fn user_text(message: &Value) -> Option<String> {
+    if message.get("role")?.as_str()? != "user" {
+        return None;
+    }
+    match message.get("content")? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => {
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect();
+            Some(texts.join("\n\n"))
+        }
+        _ => None,
+    }
 }
 
 /// What the session whose file begins with `head` and ends with `tail` is called.
@@ -101,14 +111,8 @@ pub fn title(head: &str, tail: &str) -> Option<String> {
         head.lines()
             .filter(|line| line.contains("\"user\""))
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter_map(|mut entry| entry.get_mut("message").map(Value::take))
-            .filter_map(|message| serde_json::from_value::<Message>(message).ok())
-            .find_map(|message| match message {
-                Message::User { content } => Some(content),
-                _ => None,
-            })
-            .map(|content: UserContent| content.text())
-            .filter(|text| !text.trim().is_empty())
+            .filter_map(|entry| entry.get("message").and_then(user_text))
+            .find(|text| !text.trim().is_empty())
     };
     named(tail).or_else(|| named(head)).or_else(first).map(|text| title_of(&text))
 }
@@ -154,7 +158,6 @@ mod tests {
         assert_eq!(resumed(&resume_args("s-1")), Some(("s-1", &[][..])));
         assert_eq!(resumed(&["--session".into(), "-x".into()]), None);
         assert_eq!(resumed(&["--model".into(), "m".into()]), None);
-        assert_eq!(fork_args("s-1"), ["--fork", "s-1"]);
     }
 
     /// The last name given wins, wherever it is; without one the first message names it, its

@@ -1,6 +1,6 @@
 //! slopty: a call the person waits on that runs past ten seconds says so in one toast ("Waiting
 //! on studio · List folders"), which goes when the call answers. Calls meant to run long
-//! (watches, streams, clones, installs, updates, uploads, a device being set up) never raise it.
+//! (watches, streams, clones, installs, updates, attachment reads, a device being set up) never raise it.
 //!
 //! The watch wraps the engine's service, so every call the shell makes passes through it,
 //! whatever view made it; the toast is kept by a task on the app's side.
@@ -64,8 +64,6 @@ fn long_by_design(method: &str) -> bool {
                 | methods::INSTALL_HARNESS
                 | methods::APPLY_UPDATE
                 | methods::FETCH_ALL
-                | methods::UPLOAD_CHUNK
-                | methods::UPLOAD_COMMIT
                 | methods::READ_ATTACHMENT_CHUNK
                 | methods::ADD_DEVICE
                 | methods::ANSWER_ADD_DEVICE

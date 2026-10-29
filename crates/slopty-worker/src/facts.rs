@@ -2,10 +2,7 @@
 //!
 //! The agents and toolchains installed, the GPUs and the power source
 //! (`docs/decisions/projects.md`), and the clones the server had made under
-//! `~/slopty/clones` ([`REPOS`]), so a server that restarts still finds them. The agents reached
-//! over ACP are under `acp`, named as the ACP registry names them (`slopty_agent::acp::registry`),
-//! which is also how their threads' agent is named (`acp:<name>`): what a client offers to start is
-//! what is there.
+//! `~/slopty/clones` ([`REPOS`]), so a server that restarts still finds them.
 //!
 //! The server fills in what it knows itself, from the worker's registration and capabilities
 //! (`os`, `arch`, `cpus`, `memory_mb`, `encoders`, `displays`, `load` and the rest), so none of
@@ -26,7 +23,6 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime};
 
 use parking_lot::Mutex;
-use slopty_agent::acp::registry;
 use slopty_agent::managed::{self, Launcher};
 use slopty_core::WallMs;
 use slopty_proto::server::{Fact, Facts};
@@ -57,10 +53,6 @@ const LISTING_MAX: usize = 64 * 1024;
 /// What brackets the login shell's `PATH` in its output, which an rc file may print into.
 const PATH_MARK: &str = "__SLOPTY_PATH__";
 
-/// The person's own ACP agents from `[worker.acp]`: a name and its command line
-/// ([`registry::registry`]).
-pub type OwnAcp = BTreeMap<String, Vec<String>>;
-
 /// A program whose version is a fact.
 struct Tool {
     /// Its key in the map.
@@ -79,8 +71,7 @@ impl Tool {
     }
 }
 
-/// The coding agents' command lines, under `agents`. Those reached over ACP are not listed here
-/// but taken from the registry, under `acp` ([`acp_agents`]).
+/// The coding agents' command lines, under `agents`.
 const AGENTS: [Tool; 4] = [
     Tool::version("claude", "claude"),
     Tool::version("codex", "codex"),
@@ -146,11 +137,8 @@ impl Kept {
 /// Keep `kept` current until nobody follows it.
 ///
 /// The clones are known at once; everything else once it is first asked for ([`Kept::asked`])
-/// and every [`REFRESH`] after, with the ACP agents `own` reads of the person's settings then.
-pub async fn watch<F>(kept: Kept, own: F)
-where
-    F: Fn() -> OwnAcp + Send + Sync + 'static,
-{
+/// and every [`REFRESH`] after.
+pub async fn watch(kept: Kept) {
     let Kept { facts, wanted, gathered } = kept;
     let root = crate::repo::cloning::clones_root(&slopty_platform::dirs::home());
     let mut first = Facts::from([(REPOS.to_owned(), clones(&root).await)]);
@@ -160,7 +148,6 @@ where
         () = wanted.notified() => {}
         () = facts.closed() => return,
     }
-    let own = Arc::new(own);
     let mut tick = tokio::time::interval(REFRESH);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -168,9 +155,7 @@ where
         if facts.is_closed() {
             return;
         }
-        let read = Arc::clone(&own);
-        let own_now = tokio::task::spawn_blocking(move || read()).await.unwrap_or_default();
-        let mut next = gather(own_now).await;
+        let mut next = gather().await;
         with_made(&facts, &mut next).await;
         publish(&facts, next);
         gathered.send_replace(true);
@@ -275,16 +260,14 @@ pub fn publish(facts: &watch::Sender<Facts>, next: Facts) -> bool {
 
 /// Everything this worker reports of itself now.
 ///
-/// `agents`, `acp` and `toolchains` are always there, empty when nothing is, so a reader can
-/// ask what is in them.
-pub async fn gather(own: OwnAcp) -> Facts {
+/// `agents` and `toolchains` are always there, empty when nothing is, so a reader can ask what
+/// is in them.
+pub async fn gather() -> Facts {
     let (login, stand_ins) = tokio::join!(login_path(), StandIns::find());
     let search = Arc::new(SearchPath::of(std::env::var_os("PATH").into_iter().chain(login)));
-    let acp = registry::registry(&own);
     let clones_root = crate::repo::cloning::clones_root(&slopty_platform::dirs::home());
-    let (agents, acp, toolchains, rust_targets, gpus, power, repos) = tokio::join!(
+    let (agents, toolchains, rust_targets, gpus, power, repos) = tokio::join!(
         versions(&search, &stand_ins, &AGENTS),
-        acp_agents(&search, &stand_ins, acp),
         versions(&search, &stand_ins, TOOLCHAINS),
         rust_targets(),
         gpus(&search),
@@ -297,7 +280,6 @@ pub async fn gather(own: OwnAcp) -> Facts {
     }
     let mut facts = Facts::new();
     facts.insert("agents".to_owned(), Fact::Map(agents));
-    facts.insert("acp".to_owned(), Fact::Map(acp));
     facts.insert("toolchains".to_owned(), Fact::Map(toolchains));
     facts.insert(REPOS.to_owned(), repos);
     let texts = |items: Vec<String>| Fact::List(items.into_iter().map(Fact::Text).collect());
@@ -320,20 +302,14 @@ pub async fn agent_dirs() -> Vec<PathBuf> {
     SearchPath::of(std::env::var_os("PATH").into_iter().chain(login)).dirs
 }
 
-/// The coding agents installed in `dirs` ([`agent_dirs`]), as `gather` puts them under `agents`
-/// and `acp`.
-///
-/// Those run by an adapter of their own (and the other agent programs it knows) by program, then
-/// those reached over ACP by the registry's name, the person's own (`own_acp`) among them. What the
-/// worker's capabilities say it can start ([`crate::caps::installed_agents`]).
-pub async fn agents(dirs: &[PathBuf], own_acp: &BTreeMap<String, Vec<String>>) -> (Facts, Facts) {
+/// The coding agents installed in `dirs` ([`agent_dirs`]), by program, as `gather` puts them
+/// under `agents`: what the worker's capabilities say it can start
+/// ([`crate::caps::installed_agents`]).
+pub async fn agents(dirs: &[PathBuf]) -> Facts {
     let stand_ins = StandIns::find().await;
     let lists = std::iter::once(std::env::join_paths(dirs).unwrap_or_default());
     let search = Arc::new(SearchPath::of(lists));
-    tokio::join!(
-        versions(&search, &stand_ins, &AGENTS),
-        acp_agents(&search, &stand_ins, registry::registry(own_acp)),
-    )
+    versions(&search, &stand_ins, &AGENTS).await
 }
 
 /// The versions of those of `tools` installed here, by name.
@@ -360,36 +336,6 @@ async fn versions(search: &Arc<SearchPath>, stand_ins: &StandIns, tools: &'stati
     while let Some(done) = running.join_next().await {
         if let Ok(Some((name, version))) = done {
             found.insert(name, version);
-        }
-    }
-    found
-}
-
-/// Those of the ACP `agents` installed here, by the registry's name: the version the program
-/// says, or `true` when it says none (a program that serves ACP alone may take no `--version`).
-async fn acp_agents(
-    search: &Arc<SearchPath>,
-    stand_ins: &StandIns,
-    agents: Vec<registry::Agent>,
-) -> Facts {
-    let mut running = JoinSet::new();
-    for agent in agents {
-        let Some(program) = search.resolve(&agent.program).filter(|p| stand_ins.answer(p)) else {
-            continue;
-        };
-        let search = Arc::clone(search);
-        running.spawn(async move {
-            let ran =
-                run(search.command(&program, &["--version"]), VERSION_WAIT, VERSION_OUTPUT_MAX)
-                    .await;
-            let version = ran.filter(|ran| ran.ok).and_then(|ran| version_in(&ran.out, None));
-            (agent.name, version.map_or(Fact::Bool(true), Fact::Text))
-        });
-    }
-    let mut found = Facts::new();
-    while let Some(done) = running.join_next().await {
-        if let Ok((name, fact)) = done {
-            found.insert(name, fact);
         }
     }
     found
@@ -1113,41 +1059,6 @@ mod tests {
         assert!(TOOLCHAINS.iter().all(|tool| tool.program != "xcodebuild"));
     }
 
-    /// The ACP agents installed are named as the registry names them, whatever their program
-    /// is called: `cursor-agent` is `cursor`. One that says no version is there all the same, and
-    /// the person's own is found where they put it.
-    #[tokio::test]
-    async fn the_acp_agents_installed_are_named_as_the_registry_names_them() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().canonicalize().unwrap();
-        let mine = bin.join("mine").join("agent");
-        std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
-        let programs = [
-            (bin.join("opencode"), "echo opencode v2.0.32"),
-            (bin.join("cursor-agent"), "exit 2"),
-            (bin.join("amp"), "echo amp 0.9.1"),
-            (mine.clone(), "echo mine 2.0"),
-        ];
-        for (path, body) in &programs {
-            std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let own = BTreeMap::from([(
-            "mine".to_owned(),
-            vec![mine.to_string_lossy().into_owned(), "--stdio".to_owned()],
-        )]);
-        let search = Arc::new(SearchPath::of([bin.into_os_string()]));
-        let stand_ins = StandIns { developer: true, java: true, xcode: None };
-        let found = acp_agents(&search, &stand_ins, registry::registry(&own)).await;
-        let want = Facts::from([
-            ("cursor".to_owned(), Fact::Bool(true)),
-            ("mine".to_owned(), Fact::Text("2.0".to_owned())),
-            ("opencode".to_owned(), Fact::Text("2.0.32".to_owned())),
-        ]);
-        assert_eq!(found, want, "amp is not amp-acp, the program that serves ACP");
-    }
-
     #[test]
     fn the_power_source_and_the_gpus_read_from_their_tools() {
         let batt = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t80%;";
@@ -1163,7 +1074,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn this_mac_reports_its_toolchains() {
-        let facts = gather(OwnAcp::new()).await;
+        let facts = gather().await;
         assert!(
             matches!(facts.get("gpus"), Some(Fact::List(gpus)) if !gpus.is_empty()),
             "{facts:?}"
@@ -1171,7 +1082,6 @@ mod tests {
         let Some(Fact::Map(toolchains)) = facts.get("toolchains") else { panic!("{facts:?}") };
         assert!(toolchains.contains_key("cargo"), "the test runs under cargo: {toolchains:?}");
         assert!(matches!(facts.get("agents"), Some(Fact::Map(_))));
-        assert!(matches!(facts.get("acp"), Some(Fact::Map(_))));
         for server_filled in ["os", "os_version", "arch", "memory_mb", "encoders", "displays"] {
             assert!(!facts.contains_key(server_filled), "{server_filled}");
         }

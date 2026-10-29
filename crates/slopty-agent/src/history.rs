@@ -319,7 +319,6 @@ pub mod codex {
 /// pi's session files.
 pub mod pi {
     use super::{Prompt, Value, WallMs, kept};
-    use crate::pi::rpc::Message;
 
     /// The session and folder a session file's first line (`session`) names.
     #[must_use]
@@ -351,10 +350,7 @@ pub mod pi {
                     .and_then(crate::conversation::parse_ms)
             },
         );
-        let Message::User { content } = serde_json::from_value::<Message>(message).ok()? else {
-            return None;
-        };
-        kept(session, Some(cwd.to_owned()), at, &content.text())
+        kept(session, Some(cwd.to_owned()), at, &crate::pi::sessions::user_text(&message)?)
     }
 }
 

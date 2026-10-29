@@ -68,7 +68,6 @@ pub(super) struct FileDocument {
     pub pending_save: Option<PendingSave>,
     pub pending_external_reload: Option<WorkspaceFileText>,
     pub reconcile_after_save: bool,
-    pub review_comment_flush_pending: bool,
 }
 
 #[allow(dead_code)]
@@ -100,7 +99,6 @@ impl FileDocument {
             pending_save: None,
             pending_external_reload: None,
             reconcile_after_save: false,
-            review_comment_flush_pending: false,
         }
     }
 
@@ -115,7 +113,6 @@ impl FileDocument {
         self.pending_save = None;
         self.pending_external_reload = None;
         self.reconcile_after_save = false;
-        self.review_comment_flush_pending = false;
         self.generation
     }
 
@@ -148,7 +145,6 @@ impl FileDocument {
         self.pending_save = None;
         self.pending_external_reload = None;
         self.reconcile_after_save = false;
-        self.review_comment_flush_pending = false;
         self.file = Some(file);
     }
 

@@ -12,9 +12,7 @@ use gpui::{
 use crate::popover; // slopty: appshots removed.
 
 use crate::settings::widgets;
-use crate::settings::{
-    ComposerSendBehavior, KeymapConfig, ShortcutId, combo_from_keystroke,
-}; // slopty: the pull-request destination's row is gone
+use crate::settings::{KeymapConfig, ShortcutId, combo_from_keystroke}; // slopty: the pull-request destination's row is gone
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::motion::HoverFade as _;
@@ -44,18 +42,14 @@ pub fn record_key(key: &str, ctrl: bool, alt: bool, shift: bool, cmd: bool) -> R
 pub enum ShortcutsEvent {
     /// The keymap changed — persist + re-apply.
     KeymapChanged(KeymapConfig),
-    /// The composer send behavior changed — persist + re-apply.
-    ComposerSendBehaviorChanged(ComposerSendBehavior),
     // slopty: appshots removed.
 }
 
 pub struct ShortcutsPage {
     // slopty: appshots removed.
-    general_page: bool,
     scroll: crate::settings::widgets::PageScroll,
     /// Working copy (kept in sync with the shell via change events).
     keymap: KeymapConfig,
-    composer_send_behavior: ComposerSendBehavior,
     recording: Option<ShortcutId>,
     recording_blur: Option<gpui::Subscription>,
     recording_interceptor: Option<gpui::Subscription>,
@@ -63,8 +57,7 @@ pub struct ShortcutsPage {
     /// conflicts never persist; they're refused at record time, as in slopty.
     conflict_notice: Option<SharedString>,
     focus: FocusHandle,
-    // slopty: appshots removed.
-    send_select: widgets::SelectState,
+    // slopty: appshots removed; no send-key choice, since the GUI sends nothing.
     // slopty: no pull-request pages.
     // slopty: no thread naming: an agent's thread is titled by the agent.
     _state: Entity<AppState>,
@@ -76,22 +69,18 @@ impl ShortcutsPage {
     pub fn new(
         state: Entity<AppState>,
         keymap: KeymapConfig,
-        composer_send_behavior: ComposerSendBehavior,
         // slopty: appshots removed.
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            general_page: false,
             scroll: crate::settings::widgets::PageScroll::default(),
             keymap,
-            composer_send_behavior,
             recording: None,
             recording_blur: None,
             recording_interceptor: None,
             conflict_notice: None,
             focus: cx.focus_handle(),
             // slopty: appshots removed.
-            send_select: widgets::SelectState::default(),
             // slopty: no pull-request pages.
             // slopty: no thread naming.
             _state: state,
@@ -99,18 +88,6 @@ impl ShortcutsPage {
     }
 
     // slopty: dictation and appshots removed.
-
-    pub fn show_section(&mut self, general: bool, cx: &mut Context<Self>) { // slopty: appshots removed; a section change redraws the page.
-        if self.general_page != general {
-            cx.notify();
-            self.stop_recording();
-            self.conflict_notice = None;
-            self.general_page = general;
-            // One scroll state serves these pages — rewind it so each opens
-            // at the top instead of where the other was left.
-            self.scroll.reset();
-        }
-    }
 
     fn start_recording(&mut self, id: ShortcutId, window: &mut Window, cx: &mut Context<Self>) {
         self.recording = Some(id);
@@ -146,19 +123,6 @@ impl ShortcutsPage {
         cx.notify();
     }
 
-    fn set_composer_send_behavior(
-        &mut self,
-        behavior: ComposerSendBehavior,
-        cx: &mut Context<Self>,
-    ) {
-        if self.composer_send_behavior != behavior {
-            self.composer_send_behavior = behavior;
-            self.conflict_notice = None;
-            cx.emit(ShortcutsEvent::ComposerSendBehaviorChanged(behavior));
-            cx.notify();
-        }
-    }
-
     // slopty: dictation and appshots removed.
 
     fn record_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
@@ -180,8 +144,7 @@ impl ShortcutsPage {
             RecordOutcome::Ignored => {}
             RecordOutcome::Set(combo) => {
                 self.stop_recording();
-                self.conflict_notice =
-                    refusal(&self.keymap, self.composer_send_behavior, recording, &combo);
+                self.conflict_notice = refusal(&self.keymap, recording, &combo);
                 if self.conflict_notice.is_none() {
                     self.keymap.set(recording, combo);
                     self.commit(cx);
@@ -278,12 +241,7 @@ impl ShortcutsPage {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         // slopty: appshots removed.
-        let id = if self.general_page {
-            "general-settings-page-scrollbar"
-        } else {
-            "shortcuts-page-scrollbar"
-        };
-        popover::rail(self, id, theme, cx)
+        popover::rail(self, "shortcuts-page-scrollbar", theme, cx)
     }
 }
 
@@ -397,16 +355,8 @@ fn binding_control(
 /// Why `combo` cannot be bound to `id`, if it cannot. Conflicts never
 /// persist; they're refused at record time, naming the owner (slopty
 /// settings.shortcuts.tsx: "… is already assigned to …"). Pure.
-fn refusal(
-    keymap: &KeymapConfig,
-    behavior: ComposerSendBehavior,
-    id: ShortcutId,
-    combo: &str,
-) -> Option<SharedString> {
-    // slopty: appshots removed.
-    if send_combo_is_reserved(behavior, combo) {
-        return Some(format!("{} is reserved for the composer.", crate::keys::combo_text(combo)).into());
-    }
+fn refusal(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<SharedString> {
+    // slopty: appshots removed; no key is held for a composer, since the GUI sends nothing.
     conflict_owner(keymap, id, combo).map(|owner| {
         // slopty: dictation and appshots removed.
         format!(
@@ -423,15 +373,6 @@ pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Opt
     ShortcutId::ALL
         .into_iter()
         .find(|&other| other != id && keymap.get(other) == combo) // slopty: appshots removed.
-}
-
-pub fn send_combo_is_reserved(_behavior: ComposerSendBehavior, combo: &str) -> bool {
-    combo == "mod-enter"
-}
-
-// slopty: the keys as every other key in the app reads ("⌘⏎"; "Ctrl+Enter" off the Mac).
-pub fn modifier_send_label(is_macos: bool) -> String {
-    crate::keys::combo_text_on(is_macos, "mod-enter")
 }
 
 /// The page's sections, in display order. [`group`] is a total match, so every
@@ -459,13 +400,10 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::ReopenClosedTab => "Panels", // slopty: the right pane's last closed tab
         // slopty: dictation removed; a new project is how a chat starts somewhere new.
         ShortcutId::NewProject
-        | ShortcutId::OpenModelPicker
         | ShortcutId::NewSession
         | ShortcutId::NextSession
         | ShortcutId::PrevSession
         | ShortcutId::ArchiveSession
-        | ShortcutId::OpenBranchPicker // slopty: the composer's branch
-        | ShortcutId::NextEffort // slopty: and its effort
         | ShortcutId::ResumeSession // slopty: a past Claude Code session
         | ShortcutId::NextNeedsYou => "Chats", // slopty: the next chat waiting on the person
         ShortcutId::JumpSession(_) => "Jump to chat",
@@ -484,98 +422,7 @@ impl Render for ShortcutsPage {
         // slopty: appshots removed.
         let theme = Theme::of(cx).for_settings_surface();
         let recording = self.recording;
-        let send_behavior = self.composer_send_behavior;
-        // slopty: every choice these pages hold counts, each against its default.
-        let customized = self.keymap != KeymapConfig::default()
-            || send_behavior != ComposerSendBehavior::default();
-        let mac = crate::keys::MOD_IS_COMMAND; // slopty: an iPad's ⌘ too
-        let send_behaviors = [
-            (ComposerSendBehavior::Enter, SharedString::from(crate::keys::combo_text_on(mac, "enter"))),
-            (ComposerSendBehavior::ModEnter, SharedString::from(modifier_send_label(mac))),
-        ];
-        let send_behavior_control = widgets::select(
-            "composer-send-behavior",
-            "Send messages with",
-            &theme,
-            |page: &mut Self| &mut page.send_select,
-        )
-        .options(
-            send_behaviors.iter().map(|(behavior, label)| {
-                widgets::SelectOption::new(label.clone()).standing(
-                    (*behavior == ComposerSendBehavior::default())
-                        .then_some(widgets::Standing::Default),
-                )
-            }),
-            send_behaviors
-                .iter()
-                .position(|(behavior, _)| *behavior == send_behavior)
-                .unwrap_or_default(),
-        )
-        .width(128.0)
-        .font_family(theme.font_mono.clone())
-        .on_select(move |page, ix, _, cx| page.set_composer_send_behavior(send_behaviors[ix].0, cx))
-        .render(&self.send_select, cx);
-        // slopty: "Reset" on a row whose choice is not its default (Zed's rule).
-        let send_reset = widgets::reset_action(
-            &theme,
-            "composer-send-behavior-reset",
-            "Send messages with",
-            send_behavior == ComposerSendBehavior::default(),
-        )
-        .map(|reset| {
-            reset.on_click(cx.listener(|this, _, _, cx| {
-                this.set_composer_send_behavior(ComposerSendBehavior::default(), cx);
-            }))
-        });
-        let send_behavior_row = widgets::card_row(&theme, true)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(160.0))
-                    .child(widgets::row_title(&theme, "Send messages with")),
-            )
-            .children(send_reset)
-            .child(send_behavior_control);
-        // slopty: Compact mode and Esc-to-stop are no longer settings.
-        if self.general_page {
-            // slopty: no pull-request pages, so no choice of where a pull request opens.
-            let scrollbar = self.render_scrollbar(&theme, cx);
-            return div()
-                .id("general-settings-page-host")
-                .relative()
-                .size_full()
-                .on_hover(cx.listener(Self::on_scroll_hovered))
-                .child(
-                    crate::edge_fade::edge_faded(
-                        16.0,
-                        true,
-                        true,
-                        div()
-                            .id("general-settings-page")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll.scroll)
-                            .child(
-                                widgets::page_column()
-                                    // slopty: one page head (`widgets::page_head`).
-                                    .child(widgets::page_head(
-                                        &theme,
-                                        "General",
-                                        None,
-                                        "How messages send.",
-                                        None,
-                                    ))
-                                    .child(
-                                        widgets::section_card(&theme)
-                                            .child(send_behavior_row),
-                                    ), // slopty: no thread naming.
-                            ),
-                    )
-                    .fade_overflow_y(&self.scroll.scroll),
-                )
-                .children(scrollbar)
-                .into_any_element();
-        }
+        let customized = self.keymap != KeymapConfig::default();
         // One block per group, each under its small section label — the flat
         // 16-row table read as one undifferentiated wall. `ix` (the id's
         // position in ALL) keys the interactive elements, so ids stay unique
@@ -640,10 +487,6 @@ impl Render for ShortcutsPage {
                                                 this.stop_recording();
                                                 this.conflict_notice = None;
                                                 this.commit(cx);
-                                                this.set_composer_send_behavior(
-                                                    ComposerSendBehavior::default(),
-                                                    cx,
-                                                );
                                             }))
                                         })
                                     }
@@ -681,51 +524,6 @@ mod tests {
 
     // slopty: dictation and appshots removed.
 
-    #[gpui::test]
-    fn conversation_controls_work_after_moving_out_of_shortcuts(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-        });
-        let (page, cx) = cx.add_window_view(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            let mut page = ShortcutsPage::new(
-                state,
-                KeymapConfig::default(),
-                ComposerSendBehavior::Enter,
-                // slopty: appshots removed.
-                cx,
-            );
-            page.show_section(true, cx);
-            page
-        });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let send = cx.debug_bounds("composer-send-behavior").unwrap();
-        cx.simulate_click(send.center(), gpui::Modifiers::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let option = cx.debug_bounds("composer-send-behavior-option-1").unwrap();
-        cx.simulate_click(option.center(), gpui::Modifiers::default());
-        page.update(cx, |page, _| assert!(!page.send_select.is_open()));
-        // Let the menu's exit animation finish before clicking beneath it:
-        // the reap compares wall-clock instants, so real time must pass too.
-        std::thread::sleep(
-            crate::motion::MENU_OUT
-                .total()
-                .mul_f32(crate::motion::speed_scale()),
-        );
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(1));
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("composer-send-behavior-option-1").is_none());
-        page.update(cx, |page, cx| {
-            assert_eq!(page.composer_send_behavior, ComposerSendBehavior::ModEnter);
-            page.show_section(false, cx); // slopty: appshots removed.
-        });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("composer-send-behavior").is_none());
-    }
-
     // slopty: dictation and appshots removed.
 
     #[gpui::test]
@@ -748,7 +546,6 @@ mod tests {
             ShortcutsPage::new(
                 state,
                 KeymapConfig::default(),
-                ComposerSendBehavior::default(),
                 // slopty: appshots removed.
                 cx,
             )
@@ -766,7 +563,7 @@ mod tests {
                     page.conflict_notice
                         .as_deref()
                         .unwrap()
-                        .contains("New chat")
+                        .contains("New session")
                 );
                 assert_eq!(
                     page.keymap.save_file, // slopty: appshots removed.
@@ -880,25 +677,4 @@ mod tests {
 
     // slopty: dictation and appshots removed.
 
-    #[test]
-    fn modifier_send_labels_are_platform_specific() {
-        assert_eq!(modifier_send_label(true), "⌘⏎");
-        assert_eq!(modifier_send_label(false), "Ctrl+Enter");
-    }
-
-    #[test]
-    fn modifier_send_is_always_reserved_for_the_composer() {
-        assert!(send_combo_is_reserved(
-            ComposerSendBehavior::Enter,
-            "mod-enter"
-        ));
-        assert!(send_combo_is_reserved(
-            ComposerSendBehavior::ModEnter,
-            "mod-enter"
-        ));
-        assert!(!send_combo_is_reserved(
-            ComposerSendBehavior::ModEnter,
-            "mod-shift-enter"
-        ));
-    }
 }

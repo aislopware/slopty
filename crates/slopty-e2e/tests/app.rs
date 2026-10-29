@@ -23,10 +23,6 @@ mod conversation;
 mod devices;
 
 #[cfg(test)]
-#[path = "app/dock.rs"]
-mod dock;
-
-#[cfg(test)]
 #[path = "app/hangs.rs"]
 mod hangs;
 
@@ -51,9 +47,10 @@ mod pair;
 mod past_sessions;
 
 #[cfg(test)]
-#[path = "app/races.rs"]
-mod races;
+#[path = "app/planted.rs"]
+mod planted;
 
+#[cfg(test)]
 #[cfg(test)]
 #[path = "app/resume.rs"]
 mod resume;
@@ -69,6 +66,10 @@ mod through_server;
 #[cfg(test)]
 #[path = "app/served.rs"]
 mod served;
+
+#[cfg(test)]
+#[path = "app/session.rs"]
+mod session;
 
 #[cfg(test)]
 #[path = "app/sidebar_paging.rs"]

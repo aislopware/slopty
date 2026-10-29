@@ -117,7 +117,7 @@ fn a_sidebar_headers_count_shows_under_the_pointer(cx: &mut TestAppContext) {
     let header_key = format!("sidebar-header-{key}");
     let rest = cx.update(|_, cx| {
         let theme = Theme::of(cx);
-        spaces::sidebar_hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
+        crate::motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
     });
     assert_eq!(rest.a, 0.0, "unseen at rest");
     let chevron = |cx: &mut VisualTestContext| cx.update(|_, _| spaces::sidebar_hover_reveal(&header_key));
@@ -129,7 +129,7 @@ fn a_sidebar_headers_count_shows_under_the_pointer(cx: &mut TestAppContext) {
     assert_eq!(hovered, resting, "the count fades in where it stood: nothing moves");
     let shown = cx.update(|_, cx| {
         let theme = Theme::of(cx);
-        spaces::sidebar_hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
+        crate::motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
     });
     assert!(shown.a > 0.9, "shown under the pointer: {shown:?}");
     assert!(chevron(cx) > 0.9, "and its chevron");
@@ -238,19 +238,17 @@ fn a_row_at_rest_draws_no_dot(cx: &mut TestAppContext) {
 }
 
 /// slopty: a row's one mark says working, waiting, done and failed, and morphs between them in
-/// its slot; a send waiting its turn wears the clock and a row at rest says nothing.
+/// its slot; a row at rest says nothing.
 #[test]
 fn a_rows_mark_follows_its_state() {
     use crate::loaders::status_mark::MarkState;
     use slopty_view_proto::ChatIndicator;
-    let mark = |status, queued, undelivered| super::sidebar_mark_state(status, queued, undelivered);
-    assert_eq!(mark(ChatIndicator::Working, false, false), Some(MarkState::Working));
-    assert_eq!(mark(ChatIndicator::AwaitingInput, false, false), Some(MarkState::Waiting));
-    assert_eq!(mark(ChatIndicator::Completed, false, false), Some(MarkState::Done));
-    assert_eq!(mark(ChatIndicator::Errored, false, false), Some(MarkState::Failed));
-    assert_eq!(mark(ChatIndicator::Idle, false, false), None);
-    assert_eq!(mark(ChatIndicator::Working, true, false), None, "queued: the clock");
-    assert_eq!(mark(ChatIndicator::Idle, false, true), Some(MarkState::Failed), "never sent");
+    let mark = super::sidebar_mark_state;
+    assert_eq!(mark(ChatIndicator::Working), Some(MarkState::Working));
+    assert_eq!(mark(ChatIndicator::AwaitingInput), Some(MarkState::Waiting));
+    assert_eq!(mark(ChatIndicator::Completed), Some(MarkState::Done));
+    assert_eq!(mark(ChatIndicator::Errored), Some(MarkState::Failed));
+    assert_eq!(mark(ChatIndicator::Idle), None);
 }
 
 /// A selected row under the pointer goes a step past its selection, never back toward the
@@ -366,7 +364,7 @@ fn the_palette_keeps_its_top_as_its_results_change(cx: &mut TestAppContext) {
 }
 
 /// Every row of a chat's menu is a menu item a screen reader names, Copy saying whether its
-/// submenu is open.
+/// submenu is open; none deletes the session, whose record is its agent's own.
 #[gpui::test]
 fn the_chat_menu_names_its_rows(cx: &mut TestAppContext) {
     let (shell, cx) = launch(cx, DESKTOP);
@@ -380,9 +378,10 @@ fn the_chat_menu_names_its_rows(cx: &mut TestAppContext) {
         cx.notify();
     });
     let nodes = tree(cx);
-    for label in ["Rename", "Pin", "Archive", "Delete\u{2026}"] {
+    for label in ["Rename", "Pin", "Archive"] {
         assert!(find(&nodes, Role::MenuItem, label).is_some(), "{label} is a named menu item");
     }
+    assert!(find(&nodes, Role::MenuItem, "Delete\u{2026}").is_none(), "no Delete");
     let copy = find(&nodes, Role::MenuItem, "Copy").expect("Copy");
     assert_eq!(copy.expanded, Some(false), "its submenu shut: {copy:?}");
     assert!(nodes.values().all(|node| node.role != Role::MenuItem || !node.label.is_empty()), "no row unnamed");
@@ -471,7 +470,7 @@ fn each_move_between_settings_and_the_chats_fades_the_page_in(cx: &mut TestAppCo
         shell.read_with(cx, |shell, _| shell.route_shown.map(|(_, changes)| changes))
     };
     assert_eq!(changes(cx), Some(0), "the first frame");
-    shell.update(cx, |shell, cx| shell.open_settings(SettingsSection::General, cx));
+    shell.update(cx, |shell, cx| shell.open_settings(SettingsSection::Appearance, cx));
     assert_eq!(changes(cx), Some(1), "into Settings");
     shell.update(cx, |shell, cx| shell.open_settings(SettingsSection::Shortcuts, cx));
     assert_eq!(changes(cx), Some(1), "a page within it is no move");
@@ -479,30 +478,7 @@ fn each_move_between_settings_and_the_chats_fades_the_page_in(cx: &mut TestAppCo
     assert_eq!(changes(cx), Some(2), "back to the chats");
 }
 
-/// A sidebar header or History row under the pointer keeps its hover through frames the window
-/// draws the sidebar from its last one, which read no fade and let the fades drop its key; once
-/// the pointer leaves, it rests.
-#[gpui::test]
-fn a_sidebar_row_under_the_pointer_keeps_its_hover_over_frames_drawn_from_the_last(cx: &mut TestAppContext) {
-    let cx = cx.add_empty_window();
-    let key = SharedString::from("sidebar-header-pointer-test");
-    let (rest, hover) = (gpui::black(), gpui::white());
-    let listener = spaces::sidebar_hover(key.clone());
-    cx.update(|window, cx| listener(&true, window, cx));
-    // Frames that read nothing of the sidebar: the fades take its key for gone.
-    for _ in 0..3 {
-        crate::motion::hover_fades_active(std::time::Instant::now());
-    }
-    assert!(!crate::motion::hover_known(&key), "the fades dropped it");
-    assert_eq!(spaces::sidebar_hover_blend(&key, rest, hover), hover, "still under the pointer");
-    cx.update(|window, cx| listener(&false, window, cx));
-    for _ in 0..3 {
-        crate::motion::hover_fades_active(std::time::Instant::now() + std::time::Duration::from_secs(1));
-    }
-    assert_eq!(spaces::sidebar_hover_blend(&key, rest, hover), rest, "the pointer left");
-}
-
-/// The session card and the chat menu, drawn over a shell holding three local chats.
+/// The inspector and the chat menu, drawn over a shell holding three local chats.
 mod session_card {
     use super::super::*;
 
@@ -540,66 +516,83 @@ mod session_card {
         shell.settings.sidebar_pins_mut("local".into()).push("pin".into());
     }
 
+    /// slopty: ⌘I opens the session's inspector beside its terminal, read-only, and closes it
+    /// again; the keyboard goes back to the terminal.
     #[gpui::test]
-    fn the_session_card_shows_beside_a_wide_transcript_and_opens_over_a_narrow_one(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let window = test_shell(cx, dir.path());
-        window
-            .update(cx, |shell, _, cx| {
-                prepare(shell, cx);
-                shell.debug_gate = Some(GatePhase::Ready);
-                shell.settings.sidebar_collapsed = true;
-                shell
-                    .state
-                    .update(cx, |state, _| state.selected_chat = Some("regular".into()));
-                // The card eases in and out; settle each change at once.
-                crate::motion::set_reduced_motion(cx, true);
+    fn cmd_i_opens_and_closes_the_inspector(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_session_terminals([("a".to_owned(), "t-a".to_owned())].into());
+                cx.notify();
+            });
+            shell.open_chat("a".into(), cx);
+        });
+        cx.run_until_parked();
+        let shown = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let open = shell.read_with(cx, |shell, cx| shell.inspector_shown(cx));
+            assert_eq!(open, cx.debug_bounds("inspector-header").is_some(), "drawn as it stands");
+            open
+        };
+        let before = shown(cx);
+        cx.simulate_keystrokes("cmd-i");
+        cx.run_until_parked();
+        assert_ne!(shown(cx), before, "⌘I turns it");
+        cx.simulate_keystrokes("cmd-i");
+        cx.run_until_parked();
+        assert_eq!(shown(cx), before, "and back");
+        if !before {
+            let terminal = cx.update(|window, cx| {
+                shell.read(cx).session_terminal.read(cx).focus_handle().contains_focused(window, cx)
+            });
+            assert!(terminal, "the terminal has the keyboard back");
+        }
+    }
+
+    /// slopty: an agent's session shown the first time opens on its inspector, the first tab of
+    /// its pane, without the person knowing ⌘I. The tab is then the session's like any other: one
+    /// the person closed is not given again, in this run or the next, and a plain terminal is
+    /// given none.
+    #[gpui::test]
+    fn an_agent_session_is_given_its_inspector_the_first_time_it_shows(cx: &mut gpui::TestAppContext) {
+        use super::super::RightSurface;
+        let (shell, cx) = super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
+        let show = |chat: &str, cx: &mut gpui::VisualTestContext| {
+            shell.update(cx, |shell, cx| shell.open_chat(chat.into(), cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            shell.read_with(cx, |shell, cx| {
+                (shell.right_tabs.get(chat).cloned().unwrap_or_default(), shell.inspector_shown(cx))
             })
-            .unwrap();
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        };
+        assert_eq!(show("a", cx), (vec![RightSurface::Inspector], true), "given, in front");
+        assert!(cx.debug_bounds("inspector-header").is_some(), "and drawn");
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| shell.close_right_surface(RightSurface::Inspector, window, cx));
+        });
+        assert_eq!(show("b", cx), (vec![RightSurface::Inspector], true), "each session its own");
+        assert_eq!(show("a", cx), (Vec::new(), false), "closed, it stays closed");
+        let kept = shell.read_with(cx, |shell, _| shell.settings.session_tabs.get("a").cloned());
+        assert_eq!(kept.map(|kept| kept.tabs), Some(Vec::new()), "and is kept closed");
 
-        // With room, it shows on its own, clear of the centered transcript.
-        cx.simulate_resize(gpui::size(px(1600.0), px(900.0)));
-        cx.run_until_parked();
-        let card = cx
-            .debug_bounds("session-info")
-            .expect("a wide column shows the card unasked");
-        assert!(card.right() <= px(1600.0));
-        assert!(card.left() > px(800.0 + 736.0 / 2.0));
-        let actions = cx.debug_bounds("session-info-side-chat").unwrap();
-        assert!(card.contains(&actions.center()));
+        // The next run knows only what was kept.
+        shell.update(cx, |shell, _| {
+            shell.right_tabs.clear();
+            shell.inspector_given.clear();
+            shell.unrestored_tabs = shell.settings.session_tabs.clone();
+        });
+        assert_eq!(show("a", cx), (Vec::new(), false), "nor given in the next run");
 
-        // Without room it hides, and opening it floats it over the transcript.
-        cx.simulate_resize(gpui::size(px(900.0), px(900.0)));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("session-info").is_none());
-        window
-            .update(&mut cx, |shell, _, cx| shell.toggle_session_info(cx))
-            .unwrap();
-        cx.run_until_parked();
-        let card = cx
-            .debug_bounds("session-info")
-            .expect("opening shows the card over a narrow column");
-        assert!(card.right() <= px(900.0));
-
-        // The toggle closes it again.
-        window
-            .update(&mut cx, |shell, _, cx| shell.toggle_session_info(cx))
-            .unwrap();
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("session-info").is_none());
-
-        // Choosing one of its rows dismisses it too.
-        window
-            .update(&mut cx, |shell, _, cx| shell.toggle_session_info(cx))
-            .unwrap();
-        cx.run_until_parked();
-        let fork = cx.debug_bounds("session-info-fork").unwrap();
-        cx.simulate_click(fork.center(), gpui::Modifiers::none());
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("session-info").is_none());
+        let terminal = format!("{}t", crate::inspector::TERMINAL_CHAT);
+        shell.update(cx, |shell, cx| {
+            let row = super::super::retention_tests::chat_row(&terminal, 3, None, chrono::Utc::now());
+            shell.state.update(cx, |state, cx| {
+                state.chats.push(row);
+                cx.notify();
+            });
+        });
+        assert_eq!(show(&terminal, cx), (Vec::new(), false), "a plain terminal has nothing to inspect");
     }
 
     #[gpui::test]

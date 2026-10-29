@@ -198,8 +198,8 @@ pub(super) fn launch(cx: &mut TestAppContext, screen: Screen) -> (Entity<Shell>,
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
         settings::init(UiSettings::default(), dir.path(), cx);
-        crate::composer::init(cx, ComposerSendBehavior::default());
-        apply_keymap(cx, &KeymapConfig::default(), ComposerSendBehavior::default());
+        crate::composer::init(cx);
+        apply_keymap(cx, &KeymapConfig::default());
         cx.set_reduce_motion(screen.reduced);
     });
     let path = dir.path().to_path_buf();
@@ -337,42 +337,6 @@ fn chats_switched_after_a_stream_paint_as_from_scratch(cx: &mut TestAppContext) 
     }
 }
 
-/// A message queued under a chat pinned to its end raises the stack under the transcript, and
-/// its delivery lowers it again: the transcript's end moves with the stack in the frame that
-/// shows it, as a frame from scratch draws it, with no turn of the person's own running.
-#[gpui::test]
-fn a_queue_that_comes_and_goes_moves_the_transcript_as_from_scratch(cx: &mut TestAppContext) {
-    let (shell, cx) = shell(cx);
-    cx.simulate_keystrokes("cmd-2");
-    cx.run_until_parked();
-    let now = Utc::now();
-    let mut done = turn("b", now);
-    if let Some(last) = done.last_mut() {
-        last.status = Some(MessageStatus::Complete);
-    }
-    shell.update(cx, |shell, cx| {
-        shell.state.update(cx, |state, cx| {
-            state.apply_transcript(done.clone());
-            cx.notify();
-        });
-    });
-    cx.run_until_parked();
-    assert_eq!(stale(cx), None, "the transcript in");
-    for (step, queue) in [
-        ("queued", vec![slopty_view_doc::QueuedMessage::new("q1", "Say more", "local")]),
-        ("delivered", Vec::new()),
-    ] {
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| {
-                state.queue = queue;
-                cx.notify();
-            });
-        });
-        cx.run_until_parked();
-        assert_eq!(stale(cx), None, "{step}");
-    }
-}
-
 /// A chat's row says its status to a screen reader: the working chat's row holds a Status node
 /// that says Working, and an idle row says nothing.
 #[gpui::test]
@@ -392,36 +356,6 @@ fn a_rows_status_is_a_node_of_the_tree(cx: &mut TestAppContext) {
     });
     assert!(statuses.iter().any(|l| l == "Working"), "the working row: {statuses:?}");
     assert_eq!(statuses, ["Working"], "an idle row says nothing: {statuses:?}");
-}
-
-/// A draft typed into the composer while a turn runs, in a chat that scrolls and in one that
-/// does not, paints as from scratch after every key.
-#[gpui::test]
-fn a_draft_typed_mid_turn_paints_as_from_scratch(cx: &mut TestAppContext) {
-    let (shell, cx) = shell(cx);
-    cx.simulate_keystrokes("cmd-1");
-    cx.run_until_parked();
-    let now = Utc::now();
-    for (case, entries) in [("short", turn("a", now).split_off(12)), ("long", turn("a", now))] {
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| {
-                state.apply_transcript(entries.clone());
-                cx.notify();
-            });
-            shell.composer.update(cx, |composer, cx| composer.input.update(cx, |input, cx| input.set_text("", cx)));
-        });
-        cx.run_until_parked();
-        assert_eq!(stale(cx), None, "{case}: the transcript in");
-        let input = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.clone());
-        cx.update(|window, cx| window.focus(&input.read(cx).focus_handle(cx), cx));
-        cx.run_until_parked();
-        assert_eq!(stale(cx), None, "{case}: the composer focused");
-        for ch in "Say more".chars() {
-            cx.simulate_input(&ch.to_string());
-            cx.run_until_parked();
-            assert_eq!(stale(cx), None, "{case}: after {ch:?}");
-        }
-    }
 }
 
 /// The boot landing happens once, at the first chats frame: a first frame with no chat leaves
@@ -448,55 +382,10 @@ fn a_chat_arriving_after_an_empty_first_frame_does_not_open_by_itself(cx: &mut T
     }
 }
 
-/// The composer's caret blinks as state its driver flips: a frame drawn again past a
-/// half-period of the wall clock, with no flip between, shows the caret as the frame it
-/// replaces did.
-#[gpui::test]
-fn a_caret_drawn_again_later_shows_as_it_did(cx: &mut TestAppContext) {
-    let (shell, cx) = shell(cx);
-    cx.simulate_keystrokes("cmd-1");
-    cx.run_until_parked();
-    let input = shell.read_with(cx, |shell, cx| shell.composer.read(cx).input.clone());
-    cx.update(|window, cx| {
-        window.activate_window();
-        window.focus(&input.read(cx).focus_handle(cx), cx);
-    });
-    cx.run_until_parked();
-    let shown = cx.update(|window, cx| {
-        window.is_window_active() && input.read(cx).focus_handle(cx).is_focused(window)
-    });
-    assert!(shown, "the caret is drawn: the window active, the composer focused");
-    assert_eq!(stale(cx), None, "the caret on");
-    std::thread::sleep(std::time::Duration::from_millis(crate::composer::CARET_BLINK_MS + 50));
-    assert_eq!(stale(cx), None, "past a half-period of the wall clock");
-}
-
-/// A command left running in the background: the Background tray's one row.
-pub(super) fn background_tray() -> slopty_view_doc::work::WorkTray {
-    serde_json::from_value(serde_json::json!({
-        "main": { "working": false },
-        "rows": [{
-            "id": "task:sleep", "kind": "command", "noun": "command", "title": "sleep 600",
-            "state": "running", "stateWords": "running", "live": true, "wakes": true,
-            "awaited": false, "ambient": false, "figures": "", "startedAt": 0, "persistent": false,
-            "depth": 0, "canStop": true,
-        }],
-        "counts": {
-            "commands": 1, "monitors": 0, "subagents": 0, "workflows": 0, "mcp": 0, "remote": 0,
-            "teammates": 0, "other": 0, "needsYou": 0,
-        },
-        "summary": "1 command",
-        "canStopAll": true,
-    }))
-    .expect("a tray")
-}
-
-/// A phone's chat, `screen`, drilled into a subagent that runs inside it and back by its
-/// "Back to …", as the simulator's e2e takes it: the composer comes back, the chat's Background
-/// tray arrives a frame later as the view model sends it again, and a queued message comes and
-/// goes. Every frame on the way, with the wall clock moving on between the frame and the check
-/// as it does between a frame and the self-test's dump, paints what a frame from scratch at its
-/// moment paints.
+/// A phone's session, `screen`, its subagent's timeline opened and left by the inspector's
+/// way back to its parent's, as the simulator's e2e takes it. Every frame on the way, with the
+/// wall clock moving on between the frame and the check as it does between a frame and the
+/// self-test's dump, paints what a frame from scratch at its moment paints.
 fn back_from_a_subagent(cx: &mut TestAppContext, screen: Screen) {
     let (shell, cx) = launch(cx, screen);
     let now = Utc::now();
@@ -504,10 +393,6 @@ fn back_from_a_subagent(cx: &mut TestAppContext, screen: Screen) {
     if let Some(last) = done.last_mut() {
         last.status = Some(MessageStatus::Complete);
     }
-    let tray = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
-        let composer = shell.read_with(cx, |shell, _| shell.composer.clone());
-        composer.update(cx, |composer, cx| composer.apply_tray("b", background_tray(), cx));
-    };
     shell.update(cx, |shell, cx| {
         shell.state.update(cx, |state, _| state.chats.push(chat_row("look", 0, Some(("b", true)), now)));
         shell.open_chat("b".into(), cx);
@@ -517,32 +402,15 @@ fn back_from_a_subagent(cx: &mut TestAppContext, screen: Screen) {
         });
     });
     frames(cx, std::time::Duration::from_millis(16), 120);
-    tray(&shell, cx);
-    frames(cx, std::time::Duration::from_millis(16), 120);
     assert!(shell.read_with(cx, |shell, _| shell.compact()), "the phone's own layout");
-    assert_eq!(stale(cx), None, "the parent's chat");
+    assert_eq!(stale(cx), None, "the parent's session");
     shell.update(cx, |shell, cx| shell.open_chat("look".into(), cx));
     frames(cx, std::time::Duration::from_millis(16), 120);
-    assert!(shell.read_with(cx, |shell, cx| shell.subagent_drill(cx).is_some()), "drilled in");
+    let selected = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
+    assert_eq!(selected.as_deref(), Some("look"), "the subagent's timeline");
     assert_eq!(stale(cx), None, "the subagent's run");
-    shell.update(cx, |shell, cx| assert!(shell.leave_drill(cx), "the way back"));
+    shell.update(cx, |shell, cx| shell.open_chat("b".into(), cx));
     for step in 0..40 {
-        match step {
-            1 => tray(&shell, cx),
-            3 => shell.update(cx, |shell, cx| {
-                shell.state.update(cx, |state, cx| {
-                    state.queue = vec![slopty_view_doc::QueuedMessage::new("q1", "Say more", "local")];
-                    cx.notify();
-                });
-            }),
-            20 => shell.update(cx, |shell, cx| {
-                shell.state.update(cx, |state, cx| {
-                    state.queue = Vec::new();
-                    cx.notify();
-                });
-            }),
-            _ => {}
-        }
         cx.executor().advance_clock(std::time::Duration::from_millis(16));
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
@@ -558,43 +426,9 @@ fn a_phones_way_back_from_a_subagent_paints_as_from_scratch(cx: &mut TestAppCont
     back_from_a_subagent(cx, Screen { reduced: true, ..PHONE });
 }
 
-/// The same in motion: the tray and the queue grow into their height at the frame's moment, not
-/// the wall clock's.
+/// The same in motion: what moves on the way back moves at the frame's moment, not the wall
+/// clock's.
 #[gpui::test]
 fn a_phones_way_back_in_motion_paints_as_from_scratch(cx: &mut TestAppContext) {
     back_from_a_subagent(cx, PHONE);
-}
-
-/// A phone's chat holds its composer at the floor: under the composer's footer there is only
-/// the composer's own padding (room for a finger's 44 pt target on the 24 pt row), and under the composer only the window's floor (on iOS the safe
-/// area's, which the page frame keeps). The stack's closed sections leave no room behind: each
-/// once left the column's gap below the composer, 64 pt in all.
-#[gpui::test]
-fn a_phones_composer_stands_on_the_floor(cx: &mut TestAppContext) {
-    let (shell, cx) = launch(cx, PHONE);
-    let now = Utc::now();
-    shell.update(cx, |shell, cx| {
-        shell.open_chat("b".into(), cx);
-        shell.state.update(cx, |state, cx| {
-            state.apply_transcript(turn("b", now));
-            cx.notify();
-        });
-    });
-    frames(cx, std::time::Duration::from_millis(16), 120);
-    cx.update(|window, cx| {
-        window.refresh();
-        window.draw(cx).clear(cx);
-    });
-    let bottom = |name: &'static str, cx: &mut VisualTestContext| {
-        let bounds = cx.debug_bounds(name).unwrap_or_else(|| panic!("{name} drawn"));
-        f32::from(bounds.bottom())
-    };
-    let (root, footer, stack) =
-        (bottom("composer-root", cx), bottom("composer-footer-slot", cx), bottom("bottom-stack", cx));
-    let floor = cx.update(|window, _| f32::from(window.viewport_size().height));
-    assert!(
-        root - footer <= 10.5,
-        "under the footer ({footer}) the composer ends at {root}: only its padding between"
-    );
-    assert!((stack - floor).abs() < 0.5 && (root - floor).abs() < 0.5, "the stack {stack} and the composer {root} at the floor {floor}");
 }

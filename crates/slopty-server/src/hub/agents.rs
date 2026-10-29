@@ -3,37 +3,35 @@
 //! another. The same verbs serve at any depth: an agent another started starts its own.
 //!
 //! An agent that starts another is its parent: the child's row names it
-//! ([`slopty_proto::agent::PARENT_FACT`]), so every device draws the same tree. What the
-//! child comes to (a rest, a wait on the person, its end) reaches the parent through the
-//! parent's own hooks ([`crate::deliver`]), as do words another agent tells it. Nothing is
-//! typed into a terminal, and no agent answers for the person.
+//! ([`slopty_proto::agent::PARENT_FACT`]), so every device draws the same tree. The parent reads
+//! and waits on what its children come to (`agent_read`, `agent_wait`). Words told an agent are
+//! typed into its TUI as one message by the worker that holds it, never while it asks the person
+//! at a dialog, and a stop is an Esc while its turn runs (`docs/decisions/agents.md`,
+//! "TUI-first"). No agent answers for the person.
 //!
 //! How freely a started agent acts is the person's one setting (`[agents] autonomy`), which
 //! the server turns into each harness's own mode ([`mode_for`]); an agent names no harness
 //! arguments of its own.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
-use slopty_core::{SessionId, WallMs, WorkerId, XferId};
+use slopty_core::{SessionId, WorkerId, XferId};
 use slopty_proto::agent::{AgentEntry, AgentStart, PARENT_FACT, TELL_MAX, WAIT_MAX};
 use slopty_proto::orchestration::{
-    BUNDLES, BranchBundle, ErrorCode, IdempotencyKey, Outcome, TermRef, ThreadOf, UploadPart, Verb,
+    BUNDLES, BranchBundle, ErrorCode, IdempotencyKey, Outcome, ThreadOf, UploadPart, Verb,
 };
 use slopty_proto::screen::VideoCodec;
-use slopty_proto::server::{Fact, Facts, FromServer, Liveness, Os, WorkerFacts};
+use slopty_proto::server::{Fact, Facts, Liveness, Os, WorkerFacts};
 use slopty_proto::terminal::{RepoId, SessionSummary};
 use slopty_proto::thread::wire::{NewWorktree, Start, ThreadRow};
-use slopty_proto::thread::{AgentId, Phase, ThreadId, TurnId};
+use slopty_proto::thread::{AgentId, Phase, ThreadId};
 use slopty_settings::Autonomy;
 
-use super::ladder::{parent_of, seat_of, there};
+use super::ladder::{parent_of, there};
 use super::{Entry, Hub, State, WAIT_CAP_MS, error, unknown_worker};
-use crate::deliver::{Batch, Kind};
 
 /// The most bytes of a bundle read or uploaded in one request.
 const PART: u64 = 4 << 20;
-/// The most of an agent's last words its parent reads of a rest, in bytes.
-const LAST_WORDS_MAX: usize = 2048;
 /// The fact a worker says its clones are in, and the server the repositories each worker
 /// has: each key of a repository's identity ([`RepoId::keys`]) to the clone's path.
 const REPOS: &str = "repos";
@@ -57,9 +55,6 @@ pub(super) struct Agents {
     driven: HashSet<SessionId>,
     /// The last clone number asked for.
     next_clone: u64,
-    /// Where each agent another started was last said to stand, by its worker, for its
-    /// parent to hear only of a move.
-    said: HashMap<ThreadId, (WorkerId, Stands)>,
 }
 
 impl Agents {
@@ -79,41 +74,8 @@ impl Agents {
     }
 }
 
-/// Where an agent another started stands, as its parent hears it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Stands {
-    /// At work, or not yet begun.
-    Busy,
-    /// Its turn (this one, ended then by its worker's clock) ended and it waits at its prompt:
-    /// a later end is news again, whether or not its work was seen in between.
-    Rest(Option<(TurnId, WallMs)>),
-    /// It waits on the person.
-    Needs,
-    /// Its program ended.
-    Ended,
-}
-
-impl Stands {
-    fn of(row: &ThreadRow) -> Self {
-        if !there(row) {
-            return Self::Ended;
-        }
-        if row.status.phase == Phase::NeedsYou || !row.requests.is_empty() {
-            return Self::Needs;
-        }
-        match row.status.phase {
-            // Idle before its first turn ended is a start not yet under way.
-            Phase::Idle if row.ended.is_none() => Self::Busy,
-            Phase::Idle | Phase::Done | Phase::Failed | Phase::Stopped => {
-                Self::Rest(row.ended.as_ref().map(|e| (e.turn, e.at_ms)))
-            }
-            Phase::Working | Phase::Waiting | Phase::NeedsYou => Self::Busy,
-        }
-    }
-}
-
 /// The mode `agent` starts in under `autonomy`, by the harness's own name: Claude Code's
-/// permission mode, Codex's approval policy, pi's gate; an ACP agent's own default.
+/// permission mode, Codex's approval policy; any other agent starts in its own default.
 fn mode_for(agent: &AgentId, autonomy: Autonomy) -> Option<String> {
     let mode = if agent.is(AgentId::CLAUDE_CODE) {
         match autonomy {
@@ -126,12 +88,6 @@ fn mode_for(agent: &AgentId, autonomy: Autonomy) -> Option<String> {
             Autonomy::Auto => "on-request",
             Autonomy::Full => "never",
             Autonomy::Ask => "untrusted",
-        }
-    } else if agent.is(AgentId::PI) {
-        match autonomy {
-            Autonomy::Auto => slopty_agent::pi::modes::EDITS,
-            Autonomy::Full => slopty_agent::pi::modes::OWN,
-            Autonomy::Ask => slopty_agent::pi::modes::ASK,
         }
     } else {
         return None;
@@ -155,7 +111,21 @@ fn entry_of(worker: WorkerId, row: &ThreadRow) -> AgentEntry {
         asks: row.requests.first().map(|r| r.title.clone()).filter(|t| !t.trim().is_empty()),
         last: row.last_line.clone().filter(|l| !l.trim().is_empty()),
         since_ms: row.status.since_ms,
-        rests: Stands::of(row) != Stands::Busy,
+        rests: rests(row),
+    }
+}
+
+/// Whether `row`'s agent has come to something its parent waits for: its program ended, it
+/// waits on the person, or its turn ended and it waits at its prompt. Idle before its first
+/// turn ended is a start not yet under way.
+fn rests(row: &ThreadRow) -> bool {
+    if !there(row) || row.status.phase == Phase::NeedsYou || !row.requests.is_empty() {
+        return true;
+    }
+    match row.status.phase {
+        Phase::Idle => row.ended.is_some(),
+        Phase::Done | Phase::Failed | Phase::Stopped => true,
+        Phase::Working | Phase::Waiting | Phase::NeedsYou => false,
     }
 }
 
@@ -188,48 +158,22 @@ fn under(state: &State, thread: ThreadId, above: ThreadId) -> bool {
     false
 }
 
+/// What an agent named `name`, thread `from`, telling another `text` has typed into the other's
+/// terminal: marked as an agent's words, so the agent hearing them never takes them for the
+/// person's.
+fn told(name: &str, from: ThreadId, text: &str) -> String {
+    format!("Agent {name} ({from}) says (an agent, not the person):\n{}", text.trim())
+}
+
+/// Whether `row`'s agent is in a turn an Esc stops: at work, asking nobody.
+fn at_work(row: &ThreadRow) -> bool {
+    row.status.phase == Phase::Working && row.status.wait.is_none() && row.requests.is_empty()
+}
+
 /// The name an agent is read by: its title, else its id.
 fn name_of(row: &ThreadRow) -> String {
     let title = row.title.trim();
     if title.is_empty() { row.id.to_string() } else { title.to_owned() }
-}
-
-/// `text` cut to at most `max` bytes, at a character boundary, marked when cut.
-fn clipped(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_owned();
-    }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    format!("{}…", text.get(..end).unwrap_or_default())
-}
-
-/// What the parent reads of `row`'s agent on `machine` standing at `kind`.
-fn words(row: &ThreadRow, machine: &str, kind: Kind) -> String {
-    let who = format!("Agent {} ({}) on {machine}", name_of(row), row.id);
-    match kind {
-        Kind::Rest => {
-            let mut words = format!("{who} came to rest at its prompt.");
-            if let Some(last) = row.last_line.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
-                words.push_str(" Its last words:");
-                for line in clipped(last, LAST_WORDS_MAX).lines() {
-                    words.push_str("\n  ");
-                    words.push_str(line);
-                }
-            }
-            words
-        }
-        Kind::Needs => {
-            let asks = row.requests.first().map_or("a question", |r| r.title.as_str());
-            format!(
-                "{who} waits on the person: {}. Only the person answers it.",
-                clipped(asks.trim(), LAST_WORDS_MAX)
-            )
-        }
-        Kind::Ended => format!("{who} ended; its conversation is kept."),
-    }
 }
 
 /// A worker's facts as the server keeps them: lists and maps cut to [`FACT_ITEMS_MAX`] items,
@@ -612,9 +556,10 @@ impl Hub {
         }
     }
 
-    /// `text` for `agent`, from the agent `from` or from the person. An agent tells only
-    /// agents of its own tree.
-    pub(super) fn agent_tell(
+    /// `text` for `agent`, from the agent `from` or from the person, typed into its terminal
+    /// by the worker that holds it as one message. An agent tells only agents of its own tree,
+    /// and its words go marked as an agent's, not the person's.
+    pub(super) async fn agent_tell(
         &self,
         caller: super::Caller,
         from: Option<ThreadId>,
@@ -624,46 +569,40 @@ impl Hub {
         if text.len() > TELL_MAX {
             return error(ErrorCode::Invalid, &format!("at most {TELL_MAX} bytes to tell at once"));
         }
-        let mut state = self.inner.state.lock();
-        let Some((_, row)) = state.board.row(agent) else { return unknown_agent(agent) };
-        if seat_of(row).is_none() {
-            return error(
-                ErrorCode::Unsupported,
-                &format!("agent {agent} has no seat to hear through; the person reaches it"),
-            );
-        }
-        let by = match (caller, from) {
-            (super::Caller::Person, _) => None,
-            (super::Caller::Agent, None) => {
-                return error(
-                    ErrorCode::Forbidden,
-                    "the server cannot tell which agent is speaking, so it tells nobody",
-                );
-            }
-            (super::Caller::Agent, Some(from)) => {
-                if top_of(&state, from) != top_of(&state, agent) {
+        let (worker, said) = {
+            let state = self.inner.state.lock();
+            let Some((worker, _)) = state.board.row(agent) else { return unknown_agent(agent) };
+            let said = match (caller, from) {
+                (super::Caller::Person, _) => text.to_owned(),
+                (super::Caller::Agent, None) => {
                     return error(
                         ErrorCode::Forbidden,
-                        &format!("agent {agent} is not of the tree this agent is in"),
+                        "the server cannot tell which agent is speaking, so it tells nobody",
                     );
                 }
-                let name =
-                    state.board.row(from).map_or_else(|| from.to_string(), |(_, r)| name_of(r));
-                Some((name, from))
-            }
+                (super::Caller::Agent, Some(from)) => {
+                    if top_of(&state, from) != top_of(&state, agent) {
+                        return error(
+                            ErrorCode::Forbidden,
+                            &format!("agent {agent} is not of the tree this agent is in"),
+                        );
+                    }
+                    let name =
+                        state.board.row(from).map_or_else(|| from.to_string(), |(_, r)| name_of(r));
+                    told(&name, from, text)
+                }
+            };
+            drop(state);
+            (worker, said)
         };
-        state.deliveries.words(agent, by, text, tokio::time::Instant::now());
-        drop(state);
-        self.inner.deliver.notify_one();
-        Outcome::Done
+        let tell = Verb::AgentTell { agent, text: said };
+        self.forward_to(worker, None, tell, super::FORWARD_TIMEOUT).await
     }
 
     /// Wait until one of `agents`, or each when `all`, needs someone or comes to rest, for at
-    /// most `timeout_ms` (capped at [`WAIT_CAP_MS`]); `reader`'s own children it saw so are
-    /// no news to it after.
+    /// most `timeout_ms` (capped at [`WAIT_CAP_MS`]).
     pub(super) async fn agent_wait(
         &self,
-        reader: Option<ThreadId>,
         agents: &[ThreadId],
         all: bool,
         timeout_ms: u32,
@@ -677,7 +616,7 @@ impl Hub {
         loop {
             rows.borrow_and_update();
             let entries = {
-                let mut state = self.inner.state.lock();
+                let state = self.inner.state.lock();
                 let mut entries = Vec::with_capacity(agents.len());
                 for agent in agents {
                     let Some((worker, row)) = state.board.row(*agent) else {
@@ -690,11 +629,6 @@ impl Hub {
                 } else {
                     entries.iter().any(|e| e.rests)
                 };
-                if met && let Some(reader) = reader {
-                    for e in entries.iter().filter(|e| e.rests && e.parent == Some(reader)) {
-                        state.deliveries.seen(reader, e.id);
-                    }
-                }
                 drop(state);
                 met.then_some(entries)
             };
@@ -716,15 +650,17 @@ impl Hub {
         }
     }
 
-    /// End `agent` and every agent under it, the deepest first, their conversations kept. An
-    /// agent stops only itself and the agents under it.
+    /// Stop the turn of `agent` and of every agent under it at work, the deepest first: an Esc
+    /// in each one's terminal, its session and terminal kept. One that waits on the person is
+    /// left to the person, and with none at work there is nothing to stop. An agent stops only
+    /// itself and the agents under it.
     pub(super) async fn agent_stop(
         &self,
         caller: super::Caller,
         from: Option<ThreadId>,
         agent: ThreadId,
     ) -> Outcome {
-        let seats: Vec<TermRef> = {
+        let stops: Vec<(WorkerId, ThreadId)> = {
             let state = self.inner.state.lock();
             if state.board.row(agent).is_none() {
                 return unknown_agent(agent);
@@ -736,22 +672,28 @@ impl Hub {
                     &format!("agent {agent} is not this agent or one it started"),
                 );
             }
-            let mut stops: Vec<(usize, TermRef)> = state
+            let mut stops: Vec<(usize, WorkerId, ThreadId)> = state
                 .board
                 .agent_rows()
-                .filter(|(_, r)| there(r) && under(&state, r.id, agent))
-                .filter_map(|(worker, r)| {
-                    let depth = depth_below(&state, r.id, agent);
-                    Some((depth, TermRef { worker, session: seat_of(r)? }))
-                })
+                .chain(state.board.row(agent))
+                .filter(|(_, r)| there(r) && at_work(r) && under(&state, r.id, agent))
+                .map(|(worker, r)| (depth_below(&state, r.id, agent), worker, r.id))
                 .collect();
             drop(state);
-            stops.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
-            stops.into_iter().map(|(_, term)| term).collect()
+            stops.sort_by_key(|(depth, _, id)| (std::cmp::Reverse(*depth), *id));
+            stops.dedup_by_key(|(_, _, id)| *id);
+            stops.into_iter().map(|(_, worker, id)| (worker, id)).collect()
         };
-        for term in seats {
-            match self.forward(None, Verb::Close { term }).await {
-                Outcome::Done | Outcome::Error { code: ErrorCode::UnknownTerminal, .. } => {}
+        if stops.is_empty() {
+            return error(
+                ErrorCode::Conflict,
+                &format!("agent {agent} and the agents under it are not at work: nothing to stop"),
+            );
+        }
+        for (worker, thread) in stops {
+            let stop = Verb::AgentStop { agent: thread };
+            match self.forward_to(worker, None, stop, super::FORWARD_TIMEOUT).await {
+                Outcome::Done | Outcome::Error { code: ErrorCode::Conflict, .. } => {}
                 failed => return failed,
             }
         }
@@ -832,130 +774,6 @@ impl Hub {
         let fetch =
             Verb::FetchBundle { worker: to, repo: into, bundle, branch, into: into_branch, head };
         self.forward(None, fetch).await
-    }
-
-    /// Rows came: each agent another started that moved is told to its parent, to go when it
-    /// is due ([`crate::deliver`]), and an agent back at work takes back what was to be said.
-    pub(super) fn rows_moved(&self, state: &mut State) {
-        let now = tokio::time::Instant::now();
-        let mut live: HashSet<ThreadId> = HashSet::new();
-        let mut moves: Vec<(ThreadId, ThreadId, Stands, String)> = Vec::new();
-        for (worker, row) in state.board.agent_rows() {
-            let Some(parent) = parent_of(row) else { continue };
-            live.insert(row.id);
-            let stands = Stands::of(row);
-            let was = state.agents.said.get(&row.id).map(|(_, s)| *s);
-            if was == Some(stands) {
-                continue;
-            }
-            let machine = state.workers.get(&worker).map_or("?", |e| e.info.name.as_str());
-            let kind = match stands {
-                Stands::Busy => None,
-                Stands::Rest(_) => Some(Kind::Rest),
-                Stands::Needs => Some(Kind::Needs),
-                Stands::Ended => Some(Kind::Ended),
-            };
-            let text = kind.map(|k| words(row, machine, k)).unwrap_or_default();
-            tracing::debug!(child = %row.id, %parent, ?stands, "an agent another started moved");
-            moves.push((parent, row.id, stands, text));
-            state.agents.said.insert(row.id, (worker, stands));
-        }
-        let tabled: HashSet<WorkerId> = state.board.rows().map(|(w, _)| w).collect();
-        state.agents.said.retain(|id, (worker, _)| live.contains(id) || !tabled.contains(worker));
-        if moves.is_empty() {
-            return;
-        }
-        for (parent, child, stands, text) in moves {
-            match stands {
-                Stands::Busy => state.deliveries.moved_on(child),
-                Stands::Rest(_) => state.deliveries.outcome(parent, child, Kind::Rest, &text, now),
-                Stands::Needs => state.deliveries.outcome(parent, child, Kind::Needs, &text, now),
-                Stands::Ended => state.deliveries.outcome(parent, child, Kind::Ended, &text, now),
-            }
-        }
-        self.unpark_deliveries(state);
-        self.inner.deliver.notify_one();
-    }
-
-    /// The machine `worker`, named `name`, went away (it stayed away [`super::GONE_AFTER`]) or
-    /// came `back`: each agent there that another started is told to its parent at once.
-    pub(super) fn machine_seen(&self, state: &mut State, worker: WorkerId, name: &str, back: bool) {
-        let now = tokio::time::Instant::now();
-        let children: Vec<(ThreadId, ThreadId, String)> = state
-            .board
-            .agent_rows()
-            .filter(|(w, r)| *w == worker && there(r))
-            .filter_map(|(_, r)| Some((parent_of(r)?, r.id, name_of(r))))
-            .collect();
-        for (parent, child, agent) in children {
-            if back {
-                // What its rows say from here on is news again.
-                state.agents.said.remove(&child);
-                state.deliveries.moved_on(child);
-                continue;
-            }
-            let text = format!(
-                "The machine {name} stopped answering, with agent {agent} ({child}) on it. It \
-                 goes on when the machine is back."
-            );
-            state.deliveries.outcome(parent, child, Kind::Ended, &text, now);
-        }
-        self.inner.deliver.notify_one();
-    }
-
-    /// Push every batch of words due now to its agent's worker, and say when the next falls
-    /// due.
-    pub(super) fn deliver_due(&self) -> Option<tokio::time::Instant> {
-        let mut guard = self.inner.state.lock();
-        let state = &mut *guard;
-        let now = tokio::time::Instant::now();
-        // The row with a child's last line may come after the status that ended its turn.
-        let (board, workers) = (&state.board, &state.workers);
-        state.deliveries.reword(|child, kind| {
-            let (worker, row) = board.row(child)?;
-            let machine = workers.get(&worker).map_or("?", |e| e.info.name.as_str());
-            (Stands::of(row) != Stands::Busy).then(|| words(row, machine, kind))
-        });
-        let board = &state.board;
-        let batches = state.deliveries.take(now, |to| {
-            let (worker, row) = board.row(to)?;
-            let session = seat_of(row).filter(|_| there(row))?;
-            Some(TermRef { worker, session })
-        });
-        for batch in batches {
-            tracing::debug!(to = %batch.to, session = %batch.term.session, batch = batch.number, "words due");
-            let _taken = Self::push_batch(state, &batch, now);
-        }
-        let next = state.deliveries.next_due();
-        drop(guard);
-        next
-    }
-
-    /// Send `batch` to its seat's worker, as of `now`. One the link cannot take now stays
-    /// outstanding and goes again after [`crate::deliver::RESEND`], folded into the next
-    /// batch; one for a worker with no link goes again when it registers. Whether the link took
-    /// it, or there was none to try.
-    pub(super) fn push_batch(state: &mut State, batch: &Batch, now: tokio::time::Instant) -> bool {
-        let Batch { to, term, number, reports } = batch;
-        let link = state.workers.get(&term.worker).and_then(|e| e.link.as_ref());
-        let msg =
-            FromServer::Deliver { session: term.session, batch: *number, reports: reports.clone() };
-        if let Some(link) = link
-            && link.tx.try_send(msg).is_err()
-        {
-            tracing::debug!(session = %term.session, batch = number, "words not sent now");
-            state.deliveries.unsent(*to, *number, now);
-            return false;
-        }
-        true
-    }
-
-    /// The worker holding `term` handed batch `batch` to its agent: what did not fit it may go
-    /// now.
-    pub(super) fn delivered(&self, state: &mut State, term: TermRef, batch: u64) {
-        if state.deliveries.acked(term, batch).is_some() {
-            self.inner.deliver.notify_one();
-        }
     }
 }
 

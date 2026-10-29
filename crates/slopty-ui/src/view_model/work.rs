@@ -1,21 +1,18 @@
 //! What a thread does besides its conversation, as the shell's dock and tray read it.
 //!
-//! Its background work beside the child chats it started ([`tray`]); the turn's live line, the
-//! goal, notifications, mode, context and mods' surfaces ([`dock`]); and its permission rules
-//! ([`rules`]).
+//! Its background work beside the child chats it started ([`tray`]); and the turn's live line,
+//! its permission mode, its context and the subagent kinds it offers ([`dock`]).
 //!
 //! Pure: the workspace hands in a thread's state and the rows of the threads it started, and
 //! publishes what comes out (`workspace::view_model::work`).
 
 use slopty_proto::thread::wire::ThreadRow;
 use slopty_proto::thread::{
-    BackgroundTask, Cap, ItemBody, Notice, Phase, Rule, ThreadId, ThreadState, TurnState, Usage,
+    BackgroundTask, Cap, ItemBody, Notice, Phase, ThreadId, ThreadState, TurnState, Usage,
 };
 use slopty_view_doc::{
-    ActivityLine, ChatDock, ContextBreakdown, ContextSlice, DockCan, GoalLine, MainRow,
-    McpServerRow, ModSurface, ModeChip, ModeChoice, NoteLine, PermissionRuleRow, PermissionRules,
-    RetryLine, RuleScope, SideLine, StatusSpan, SubagentKindRow, TurnTokens, WorkCounts, WorkRow,
-    WorkTray, tokens_short,
+    ActivityLine, ChatDock, ContextBreakdown, ContextSlice, MainRow, ModeChip, RetryLine,
+    TurnTokens, WorkCounts, WorkRow, WorkTray, tokens_short,
 };
 
 use super::transcript::at;
@@ -119,10 +116,6 @@ pub fn tray(
     chat_of: &dyn Fn(ThreadId) -> String,
 ) -> WorkTray {
     let can_stop_task = state.meta.can(Cap::STOP_TASK);
-    let model_of = |agent_type: Option<&str>| {
-        let agent_type = agent_type?;
-        state.agents.iter().find(|kind| kind.name == agent_type).and_then(|kind| kind.model.clone())
-    };
     // A task's chat: the one it names, else the one its call started (a subagent taken up again
     // names none).
     let child_of = |task: &BackgroundTask| {
@@ -146,7 +139,7 @@ pub fn tray(
             noun: noun.to_owned(),
             title: task.title.clone(),
             agent_type: task.agent_type.clone(),
-            model: model_of(task.agent_type.as_deref()),
+            model: child.and_then(|c| c.row.meters.model.clone()),
             state: if needs_you.is_some() { NEEDS_YOU.to_owned() } else { task.state.clone() },
             state_words: state_words(if needs_you.is_some() { NEEDS_YOU } else { &task.state }),
             live,
@@ -400,26 +393,12 @@ fn todo_now(state: &ThreadState) -> (Option<String>, Option<String>) {
     (doing, next)
 }
 
-/// The session's tokens as far as `state` holds its turns.
-fn session_tokens(state: &ThreadState) -> u64 {
-    state.turns.iter().fold(0_u64, |sum, turn| sum.saturating_add(turn.usage.tokens()))
-}
-
 /// A permission mode's chip.
 fn mode_chip(state: &ThreadState) -> Option<ModeChip> {
     let id = state.meters.mode.clone()?;
-    let choices: Vec<ModeChoice> = state
+    let label = state
         .meta
         .modes
-        .iter()
-        .map(|mode| ModeChoice {
-            id: mode.id.clone(),
-            label: mode.label.clone(),
-            description: mode.description.clone(),
-            recommended: mode.id == RECOMMENDED_MODE,
-        })
-        .collect();
-    let label = choices
         .iter()
         .find(|mode| mode.id == id)
         .map_or_else(|| humane(&id), |mode| mode.label.clone());
@@ -434,13 +413,8 @@ fn mode_chip(state: &ThreadState) -> Option<ModeChip> {
         _ => ModeChip::QUIET,
     };
     let words = if tone == ModeChip::QUIET { String::new() } else { format!("{label} on") };
-    Some(ModeChip { id, label, words, tone: tone.to_owned(), choices })
+    Some(ModeChip { id, label, words, tone: tone.to_owned() })
 }
-
-/// The mode Claude Code starts in when nothing chooses another, and the one it recommends: auto,
-/// where a judge asks only about what looks risky
-/// (`slopty_agent::claude::offers`, its built-in mode).
-const RECOMMENDED_MODE: &str = "auto";
 
 /// An agent's camel-cased name for people: `acceptEdits` → "Accept edits".
 fn humane(id: &str) -> String {
@@ -522,34 +496,9 @@ fn context(state: &ThreadState) -> Option<ContextBreakdown> {
     })
 }
 
-/// A notification's tone, from its colour or its priority.
-fn note_tone(color: Option<&str>, priority: &str) -> &'static str {
-    match color {
-        Some(c) if c.contains("error") || c.contains("red") => NoteLine::ERROR,
-        Some(c) if c.contains("warn") || c.contains("yellow") || c.contains("orange") => {
-            NoteLine::WARNING
-        }
-        _ if priority == "immediate" || priority == "high" => NoteLine::WARNING,
-        _ => NoteLine::INFO,
-    }
-}
-
-/// What the agent waits on once its turn ended with work running: the turn footer's line.
-fn waiting_words(state: &ThreadState, counts: &WorkCounts) -> Option<String> {
-    if state.status.phase != Phase::Waiting || counts.total() == 0 {
-        return None;
-    }
-    let agents = counts.subagents.saturating_add(counts.workflows).saturating_add(counts.teammates);
-    if agents > 0 {
-        let noun = if agents == 1 { "subagent" } else { "subagents" };
-        return Some(format!("Waiting for {agents} {noun} to finish"));
-    }
-    Some(format!("{} still running", counts.summary()))
-}
-
-/// `state`'s dock, at `now_ms`; `counts` is its tray's.
+/// `state`'s dock: what the inspector reads beside the session's terminal.
 #[must_use]
-pub fn dock(state: &ThreadState, counts: &WorkCounts, now_ms: i64) -> ChatDock {
+pub fn dock(state: &ThreadState) -> ChatDock {
     let working = state.status.phase == Phase::Working;
     let (doing, next) = todo_now(state);
     let activity = working.then(|| {
@@ -566,282 +515,7 @@ pub fn dock(state: &ThreadState, counts: &WorkCounts, now_ms: i64) -> ChatDock {
             quiet_since: live.quiet_since.map(at).filter(|ms| *ms > 0),
         }
     });
-    let goal = state.goal.as_ref().map(|goal| GoalLine {
-        condition: goal.condition.clone(),
-        set_at: at(goal.set_ms),
-        iterations: goal.iterations,
-        tokens: (!state.older)
-            .then(|| session_tokens(state).saturating_sub(goal.tokens_at_start))
-            .filter(|n| *n > 0),
-        last_reason: goal.last_reason.clone(),
-    });
-    let notes = state
-        .notes
-        .iter()
-        .filter(|note| note.until_ms.is_none_or(|until| at(until) > now_ms))
-        .map(|note| NoteLine {
-            key: note.key.clone(),
-            text: note.text.clone(),
-            tone: note_tone(note.color.as_deref(), &note.priority).to_owned(),
-            priority: note.priority.clone(),
-            at: at(note.at_ms),
-            until: note.until_ms.map(at),
-        })
-        .collect();
-    let surfaces = state
-        .surfaces
-        .iter()
-        .filter(|s| s.until_ms.is_none_or(|until| at(until) > now_ms))
-        .map(|s| ModSurface {
-            id: s.id.clone(),
-            kind: s.kind.clone(),
-            plugin: s.plugin.clone(),
-            title: s.title.clone(),
-            text: s.text.clone(),
-            tree: serde_json::from_str(&s.tree).unwrap_or(serde_json::Value::Null),
-            until: s.until_ms.map(at),
-        })
-        .collect();
-    let can = |cap: &str| state.meta.can(cap);
-    ChatDock {
-        activity,
-        goal,
-        notes,
-        suggestion: state.suggestion.clone().filter(|s| !s.trim().is_empty()),
-        status_line: state.status_line.as_deref().map(status_spans).unwrap_or_default(),
-        mode: mode_chip(state),
-        waiting: waiting_words(state, counts),
-        context: context(state),
-        subagent_kinds: state
-            .agents
-            .iter()
-            .map(|kind| SubagentKindRow {
-                name: kind.name.clone(),
-                description: kind.description.clone(),
-                model: kind.model.clone(),
-            })
-            .collect(),
-        surfaces,
-        side: state
-            .side
-            .iter()
-            .map(|s| SideLine {
-                id: s.intent.to_string(),
-                question: s.question.clone(),
-                answer: s.answer.clone(),
-                failed: s.failed.clone(),
-                at: at(s.at_ms),
-            })
-            .collect(),
-        can: DockCan {
-            stop_work: can(Cap::STOP_TASK),
-            background: can(Cap::BACKGROUND),
-            shell: can(Cap::SHELL),
-            rewind: can(Cap::REWIND),
-            fork: can(Cap::FORK) || can(Cap::REWIND_CONVERSATION),
-            rules: can(Cap::RULES),
-            surfaces: can(Cap::SURFACES),
-            set_mode: can(Cap::SET_MODE) && !state.meta.modes.is_empty(),
-            side: can(Cap::SIDE),
-            mcp_servers: can(Cap::MCP_SERVERS),
-        },
-        servers: state
-            .servers
-            .iter()
-            .map(|server| McpServerRow {
-                name: server.name.clone(),
-                status: server.status.clone(),
-                error: server.error.clone(),
-                source: server.source.clone(),
-                reconnects: server.reconnects(),
-            })
-            .collect(),
-    }
-}
-
-/// The scopes a rule can be added to, the narrowest first.
-fn scopes() -> Vec<RuleScope> {
-    [
-        (Rule::LOCAL, "This project, this machine", ".claude/settings.local.json"),
-        (Rule::PROJECT, "This project, shared", ".claude/settings.json"),
-        (Rule::USER, "You, every project", "~/.claude/settings.json"),
-    ]
-    .into_iter()
-    .map(|(id, label, file)| RuleScope {
-        id: id.to_owned(),
-        label: label.to_owned(),
-        file: file.to_owned(),
-    })
-    .collect()
-}
-
-/// Where a rule comes from, for people.
-fn source_label(source: &str) -> String {
-    match source {
-        Rule::LOCAL => "This project, this machine",
-        Rule::PROJECT => "This project, shared",
-        Rule::USER => "You, every project",
-        "session" => "This session",
-        "cliArg" => "How it was started",
-        "policySettings" => "Your organisation",
-        "flagSettings" => "Its flags",
-        "command" => "A command",
-        other => return humane(other),
-    }
-    .to_owned()
-}
-
-/// `state`'s permission rules, as the chat `chat` reads them.
-#[must_use]
-pub fn rules(state: &ThreadState, chat: &str) -> PermissionRules {
-    let rules = state.rules.as_ref();
-    PermissionRules {
-        chat_id: chat.to_owned(),
-        known: rules.is_some(),
-        rules: rules
-            .map(|rules| {
-                rules
-                    .rules
-                    .iter()
-                    .map(|rule| PermissionRuleRow {
-                        behavior: rule.behavior.clone(),
-                        rule: rule.text.clone(),
-                        source: rule.source.clone(),
-                        source_label: source_label(&rule.source),
-                        description: rule.description.clone(),
-                        editable: rule.editable,
-                        in_effect: rule.in_effect,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        directories: rules.map(|rules| rules.directories.clone()).unwrap_or_default(),
-        scopes: if state.meta.can(Cap::RULES) { scopes() } else { Vec::new() },
-    }
-}
-
-/// A status line's text, its ANSI styles read into spans; escapes it does not style by (a
-/// link, a title) are dropped.
-#[must_use]
-pub fn status_spans(text: &str) -> Vec<StatusSpan> {
-    let mut spans: Vec<StatusSpan> = Vec::new();
-    let mut style = StatusSpan::default();
-    let mut chars = text.chars().peekable();
-    let mut run = String::new();
-    let flush = |run: &mut String, style: &StatusSpan, spans: &mut Vec<StatusSpan>| {
-        if run.is_empty() {
-            return;
-        }
-        let text = std::mem::take(run);
-        match spans.last_mut() {
-            Some(last) if StatusSpan { text: String::new(), ..last.clone() } == *style => {
-                last.text.push_str(&text);
-            }
-            _ => spans.push(StatusSpan { text, ..style.clone() }),
-        }
-    };
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            if c != '\r' && (c == '\n' || !c.is_control()) {
-                run.push(c);
-            }
-            continue;
-        }
-        match chars.next() {
-            Some('[') => {
-                let mut params = String::new();
-                let mut end = None;
-                for c in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&c) {
-                        end = Some(c);
-                        break;
-                    }
-                    params.push(c);
-                }
-                if end == Some('m') {
-                    flush(&mut run, &style, &mut spans);
-                    sgr(&params, &mut style);
-                }
-            }
-            // An OSC (a link, a title) runs to BEL or ST; its text is not drawn.
-            Some(']') => {
-                while let Some(c) = chars.next() {
-                    if c == '\u{7}' {
-                        break;
-                    }
-                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    flush(&mut run, &style, &mut spans);
-    spans
-}
-
-/// One SGR sequence's parameters applied to `style`.
-fn sgr(params: &str, style: &mut StatusSpan) {
-    let codes: Vec<u16> = params
-        .split([';', ':'])
-        .map(|p| if p.is_empty() { 0 } else { p.parse().unwrap_or(0) })
-        .collect();
-    let codes = if codes.is_empty() { vec![0] } else { codes };
-    let mut ix = 0;
-    while let Some(&code) = codes.get(ix) {
-        ix = ix.saturating_add(1);
-        match code {
-            0 => *style = StatusSpan::default(),
-            1 => style.bold = true,
-            2 => style.dim = true,
-            3 => style.italic = true,
-            4 => style.underline = true,
-            22 => {
-                style.bold = false;
-                style.dim = false;
-            }
-            23 => style.italic = false,
-            24 => style.underline = false,
-            30..=37 => style.fg = Some(format!("ansi:{}", code.saturating_sub(30))),
-            90..=97 => style.fg = Some(format!("ansi:{}", code.saturating_sub(82))),
-            40..=47 => style.bg = Some(format!("ansi:{}", code.saturating_sub(40))),
-            100..=107 => style.bg = Some(format!("ansi:{}", code.saturating_sub(92))),
-            39 => style.fg = None,
-            49 => style.bg = None,
-            38 | 48 => {
-                let colour = match codes.get(ix) {
-                    Some(5) => {
-                        let n = codes.get(ix.saturating_add(1)).copied();
-                        ix = ix.saturating_add(2);
-                        n.map(|n| format!("ansi:{}", n.min(255)))
-                    }
-                    Some(2) => {
-                        let rgb: Vec<u16> =
-                            codes.iter().skip(ix.saturating_add(1)).take(3).copied().collect();
-                        ix = ix.saturating_add(4);
-                        match rgb.as_slice() {
-                            [r, g, b] => Some(format!(
-                                "#{:02x}{:02x}{:02x}",
-                                (*r).min(255),
-                                (*g).min(255),
-                                (*b).min(255)
-                            )),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                if code == 38 {
-                    style.fg = colour;
-                } else {
-                    style.bg = colour;
-                }
-            }
-            _ => {}
-        }
-    }
+    ChatDock { activity, mode: mode_chip(state), context: context(state) }
 }
 
 #[cfg(test)]

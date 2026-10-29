@@ -1,8 +1,7 @@
 //! The daemons and doubles a test spawns, from the same build as the test.
 //!
 //! A test that spawns `slopty-ptyd`, `slopty-worker`, `slopty-server`, `slopty` or the stand-ins
-//! for `claude`, a managed launcher, `pi`, an ACP agent, an MCP App's server and an app's window
-//! finds each beside its own binary. Under
+//! for `claude`, a managed launcher and an app's window finds each beside its own binary. Under
 //! `cargo xtask` (the gate's tests, the e2e suites) they are built before any test starts, which
 //! sets [`FRESH`], so no test shells out to cargo: one that did would wait on cargo's locks for as
 //! long as any other build on the machine held them, inside its own timeout. A bare `cargo nextest
@@ -22,16 +21,13 @@ pub const FRESH: &str = "SLOPTY_BINS_FRESH";
 pub const BUILT: &str = "SLOPTY_BINS_BUILT";
 
 /// The binaries a test may spawn. `cargo xtask` builds the same list (`--bin`).
-pub const NAMES: [&str; 10] = [
+pub const NAMES: [&str; 7] = [
     "slopty-ptyd",
     "slopty-worker",
     "slopty-server",
     "slopty",
     "slopty-stub-claude",
     "slopty-stub-managed-claude",
-    "slopty-stub-pi",
-    "slopty-stub-acp",
-    "slopty-stub-mcp-apps",
     "slopty-stub-window",
 ];
 
@@ -73,7 +69,7 @@ fn build(anchor: &Path) {
     // Into the target directory the test runs from. A tool may have named it to cargo with
     // `--target-dir` while this process's environment names another: `cargo llvm-cov` runs the
     // tests from `llvm-cov-target`, and a build that followed `CARGO_TARGET_DIR` left every
-    // binary somewhere else, so an ACP test found no agent (Deep run 38001943825).
+    // binary somewhere else, so a test found no stand-in (Deep run 38001943825).
     if let Some((dir, triple)) = anchor.parent().and_then(target_of) {
         build.arg("--target-dir").arg(dir);
         if let Some(triple) = triple {

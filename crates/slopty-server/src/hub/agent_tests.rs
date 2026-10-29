@@ -31,7 +31,6 @@ impl Fleet {
             .unwrap();
         let parent = row(Phase::Working, 1_000, Some(shell));
         lease.handle(snapshot(vec![parent.clone()]));
-        tokio::spawn(Hub::deliver_reports(hub.downgrade()));
         Self { hub, worker, lease, rx, shell, parent }
     }
 
@@ -47,19 +46,6 @@ impl Fleet {
                 Ok(Some(FromServer::Request { id, key, verb })) => return (id, key, verb),
                 Ok(Some(_)) => {}
                 other => panic!("no request: {other:?}"),
-            }
-        }
-    }
-
-    /// The next batch of words the worker is sent for an agent.
-    async fn delivered(&mut self) -> (SessionId, u64, String) {
-        loop {
-            match tokio::time::timeout(Duration::from_secs(60), self.rx.recv()).await {
-                Ok(Some(FromServer::Deliver { session, batch, reports })) => {
-                    return (session, batch, reports.text());
-                }
-                Ok(Some(_)) => {}
-                other => panic!("no words: {other:?}"),
             }
         }
     }
@@ -135,15 +121,13 @@ async fn a_start_names_its_parent_and_takes_the_person_s_autonomy() {
     let _answered = asked.await;
 }
 
-/// A child at rest reaches its parent through the parent's hooks once the rest settles, and
-/// a wait on it ends; a child back at work takes back what was to be said; words told go at
-/// once; a child read already is no news.
-#[tokio::test(start_paused = true)]
-async fn a_child_s_rest_reaches_its_parent_and_ends_a_wait() {
+/// A wait on a child ends once it comes to rest; words a parent tells it go to the worker
+/// that holds it, marked as an agent's, for the worker to type into its terminal.
+#[tokio::test]
+async fn a_child_s_rest_ends_a_wait_and_told_words_go_to_its_worker() {
     let mut fleet = Fleet::new();
-    let seat = SessionId::new();
     let mut child = started_by(row(Phase::Working, 2_000, None), &fleet.parent);
-    child.facts.insert(SEAT_FACT.to_owned(), seat.to_string());
+    child.facts.insert(SEAT_FACT.to_owned(), SessionId::new().to_string());
     child.title = "login fixer".to_owned();
     fleet.lease.handle(snapshot(vec![fleet.parent.clone(), child.clone()]));
 
@@ -166,56 +150,36 @@ async fn a_child_s_rest_reaches_its_parent_and_ends_a_wait() {
         last_line: Some("Fixed it on worktree-login.".to_owned()),
         ..child.clone()
     };
-    fleet.lease.handle(snapshot(vec![fleet.parent.clone(), rested.clone()]));
+    fleet.lease.handle(snapshot(vec![fleet.parent.clone(), rested]));
     let Outcome::Agents { agents, timed_out } = waiting.await.unwrap() else { panic!() };
     assert!(!timed_out);
     assert_eq!((agents[0].id, agents[0].parent), (child.id, Some(fleet.parent.id)));
     assert!(agents[0].rests);
 
-    // The parent waited and saw it rest: no word comes of it.
-    fleet.lease.handle(snapshot(vec![fleet.parent.clone(), child.clone()]));
-    fleet.lease.handle(snapshot(vec![fleet.parent.clone(), rested.clone()]));
-    let (session, batch, text) = fleet.delivered().await;
-    assert_eq!(session, fleet.shell, "the parent's own terminal");
-    assert!(text.contains("login fixer") && text.contains("came to rest"), "{text}");
-    assert!(text.contains("Fixed it on worktree-login."), "its last words: {text}");
-    let reported = AgentReport::Delivered { session, batch };
-    fleet.lease.handle(ToServer::Report(reported));
-
-    // Told words go to the child's seat at once, marked as the parent's.
-    let tell = Verb::AgentTell { agent: child.id, text: "Now the logout too.".to_owned() };
-    assert_eq!(fleet.parent_says(tell).await, Outcome::Done);
-    let (session, _, text) = fleet.delivered().await;
-    assert_eq!(session, seat, "the child's seat");
+    let telling = tokio::spawn({
+        let (hub, shell, id) = (fleet.hub.clone(), fleet.shell, child.id);
+        async move {
+            let tell = Verb::AgentTell { agent: id, text: "Now the logout too.".to_owned() };
+            hub.dispatch_as(Speaker::Proven(shell), None, tell).await
+        }
+    });
+    let (id, _, verb) = fleet.request().await;
+    let Verb::AgentTell { agent, text } = verb else { panic!("{verb:?}") };
+    assert_eq!(agent, child.id, "for the worker that holds the child");
     assert!(text.contains("an agent, not the person") && text.contains("Now the logout"), "{text}");
-
-    // A child needing the person is told once the wait lasted.
-    let needs = asking(
-        ThreadRow {
-            status: slopty_proto::thread::Status {
-                phase: Phase::NeedsYou,
-                ..rested.status.clone()
-            },
-            ..rested.clone()
-        },
-        "Run rm?",
-    );
-    fleet.lease.handle(snapshot(vec![fleet.parent.clone(), needs]));
-    let (_, _, text) = fleet.delivered().await;
-    assert!(text.contains("waits on the person: Run rm?"), "{text}");
+    fleet.lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
+    assert_eq!(telling.await.unwrap(), Outcome::Done);
 }
 
-/// No agent answers a request, its own child's least of all, and one only the person at its
-/// card answers (Claude Code's `requires_user_interaction`) waits for them there: the worker
-/// is never asked.
+/// No one answers an agent's request from outside its terminal, an agent or the person: its
+/// TUI asks there and takes the answer there, and the worker is never asked.
 #[tokio::test]
-async fn no_agent_answers_a_request_that_needs_the_person_at_its_card() {
+async fn no_request_is_answered_from_outside_its_terminal() {
     let mut fleet = Fleet::new();
-    let mut child = asking(
+    let child = asking(
         started_by(row(Phase::NeedsYou, 2_000, Some(SessionId::new())), &fleet.parent),
         "Run rm -rf build?",
     );
-    child.requests[0].needs_presence = true;
     fleet.lease.handle(snapshot(vec![fleet.parent.clone(), child.clone()]));
     let answer = Verb::AnswerRequest {
         of: ThreadOf::Thread(child.id),
@@ -223,16 +187,18 @@ async fn no_agent_answers_a_request_that_needs_the_person_at_its_card() {
         choice: "allow".to_owned(),
         message: None,
     };
-    let refused = fleet.parent_says(answer).await;
-    assert!(matches!(refused, Outcome::Error { code: ErrorCode::Forbidden, .. }), "{refused:?}");
+    let refused = fleet.parent_says(answer.clone()).await;
+    assert!(matches!(refused, Outcome::Error { code: ErrorCode::Unsupported, .. }), "{refused:?}");
+    let refused = fleet.hub.dispatch(answer).await;
+    assert!(matches!(refused, Outcome::Error { code: ErrorCode::Unsupported, .. }), "{refused:?}");
     assert!(
         tokio::time::timeout(Duration::from_millis(200), fleet.request()).await.is_err(),
         "the worker is never asked"
     );
 }
 
-/// An agent tells only its own tree and stops only itself and what it started; the person
-/// stops anything, deepest first.
+/// An agent tells only its own tree and stops only itself and what it started, each one at
+/// work stopped on its worker, deepest first.
 #[tokio::test]
 async fn an_agent_reaches_only_its_own_tree() {
     let mut fleet = Fleet::new();
@@ -255,16 +221,15 @@ async fn an_agent_reaches_only_its_own_tree() {
         let (hub, shell, id) = (fleet.hub.clone(), fleet.shell, child.id);
         async move { hub.dispatch_as(Speaker::Proven(shell), None, Verb::AgentStop { agent: id }).await }
     });
-    let mut closed = Vec::new();
+    let mut stopped = Vec::new();
     for _ in 0..2 {
         let (id, _, verb) = fleet.request().await;
-        let Verb::Close { term } = verb else { panic!("{verb:?}") };
-        closed.push(term.session);
+        let Verb::AgentStop { agent } = verb else { panic!("{verb:?}") };
+        stopped.push(agent);
         fleet.lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
     }
     assert_eq!(stopping.await.unwrap(), Outcome::Done);
-    let seats = [&grandchild, &child].map(|r| ladder::seat_of(r).unwrap());
-    assert_eq!(closed, seats, "deepest first");
+    assert_eq!(stopped, [grandchild.id, child.id], "deepest first, each an Esc on its worker");
 
     let Outcome::Agents { agents, .. } = fleet.hub.dispatch(Verb::Agents).await else { panic!() };
     let parent_of = |id| agents.iter().find(|a| a.id == id).and_then(|a| a.parent);

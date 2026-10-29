@@ -32,81 +32,27 @@ pub mod methods {
     // slopty: voice removed.
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
-    pub const CANCEL_INSTALL: &str = "CancelInstall";
     pub const INSTALL_HARNESS: &str = "InstallHarness";
     // slopty: no thread naming: an agent's thread is titled by the agent.
     /// Flip a harness's enablement on the target device (Settings → Providers);
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
-    pub const LIST_MODELS: &str = "ListModels";
-    pub const LIST_SKILLS: &str = "ListSkills";
-    pub const LIST_COMMANDS: &str = "ListCommands";
-    pub const QUEUE_COMMAND: &str = "QueueCommand";
-    pub const TAKE_PROJECT_ACTION_SETUP: &str = "TakeProjectActionSetup";
-    /// Peer-to-peer delivery fallback: the SENDER's engine forwards a queued
-    /// command entry (client-minted id and all) straight over the device-room
-    /// link when its chat2 rows can't reach the edge but the host's peer link
-    /// is alive. The host claims the id in its processed ledger before
-    /// executing, so the doc row arriving later dedupes to a no-op —
-    /// exactly-once by construction. Params `{chatId, entry}`.
-    pub const RELAY_COMMAND: &str = "RelayCommand";
-    /// User-driven delivery retry for a chat with unadopted queued sends:
-    /// fresh chat2 socket, host nudge, drain pass, and a new delivery escort
-    /// per pending command. Params `{chatId}`; IPC-only.
-    pub const RETRY_DELIVERY: &str = "RetryDelivery";
-    // slopty: a failed turn tried again, with the person's own words: `{chatId}` → `{}`.
-    pub const RETRY_TURN: &str = "RetryTurn";
-    // slopty: the person's unsent words, kept on the chat's machine for every device:
-    // `{chatId, text}` → `{}`; empty words clear them.
-    pub const SAVE_DRAFT: &str = "SaveDraft";
     // slopty: what the chats said, searched: `{query, limit}` →
     // `[{chatId, role: "user"|"agent", excerpt, matchStart, matchEnd}]`, byte offsets into
     // the excerpt.
     pub const SEARCH_CHATS: &str = "SearchChats";
-    pub const FORK_SIDE_CHAT: &str = "ForkSideChat";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
     /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
     /// connection; automatic subscriptions and retries must not call it.
     pub const FOCUS_CHAT: &str = "FocusChat";
-    /// Messages typed while the agent was busy, held on the chat doc so every
-    /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
-    pub const WATCH_QUEUE: &str = "WatchQueue";
-    /// Append to the queue. `{ chatId, text, attachments?, holdForTurnEnd? }` → `{ id }`.
-    pub const QUEUE_MESSAGE: &str = "QueueMessage";
-    /// Retype a queued message; empty text deletes it.
-    /// `{ chatId, id, text }` → `{ changed }`.
-    pub const UPDATE_QUEUED_MESSAGE: &str = "UpdateQueuedMessage";
-    /// Acquire a host-authoritative edit lease for one queued row.
-    pub const BEGIN_QUEUED_MESSAGE_EDIT: &str = "BeginQueuedMessageEdit";
-    /// Renew an acquired queue edit lease.
-    pub const RENEW_QUEUED_MESSAGE_EDIT: &str = "RenewQueuedMessageEdit";
-    /// Commit, cancel, discard, or explicitly release an acquired edit.
-    pub const FINISH_QUEUED_MESSAGE_EDIT: &str = "FinishQueuedMessageEdit";
-    /// Reorder. `{ chatId, id, toIndex }` → `{ changed }`.
-    pub const MOVE_QUEUED_MESSAGE: &str = "MoveQueuedMessage";
-    pub const REMOVE_QUEUED_MESSAGE: &str = "RemoveQueuedMessage";
-    /// Interrupt whatever is running and send this one. `{ chatId, id }` → `{ sent }`.
-    pub const SEND_QUEUED_MESSAGE_NOW: &str = "SendQueuedMessageNow";
-    /// Steer this row into the live turn without interrupting it.
-    /// `{ chatId, id }` → `{ sent }`.
-    pub const STEER_QUEUED_MESSAGE_NOW: &str = "SteerQueuedMessageNow";
     /// Nudge every open room client to verify liveness NOW (window focus,
     /// app foregrounded). No params; IPC-only. Each room ignores the hint
     /// unless it has been broadcast-quiet ≥30s, so this is cheap to spam.
     pub const PROBE_SYNC: &str = "ProbeSync";
-    /// Live sync introspection (`slopty sync` / debug surfaces): per-room
-    /// connection state, last pushed-frame/ack ages, rejoin/probe/resync
-    /// counters for the workspace room and every open chat doc. No params;
-    /// IPC-only.
-    pub const SYNC_STATUS: &str = "SyncStatus";
     /// Pushed edge-connectivity posture (`slopty_view_proto::Connectivity`):
     /// current value first, then every change — the connection pill /
     /// composer-honesty / queued-badge feed. No params; IPC-only.
     pub const WATCH_CONNECTIVITY: &str = "WatchConnectivity";
-    /// In-flight queued-attachment transfers (`slopty_view_proto::TransferProgress`
-    /// list): current set first, then a fresh snapshot per landed chunk —
-    /// the sending thumbnail's percent-ring feed. No params; IPC-only.
-    pub const WATCH_TRANSFERS: &str = "WatchTransfers";
     pub const WATCH_CHATS: &str = "WatchChats";
     pub const WATCH_SIDEBAR_PREFERENCES: &str = "WatchSidebarPreferences";
     pub const WATCH_DEVICES: &str = "WatchDevices";
@@ -132,38 +78,20 @@ pub mod methods {
     pub const AUTH_STATUS: &str = "AuthStatus";
     // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
     pub const SIGN_IN: &str = "SignIn";
-    pub const SIGN_IN_HEADLESS: &str = "SignInHeadless";
-    pub const COMPLETE_SIGN_IN: &str = "CompleteSignIn";
-    pub const SIGN_OUT: &str = "SignOut";
-    pub const LIST_ORGS: &str = "ListOrgs";
-    pub const CREATE_ORG: &str = "CreateOrg";
-    pub const SELECT_ORG: &str = "SelectOrg";
-    /// One-time local→synced profile import: what's importable (unary).
-    pub const LOCAL_IMPORT_STATUS: &str = "LocalImportStatus";
-    /// One-time local→synced profile import: run it (stream of progress items).
-    pub const IMPORT_LOCAL_WORKSPACE: &str = "ImportLocalWorkspace";
     // Repos / worktrees / folders (ControlRpc, relay-forwardable).
-    pub const LIST_REPOS: &str = "ListRepos";
-    pub const ADD_REPO: &str = "AddRepo";
     pub const CLONE_REPO: &str = "CloneRepo";
-    pub const CREATE_REPO: &str = "CreateRepo";
     pub const LIST_BRANCHES: &str = "ListBranches";
     pub const LIST_REFS: &str = "ListRefs";
     // slopty: no History surface (ruled out).
     /// Update remote-tracking refs without changing HEAD, the index, or files.
     pub const FETCH_ALL: &str = "FetchAll";
-    pub const SWITCH_REF: &str = "SwitchRef";
     pub const LIST_FOLDERS: &str = "ListFolders";
-    pub const GET_WORKTREE_SETTINGS: &str = "GetWorktreeSettings";
-    pub const SET_WORKTREE_SETTINGS: &str = "SetWorktreeSettings";
     /// The device's browse roots: home plus mounted drives/volumes.
     pub const LIST_DRIVES: &str = "ListDrives";
     /// Folders under the host's home by name (new-project picker).
     pub const SEARCH_HOME_FOLDERS: &str = "SearchHomeFolders";
     /// The new-project picker closed: drop the host's home index if unpinned.
     pub const RELEASE_HOME_FOLDER_SEARCH: &str = "ReleaseHomeFolderSearch";
-    /// Fuzzy relative-path search rooted in a known chat or space checkout.
-    pub const SEARCH_FILES: &str = "SearchFiles";
     // Device-local workspace filesystem operations. All are relay-forwardable;
     // WatchWorkspaceFiles is the only streaming method in this group.
     pub const LIST_WORKSPACE_DIRECTORY: &str = "ListWorkspaceDirectory";
@@ -178,18 +106,13 @@ pub mod methods {
     pub const DELETE_WORKSPACE_ENTRY: &str = "DeleteWorkspaceEntry";
     pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
-    pub const CREATE_WORKTREE: &str = "CreateWorktree";
-    pub const DELETE_WORKTREE: &str = "DeleteWorktree";
     // Project Actions are private state on the device that owns the project.
     pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
-    // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
+    // Terminals (ControlRpc, relay-forwardable).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
-    pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
-    pub const WRITE_TERMINAL: &str = "WriteTerminal";
-    pub const RESIZE_TERMINAL: &str = "ResizeTerminal";
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
     /// Checkout-diff stream for the target device's chats (DataRpc,
     /// relay-forwardable — diffs are produced where the checkout lives).
@@ -197,36 +120,20 @@ pub mod methods {
     pub const WATCH_WORKSPACE_GIT_STATUS: &str = "WatchWorkspaceGitStatus";
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
-    /// One page of a repository's open pull requests (`filter`, `after`
-    /// cursor), with the total count.
-    pub const LIST_CHANGE_REQUEST_PAGE: &str = "ListChangeRequestPage";
-    /// Resolve a selected checkout through local Git metadata only.
-    pub const GET_CHANGE_REQUEST_REPOSITORY: &str = "GetChangeRequestRepository";
-    pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";
-    pub const POST_CHANGE_REQUEST_COMMENT: &str = "PostChangeRequestComment";
-    pub const GET_CHANGE_REQUEST_DIFF: &str = "GetChangeRequestDiff";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     // slopty: no Discard changes (ruled out).
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
-    pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
-    pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
-    pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
     pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
     pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
-    pub const CANCEL_AGENT_LOGIN: &str = "CancelAgentLogin";
-    // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
-    pub const UPLOAD_CHUNK: &str = "UploadChunk";
-    pub const UPLOAD_COMMIT: &str = "UploadCommit";
+    // Attachments read back (ControlRpc, relay-forwardable — target the chat's host device).
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
     // slopty: no agent visuals.
     /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
     /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
-    // Updates (ControlRpc, relay-forwardable — a device reports/applies its own
-    // binary's update). Stream: current UpdateStatus, then every change.
-    pub const UPDATE_STATUS: &str = "UpdateStatus";
+    // Updates (ControlRpc, relay-forwardable — a device applies its own binary's update).
     /// Download + apply the newest release on the target device (symlink-managed
     /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
@@ -245,16 +152,6 @@ pub mod methods {
     // slopty: one of a device's (or the server's, `deviceId: "server"`) actions pressed:
     // `DeviceAction { deviceId, action }`; the app runs it and says how it went in a toast.
     pub const DEVICE_ACTION: &str = "DeviceAction";
-}
-
-/// Stable capability error codes transported without provider stderr.
-pub mod capability_errors {
-    pub const PULL_REQUESTS_CLI_UNAVAILABLE: &str = "pull_requests.cli_unavailable";
-    pub const PULL_REQUESTS_AUTHENTICATION: &str = "pull_requests.authentication";
-    pub const PULL_REQUESTS_RATE_LIMITED: &str = "pull_requests.rate_limited";
-    pub const PULL_REQUESTS_TIMEOUT: &str = "pull_requests.timeout";
-    pub const PULL_REQUESTS_DECODE: &str = "pull_requests.decode";
-    pub const PULL_REQUESTS_COMMAND_FAILED: &str = "pull_requests.command_failed";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -415,9 +312,7 @@ mod tests {
                 }
                 "Never" => Ok(RpcReply::Stream(futures::stream::pending().boxed())),
                 "Boom" => Err(RpcError::Failed("boom".into())),
-                "Capability" => Err(RpcError::Capability(
-                    capability_errors::PULL_REQUESTS_AUTHENTICATION.into(),
-                )),
+                "Capability" => Err(RpcError::Capability("harness.missing".into())),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -462,8 +357,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             err,
-            RpcError::Capability(code)
-                if code == capability_errors::PULL_REQUESTS_AUTHENTICATION
+            RpcError::Capability(code) if code == "harness.missing"
         ));
     }
 

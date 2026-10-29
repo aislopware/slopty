@@ -1,16 +1,14 @@
-//! slopty: what a chat's dock shows around its composer beside the queue and the tray (Slopty's
-//! own; not in zeron).
+//! slopty: what a session says beside its terminal, read-only: the inspector's header reads it
+//! (Slopty's own; not in zeron).
 //!
 //! The view model serves it on `slopty.WatchDock` ([`crate::calls::WATCH_DOCK`]) for one chat:
 //! one [`ChatDock`] each time anything in it changes. It holds the turn's live line (the TUI's
-//! spinner row), the goal, the agent's passing notifications, the prompt it guesses comes next,
-//! the person's own status line, the permission mode, the context by category, the subagent
-//! kinds `@` offers, the surfaces the agent's mods draw, the side questions asked and their
-//! answers, and what the chat's agent can be asked from the dock ([`DockCan`]).
+//! spinner row), the permission mode and the context by category. Nothing in it asks the agent
+//! anything: its TUI answers in its terminal.
 //!
 //! Times are milliseconds since the epoch; whatever ticks (elapsed time, a retry's countdown,
-//! how long a goal has been active, the thinking words) is the shell's to tick from the times
-//! here, with the helpers on each shape so every surface words it alike.
+//! the thinking words) is the shell's to tick from the times here, with the helpers on each
+//! shape so every surface words it alike.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,132 +19,12 @@ pub struct ChatDock {
     /// The turn under way, while one is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<ActivityLine>,
-    /// The goal the agent works towards, while one is set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<GoalLine>,
-    /// The agent's passing notifications still showing, newest last.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<NoteLine>,
-    /// The prompt the agent guesses the person sends next: a quiet chip over the composer, which
-    /// Tab takes into the draft. Never sent on its own.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suggestion: Option<String>,
-    /// The person's own status line, as its command printed it, in spans of one style; empty
-    /// for none. A footer segment.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub status_line: Vec<StatusSpan>,
     /// The permission mode, as its chip says it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ModeChip>,
-    /// What the agent waits on now that its turn ended: "Waiting for 2 subagents to finish",
-    /// "1 command still running"; the turn footer's line.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub waiting: Option<String>,
     /// The context by category, once the agent counted it, else its totals alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextBreakdown>,
-    /// The kinds of subagent the agent offers, which `@` lists after files.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub subagent_kinds: Vec<SubagentKindRow>,
-    /// What the agent's mods draw, in the order they came, toasts past their time left out.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub surfaces: Vec<ModSurface>,
-    /// The side questions asked (`/btw`, `slopty.AskSide`) and their answers, newest last.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub side: Vec<SideLine>,
-    /// The agent's MCP servers as it last listed them, which the context card shows with what
-    /// the person can do to each.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub servers: Vec<McpServerRow>,
-    /// What the dock may ask of the chat's agent.
-    pub can: DockCan,
-}
-
-/// One of the agent's MCP servers, as the context card lists it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpServerRow {
-    /// Its name, as the agent's config names it.
-    pub name: String,
-    /// Where it stands, open: `connected`, `pending`, `failed`, `needs-auth`, `disabled`, or a
-    /// word an agent adds.
-    pub status: String,
-    /// Why it failed, in the agent's words, when it did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Where it is configured, in the agent's words: `user`, `project`, `local`, `plugin`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    /// A reconnect is worth offering: it is on and not connected (`slopty.McpReconnect`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub reconnects: bool,
-}
-
-impl McpServerRow {
-    /// Turned off by the person: what turns it on is Enable, else Disable.
-    #[must_use]
-    pub fn disabled(&self) -> bool {
-        self.status == "disabled"
-    }
-}
-
-/// What a chat's agent can be asked from the dock; a control for a verb it cannot do is not
-/// offered.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DockCan {
-    /// Stop one piece of background work (`slopty.StopWork`).
-    pub stop_work: bool,
-    /// Move a running call to the background (`slopty.Background`).
-    pub background: bool,
-    /// Run a `!` command on the chat's machine (`slopty.RunShell`).
-    pub shell: bool,
-    /// Put the files back as they were before a message (`slopty.Rewind` with `code`).
-    pub rewind: bool,
-    /// Take the conversation back to before a message (`slopty.Rewind` with `conversation`):
-    /// in the chat itself where its agent can, else branched into a chat of its own.
-    pub fork: bool,
-    /// Read and change its permission rules (`slopty.WatchRules`, `slopty.ChangeRule`).
-    pub rules: bool,
-    /// Act in its mods' surfaces (`slopty.SurfaceEvent`).
-    pub surfaces: bool,
-    /// Switch its permission mode (`slopty.SetMode`).
-    pub set_mode: bool,
-    /// Ask it a side question (`slopty.AskSide`).
-    pub side: bool,
-    /// Reconnect its MCP servers and turn them on or off (`slopty.McpReconnect`,
-    /// `slopty.McpEnable`).
-    #[serde(default)]
-    pub mcp_servers: bool,
-}
-
-/// A side question the person asked beside the conversation, and its answer.
-///
-/// The agent answers it from the conversation so far, without tools, never entering it and never
-/// stopping the turn.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SideLine {
-    /// Its own id, kept as it is answered.
-    pub id: String,
-    /// The question.
-    pub question: String,
-    /// The answer, once it came, in Markdown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub answer: Option<String>,
-    /// Why none will come.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed: Option<String>,
-    /// When it was asked.
-    pub at: i64,
-}
-
-impl SideLine {
-    /// Whether the agent is still at it.
-    #[must_use]
-    pub const fn pending(&self) -> bool {
-        self.answer.is_none() && self.failed.is_none()
-    }
 }
 
 /// The turn under way, as the TUI's spinner row shows it: "Cogitating… (1m 5s · ↓ 2.3k tokens ·
@@ -268,24 +146,6 @@ impl RetryLine {
     }
 }
 
-/// The goal the agent works towards: "◎ /goal active (5h)"; its condition shows on hover.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GoalLine {
-    /// What has to hold for it to be met.
-    pub condition: String,
-    /// When it was set: how long it has been active runs from here.
-    pub set_at: i64,
-    /// The checks made so far ("{n} turns").
-    pub iterations: u32,
-    /// Tokens the session spent since it was set, as far as this client holds its turns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<u64>,
-    /// What the last check said, when one ran ("Last check: …").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_reason: Option<String>,
-}
-
 /// A passing notification of the agent's.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -315,38 +175,11 @@ impl NoteLine {
     pub const WARNING: &'static str = "warning";
 }
 
-/// One run of the status line drawn in one style: its ANSI colours read into these.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StatusSpan {
-    /// Its text.
-    pub text: String,
-    /// Its colour: `ansi:{0-255}` for a palette colour, which the terminal theme maps, or
-    /// `#rrggbb`; `None` for the footer's own.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fg: Option<String>,
-    /// Its background, the same way.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bg: Option<String>,
-    /// Bold.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub bold: bool,
-    /// Dim.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub dim: bool,
-    /// Italic.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub italic: bool,
-    /// Underlined.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub underline: bool,
-}
-
 /// The permission mode, as its chip says it: "Bypass permissions on", amber for bypass.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModeChip {
-    /// The agent's own name for it, as `slopty.SetMode` takes it.
+    /// The agent's own name for it.
     pub id: String,
     /// Its name for people ("Accept edits").
     pub label: String,
@@ -356,8 +189,6 @@ pub struct ModeChip {
     /// How loud it is: [`ModeChip::DANGER`] (nothing is asked), [`ModeChip::PLAN`],
     /// [`ModeChip::ACCEPT`], [`ModeChip::QUIET`].
     pub tone: String,
-    /// The modes it can be switched to, in the agent's order: what ⇧Tab cycles through.
-    pub choices: Vec<ModeChoice>,
 }
 
 impl ModeChip {
@@ -370,22 +201,6 @@ impl ModeChip {
     /// The recommended default (auto) or plain asking (manual): the chip says the mode's name
     /// quietly.
     pub const QUIET: &'static str = "quiet";
-}
-
-/// A mode the chip can switch to.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModeChoice {
-    /// The agent's own name for it.
-    pub id: String,
-    /// Its name for people.
-    pub label: String,
-    /// What it does, when the agent says.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// The agent's own default, the mode it recommends: its menu row says so.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub recommended: bool,
 }
 
 /// The context window: how full it is, by category when the agent counted them.
@@ -446,76 +261,6 @@ pub struct ContextSlice {
     /// The agent's name for the colour it draws it in, when it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
-}
-
-/// A kind of subagent the agent offers, for `@`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubagentKindRow {
-    /// Its name, as the agent calls it and `@` inserts it.
-    pub name: String,
-    /// What it is for.
-    pub description: String,
-    /// The model it runs on, when it names one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-}
-
-/// Something one of the agent's mods draws, in the shell's own components: a band over the
-/// composer, a toast, a footer segment, a right-pane tab, a log line. No mod is special.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModSurface {
-    /// Its id, stable while it shows; `slopty.SurfaceEvent` names it.
-    pub id: String,
-    /// Where it shows: [`ModSurface::BAND`], [`ModSurface::TOAST`], [`ModSurface::STATUS`],
-    /// [`ModSurface::PANE`], [`ModSurface::LOG`], else drawn as a band.
-    pub kind: String,
-    /// The mod that draws it.
-    pub plugin: String,
-    /// Its title, for a pane's tab or a band's heading.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// Its words, for a toast, a footer segment or a log line.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Its element tree, nodes `{type, props, children}` of `Box`, `Text`, `Button`, `Input`,
-    /// `Select`, `Link`, `Code`, `Markdown`, `Svg`; each one the person acts in has an `id`,
-    /// which `slopty.SurfaceEvent`'s `element` names. `null` for a surface of words alone.
-    #[serde(default)]
-    pub tree: serde_json::Value,
-    /// When a toast stops showing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until: Option<i64>,
-}
-
-impl ModSurface {
-    /// A band over the composer.
-    pub const BAND: &'static str = "band";
-    /// A line of the mod's log.
-    pub const LOG: &'static str = "log";
-    /// A tab of the right pane.
-    pub const PANE: &'static str = "pane";
-    /// A segment of the footer.
-    pub const STATUS: &'static str = "status";
-    /// A toast.
-    pub const TOAST: &'static str = "toast";
-}
-
-/// What undoes a rewind (`slopty.Rewind`'s `undo`): the dock offers "Undo rewind" with it for
-/// a few seconds, and `slopty.UndoRewind` takes it back: the code put back as it was, the
-/// branched conversation deleted.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RewindUndo {
-    /// The chat rewound, shown again on undo.
-    pub chat_id: String,
-    /// The chat a conversation rewind branched, deleted on undo.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch_chat_id: Option<String>,
-    /// What names the files the worker kept before a code rewind, put back on undo.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree: Option<String>,
 }
 
 #[cfg(test)]

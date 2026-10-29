@@ -14,7 +14,7 @@ workspace = true
 blake3.workspace = true
 bytes.workspace = true
 ec4rs.workspace = true
-# The Codex app-server's control socket is a WebSocket (`thread::codex`).
+# Asking every worktree's state at once (`repo::worktrees`).
 futures-util.workspace = true
 grep-matcher.workspace = true
 grep-regex.workspace = true
@@ -51,7 +51,6 @@ tempfile.workspace = true
 thiserror.workspace = true
 rustix.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
 tracing.workspace = true
 
 # The main queue the virtual displays live on (`screen::sized`).

@@ -46,6 +46,9 @@ pub mod calls {
     pub const OPEN_PAST_SESSION: &str = "slopty.OpenPastSession";
 }
 
+// slopty: `slopty_view_doc::calls::START_SESSION` starts a new session here too: its start is
+// answered as a past session's is (`past_done`).
+
 /// The fact a session's branch is said by, when its machine says it.
 pub const BRANCH: &str = "branch";
 
@@ -131,11 +134,12 @@ impl WorkspaceView {
         &mut self,
         method: &str,
         params: &serde_json::Value,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Option<Task<Result<RpcReply, RpcError>>> {
         Some(match method {
             calls::PAST_SESSIONS => self.past_sessions(params, cx),
             calls::OPEN_PAST_SESSION => self.open_past_session(params, cx),
+            slopty_view_doc::calls::START_SESSION => self.start_session(params, cx),
             _ => return None,
         })
     }
@@ -157,7 +161,7 @@ impl WorkspaceView {
         let Some(reply) = self.view_model.past.opening.remove(&done.id) else { return };
         let answer = match &done.outcome {
             Outcome::Started { thread } => {
-                Ok(RpcReply::Value(serde_json::json!({ "chatId": self.chat_id(*thread) })))
+                Ok(RpcReply::Value(serde_json::json!({ "chatId": thread.to_string() })))
             }
             Outcome::Refused { reason } => Err(RpcError::Failed(reason.clone())),
             Outcome::Unsupported { cap } => {
@@ -363,8 +367,65 @@ impl WorkspaceView {
             "updatedAt": session.updated_ms.map(slopty_core::WallMs::as_millis),
             "branch": session.facts.get(BRANCH),
             "running": session.facts.get(PAST_RUNNING),
-            "chatId": session.thread.map(|thread| self.chat_id(thread)),
+            "chatId": session.thread.map(|thread| thread.to_string()),
             "resume": session.resume,
+        })
+    }
+
+    /// `slopty.StartSession`: a new session in `params.cwd` on `params.deviceId`'s machine: the
+    /// agent `params.agent` in its own TUI in a terminal there, or a plain shell
+    /// (`terminal`); answered with its chat once the machine started it, or the machine's words
+    /// for why not. Nothing is said to the agent: the person types to it in its terminal.
+    fn start_session(
+        &mut self,
+        params: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<RpcReply, RpcError>> {
+        let Some(key) = param(params, "deviceId").and_then(|device| self.view_worker(device))
+        else {
+            return now(Err(RpcError::Failed("Its machine is not one of these".to_owned())));
+        };
+        let Some(cwd) = param(params, "cwd").map(str::to_owned) else {
+            return now(Err(RpcError::BadParams("cwd is required".to_owned())));
+        };
+        let agent = param(params, "agent").unwrap_or(AgentId::CLAUDE_CODE).to_owned();
+        if !self.reachable_for(key, "a new session", cx) {
+            let name = self.past_machine(key);
+            return now(Err(RpcError::Failed(format!("{name} is out of reach"))));
+        }
+        if agent == slopty_view_doc::calls::TERMINAL_AGENT {
+            return self.live_start_terminal(key, cwd, cx);
+        }
+        let id = IntentId::new();
+        let start = Start {
+            agent: AgentId::named(&agent),
+            cwd,
+            drive: None,
+            prompt: None,
+            model: None,
+            mode: None,
+            effort: None,
+            attachments: Vec::new(),
+            args: Vec::new(),
+            options: std::collections::BTreeMap::new(),
+            worktree: None,
+        };
+        let (reply, answer) = oneshot::channel();
+        self.view_model.past.opening.insert(id, reply);
+        self.view_send_kept(
+            key,
+            id,
+            ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start) }),
+        );
+        cx.spawn(async move |this, cx| {
+            if let Some(answer) = within(cx, answer).await {
+                return answer;
+            }
+            let _forgot = this.update(cx, |view, _| {
+                view.view_model.past.opening.remove(&id);
+                view.view_model.unanswered.remove(&id);
+            });
+            Err(RpcError::Failed("Its machine did not answer".to_owned()))
         })
     }
 

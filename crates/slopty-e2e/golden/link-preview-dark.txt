@@ -7,21 +7,24 @@ Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group (focused)
+Terminal │ shell │ >
+Heading │ Read the guide before the first run.
 Article │ You
 Paragraph │ Read [the guide](https://example.com/docs/guide/getting-started) before the first run.
-Button │ Rewind…
+Article │ Claude Code
 Paragraph │ Done: Read the guide before the first run.
 Link │ the guide
-Button │ Attach images
-MultilineTextInput │ Do anything… (focused)
-Button │ Model: Opus 5.5, High
-Button │ Send message
-Button │ Mode: Auto
+Splitter │ Resize side pane
 Button │ Open in…
-Button │ Show chat details
+Button │ Hide inspector
+Button │ Inspector
+Button │ Close Inspector
+Button │ New tab
+Button │ Expand side pane
 Button │ Show files panel
-Button │ Show side pane
+Button │ Hide side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ New chat
+Button │ New session

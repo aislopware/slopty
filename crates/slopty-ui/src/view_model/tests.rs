@@ -29,28 +29,6 @@ fn device(
     }
 }
 
-/// A message the shell sent goes by the id the shell gave it, so the shell's echo of it gives
-/// way to it instead of waiting below it as "Sending…" for good.
-#[test]
-fn a_message_the_shell_sent_goes_by_the_id_it_gave() {
-    let mut state = fixtures::thread("tools");
-    let sent = slopty_proto::thread::IntentId::new();
-    let item = state
-        .items
-        .iter_mut()
-        .find(|item| matches!(item.body, slopty_proto::thread::ItemBody::User(_)))
-        .expect("the person's message");
-    if let slopty_proto::thread::ItemBody::User(message) = &mut item.body {
-        message.intent = Some(sent);
-    }
-    let named = |intent| (intent == sent).then(|| "m-1".to_owned());
-    let entries = transcript::entries(&state, &transcript::Look::new("w").named(named));
-    assert_eq!(entries.first().map(|e| e.id.as_str()), Some("m-1"));
-    let unnamed = transcript::entries(&state, &transcript::Look::new("w"));
-    let own = sent.to_string();
-    assert_eq!(unnamed.first().map(|e| e.id.as_str()), Some(own.as_str()), "its intent's");
-}
-
 /// A recorded session's thread, as the shell's transcript, applied by the shell's own reducer.
 #[test]
 fn a_recorded_session_reads_as_the_shells_transcript() {
@@ -225,7 +203,7 @@ async fn a_tray_watch_follows_its_chat() {
     feed.chat_views("c", views.clone());
     let value = watch.recv().await.expect("the tray");
     assert_eq!(value["summary"], "1 command");
-    views.dock.goal = None;
+    views.dock.mode = None;
     feed.chat_views("c", views);
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), watch.recv()).await.is_err(),
@@ -347,8 +325,7 @@ fn request(
     }
 }
 
-/// The request the shell's question panel serves (`slopty_shell::composer::pending_input_request`):
-/// an unanswered input on the last answer.
+/// The request a session waits on: an unanswered input on the last answer.
 fn served(
     entries: &[slopty_view_doc::SessionMessageEntry],
 ) -> Option<(String, Vec<slopty_view_proto::UserInputQuestion>)> {
@@ -362,19 +339,10 @@ fn served(
     })
 }
 
-/// The question panel's answer to the question `id`.
-fn picked(id: &str, label: &str) -> slopty_view_proto::UserInputAnswer {
-    slopty_view_proto::UserInputAnswer {
-        question_id: id.to_owned(),
-        labels: vec![label.to_owned()],
-        notes: None,
-    }
-}
-
-/// An approval the agent waits on is asked where the person looks: the question panel serves
-/// it from the last answer, and the pick goes back as the choice it names.
+/// An approval the agent waits on shows where the person looks: the question panel serves it
+/// from the last answer, by the choices its TUI offers.
 #[test]
-fn an_open_approval_is_asked_and_answered_by_its_choice() {
+fn an_open_approval_is_served_with_its_choices() {
     use slopty_proto::thread::Effect;
     let mut state = fixtures::thread("tools");
     let approval = request(
@@ -388,17 +356,8 @@ fn an_open_approval_is_asked_and_answered_by_its_choice() {
     let (asked, questions) = served(&entries).expect("the panel serves it");
     // Named by its thread too: another chat's first ask has the same id.
     assert_eq!(asked, format!("{}/ask-1", state.meta.id));
-    assert_eq!(transcript::request_of(&asked), Some((state.meta.id, approval.id.clone())));
+    assert_eq!(transcript::request_of(&asked), Some((state.meta.id, approval.id)));
     assert_eq!(questions[0].options, ["Allow", "Deny"]);
-    assert_eq!(
-        transcript::answer(&approval, &[picked(&questions[0].id, "Allow")]),
-        Ok(("allow".to_owned(), None))
-    );
-    // Words of one's own turn the call down, with them as the reason.
-    assert_eq!(
-        transcript::answer(&approval, &[picked(&questions[0].id, "use nextest")]),
-        Ok(("deny".to_owned(), Some("use nextest".to_owned())))
-    );
 }
 
 /// An "Always allow" that reaches folders says them in full, one per line, while the pointer
@@ -527,22 +486,9 @@ fn an_open_turn_of_a_thread_at_rest_reads_as_finished() {
     assert!(entries.iter().all(|e| e.status != Some(MessageStatus::Streaming)));
 }
 
-/// The shell may queue messages with their files kept as chips, send its chips, and start a
-/// chat with no project in a scratch folder of its own: Slopty answers each. A scratch folder
-/// is no project.
+/// A scratch folder is no project, as written or expanded; a folder of its own is one.
 #[test]
-fn the_shell_is_told_what_slopty_answers() {
-    use slopty_view_proto::capabilities as can;
-    let claimed = super::capabilities();
-    for capability in [
-        can::COMPOSER_REFERENCES_V1,
-        can::MESSAGE_QUEUE_V1,
-        can::MESSAGE_QUEUE_ACTIONS_V1,
-        can::MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
-        can::PROJECTLESS_SCRATCH_V1,
-    ] {
-        assert!(claimed.iter().any(|c| c == capability), "{capability}");
-    }
+fn a_scratch_folder_is_no_project() {
     let scratch = slopty_view_proto::projectless::scratch_cwd("c-1", Utc::now());
     assert_eq!(rows::place(Some(&scratch), None, Some("/Users/me"), &[]), None, "as written");
     let expanded = scratch.replacen('~', "/Users/me", 1);
@@ -579,20 +525,13 @@ fn a_notice_reads_by_its_kind() {
     assert!(matches!(part(&ids[3]), Some(MessagePart::Error { .. })));
 }
 
-/// A slash command reads `/name args`, a skill run as one `Skill(name)`, a shell command
-/// `! command`, as the TUI's rows say them; words the shell sent stay the person's own.
+/// A slash command reads `/name args` and a shell command `! command`, as the TUI's rows say
+/// them.
 #[test]
 fn a_users_command_keeps_its_mark() {
+    use slopty_proto::thread::ItemBody;
     use slopty_proto::thread::detail::Clipped;
-    use slopty_proto::thread::{Command, ItemBody};
     let mut state = fixtures::thread("tools");
-    state.commands = vec![Command {
-        name: "review".to_owned(),
-        description: String::new(),
-        argument_hint: None,
-        source: "user".to_owned(),
-        skill: true,
-    }];
     let last = state.items.last().cloned().expect("an item");
     let mut ids = Vec::new();
     for (n, (command, words)) in
@@ -621,7 +560,7 @@ fn a_users_command_keeps_its_mark() {
     };
     assert_eq!(said(&ids[0]).as_deref(), Some("/compact focus on tests"));
     assert_eq!(said(&ids[1]).as_deref(), Some("! ls -la"));
-    assert_eq!(said(&ids[2]).as_deref(), Some("Skill(review)"));
+    assert_eq!(said(&ids[2]).as_deref(), Some("/review"));
 }
 
 /// A file written shows what was written, and a long output can be fetched whole.
@@ -721,30 +660,6 @@ fn a_cut_text_reads_whole_once_its_whole_came() {
     let came = |content: &ContentRef| (*content == full).then(|| whole.clone());
     let entries = transcript::entries(&state, &transcript::Look::new("w").whole(came));
     assert_eq!(text_of(&entries, &id), Some(whole));
-}
-
-/// A message the shell sent reads as the person wrote it, chips and all, not in the words the
-/// agent was given.
-#[test]
-fn a_sent_message_reads_as_the_person_wrote_it() {
-    let mut state = fixtures::thread("tools");
-    let sent = slopty_proto::thread::IntentId::new();
-    let item = state
-        .items
-        .iter_mut()
-        .find(|item| matches!(item.body, slopty_proto::thread::ItemBody::User(_)))
-        .expect("the person's message");
-    if let slopty_proto::thread::ItemBody::User(message) = &mut item.body {
-        message.intent = Some(sent);
-        message.text = slopty_proto::thread::Clipped::whole("Check [a.rs](src/a.rs)");
-    }
-    let chip = slopty_view_proto::file_mentions::local_file_link("src/a.rs", false);
-    let written = format!("Check {chip}");
-    let look = transcript::Look::new("w")
-        .named(|intent| (intent == sent).then(|| "m-1".to_owned()))
-        .said(|intent| (intent == sent).then(|| written.clone()));
-    let entries = transcript::entries(&state, &look);
-    assert_eq!(text_of(&entries, "m-1:text"), Some(written.clone()));
 }
 
 /// An edit offers its diff by its own ref, read from its hunks: what it replaced and what with.
@@ -1668,8 +1583,7 @@ fn an_approval_says_why_it_asks() {
     assert_eq!(asked_of(&mut state, approval).reason, None);
 }
 
-/// An approval shows a bidi override or a zero-width character as its code, and its answer
-/// still goes as the agent's own choice.
+/// An approval shows a bidi override or a zero-width character as its code.
 #[test]
 fn an_approval_shows_bidi_overrides_as_visible_escapes() {
     let mut state = fixtures::thread("tools");
@@ -1678,10 +1592,6 @@ fn an_approval_shows_bidi_overrides_as_visible_escapes() {
     let asked = asked_of(&mut state, approval.clone());
     assert_eq!(asked.command.as_deref(), Some("cat notes[U+202E]txt.sh"));
     assert_eq!(asked.options[0], "Allow [U+200B]once");
-    assert_eq!(
-        transcript::answer(&approval, &[picked(&asked.id, &asked.options[0])]),
-        Ok(("allow".to_owned(), None))
-    );
 }
 
 /// Every word a request's card shows reaches the shell escaped: its reason, its address, its
@@ -1735,7 +1645,7 @@ fn an_edit_approval_shows_its_diff() {
 /// A failure reads in one grammar, naming its machine, with the agent's words behind it; the
 /// failed last turn offers to try it again, an earlier one does not.
 #[test]
-fn a_failure_reads_in_one_grammar_and_offers_retry() {
+fn a_failure_reads_in_one_grammar() {
     use slopty_proto::thread::{Notice, TurnState};
     let (copy, raw) =
         transcript::error_words(Notice::API_ERROR, "529 Overloaded", Some("studio"), None);
@@ -1764,49 +1674,24 @@ fn a_failure_reads_in_one_grammar_and_offers_retry() {
         turn.state = TurnState::Failed { error: "Overloaded".to_owned(), until_ms: None };
     }
     let entries = transcript::entries(&state, &transcript::Look::new("w").host("studio"));
-    let errors: Vec<(String, bool)> = entries
+    let errors: Vec<&String> = entries
         .iter()
         .flat_map(|e| &e.parts)
         .filter_map(|p| match p {
-            MessagePart::Error { message, detail: Some(raw), retry, .. } if raw == "Overloaded" => {
-                Some((message.clone(), *retry))
+            MessagePart::Error { message, detail: Some(raw), .. } if raw == "Overloaded" => {
+                Some(message)
             }
             _ => None,
         })
         .collect();
     assert_ne!(errors.len(), 0, "the failed turns say so");
-    assert!(errors.iter().all(|(message, _)| message == "The turn failed on studio. Try again."));
-    assert_eq!(errors.iter().filter(|(_, retry)| *retry).count(), 1, "the last turn's alone");
-    assert!(errors.last().is_some_and(|(_, retry)| *retry));
-}
-
-/// The files on their way to a machine are watched by their upload ids.
-#[tokio::test]
-async fn a_files_way_up_is_watched_by_its_upload() {
-    let (view_model, feed, _asks) = ViewModel::new("me".to_owned());
-    let client = memory_client(view_model);
-    let mut watch = client
-        .subscribe_scoped(methods::WATCH_TRANSFERS, serde_json::json!({}))
-        .await
-        .expect("the watch");
-    assert_eq!(watch.recv().await, Some(serde_json::json!([])));
-    let going = |done| slopty_view_proto::TransferProgress {
-        upload_id: "u-1".to_owned(),
-        file_name: "shot.png".to_owned(),
-        done,
-        total: 4_000_000,
-    };
-    feed.transfers(vec![going(1_000_000)]);
-    let read: Vec<slopty_view_proto::TransferProgress> =
-        serde_json::from_value(watch.recv().await.expect("a frame")).expect("transfers");
-    assert_eq!(read, vec![going(1_000_000)]);
+    assert!(errors.iter().all(|message| *message == "The turn failed on studio. Try again."));
 }
 
 /// Claude Code's "Yes, and tell Claude what to do next": an approval says which choice takes the
-/// person's words beside it, and the pick with words goes back as that allow and the words; a
-/// question's option previews ride beside its options.
+/// person's words beside it; a question's option previews ride beside its options.
 #[test]
-fn an_allow_takes_words_and_options_carry_previews() {
+fn an_allow_is_marked_and_options_carry_previews() {
     use slopty_proto::thread::Effect;
     use slopty_proto::thread::detail::{Offered, Question};
     let mut state = fixtures::thread("tools");
@@ -1814,20 +1699,11 @@ fn an_allow_takes_words_and_options_carry_previews() {
         slopty_proto::thread::Request::APPROVAL,
         &[("allow", "Yes", Effect::Allow), ("deny", "No", Effect::Deny)],
     );
-    state.requests.push(approval.clone());
+    state.requests.push(approval);
     let mut entries = transcript::entries(&state, &transcript::Look::new("w"));
     transcript::asks(&state, "w", &mut entries);
     let (_, questions) = served(&entries).expect("the panel serves it");
     assert_eq!(questions[0].allow_option, Some(0));
-    let with_words = slopty_view_proto::UserInputAnswer {
-        question_id: questions[0].id.clone(),
-        labels: vec!["Yes".to_owned(), "then commit".to_owned()],
-        notes: None,
-    };
-    assert_eq!(
-        transcript::answer(&approval, &[with_words]),
-        Ok(("allow".to_owned(), Some("then commit".to_owned())))
-    );
 
     let mut asked = request(slopty_proto::thread::Request::QUESTION, &[]);
     let offered = |label: &str, preview: Option<&str>| Offered {
@@ -1941,11 +1817,10 @@ fn a_signed_out_agent_says_so() {
     assert_eq!(words, "The model's service returned an error. Try again.");
 }
 
-/// A Claude Code plan shown whole may be approved as the person edits it: its manual approval
-/// carries the edited plan as words. An agent's questions offer the choice beside them ("Chat
-/// about this"), which answers alone; a request that lists its deny first starts there.
+/// A Claude Code plan shows whole, its manual approval marked; an agent's questions name the
+/// choice beside them ("Chat about this"); a request that lists its deny first starts there.
 #[test]
-fn a_plan_is_edited_and_questions_are_talked_over() {
+fn a_plan_and_questions_name_their_choices() {
     use slopty_proto::thread::detail::{Clipped, Question};
     use slopty_proto::thread::{AgentId, Effect, Request};
     let mut state = fixtures::thread("tools");
@@ -1959,18 +1834,9 @@ fn a_plan_is_edited_and_questions_are_talked_over() {
         ],
     );
     plan.text = Some(Clipped::whole("1. Read"));
-    let asked = asked_of(&mut state, plan.clone());
+    let asked = asked_of(&mut state, plan);
     assert_eq!(asked.edit_from.as_deref(), Some("1. Read"));
     assert_eq!(asked.allow_option, Some(1), "the manual approval");
-    let edited = slopty_view_proto::UserInputAnswer {
-        question_id: asked.id,
-        labels: vec!["Yes, manually approve edits".to_owned(), "1. Read\n2. Test".to_owned()],
-        notes: None,
-    };
-    assert_eq!(
-        transcript::answer(&plan, &[edited]),
-        Ok(("allow".to_owned(), Some("1. Read\n2. Test".to_owned())))
-    );
 
     let mut questions = request(
         Request::QUESTION,
@@ -1982,27 +1848,8 @@ fn a_plan_is_edited_and_questions_are_talked_over() {
         options: Vec::new(),
         multi_select: false,
     }];
-    let asked = asked_of(&mut state, questions.clone());
+    let asked = asked_of(&mut state, questions);
     assert_eq!(asked.aside.as_deref(), Some("Chat about this"));
-    assert_eq!(
-        transcript::answer(&questions, &[picked("choice", "Chat about this")]),
-        Ok(("clarify".to_owned(), None))
-    );
-    // Skipped, the questions go as the plain decline; with none to go as, they can't be.
-    let skip = slopty_view_proto::UserInputAnswer {
-        question_id: transcript::SKIP.to_owned(),
-        labels: Vec::new(),
-        notes: None,
-    };
-    assert_eq!(
-        transcript::answer(&questions, std::slice::from_ref(&skip)),
-        Ok(("deny".to_owned(), None))
-    );
-    questions.options.clear();
-    assert_eq!(
-        transcript::answer(&questions, &[skip]),
-        Err("These questions can't be skipped".to_owned())
-    );
 
     let mut said_no = approval_of(&mut state, "ls");
     said_no.options.rotate_right(1);
@@ -2049,32 +1896,6 @@ fn a_thought_says_how_long_it_took() {
         _ => None,
     });
     assert_eq!(took, Some(Some(12_000)));
-}
-
-/// The person's notes on a question go beside the answers, by the question's text.
-#[test]
-fn notes_go_beside_the_answers() {
-    use slopty_proto::thread::Request;
-    use slopty_proto::thread::detail::{Offered, Question};
-    let mut asked = request(Request::QUESTION, &[]);
-    asked.questions = vec![Question {
-        header: Some("Layout".to_owned()),
-        text: "Which layout?".to_owned(),
-        options: vec![Offered {
-            label: "Split".to_owned(),
-            description: None,
-            preview: Some("| a | b |".to_owned()),
-        }],
-        multi_select: false,
-    }];
-    let answer = slopty_view_proto::UserInputAnswer {
-        question_id: "0".to_owned(),
-        labels: vec!["Split".to_owned()],
-        notes: Some(" keep the gutter ".to_owned()),
-    };
-    let (choice, notes) = transcript::answer(&asked, &[answer]).expect("answered");
-    assert!(choice.contains("Split"), "{choice}");
-    assert_eq!(notes.as_deref(), Some(r#"{"Which layout?":"keep the gutter"}"#));
 }
 
 /// A subagent's end that lands in the turn of the call that started it is said by its card, so

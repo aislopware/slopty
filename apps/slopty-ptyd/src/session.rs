@@ -55,9 +55,6 @@ pub struct Session {
     /// Such a child's start as the kernel recorded it when this ptyd took it
     /// ([`slopty_pty::process::start_mark`]): its pid is that child's only while it carries it.
     mark: Option<u64>,
-    /// The child runs on a socket pair, not a PTY (`PtydRequest::SpawnPiped`): `master` is its
-    /// socket, there is no tty, and it is ended by `SIGTERM` rather than a hangup.
-    piped: bool,
 }
 
 /// How long a session a worker held when the ptyd before this build handed it over is kept out
@@ -90,7 +87,6 @@ struct Start {
     exited: Option<Exit>,
     orphan: bool,
     mark: Option<u64>,
-    piped: bool,
 }
 
 /// What a session's reader is to do with the master.
@@ -120,9 +116,6 @@ struct State {
     /// Connection id holding the master, if any.
     attached_by: Option<u64>,
 }
-
-/// How long a closed piped session's child has after its `SIGTERM` before it is killed.
-const PIPED_GRACE: Duration = Duration::from_secs(5);
 
 /// What a worker taking the master is handed besides it.
 #[derive(Debug)]
@@ -179,40 +172,6 @@ impl Session {
             exited: None,
             orphan: false,
             mark: None,
-            piped: false,
-        })?;
-        session.watch(Watch::Child(child), events);
-        Ok(session)
-    }
-
-    /// Spawn on a socket pair rather than a PTY (`PtydRequest::SpawnPiped`), its standard error
-    /// into `stderr`; start the reader and the exit waiter.
-    pub fn spawn_piped(
-        id: SessionId,
-        spec: &SpawnSpec,
-        stderr: Option<&std::path::Path>,
-        backlog_bytes: usize,
-        events: broadcast::Sender<Broadcast>,
-    ) -> Result<Arc<Self>, slopty_pty::PtyError> {
-        let slopty_pty::pty::Piped { io, child } = slopty_pty::pty::spawn_piped(spec, stderr)?;
-        let session = Self::start(Start {
-            id,
-            pid: child.id().unwrap_or(0),
-            started_ms: WallMs::now(),
-            term: String::new(),
-            tty: PathBuf::new(),
-            master: io,
-            state: State {
-                size: TermSize::default(),
-                ring: Ring::new(backlog_bytes),
-                checkpoint: Vec::new(),
-                attached_by: None,
-            },
-            reader: Reader::Drain,
-            exited: None,
-            orphan: false,
-            mark: None,
-            piped: true,
         })?;
         session.watch(Watch::Child(child), events);
         Ok(session)
@@ -229,8 +188,8 @@ impl Session {
         conn: u64,
         events: broadcast::Sender<Broadcast>,
     ) -> Result<Arc<Self>, slopty_pty::PtyError> {
-        let slopty_pty::Adoptee { pid, size, started_ms, term, piped } = child;
-        let tty = if piped { PathBuf::new() } else { slopty_pty::pty::slave_of(&master)? };
+        let slopty_pty::Adoptee { pid, size, started_ms, term } = child;
+        let tty = slopty_pty::pty::slave_of(&master)?;
         let session = Self::start(Start {
             id,
             pid,
@@ -248,7 +207,6 @@ impl Session {
             exited: None,
             orphan: true,
             mark: mark_of(pid),
-            piped,
         })?;
         session.watch(Watch::Orphan, events);
         Ok(session)
@@ -277,7 +235,6 @@ impl Session {
             attached,
             orphan,
             orphan_mark,
-            piped,
             // Taken already: it is `master`.
             ..
         } = heir;
@@ -310,7 +267,6 @@ impl Session {
             exited,
             orphan: orphan || watched,
             mark,
-            piped,
         })?;
         match child {
             Some(child) => session.watch(Watch::Child(child), events),
@@ -329,20 +285,8 @@ impl Session {
     }
 
     fn start(start: Start) -> Result<Arc<Self>, slopty_pty::PtyError> {
-        let Start {
-            id,
-            pid,
-            started_ms,
-            term,
-            tty,
-            master,
-            state,
-            reader,
-            exited,
-            orphan,
-            mark,
-            piped,
-        } = start;
+        let Start { id, pid, started_ms, term, tty, master, state, reader, exited, orphan, mark } =
+            start;
         let master = Arc::new(PtyMaster::new(master)?);
         let (reader, _) = watch::channel(reader);
         let (parked, _) = watch::channel(false);
@@ -359,7 +303,6 @@ impl Session {
             parked,
             orphan,
             mark,
-            piped,
         });
         let reading = Arc::clone(&session);
         tokio::spawn(async move { reading.read_loop().await });
@@ -550,15 +493,13 @@ impl Session {
 
     /// The session is closed: the reader drops what the child still writes from now on,
     /// whoever holds the master ([`Reader::Discard`]), and the child is hung up
-    /// ([`Self::hang_up`]), then killed if it has not exited within `grace` ([`PIPED_GRACE`]
-    /// for a piped one). Once the child is reaped nothing holds the session, so its master,
-    /// ring and checkpoint go.
+    /// ([`Self::hang_up`]), then killed if it has not exited within `grace`. Once the child is
+    /// reaped nothing holds the session, so its master, ring and checkpoint go.
     pub fn close(self: Arc<Self>, grace: Duration) {
         self.reader.send_replace(Reader::Discard);
         if self.exited.borrow().is_some() {
             return;
         }
-        let grace = if self.piped { PIPED_GRACE } else { grace };
         let _hup = self.hang_up();
         tokio::spawn(async move {
             if !self.exits_within(grace).await {
@@ -567,16 +508,9 @@ impl Session {
         });
     }
 
-    /// Tell the child's process group to end: a hangup on a terminal, `SIGTERM` on a pipe,
-    /// which has no terminal to hang up.
+    /// Tell the child's process group to end: a hangup on its terminal.
     pub fn hang_up(&self) -> Result<(), std::io::Error> {
-        self.signal(if self.piped { Signal::TERM } else { Signal::HUP })
-    }
-
-    /// A piped session (`PtydRequest::SpawnPiped`): no tty to size.
-    #[must_use]
-    pub const fn piped(&self) -> bool {
-        self.piped
+        self.signal(Signal::HUP)
     }
 
     /// The master fd.
@@ -605,7 +539,6 @@ impl Session {
             attached: state.attached_by.is_some(),
             orphan: self.orphan,
             orphan_mark: self.mark.filter(|_| self.orphan),
-            piped: self.piped,
         }
     }
 
@@ -622,7 +555,6 @@ impl Session {
             exited: *self.exited.borrow(),
             backlog: state.ring.len(),
             checkpoint: state.checkpoint.len(),
-            piped: self.piped,
         }
     }
 

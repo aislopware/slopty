@@ -684,10 +684,7 @@ pub(crate) fn tab_strip_region(
     theme: &Theme,
 ) -> gpui::AnyElement {
     // Fade flags from the LAST frame's scroll state (invisible lag).
-    let scrolled = -f32::from(scroll.offset().x);
-    let max_scroll = f32::from(scroll.max_offset().x);
-    let fade_left = scrolled > 1.0;
-    let fade_right = scrolled < max_scroll - 1.0;
+    let (fade_left, fade_right) = strip_fades(scroll);
     let glass = theme.is_glass();
     let bar_bg = theme.surface;
     let edge = |angle: f32| {
@@ -709,6 +706,8 @@ pub(crate) fn tab_strip_region(
         .flex()
         .items_center()
         .child(strip)
+        // slopty: the lag above lasts one frame, never the window's rest.
+        .child(strip_fades_follow(scroll.clone(), (fade_left, fade_right)))
         .when(fade_left && !glass, |el| el.child(edge(90.0).left_0()))
         .when(fade_right && !glass, |el| el.child(edge(270.0).right_0()));
     if glass {
@@ -719,6 +718,30 @@ pub(crate) fn tab_strip_region(
     } else {
         region.into_any_element()
     }
+}
+
+/// Which sides of the strip hide tabs, by its scroll state: left, right.
+fn strip_fades(scroll: &gpui::ScrollHandle) -> (bool, bool) {
+    let scrolled = -f32::from(scroll.offset().x);
+    let max_scroll = f32::from(scroll.max_offset().x);
+    (scrolled > 1.0, scrolled < max_scroll - 1.0)
+}
+
+/// slopty: nothing drawn. Laid out after the strip, it reads the strip's scroll as this frame
+/// left it (a tab opened, closed or scrolled to), and when that calls for other fades than the
+/// ones `drawn`, it asks for the next frame, which draws them: a window at rest never keeps a
+/// fade over a tab that no longer hides.
+fn strip_fades_follow(scroll: gpui::ScrollHandle, drawn: (bool, bool)) -> impl IntoElement {
+    gpui::canvas(
+        move |_, window, _| {
+            if strip_fades(&scroll) != drawn {
+                window.request_animation_frame();
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .size_0()
 }
 
 #[cfg(test)]
@@ -983,6 +1006,69 @@ mod tests {
         hold.hold(150.0, t0);
         hold.release(ms(10));
         assert_eq!(hold.width(120.0, ms(11), true), (120.0, false), "reduced motion lands at once");
+    }
+
+    /// A strip of `tabs` 60 pt tabs in 200 pt.
+    struct Strip {
+        tabs: usize,
+        scroll: gpui::ScrollHandle,
+    }
+
+    impl Render for Strip {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let tabs = (0..self.tabs).map(|_| div().flex_none().w(px(60.0)).h(px(20.0)));
+            let strip = div()
+                .id("strip")
+                .flex()
+                .min_w_0()
+                .overflow_x_scroll()
+                .track_scroll(&self.scroll)
+                .children(tabs);
+            // Opaque: its fades are gradients, where glass's ramp the chips' own glyphs.
+            let mut theme = Theme::dark();
+            theme.surface_treatment = slopty_shell_theme::SurfaceTreatment::Opaque;
+            div().w(px(200.0)).h(px(20.0)).child(tab_strip_region(strip, &self.scroll, &theme))
+        }
+    }
+
+    /// slopty: the strip fades the side that hides tabs from its last frame's scroll, and the
+    /// frame that changes what hides asks for the next: tabs coming to overflow it, then going,
+    /// leave a window at rest as the same state draws from scratch.
+    #[gpui::test]
+    fn a_tab_strip_at_rest_fades_what_it_hides_now(cx: &mut gpui::TestAppContext) {
+        let (strip, cx) = cx.add_window_view(|_, _| Strip { tabs: 1, scroll: gpui::ScrollHandle::new() });
+        let rest = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            for _ in 0..4 {
+                cx.update(|window, cx| window.simulate_next_frame(cx));
+                cx.run_until_parked();
+            }
+            cx.update(|window, cx| {
+                let mut shown = window.painted_primitives();
+                shown.sort_unstable();
+                window.repeat_frame_time();
+                window.refresh();
+                window.draw(cx).clear(cx);
+                let mut scratch = window.painted_primitives();
+                scratch.sort_unstable();
+                shown == scratch
+            })
+        };
+        let fades = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| {
+                let quads = window.painted_quads();
+                quads.iter().filter(|quad| format!("{:?}", quad.background).starts_with("LinearGradient")).count()
+            })
+        };
+        draw(cx);
+        for (tabs, faded) in [(10, 1), (1, 0)] {
+            strip.update(cx, |strip, cx| {
+                strip.tabs = tabs;
+                cx.notify();
+            });
+            assert!(rest(cx), "{tabs} tabs at rest draw as from scratch");
+            assert_eq!(fades(cx), faded, "{tabs} tabs: the right side fades only while it hides");
+        }
     }
 
     #[gpui::test]

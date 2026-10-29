@@ -991,3 +991,40 @@ fn the_advisors_review_settles_its_call() {
     assert_eq!(failed.said.as_deref(), Some("Advisor unavailable (overloaded)"));
     assert_eq!(failed.status, ResultStatus::Error);
 }
+
+/// Claude Code's tools-used manifest is the model's: a subagent's report reads without it, a
+/// compaction summary says the tools it names in the TUI's words and drops the reminder that
+/// held only it, and a line that merely mentions it stays as written.
+#[test]
+fn the_tools_used_manifest_is_the_models() {
+    let summary = "Continued.\n\n<system-reminder>\n<tools-used-before-summary>Read, Bash\
+                   </tools-used-before-summary>\n</system-reminder>\nSummary:\n1. Asked.";
+    assert_eq!(
+        summary_text(summary),
+        "Continued.\n\nTools called before this summary: Read, Bash\nSummary:\n1. Asked."
+    );
+    let empty = "Continued.\n\n<system-reminder>\n<tools-used-before-summary>\
+                 </tools-used-before-summary>\n</system-reminder>\nSummary:";
+    assert_eq!(summary_text(empty), "Continued.\n\nSummary:");
+    let more = "<system-reminder>\n<tools-used-before-summary>Read</tools-used-before-summary>\n\
+                More.\n</system-reminder>";
+    assert_eq!(
+        summary_text(more),
+        "<system-reminder>\nTools called before this summary: Read\nMore.\n</system-reminder>",
+        "a reminder with more in it stays"
+    );
+
+    let report = json!([
+        {"type": "text", "text": "<tools-used-before-summary>Read</tools-used-before-summary>\n"},
+        {"type": "text", "text": "4"},
+    ]);
+    let mut c = Conversation::default();
+    c.ingest(&MAIN, &call("a1", None, "t1", "Agent", &json!({"description": "Count lines"})));
+    let structured = json!({"agentId": "x1", "status": "completed", "content": report});
+    c.ingest(&MAIN, &result("u1", Some("a1"), "t1", "4", &structured));
+    let ToolDetail::Agent(agent) = &tool(&c, &MAIN, "t1").detail else { panic!("an agent") };
+    assert_eq!(agent.report.as_ref().map(|r| r.text.as_str()), Some("4"));
+
+    let mention = "The tag <tools-used-before-summary> is Claude Code's.";
+    assert_eq!(content_text(&json!(mention)), mention);
+}

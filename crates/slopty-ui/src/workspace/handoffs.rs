@@ -185,7 +185,7 @@ impl WorkspaceView {
                 .map(|row| (row.id, row.title.clone()))
         });
         if let Some((thread, title)) = found {
-            return Some((self.chat_id(thread), title));
+            return Some((thread.to_string(), title));
         }
         let chat = self.chat_of(session)?;
         let title = self.summary(session).map(|s| s.title.clone()).unwrap_or_default();
@@ -309,15 +309,6 @@ impl WorkspaceView {
         let at = line.map_or_else(String::new, |line| format!("#L{line}"));
         let target = format!("file://{}{at}", escaped(&absolute));
         cx.emit(WorkspaceEvent::OpenFile { chat, target });
-    }
-
-    /// A block or a selection the person attached in shell `session` goes to the draft of the
-    /// chat the shell was opened for ([`WorkspaceEvent::Attach`]).
-    pub(super) fn attach_to_chat(&self, session: SessionId, text: &str, cx: &mut Context<Self>) {
-        match self.chat_of(session) {
-            Some(chat) => cx.emit(WorkspaceEvent::Attach { chat, text: text.to_owned() }),
-            None => Self::show_notice("This shell has no chat to attach to".to_owned(), cx),
-        }
     }
 
     /// The chat shell `session` was opened for.
@@ -693,44 +684,5 @@ mod tests {
         assert_eq!(heard.borrow().files.len(), 1, "no chat to open it in");
         let said = heard.borrow().notices.last().cloned();
         assert_eq!(said.as_deref(), Some("This shell has no chat to open a.rs in"));
-    }
-
-    /// A block or a selection attached in a shell opened for a chat goes to that chat's draft;
-    /// a shell opened for no chat offers no attaching, and a key bound to it says so.
-    #[gpui::test]
-    fn a_block_attached_in_a_shell_goes_to_its_chat_s_draft(cx: &mut TestAppContext) {
-        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
-        let cx = cx.add_empty_window();
-        let heard = hear(&workspace, cx);
-        let (mine, loose) = (SessionId::new(), SessionId::new());
-        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
-        let _rx = link(&workspace, cx, mac(|_| {}), vec![shell(mine), shell(loose)]);
-        let item = |session, chat: Option<&str>| Item {
-            id: ItemId::new(),
-            kind: ItemKind::Terminal { session },
-            name: None,
-            facts: chat
-                .map(|chat| BTreeMap::from([("chat".to_owned(), chat.to_owned())]))
-                .unwrap_or_default(),
-        };
-        let items = vec![item(mine, Some("chat-1")), item(loose, None)];
-        workspace
-            .update(cx, |v, cx| v.apply_sync(KEY, ItemSync::Snapshot { version: 1, items }, cx));
-        cx.run_until_parked();
-
-        let (shown, bare) = workspace
-            .read_with(cx, |v, _| (v.terminals[&mine].clone(), v.terminals[&loose].clone()));
-        let block = "```sh\n$ make\nok\n```";
-        shown.update(cx, |_, cx| {
-            cx.emit(slopty_terminal::TerminalViewEvent::Attach(block.to_owned()));
-        });
-        assert_eq!(heard.borrow().attached, [("chat-1".to_owned(), block.to_owned())]);
-
-        cx.update(|window, cx| {
-            bare.update(cx, |v, cx| v.attach_block(&slopty_terminal::AttachBlock, window, cx));
-        });
-        assert_eq!(heard.borrow().attached.len(), 1, "no chat to attach to");
-        let said = heard.borrow().notices.last().cloned();
-        assert_eq!(said.as_deref(), Some("No agent to attach the block to"));
     }
 }

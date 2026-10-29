@@ -1,8 +1,8 @@
 //! A Claude Code session's record mapped onto the agent-neutral thread model
 //! (`slopty_proto::thread`).
 //!
-//! Its conversation is read from the session's own transcript or heard as the driven Claude Code
-//! streams it ([`super::driven`]), both through the transcript decoder ([`crate::conversation`]).
+//! Its conversation is read from the session's own transcript as the TUI writes it, through the
+//! transcript decoder ([`crate::conversation`]).
 //!
 //! Sans-IO. This turns what the decoder makes of the records into [`Out`]s, the threads to make
 //! and the actions to apply, and keeps only what the mapping needs (which turn each entry is in,
@@ -14,35 +14,27 @@
 //!   `--resume`. Each subagent is a thread of its own, derived from the session's and its agent id,
 //!   linked to the `Agent` call that started it.
 //! - **Turns.** A prompt starts the next turn of its thread; every entry after it is in that turn.
-//!   The engine's end of a turn ([`History::ended`]) or the transcript's turn record ends it, and a
+//!   Claude Code's `Stop` ([`History::ended`]) or the transcript's turn record ends it, and a
 //!   prompt that comes while a turn is open ends that one. A branch (a rewind, an edited prompt)
 //!   truncates the thread back to before the dropped prompt.
 //! - **Items.** An entry keeps its id. A tool call's kind comes from the decoder's typed detail,
 //!   not from Claude Code's tool names, and its title is worded here.
-//! - **Live blocks.** A block the model is writing ([`History::live`]) is an item of its own,
-//!   appended to as it grows, until its entry settles it ([`History::settle`]): a tool call's block
-//!   takes the call's own id, and a text's or a thinking's entry takes the block's item, so the
-//!   entry replaces the block where it stands.
-//! - **Requests.** A permission Claude Code asks for is a request with the answers it takes: allow,
-//!   allow always (with what the suggestions grant), deny, and deny and stop. [`verdict`] maps a
-//!   chosen answer back.
+//! - **Status.** The phase is told from outside ([`History::status`]): the session's hooks, or its
+//!   transcript when it has none. A dialog the TUI holds is a wait on the person, never a request
+//!   answered here: the person answers it in the terminal.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use slopty_core::WallMs;
 use slopty_proto::thread::{
-    self, Action, AgentId, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Compaction,
-    ContentRef, Drive, Effect, IntentId, Item, ItemBody, ItemId, Link, Liveness, Meters, Model,
-    Notice, PartKey, Pending, Phase, Plan, Request, RequestState, Retry, Status, Step, ThreadId,
+    self, Action, AgentId, BackgroundTask, Cap, Changed, Clipped, Compaction, ContentRef, Drive,
+    Item, ItemBody, ItemId, Link, Liveness, Notice, Phase, Plan, Retry, Status, Step, ThreadId,
     ThreadMeta, ThreadState, ToolCall, ToolState, Turn, TurnId, TurnState, Usage, UserMessage,
     Wait, detail, kind,
 };
 
-use crate::conversation::{
-    self as conv, Body, Change, Grant, Live, LiveId, LiveKind, NoteKind, PermissionEvent,
-    PermissionPrompt, ResultStatus, Settled, TextRef, Verdict,
-};
-use crate::driven::title_of;
+use crate::conversation::{self as conv, Body, Change, NoteKind, ResultStatus, TextRef};
+use crate::title::title_of;
 
 /// What the threads of a session need done.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +46,7 @@ pub enum Out {
     Actions(ThreadId, Vec<Action>),
 }
 
-/// How the engine ended a turn ([`History::ended`]).
+/// How Claude Code ended a turn ([`History::ended`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum End {
     /// It answered.
@@ -66,23 +58,16 @@ pub enum End {
     Failed(Option<String>),
 }
 
-/// Claude Code's fast mode, offered on each of its models while its `/fast` command is listed:
-/// the one option a Claude Code model has ([`Model::options`]).
-pub const FAST: &str = "fast";
-
-pub use cards::{PLAN_CLEAR, clear_mode};
-
 /// The words a thread waits with while it is compacted.
 pub const COMPACTING_TEXT: &str = "Compacting the conversation";
 
-/// Claude Code's own review ([`Cap::REVIEW`]): its built-in skill, which takes a ref range
-/// (`a...b`) and reviews what it changes. A thread can review only while Claude Code lists it.
-pub const REVIEW_COMMAND: &str = "code-review";
-
-/// The models a Claude Code takes by the aliases it resolves to its current ones, until it lists
-/// its own ([`History::models`]).
-pub const MODELS: [(&str, &str); 4] =
-    [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("default", "Default")];
+/// The capabilities named `names`, each once, in order.
+fn caps_of(names: &[&str]) -> Vec<Cap> {
+    let mut caps: Vec<Cap> = names.iter().copied().map(Cap::named).collect();
+    caps.sort();
+    caps.dedup();
+    caps
+}
 
 /// What a permission waits on, as a row leads with it: the action on its subject ("Run cargo
 /// test", [`tool_action`]) from the hook's line `detail`, or what the tool does when the hook
@@ -184,9 +169,6 @@ fn ask_subject<'a>(tool: &str, line: &'a str) -> &'a str {
     if named { rest.trim_start_matches(':').trim_start() } else { line }
 }
 
-/// What an agent stopped on its plan's usage limit waits on ([`Wait::LIMIT`]).
-pub const LIMIT_TEXT: &str = "Hit its usage limit";
-
 /// What a subagent that stopped with background work of its own still running waits on.
 pub const WAITING_TEXT: &str = "Waiting on its own background work";
 
@@ -208,34 +190,9 @@ pub fn text_ref(content: &ContentRef) -> Option<(conv::ThreadId, TextRef)> {
     serde_json::from_str(&content.0).ok()
 }
 
-/// The answer to give Claude Code for choice `choice` of a request made from a permission
-/// prompt, with the person's `message`; `None` for a choice it never offered.
-#[must_use]
-pub fn verdict(choice: &str, message: Option<&str>) -> Option<Verdict> {
-    let message = message.unwrap_or_default().to_owned();
-    match choice {
-        "allow" => Some(Verdict::Allow),
-        "always" => Some(Verdict::AllowAlways),
-        "deny" => Some(Verdict::Deny { message, interrupt: false }),
-        "deny-stop" => Some(Verdict::Deny { message, interrupt: true }),
-        answers => serde_json::from_str(answers).ok().map(|answers| Verdict::Answer { answers }),
-    }
-}
-
 /// The choice that answers an agent's questions with none of their answers, to talk them over
 /// first (the TUI's "Chat about this").
 pub const CLARIFY: &str = "clarify";
-
-/// The choice a verdict took, as [`verdict`] reads it.
-fn choice_of(verdict: &Verdict) -> String {
-    match verdict {
-        Verdict::Allow => "allow".to_owned(),
-        Verdict::AllowAlways => "always".to_owned(),
-        Verdict::Deny { interrupt: false, .. } => "deny".to_owned(),
-        Verdict::Deny { interrupt: true, .. } => "deny-stop".to_owned(),
-        Verdict::Answer { answers } => serde_json::to_string(answers).unwrap_or_default(),
-    }
-}
 
 /// One of the decoder's threads, as mapped.
 #[derive(Debug)]
@@ -254,30 +211,21 @@ struct Mapped {
     stopped: HashMap<TurnId, (conv::Stop, String)>,
     /// Turns whose end was sent.
     ended: HashSet<TurnId>,
-    /// Turns the engine ended, as it ended them: the transcript's record of one changes it no
-    /// more.
+    /// Turns Claude Code's hooks ended, as they ended them: the transcript's record of one
+    /// changes it no more.
     by_engine: HashMap<TurnId, TurnState>,
     /// Each turn as last sent.
     turns: HashMap<TurnId, Turn>,
     /// Background commands as last sent, for their output to land on.
     background: HashMap<String, Item>,
-    /// Calls not ended yet, as last sent, by call: a permission prompt held for one marks it
-    /// waiting on the person, and its settling lets it run again.
-    calls: HashMap<String, Item>,
     /// The work left running in the background, by the call that started it, in the order
     /// the calls came, as last sent.
     tasks: Vec<BackgroundTask>,
-    /// The entries that settled a live text or thinking block, and that block's item, which
-    /// they are shown as: where the block stood, not after what began since.
-    shown_as: HashMap<String, ItemId>,
     /// A subagent's status as last told ([`History::settle_subagents`]).
     told: Option<Status>,
     /// What each call's header and line said in the TUI's words, as last noted: a call is noted
     /// again only when they change.
     worded: HashMap<String, (Option<String>, Option<String>)>,
-    /// Calls of MCP tools shown as plain calls, as last sent, with their record: one whose tool
-    /// turns out to be an app is shown again as its page ([`History::set_apps`]).
-    mcp_plain: HashMap<String, (Item, conv::ToolCall)>,
 }
 
 impl Mapped {
@@ -293,12 +241,9 @@ impl Mapped {
             by_engine: HashMap::new(),
             turns: HashMap::new(),
             background: HashMap::new(),
-            calls: HashMap::new(),
             tasks: Vec::new(),
-            shown_as: HashMap::new(),
             told: None,
             worded: HashMap::new(),
-            mcp_plain: HashMap::new(),
         }
     }
 
@@ -464,33 +409,6 @@ fn end_tasks(tasks: &mut [BackgroundTask], at: WallMs, state: &str) -> bool {
     ended
 }
 
-/// A live block as an item.
-#[derive(Debug)]
-struct Provisional {
-    thread: conv::ThreadId,
-    item: ItemId,
-    tool: bool,
-}
-
-/// A live block that began while its thread had no turn open: its prompt is not in the
-/// transcript yet. It is held, with what it said meanwhile, until that prompt opens its turn.
-#[derive(Debug)]
-struct Deferred {
-    thread: conv::ThreadId,
-    id: LiveId,
-    kind: LiveKind,
-    text: String,
-}
-
-/// What an agent at rest waits on: the tasks left running and the scheduled prompts, and the
-/// engine's words for the first task.
-#[derive(Debug)]
-struct Waiting {
-    tasks: u32,
-    crons: u32,
-    named: Option<String>,
-}
-
 /// One Claude Code session as threads.
 #[derive(Debug)]
 pub struct History {
@@ -498,69 +416,30 @@ pub struct History {
     threads: HashMap<conv::ThreadId, Mapped>,
     /// Each subagent's call, by the subagent's id.
     spawned: HashMap<String, Spawn>,
-    live: HashMap<LiveId, Provisional>,
-    /// Live blocks held until their prompt opens their turn, oldest first.
-    deferred: Vec<Deferred>,
-    meters: Meters,
-    /// The status last told, and the requests open: a thread begun anew from the transcript
-    /// gets them again, since the transcript has neither.
+    /// The status last told: a thread begun anew from the transcript gets it again, since the
+    /// transcript has none.
     status: Option<Status>,
-    open: Vec<Request>,
-    /// What the agent waits on at rest (background tasks, scheduled prompts), while it waits:
-    /// the wait is worded again as the transcript names those tasks.
-    waiting_on: Option<Waiting>,
     out: Vec<Out>,
-    /// The slash commands as last told.
-    commands: Vec<thread::Command>,
-    /// The person's and the project's own commands on disk (`crate::commands::custom`).
-    custom: Vec<conv::SlashCommand>,
-    /// Claude Code's own list of its commands and skills, as it last said it.
-    listed: Option<Vec<crate::commands::Listed>>,
     /// The main thread's last turn ended failed, so its agent's done is a failure.
     failed: bool,
-    /// The wall clock as a live block was last heard: when a live block shows.
-    wall: WallMs,
-    /// When the Claude Code that runs the session now started ([`Self::started`]).
-    started: Option<WallMs>,
+    /// When the Claude Code that ran the session last went ([`Self::gone`]).
+    went: Option<WallMs>,
     /// No Claude Code runs the session: the last one ended by then ([`Self::rest`]).
     rested: Option<WallMs>,
-    /// The intent that sent each of the person's messages Slopty gave the engine, by the
-    /// message's id ([`Self::sent_as`]).
-    intents: HashMap<String, IntentId>,
-    /// A stop under way, worded as far as it went ([`Wait::STOPPING`]).
-    stopping: Option<String>,
-    /// The turn under way shows no progress, worded ([`Wait::STALLED`]).
-    stalled: Option<String>,
     /// Its context is being compacted ([`Wait::COMPACTING`]).
     compacting: bool,
-    /// Held at its plan's usage limit until then ([`Wait::LIMIT`]).
-    limited: Option<WallMs>,
     /// When the latest entry was made.
     last_at: WallMs,
-    /// The main thread's request being tried again ([`Self::retrying`]): its one row, as it
-    /// stands.
-    retry: Option<Item>,
-    /// The MCP Apps the session's servers offer, by server (as its tools are named) and tool
-    /// ([`Self::set_apps`]).
-    apps: HashMap<(String, String), slopty_proto::visual::McpApp>,
-    /// Notices said so far, so two in one millisecond are two rows.
-    notices: u64,
-    /// The resources each task's result linked, by the task, for its row.
-    task_links: HashMap<String, Vec<slopty_proto::visual::ResourceLink>>,
-    /// The home of the machine the session runs on, which a folder granted under it is said
-    /// from (`~/…`).
-    home: String,
 }
 
 impl History {
-    /// Session `native` of Claude Code `version` in `cwd`, as Slopty drives it, with
+    /// Session `native` of Claude Code `version` in `cwd`, as Slopty reads it, with
     /// capabilities `caps`. The first outs it gives, from whichever call, begin its thread.
     #[must_use]
     pub fn new(native: &str, version: &str, cwd: &str, caps: &[&str], now: WallMs) -> Self {
-        let offers = super::offers::offers();
         let meta = ThreadMeta {
-            modes: offers.modes,
-            efforts: offers.efforts,
+            modes: Vec::new(),
+            efforts: Vec::new(),
             id: thread_of(native),
             agent: AgentId::named(AgentId::CLAUDE_CODE),
             agent_version: version.to_owned(),
@@ -570,9 +449,9 @@ impl History {
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
             forked_from: None,
-            drive: Drive::named(Drive::DRIVEN),
+            drive: Drive::named(Drive::OBSERVED),
             caps: Vec::new(),
-            models: offers.models,
+            models: Vec::new(),
             facts: BTreeMap::new(),
             created_ms: now,
         };
@@ -590,57 +469,24 @@ impl History {
             meta,
             threads,
             spawned: HashMap::new(),
-            live: HashMap::new(),
-            deferred: Vec::new(),
-            meters: Meters::default(),
             status: None,
-            open: Vec::new(),
-            waiting_on: None,
-            commands: Vec::new(),
-            custom: Vec::new(),
-            listed: None,
             failed: false,
-            wall: WallMs::ZERO,
-            started: None,
+            went: None,
             rested: None,
-            intents: HashMap::new(),
-            stopping: None,
-            stalled: None,
             compacting: false,
-            limited: None,
             last_at: WallMs::ZERO,
-            retry: None,
-            apps: HashMap::new(),
-            notices: 0,
-            task_links: HashMap::new(),
-            home: slopty_platform::dirs::home().to_string_lossy().into_owned(),
         };
-        history.meta.caps = history.caps_with(caps);
+        history.meta.caps = caps_of(caps);
         history.out.push(Out::Begin(Box::new(history.meta.clone())));
         history
     }
 
-    /// `base`, and [`Cap::REVIEW`] while Claude Code lists its review and a message can reach
-    /// it.
-    fn caps_with(&self, base: &[&str]) -> Vec<Cap> {
-        let mut caps: Vec<Cap> = base.iter().copied().map(Cap::named).collect();
-        let sends = caps.contains(&Cap::named(Cap::QUEUE));
-        if sends && self.commands.iter().any(|c| c.name == REVIEW_COMMAND) {
-            caps.push(Cap::named(Cap::REVIEW));
-        }
-        caps.sort();
-        caps.dedup();
-        caps
-    }
-
-    /// The capabilities are `caps` now (and review where it is listed).
-    pub fn set_caps(&mut self, caps: &[&str]) -> Vec<Out> {
-        let caps = self.caps_with(caps);
-        if caps != self.meta.caps {
-            self.meta.caps = caps;
-            self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
-        }
-        self.drain()
+    /// The main thread's turn under way, or its last: what a session with no hooks takes its
+    /// phase from.
+    #[must_use]
+    pub fn last_turn(&self) -> Option<&Turn> {
+        let main = self.threads.get(&conv::ThreadId::Main)?;
+        main.turns.get(&main.turn)
     }
 
     /// Keep `value` as the thread's fact `name`, or forget it for `None`.
@@ -656,27 +502,13 @@ impl History {
         self.drain()
     }
 
-    /// `status` as the thread shows it: what it waits on beside its phase (a stop under way,
-    /// a compaction, the plan's limit, no progress).
+    /// `status` as the thread shows it: compacting while its context is compacted.
     fn shown(&self, status: Option<Status>) -> Option<Status> {
         let mut status = status?;
-        if status.liveness != Liveness::Live {
-            return Some(status);
-        }
-        let at_work = matches!(status.phase, Phase::Working | Phase::NeedsYou | Phase::Waiting);
-        if let Some(text) = self.stopping.as_ref().filter(|_| at_work) {
-            status.phase = Phase::Working;
-            status.wait = Some(Wait { kind: Wait::STOPPING.to_owned(), text: text.clone() });
-        } else if self.compacting {
+        if status.liveness == Liveness::Live && self.compacting {
             status.phase = Phase::Working;
             let text = COMPACTING_TEXT.to_owned();
             status.wait = Some(Wait { kind: Wait::COMPACTING.to_owned(), text });
-        } else if self.limited.is_some() && status.phase != Phase::NeedsYou {
-            status.phase = Phase::Waiting;
-            status.wait = Some(Wait { kind: Wait::LIMIT.to_owned(), text: LIMIT_TEXT.to_owned() });
-        } else if let Some(text) = self.stalled.as_ref().filter(|_| status.phase == Phase::Working)
-        {
-            status.wait = Some(Wait { kind: Wait::STALLED.to_owned(), text: text.clone() });
         }
         Some(status)
     }
@@ -688,8 +520,9 @@ impl History {
         }
     }
 
-    /// The engine is at `phase` since `since_ms`, alive or not; what it waits on, if anything,
-    /// is `wait` (a permission, a question), else what the thread's overlays say.
+    /// Claude Code is at `phase` since `since_ms`, as its hooks or its transcript say, alive or
+    /// not; what it waits on, if anything, is `wait` (a permission, a question), else its
+    /// compaction.
     pub fn status(
         &mut self,
         phase: Phase,
@@ -698,12 +531,6 @@ impl History {
         since_ms: WallMs,
     ) -> Vec<Out> {
         let phase = if phase == Phase::Done && self.failed { Phase::Failed } else { phase };
-        let (phase, wait) = match (phase, wait, self.waiting_on.as_ref()) {
-            (Phase::Done | Phase::Idle, None, Some(waiting)) if liveness == Liveness::Live => {
-                (Phase::Waiting, Some(self.wait_on(waiting)))
-            }
-            (phase, wait, _) => (phase, wait),
-        };
         let status = Status { phase, wait, liveness, since_ms };
         let same = self.status.as_ref().is_some_and(|had| {
             had.phase == status.phase && had.wait == status.wait && had.liveness == status.liveness
@@ -719,242 +546,6 @@ impl History {
     #[must_use]
     pub const fn phase(&self) -> Option<&Status> {
         self.status.as_ref()
-    }
-
-    /// What the engine left running at rest: `tasks` background tasks and `crons` scheduled
-    /// prompts, the first named `named`. The thread waits on them once its turn ends.
-    pub fn background(&mut self, tasks: u32, crons: u32, named: Option<String>) -> Vec<Out> {
-        self.waiting_on = (tasks > 0 || crons > 0).then_some(Waiting { tasks, crons, named });
-        self.rewait();
-        self.drain()
-    }
-
-    /// A task the engine says it started, in the session's list: in place of the one its call
-    /// started, else of its id, else after the others.
-    pub fn task_started(&mut self, task: BackgroundTask) -> Vec<Out> {
-        let id = self.meta.id;
-        let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Main) else {
-            return self.drain();
-        };
-        let at = mapped
-            .tasks
-            .iter()
-            .position(|t| t.id == task.id || (task.item.is_some() && t.item == task.item));
-        let changed = if let Some(had) = at.and_then(|at| mapped.tasks.get_mut(at)) {
-            let before = had.clone();
-            let mut merged = task;
-            // What the transcript said already stands; the engine adds what it alone knows.
-            merged.state.clone_from(&had.state);
-            merged.output.clone_from(&had.output);
-            merged.ended_ms = had.ended_ms;
-            merged.started_ms = had.started_ms.min(merged.started_ms);
-            merged.title = if had.title.is_empty() { merged.title } else { had.title.clone() };
-            merge_live(&before, &mut merged);
-            *had = merged;
-            *had != before
-        } else {
-            mapped.tasks.push(task);
-            true
-        };
-        if changed {
-            let tasks = mapped.tasks.clone();
-            self.push(id, Action::TasksSet(tasks));
-        }
-        self.drain()
-    }
-
-    /// Change task `task` as `change` says, when the session lists it; tell the list again
-    /// when that changed it.
-    pub fn task_changed(
-        &mut self,
-        task: &str,
-        change: impl FnOnce(&mut BackgroundTask),
-    ) -> Vec<Out> {
-        let id = self.meta.id;
-        let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Main) else {
-            return self.drain();
-        };
-        if let Some(had) = mapped.tasks.iter_mut().find(|t| t.id == task) {
-            let before = had.clone();
-            change(had);
-            if *had != before {
-                let tasks = mapped.tasks.clone();
-                self.push(id, Action::TasksSet(tasks));
-            }
-        }
-        self.drain()
-    }
-
-    /// The tasks the engine says run now, by id: one listed running that is not among them
-    /// ended at `now`, however its notice says it did once that comes.
-    pub fn tasks_live(&mut self, live: &[String], now: WallMs) -> Vec<Out> {
-        let id = self.meta.id;
-        let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Main) else {
-            return self.drain();
-        };
-        let mut changed = false;
-        for task in &mut mapped.tasks {
-            // A subagent waiting on its own work is not in the engine's list, and still waits.
-            let gone = task.is_live()
-                && task.state != BackgroundTask::WAITING
-                && task.backgrounded
-                && !live.contains(&task.id);
-            if gone {
-                BackgroundTask::COMPLETED.clone_into(&mut task.state);
-                task.ended_ms = task.ended_ms.or(Some(now));
-                changed = true;
-            }
-        }
-        if changed {
-            let tasks = mapped.tasks.clone();
-            self.push(id, Action::TasksSet(tasks));
-        }
-        self.drain()
-    }
-
-    /// The resources task `task`'s result linked, for the row it ends with.
-    pub fn task_links(&mut self, task: &str, links: Vec<slopty_proto::visual::ResourceLink>) {
-        if !links.is_empty() {
-            self.task_links.insert(task.to_owned(), links);
-        }
-    }
-
-    /// Call `call` says how it goes, `note`: on the thread it is in.
-    pub fn call_noted(&mut self, call: &str, note: thread::CallNote) -> Vec<Out> {
-        let thread = self
-            .threads
-            .values()
-            .find(|m| m.calls.contains_key(call) || m.items.contains_key(call))
-            .map(|m| m.id);
-        if let Some(thread) = thread {
-            self.push(thread, Action::CallNoted { item: ItemId(call.to_owned()), note });
-        }
-        self.drain()
-    }
-
-    /// Whether call `call` runs still, as far as the record says.
-    #[must_use]
-    pub fn call_open(&self, call: &str) -> bool {
-        self.threads.values().any(|m| m.calls.contains_key(call))
-    }
-
-    /// A request of the agent's own beside its permissions (a dialog, a form): open now.
-    pub fn asked(&mut self, request: Request) -> Vec<Out> {
-        self.open.retain(|r| r.id != request.id);
-        self.open.push(request.clone());
-        self.push(self.meta.id, Action::RequestOpened(Box::new(request)));
-        self.drain()
-    }
-
-    /// Request `id` stands as `state` now.
-    pub fn resolved(&mut self, id: &AskId, state: RequestState) -> Vec<Out> {
-        if self.open.iter().any(|r| r.id == *id) {
-            self.open.retain(|r| r.id != *id);
-            self.push(self.meta.id, Action::RequestResolved { id: id.clone(), state });
-        }
-        self.drain()
-    }
-
-    /// The MCP Apps the session's servers offer now, by server (as the session names its
-    /// tools, `mcp__<server>__<tool>`) and tool: a call of one shows its page, the calls already
-    /// shown before the servers were listed (a first turn's, a resumed session's) too.
-    pub fn set_apps(
-        &mut self,
-        apps: HashMap<(String, String), slopty_proto::visual::McpApp>,
-    ) -> Vec<Out> {
-        self.apps = apps;
-        let mut again = Vec::new();
-        for (thread, mapped) in &self.threads {
-            for (entry, (item, call)) in &mapped.mcp_plain {
-                if let conv::ToolDetail::Mcp(m) = &call.detail
-                    && self.apps.contains_key(&(m.server.clone(), m.tool.clone()))
-                {
-                    again.push((
-                        thread.clone(),
-                        mapped.id,
-                        entry.clone(),
-                        item.clone(),
-                        call.clone(),
-                    ));
-                }
-            }
-        }
-        for (thread, id, entry, mut item, call) in again {
-            let ItemBody::Tool(was) = &item.body else { continue };
-            let mut shown = self.tool(&thread, &call);
-            shown.state = was.state.clone();
-            let open = !shown.state.is_final();
-            item.body = ItemBody::Tool(Box::new(shown));
-            if let Some(mapped) = self.threads.get_mut(&thread) {
-                mapped.mcp_plain.remove(&entry);
-                if open {
-                    mapped.calls.insert(entry, item.clone());
-                }
-            }
-            self.push(
-                id,
-                if open { Action::ItemUpdated(item) } else { Action::ItemCompleted(item) },
-            );
-        }
-        self.drain()
-    }
-
-    /// The record that began turn `turn` of the session's own thread: its prompt's record id.
-    #[must_use]
-    pub fn prompt_of(&self, turn: TurnId) -> Option<String> {
-        let mapped = self.threads.get(&conv::ThreadId::Main)?;
-        let (id, _) = mapped.prompts.iter().find(|(_, t)| **t == turn)?;
-        Some(id.split_once(':').map_or(id.as_str(), |(record, _)| record).to_owned())
-    }
-
-    /// The messages of turn `turn` and of every main turn after it, in order, by their records'
-    /// ids: where a checkpoint of the files as they were before `turn` may be found, when its
-    /// own message has none (a command Claude Code ran itself, such as `/mcp`).
-    #[must_use]
-    pub fn prompts_from(&self, turn: TurnId) -> Vec<String> {
-        let Some(mapped) = self.threads.get(&conv::ThreadId::Main) else { return Vec::new() };
-        let mut prompts: Vec<(TurnId, &str)> = mapped
-            .prompts
-            .iter()
-            .filter(|(_, t)| **t >= turn)
-            .map(|(id, t)| (*t, id.split_once(':').map_or(id.as_str(), |(record, _)| record)))
-            .collect();
-        prompts.sort_by_key(|(t, _)| *t);
-        prompts.into_iter().map(|(_, id)| id.to_owned()).collect()
-    }
-
-    /// The conversation was taken back to before turn `turn` (Claude Code's
-    /// `rewind_conversation`): the turn and every one after go, as a branch in its transcript
-    /// takes them.
-    pub fn rewound_to(&mut self, turn: TurnId) -> Vec<Out> {
-        let entry = self.threads.get(&conv::ThreadId::Main).and_then(|mapped| {
-            mapped.prompts.iter().find(|(_, t)| **t == turn).map(|(entry, _)| entry.clone())
-        });
-        if let Some(entry) = entry {
-            self.remove(&conv::ThreadId::Main, &entry);
-        }
-        self.drain()
-    }
-
-    /// Claude Code cleared the conversation (`/clear`): every turn goes, as its screen empties.
-    pub fn conversation_cleared(&mut self) -> Vec<Out> {
-        let first = self
-            .threads
-            .get(&conv::ThreadId::Main)
-            .and_then(|mapped| mapped.prompts.values().copied().min());
-        match first {
-            Some(first) => self.rewound_to(first),
-            None => self.drain(),
-        }
-    }
-
-    /// The conversation goes on as Claude Code session `native`, as a `/clear` begins one.
-    pub fn moved_to(&mut self, native: &str) -> Vec<Out> {
-        if self.meta.native != native {
-            native.clone_into(&mut self.meta.native);
-            self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
-        }
-        self.drain()
     }
 
     /// `shown` with its paths made the worker's own: a relative path is under the session's
@@ -991,38 +582,6 @@ impl History {
         self.drain()
     }
 
-    /// The session's list of tasks as it stands.
-    #[must_use]
-    pub fn tasks_now(&self) -> &[BackgroundTask] {
-        self.threads.get(&conv::ThreadId::Main).map_or(&[], |m| m.tasks.as_slice())
-    }
-
-    /// The turn entries go to now in the session's own thread.
-    #[must_use]
-    pub fn turn_now(&self) -> TurnId {
-        self.threads.get(&conv::ThreadId::Main).map_or(TurnId::BEFORE, |m| m.turn)
-    }
-
-    /// A stop under way, worded as far as it went, or `None` once it ended: the thread waits on
-    /// it ([`Wait::STOPPING`]) while it works.
-    pub fn stopping(&mut self, text: Option<String>) -> Vec<Out> {
-        if self.stopping != text {
-            self.stopping = text;
-            self.reshow();
-        }
-        self.drain()
-    }
-
-    /// The turn under way shows no progress, worded, or `None` once it moved again
-    /// ([`Wait::STALLED`]). Nothing is done about it but saying so.
-    pub fn stalled(&mut self, text: Option<String>) -> Vec<Out> {
-        if self.stalled != text {
-            self.stalled = text;
-            self.reshow();
-        }
-        self.drain()
-    }
-
     /// Its context is being compacted, or was ([`Wait::COMPACTING`]).
     pub fn compacting(&mut self, on: bool) -> Vec<Out> {
         if self.compacting != on {
@@ -1032,65 +591,18 @@ impl History {
         self.drain()
     }
 
-    /// Held at the plan's usage limit until `until`, or no more for `None` ([`Wait::LIMIT`]).
-    pub fn limited(&mut self, until: Option<WallMs>) -> Vec<Out> {
-        if self.limited != until {
-            self.limited = until;
-            self.reshow();
-        }
-        self.drain()
-    }
-
-    /// The person's message `id` (the record Claude Code writes of it) was sent as `intent`:
-    /// its item says so.
-    pub fn sent_as(&mut self, id: &str, intent: IntentId) {
-        self.intents.insert(id.to_owned(), intent);
-    }
-
-    /// The engine's main loop began a turn at `now`: the thread works, unless it already waits
-    /// on the person.
-    pub fn working(&mut self, now: WallMs) -> Vec<Out> {
-        let status = self.status.get_or_insert(Status {
-            phase: Phase::Idle,
-            wait: None,
-            liveness: Liveness::Live,
-            since_ms: now,
-        });
-        if matches!(status.phase, Phase::Working | Phase::NeedsYou) {
-            return self.drain();
-        }
-        *status =
-            Status { phase: Phase::Working, wait: None, liveness: Liveness::Live, since_ms: now };
-        self.failed = false;
-        self.reshow();
-        self.drain()
-    }
-
-    /// The engine said the main loop's turn under way ended, as `end` says, at `now`: the turn
-    /// open ends so, and a transcript record of it that comes after changes that no more. The
-    /// thread rests: stopped after an interruption, failed after an error, else done.
+    /// Claude Code said the main loop's turn under way ended (its `Stop` hook), as `end` says,
+    /// at `now`: the turn open ends so, and a transcript record of it that comes after changes
+    /// that no more. The thread rests: stopped after an interruption, failed after an error,
+    /// else done.
     pub fn ended(&mut self, end: &End, now: WallMs) -> Vec<Out> {
         let phase = match end {
             End::Interrupted => Phase::Stopped,
             End::Failed(_) => Phase::Failed,
             End::Complete => Phase::Done,
         };
-        let limited = self.limited;
         let id = self.meta.id;
         let mut actions = Vec::new();
-        // A request still being tried again: a failed turn ran out of attempts, and the row is
-        // its error now; any other end leaves nothing to try.
-        if let Some(mut item) = self.retry.take() {
-            if matches!(end, End::Failed(_)) {
-                if let ItemBody::Notice(notice) = &mut item.body {
-                    notice.retry = None;
-                }
-                item.at_ms = now;
-                actions.push(Action::ItemCompleted(item));
-            } else {
-                actions.push(Action::ItemRemoved { item: item.id });
-            }
-        }
         if let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Main) {
             let turn = mapped.turn;
             if turn != TurnId::BEFORE && !mapped.ended.contains(&turn) {
@@ -1104,10 +616,10 @@ impl History {
                                     said.unwrap_or_else(|| {
                                         "Claude Code's request failed".to_owned()
                                     }),
-                                    limited,
+                                    None,
                                 )
                             },
-                            |(stop, error)| (error.clone(), stop.until_ms.or(limited)),
+                            |(stop, error)| (error.clone(), stop.until_ms),
                         );
                         TurnState::Failed { error, until_ms }
                     }
@@ -1132,58 +644,8 @@ impl History {
             && status.liveness == Liveness::Live
         {
             *status = Status { phase, wait: None, liveness: Liveness::Live, since_ms: now };
-            if let Some(waiting) = self.waiting_on.as_ref() {
-                let wait = self.wait_on(waiting);
-                if let Some(status) = self.status.as_mut() {
-                    status.phase = Phase::Waiting;
-                    status.wait = Some(wait);
-                }
-            }
             self.reshow();
         }
-        self.drain()
-    }
-
-    /// The worker ended the turn under way itself, at `now`, when a stop did not reach the
-    /// engine's own end ([`Self::ended`]): the turn is interrupted, saying `how`.
-    pub fn cut(&mut self, how: &str, now: WallMs) -> Vec<Out> {
-        let open = self
-            .threads
-            .get(&conv::ThreadId::Main)
-            .map(|m| m.turn)
-            .filter(|turn| *turn != TurnId::BEFORE);
-        let ended = self
-            .threads
-            .get(&conv::ThreadId::Main)
-            .is_some_and(|m| open.is_some_and(|turn| m.ended.contains(&turn)));
-        let mut outs = Vec::new();
-        if !ended {
-            outs.extend(self.ended(&End::Interrupted, now));
-        }
-        if let Some(turn) = open.filter(|_| !ended) {
-            let item = Item {
-                id: ItemId(format!("stopped-{}", now.as_millis())),
-                turn,
-                at_ms: now,
-                body: ItemBody::Notice(Notice::new(Notice::INTERRUPTED, Clipped::whole(how))),
-            };
-            self.push(self.meta.id, Action::ItemCompleted(item));
-        }
-        outs.extend(self.drain());
-        outs
-    }
-
-    /// What the person's messages on their way and held are now.
-    pub fn pending(&mut self, pending: Vec<Pending>) -> Vec<Out> {
-        self.push(self.meta.id, Action::PendingSet(pending));
-        self.drain()
-    }
-
-    /// The thread branched off `fork`'s conversation, which it holds the history of.
-    pub fn forked(&mut self, fork: thread::Fork) -> Vec<Out> {
-        self.meta.forked_from = Some(fork);
-        ThreadMeta::FORK.clone_into(&mut self.meta.origin);
-        self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
         self.drain()
     }
 
@@ -1271,56 +733,8 @@ impl History {
             since_ms: now,
         });
         self.reshow();
-        self.started = Some(now);
+        self.went = Some(now);
         self.settle_subagents();
-        self.drain()
-    }
-
-    /// Claude Code tries a failed request of the turn under way again: one row for the turn,
-    /// made at the first attempt and updated in place by each after it (`error`, which attempt
-    /// comes next and in how long, counted from the row's `at_ms`), gone once the turn streams
-    /// again ([`Self::retried`]) and left as the turn's error when the attempts run out
-    /// ([`Self::ended`]).
-    pub fn retrying(&mut self, error: &str, retry: Retry, now: WallMs) -> Vec<Out> {
-        let turn = self.threads.get(&conv::ThreadId::Main).map_or(TurnId::BEFORE, |m| m.turn);
-        let had = self.retry.take().filter(|item| item.turn == turn);
-        let id = had.as_ref().map_or_else(
-            || ItemId(format!("{}-retry-{}", Notice::API_ERROR, now.as_millis())),
-            |item| item.id.clone(),
-        );
-        let notice = Notice {
-            kind: Notice::API_ERROR.to_owned(),
-            text: Clipped::whole(error),
-            retry: Some(retry),
-        };
-        let item = Item { id, turn, at_ms: now, body: ItemBody::Notice(notice) };
-        self.retry = Some(item.clone());
-        let action =
-            if had.is_some() { Action::ItemUpdated(item) } else { Action::ItemStarted(item) };
-        self.push(self.meta.id, action);
-        self.drain()
-    }
-
-    /// The request being tried again went through: its row goes.
-    pub fn retried(&mut self) -> Vec<Out> {
-        if let Some(item) = self.retry.take() {
-            self.push(self.meta.id, Action::ItemRemoved { item: item.id });
-        }
-        self.drain()
-    }
-
-    /// A notice in the main thread's turn under way, or its last, at `now`: what Slopty did
-    /// there that the transcript does not say (a setting Claude Code refused).
-    pub fn notice(&mut self, kind: &str, text: &str, now: WallMs) -> Vec<Out> {
-        let turn = self.threads.get(&conv::ThreadId::Main).map_or(TurnId::BEFORE, |m| m.turn);
-        self.notices = self.notices.saturating_add(1);
-        let item = Item {
-            id: ItemId(format!("{kind}-{}-{}", now.as_millis(), self.notices)),
-            turn,
-            at_ms: now,
-            body: ItemBody::Notice(Notice::new(kind, Clipped::whole(text))),
-        };
-        self.push(self.meta.id, Action::ItemCompleted(item));
         self.drain()
     }
 
@@ -1369,241 +783,6 @@ impl History {
         }
         self.settle_subagents();
         self.drain()
-    }
-
-    /// A block the model is writing, heard at `wall`: begun, grown or let go.
-    pub fn live(&mut self, change: Live, wall: WallMs) -> Vec<Out> {
-        self.wall = wall;
-        match change {
-            Live::Start { thread, id, kind } => self.live_start(&thread, id, &kind),
-            Live::Append { id, text } => {
-                if let Some(held) = self.deferred.iter_mut().find(|d| d.id == id) {
-                    held.text.push_str(&text);
-                    return self.drain();
-                }
-                if let Some(p) = self.live.get(&id) {
-                    let part = if p.tool { PartKey::Input } else { PartKey::Body };
-                    let (thread, item) = (p.thread.clone(), p.item.clone());
-                    let thread = self.ensure(&thread);
-                    self.push(thread, Action::Append { item, part, text });
-                }
-            }
-            Live::Clear { id } => self.cleared(&[Live::Clear { id }]),
-        }
-        self.drain()
-    }
-
-    /// Live block `id` is settled by the entry `entry` that comes next: a text's or a
-    /// thinking's entry takes the block's item, where it stands, and a tool call's has its id
-    /// already.
-    pub fn settle(&mut self, id: &LiveId, entry: &str) {
-        self.deferred.retain(|d| d.id != *id);
-        let Some(p) = self.live.remove(id) else { return };
-        if !p.tool
-            && let Some(mapped) = self.threads.get_mut(&p.thread)
-        {
-            mapped.shown_as.insert(entry.to_owned(), p.item);
-        }
-    }
-
-    /// What an agent at rest waits on: the tasks left running and the scheduled prompts. When every
-    /// one is a command the session's own transcript shows running in the background (a dev
-    /// server, say), it waits on [`Wait::COMMAND`], named by those commands; a subagent, a
-    /// monitor or a scheduled prompt among them is a task, named by the engine's words for a
-    /// lone one, else counted.
-    fn wait_on(&self, waiting: &Waiting) -> Wait {
-        let (tasks, crons) = (waiting.tasks, waiting.crons);
-        let running: Vec<&BackgroundTask> = self
-            .threads
-            .get(&conv::ThreadId::Main)
-            .map(|m| m.tasks.iter().filter(|t| t.is_running()).collect())
-            .unwrap_or_default();
-        let only_commands = crons == 0
-            && tasks > 0
-            && usize::try_from(tasks).is_ok_and(|n| n == running.len())
-            && running.iter().all(|t| t.kind == BackgroundTask::SHELL);
-        if only_commands {
-            let named: Vec<&str> = running.iter().map(|t| t.title.as_str()).collect();
-            return Wait { kind: Wait::COMMAND.to_owned(), text: named.join(", ") };
-        }
-        let named = waiting.named.as_deref().map(str::trim).filter(|n| !n.is_empty());
-        let text = match (tasks, crons, named) {
-            (1, 0, Some(named)) => named.to_owned(),
-            (0, 1, _) => "1 scheduled prompt".to_owned(),
-            (0, n, _) => format!("{n} scheduled prompts"),
-            (1, ..) => "1 background task".to_owned(),
-            (n, ..) => format!("{n} background tasks"),
-        };
-        Wait { kind: Wait::TASK.to_owned(), text }
-    }
-
-    /// Word the wait again once the transcript changed what runs in the background, while the
-    /// agent waits at rest.
-    fn rewait(&mut self) {
-        let Some(waiting) = self.waiting_on.as_ref() else { return };
-        let wait = self.wait_on(waiting);
-        let Some(status) = self.status.as_mut().filter(|s| s.wait.as_ref() != Some(&wait)) else {
-            return;
-        };
-        status.wait = Some(wait);
-        self.reshow();
-    }
-
-    /// The person's and the project's own commands in this session's folder
-    /// (`crate::commands::custom`): the menu until Claude Code lists its own, and where each of
-    /// those comes from.
-    pub fn commands(&mut self, custom: &[conv::SlashCommand]) -> Vec<Out> {
-        custom.clone_into(&mut self.custom);
-        self.tell_commands();
-        self.drain()
-    }
-
-    /// Claude Code's own list of its commands and skills: the menu
-    /// ([`crate::commands::listed`]).
-    pub fn listed(&mut self, commands: Vec<crate::commands::Listed>) -> Vec<Out> {
-        if self.listed.as_ref() != Some(&commands) {
-            self.listed = Some(commands);
-            self.tell_commands();
-        }
-        self.drain()
-    }
-
-    /// The models Claude Code offers, in its menu's order.
-    pub fn models(&mut self, models: Vec<Model>) -> Vec<Out> {
-        if !models.is_empty() && models != self.meta.models {
-            self.meta.models = models;
-            self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
-        }
-        self.drain()
-    }
-
-    /// What its permission modes and efforts are, as offered.
-    pub fn offers(&mut self, modes: Vec<thread::Mode>, efforts: Vec<thread::Effort>) -> Vec<Out> {
-        if modes != self.meta.modes || efforts != self.meta.efforts {
-            self.meta.modes = modes;
-            self.meta.efforts = efforts;
-            self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
-        }
-        self.drain()
-    }
-
-    /// Tell the thread its menu, when it changed.
-    fn tell_commands(&mut self) {
-        let agent = self.listed.as_deref();
-        let listed = crate::commands::listed(agent, &self.custom);
-        let commands: Vec<thread::Command> = listed
-            .iter()
-            .map(|c| thread::Command {
-                name: c.name.clone(),
-                description: c.description.clone(),
-                argument_hint: c.argument_hint.clone(),
-                source: match c.source {
-                    conv::CommandSource::BuiltIn => "built-in",
-                    conv::CommandSource::Personal => "personal",
-                    conv::CommandSource::Project => "project",
-                    conv::CommandSource::Plugin => "plugin",
-                }
-                .to_owned(),
-                skill: c.skill,
-            })
-            .collect();
-        let reviews = commands.iter().any(|c| c.name == REVIEW_COMMAND);
-        let review = Cap::named(Cap::REVIEW);
-        let held = self.meta.caps.binary_search(&review);
-        if reviews != held.is_ok() {
-            match held {
-                Ok(at) => drop(self.meta.caps.remove(at)),
-                Err(at) => self.meta.caps.insert(at, review),
-            }
-            self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
-        }
-        if commands != self.commands {
-            self.commands.clone_from(&commands);
-            self.push(self.meta.id, Action::CommandsSet(commands));
-        }
-    }
-
-    /// The Claude Code that runs the session now started at `at`, as its process said. A
-    /// subagent runs only inside the process that started it, in the foreground or the
-    /// background, and a session taken up again (`--resume`) brings none back: one started
-    /// before then that never said how it ended ended with the process before.
-    pub fn started(&mut self, at: WallMs) -> Vec<Out> {
-        if self.started != Some(at) {
-            self.started = Some(at);
-            self.rested = None;
-            self.settle_subagents();
-        }
-        self.drain()
-    }
-
-    /// The meters as they stand now.
-    #[must_use]
-    pub const fn meters_now(&self) -> &Meters {
-        &self.meters
-    }
-
-    /// The meters are `meters` now.
-    pub fn meters(&mut self, meters: Meters) -> Vec<Out> {
-        if meters != self.meters {
-            self.meters = meters;
-            self.push(self.meta.id, Action::MetersSet(self.meters.clone()));
-        }
-        self.drain()
-    }
-
-    /// A permission prompt held for the session, or settled.
-    pub fn permission(&mut self, event: &PermissionEvent) -> Vec<Out> {
-        let action = match event {
-            PermissionEvent::Asked(prompt) => {
-                let places = Places { cwd: self.meta.cwd.clone(), home: self.home.clone() };
-                let request = request(prompt, &places);
-                self.open.push(request.clone());
-                if let Some(call) = &request.item {
-                    self.call_state(call, &ToolState::Pending { ask: request.id.clone() });
-                }
-                Action::RequestOpened(Box::new(request))
-            }
-            PermissionEvent::Settled { ask, outcome, .. } => {
-                let id = ask.to_string();
-                let calls: Vec<ItemId> = self
-                    .open
-                    .iter()
-                    .filter(|r| r.id.0 == id)
-                    .filter_map(|r| r.item.clone())
-                    .collect();
-                self.open.retain(|r| r.id.0 != id);
-                for call in &calls {
-                    self.call_state(call, &ToolState::Running);
-                }
-                let state = match outcome {
-                    Settled::Answered { verdict, by } => {
-                        RequestState::Answered { by: by.clone(), choice: choice_of(verdict) }
-                    }
-                    Settled::Withdrawn => RequestState::Withdrawn,
-                };
-                Action::RequestResolved { id: AskId(id), state }
-            }
-        };
-        self.push(self.meta.id, action);
-        self.drain()
-    }
-
-    /// Set the state of `call`, a call not ended yet, and send it again: a prompt held for it
-    /// marks it waiting on the person, and its settling lets it run. A call not in the
-    /// transcript yet, or ended, is left as it is.
-    fn call_state(&mut self, call: &ItemId, state: &ToolState) {
-        let found = self.threads.values_mut().find_map(|m| {
-            let item = m.calls.get_mut(&call.0)?;
-            let ItemBody::Tool(tool) = &mut item.body else { return None };
-            if tool.state == *state {
-                return None;
-            }
-            tool.state = state.clone();
-            Some((m.id, item.clone()))
-        });
-        if let Some((thread, item)) = found {
-            self.push(thread, Action::ItemUpdated(item));
-        }
     }
 
     fn push(&mut self, thread: ThreadId, action: Action) {
@@ -1670,29 +849,12 @@ impl History {
                 conv::ThreadId::Agent(agent) => self.subagent_meta(id, agent),
             };
             self.out.push(Out::Begin(Box::new(meta)));
+            // What the main thread holds that its transcript does not, its status, is told
+            // again once it began anew.
             if thread == conv::ThreadId::Main {
                 self.failed = false;
-                self.again();
+                self.reshow();
             }
-        }
-        self.live.clear();
-        self.deferred.clear();
-    }
-
-    /// What the main thread holds that its transcript does not: told again after it began
-    /// anew.
-    fn again(&mut self) {
-        let mut actions: Vec<Action> =
-            self.shown(self.status.clone()).into_iter().map(Action::Status).collect();
-        if self.meters != Meters::default() {
-            actions.push(Action::MetersSet(self.meters.clone()));
-        }
-        actions.extend(self.open.iter().cloned().map(|r| Action::RequestOpened(Box::new(r))));
-        if !self.commands.is_empty() {
-            actions.push(Action::CommandsSet(self.commands.clone()));
-        }
-        for action in actions {
-            self.push(self.meta.id, action);
         }
     }
 
@@ -1716,7 +878,7 @@ impl History {
         }
         let Some(mapped) = self.threads.get_mut(thread) else { return };
         let mut actions = Vec::new();
-        let (mut began, mut opened) = (false, false);
+        let mut began = false;
         let turn = match (&entry.body, mapped.items.get(&entry.id)) {
             (_, Some((turn, _))) => *turn,
             (Body::Prompt(_), None) => {
@@ -1738,7 +900,6 @@ impl History {
                 mapped.turns.insert(turn, started.clone());
                 actions.push(Action::TurnStarted(started));
                 began = *thread == conv::ThreadId::Main;
-                opened = true;
                 turn
             }
             (_, None) => mapped.turn,
@@ -1757,15 +918,7 @@ impl History {
         }
         let changed = changed_by(&entry.body);
         let had = mapped.items.insert(entry.id.clone(), (turn, changed)).map(|(_, c)| c);
-        let shown_as = mapped.shown_as.get(&entry.id).cloned();
-        let item_id = shown_as.unwrap_or_else(|| ItemId(entry.id.clone()));
-        let mut item = Item { id: item_id, turn, at_ms: entry.at_ms, body };
-        if let ItemBody::Tool(call) = &mut item.body
-            && call.state == ToolState::Running
-            && let Some(asked) = self.open.iter().find(|r| r.item.as_ref() == Some(&item.id))
-        {
-            call.state = ToolState::Pending { ask: asked.id.clone() };
-        }
+        let item = Item { id: ItemId(entry.id.clone()), turn, at_ms: entry.at_ms, body };
         let background = matches!(&item.body, ItemBody::Tool(call)
             if matches!(&call.detail, Some(detail::ToolDetail::Exec(e)) if e.background));
         if background {
@@ -1780,21 +933,6 @@ impl History {
             actions.push(Action::TasksSet(mapped.tasks.clone()));
         }
         let open = matches!(&item.body, ItemBody::Tool(call) if !call.state.is_final());
-        if open {
-            mapped.calls.insert(entry.id.clone(), item.clone());
-        } else {
-            mapped.calls.remove(&entry.id);
-        }
-        let plain_mcp = matches!(&item.body, ItemBody::Tool(call)
-            if matches!(call.detail, Some(detail::ToolDetail::Mcp(_))));
-        match &entry.body {
-            Body::Tool(call) if plain_mcp => {
-                mapped.mcp_plain.insert(entry.id.clone(), (item.clone(), call.as_ref().clone()));
-            }
-            _ => {
-                mapped.mcp_plain.remove(&entry.id);
-            }
-        }
         let item_id = item.id.clone();
         actions.push(if open { Action::ItemUpdated(item) } else { Action::ItemCompleted(item) });
         // What the TUI says of the call beyond its kind: its header, its line under it.
@@ -1822,10 +960,6 @@ impl History {
         for action in actions {
             self.push(id, action);
         }
-        if opened {
-            self.place_deferred(thread);
-        }
-        self.rewait();
         // A new prompt leaves the failure behind: its own turn's end says how it went.
         if began {
             self.failed = false;
@@ -1851,10 +985,9 @@ impl History {
 
     /// Each subagent's thread says where its run stands: working while its call runs, and once
     /// the call that started it ended (or Claude Code said its run in the background did), its
-    /// open turn ended and the thread exited as the run ended, done, failed or stopped. One the
-    /// Claude Code before this one started, which never said how it ended, stopped with that
-    /// process ([`Self::started`]). Nothing takes a subagent up again alone, so it is not
-    /// resumable.
+    /// open turn ended and the thread exited as the run ended, done, failed or stopped. One begun
+    /// before its Claude Code went ([`Self::gone`]), which never said how it ended, stopped with
+    /// that process. Nothing takes a subagent up again alone, so it is not resumable.
     fn settle_subagents(&mut self) {
         let agents: Vec<String> = self
             .threads
@@ -1866,7 +999,7 @@ impl History {
             .collect();
         for agent in agents {
             let spawn = self.spawned.get(&agent);
-            let (wall, started, rested) = (self.wall, self.started, self.rested);
+            let (wall, started, rested) = (self.last_at, self.went, self.rested);
             let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Agent(agent)) else {
                 continue;
             };
@@ -1942,11 +1075,9 @@ impl History {
     fn remove(&mut self, thread: &conv::ThreadId, entry: &str) {
         let id = self.ensure(thread);
         let Some(mapped) = self.threads.get_mut(thread) else { return };
-        let item = mapped.shown_as.remove(entry).unwrap_or_else(|| ItemId(entry.to_owned()));
-        let mut actions = vec![Action::ItemRemoved { item }];
+        let mut actions = vec![Action::ItemRemoved { item: ItemId(entry.to_owned()) }];
         mapped.items.remove(entry);
         mapped.background.remove(entry);
-        mapped.calls.remove(entry);
         if mapped.set_task(entry, None) {
             actions.push(Action::TasksSet(mapped.tasks.clone()));
         }
@@ -1955,8 +1086,6 @@ impl History {
             mapped.turn = after;
             mapped.prompts.retain(|_, t| *t < turn);
             mapped.items.retain(|_, (t, _)| *t < turn);
-            let items = &mapped.items;
-            mapped.shown_as.retain(|entry, _| items.contains_key(entry));
             mapped.turns.retain(|t, _| *t < turn);
             mapped.ended.retain(|t| *t < turn);
             mapped.interrupted.retain(|t| *t < turn);
@@ -1966,7 +1095,6 @@ impl History {
         for action in actions {
             self.push(id, action);
         }
-        self.rewait();
     }
 
     fn turn(&mut self, thread: &conv::ThreadId, record: &conv::Turn) {
@@ -1976,14 +1104,9 @@ impl History {
         let state = match (record.ended_ms, mapped.stopped.get(&turn)) {
             (None, _) => TurnState::Active,
             (Some(_), _) if mapped.interrupted.contains(&turn) => TurnState::Interrupted,
-            (Some(_), Some((stop, error))) => TurnState::Failed {
-                error: error.clone(),
-                until_ms: stop.until_ms.or_else(|| {
-                    stop.limited()
-                        .then(|| crate::driven::reset_of_full(&self.meters.limits))
-                        .flatten()
-                }),
-            },
+            (Some(_), Some((stop, error))) => {
+                TurnState::Failed { error: error.clone(), until_ms: stop.until_ms }
+            }
             (Some(_), None) => TurnState::Complete,
         };
         let usage = usage(&record.usage);
@@ -2074,77 +1197,6 @@ impl History {
         }
     }
 
-    /// `thread`'s prompt opened its turn: the live blocks held for it begin there, after it,
-    /// with what they said meanwhile.
-    fn place_deferred(&mut self, thread: &conv::ThreadId) {
-        let (held, kept): (Vec<Deferred>, Vec<Deferred>) =
-            std::mem::take(&mut self.deferred).into_iter().partition(|d| d.thread == *thread);
-        self.deferred = kept;
-        for Deferred { thread, id, kind, text } in held {
-            self.live_start(&thread, id.clone(), &kind);
-            let Some(p) = self.live.get(&id).filter(|_| !text.is_empty()) else { continue };
-            let part = if p.tool { PartKey::Input } else { PartKey::Body };
-            let item = p.item.clone();
-            let thread = self.ensure(&thread);
-            self.push(thread, Action::Append { item, part, text });
-        }
-    }
-
-    /// A live block begins: an item in its thread's open turn. With no turn open (the last one
-    /// ended, or none began), the block's prompt is not in the transcript yet, and an item now
-    /// would stand ahead of it: the block waits for the prompt ([`Deferred`]).
-    fn live_start(&mut self, thread: &conv::ThreadId, id: LiveId, kind: &LiveKind) {
-        let thread_id = self.ensure(thread);
-        let Some(mapped) = self.threads.get(thread) else { return };
-        let turn = mapped.turn;
-        if turn == TurnId::BEFORE || mapped.ended.contains(&turn) {
-            let (thread, kind) = (thread.clone(), kind.clone());
-            self.deferred.push(Deferred { thread, id, kind, text: String::new() });
-            return;
-        }
-        let (item, body, tool) = match kind {
-            LiveKind::Text => (live_item(&id), ItemBody::Text(Clipped::default()), false),
-            LiveKind::Thinking => (live_item(&id), ItemBody::Reasoning(Clipped::default()), false),
-            LiveKind::Tool { id: call, name } => {
-                if mapped.items.contains_key(call) {
-                    return;
-                }
-                let body = ItemBody::Tool(Box::new(ToolCall {
-                    name: name.clone(),
-                    kind: kind_of_name(name).to_owned(),
-                    title: name.clone(),
-                    input: Clipped::default(),
-                    state: ToolState::Streaming,
-                    output: None,
-                    images: Vec::new(),
-                    detail: None,
-                    child: None,
-                    ended_ms: None,
-                }));
-                (ItemId(call.clone()), body, true)
-            }
-        };
-        self.live.insert(id, Provisional { thread: thread.clone(), item: item.clone(), tool });
-        let item = Item { id: item, turn, at_ms: self.wall, body };
-        self.push(thread_id, Action::ItemStarted(item));
-    }
-
-    /// Live blocks let go: each item goes, but a tool call's the transcript has by now,
-    /// which is the transcript's own.
-    fn cleared(&mut self, cleared: &[Live]) {
-        for change in cleared {
-            let Live::Clear { id } = change else { continue };
-            self.deferred.retain(|d| d.id != *id);
-            let Some(p) = self.live.remove(id) else { continue };
-            let thread = self.ensure(&p.thread);
-            let settled =
-                self.threads.get(&p.thread).is_some_and(|m| m.items.contains_key(&p.item.0));
-            if !(p.tool && settled) {
-                self.push(thread, Action::ItemRemoved { item: p.item });
-            }
-        }
-    }
-
     fn body(&self, thread: &conv::ThreadId, entry: &conv::Entry) -> ItemBody {
         let clip = |c: &conv::Clipped| clipped(thread, c);
         match &entry.body {
@@ -2152,7 +1204,7 @@ impl History {
                 text: clip(&prompt.text),
                 images: prompt.images.iter().map(|i| image(thread, i)).collect(),
                 command: prompt.command.clone(),
-                intent: self.intents.get(&entry.id).copied(),
+                intent: None,
             }),
             Body::Text(text) => ItemBody::Text(clip(text)),
             Body::Thinking(text) => ItemBody::Reasoning(clip(text)),
@@ -2180,7 +1232,6 @@ impl History {
                     NoteKind::Command => Notice::COMMAND,
                     NoteKind::Info => Notice::INFO,
                     NoteKind::Hook => Notice::HOOK,
-                    NoteKind::Report => Notice::REPORT,
                     NoteKind::CommandError => Notice::COMMAND_ERROR,
                     NoteKind::Quiet => Notice::NOTE,
                 }
@@ -2202,7 +1253,7 @@ impl History {
                 call: note.call.clone().map(ItemId),
                 usage: task_usage(note.usage),
                 exit_code: note.exit_code,
-                links: self.task_links.get(&note.task_id).cloned().unwrap_or_default(),
+                links: Vec::new(),
             })),
             Body::Rewound { dropped } => ItemBody::Notice(Notice::new(
                 Notice::REWOUND,
@@ -2385,24 +1436,12 @@ impl History {
             ),
             conv::ToolDetail::Mcp(m) => {
                 input = clip(&m.input);
-                // A tool whose descriptor names a UI resource is an MCP App: its page.
-                let shown = match self.apps.get(&(m.server.clone(), m.tool.clone())) {
-                    Some(app) => detail::ToolDetail::Page(slopty_proto::visual::PageDetail {
-                        title: m.tool.clone(),
-                        source: slopty_proto::visual::PageSource::App(
-                            slopty_proto::visual::McpApp {
-                                result: m.result.clone(),
-                                ..app.clone()
-                            },
-                        ),
-                    }),
-                    None => detail::ToolDetail::Mcp(detail::McpDetail {
-                        server: m.server.clone(),
-                        tool: m.tool.clone(),
-                        structured: m.structured.clone(),
-                        links: m.links.clone(),
-                    }),
-                };
+                let shown = detail::ToolDetail::Mcp(detail::McpDetail {
+                    server: m.server.clone(),
+                    tool: m.tool.clone(),
+                    structured: m.structured.clone(),
+                    links: m.links.clone(),
+                });
                 (kind::MCP, format!("{}: {}", m.server, m.tool), Some(shown))
             }
             // A visual shows once its call worked: Slopty's server checked its script then.
@@ -2448,30 +1487,6 @@ impl History {
             child,
             ended_ms: call.result.as_ref().map(|r| r.at_ms),
         }
-    }
-}
-
-fn live_item(id: &LiveId) -> ItemId {
-    ItemId(format!("live:{}:{}:{}", id.turn, id.step, id.block))
-}
-
-/// A tool's kind from its name alone, for a call the mod reports before the transcript types
-/// it.
-fn kind_of_name(name: &str) -> &'static str {
-    match name {
-        "Edit" | "MultiEdit" | "NotebookEdit" => kind::EDIT,
-        "Write" => kind::WRITE,
-        "Read" => kind::READ,
-        "Grep" | "Glob" => kind::SEARCH,
-        "Bash" | "PowerShell" => kind::EXEC,
-        "WebFetch" => kind::FETCH,
-        "WebSearch" => kind::WEB_SEARCH,
-        "Agent" | "Task" => kind::AGENT,
-        "AskUserQuestion" => kind::QUESTION,
-        "ExitPlanMode" => kind::PLAN,
-        "TaskCreate" | "TaskUpdate" | "TodoWrite" => kind::TASKS,
-        name if name.starts_with("mcp__") => kind::MCP,
-        _ => kind::OTHER,
     }
 }
 
@@ -2649,240 +1664,6 @@ fn question(q: &conv::QuestionDetail) -> detail::QuestionDetail {
     }
 }
 
-/// What "allow always" grants, worded as Claude Code's own dialog words it, to follow the
-/// button's "Always allow": "edits in this folder this session", "access to src in this
-/// project", "npm test commands in this project". A mode leads, in the folders granted with it;
-/// rules follow; an update of a kind this worker does not know is said in words. Each part ends
-/// with how long it holds, from where Claude Code keeps it. A folder is said short, as the TUI
-/// says it ([`folder_words`]); the folders in full come beside, for the tooltip.
-fn grants(prompt: &PermissionPrompt, places: &Places) -> (Option<String>, Vec<String>) {
-    let (mut mode, mut dirs, mut rules, mut others) = (None, Vec::new(), Vec::new(), Vec::new());
-    let mut folders: Vec<String> = Vec::new();
-    let (mut held, mut rules_held) = (None, None);
-    for suggestion in &prompt.suggestions {
-        let kept = suggestion.destination.as_deref();
-        match &suggestion.grant {
-            Grant::Mode { mode: m } => {
-                let said = mode_words(m);
-                if mode.is_none() && !said.is_empty() {
-                    mode = Some(said);
-                    held = held.or(kept);
-                }
-            }
-            Grant::Directories { directories } => {
-                let full: Vec<&str> =
-                    directories.iter().map(|d| d.trim()).filter(|d| !d.is_empty()).collect();
-                let named: Vec<String> = full.iter().map(|d| folder_words(d, places)).collect();
-                folders.extend(full.iter().map(|d| (*d).to_owned()));
-                if !named.is_empty() {
-                    dirs.extend(named);
-                    held = held.or(kept);
-                }
-            }
-            Grant::Rules { rules: r, .. } => {
-                let said: Vec<String> = r.iter().filter_map(|rule| rule_words(rule)).collect();
-                if !said.is_empty() {
-                    rules.extend(said);
-                    rules_held = rules_held.or(kept);
-                }
-            }
-            Grant::Other { kind } => others.push(words(kind)),
-        }
-    }
-    let subject = match (mode, dirs.is_empty()) {
-        (Some(mode), true) => Some(mode),
-        (Some(mode), false) => Some(format!("{mode} in {}", dirs.join(", "))),
-        (None, false) => Some(format!("access to {}", dirs.join(", "))),
-        (None, true) => None,
-    };
-    let parts: Vec<String> = subject
-        .map(|subject| format!("{subject}{}", for_how_long(held)))
-        .into_iter()
-        .chain(
-            (!rules.is_empty())
-                .then(|| format!("{}{}", rules.join(", "), for_how_long(rules_held))),
-        )
-        .chain(others.into_iter().filter(|o| !o.is_empty()))
-        .collect();
-    ((!parts.is_empty()).then(|| parts.join("; ")), folders)
-}
-
-/// Where a thread works and whose home that is, for saying a folder short.
-#[derive(Clone, Debug)]
-pub(crate) struct Places {
-    /// The thread's folder.
-    pub cwd: String,
-    /// The home of the machine it works on.
-    pub home: String,
-}
-
-/// Folder `dir` said short: "this folder" for the thread's own, a folder in it relative to
-/// it ("src/lexer"), one under the home from `~` ("~/notes"), any other in full.
-fn folder_words(dir: &str, places: &Places) -> String {
-    let trimmed = |p: &str| p.trim_end_matches('/').to_owned();
-    let (dir, cwd, home) = (trimmed(dir), trimmed(&places.cwd), trimmed(&places.home));
-    let under = |root: &str| {
-        (!root.is_empty())
-            .then(|| dir.strip_prefix(root)?.strip_prefix('/').filter(|r| !r.is_empty()))
-            .flatten()
-    };
-    if !cwd.is_empty() && dir == cwd {
-        return "this folder".to_owned();
-    }
-    if let Some(inside) = under(&cwd) {
-        return inside.to_owned();
-    }
-    if !home.is_empty() && dir == home {
-        return "~".to_owned();
-    }
-    under(&home).map_or_else(|| dir.clone(), |inside| format!("~/{inside}"))
-}
-
-/// A permission mode as what it lets through: `acceptEdits` is "edits", as Claude Code's
-/// "allow all edits during this session" says it; any other mode is named ("plan mode").
-fn mode_words(mode: &str) -> String {
-    match mode.trim() {
-        "acceptEdits" => "edits".to_owned(),
-        mode => {
-            let said = words(mode);
-            if said.is_empty() { said } else { format!("{said} mode") }
-        }
-    }
-}
-
-/// A permission rule as Claude Code's dialog says it: a command prefix as "npm test commands",
-/// a whole command as itself, any other rule as written. `None` for an empty rule.
-fn rule_words(rule: &str) -> Option<String> {
-    let rule = rule.trim();
-    let command = rule.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')).map(str::trim);
-    let said = match command {
-        Some(command) => match command.strip_suffix(":*").or_else(|| command.strip_suffix(" *")) {
-            Some(prefix) => format!("{} commands", prefix.trim()),
-            None => command.to_owned(),
-        },
-        None => rule.to_owned(),
-    };
-    (!said.is_empty()).then_some(said)
-}
-
-/// How long a grant kept at `destination` holds, as words that end its line: the session's,
-/// this project's (its local or shared settings), every project's.
-fn for_how_long(destination: Option<&str>) -> &'static str {
-    match destination {
-        Some("session") => " this session",
-        Some("localSettings" | "projectSettings") => " in this project",
-        Some("userSettings") => " in every project",
-        _ => "",
-    }
-}
-
-/// An open name (a mode, an update's kind) in lower-case words: `acceptEdits` and
-/// `AcceptEdits` read "accept edits", `dont-ask` "dont ask". The same split as the client's
-/// sentence case, so a name the worker does not know still reads as words.
-fn words(name: &str) -> String {
-    let mut out = String::with_capacity(name.len().saturating_add(4));
-    let mut prev: Option<char> = None;
-    for c in name.trim().chars() {
-        match c {
-            '-' | '_' | ' ' => {
-                if !out.is_empty() && !out.ends_with(' ') {
-                    out.push(' ');
-                }
-            }
-            c if c.is_uppercase() => {
-                if prev.is_some_and(|p| p.is_lowercase() || p.is_ascii_digit())
-                    && !out.ends_with(' ')
-                {
-                    out.push(' ');
-                }
-                out.extend(c.to_lowercase());
-            }
-            c => out.push(c),
-        }
-        prev = Some(c);
-    }
-    out.truncate(out.trim_end().len());
-    out
-}
-
-/// A held permission prompt as a request, with the answers Claude Code takes.
-fn request(prompt: &PermissionPrompt, places: &Places) -> Request {
-    let thread = conv::ThreadId::Main;
-    let choice = |id: &str, label: &str, effect, scope, stops| Choice {
-        id: id.to_owned(),
-        label: label.to_owned(),
-        effect,
-        scope,
-        folders: Vec::new(),
-        stops,
-    };
-    let deny = choice("deny", "Deny", Effect::Deny, None, false);
-    let deny_stop = choice("deny-stop", "Deny and stop", Effect::Deny, None, true);
-    let (kind, title, options, questions, proposed) = match &prompt.detail {
-        conv::ToolDetail::Question(q) => {
-            let title =
-                q.questions.first().map_or_else(|| "A question".to_owned(), |q| q.text.clone());
-            // "Chat about this": none of the answers, the questions talked over first.
-            let clarify = choice(CLARIFY, "Chat about this", Effect::Deny, None, false);
-            (Request::QUESTION, title, vec![deny, clarify], question(q).questions, None)
-        }
-        // Claude Code's own plan dialog, in its words: approve with a clear context, in the mode
-        // its request suggests (carried back as "Always allow" carries its suggestions), with
-        // edits still asked about, or keep planning.
-        conv::ToolDetail::Plan { .. } => {
-            let options = cards::plan_options(prompt, grants(prompt, places).0);
-            (Request::PLAN, "Ready to code?".to_owned(), options, Vec::new(), None)
-        }
-        _ if prompt.tool == "EnterPlanMode" => {
-            let (title, _) = cards::approval(prompt);
-            (Request::APPROVAL, title, cards::enter_plan_options(), Vec::new(), None)
-        }
-        detail => {
-            let mut options = vec![choice("allow", "Allow", Effect::Allow, None, false)];
-            if !prompt.suggestions.is_empty() {
-                let (scope, folders) = grants(prompt, places);
-                let always = choice("always", "Always allow", Effect::Allow, scope, false);
-                options.push(Choice { folders, ..always });
-            }
-            options.extend([deny, deny_stop]);
-            // A request Claude Code would start on "No" (`default_to_no`) lists its deny first,
-            // where the card's focus starts.
-            if prompt.default_to_no {
-                options.rotate_right(2);
-            }
-            let proposed = match detail {
-                conv::ToolDetail::Edit(e) => Some(e.patch.clone()),
-                conv::ToolDetail::Write(w) => Some(w.patch.clone()),
-                _ => None,
-            };
-            (Request::APPROVAL, cards::approval(prompt).0, options, Vec::new(), proposed)
-        }
-    };
-    // What the card asks under its title, in the TUI's words; a plan is its own text.
-    let text = match &prompt.detail {
-        conv::ToolDetail::Plan { plan } => Some(clipped(&thread, plan)),
-        conv::ToolDetail::Bash(b) if prompt.input.is_null() => Some(clipped(&thread, &b.command)),
-        _ => cards::approval(prompt).1.map(|text| Clipped::whole(&text)),
-    };
-    Request {
-        id: AskId(prompt.ask.to_string()),
-        item: prompt.call.clone().map(ItemId),
-        kind: kind.to_owned(),
-        title,
-        text,
-        options,
-        questions,
-        proposed,
-        schema_json: None,
-        url: None,
-        reason: prompt.reason.clone(),
-        state: RequestState::Open,
-        opened_ms: prompt.asked_ms,
-        until_ms: None,
-        needs_presence: prompt.needs_presence,
-    }
-}
-
 /// The fact that names the branch checked out where the agent works, as Codex's threads name it.
 pub const BRANCH_FACT: &str = "branch";
 
@@ -2959,8 +1740,6 @@ pub fn replay(records: &[serde_json::Value]) -> ThreadState {
     }
     state
 }
-
-mod cards;
 
 #[cfg(test)]
 mod tests;

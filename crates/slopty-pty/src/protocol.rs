@@ -145,9 +145,6 @@ pub enum PtydRequest {
         started_ms: WallMs,
         /// The terminfo name the child was given as `TERM`.
         term: String,
-        /// The session is a piped one ([`Self::SpawnPiped`]): the descriptor is its socket,
-        /// not a PTY master.
-        piped: bool,
     },
     /// Become the build at `program`, keeping every session: ptyd runs it in place, so its pid,
     /// its children and their masters stay, and hands it every session's state
@@ -161,21 +158,6 @@ pub enum PtydRequest {
     Succeed {
         /// The new build's `slopty-ptyd`.
         program: PathBuf,
-    },
-    /// Spawn on a pipe rather than a PTY ([`crate::pty::spawn_piped`]): one end of a Unix
-    /// stream socket pair is the child's standard input and output, and ptyd keeps the other as
-    /// the session's master, read into the ring while no worker holds it, handed over by
-    /// `Attach`, kept across a handover, as a PTY's. A program driven over its standard streams
-    /// so outlives the worker driving it. `spec.size` is ignored and a `Resize` does nothing;
-    /// `Close` sends `SIGTERM` to the child's process group, `SIGKILL` if it still runs 5 s
-    /// later. Answer: `Spawned` or `Error`.
-    SpawnPiped {
-        /// Chosen by the worker.
-        id: SessionId,
-        /// What to run.
-        spec: SpawnSpec,
-        /// Where its standard error goes, appended to (made `0600`); `/dev/null` when `None`.
-        stderr: Option<PathBuf>,
     },
 }
 
@@ -246,7 +228,7 @@ pub struct Heir {
     pub master: i32,
     /// Its child.
     pub pid: u32,
-    /// Slave device path; empty for a piped session.
+    /// Slave device path.
     pub tty: PathBuf,
     /// When the child was spawned.
     pub started_ms: WallMs,
@@ -272,8 +254,6 @@ pub struct Heir {
     /// An adopted child's start as the kernel recorded it when it was adopted
     /// ([`crate::process::start_mark`]): it is that child only while its pid carries this mark.
     pub orphan_mark: Option<u64>,
-    /// A piped session ([`PtydRequest::SpawnPiped`]): `master` is its socket, `tty` empty.
-    pub piped: bool,
 }
 
 /// ptyd → the worker.
@@ -370,7 +350,7 @@ pub struct SessionInfo {
     pub id: SessionId,
     /// Child pid.
     pub pid: u32,
-    /// Slave device path; empty for a piped session.
+    /// Slave device path.
     pub tty: PathBuf,
     /// Size of record.
     pub size: TermSize,
@@ -382,10 +362,6 @@ pub struct SessionInfo {
     pub backlog: usize,
     /// Checkpoint bytes held.
     pub checkpoint: usize,
-    /// A piped session ([`PtydRequest::SpawnPiped`]), no terminal: `tty` is empty. A worker's
-    /// terminals leave it alone; whoever spawned it attaches it.
-    #[serde(default)]
-    pub piped: bool,
 }
 
 /// [`PtydRequest::Output`] as its codec frame, ready for [`crate::PtydClient::output`].

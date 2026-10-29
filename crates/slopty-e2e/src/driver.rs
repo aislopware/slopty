@@ -307,16 +307,6 @@ impl Driver {
         self.ok(&Command::FramesReset).await
     }
 
-    /// Activate an agent banner: reveal `tag`'s session, on whichever worker runs it, as the
-    /// response handler does.
-    ///
-    /// # Errors
-    ///
-    /// When the socket breaks or the session is on no worker.
-    pub async fn notification_response(&mut self, tag: &str) -> Result<()> {
-        self.ok(&Command::NotificationResponse { tag: tag.to_owned() }).await
-    }
-
     /// Register `token` as the phone's device token, with notes allowed quietly; the public
     /// half of the phone's push key.
     ///
@@ -344,20 +334,6 @@ impl Driver {
             Reply::Error { message } => bail!("OpenPush: {message}"),
             other => bail!("OpenPush: unexpected {other:?}"),
         }
-    }
-
-    /// Press `action` ("allow" or "deny") on an approval note carrying `info`, as a press with
-    /// no window is answered: through the server, over a link of the press's own.
-    ///
-    /// # Errors
-    ///
-    /// When the socket breaks, or the server did not take the answer (in its words).
-    pub async fn press_note(
-        &mut self,
-        action: &str,
-        info: std::collections::BTreeMap<String, String>,
-    ) -> Result<()> {
-        self.ok(&Command::PressNote { action: action.to_owned(), info }).await
     }
 
     /// The notes the Notification Centre shows for the app.

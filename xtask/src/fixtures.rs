@@ -5,8 +5,10 @@
 //! whatever `claude` is on `PATH`) headless on haiku, in a scratch directory of its own, with a
 //! cheap scripted prompt. The transcript is taken from the `transcript_mirror` frames
 //! `--session-mirror` writes on stdout, never from the files under `~/.claude`. Hook payloads
-//! come from this binary, registered for the run as the hook (`fixtures hook-sink`), which also
-//! answers permission requests so the capture proves the decision output Claude Code accepts.
+//! come from this binary, registered for the run as the hook (`fixtures hook-sink`) for the events
+//! Slopty's relay hears (`slopty_agent::hooks::EVENTS`). With no person at a dialog in `-p`, the
+//! sink stands in for one at a permission request: it allows the call or refuses it, as the TUI's
+//! dialog would.
 //!
 //! No user or project settings are loaded (`--setting-sources ""`), and everything written is
 //! scrubbed: the scratch directory becomes `/work`, the home directory `/home/user`, the user
@@ -28,8 +30,6 @@ use serde_json::{Map, Value, json};
 
 use crate::tools::repo_root;
 
-mod stream;
-
 #[derive(Subcommand)]
 pub enum FixturesCmd {
     /// Capture every scenario, or the one named, with the official Claude Code build.
@@ -41,15 +41,8 @@ pub enum FixturesCmd {
         #[arg(long, default_value = crate::claude::VERSION)]
         version: String,
     },
-    /// Record the official Claude Code build driven as the worker drives it (`claude -p` over
-    /// stream-json with the control protocol), against a canned API: no account, no model.
-    ClaudeStream {
-        /// The Claude Code release to record with.
-        #[arg(long, default_value = crate::claude::VERSION)]
-        version: String,
-    },
-    /// The hook a capture registers: saves the payload on stdin and answers permission
-    /// requests. Not for people.
+    /// The hook a capture registers: saves the payload on stdin and, standing in for the
+    /// person, answers permission requests. Not for people.
     #[command(hide = true)]
     HookSink {
         /// Where the payloads go, one file each.
@@ -60,7 +53,6 @@ pub enum FixturesCmd {
 pub fn run(cmd: &FixturesCmd) -> Result<()> {
     match cmd {
         FixturesCmd::Claude { only, version } => capture_all(only.as_deref(), version),
-        FixturesCmd::ClaudeStream { version } => stream::record(version),
         FixturesCmd::HookSink { dir } => hook_sink(dir),
     }
 }
@@ -74,7 +66,7 @@ struct Scenario {
     turns: &'static [&'static str],
     /// `--allowedTools`.
     allowed: &'static str,
-    /// Interrupt the turn when the assistant calls this tool.
+    /// Interrupt the turn while this tool runs ([`RUNNING`] after the assistant calls it).
     interrupt_on: Option<&'static str>,
     /// Files the run must leave in the scratch directory, and files it must not.
     expect: &'static [&'static str],
@@ -157,15 +149,23 @@ const SCENARIOS: &[Scenario] = &[
         canned: false,
         mode: "default",
     },
+    // Calls put to the person (`PermissionRequest`, what marks a session as needing them): a
+    // command refused, one allowed, then an edit and a write allowed. Each call's `PreToolUse`
+    // names it before its `PermissionRequest`, which names no call and asks about it with the
+    // same input, what the status says it asks about ("Run touch allowed.txt", "Edit
+    // notes.txt"). (A plan's approval cannot be captured this way: `--print` offers no
+    // `ExitPlanMode`.)
     Scenario {
         name: "permission",
-        files: &[],
-        turns: &["Run these three Bash commands one at a time, in order, each as its own call, \
-                  then reply \"done\": `touch refused.txt`, `touch allowed.txt`, \
-                  `touch always.txt`. If one is refused, go on with the next."],
-        allowed: "",
+        files: &[("notes.txt", "alpha\nbeta\n")],
+        turns: &["Run these two Bash commands one at a time, in order, each as its own call: \
+                  `touch refused.txt`, `touch allowed.txt`. If one is refused, go on with the \
+                  next. Then Read notes.txt and use the Edit tool to change beta to BETA in it, \
+                  then use the Write tool to create todo.txt containing the single line \
+                  \"ship\", then reply \"done\"."],
+        allowed: "Read",
         interrupt_on: None,
-        expect: &["allowed.txt", "always.txt"],
+        expect: &["allowed.txt", "todo.txt"],
         absent: &["refused.txt"],
         wakes: 0,
         canned: false,
@@ -203,23 +203,6 @@ const SCENARIOS: &[Scenario] = &[
         wakes: 0,
         canned: false,
         mode: "auto",
-    },
-    // An edit and a write put to the person: each call's `PreToolUse` names it before the
-    // `PermissionRequest`, which names no call, asks about it with the same input. (A plan's
-    // approval cannot be captured this way: `--print` offers no `ExitPlanMode`.)
-    Scenario {
-        name: "approve-edit",
-        files: &[("notes.txt", "alpha\nbeta\n")],
-        turns: &["Use the Edit tool to change beta to BETA in notes.txt, then use the Write \
-                  tool to create todo.txt containing the single line \"ship\", then reply \
-                  \"done\"."],
-        allowed: "Read",
-        interrupt_on: None,
-        expect: &["todo.txt"],
-        absent: &[],
-        wakes: 0,
-        canned: false,
-        mode: "default",
     },
     // A fork subagent (2.1.302's default in `-p`): its transcript opens with what it inherited.
     Scenario {
@@ -261,27 +244,33 @@ const NOTEBOOK: &str = r#"{"cells": [{"cell_type": "code", "execution_count": nu
  "nbformat_minor": 5}
 "#;
 
-/// Events the sink is registered for.
+/// Events the sink is registered for: the relay's (`slopty_agent::hooks::EVENTS`), so a capture
+/// holds what Slopty hears of a session, and nothing it does not.
 const SINK_EVENTS: [&str; 15] = [
     "SessionStart",
+    "SessionEnd",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
     "PostToolUseFailure",
     "PermissionRequest",
     "PermissionDenied",
-    "SubagentStart",
-    "SubagentStop",
-    "TaskCreated",
-    "TaskCompleted",
-    "PreCompact",
-    "PostCompact",
+    "Notification",
     "Stop",
     "StopFailure",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
 ];
 
 /// How long one scenario may run.
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long after the assistant's call an interrupt goes: past its hooks, into the command it
+/// runs (the scenario's sleeps far longer). From 2.1.312 the call's frame comes while the reply
+/// still streams, and an interrupt at once stops the reply and refuses the call before it ran.
+const RUNNING: Duration = Duration::from_secs(3);
 
 fn capture_all(only: Option<&str>, version: &str) -> Result<()> {
     let claude = crate::claude::official(version)?;
@@ -431,12 +420,30 @@ fn drive(scenario: &Scenario, child: &mut Child) -> Result<Captured> {
     let deadline = Instant::now().checked_add(SCENARIO_TIMEOUT).context("deadline")?;
     let mut captured = Captured::default();
     let mut interrupted = false;
+    // When the interrupt is due, once the assistant called the tool.
+    let mut due: Option<Instant> = None;
     let mut wakes = scenario.wakes;
     loop {
+        if let Some(at) = due
+            && Instant::now() >= at
+        {
+            if let Some(input) = stdin.as_mut() {
+                let request = json!({
+                    "type": "control_request",
+                    "request_id": "fixture-interrupt",
+                    "request": { "subtype": "interrupt" },
+                });
+                writeln!(input, "{request}")?;
+                input.flush()?;
+            }
+            (due, interrupted) = (None, true);
+        }
         let left = deadline.saturating_duration_since(Instant::now());
-        let line = match rx.recv_timeout(left) {
+        let wait = due.map_or(left, |at| at.saturating_duration_since(Instant::now()).min(left));
+        let line = match rx.recv_timeout(wait) {
             Ok(line) => line,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) if due.is_some() && wait < left => continue,
             Err(mpsc::RecvTimeoutError::Timeout) => bail!("timed out"),
         };
         let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue };
@@ -446,17 +453,10 @@ fn drive(scenario: &Scenario, child: &mut Child) -> Result<Captured> {
                 let entries = frame.get("entries").and_then(Value::as_array).cloned();
                 captured.push(path, entries.unwrap_or_default());
             }
-            Some("assistant") if !interrupted && calls(&frame, scenario.interrupt_on) => {
-                if let Some(input) = stdin.as_mut() {
-                    let request = json!({
-                        "type": "control_request",
-                        "request_id": "fixture-interrupt",
-                        "request": { "subtype": "interrupt" },
-                    });
-                    writeln!(input, "{request}")?;
-                    input.flush()?;
-                }
-                interrupted = true;
+            Some("assistant")
+                if !interrupted && due.is_none() && calls(&frame, scenario.interrupt_on) =>
+            {
+                due = Instant::now().checked_add(RUNNING);
             }
             Some("control_request") => bail!("claude asked the host: {line}"),
             Some("result") => {
@@ -488,8 +488,9 @@ fn send_prompt(input: &mut ChildStdin, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// The hook: save the payload, and answer a permission request by its command, the way the
-/// `permission` scenario expects (allow once, allow always with the suggested rule, deny).
+/// The hook: save the payload, and answer a permission request by its command as the person
+/// would at the TUI's dialog, the way the `permission` scenario expects (refuse the call that
+/// says so, allow the rest).
 fn hook_sink(dir: &Path) -> Result<()> {
     let mut payload = String::new();
     std::io::stdin().read_to_string(&mut payload)?;
@@ -532,9 +533,6 @@ fn permission_answer(input: &Value) -> Value {
     let command = input.pointer("/tool_input/command").and_then(Value::as_str).unwrap_or_default();
     let decision = if command.contains("refused") {
         json!({ "behavior": "deny", "message": "Refused by the fixture." })
-    } else if command.contains("always") {
-        let suggested = input.get("permission_suggestions").cloned().unwrap_or_else(|| json!([]));
-        json!({ "behavior": "allow", "updatedPermissions": suggested })
     } else {
         json!({ "behavior": "allow" })
     };

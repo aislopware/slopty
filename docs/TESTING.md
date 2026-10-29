@@ -23,8 +23,8 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    once the frame's next-frame callbacks have run, so an animation's own notify is in the frame
    it judges, and only after a frame that painted nothing new (at most eight): a value measured
    while drawing reaches the views that read it a frame later (ARCHITECTURE.md, "Drawing under
-   retention"), as when a narrower column flips the composer to two rows and the transcript
-   then clears the taller stack. What changed after that frame and is not drawn yet (an agent's
+   retention"), as when a narrower window moves the workspace's width inset and the views laid
+   out against it then move with it. What changed after that frame and is not drawn yet (an agent's
    toast pushed while the dump waited) is drawn first, as the next frame would draw it, so the
    frame judged never predates the state the scratch draws see. The scratch draws show the
    moment the frame shown showed
@@ -131,10 +131,6 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    twice, as soon as it shows down and again after the server has called it unreachable; it
    must show down within 5 s and be connected within 2 s of each restart.
    `cargo xtask e2e ios [--sim iphone|ipad]` is the same socket with the app in the simulator.
-   A note's button pressed on a killed app is the one press simctl cannot make (it delivers
-   pushes, not presses), so the e2e build alone reads `SLOPTY_E2E_LAUNCH_TAP` at launch and
-   hands that press to notify's own delivery before any window, as the system's launching
-   response would (`Stack::relaunch_on_simulator`); no release build carries the seam.
    `cargo xtask e2e server` (about 7 s) is the server with a real
    worker: `slopty-server`, then ptyd + `slopty-worker` registered with it through `--server`,
    on ports of their own under a temp root (`harness::ServerStack`). It drives them only
@@ -164,28 +160,22 @@ decide whether to run. One that needs the Screen Recording grant sits in its tar
 `SLOPTY_INPUT_E2E`, which the xtask sets for them.
 
 ## Agents: recordings and stand-ins
-No test runs a signed-in agent. Each adapter is held to a recording of the agent's own pinned
-build: `cargo xtask codex fixtures`, `pi fixtures` and `acp fixtures` run Codex, pi and OpenCode
-in a scratch home with nothing signed in, against a canned model on loopback, and drive them as
-the worker does. The scrubbed lines land in `crates/slopty-agent/tests/fixtures/<agent>/`. There
-the adapter's tests read every line the agent wrote into its protocol's types, and replay the
-rest through the codec, which must send exactly what the agent was sent. The worker's tests start
-stand-ins in the agent's place: `slopty-stub-pi` and `slopty-stub-acp` replay such a recording
-(named in a config file beside the binary), match each message the worker sends to the next one
-recorded, and write down what they heard. A test then asserts both the thread the worker built
-and what the agent was sent. Claude Code is played by `slopty-stub-claude`
-(`slopty_testkit::claude_stream`), which speaks stream-json with the control protocol as
-`claude -p` does, keeps its conversation where Claude Code keeps it, records every line it
-heard, and fails on cue (a crash mid-turn, no echo, a torn line, no answer to `initialize`, an
-exit at start, a slow stop, a usage limit). It also calls Slopty's tools through the
-`slopty mcp` it is handed, as a script names them per prompt (`STUB_TURNS`), and plays a recorded
-Claude Code turn of the conversation fixtures over the stream as its own (`STUB_REPLAY`,
-`slopty_testkit::replay`). `crates/slopty-worker/tests/claude.rs` proves the drive one behaviour
-per test against it and a real ptyd. An agent's MCP App is played by `slopty-stub-mcp-apps`, an
-MCP server over stdio with one app tool, one app-only tool and the app's `ui://` page. Its tool
-list shows the UI only to a host that declared the extension, and `--log` keeps what it was
-sent. Codex's `media.jsonl` is recorded with it, and the recording stops if Codex offers the
-model the app-only tool. A fixture no recording can reach,
+No test runs a signed-in agent. Every agent runs as its own TUI in a terminal
+(`docs/decisions/agents.md`, "TUI-first"), so the stand-in is a TUI too: Claude Code is played by
+`slopty-stub-claude` (`slopty_testkit::claude_tui`) in a real terminal of a real ptyd and worker.
+It keeps the records Claude Code keeps (its registry entry and its transcript, a new session on
+`/clear`, and the waiting state in its registry record), runs the hooks it is given and waits
+for each, and records what it was typed, every read with its time, and each hook it ran
+(`STUB_RECORD`). Its prompts script it: `ask <question>` waits on the person,
+`hold` keeps a turn at work until Esc, and `STUB_TURNS` names the calls of Slopty's tools a
+prompt makes through the `slopty mcp` it is handed. `apps/slopty-worker/tests/threads.rs` proves
+the TUI-first worker one behaviour per test against it, and `crates/slopty-client/tests/threads.rs`
+the client's table and follow over the same stand-in. The conversation fixtures
+(`crates/slopty-agent/tests/fixtures/conversation/`) are recorded from a real session and hold
+the transcript decoder. The app's e2e reads them too: `tests/app/planted.rs` lays recordings,
+and turns a test writes, end to end as one past session in the worker's Claude Code store, an
+hour old whatever day it runs, and takes it up from History, so the stand-in `--resume`s it in a
+terminal while the inspector beside it reads what Claude Code wrote. A fixture no recording can reach,
 such as an agent asking to be signed in, is written to the schema by hand, and its test says so.
 
 ## Where the gate runs

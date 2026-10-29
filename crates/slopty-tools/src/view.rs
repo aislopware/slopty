@@ -81,7 +81,7 @@ pub struct WorkerView<'a> {
 #[derive(Debug, Serialize)]
 pub struct WaitingView {
     term: String,
-    /// The agent, by its id (`claude-code`, `codex`, `pi`, `acp:<name>`).
+    /// The agent, by its id (`claude-code`, `codex`, `pi`).
     agent: String,
     /// What it asks.
     asks: Option<String>,
@@ -110,7 +110,7 @@ pub struct TerminalView {
 /// An agent's status, as its thread's row says, for JSON.
 #[derive(Debug, Serialize)]
 pub struct AgentView {
-    /// The agent, by its id (`claude-code`, `codex`, `pi`, `acp:<name>`); none with no agent.
+    /// The agent, by its id (`claude-code`, `codex`, `pi`); none with no agent.
     agent: Option<String>,
     /// Its thread, the handle the thread verbs take.
     thread: Option<ThreadId>,
@@ -366,7 +366,7 @@ fn agent_name(agent: &AgentId) -> String {
         AgentId::CLAUDE_CODE => "Claude Code".to_owned(),
         AgentId::CODEX => "Codex".to_owned(),
         AgentId::PI => "pi".to_owned(),
-        _ => agent.acp_name().unwrap_or(&agent.0).to_owned(),
+        other => other.to_owned(),
     }
 }
 

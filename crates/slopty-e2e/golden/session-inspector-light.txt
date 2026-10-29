@@ -1,0 +1,30 @@
+Window
+Button │ Filter projects: All projects
+Button │ Done, 1
+Button │ List the machines
+Button │ Inactive, 0
+Button │ History: past Claude Code sessions
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Splitter │ Resize sidebar
+Group (focused)
+Terminal │ shell │ >
+Heading │ List the machines
+Article │ You
+Paragraph │ List the machines
+Button │ Copy message
+Paragraph │ Done: List the machines
+Button │ Copy message
+Splitter │ Resize side pane
+Button │ Open in…
+Button │ Hide inspector
+Button │ Inspector
+Button │ Close Inspector
+Button │ New tab
+Button │ Expand side pane
+Button │ Show files panel
+Button │ Hide side pane
+Button │ Hide sidebar
+Button │ Back
+Button │ Forward
+Button │ New session

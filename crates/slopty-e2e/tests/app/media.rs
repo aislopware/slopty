@@ -1,8 +1,9 @@
-//! What an agent shows in its chat beyond words, on a real stack: a stand-in Claude Code
-//! (`slopty-stub-claude`) calls Slopty's own `show_visual` and `show_page` through the `slopty`
-//! MCP server the worker hands it (`STUB_TURNS`), and answers with a chart fence, a Mermaid
-//! diagram and formulas. Each is judged by the accessibility tree and by numbers: what a page
-//! reached, what the card's actions left on the run's pasteboard and in the folder, where a
+//! What an agent shows beyond words, in the inspector beside its session's terminal, on a real
+//! stack: the stand-in Claude Code TUI (`slopty-stub-claude`) calls Slopty's own `show_visual`
+//! and `show_page` through the `slopty` MCP server the worker hands it (`STUB_TURNS`), and
+//! answers with a chart fence, a Mermaid diagram and formulas; a session planted with a `Read` of
+//! a picture shows the picture. Each is judged by the accessibility tree and by numbers: what a
+//! page reached, what the card's actions left on the run's pasteboard and in the folder, where a
 //! formula sits on its line, what a tab changed in the picture.
 
 #![cfg(target_os = "macos")]
@@ -18,8 +19,8 @@ use slopty_e2e::{A11yNode, Dump};
 use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
 
 use crate::served::{
-    SETTLE, STEP, click, goldens, holding, hover, middle, node, open_thread, says, seen, start,
-    tell, thread_until,
+    SETTLE, STEP, WINDOW, click, goldens, holding, hover, middle, node, open_thread, says, seen,
+    start, tell, thread_until,
 };
 
 /// The worker's name, as the CLI names the machine.
@@ -134,8 +135,7 @@ async fn a_visual_draws_from_its_script_read_through_the_thread() {
     goldens(drv, &renders, "media-visual", &[]).await;
 
     // The pointer rests on the sidebar for both pictures, so no hover strip or wash differs; the
-    // shown tab is pressed first, so the composer has let the keyboard go (and settled its lift)
-    // in both.
+    // shown tab is pressed first, so the keyboard has left whatever held it in both.
     let rest = slopty_e2e::Command::Move { x: 100.0, y: 600.0 };
     click(drv, "Tab", "p95").await;
     drv.ok(&rest).await.unwrap();
@@ -180,8 +180,9 @@ fn count_connections(listener: std::net::TcpListener) -> Arc<AtomicUsize> {
 /// page that tries to reach a server on this Mac (a fetch, a beacon), which never
 /// hears from it. The card is the page's group, live; on hover its header offers Copy image,
 /// Save, Open in pane and Expand page. Copy image leaves a PNG on the run's pasteboard, Save
-/// writes the page into the chat's folder, and Open in pane leaves the card's one line, whose
-/// Bring back returns it.
+/// writes the page into the chat's folder, and Open in pane puts the page in a tab of its own in
+/// front, whose Back to the inspector returns it; sent there again, the card in the inspector is
+/// one line, whose Bring back returns it too.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_page_card_is_sandboxed_and_acts_for_the_person() {
@@ -283,20 +284,34 @@ async fn a_page_card_is_sandboxed_and_acts_for_the_person() {
     let text = std::fs::read_to_string(&saved).unwrap_or_default();
     assert!(text.contains("Probe page"), "the page's own document: {}", saved.display());
 
-    // Open in pane, then Bring back.
+    // Open in pane: the page in front in a tab of its own, and back from there, in its card
+    // again: live, or its picture while the pointer rests on the button that brought it back.
+    let back_in_card = |d: &Dump| {
+        node(d, "Group", "Shown in the pane").is_none()
+            && node(d, "Group", "Page: Probe")
+                .is_some_and(|n| matches!(n.value.as_deref(), Some("live" | "snapshot")))
+    };
+    let in_pane = |d: &Dump| {
+        node(d, "Group", "Page: Probe").is_some_and(|n| n.value.as_deref() == Some("pane"))
+            && node(d, "Button", "Back to the inspector").is_some()
+    };
     let drv = &mut stack.driver;
     hover(drv, &group).await;
     click(drv, "Button", "Open in pane").await;
+    seen(drv, "the page in the pane", STEP, in_pane).await;
+    click(drv, "Button", "Back to the inspector").await;
+    seen(drv, "the page back in its card", STEP, back_in_card).await;
+    // Sent again, the inspector's card is one line while the page is in the pane: its Bring back.
+    hover(drv, &group).await;
+    click(drv, "Button", "Open in pane").await;
+    seen(drv, "the page in the pane", STEP, in_pane).await;
+    click(drv, "Button", "Inspector").await;
     seen(drv, "the card's line", STEP, |d| {
         node(d, "Group", "Shown in the pane").is_some() && node(d, "Button", "Bring back").is_some()
     })
     .await;
     click(drv, "Button", "Bring back").await;
-    seen(drv, "the page back in its card", STEP, |d| {
-        node(d, "Group", "Shown in the pane").is_none()
-            && node(d, "Group", "Page: Probe").is_some_and(|n| n.value.as_deref() == Some("live"))
-    })
-    .await;
+    seen(drv, "the page back in its card", STEP, back_in_card).await;
     assert_eq!(reached.load(Ordering::SeqCst), 0, "nor from the pane");
     stack.shutdown().await;
 }
@@ -385,13 +400,14 @@ async fn a_chart_fence_a_pdf_and_a_csv_draw_in_the_chat() {
     assert_eq!((rows, heads, cells), (5, 3, 12), "a header and four records of three fields");
     assert!(node(&shown, "Cell", "sa-east").is_some(), "the last record");
 
-    // The page is taller than the chat's band, so its node is clipped: back up until its top
-    // shows, then judge its shape by what it draws. The PDF fills a square, 200 by 200 of its
-    // 300 by 400, so a page drawn in its own shape shows a square.
+    // The page is taller than the inspector's band, so its node is clipped to the band, whose
+    // top is under the inspector's header (about 100 pt down): back up until the page's top is
+    // well below that, then judge its shape by what it draws. The PDF fills a square, 200 by 200
+    // of its 300 by 400, so a page drawn in its own shape shows a square.
     let [x, y, w, h] = table.bounds;
     let mut page = node(&shown, "Image", "page 1 of 1").cloned().unwrap();
     for _ in 0..20 {
-        if page.bounds[1] > 60.0 {
+        if page.bounds[1] > 160.0 {
             break;
         }
         drv.scroll(x + w / 2.0, y + h / 2.0, 0.0, 3.0).await.unwrap();
@@ -591,7 +607,7 @@ fn cpu_per_frame(frames: &slopty_e2e::FrameInfo) -> u64 {
 }
 
 /// After the pointer went to `card`: dump until it is live, or [`SETTLE`] passes (a card whose
-/// middle the composer covers, or that is past the window's bottom, never goes live), and whether
+/// middle something covers, or that is past the window's bottom, never goes live), and whether
 /// it went live.
 async fn after_hover(drv: &mut slopty_e2e::Driver, card: &A11yNode) -> (Dump, bool) {
     let since = std::time::Instant::now();
@@ -626,7 +642,7 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
     const WEB_CONTENT: usize = 8;
     /// Pages' main-thread CPU a frame, at most, in percent of words'.
     const CPU_PERCENT: u64 = 125;
-    const WINDOW_HEIGHT: f32 = crate::served::WINDOW.1;
+    const WINDOW_HEIGHT: f32 = WINDOW.1;
     let calls: Vec<serde_json::Value> = (1..=12_u32)
         .map(|n| {
             let hue = n.saturating_mul(30);
@@ -770,39 +786,17 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
     stack.shutdown().await;
 }
 
-/// The MCP App's prompt, as the recording below says it.
-const APP_PROMPT: &str = "Echo hi through the app";
-
-/// A recorded turn (`STUB_REPLAY`'s folder) whose one call is the stand-in MCP App's `echo`
-/// (`slopty-stub-mcp-apps`), then an answer: what Claude Code writes for a call of an app's
-/// tool.
-fn echo_recording(folder: &std::path::Path) {
-    let echoed = json!([{ "type": "text", "text": "hi" }]);
-    recorded_turn(
-        folder,
-        APP_PROMPT,
-        &json!({
-            "type": "tool_use", "id": "toolu_01", "name": "mcp__apps__echo",
-            "input": { "text": "hi" },
-        }),
-        &echoed,
-        json!({ "content": echoed, "structuredContent": { "echo": "hi", "hostUi": true } }),
-        "Echoed hi through the app's page.",
-    );
-}
-
-/// A recorded turn of one call, in `folder` as `STUB_REPLAY` reads it: `prompt`, the assistant's
-/// `call` (its id `toolu_01`), the result Claude Code writes for it (`content` in the message,
-/// `tool_use_result` beside it), then `answer`. The folder is `/work` to the recording, which
-/// the replay moves to the chat's own.
+/// A turn of one call, as Claude Code records it: `prompt`, the assistant's `call` (its id
+/// `toolu_01`), the result Claude Code writes for it (`content` in the message, `tool_use_result`
+/// beside it), then `answer`. The folder is `/work` to the records, which planting moves to the
+/// session's own.
 fn recorded_turn(
-    folder: &std::path::Path,
     prompt: &str,
     call: &serde_json::Value,
     content: &serde_json::Value,
     tool_use_result: serde_json::Value,
     answer: &str,
-) {
+) -> Vec<serde_json::Value> {
     const ID: &str = "00000000-0000-4000-8000-0000000000";
     const SESSION: &str = "00000000-0000-4000-8000-000000000001";
     let record = |n: u32, parent: Option<u32>, kind: &str, at: u32, message: serde_json::Value| {
@@ -835,7 +829,7 @@ fn recorded_turn(
     );
     result["sourceToolAssistantUUID"] = json!(format!("{ID}04"));
     result["toolUseResult"] = tool_use_result;
-    let lines = [
+    vec![
         record(3, None, "user", 0, json!({ "role": "user", "content": prompt })),
         record(4, Some(3), "assistant", 1, said(json!([call]), "msg_01", "tool_use")),
         result,
@@ -846,84 +840,7 @@ fn recorded_turn(
             3,
             said(json!([{ "type": "text", "text": answer }]), "msg_02", "end_turn"),
         ),
-    ];
-    std::fs::create_dir_all(folder).unwrap();
-    let transcript = lines.iter().fold(String::new(), |mut text, line| {
-        use std::fmt::Write as _;
-        writeln!(text, "{line}").unwrap();
-        text
-    });
-    std::fs::write(folder.join("transcript.jsonl"), transcript).unwrap();
-    std::fs::write(folder.join("hooks.jsonl"), "").unwrap();
-}
-
-/// An MCP App's card, end to end: Claude Code (the stand-in, playing a recorded call of the
-/// stand-in app's `echo`) lists the folder's `apps` server with its `ui://` page, so the call
-/// shows as the app's page card; the card reads its page through Claude Code
-/// (`mcp_read_resource`), never from the server itself, and draws it live.
-#[tokio::test]
-#[ignore = "live: cargo xtask e2e app"]
-async fn an_mcp_app_call_shows_its_page_read_through_claude_code() {
-    let mut stack = ServedApp::launch_rooted(MACHINE, &[], |root| {
-        let replay = json!({ APP_PROMPT: root.join("echo-app") });
-        vec![
-            ("STUB_REPLAY".to_owned(), replay.to_string()),
-            ("STUB_RECORD".to_owned(), root.join("heard.json").to_string_lossy().into_owned()),
-        ]
-    })
-    .await
-    .unwrap();
-    echo_recording(&stack.path("echo-app"));
-    let apps = slopty_e2e::harness::testkit_bin("slopty-stub-mcp-apps").await.unwrap();
-    let log = stack.path("apps.log");
-    let servers = json!({ "mcpServers": { "apps": {
-        "command": apps, "args": ["--log", log],
-    } } });
-    let repo = stack.path("repo");
-    std::fs::write(repo.join(".mcp.json"), servers.to_string()).unwrap();
-    // A first turn, so Claude Code has listed its servers' apps (`mcp_status`, asked once it
-    // starts) before the app's tool is called.
-    let agent = start(&stack, MACHINE, &repo, "Say hello").await;
-    thread_until(&stack, &agent, "said hello", |r| says(r, "Done: Say hello")).await;
-    tell(&mut stack, APP_PROMPT).await;
-    thread_until(&stack, &agent, "echoed", |r| says(r, "Echoed hi")).await;
-
-    let renders = stack.path("");
-    let drv = &mut stack.driver;
-    let shown = seen(drv, "the app's card", STEP, |d| {
-        node(d, "Group", "Page: echo")
-            .is_some_and(|n| matches!(n.value.as_deref(), Some("live" | "snapshot")))
-    })
-    .await;
-    let card = node(&shown, "Group", "Page: echo").cloned().unwrap();
-    hover(drv, &card).await;
-    seen(drv, "the app's card, live", STEP, |d| {
-        node(d, "Group", "Page: echo").is_some_and(|n| n.value.as_deref() == Some("live"))
-    })
-    .await;
-    // Its page came through Claude Code's door, by the app's own URI.
-    let record = stack.path("heard.json");
-    let since = std::time::Instant::now();
-    let read = loop {
-        let reads =
-            crate::served::control_requests(&crate::served::heard(&record), "mcp_read_resource");
-        if let Some(read) = reads.into_iter().find(|r| r["request"]["uri"] == "ui://apps/echo") {
-            break read;
-        }
-        assert!(since.elapsed() < STEP, "the card read its page through Claude Code");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    };
-    assert_eq!(read["request"]["serverName"], "apps", "{read}");
-    let logged = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(logged.contains("resources/read"), "the app's server was read: {logged}");
-    let [_, gy, _, gh] = card.bounds;
-    println!(
-        "MEASURE mcp-app-card: {gh:.0} pt tall at y {gy:.0}, its page read through mcp_read_resource"
-    );
-    tokio::time::sleep(SETTLE).await;
-    let drv = &mut stack.driver;
-    goldens(drv, &renders, "media-app", &[]).await;
-    stack.shutdown().await;
+    ]
 }
 
 /// The picture prompt, as the recording below says it.
@@ -972,50 +889,48 @@ fn red_extent(frame: &slopty_e2e::snapshot::Frame) -> Option<[f32; 4]> {
     })
 }
 
-/// A picture a tool returned shows in the chat, and opens large: the stand-in plays Claude Code's
-/// own record of a `Read` of a PNG (the image block in the result, the file in `toolUseResult`,
-/// as 2.1.302 writes them), the worker keeps the picture in the thread, and the shell reads it
-/// back through it (`slopty-image:`) and draws it after the call, scaled into its 512 by 420
-/// frame. A click opens the lightbox over a scrim, the picture larger and centred; Esc closes
-/// it, and the keyboard is back on the picture.
+/// The planted session that read the plot, as Claude Code names a session.
+const PLOT_SESSION: &str = "5a2c7e90-1b4d-4f6a-8c3e-9d0b2f4a6c18";
+
+/// A picture a tool returned shows in the inspector, and opens large: a session planted with
+/// Claude Code's own record of a `Read` of a PNG (the image block in the result, the file in
+/// `toolUseResult`, as 2.1.302 writes them) is taken up from History, the worker keeps the
+/// picture in the thread, and the shell reads it back through it (`slopty-image:`) and draws it
+/// after the call, scaled into the inspector's width. A click opens the lightbox over a scrim,
+/// the picture larger and centred; Esc closes it, and the keyboard is back on the picture.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_picture_a_tool_returned_shows_inline_and_opens_in_the_lightbox() {
-    let mut stack = ServedApp::launch_rooted(MACHINE, &[], |root| {
-        let replay = json!({ PICTURE_PROMPT: root.join("read-plot") });
-        vec![("STUB_REPLAY".to_owned(), replay.to_string())]
-    })
-    .await
-    .unwrap();
     let (width, height) = (640, 400);
-    let png = plot_png(width, height);
-    std::fs::write(stack.path("repo").join("plot.png"), &png).unwrap();
-    let data = data_encoding::BASE64.encode(&png);
-    recorded_turn(
-        &stack.path("read-plot"),
-        PICTURE_PROMPT,
-        &json!({ "type": "tool_use", "id": "toolu_01", "name": "Read",
-            "input": { "file_path": "/work/plot.png" } }),
-        &json!([{ "type": "image", "source": {
-            "type": "base64", "data": data, "media_type": "image/png",
-        } }]),
-        json!({ "type": "image", "file": {
-            "base64": data, "type": "image/png", "originalSize": png.len(),
-            "dimensions": { "originalWidth": width, "originalHeight": height,
-                "displayWidth": width, "displayHeight": height },
-        } }),
-        "The plot climbs in five red bars.",
-    );
-    let repo = stack.path("repo");
-    let agent = start(&stack, MACHINE, &repo, "Say hello").await;
-    thread_until(&stack, &agent, "said hello", |r| says(r, "Done: Say hello")).await;
-    tell(&mut stack, PICTURE_PROMPT).await;
-    thread_until(&stack, &agent, "read the plot", |r| says(r, "five red bars")).await;
+    let (mut stack, _work) = crate::planted::stack(MACHINE, |home, work| {
+        let png = plot_png(width, height);
+        std::fs::write(work.join("plot.png"), &png).unwrap();
+        let data = data_encoding::BASE64.encode(&png);
+        let turn = recorded_turn(
+            PICTURE_PROMPT,
+            &json!({ "type": "tool_use", "id": "toolu_01", "name": "Read",
+                "input": { "file_path": "/work/plot.png" } }),
+            &json!([{ "type": "image", "source": {
+                "type": "base64", "data": data, "media_type": "image/png",
+            } }]),
+            json!({ "type": "image", "file": {
+                "base64": data, "type": "image/png", "originalSize": png.len(),
+                "dimensions": { "originalWidth": width, "originalHeight": height,
+                    "displayWidth": width, "displayHeight": height },
+            } }),
+            "The plot climbs in five red bars.",
+        );
+        crate::planted::plant(home, work, PLOT_SESSION, &[crate::planted::Turn::Records(turn)]);
+    })
+    .await;
+    crate::planted::resume(&mut stack.driver, PICTURE_PROMPT).await;
+    let plot = crate::planted::thread_of(PLOT_SESSION);
+    thread_until(&stack, &plot, "read the plot", |r| says(r, "five red bars")).await;
 
     let renders = stack.path("");
     let drv = &mut stack.driver;
     let picture = "Image: plot.png";
-    seen(drv, "the picture in the chat", STEP, |d| node(d, "Button", picture).is_some()).await;
+    seen(drv, "the picture inline", STEP, |d| node(d, "Button", picture).is_some()).await;
     // The turn settles round the picture as it arrives (its work folding behind the divider),
     // so its button is read from the frame that is rendered, not from the first that showed it.
     tokio::time::sleep(SETTLE).await;
@@ -1026,9 +941,14 @@ async fn a_picture_a_tool_returned_shows_inline_and_opens_in_the_lightbox() {
         .find(|n| n.role == "Button" && n.label.as_deref() == Some(picture))
         .cloned()
         .expect("the picture's button in the frame rendered");
-    let [in_x, in_y, in_w, in_h] = red_extent(&inline).expect("the picture is drawn in the chat");
-    // 640 by 400 scaled into the 512-wide frame, where its button is.
-    assert!((in_w - 512.0).abs() <= 2.0 && (in_h - 320.0).abs() <= 2.0, "inline {in_w}x{in_h}");
+    let [in_x, in_y, in_w, in_h] = red_extent(&inline).expect("the picture is drawn inline");
+    // 640 by 400 scaled into the inspector's width, its shape kept, where its button is.
+    let terminal = inline.a11y.iter().find(|n| n.role == "Terminal").map(|n| n.bounds);
+    let room = terminal.map_or(WINDOW.0, |[x, _, w, _]| WINDOW.0 - x - w);
+    assert!(
+        in_w <= room.min(512.0) + 2.0 && (in_w / in_h - 1.6).abs() < 0.02,
+        "inline {in_w}x{in_h} in {room} pt"
+    );
     let [bx, by, bw, bh] = button.bounds;
     assert!(
         (in_x - bx).abs() <= 2.0 && (in_y - by).abs() <= 2.0,

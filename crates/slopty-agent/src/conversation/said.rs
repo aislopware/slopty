@@ -4,7 +4,9 @@
 //! (1.2MB)", "Did 3 searches in 4s", "Scheduled 7f2a (every 5 minutes, next run in 4m)").
 //!
 //! A tool the TUI draws as a list (`CronList`, `ReadNotifications`, a code review's findings, a
-//! question's answers) gives its list as the call's body, in place of the text the model read.
+//! question's answers) gives its list as the call's body, in place of the text the model read; a
+//! call auto mode's classifier refused is its line alone, as the TUI draws it, the paragraph the
+//! model was told left out.
 //! Each template is the TUI's own (2.1.301, `.research/tui-strings-2026-10-16.md` §1A–1B); the
 //! terminal's key hints are left out, since the GUI has its own affordances.
 
@@ -19,13 +21,18 @@ use super::ResultStatus;
 pub(super) struct Said {
     /// The line under the call.
     pub line: Option<String>,
-    /// What the call's body shows in place of the text the model read.
+    /// What the call's body shows in place of the text the model read: nothing, when empty.
     pub body: Option<String>,
 }
 
 impl Said {
     fn line(line: impl Into<String>) -> Self {
         Self { line: Some(line.into()), body: None }
+    }
+
+    /// The line, standing for the text the model read: the call shows no body.
+    const fn alone(line: String) -> Self {
+        Self { line: Some(line), body: Some(String::new()) }
     }
 
     fn with_body(line: Option<String>, body: String) -> Self {
@@ -175,6 +182,9 @@ pub(super) fn said(name: &str, outcome: Outcome<'_>) -> Said {
     let Outcome { input, result, text: text_seen, status, at_ms } = outcome;
     if status == ResultStatus::Rejected {
         return Said::default();
+    }
+    if let Some(line) = denied(text_seen) {
+        return Said::alone(line);
     }
     let none = Value::Null;
     let r = result.unwrap_or(&none);
@@ -519,6 +529,35 @@ fn asked(question: &Value) -> Option<String> {
         format!("· {text_of}")
     } else {
         format!("· {text_of} ({})", options.join(" / "))
+    })
+}
+
+/// What Claude Code tells the model of a call auto mode's classifier refused, before the
+/// classifier's reason; and of one refused with no word of the classifier.
+const CLASSIFIER_DENIED: &str =
+    "Permission for this action was denied by the Claude Code auto mode classifier. Reason: ";
+const DENIED: &str = "Permission for this action has been denied. Reason: ";
+
+/// What follows the classifier's reason.
+const AFTER_REASON: &str = ". If you have other tasks";
+
+/// What the TUI says of a call auto mode refused, from what the model was told: "Denied by auto
+/// mode classifier · Data Exfiltration", its reason as the classifier named it, its brackets
+/// dropped. The TUI's link to auto mode's docs is left out.
+fn denied(told: &str) -> Option<String> {
+    const LINE: &str = "Denied by auto mode classifier";
+    if told.starts_with(DENIED) {
+        return Some(LINE.to_owned());
+    }
+    let rest = told.strip_prefix(CLASSIFIER_DENIED)?;
+    let reason = rest.find(AFTER_REASON).and_then(|end| rest.get(..end)).map(|reason| {
+        let reason = reason.trim();
+        let bare = reason.strip_prefix('[').and_then(|r| r.strip_suffix(']'));
+        bare.unwrap_or(reason).trim()
+    });
+    Some(match reason.filter(|r| !r.is_empty()) {
+        Some(reason) => format!("{LINE} · {reason}"),
+        None => LINE.to_owned(),
     })
 }
 
@@ -908,6 +947,38 @@ mod tests {
         let rejected =
             said("Read", Outcome { status: ResultStatus::Rejected, ..outcome(None, Some(&pdf)) });
         assert_eq!(rejected, Said::default(), "a call turned down says only that");
+    }
+
+    /// A call auto mode's classifier refused says what the TUI's line says, whatever the tool,
+    /// its reason as the classifier named it, and shows nothing of the paragraph the model was
+    /// told; one refused with no reason says the line alone, and a refusal in other words is
+    /// not taken for one.
+    #[test]
+    fn a_refusal_by_auto_mode_is_the_tuis_line_alone() {
+        let told = "Permission for this action was denied by the Claude Code auto mode \
+                    classifier. Reason: [Data Exfiltration]. If you have other tasks that don't \
+                    depend on this action, continue working on those.";
+        let refused = |name: &str, text: &str| {
+            said(name, Outcome { text, status: ResultStatus::Error, ..outcome(None, None) })
+        };
+        for name in ["Bash", "WebFetch", "mcp__db__query"] {
+            let said = refused(name, told);
+            assert_eq!(
+                said.line.as_deref(),
+                Some("Denied by auto mode classifier · Data Exfiltration")
+            );
+            assert_eq!(said.body.as_deref(), Some(""), "{name}: no paragraph");
+        }
+        let unnamed = "Permission for this action has been denied. Reason: unavailable.";
+        assert_eq!(
+            refused("Bash", unnamed).line.as_deref(),
+            Some("Denied by auto mode classifier")
+        );
+        let cut = "Permission for this action was denied by the Claude Code auto mode \
+                   classifier. Reason: ";
+        assert_eq!(refused("Bash", cut).line.as_deref(), Some("Denied by auto mode classifier"));
+        let other = refused("Bash", "Permission to use Bash has been denied.");
+        assert_eq!(other, Said::default());
     }
 
     /// A list the TUI draws under its call stands for the model's text; what it could not do

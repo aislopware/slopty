@@ -463,7 +463,7 @@ fn urgent(push: &Outgoing) -> bool {
 }
 
 /// A notice that finds the person at no client is pushed to a phone whose link is gone, once
-/// per moment: a thread needing them for a plain yes or no carries its ask, urgent. Nothing is
+/// per moment: a thread needing them is urgent, and its note answers nothing. Nothing is
 /// pushed while they are at a desk, nor to a phone still listening on its link, but one that
 /// said it stops listening is pushed to. A finished turn shorter than the phone's quiet time
 /// is not pushed. A phone that withdraws, or that APNs says is gone, is forgotten.
@@ -544,8 +544,11 @@ async fn needs_you_pushes_once_per_ask() {
     let pushed_body = body(push);
     assert_eq!(pushed_body.notice.kind, NoticeKind::NeedsYou);
     assert_eq!(pushed_body.notice.text, "Run cargo test?");
-    assert_eq!(pushed_body.ask, Some(AskId("1".to_owned())), "a yes or no its buttons answer");
-    assert!(pushed_body.picks.is_empty(), "Allow and Deny answer it");
+    assert_eq!(
+        (&pushed_body.ask, pushed_body.picks.len(), pushed_body.quiet),
+        (&None, 0, false),
+        "a note answers nothing: it opens its session, where the terminal takes the answer"
+    );
     assert!(urgent(push));
     hub.rank_ladder();
     rank(vec![needs.clone()]);
@@ -560,15 +563,14 @@ async fn needs_you_pushes_once_per_ask() {
     assert!(pushes().is_empty(), "taken back once");
     let mut question = asking(moved(&thread, Phase::NeedsYou, 4_600), "Which database?");
     question.requests[0].kind = Request::QUESTION.to_owned();
-    let buttons: Vec<NoteChoice> = ["Postgres", "SQLite"]
+    question.requests[0].buttons = ["Postgres", "SQLite"]
         .map(|label| NoteChoice { label: label.to_owned(), choice: format!("[{label}]") })
         .to_vec();
-    question.requests[0].buttons.clone_from(&buttons);
     rank(vec![question]);
     let asked = pushes();
     assert_eq!(asked.len(), 1, "{asked:?}");
-    assert_eq!(body(&asked[0]).ask, Some(AskId("1".to_owned())), "a question its options answer");
-    assert_eq!(body(&asked[0]).picks, ["Postgres", "SQLite"], "each a button of its own");
+    assert_eq!(body(&asked[0]).notice.text, "Which database?");
+    assert!(body(&asked[0]).picks.is_empty(), "no button of its own for an option");
     rank(vec![moved(&thread, Phase::Working, 4_700)]);
     assert_eq!(pushes().len(), 1, "taken back");
     mac.at(&hub, Seat::Desk, true, Vec::new());
@@ -982,7 +984,7 @@ async fn a_need_told_at_the_desk_is_pushed_once_the_person_leaves_it() {
     let [Sending::Note(note)] = left.as_slice() else { panic!("{left:?}") };
     assert_eq!(note.notice.about, Subject::Thread(ThreadAt { worker, thread: one.id }));
     assert_eq!(note.notice.kind, NoticeKind::NeedsYou);
-    assert_eq!(note.ask, None, "an ask with no choices is answered on the phone's app");
+    assert_eq!(note.ask, None, "a note answers nothing");
     assert_eq!(desk.notices(), [], "the desk holds it already");
 
     desk.at(&hub, Seat::Desk, true, Vec::new());
@@ -999,61 +1001,7 @@ async fn a_need_told_at_the_desk_is_pushed_once_the_person_leaves_it() {
     assert_eq!(pushes().len(), 1, "a need that finds the person away");
 }
 
-/// A note that a thread needs the person follows what its buttons answer: a request that
-/// opens in the place of the one it showed pushes it again quietly, under the same collapse
-/// id, its buttons the new request's; one that goes while the thread still waits takes them
-/// away the same way. Nothing moved, nothing is pushed.
-#[tokio::test]
-async fn a_shown_need_follows_its_request_quietly() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (out, mut pushed) = mpsc::channel(8);
-    hub.push_to(Some(out));
-    let worker = WorkerId::new();
-    let (tx, _rx) = mpsc::channel(8);
-    let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
-    let mut pushes = || {
-        let mut out = Vec::new();
-        while let Ok(push) = pushed.try_recv() {
-            out.push(push);
-        }
-        out
-    };
-    let phone = Client::sit(&hub, "phone");
-    pocketed_phone(&hub, phone.seated.link(), ClientId::new());
-    let one = row(Phase::Working, 1_000, None);
-    lease.handle(snapshot(vec![one.clone()]));
-    hub.rank_ladder();
-    let needs = approval(&one, 2_000, "Run cargo test?");
-    lease.handle(delta(vec![needs.clone()]));
-    hub.rank_ladder();
-    let first = pushes();
-    let [push] = first.as_slice() else { panic!("{first:?}") };
-    assert_eq!((body(push).ask.clone(), body(push).quiet), (Some(AskId("1".to_owned())), false));
-
-    let mut next = needs;
-    next.requests[0].id = AskId("2".to_owned());
-    next.requests[0].title = "Run cargo build?".to_owned();
-    lease.handle(delta(vec![next.clone()]));
-    hub.rank_ladder();
-    let moved_on = pushes();
-    let [push] = moved_on.as_slice() else { panic!("{moved_on:?}") };
-    let quiet = body(push);
-    assert_eq!((quiet.ask.clone(), quiet.quiet), (Some(AskId("2".to_owned())), true));
-    assert_eq!(quiet.notice.text, "Run cargo build?", "in the new request's words");
-    assert_eq!(quiet.notice.kind, NoticeKind::NeedsYou);
-    hub.rank_ladder();
-    assert!(pushes().is_empty(), "nothing moved, nothing pushed");
-
-    let mut waits = next.clone();
-    waits.requests.clear();
-    lease.handle(delta(vec![waits]));
-    hub.rank_ladder();
-    let gone = pushes();
-    let [push] = gone.as_slice() else { panic!("{gone:?}") };
-    assert_eq!((body(push).ask.clone(), body(push).quiet), (None, true), "no buttons now");
-}
-
-/// `row` asking a plain yes or no of the person, its note's Allow and Deny answering it.
+/// `row` asking a plain yes or no of the person.
 fn approval(row: &ThreadRow, since: u64, title: &str) -> ThreadRow {
     use slopty_proto::thread::{Choice, Effect};
     let choice = |id: &str, effect| Choice {
@@ -1073,8 +1021,7 @@ fn approval(row: &ThreadRow, since: u64, title: &str) -> ThreadRow {
 /// A thread first seen already needing the person (the server just started, or its worker
 /// linked again) is pushed to a pocketed phone, once, as a need that came while they were away
 /// would be. A server started again from the store does not push it again to a phone already
-/// showing it, and moves that note quietly once, since it no longer knows what its buttons
-/// answer.
+/// showing it.
 #[tokio::test]
 async fn a_need_first_seen_is_pushed_to_a_phone_not_showing_it() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -1107,10 +1054,7 @@ async fn a_need_first_seen_is_pushed_to_a_phone_not_showing_it() {
     hub.rank_ladder();
     assert!(pushed.try_recv().is_err(), "the phone shows it already");
     hub.rank_ladder();
-    let moved_once = pushed.try_recv().expect("its buttons moved once");
-    assert!(body(&moved_once).quiet);
-    hub.rank_ladder();
-    assert!(pushed.try_recv().is_err(), "then followed as before");
+    assert!(pushed.try_recv().is_err(), "and nothing moved");
 }
 
 /// A pushed finished turn is taken back once the person has seen that turn on any device, and

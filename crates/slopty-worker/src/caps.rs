@@ -52,21 +52,15 @@ pub fn writes_failing() -> Option<String> {
     NOT_WRITTEN.lock().values().next().cloned()
 }
 
-/// The agents with an adapter of their own, by the program [`crate::facts::agents`] names.
+/// The agents Slopty starts in their own TUIs, by the program [`crate::facts::agents`] names.
 const ADAPTED: [(&str, &str); 3] =
     [("claude", AgentId::CLAUDE_CODE), ("codex", AgentId::CODEX), ("pi", AgentId::PI)];
 
-/// The coding agents a thread can be started of here, with the versions they report.
-///
-/// Claude Code, Codex and pi, then each agent reached over ACP whose program is here, the
-/// person's own (`own_acp`, from `[worker.acp]`) among the known ones. What a client offers to
-/// start on this machine is exactly this, with no server needed.
-pub async fn installed_agents(
-    dirs: &[PathBuf],
-    own_acp: &BTreeMap<String, Vec<String>>,
-) -> Vec<InstalledAgent> {
-    let (agents, acp) = crate::facts::agents(dirs, own_acp).await;
-    agents_in(&agents, &acp)
+/// The coding agents a thread can be started of here, with the versions they report: Claude
+/// Code, Codex and pi. What a client offers to start on this machine is exactly this, with no
+/// server needed.
+pub async fn installed_agents(dirs: &[PathBuf]) -> Vec<InstalledAgent> {
+    agents_in(&crate::facts::agents(dirs).await)
 }
 
 /// How long the directories agents are found in stay quiet before they are looked in again:
@@ -77,13 +71,8 @@ pub const INSTALL_SETTLE: Duration = Duration::from_secs(1);
 ///
 /// They are looked for again whenever an entry in one of the directories is added, removed or
 /// renamed (an agent installed, upgraded or removed), once the directories have been quiet for
-/// [`INSTALL_SETTLE`], and whenever the person's own ACP agents (`own_acp`) change. It ends once
-/// `installed` has no receiver left.
-pub async fn follow_agents(
-    dirs: Vec<PathBuf>,
-    mut own_acp: watch::Receiver<BTreeMap<String, Vec<String>>>,
-    installed: watch::Sender<Vec<InstalledAgent>>,
-) {
+/// [`INSTALL_SETTLE`]. It ends once `installed` has no receiver left.
+pub async fn follow_agents(dirs: Vec<PathBuf>, installed: watch::Sender<Vec<InstalledAgent>>) {
     let named = |paths: &[PathBuf]| -> Vec<String> {
         paths.iter().map(|d| d.to_string_lossy().into_owned()).collect()
     };
@@ -98,20 +87,14 @@ pub async fn follow_agents(
     if moved.status().wait_for(|status| status.lists > 0).await.is_err() {
         return;
     }
-    let mut own = own_acp.borrow_and_update().clone();
-    let mut acp_followed = true;
     loop {
-        let now = installed_agents(&dirs, &own).await;
+        let now = installed_agents(&dirs).await;
         installed.send_if_modified(|was| {
             let differs = *was != now;
             *was = now;
             differs
         });
         tokio::select! {
-            changed = own_acp.changed(), if acp_followed => match changed {
-                Ok(()) => own = own_acp.borrow_and_update().clone(),
-                Err(_) => acp_followed = false,
-            },
             seen = moved.next() => {
                 if seen.is_none() {
                     return;
@@ -129,28 +112,24 @@ pub async fn follow_agents(
     }
 }
 
-/// The agents a thread can be started of, from the `agents` and `acp` facts.
+/// The agents a thread can be started of, from the `agents` facts: Claude Code, Codex and pi,
+/// in that order.
 ///
-/// Those with an adapter come in its order, then the ACP ones by name. An agent with no adapter
-/// (`aider`) is not startable, and an ACP agent that says no version is listed with none.
+/// An agent Slopty does not start in its own TUI (`aider`) is not startable. None offers
+/// models, modes or efforts: the agent's own TUI chooses them (`docs/decisions/agents.md`,
+/// "TUI-first").
 #[must_use]
-pub fn agents_in(agents: &Facts, acp: &Facts) -> Vec<InstalledAgent> {
-    let text = |fact: &Fact| match fact {
-        Fact::Text(version) => version.clone(),
-        _ => String::new(),
-    };
-    let adapted = ADAPTED.iter().filter_map(|(program, name)| {
-        let version = text(agents.get(*program)?);
-        let agent = AgentId::named(name);
-        let offers = crate::thread::offers::seed(&agent);
-        Some(InstalledAgent { offers, agent, version })
-    });
-    let reached = acp.iter().map(|(name, fact)| InstalledAgent {
-        agent: AgentId::acp(name),
-        version: text(fact),
-        offers: Offers::default(),
-    });
-    adapted.chain(reached).collect()
+pub fn agents_in(agents: &Facts) -> Vec<InstalledAgent> {
+    ADAPTED
+        .iter()
+        .filter_map(|(program, name)| {
+            let version = match agents.get(*program)? {
+                Fact::Text(version) => version.clone(),
+                _ => String::new(),
+            };
+            Some(InstalledAgent { agent: AgentId::named(name), version, offers: Offers::default() })
+        })
+        .collect()
 }
 
 /// What of a worker is read only once a minute, each answer costing a child process.
@@ -344,9 +323,6 @@ fn memory() -> u64 {
 /// Keep `caps` and `load` current until every receiver of both is gone, with the agents
 /// installed as `agents` last says: a change of them is probed at once.
 ///
-/// What each agent can be started with is what the threads `host` holds published
-/// ([`crate::thread::offers`]).
-///
 /// Permissions and displays every 5 s (the displays from CoreGraphics, since a ScreenCaptureKit
 /// enumeration that often raises the private-window consent prompt again and again), the load
 /// every 30 s when it moved by more than 0.5.
@@ -354,7 +330,6 @@ pub async fn watch(
     caps: watch::Sender<WorkerCaps>,
     load: watch::Sender<f32>,
     mut agents: watch::Receiver<Vec<InstalledAgent>>,
-    host: Option<crate::thread::Host>,
 ) {
     let mut tick = tokio::time::interval(CHECK_PERIOD);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -389,14 +364,7 @@ pub async fn watch(
             seldom = now;
             seldom_at = Some(tokio::time::Instant::now());
         }
-        let mut installed = agents.borrow_and_update().clone();
-        if let Some(host) = &host {
-            let seen = crate::thread::offers::seen(host);
-            for agent in &mut installed {
-                let seed = std::mem::take(&mut agent.offers);
-                agent.offers = crate::thread::offers::merged(seed, seen.get(&agent.agent));
-            }
-        }
+        let installed = agents.borrow_and_update().clone();
         let next = probe(&installed, &seldom);
         caps.send_if_modified(|current| {
             let changed = *current != next;
@@ -486,9 +454,8 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("dir");
         let bin = dir.path().canonicalize().expect("path");
-        let (_own, own_acp) = watch::channel(BTreeMap::new());
         let (installed, mut agents) = watch::channel(Vec::new());
-        let following = tokio::spawn(follow_agents(vec![bin.clone()], own_acp, installed));
+        let following = tokio::spawn(follow_agents(vec![bin.clone()], installed));
         let codex = |agents: &[InstalledAgent]| {
             agents
                 .iter()
@@ -556,9 +523,8 @@ mod tests {
         assert_eq!(writes_failing(), None);
     }
 
-    /// What a machine can start is every agent with an adapter its facts found, by the name its
-    /// threads carry, then each ACP agent found, the one that says no version listed with none;
-    /// a program with no adapter (aider) is not startable.
+    /// What a machine can start is every agent Slopty starts in its TUI that its facts found, by
+    /// the name its threads carry; a program it does not start (aider) is not startable.
     #[test]
     fn the_agents_found_are_what_a_thread_can_be_started_of() {
         let text = |v: &str| Fact::Text(v.to_owned());
@@ -569,22 +535,11 @@ mod tests {
             ("pi".to_owned(), text("0.42.1")),
         ]
         .into();
-        let acp: Facts =
-            [("gemini".to_owned(), text("0.9.0")), ("goose".to_owned(), Fact::Bool(true))].into();
-        let found = agents_in(&agents, &acp);
+        let found = agents_in(&agents);
         let named: Vec<(&str, &str)> =
             found.iter().map(|a| (a.agent.0.as_str(), a.version.as_str())).collect();
-        assert_eq!(
-            named,
-            [
-                ("claude-code", "2.1.286"),
-                ("codex", "0.157.0"),
-                ("pi", "0.42.1"),
-                ("acp:gemini", "0.9.0"),
-                ("acp:goose", ""),
-            ]
-        );
-        assert_eq!(agents_in(&Facts::new(), &Facts::new()), []);
+        assert_eq!(named, [("claude-code", "2.1.286"), ("codex", "0.157.0"), ("pi", "0.42.1"),]);
+        assert_eq!(agents_in(&Facts::new()), []);
     }
 
     /// A Linux worker names its distribution and version, quoted or not.

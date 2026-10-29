@@ -1025,6 +1025,9 @@ impl IndicatorSlide {
 pub struct HoverFades {
     entries: HashMap<String, FadeEntry>,
     frame: u64,
+    /// slopty: how many elements laid out with a [`fade_driver`] stand behind each key, while
+    /// they are drawn: afresh, or again from the last frame, which reads no fade.
+    mounted: HashMap<String, usize>,
 }
 
 impl HoverFades {
@@ -1075,6 +1078,29 @@ impl HoverFades {
         self.entries.get(key).is_some_and(|entry| !entry.settled(now, Self::duration()))
     }
 
+    /// slopty: an element with `key`'s [`fade_driver`] is laid out, and stays until
+    /// [`Self::unmount`]: the fades hold the key through frames that draw it from the last one.
+    pub fn mount(&mut self, key: &str) {
+        *self.mounted.entry(key.to_owned()).or_default() += 1;
+    }
+
+    /// slopty: an element [`Self::mount`] told of is gone: once none stands behind `key`, its
+    /// leave will never come, and the fade lets it go.
+    pub fn unmount(&mut self, key: &str) {
+        let Some(count) = self.mounted.get_mut(key) else { return };
+        *count -= 1;
+        if *count == 0 {
+            self.mounted.remove(key);
+            self.entries.remove(key);
+        }
+    }
+
+    /// slopty: whether `key` is held though no read of the last frame stamped it.
+    #[cfg(test)]
+    fn unread(&self, key: &str) -> bool {
+        self.entries.get(key).is_some_and(|entry| entry.seen + 1 < self.frame)
+    }
+
     /// Once-per-frame bookkeeping: advance the frame counter, prune entries
     /// that settled back to rest or went a full frame unread (unmounted), and
     /// report whether any fade is still mid-flight (→ keep frames coming).
@@ -1083,10 +1109,13 @@ impl HoverFades {
         let frame = self.frame;
         let duration = Self::duration();
         let mut active = false;
-        self.entries.retain(|_, entry| {
+        let mounted = &self.mounted;
+        self.entries.retain(|key, entry| {
             // Unread through the whole previous frame: the element unmounted
             // (its leave event will never come) — drop the entry.
-            if entry.seen + 1 < frame {
+            // slopty: unless a mounted element holds it, drawn from its last frame, which reads
+            // nothing ([`HoverFades::mount`]).
+            if entry.seen + 1 < frame && !mounted.contains_key(key) {
                 return false;
             }
             let settled = entry.settled(now, duration);
@@ -1135,11 +1164,16 @@ pub fn revealed_by_hover(key: &str) -> f32 {
     if cfg!(target_os = "ios") { 1.0 } else { hover_t(key) }
 }
 
-/// slopty: whether the fades hold `key`, hovered or fading. They let go of a key no frame read,
-/// taking it for an element gone, which a view the window draws from its last frame also reads
-/// none of: a view that knows it is hovered tells them again ([`set_hover`]).
+/// slopty: whether the fades hold `key`, hovered or fading.
 pub fn hover_known(key: &str) -> bool {
     HOVER_FADES.with(|fades| fades.borrow().entries.contains_key(key))
+}
+
+/// slopty: whether the fades hold `key` though no read of the last frame stamped it: its
+/// element was drawn from an earlier frame, or not at all.
+#[cfg(test)]
+pub(crate) fn hover_unread(key: &str) -> bool {
+    HOVER_FADES.with(|fades| fades.borrow().unread(key))
 }
 
 /// Record a hover flip for `key` (reduced motion snaps).
@@ -1170,9 +1204,21 @@ impl<E: StatefulInteractiveElement + ParentElement> HoverFade for E {}
 /// slopty: the part of [`HoverFade`] that keeps `key`'s fade moving, for an element whose own
 /// hover listener calls [`hover_listener`]'s: nothing drawn, and while the fade runs, the view
 /// it is laid out in is asked for the next frame.
+///
+/// It also holds the element's place in the fades ([`FadeMount`]). A view the window draws from
+/// its last frame reads no fade, and the fades let go of a key no frame read, as an element gone
+/// whose leave will never come: a card, row or trigger the pointer rests on would then come back
+/// unlit when its view is next built, while the frame before drew it lit. GPUI keeps an
+/// element's state for as long as the element is drawn, afresh or again from the last frame, and
+/// drops it once a frame leaves the element out: the mount lives exactly as long as the element.
 pub fn fade_driver(key: SharedString) -> impl IntoElement {
     gpui::canvas(
         move |_, window, _| {
+            window.with_global_id(gpui::ElementId::Name(key.clone()), |id, window| {
+                window.with_element_state::<FadeMount, _>(id, |mount, _| {
+                    ((), mount.unwrap_or_else(|| FadeMount::new(key.clone())))
+                })
+            });
             if HOVER_FADES.with(|f| f.borrow().moving_at(&key, hover_frame())) {
                 window.request_animation_frame();
             }
@@ -1181,6 +1227,28 @@ pub fn fade_driver(key: SharedString) -> impl IntoElement {
     )
     .absolute()
     .size_0()
+}
+
+/// slopty: an element with a [`fade_driver`], for as long as GPUI keeps its state: mounted in
+/// the fades when made, unmounted when dropped.
+struct FadeMount(SharedString);
+
+impl FadeMount {
+    fn new(key: SharedString) -> Self {
+        HOVER_FADES.with(|fades| fades.borrow_mut().mount(&key));
+        Self(key)
+    }
+}
+
+impl Drop for FadeMount {
+    fn drop(&mut self) {
+        // A window dropped as the thread ends finds the fades already gone.
+        let _gone = HOVER_FADES.try_with(|fades| {
+            if let Ok(mut fades) = fades.try_borrow_mut() {
+                fades.unmount(&self.0);
+            }
+        });
+    }
 }
 
 /// An `.on_hover` listener driving the fade for `key` — pair with
@@ -2349,6 +2417,31 @@ mod tests {
         fades.tick_at(ms(48)); // frame 3: a full unread frame has passed
         assert!(fades.entries.is_empty(), "unread entry evicted");
         assert_eq!(fades.value_at("menu-row", ms(64)), 0.0);
+    }
+
+    /// slopty: a mounted element drawn from its last frame keeps its fade through frames that
+    /// read none of it; once the last element behind the key is gone, the fade goes with it.
+    #[test]
+    fn hover_tick_keeps_a_mounted_entry_unread() {
+        let mut fades = HoverFades::default();
+        let t0 = Instant::now();
+        let ms = |m: u64| t0 + Duration::from_millis(m);
+        fades.mount("card");
+        fades.mount("card"); // one row moving to another parent lays out twice for a frame
+        fades.set_at("card", true, true, t0);
+        for frame in 1..=4 {
+            fades.tick_at(ms(16 * frame));
+        }
+        assert!(fades.unread("card"), "no frame read it");
+        assert_eq!(fades.value_at("card", ms(80)), 1.0, "still lit when its view is next built");
+        fades.unmount("card");
+        fades.tick_at(ms(96));
+        fades.tick_at(ms(112));
+        assert_eq!(fades.value_at("card", ms(112)), 1.0, "one element still stands behind it");
+        fades.unmount("card");
+        assert!(fades.entries.is_empty() && fades.mounted.is_empty(), "the last one gone");
+        fades.unmount("card");
+        assert!(fades.mounted.is_empty(), "an unmount past the last is inert");
     }
 
     #[test]

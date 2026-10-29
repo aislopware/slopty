@@ -702,9 +702,6 @@ impl WorkspaceView {
     pub fn xfer_message(&mut self, msg: XferMsg, cx: &mut Context<Self>) {
         match msg {
             XferMsg::Progress { xfer, done } => {
-                if self.attach_progress(xfer, done, cx) {
-                    return;
-                }
                 if let Some(upload) = self.uploads.get_mut(&xfer)
                     && upload.done != done
                 {

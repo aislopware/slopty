@@ -227,7 +227,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             resolved: Some(*resolved),
             ..Default::default()
         },
-        // slopty: an error's detail and retry are the live view's, not the doc's.
+        // slopty: an error's detail is the live view's, not the doc's.
         MessagePart::Error { id, message, .. } => DocPartJson {
             id: id.clone(),
             kind: "error".into(),
@@ -288,7 +288,6 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 id: p.id,
                 message: "Visual unavailable".into(),
                 detail: None, // slopty: one error grammar.
-                retry: false,
             },
         },
         "tool" => match p.call.and_then(|c| serde_json::from_value(c).ok()) {
@@ -331,7 +330,6 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
             id: p.id,
             message: p.message.unwrap_or_default(),
             detail: None, // slopty: one error grammar.
-            retry: false,
         },
         // slopty: dividers.
         "marker" => MessagePart::Marker {
@@ -394,7 +392,6 @@ fn image_part(
             id,
             message: "Generated image unavailable".into(),
             detail: None, // slopty: one error grammar.
-            retry: false,
         },
     }
 }
@@ -569,7 +566,6 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             id,
             message: message.to_owned(),
             detail: None, // slopty: one error grammar.
-            retry: false,
         });
     }
     None

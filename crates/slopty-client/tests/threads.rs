@@ -1,12 +1,12 @@
-//! ptyd + worker + this crate's client core on this machine: a driven Claude Code thread held by
+//! ptyd + worker + this crate's client core on this machine: a Claude Code session held by
 //! `slopty_client::threads`, through a dropped link, a relaunch and a cut network.
 //!
-//! The thread is started and followed; a permission Claude Code asks is answered through the
-//! outbox, drawn as answered before the worker hears of it. The link drops, the client keeps the
-//! thread and an answer it could not send, and a new client core starts from that cache: the
-//! thread draws before any frame comes, catches up from its cursor with only the actions it
-//! missed, and the answer goes under its first id and is acted on. Claude Code is the stand-in
-//! (`slopty-stub-claude`) first on the daemons' `PATH`, whose record says what it heard.
+//! The session is started in a terminal of the worker and its thread followed; the person names
+//! it through the outbox, drawn as named before the worker hears of it. The link drops, the
+//! client keeps the thread and a name it could not send, and a new client core starts from that
+//! cache: the thread draws before any frame comes, catches up from its cursor with only the
+//! actions it missed, and the name goes under its first id and is acted on once. Claude Code is
+//! the stand-in TUI (`slopty-stub-claude`) first on the daemons' `PATH`.
 
 #![cfg(target_vendor = "apple")]
 
@@ -26,9 +26,7 @@ mod threads {
     use slopty_proto::thread::wire::{
         Against, Intent, IntentDone, Outcome, ReviewScope, Start, ThreadFrame, ThreadRequest,
     };
-    use slopty_proto::thread::{
-        AgentId, AskId, Cursor, Delivery, IntentId, RequestState, ThreadId, ThreadState, TurnState,
-    };
+    use slopty_proto::thread::{AgentId, Cursor, IntentId, ThreadId, ThreadState, TurnState};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
     use tokio::sync::mpsc;
@@ -50,8 +48,6 @@ mod threads {
         children: Vec<Child>,
         pasteboard: String,
         addr: SocketAddr,
-        /// The stand-in's record of how it started and what it heard.
-        record: PathBuf,
         /// Where the threads work.
         work: PathBuf,
     }
@@ -73,9 +69,7 @@ mod threads {
     fn scrubbed(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
         let mut command = Command::new(program);
         slopty_testkit::env::scrub(command.as_std_mut(), home);
-        command
-            .env("PATH", slopty_testkit::env::path_with(&home.join("programs")))
-            .env("STUB_RECORD", home.join("record.json"));
+        command.env("PATH", slopty_testkit::env::path_with(&home.join("programs")));
         command
     }
 
@@ -134,37 +128,7 @@ mod threads {
         } else {
             bound
         };
-        let record = dir.join("record.json");
-        Daemons { children: vec![ptyd, worker], pasteboard, addr, record, work }
-    }
-
-    /// The permissions the stand-in was answered, by behaviour, as it heard them.
-    fn answers(daemons: &Daemons) -> Vec<String> {
-        let record: serde_json::Value = std::fs::read(&daemons.record)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        record["received"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|line| line["type"] == "control_response")
-            .filter_map(|line| line["response"]["response"]["behavior"].as_str())
-            .map(str::to_owned)
-            .collect()
-    }
-
-    /// The stand-in's answers once there are `n`; a failure once [`STEP`] passes without.
-    async fn answered_times(daemons: &Daemons, n: usize) -> Vec<String> {
-        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
-        loop {
-            let seen = answers(daemons);
-            if seen.len() >= n {
-                return seen;
-            }
-            assert!(tokio::time::Instant::now() < deadline, "never answered {n} times: {seen:?}");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        Daemons { children: vec![ptyd, worker], pasteboard, addr, work }
     }
 
     /// A Claude Code start in the daemons' work folder with `prompt`.
@@ -184,9 +148,9 @@ mod threads {
         })
     }
 
-    /// A message `text` for the thread, sent through the core.
-    fn say(text: &str) -> Intent {
-        Intent::Send { text: text.to_owned(), delivery: Delivery::Steer, attachments: Vec::new() }
+    /// The person's name `title` for the thread, sent through the core.
+    fn name(title: &str) -> Intent {
+        Intent::Name { title: title.to_owned() }
     }
 
     /// One client: a link and the client core it feeds, as the app holds them.
@@ -294,6 +258,12 @@ mod threads {
             Some(None)
         }
 
+        /// Feed the core whatever comes for `time`.
+        async fn take_for(&mut self, time: Duration) {
+            let deadline = tokio::time::Instant::now().checked_add(time).unwrap();
+            while self.step(deadline).await.is_some() {}
+        }
+
         /// Feed the core until `done` holds; a failure naming `what` once [`STEP`] passes
         /// without it, however busy the link is meanwhile.
         async fn until(&mut self, what: &str, done: impl Fn(&Threads) -> bool) {
@@ -308,17 +278,20 @@ mod threads {
         threads.mirror(thread).and_then(Mirror::state)
     }
 
-    fn open_ask(threads: &Threads, thread: ThreadId, not: Option<&AskId>) -> Option<AskId> {
-        let state = state(threads, thread)?;
-        state.open_requests().map(|r| r.id.clone()).find(|id| Some(id) != not)
+    fn named(threads: &Threads, thread: ThreadId, title: &str) -> bool {
+        state(threads, thread).is_some_and(|s| s.named == title)
     }
 
-    fn answered(threads: &Threads, thread: ThreadId, ask: &AskId) -> bool {
-        state(threads, thread).is_some_and(|s| {
-            s.requests
-                .iter()
-                .any(|r| r.id == *ask && matches!(r.state, RequestState::Answered { .. }))
-        })
+    /// Whether the name `title` waits in the outbox, drawn over the thread before it shows it.
+    fn naming(threads: &Threads, thread: ThreadId, title: &str) -> bool {
+        threads
+            .unshown(thread)
+            .any(|s| !s.failed() && matches!(&s.intent, Intent::Name { title: t } if t == title))
+    }
+
+    /// How many answers `client` heard for intent `id`.
+    fn answers(client: &Client, id: IntentId) -> usize {
+        client.done.iter().filter(|d| d.id == id).count()
     }
 
     fn turn_complete(threads: &Threads, thread: ThreadId, n: usize) -> bool {
@@ -328,34 +301,28 @@ mod threads {
     }
 
     #[tokio::test]
-    async fn a_thread_and_an_answer_outlive_a_dropped_link_and_a_relaunch() {
+    async fn a_thread_and_a_name_outlive_a_dropped_link_and_a_relaunch() {
         let dir = tempfile::tempdir().unwrap();
         let daemons = daemons(dir.path()).await;
         let cache = Cache::new(dir.path().join("client").join("worker"));
         let me = ClientId::new();
         let mut a = Client::connect(&daemons, me, Threads::new(cache.outbox())).await;
 
-        // A thread started here, followed, and its first permission held for this follower.
-        let thread = a.start(start(&daemons, "bash touch one")).await;
+        // A session started here in a terminal, its thread followed through its first turn.
+        let thread = a.start(start(&daemons, "Say hello")).await;
         let follow = a.threads.open_thread(thread, None);
         a.send_all(follow).await;
-        a.until("the first prompt", |t| open_ask(t, thread, None).is_some()).await;
-        let ask = open_ask(&a.threads, thread, None).unwrap();
+        a.until("the first turn", |t| turn_complete(t, thread, 1)).await;
 
-        // Answered through the outbox: drawn as answered before the worker hears of it.
-        let allow = |ask: &AskId| Intent::Answer {
-            ask: ask.clone(),
-            choice: "allow".to_owned(),
-            message: None,
-        };
-        let (_id, msg) = a.threads.intent(thread, allow(&ask));
-        assert!(a.threads.answering(thread, &ask).is_some(), "flipped in the same frame");
+        // Named through the outbox: drawn as named before the worker hears of it.
+        let (first, msg) = a.threads.intent(thread, name("Greeting"));
+        assert!(naming(&a.threads, thread, "Greeting"), "drawn in the same frame");
         a.send_all(msg).await;
-        assert_eq!(answered_times(&daemons, 1).await, ["allow"]);
-        a.until("the first answer settled", |t| {
-            answered(t, thread, &ask) && t.outbox().all().is_empty() && turn_complete(t, thread, 1)
+        a.until("the name settled", |t| {
+            named(t, thread, "Greeting") && t.outbox().all().is_empty()
         })
         .await;
+        assert_eq!(answers(&a, first), 1);
 
         // A second device follows throughout.
         let mut witness = Client::connect(&daemons, ClientId::new(), Threads::default()).await;
@@ -371,14 +338,10 @@ mod threads {
             })
             .await;
 
-        // A second prompt; the link drops before its answer can go.
-        let (_said, msg) = a.threads.intent(thread, say("bash touch two"));
-        a.send_all(msg).await;
-        a.until("the second prompt", |t| open_ask(t, thread, Some(&ask)).is_some()).await;
-        let next = open_ask(&a.threads, thread, Some(&ask)).unwrap();
+        // The link drops; a new name waits for the next.
         a.link.close();
         a.threads.disconnected();
-        let (later, msg) = a.threads.intent(thread, allow(&next));
+        let (later, msg) = a.threads.intent(thread, name("Greeting, kept"));
         assert!(msg.is_none(), "nothing goes on a dropped link");
         let kept = a.threads.to_cache(thread).unwrap();
         cache.keep_thread(thread, &kept).unwrap();
@@ -390,13 +353,12 @@ mod threads {
         assert_eq!(threads.outbox().unanswered().map(|s| s.id).collect::<Vec<_>>(), [later]);
         assert!(threads.open_thread(thread, cache.thread(thread)).is_none(), "not linked yet");
         assert_eq!(state(&threads, thread), Some(&kept.state), "drawn from the cache");
-        assert!(threads.answering(thread, &next).is_some(), "the unsent answer is drawn too");
+        assert!(naming(&threads, thread, "Greeting, kept"), "the unsent name is drawn too");
 
-        // Linked again: only what was missed comes, and the answer goes under its first id.
+        // Linked again: only what was missed comes, and the name goes under its first id.
         let mut b = Client::connect(&daemons, me, threads).await;
-        assert_eq!(answered_times(&daemons, 2).await, ["allow", "allow"]);
-        b.until("the second answer settled", |t| {
-            answered(t, thread, &next) && t.outbox().all().is_empty() && turn_complete(t, thread, 2)
+        b.until("the second name settled", |t| {
+            named(t, thread, "Greeting, kept") && t.outbox().all().is_empty()
         })
         .await;
         let cursor: Cursor = kept.cursor;
@@ -407,7 +369,8 @@ mod threads {
             b.came
         );
         assert!(!b.came.contains(&Came::Snapshot), "{:?}", b.came);
-        assert_eq!(answers(&daemons).len(), 2, "each answer acted on once");
+        assert_eq!(answers(&b, later), 1, "acted on once");
+        witness.until("the witness has the name", |t| named(t, thread, "Greeting, kept")).await;
 
         drop(b);
         drop(witness);
@@ -422,35 +385,35 @@ mod threads {
     /// sides. It was 30 s, which made this test alone the length of the suite's run.
     const AWAY: Duration = Duration::from_secs(12);
 
-    /// The app's link to its worker cut while the person answers and reviews, as the app meets
-    /// it: the link goes silent, the app gives it up after six seconds without a pong and dials
-    /// again until the network is back. Cut both ways for 12 s, an answer and a review asked into
-    /// the cut go again on the next link and arrive, the answer acted on once and the review
-    /// without being asked again. Cut on the way back alone, an answer is acted on and its reply
-    /// lost; on the next link it goes again under its id and is answered as it was, not refused
-    /// as answered already. The times from the network back are printed: the measurement.
+    /// The app's link to its worker cut while the person names a session and asks for its
+    /// review, as the app meets it: the link goes silent, the app gives it up after six seconds
+    /// without a pong and dials again until the network is back. Cut both ways for 12 s, a name
+    /// and a review asked into the cut go again on the next link and arrive, the name acted on
+    /// once and the review without being asked again. Cut on the way back alone, a name is acted
+    /// on (a second device sees it) and its reply lost; on the next link it goes again under its
+    /// id and is answered as it was. The times from the network back are printed: the
+    /// measurement.
     #[tokio::test]
-    async fn an_answer_and_a_review_cross_a_cut_link() {
+    async fn a_name_and_a_review_cross_a_cut_link() {
         let dir = tempfile::tempdir().unwrap();
         let daemons = daemons(dir.path()).await;
         let cable = slopty_testkit::relay::Relay::start(daemons.addr).await.unwrap();
         let me = ClientId::new();
         let mut a = Client::connect_to(cable.addr(), me, Threads::default()).await;
-        let thread = a.start(start(&daemons, "bash touch one")).await;
+        let thread = a.start(start(&daemons, "Say hello")).await;
         let follow = a.threads.open_thread(thread, None);
         a.send_all(follow).await;
-        let allow = |ask: &AskId| Intent::Answer {
-            ask: ask.clone(),
-            choice: "allow".to_owned(),
-            message: None,
-        };
+        a.until("the first turn", |t| turn_complete(t, thread, 1)).await;
+        // A second device on the worker itself, past the cut, sees what the worker does.
+        let mut witness = Client::connect(&daemons, ClientId::new(), Threads::default()).await;
+        let follow = witness.threads.open_thread(thread, None);
+        witness.send_all(follow).await;
+        witness.until("the witness has the turn", |t| turn_complete(t, thread, 1)).await;
 
-        // Cut both ways: the answer and a review go into the cut, and the app gives up.
-        a.until("the first prompt", |t| open_ask(t, thread, None).is_some()).await;
-        let ask = open_ask(&a.threads, thread, None).unwrap();
+        // Cut both ways: the name and a review go into the cut, and the app gives up.
         cable.cut();
         let cut = tokio::time::Instant::now();
-        let (first, msg) = a.threads.intent(thread, allow(&ask));
+        let (first, msg) = a.threads.intent(thread, name("Greeting"));
         a.send_all(msg).await;
         let scope = ReviewScope::WorkingTree(Against::Head);
         let msg = a.threads.ask_review(thread, scope.clone());
@@ -461,40 +424,34 @@ mod threads {
         let threads = std::mem::take(&mut a.threads);
         drop(a);
         tokio::time::sleep_until(cut.checked_add(AWAY).unwrap()).await;
-        assert!(answers(&daemons).is_empty(), "nothing crossed the cut");
+        witness.take_for(Duration::from_secs(1)).await;
+        assert!(!named(&witness.threads, thread, "Greeting"), "nothing crossed the cut");
         cable.restore();
         let back = tokio::time::Instant::now();
         let mut b = Client::connect_to(cable.addr(), me, threads).await;
         let linked = back.elapsed();
-        assert_eq!(answered_times(&daemons, 1).await, ["allow"], "acted on");
+        b.until("the name acted on", |t| named(t, thread, "Greeting")).await;
         let acted = back.elapsed();
         b.until("the review", |t| t.review(thread, &scope).is_some()).await;
         let reviewed = back.elapsed();
-        b.until("the answer settled", |t| {
-            answered(t, thread, &ask) && t.outbox().all().iter().all(|s| s.id != first)
-        })
-        .await;
+        b.until("the name settled", |t| t.outbox().all().iter().all(|s| s.id != first)).await;
         let answer = b.done.iter().find(|d| d.id == first).map(|d| d.outcome.clone());
         assert!(
             matches!(answer, Some(Outcome::Done | Outcome::Accepted)),
             "answered as done: {answer:?}"
         );
+        assert_eq!(answers(&b, first), 1, "acted on once");
         println!(
-            "cut both ways {AWAY:?}: back to linked {linked:?}, to the answer acted on \
+            "cut both ways {AWAY:?}: back to linked {linked:?}, to the name acted on \
              {acted:?}, to the review {reviewed:?}"
         );
 
-        // Cut on the way back: the answer is acted on, its reply lost, and the app gives up.
-        b.until("the first turn", |t| turn_complete(t, thread, 1)).await;
-        let (_said, msg) = b.threads.intent(thread, say("bash touch two"));
-        b.send_all(msg).await;
-        b.until("the second prompt", |t| open_ask(t, thread, Some(&ask)).is_some()).await;
-        let next = open_ask(&b.threads, thread, Some(&ask)).unwrap();
+        // Cut on the way back: the name is acted on, its reply lost, and the app gives up.
         cable.cut_back();
         let cut = tokio::time::Instant::now();
-        let (second, msg) = b.threads.intent(thread, allow(&next));
+        let (second, msg) = b.threads.intent(thread, name("Greeting, renamed"));
         b.send_all(msg).await;
-        assert_eq!(answered_times(&daemons, 2).await, ["allow", "allow"], "acted on");
+        witness.until("the second name acted on", |t| named(t, thread, "Greeting, renamed")).await;
         tokio::time::sleep_until(cut.checked_add(SILENCE_DROP).unwrap()).await;
         assert!(b.done.iter().all(|d| d.id != second), "its reply was lost");
         b.link.close();
@@ -504,18 +461,19 @@ mod threads {
         cable.restore();
         let back = tokio::time::Instant::now();
         let mut c = Client::connect_to(cable.addr(), me, threads).await;
-        c.until("the second answer settled", |t| t.outbox().all().iter().all(|s| s.id != second))
+        c.until("the second name settled", |t| t.outbox().all().iter().all(|s| s.id != second))
             .await;
         let settled = back.elapsed();
         let answer = c.done.iter().find(|d| d.id == second).map(|d| d.outcome.clone());
         assert!(
             matches!(answer, Some(Outcome::Done | Outcome::Accepted)),
-            "answered as it was, not refused as answered already: {answer:?}"
+            "answered as it was: {answer:?}"
         );
-        assert_eq!(answers(&daemons).len(), 2, "acted on once");
-        println!("reply lost: back to the answer settled {settled:?}");
+        c.until("the name kept", |t| named(t, thread, "Greeting, renamed")).await;
+        println!("reply lost: back to the name settled {settled:?}");
 
         drop(c);
+        drop(witness);
         drop(daemons);
     }
 }

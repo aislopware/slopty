@@ -15,12 +15,15 @@
 //! ([`idempotency`]). A start under an id the caller chose is done once per id: asked again,
 //! it answers the terminal that id already names.
 //!
-//! Nothing is typed into a terminal a coding agent runs in ([`may_type`]): an agent is driven
-//! through its own door, as a thread, never by keys (`docs/decisions/agents.md`).
+//! No key is typed into a terminal a coding agent runs in ([`may_type`]). What one agent tells
+//! another ([`Verb::AgentTell`]) and what the person sends ([`Verb::SendMessage`]) go in as one
+//! message each ([`TermRequest::Submit`]), never while the agent asks the person at a dialog;
+//! a stop ([`Verb::AgentStop`]) is an Esc while its turn runs (`docs/decisions/agents.md`,
+//! "TUI-first").
 //!
-//! Any agent's thread is read and its requests answered through the daemon's [`ThreadReads`]
-//! ([`thread_read`]); a still picture from ScreenCaptureKit ([`still`]); a file too large for
-//! one reply goes up in parts ([`upload`]).
+//! Any agent's thread is read through the daemon's [`ThreadReads`] ([`thread_read`]); a request
+//! it makes is the person's to answer in its terminal. A still picture from ScreenCaptureKit
+//! ([`still`]); a file too large for one reply goes up in parts ([`upload`]).
 
 pub mod idempotency;
 pub mod keys;
@@ -47,8 +50,8 @@ use slopty_proto::orchestration::{
 };
 use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
-use slopty_proto::thread::wire::{self, Intent, ThreadRow};
-use slopty_proto::thread::{Delivery, IntentId, ThreadId, ThreadState};
+use slopty_proto::thread::wire::{self, ThreadRow};
+use slopty_proto::thread::{Phase, Status, ThreadId, ThreadMeta, ThreadState};
 use tokio::sync::broadcast;
 pub use wait::wait_for;
 
@@ -58,6 +61,18 @@ use crate::{ItemStore, Worker, WorkerError, listing};
 /// Who orchestration acts as, for the session actor (its errors go nowhere: the verb's own
 /// outcome reports them) and for the item deltas it causes (nobody's echo).
 const ORCHESTRATOR: ClientId = ClientId::nil();
+
+/// Why an agent's request is not answered from here: the person answers it in the agent's own
+/// terminal (`docs/decisions/agents.md`, "TUI-first").
+pub const ANSWER_IN_ITS_TERMINAL: &str =
+    "Its agent asks in its own terminal: the person answers it there";
+
+/// Why nothing is typed into or stopped in an agent that runs in no terminal now.
+pub const IN_NO_TERMINAL: &str =
+    "This agent runs in no terminal now: start it again to take its session up";
+
+/// Why an agent at rest is not stopped.
+pub const NOTHING_TO_STOP: &str = "This agent is not at work: there is no turn to stop";
 
 /// How many clone progress steps wait for the server's link before the oldest are dropped.
 const CLONE_PROGRESS: usize = 64;
@@ -96,7 +111,7 @@ const MAX_SIZE: Size = Size { cols: 1000, rows: 500 };
 const RESTART_AFTER: Duration = Duration::from_millis(500);
 
 /// Size of a terminal opened by a verb, until a client attaches and drives it.
-const ORCHESTRATED_SIZE: TermSize = TermSize {
+pub const ORCHESTRATED_SIZE: TermSize = TermSize {
     cols: 120,
     rows: 36,
     metrics: slopty_proto::input::CellMetrics { cell_width: 8, cell_height: 16 },
@@ -138,29 +153,26 @@ pub trait SeatedThreads: Send + Sync {
     /// Its Slopty tools get what every terminal of the worker gets for that seat (the server,
     /// the seat as its session, the token for it), through its agent's own door. The system
     /// text goes through that door too: a system prompt where the agent takes one, else ahead
-    /// of its first prompt. An agent that runs in a terminal runs in one opened under the
-    /// seat. A seat started already answers its thread, starting nothing.
+    /// of its first prompt. The agent runs in its TUI in a terminal opened under the seat,
+    /// which [`Verb::Close`] closes. A seat started already answers its thread, starting
+    /// nothing.
     ///
     /// # Errors
     /// [`ErrorCode::Unsupported`] for an agent it cannot start; any other failure as it is.
     fn start(&self, thread: SeatedThread) -> BoxFuture<'_, Result<ThreadId, Failure>>;
-
-    /// End the agent of the thread seated at `seat`, its session kept to take up again.
-    /// `Ok(false)` when no thread is seated there.
-    ///
-    /// # Errors
-    /// A thread there that could not be ended.
-    fn close(&self, seat: SessionId) -> BoxFuture<'_, Result<bool, Failure>>;
 }
 
-/// The worker's threads as orchestration reads and answers them ([`Verb::ReadThread`],
-/// [`Verb::AnswerRequest`]). The daemon gives it ([`Orchestrator::set_thread_reads`]).
+/// The worker's threads as orchestration reads them ([`Verb::ReadThread`]).
+///
+/// It finds the terminal each agent runs in, which [`Verb::AgentTell`] and [`Verb::SendMessage`]
+/// type into and [`Verb::AgentStop`] presses Esc in. The daemon gives it
+/// ([`Orchestrator::set_thread_reads`]).
 pub trait ThreadReads: Send + Sync {
     /// `thread` as it stands; `None` for one this worker does not hold.
     fn state(&self, thread: ThreadId) -> Option<ThreadState>;
 
-    /// Do `intent` on `thread` once under `id`, as a client's would be done, by orchestration.
-    fn intent(&self, thread: ThreadId, id: IntentId, intent: Intent) -> wire::Outcome;
+    /// What `thread` is and how it stands, without its items; `None` for one not held.
+    fn standing(&self, thread: ThreadId) -> Option<(ThreadMeta, Status)>;
 
     /// The row of the thread seated at terminal `session`, if one is.
     fn seated_at(&self, session: SessionId) -> Option<ThreadRow>;
@@ -388,10 +400,73 @@ impl Orchestrator {
             ));
         };
         self.mine(worker)?;
-        let reads = self.inner.thread_reads.get().cloned().ok_or_else(|| {
+        Ok((thread, self.reads()?))
+    }
+
+    /// The threads to read, once the daemon gave them.
+    fn reads(&self) -> Result<Arc<dyn ThreadReads>, Failure> {
+        self.inner.thread_reads.get().cloned().ok_or_else(|| {
             Failure::new(ErrorCode::Unsupported, "this worker keeps no threads to read")
+        })
+    }
+
+    /// Type `text` into the terminal `thread`'s agent runs in, as one message
+    /// ([`TermRequest::Submit`]): refused while the agent waits on the person at a dialog, which
+    /// would take the words as its answer, and for an agent in no terminal now.
+    fn submit(
+        &self,
+        reads: &dyn ThreadReads,
+        thread: ThreadId,
+        text: String,
+    ) -> Result<Outcome, Failure> {
+        let handle = self.terminal_of(reads, thread, |status| {
+            crate::thread::submit_refused(status).map(|why| Failure::new(ErrorCode::Conflict, why))
         })?;
-        Ok((thread, reads))
+        tracing::info!(%thread, session = %handle.id(), chars = text.chars().count(), "typed into an agent's terminal");
+        handle
+            .request(ORCHESTRATOR, TermRequest::Submit { text })
+            .map_err(|e| Failure::new(ErrorCode::Failed, e.to_string()))?;
+        Ok(Outcome::Done)
+    }
+
+    /// Press Esc in the terminal `thread`'s agent runs in, which stops its turn, while it works
+    /// and waits on nobody: an Esc at a dialog would answer it, and one at rest has nothing to
+    /// stop. The terminal and the session stay (`docs/decisions/agents.md`, "TUI-first").
+    fn stop(&self, reads: &dyn ThreadReads, thread: ThreadId) -> Result<Outcome, Failure> {
+        let handle = self.terminal_of(reads, thread, |status| match status.phase {
+            Phase::Working if status.wait.is_none() => None,
+            Phase::NeedsYou => Some(Failure::new(
+                ErrorCode::Conflict,
+                crate::thread::submit_refused(status)
+                    .unwrap_or_else(|| ANSWER_IN_ITS_TERMINAL.to_owned()),
+            )),
+            _ => Some(Failure::new(ErrorCode::Conflict, NOTHING_TO_STOP)),
+        })?;
+        let escape = keys::parse("escape", 0).map_err(|e| Failure::new(ErrorCode::Failed, e))?;
+        tracing::info!(%thread, session = %handle.id(), "Esc pressed in an agent's terminal");
+        handle
+            .request(ORCHESTRATOR, TermRequest::Key(escape))
+            .map_err(|e| Failure::new(ErrorCode::Failed, e.to_string()))?;
+        Ok(Outcome::Done)
+    }
+
+    /// The terminal `thread`'s agent runs in, unless `refuse` says why not from its status.
+    fn terminal_of(
+        &self,
+        reads: &dyn ThreadReads,
+        thread: ThreadId,
+        refuse: impl FnOnce(&Status) -> Option<Failure>,
+    ) -> Result<SessionHandle, Failure> {
+        let (meta, status) = reads.standing(thread).ok_or_else(|| no_thread(thread))?;
+        let terminal =
+            meta.terminal().ok_or_else(|| Failure::new(ErrorCode::Failed, IN_NO_TERMINAL))?;
+        if let Some(refused) = refuse(&status) {
+            return Err(refused);
+        }
+        self.inner
+            .worker
+            .get(terminal)
+            .map_err(|_gone| Failure::new(ErrorCode::Failed, IN_NO_TERMINAL))
     }
 
     /// Answer one verb, once per `key` when it changes something. Every failure is an
@@ -420,9 +495,7 @@ impl Orchestrator {
             | Verb::ForgetWorker { .. }
             | Verb::Wake { .. }
             | Verb::AgentStart(..)
-            | Verb::AgentTell { .. }
             | Verb::AgentWait { .. }
-            | Verb::AgentStop { .. }
             | Verb::Agents
             | Verb::BranchBring { .. } => {
                 Err(Failure::new(ErrorCode::Invalid, "the server answers this, not a worker"))
@@ -508,13 +581,6 @@ impl Orchestrator {
             }
             Verb::Close { term } => {
                 self.mine(term.worker)?;
-                // A seated thread with no terminal of its own is closed by its seat.
-                if inner.worker.get(term.session).is_err()
-                    && let Some(threads) = inner.seated_threads.get()
-                    && threads.close(term.session).await?
-                {
-                    return Ok(Outcome::Done);
-                }
                 self.close(term.session).await?;
                 Ok(Outcome::Done)
             }
@@ -597,21 +663,12 @@ impl Orchestrator {
             }
             Verb::SendMessage { of, text } => {
                 let (thread, reads) = self.thread_of(&of)?;
-                let intent = Intent::Send { text, delivery: Delivery::Queue, attachments: vec![] };
-                match reads.intent(thread, IntentId::new(), intent) {
-                    wire::Outcome::Done | wire::Outcome::Accepted => Ok(Outcome::Done),
-                    wire::Outcome::Refused { reason } => {
-                        Err(Failure::new(ErrorCode::Failed, reason))
-                    }
-                    wire::Outcome::Unsupported { cap } => Err(Failure::new(
-                        ErrorCode::Unsupported,
-                        format!("this thread's agent takes no message from here ({})", cap.0),
-                    )),
-                    wire::Outcome::Started { .. } | wire::Outcome::SetupFailed { .. } => {
-                        Err(unexpected())
-                    }
-                }
+                self.submit(&*reads, thread, text)
             }
+            // The server lets an agent tell or stop only the agents of its own tree, then asks
+            // the worker that holds the one named.
+            Verb::AgentTell { agent, text } => self.submit(&*self.reads()?, agent, text),
+            Verb::AgentStop { agent } => self.stop(&*self.reads()?, agent),
             Verb::RestartWorker { worker } => {
                 self.mine(worker)?;
                 let restart = inner.restart.get().cloned().ok_or_else(|| {
@@ -629,22 +686,10 @@ impl Orchestrator {
                 });
                 Ok(Outcome::Done)
             }
-            Verb::AnswerRequest { of, ask, choice, message } => {
+            Verb::AnswerRequest { of, .. } => {
                 let (thread, reads) = self.thread_of(&of)?;
-                let intent = Intent::Answer { ask, choice, message };
-                match reads.intent(thread, IntentId::new(), intent) {
-                    wire::Outcome::Done | wire::Outcome::Accepted => Ok(Outcome::Done),
-                    wire::Outcome::Refused { reason } => {
-                        Err(Failure::new(ErrorCode::Failed, reason))
-                    }
-                    wire::Outcome::Unsupported { cap } => Err(Failure::new(
-                        ErrorCode::Unsupported,
-                        format!("this thread's agent cannot be answered here ({})", cap.0),
-                    )),
-                    wire::Outcome::Started { .. } | wire::Outcome::SetupFailed { .. } => {
-                        Err(unexpected())
-                    }
-                }
+                reads.standing(thread).ok_or_else(|| no_thread(thread))?;
+                Err(Failure::new(ErrorCode::Unsupported, ANSWER_IN_ITS_TERMINAL))
             }
             Verb::CaptureStill { worker, target } => {
                 self.mine(worker)?;

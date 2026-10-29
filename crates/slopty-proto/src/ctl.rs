@@ -73,6 +73,21 @@ pub enum CtlRequest {
     /// An agent drives the person's window (`slopty ui`): the client in front of its session
     /// that has a window does it. Answered with [`CtlReply::UiDone`] or [`CtlReply::UiFailed`].
     Ui(UiCall),
+    /// One of Claude Code's hooks, relayed by `slopty hook` from the session it runs in, as
+    /// Claude Code gave it on stdin: the worker reads the session's status from it. Answered
+    /// with [`CtlReply::Ok`], or an error for a token that does not vouch for the session.
+    Hook {
+        /// The session the hook ran in (`SLOPTY_SESSION`).
+        session: SessionId,
+        /// That session's token ([`SESSION_TOKEN_ENV`]).
+        token: String,
+        /// When the relay started, in microseconds since the Unix epoch. Claude Code runs every
+        /// hook asynchronously, so two relays may arrive out of order: the worker passes over
+        /// one older than the last it took for the session.
+        at_us: u64,
+        /// The hook's JSON.
+        payload: String,
+    },
 }
 
 /// An agent's ask of the person's window ([`CtlRequest::Ui`]).

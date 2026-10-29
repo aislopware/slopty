@@ -195,12 +195,13 @@ pub async fn start(stack: &ServedApp, machine: &str, folder: &Path, prompt: &str
     agent
 }
 
-/// Send the first thread `words` from its composer, as the person does: the CLI's `agent tell`
-/// reaches an agent as a report from another, which Claude Code is not asked to act on alone.
+/// Type `words` into the first session's TUI and send them, as the person does in its
+/// terminal: the CLI's `agent tell` reaches an agent as a report from another, which Claude Code
+/// is not asked to act on alone.
 pub async fn tell(stack: &mut ServedApp, words: &str) {
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
-    type_in_composer(drv, words).await;
+    type_in_terminal(drv, words).await;
     drv.keys("enter").await.unwrap();
 }
 
@@ -229,28 +230,30 @@ pub fn says(read: &Value, words: &str) -> bool {
     read.to_string().contains(words)
 }
 
-/// Whether the thread has a request waiting on the person.
-pub fn asking(read: &Value) -> bool {
-    read["requests"].as_array().is_some_and(|r| !r.is_empty())
-}
-
-/// Open the `nth` thread of the sidebar (⌘1 is the first started) at the window's size, once its
-/// composer is drawn.
+/// Open the `nth` session of the sidebar (⌘1 is the first started) at the window's size, once its
+/// titlebar is drawn.
 pub async fn open_thread(drv: &mut Driver, nth: u8) -> Dump {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.keys(&format!("cmd-{nth}")).await.unwrap();
-    seen(drv, "the thread's composer", STEP, |d| d.a11y_node("Button", Some("Open in…")).is_some())
+    seen(drv, "the session's titlebar", STEP, |d| d.a11y_node("Button", Some("Open in…")).is_some())
         .await
 }
 
-/// Click the composer and type `text` into it.
-pub async fn type_in_composer(drv: &mut Driver, text: &str) {
+/// Type `text` into the open session's terminal, its TUI's prompt: the keyboard is the
+/// terminal's once the session opens, and a click on it gives it back from elsewhere.
+pub async fn type_in_terminal(drv: &mut Driver, text: &str) {
     let dump =
-        seen(drv, "the composer", STEP, |d| d.a11y.iter().any(|n| n.role == "MultilineTextInput"))
+        seen(drv, "the session's terminal", STEP, |d| d.a11y.iter().any(|n| n.role == "Terminal"))
             .await;
-    let composer = dump.a11y.iter().find(|n| n.role == "MultilineTextInput").unwrap();
-    let (x, y) = middle(composer);
-    drv.click(x, y).await.unwrap();
+    if !dump.focused.starts_with("terminal:") {
+        let terminal = dump.a11y.iter().find(|n| n.role == "Terminal").unwrap();
+        let (x, y) = middle(terminal);
+        drv.click(x, y).await.unwrap();
+        seen(drv, "the terminal holding the keyboard", STEP, |d| {
+            d.focused.starts_with("terminal:")
+        })
+        .await;
+    }
     drv.type_text(text).await.unwrap();
 }
 
@@ -262,21 +265,51 @@ pub fn heard(path: &Path) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// The control requests of `subtype` the stand-in heard, in order.
-pub fn control_requests(record: &Value, subtype: &str) -> Vec<Value> {
-    record["received"]
-        .as_array()
-        .map(|lines| {
-            lines
-                .iter()
-                .filter_map(|line| match line {
-                    Value::String(text) => serde_json::from_str::<Value>(text).ok(),
-                    other => Some(other.clone()),
-                })
-                .filter(|line| {
-                    line["type"] == "control_request" && line["request"]["subtype"] == subtype
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// Claude Code's name for a folder's project directory: every character but a letter or a digit
+/// made `-`.
+pub fn escaped(dir: &Path) -> String {
+    dir.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+
+/// `at` (ms since the epoch) as Claude Code's transcripts write a moment: RFC 3339 in UTC, to the
+/// millisecond (the days-to-date step is Howard Hinnant's `civil_from_days`).
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the days-to-civil formula cannot overflow an i64 for any moment since the epoch"
+)]
+pub fn rfc3339(at: u64) -> String {
+    let (secs, ms) = (i64::try_from(at / 1000).unwrap(), at % 1000);
+    let (days, of_day) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let doe = shifted - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let (hour, minute, second) = (of_day / 3600, of_day % 3600 / 60, of_day % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{ms:03}Z")
+}
+
+/// The moment an RFC 3339 time in UTC to the millisecond names, as Claude Code's transcripts
+/// write one ("2026-10-19T01:46:38.286Z"), in ms since the epoch (Howard Hinnant's
+/// `days_from_civil`).
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the civil-to-days formula cannot overflow an i64 for any year a transcript names"
+)]
+pub fn epoch_ms(at: &str) -> Option<u64> {
+    let number = |range: std::ops::Range<usize>| at.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    let ms = if at.as_bytes().get(19) == Some(&b'.') { number(20..23)? } else { 0 };
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(((days * 86_400 + hour * 3600 + minute * 60 + second) * 1000) + ms).ok()
 }

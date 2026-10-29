@@ -22,7 +22,7 @@ impl Render for NavigationHost {
                 window,
                 cx,
             );
-            let main = shell.render_main(window, 400., 400., cx);
+            let main = shell.render_main(window, cx);
             let right = shell.render_right_pane(window, cx);
             div()
                 .size_full()
@@ -69,7 +69,6 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         apply_keymap(
             cx,
             &KeymapConfig::default(),
-            ComposerSendBehavior::default(),
         );
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
@@ -100,12 +99,12 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                     })
                     .collect();
                 state.selected_chat = Some("parent".into());
+                // slopty: each session runs in its terminal, the main column.
+                state.session_terminals =
+                    [("parent", "t-parent"), ("other", "t-other")].map(|(c, t)| (c.into(), t.into())).into();
             });
             shell.active_chat = "parent".into();
             crate::motion::set_reduced_motion(cx, true);
-            shell
-                .composer
-                .update(cx, |composer, _| composer.focus_pending = false);
             shell
         });
         NavigationHost {
@@ -127,6 +126,11 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
     });
     cx.update(|window, cx| window.draw(cx).clear(cx));
     (shell, cx)
+}
+
+/// slopty: the session's terminal, the main column's keyboard.
+fn session_focus(shell: &Entity<Shell>, cx: &App) -> FocusHandle {
+    shell.read(cx).session_terminal.read(cx).focus_handle()
 }
 
 fn press(cx: &mut VisualTestContext, forward: bool) {
@@ -175,7 +179,7 @@ fn repeated_keys_stay_in_the_right_pane_and_follow_reordering(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn clicking_main_transcript_switches_back_to_session_navigation(cx: &mut TestAppContext) {
+fn clicking_the_session_terminal_switches_back_to_session_navigation(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
     cx.simulate_click(tab, gpui::Modifiers::default());
@@ -189,62 +193,6 @@ fn clicking_main_transcript_switches_back_to_session_navigation(cx: &mut TestApp
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
     });
-}
-
-#[gpui::test]
-fn side_chat_to_diff_retains_right_focus_and_custom_bindings(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            let chat = serde_json::from_value(serde_json::json!({
-                "id": "side", "parentChatId": "parent", "deviceId": "local",
-                "archived": false, "createdAt": Utc::now(),
-            }))
-            .unwrap();
-            shell.open_side_chat(chat, shell.panel_key(cx), cx);
-            shell.add_diff_surface(window, cx);
-            shell.activate_right_surface(RightSurface::SideChat(1), window, cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|window, cx| {
-        assert!(
-            shell.read(cx).side_chats[&1]
-                .composer
-                .focus_handle(cx)
-                .is_focused(window)
-        );
-        let mut keymap = KeymapConfig::default();
-        keymap.next_session = "alt-down".into();
-        keymap.prev_session = "alt-up".into();
-        apply_keymap(cx, &keymap, ComposerSendBehavior::default());
-    });
-    cx.simulate_keystrokes("alt-down");
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert_surface(&shell, cx, RightSurface::Diff(3));
-    cx.simulate_keystrokes("alt-down");
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert_surface(&shell, cx, RightSurface::Diff(1));
-    cx.simulate_keystrokes("alt-up");
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert_surface(&shell, cx, RightSurface::Diff(3));
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.activate_right_surface(RightSurface::SideChat(1), window, cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.close_right_surface(RightSurface::SideChat(1), window, cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    // Closing returns to the most recently visited tab, then cycles in strip order.
-    assert_surface(&shell, cx, RightSurface::Diff(3));
-    cx.simulate_keystrokes("alt-down");
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    assert_surface(&shell, cx, RightSurface::Diff(1));
 }
 
 #[gpui::test]
@@ -263,7 +211,7 @@ fn closing_active_and_last_tabs_recovers_the_correct_pane(cx: &mut TestAppContex
         shell.update(cx, |shell, cx| {
             shell.close_right_surface(RightSurface::Diff(2), window, cx);
             assert!(!shell.right_pane_open(cx));
-            assert!(shell.composer.focus_handle(cx).is_focused(window));
+            assert!(shell.session_terminal.read(cx).focus_handle().is_focused(window));
         })
     });
     press(cx, true);
@@ -284,7 +232,7 @@ fn modal_and_picker_block_navigation_in_both_panes(cx: &mut TestAppContext) {
                     &shell.navigation_focus.main
                 };
                 window.focus(focus, cx);
-                shell.delete_confirm = Some("parent".into());
+                shell.delete_space_confirm = Some("space".into());
             })
         });
         press(cx, true);
@@ -295,16 +243,12 @@ fn modal_and_picker_block_navigation_in_both_panes(cx: &mut TestAppContext) {
                 Some("parent")
             );
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(2));
-            shell.delete_confirm = None;
+            shell.delete_space_confirm = None;
         });
     }
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell
-                .composer
-                .update(cx, |composer, cx| composer.open_model_menu(window, cx));
-        })
-    });
+    // slopty: New session's picker, an overlay that owns the keyboard.
+    shell.update(cx, |shell, cx| shell.open_new_session_picker(None, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
     press(cx, true);
     shell.read_with(cx, |shell, cx| {
         assert_eq!(
@@ -343,14 +287,14 @@ fn hiding_reopening_and_expanding_preserve_navigation_boundaries(cx: &mut TestAp
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.update(|window, cx| {
         assert!(!shell.read(cx).navigation_focus.in_right(window, cx));
-        assert!(shell.read(cx).composer.focus_handle(cx).is_focused(window));
+        assert!(session_focus(&shell, cx).is_focused(window));
     });
     shell.update(cx, |shell, cx| shell.set_surfaces_open(true, cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.update(|window, cx| {
-        assert!(shell.read(cx).composer.focus_handle(cx).is_focused(window));
+        assert!(session_focus(&shell, cx).is_focused(window));
     });
-    // Restored tabs do not take navigation away from the main composer.
+    // Restored tabs do not take navigation away from the session's terminal.
     press(cx, true);
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
@@ -438,19 +382,26 @@ fn each_session_cycles_only_its_own_tabs(cx: &mut TestAppContext) {
             shell.activate_right_surface(RightSurface::Diff(3), window, cx);
         })
     });
-    press(cx, true);
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
-        assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(3));
-    });
+    // slopty: its strip is the inspector it was given when it first showed, and its diff.
+    for surface in [RightSurface::Inspector, RightSurface::Diff(3)] {
+        press(cx, true);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
+            assert_eq!(shell.resolved_right_active(cx), surface);
+        });
+    }
     shell.update(cx, |shell, cx| shell.open_chat("parent".into(), cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
+    let tabs = shell.read_with(cx, |shell, _| shell.right_tabs["parent"].clone());
+    assert_eq!(tabs, [RightSurface::Inspector, RightSurface::Diff(1), RightSurface::Diff(2)]);
     let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
     cx.simulate_click(tab, gpui::Modifiers::default());
     press(cx, true);
+    assert_surface(&shell, cx, RightSurface::Diff(1));
+    press(cx, true);
     assert_surface(&shell, cx, RightSurface::Diff(2));
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(1));
+    assert_surface(&shell, cx, RightSurface::Inspector);
 }
 
 /// Settles a transcript selection and seeds the clipboard with a sentinel, so
@@ -470,31 +421,7 @@ fn clear_transcript_selection() {
 }
 
 #[gpui::test]
-fn copy_shortcut_copies_transcript_selection_after_clicking_the_transcript(
-    cx: &mut TestAppContext,
-) {
-    let _selection = crate::markdown::selection::test_state_lock();
-    let (shell, cx) = setup(cx);
-    cx.update(|window, cx| window.focus(&shell.read(cx).composer.focus_handle(cx), cx));
-    let main = cx.debug_bounds("navigation-main").unwrap();
-    cx.simulate_click(
-        main.origin + gpui::point(px(100.), px(150.)),
-        gpui::Modifiers::default(),
-    );
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|window, cx| {
-        let shell = shell.read(cx);
-        assert!(!shell.composer.focus_handle(cx).is_focused(window));
-        assert!(shell.navigation_focus.main.is_focused(window));
-    });
-    select_transcript_text(cx);
-    cx.simulate_keystrokes("ctrl-c");
-    assert_eq!(clipboard_text(cx).as_deref(), Some("selected"));
-    clear_transcript_selection();
-}
-
-#[gpui::test]
-fn copy_shortcut_copies_side_chat_selection_from_the_right_pane(cx: &mut TestAppContext) {
+fn copy_shortcut_copies_the_inspector_selection_from_the_right_pane(cx: &mut TestAppContext) {
     let _selection = crate::markdown::selection::test_state_lock();
     let (shell, cx) = setup(cx);
     cx.update(|window, cx| {
@@ -505,19 +432,6 @@ fn copy_shortcut_copies_side_chat_selection_from_the_right_pane(cx: &mut TestApp
     select_transcript_text(cx);
     cx.simulate_keystrokes("ctrl-c");
     assert_eq!(clipboard_text(cx).as_deref(), Some("selected"));
-    clear_transcript_selection();
-}
-
-#[gpui::test]
-fn copy_shortcut_prefers_the_focused_composer_selection(cx: &mut TestAppContext) {
-    let _selection = crate::markdown::selection::test_state_lock();
-    let (shell, cx) = setup(cx);
-    cx.update(|window, cx| window.focus(&shell.read(cx).composer.focus_handle(cx), cx));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.simulate_input("draft text");
-    select_transcript_text(cx);
-    cx.simulate_keystrokes("ctrl-a ctrl-c");
-    assert_eq!(clipboard_text(cx).as_deref(), Some("draft text"));
     clear_transcript_selection();
 }
 
@@ -579,7 +493,8 @@ fn a_closed_tab_comes_back_with_its_key(cx: &mut TestAppContext) {
 fn new_tab_and_history_keys(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| window.focus(&shell.composer.focus_handle(cx), cx))
+        let focus = session_focus(&shell, cx);
+        window.focus(&focus, cx);
     });
     cx.simulate_keystrokes(&platform_combo("mod-t"));
     cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -643,61 +558,6 @@ fn an_archive_is_undone_from_its_toast_or_cmd_z(cx: &mut TestAppContext) {
     assert!(requests.try_recv().is_err());
 }
 
-// slopty: a subagent drilled into from its card.
-/// A subagent of a call shows "parent › subagent" over its run and, for the composer, the bar
-/// that says it runs inside its parent; Escape there goes back to the parent.
-#[gpui::test]
-fn a_drilled_in_subagent_leads_back_to_its_parent(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    shell.update(cx, |shell, cx| {
-        shell.state.update(cx, |state, _| {
-            state.chats.push(
-                serde_json::from_value(serde_json::json!({
-                    "id": "child", "title": "Count lines", "parentChatId": "parent",
-                    "subagent": true, "inParent": true, "deviceId": "local",
-                    "archived": false, "createdAt": Utc::now(),
-                }))
-                .unwrap(),
-            );
-        });
-        shell.open_chat("child".into(), cx);
-        shell.drill_focus_pending = true;
-    });
-    let labels = |cx: &mut VisualTestContext| {
-        cx.update(|window, cx| {
-            window.set_a11y_active(true);
-            window.refresh();
-            window.draw(cx).clear(cx);
-            let update = window.a11y_tree().expect("a tree");
-            update
-                .nodes
-                .iter()
-                .map(|(_, node)| (node.role(), node.label().unwrap_or_default().to_owned()))
-                .collect::<Vec<_>>()
-        })
-    };
-    let nodes = labels(cx);
-    use gpui::accesskit::Role as A11y;
-    assert!(
-        nodes.contains(&(A11y::Navigation, "parent › Count lines".to_owned())),
-        "the breadcrumb: {nodes:?}"
-    );
-    assert!(nodes.contains(&(A11y::Status, "Runs inside parent".to_owned())), "the bar");
-    assert!(nodes.contains(&(A11y::Link, "Back to parent".to_owned())));
-    let bar = cx.debug_bounds("subagent-bar").expect("the bar drawn");
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("parent"));
-    });
-    let nodes = labels(cx);
-    assert!(!nodes.contains(&(A11y::Status, "Runs inside parent".to_owned())), "back home");
-    // The bar stands in the composer's own column, edge for edge.
-    let pill = shell.read_with(cx, |shell, cx| shell.composer.read(cx).surface_bounds().get()).expect("the composer");
-    let edges = |b: gpui::Bounds<gpui::Pixels>| (f32::from(b.left()).round(), f32::from(b.right()).round());
-    assert_eq!(edges(bar), edges(pill), "bar {bar:?}, composer {pill:?}");
-}
-
 /// slopty: whether the keyboard is in a Changes surface, whose context the diff's find keys are
 /// bound in.
 fn keyboard_in_changes(cx: &mut VisualTestContext) -> bool {
@@ -714,8 +574,8 @@ fn keyboard_in_changes(cx: &mut VisualTestContext) -> bool {
 #[gpui::test]
 fn a_diff_brought_to_the_front_takes_the_keyboard(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    let composer = cx.update(|_, cx| shell.read(cx).composer.focus_handle(cx));
-    cx.update(|window, cx| window.focus(&composer, cx));
+    let session = cx.update(|_, cx| session_focus(&shell, cx));
+    cx.update(|window, cx| window.focus(&session, cx));
     assert!(!keyboard_in_changes(cx), "diffs opened for no one leave the keyboard");
 
     cx.update(|window, cx| {
@@ -725,8 +585,8 @@ fn a_diff_brought_to_the_front_takes_the_keyboard(cx: &mut TestAppContext) {
     });
     assert!(keyboard_in_changes(cx), "the diff opened from the offers has the keyboard");
 
-    cx.update(|window, cx| window.focus(&composer, cx));
-    assert!(!keyboard_in_changes(cx), "the composer has it back");
+    cx.update(|window, cx| window.focus(&session, cx));
+    assert!(!keyboard_in_changes(cx), "the session's terminal has it back");
     let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
     cx.simulate_click(tab, gpui::Modifiers::default());
     assert!(keyboard_in_changes(cx), "the diff picked by its tab has the keyboard");

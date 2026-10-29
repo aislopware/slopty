@@ -287,7 +287,7 @@ impl Render for PagePaneView {
         let back = live::chrome::icon_button(
             format!("{}-pane-back", self.page),
             crate::icons::ALT_ARROW_LEFT,
-            "Back to the chat",
+            "Back to the inspector",
             &theme,
         )
         .on_click({

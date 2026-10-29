@@ -2012,7 +2012,7 @@ pub(super) fn sidebar_disclosure_header(
     hovered: Option<Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
 ) -> gpui::Stateful<gpui::Div> {
     let fade_key = SharedString::from(format!("sidebar-header-{key}"));
-    let fade = sidebar_hover(fade_key.clone());
+    let fade = motion::hover_listener(fade_key.clone());
     let hover = move |is: &bool, window: &mut Window, cx: &mut App| {
         fade(is, window, cx);
         if let Some(hovered) = &hovered {
@@ -2042,7 +2042,7 @@ pub(super) fn sidebar_disclosure_header(
             div()
                 .text_size(crate::typography::ui_rems(SIDEBAR_HEADER_TEXT))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(sidebar_hover_blend(&fade_key, theme.text_muted, theme.text))
+                .text_color(motion::hover_blend(&fade_key, theme.text_muted, theme.text))
                 .child(label),
         ))
         .children(count.map(|count| {
@@ -2052,7 +2052,7 @@ pub(super) fn sidebar_disclosure_header(
                 .flex_none()
                 .text_size(crate::typography::ui_rems(SIDEBAR_HEADER_TEXT))
                 .font_features(crate::typography::tabular())
-                .text_color(sidebar_hover_blend(
+                .text_color(motion::hover_blend(
                     &fade_key,
                     theme.text_muted.opacity(0.0),
                     theme.text_muted,
@@ -2076,46 +2076,13 @@ pub(super) fn sidebar_disclosure_header(
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
 }
 
-// slopty: the sidebar is a view the window may draw from its last frame, and the hover fades let
-// go of a key no frame read, taking its element for gone: the one sidebar element the pointer
-// is over (a header, a History row) says so again before its fade is read, as a page card does.
-thread_local! {
-    static SIDEBAR_POINTER: std::cell::RefCell<Option<SharedString>> = const { std::cell::RefCell::new(None) };
-}
-
-/// The `.on_hover` listener of the sidebar fade `key`, which remembers the pointer over it.
-pub(super) fn sidebar_hover(key: SharedString) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
-    let fade = motion::hover_listener(key.clone());
-    move |hovered, window, cx| {
-        SIDEBAR_POINTER.with(|pointer| {
-            let mut pointer = pointer.borrow_mut();
-            if *hovered {
-                *pointer = Some(key.clone());
-            } else if pointer.as_ref() == Some(&key) {
-                *pointer = None;
-            }
-        });
-        fade(hovered, window, cx);
-    }
-}
-
-/// slopty: how far a sidebar fade `key` set by [`sidebar_hover`] reveals what it shows only
-/// under the pointer: wholly on a touch screen, where nothing hovers.
+/// slopty: how far a sidebar fade `key` reveals what it shows only under the pointer: wholly on
+/// a touch screen, where nothing hovers.
 pub(super) fn sidebar_hover_reveal(key: &str) -> f32 {
     if super::compact::touch_screen() {
         return 1.0;
     }
-    let clear = gpui::Hsla { h: 0.0, s: 0.0, l: 0.0, a: 0.0 };
-    sidebar_hover_blend(key, clear, gpui::Hsla { a: 1.0, ..clear }).a
-}
-
-/// [`motion::hover_blend`] of a sidebar fade `key` set by [`sidebar_hover`].
-pub(super) fn sidebar_hover_blend(key: &str, rest: gpui::Hsla, hover: gpui::Hsla) -> gpui::Hsla {
-    let over = SIDEBAR_POINTER.with(|pointer| pointer.borrow().as_deref() == Some(key));
-    if over && !motion::hover_known(key) {
-        motion::set_hover(key, true, true);
-    }
-    motion::hover_blend(key, rest, hover)
+    motion::hover_t(key)
 }
 
 /// Section header glyphs (chevron, `+`, `…`) share the label's muted tone.
@@ -2540,6 +2507,23 @@ fn path_under(path: &str, base: &str) -> bool {
         || path
             .strip_prefix(base)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '\\']))
+}
+
+// slopty: what removing a project does, in the dialog's words: it leaves the sidebar and its
+// sessions move to Archived, where they are restored; nothing on the machine is deleted.
+/// What the Remove project dialog says removing `name`, with `count` sessions on `device`, does.
+fn remove_project_body(name: &str, device: &str, count: usize) -> String {
+    match count {
+        0 => format!("\u{201C}{name}\u{201D} leaves the sidebar. Nothing on {device} is deleted."),
+        1 => format!(
+            "\u{201C}{name}\u{201D} leaves the sidebar, and its session on {device} moves to \
+             Archived, where you can restore it. Nothing on {device} is deleted."
+        ),
+        _ => format!(
+            "\u{201C}{name}\u{201D} leaves the sidebar, and its {count} sessions on {device} move \
+             to Archived, where you can restore them. Nothing on {device} is deleted."
+        ),
+    }
 }
 
 /// The space-row Rename dialog (same shape as [`RenameChatDialog`]).
@@ -4271,11 +4255,8 @@ impl Shell {
         let session = state.session_for(&chat.id);
         let group = super::sidebar_status::StatusGroup::of(status, &chat, session, now);
         let group = Some((group.key().to_owned(), group.label().to_owned()));
-        // slopty: as the row decides it (`Shell::render_chat_row`): a send held or failed says
-        // that instead.
-        let reason = !state.send_queued(&chat.id, now)
-            && !state.send_undelivered(&chat.id, now)
-            && super::sidebar_status::reason(status, session, now).is_some();
+        // slopty: as the row decides it (`Shell::render_chat_row`).
+        let reason = super::sidebar_status::reason(status, session, now).is_some();
         ActiveChatRow {
             status,
             chat: chat.clone(),
@@ -4550,7 +4531,7 @@ impl Shell {
         let selected = self.state.read(cx).selected_chat.clone();
         // Re-checked at render so the chips drop the FRAME a popover opens,
         // not on the next modifier event — the jumps are suppressed under it.
-        let jump_hints = self.jump_hints && !self.overlay_owns_keyboard(cx);
+        let jump_hints = self.jump_hints && !self.overlay_owns_keyboard();
         let keymap = self.settings.keymap.clone();
         // Flat top-to-bottom slot across groups: the same order
         // `sidebar_visible_order` hands the jump shortcuts and cycling, so a
@@ -4640,7 +4621,7 @@ impl Shell {
                 let element = self.render_chat_row(
                     chat.id.clone(),
                     transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New chat".into()),
+                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
                     )
                     .into(),
                     title_hints.get(&chat.id).cloned(),
@@ -5013,7 +4994,7 @@ impl Shell {
                 let element = self.render_chat_row(
                     chat.id.clone(),
                     transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New chat".into()),
+                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
                     )
                     .into(),
                     title_hints.get(&chat.id).cloned(),
@@ -6984,15 +6965,9 @@ impl Shell {
                     state.chats_in_space(&space_id).len(),
                 )
             };
-            let copy = if count == 1 {
-                format!(
-                    "Removing “{name}” permanently deletes its 1 chat on {device}. This can’t be undone."
-                )
-            } else {
-                format!(
-                    "Removing “{name}” permanently deletes its {count} chats on {device}. This can’t be undone."
-                )
-            };
+            // slopty: a session is its agent's own record, so removing a project archives its
+            // sessions (Archived restores them) and deletes nothing on the machine.
+            let copy = remove_project_body(&name, &device, count);
             let shell = cx.weak_entity();
             let card = crate::surface_chrome::modal_card(
                 popover::dialog_card(&theme),
@@ -7045,6 +7020,19 @@ mod tests {
 
     use super::compare_sidebar_chats;
 
+    /// slopty: removing a project says its sessions move to Archived, counted, and that the
+    /// machine keeps everything.
+    #[test]
+    fn removing_a_project_says_its_sessions_are_archived() {
+        let none = super::remove_project_body("app", "Studio", 0);
+        assert_eq!(none, "\u{201C}app\u{201D} leaves the sidebar. Nothing on Studio is deleted.");
+        let one = super::remove_project_body("app", "Studio", 1);
+        assert!(one.contains("its session on Studio moves to Archived"), "{one}");
+        let many = super::remove_project_body("app", "Studio", 3);
+        assert!(many.contains("its 3 sessions on Studio move to Archived"), "{many}");
+        assert!(many.ends_with("Nothing on Studio is deleted."), "{many}");
+    }
+
     fn chat(id: &str) -> slopty_view_proto::Chat {
         slopty_view_proto::Chat {
             id: id.into(),
@@ -7090,13 +7078,6 @@ mod tests {
 #[cfg(feature = "project-palette-fixture")]
 impl Shell {
     pub fn fixture_project_responses(&mut self, cx: &mut Context<Self>) {
-        if std::env::var_os("SLOPTY_FIXTURE_BACKGROUND").is_some() {
-            self.composer
-                .read(cx)
-                .pickers()
-                .clone()
-                .update(cx, |pickers, cx| pickers.fixture_model_catalog(cx));
-        }
         let Some(flow) = self.add_space.as_mut() else {
             return;
         };

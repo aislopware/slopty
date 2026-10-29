@@ -294,20 +294,6 @@ impl Shell {
                             surface.update(cx, |files, cx| files.hold_mutation(paths.clone(), cx));
                         }
                     }
-                    FilesEvent::AddToChat {
-                        path,
-                        is_directory,
-                        origin,
-                    } => {
-                        let payload = WorkspacePathDrag::new(path.clone(), *is_directory)
-                            .with_origin(
-                                Some(origin.clone()),
-                                crate::files::WorkspacePathSource::Tree,
-                                None,
-                            );
-                        let composer = this.composer.clone();
-                        this.attach_workspace_drag(&payload, &composer, window, cx);
-                    }
                     FilesEvent::Mutate(intent)
                         if this.accepts_file_navigation(&owner, &source, cx) =>
                     {
@@ -355,8 +341,6 @@ impl Shell {
                 files.focus_explorer(window, cx);
             });
         }
-        self.composer
-            .update(cx, |composer, _| composer.focus_pending = false);
         cx.notify();
     }
 
@@ -389,7 +373,7 @@ impl Shell {
             return;
         }
         self.close_files_panel(cx);
-        window.focus(&self.composer.focus_handle(cx), cx);
+        self.focus_session_terminal(window, cx); // slopty: the session
         if self.right_pane_open(cx) {
             self.focus_right_file_editor(self.resolved_right_active(cx), window, cx);
         }
@@ -441,7 +425,7 @@ impl Shell {
         if content.is_none() && self.files_panel_open(cx) {
             cx.defer_in(window, |shell, window, cx| {
                 shell.add_files_surface(window, cx);
-                window.focus(&shell.composer.focus_handle(cx), cx);
+                shell.focus_session_terminal(window, cx); // slopty: the session
             });
         }
         if let Some(files) = &content {

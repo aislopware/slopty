@@ -127,12 +127,6 @@ mod actions {
             RerunLast,
             /// Copy the output of the selected command block (the last one with none selected).
             CopyBlockOutput,
-            /// Attach the selected command block (the last one with none selected) to an
-            /// agent's thread as context.
-            AttachBlock,
-            /// Attach the selected text to an agent's thread as context, fenced and named after
-            /// the command whose output it is.
-            AttachSelection,
             /// Clear the screen and the history (⌘K, as in every Mac terminal).
             ClearScreen,
             /// Keyboard copy mode: a cursor of its own walks the history with vi's keys,
@@ -145,9 +139,9 @@ mod actions {
     );
 }
 pub use actions::{
-    AttachBlock, AttachSelection, ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput,
-    CopyMode, Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ScrollPageDown,
-    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, SendEscape, ToggleMatchCase, ToggleRegex,
+    ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput, CopyMode, Find, FindNext,
+    FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ScrollPageDown, ScrollPageUp,
+    ScrollToBottom, ScrollToTop, SelectAll, SendEscape, ToggleMatchCase, ToggleRegex,
     ToggleWholeWord,
 };
 
@@ -220,8 +214,6 @@ pub fn commands() -> Vec<KeyCommand> {
         // ⌘⇧↩ is the workspace's zoom-pane; "Rerun last command" is in the palette.
         c("rerun_last", RerunLast, &[], GRID),
         c("copy_block_output", CopyBlockOutput, &[], GRID),
-        c("attach_block", AttachBlock, &[], GRID),
-        c("attach_selection", AttachSelection, &[], GRID),
         c("clear_screen", ClearScreen, &["cmd-k"], GRID),
     ];
     // An iPad's Magic Keyboard has no Esc key; ⌘. is the Mac's old Escape, and iPadOS gives
@@ -397,12 +389,6 @@ pub enum TerminalViewEvent {
         /// How long it ran.
         elapsed: Duration,
     },
-    /// Context for an agent's message, Markdown, for the workspace to put in the draft of the
-    /// agent it picks: a block from "Add to chat" on its menu or the palette's "Attach block
-    /// to agent" (`block_context`), or the selection from "Add selection to chat" or the
-    /// palette's "Attach selection to agent" (`selection_context`). Offered only while the
-    /// attach probe finds an agent.
-    Attach(String),
     /// "View" on a tool call that named a file, or ⌘-click on a path while a command runs:
     /// the workspace opens (or reveals) a file tile for it, a relative path made absolute
     /// against the session's directory, landing on `line` (1-based) when one is known.
@@ -461,9 +447,6 @@ impl ClipPaste {
 
 /// Asked by ⌘V and ⌃V before they go on: what the clipboard holds.
 pub type ClipHook = Rc<dyn Fn() -> ClipPaste>;
-
-/// Asked before a block is offered to an agent: whether one would take it.
-pub type AttachProbe = Rc<dyn Fn(&App) -> bool>;
 
 /// Whether `keystroke` is ⌃V, the key Claude Code pastes a picture on.
 fn is_control_v(keystroke: &Keystroke) -> bool {
@@ -559,6 +542,8 @@ pub struct TerminalView {
     /// take back and replace (Telex turning a sent `e` into `ê`), the line before the cursor
     /// as it knows it.
     typed: String,
+    /// Words the person has put in the program's line and not yet sent (see [`drafting_after`]).
+    drafting: bool,
     /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
     sticky_control: bool,
     /// The next key (or typed character) gets Alt, as Meta whatever the ⌥ setting: the key
@@ -583,8 +568,6 @@ pub struct TerminalView {
     path_press: Option<(url::PathSpan, bool, gpui::Point<Pixels>)>,
     /// Asked by ⌘V and ⌃V for what the clipboard holds.
     clip_hook: Option<ClipHook>,
-    /// Whether an agent would take a block as context ([`Self::set_attach_probe`]).
-    attach_probe: Option<AttachProbe>,
     /// A ⌘C whose history is still arriving.
     copying: Option<Copying>,
     /// A block item picked before its block's rows arrived: the item, the block's prompt row,
@@ -761,6 +744,7 @@ impl TerminalView {
             latency: Rc::default(),
             marked: None,
             typed: String::new(),
+            drafting: false,
             sticky_control: false,
             sticky_alt: false,
             pointer_hidden: false,
@@ -773,7 +757,6 @@ impl TerminalView {
             click_at: None,
             path_press: None,
             clip_hook: None,
-            attach_probe: None,
             copying: None,
             block_pick: None,
             copy_mode: None,
@@ -1579,11 +1562,7 @@ impl TerminalView {
 
     /// The menu's items, in order: what applies to the block under the click, then the
     /// terminal's own (Copy only with something selected).
-    fn block_menu_items(
-        block: Option<&CommandBlock>,
-        has_selection: bool,
-        can_attach: bool,
-    ) -> Vec<BlockMenuItem> {
+    fn block_menu_items(block: Option<&CommandBlock>, has_selection: bool) -> Vec<BlockMenuItem> {
         let mut items = Vec::new();
         if let Some(block) = block {
             if block.command.is_some() {
@@ -1596,16 +1575,10 @@ impl TerminalView {
             if block.command.is_some() {
                 items.push(BlockMenuItem::Rerun);
             }
-            if can_attach {
-                items.push(BlockMenuItem::Attach);
-            }
             items.push(BlockMenuItem::SelectBlock);
         }
         if has_selection {
             items.push(BlockMenuItem::Copy);
-            if can_attach {
-                items.push(BlockMenuItem::AttachSelection);
-            }
         }
         items.push(BlockMenuItem::Paste);
         items.push(BlockMenuItem::Find);
@@ -1627,11 +1600,9 @@ impl TerminalView {
             BlockMenuItem::Paste => self.paste_clipboard(&Paste, window, cx),
             BlockMenuItem::Find => self.find(&Find, window, cx),
             BlockMenuItem::ClearScreen => self.clear_screen(&ClearScreen, window, cx),
-            BlockMenuItem::AttachSelection => self.attach_selection(&AttachSelection, window, cx),
             BlockMenuItem::CopyCommand
             | BlockMenuItem::CopyOutput
             | BlockMenuItem::Rerun
-            | BlockMenuItem::Attach
             | BlockMenuItem::SelectBlock => {
                 if let Some(block) = block {
                     self.block_item_pick(item, block, cx);
@@ -1693,10 +1664,8 @@ impl TerminalView {
                     self.run_text(command, cx);
                 }
             }
-            BlockMenuItem::Attach => cx.emit(TerminalViewEvent::Attach(block_context(&block))),
             BlockMenuItem::SelectBlock => self.select_block(&block),
             BlockMenuItem::Copy
-            | BlockMenuItem::AttachSelection
             | BlockMenuItem::Paste
             | BlockMenuItem::Find
             | BlockMenuItem::ClearScreen => {}
@@ -1735,46 +1704,6 @@ impl TerminalView {
         if let Some(block) = self.target_block().filter(|b| !b.output.is_empty()) {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(block.output));
         }
-    }
-
-    /// The palette's "Attach block to agent": the block `target_block` picks goes to an agent's
-    /// draft as context ([`TerminalViewEvent::Attach`]). With no agent to take it
-    /// ([`Self::set_attach_probe`]) the palette lists no line for it, and a key bound to it says
-    /// so.
-    pub fn attach_block(&mut self, _: &AttachBlock, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.can_attach(cx) {
-            cx.emit(TerminalViewEvent::Notice("No agent to attach the block to".to_owned()));
-            return;
-        }
-        match self.target_block() {
-            Some(block) => cx.emit(TerminalViewEvent::Attach(block_context(&block))),
-            None => cx.emit(TerminalViewEvent::Notice("No command block to attach".to_owned())),
-        }
-    }
-
-    /// The palette's "Attach selection to agent", and the menu's "Add selection to chat": the
-    /// selected text goes to an agent's draft as context ([`TerminalViewEvent::Attach`]), fenced
-    /// and named after the command whose block the selection starts in. With no agent to take it,
-    /// or nothing selected, it says so.
-    pub fn attach_selection(
-        &mut self,
-        _: &AttachSelection,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.can_attach(cx) {
-            cx.emit(TerminalViewEvent::Notice("No agent to attach the selection to".to_owned()));
-            return;
-        }
-        let Some(text) = self.selected_text().filter(|t| !t.trim().is_empty()) else {
-            cx.emit(TerminalViewEvent::Notice("Nothing selected to attach".to_owned()));
-            return;
-        };
-        let block = self
-            .selection
-            .filter(|_| !self.state.modes().contains(TermModes::ALT_SCREEN))
-            .and_then(|selection| self.state.command_block(selection.ordered().0.0));
-        cx.emit(TerminalViewEvent::Attach(selection_context(&text, block.as_ref())));
     }
 
     /// ⇧-arrow with a selection: where its head moves (a cell sideways, wrapping at the row's
@@ -1817,7 +1746,7 @@ impl TerminalView {
     ) -> gpui::AnyElement {
         use slopty_shell::live::menu::{Menu, MenuItem, MenuPanel};
         let has_selection = self.selection_has_text();
-        let items = Self::block_menu_items(menu.block.as_ref(), has_selection, menu.attach);
+        let items = Self::block_menu_items(menu.block.as_ref(), has_selection);
         let this = cx.entity().downgrade();
         let mut rows = Menu::new();
         let mut group = None;
@@ -1979,19 +1908,6 @@ impl TerminalView {
         self.clip_hook = Some(hook);
     }
 
-    /// Where the view asks whether an agent would take a block as context: only then does the
-    /// block menu offer "Add to chat" (the palette asks the workspace itself).
-    pub fn set_attach_probe(&mut self, probe: AttachProbe) {
-        self.attach_probe = Some(probe);
-    }
-
-    /// An agent would take a block as context. Asked where a block is offered (the menu
-    /// opening, the action), never while drawing: the probe reads the workspace, and a read in
-    /// render would draw the terminal again whenever the workspace changes.
-    fn can_attach(&self, cx: &App) -> bool {
-        self.attach_probe.as_ref().is_some_and(|probe| probe(cx))
-    }
-
     /// Open the block menu for `block` (none off every block) at `at`.
     /// Open the block menu on the block line `index` is in, asking for its rows not held here
     /// (a burst of output scrolls rows away that no frame carried): the menu reads the block
@@ -2005,9 +1921,8 @@ impl TerminalView {
         let effects = self.state.request_block(index);
         self.send_effects(effects, cx);
         let block = self.state.command_block(index);
-        let attach = self.can_attach(cx);
         let epoch = self.state.epoch();
-        self.block_menu.open(BlockMenu { index, epoch, block, at, attach });
+        self.block_menu.open(BlockMenu { index, epoch, block, at });
         cx.notify();
     }
 
@@ -2647,6 +2562,15 @@ impl TerminalView {
         }
     }
 
+    /// Whether the person has words in the program's line they have not sent yet: typed or
+    /// pasted, and not yet sent with ↩ or dropped with ⌃C or ⌃U. Judged on what the person
+    /// sends alone, never on the program's screen; what an agent driving the window reads as the
+    /// person typing.
+    #[must_use]
+    pub const fn drafting(&self) -> bool {
+        self.drafting
+    }
+
     /// Whether the program asks for files dropped on it now: a drop goes to it, not as typed
     /// paths.
     #[must_use]
@@ -3109,6 +3033,7 @@ impl TerminalView {
         if matches!(req, TermRequest::Paste { .. } | TermRequest::PastePicture(_)) {
             self.typed.clear();
         }
+        self.drafting = drafting_after(self.drafting, &req);
         self.post(req, cx);
     }
 
@@ -4251,8 +4176,6 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy_last_output))
             .on_action(cx.listener(Self::rerun_last))
             .on_action(cx.listener(Self::copy_block_output))
-            .on_action(cx.listener(Self::attach_block))
-            .on_action(cx.listener(Self::attach_selection))
             .on_action(cx.listener(Self::clear_screen))
             .on_action(cx.listener(|this, _: &SendEscape, _window, cx| this.press(escape(), cx)))
             .on_action(cx.listener(Self::scroll_page_up))
@@ -4370,6 +4293,36 @@ const fn is_motion(req: &TermRequest) -> bool {
     matches!(req, TermRequest::Mouse(MouseEvent { action: MouseAction::Motion, .. }))
 }
 
+/// Whether the person still has unsent words in the program's line after `req`, having had
+/// them before when `drafting`: a typed character or a paste puts words there; ↩, ⌃C, ⌃U, ⌃D or
+/// a submit sends or drops them. Other keys (arrows, Esc, ⌫) leave it as it was: a line taken
+/// back to nothing still counts until it is sent or dropped, the safe side for the person.
+fn drafting_after(drafting: bool, req: &TermRequest) -> bool {
+    use slopty_proto::input::{KeyCode, Mods};
+    let ends = |byte: &u8| matches!(byte, b'\r' | b'\n' | 0x03 | 0x04 | 0x15);
+    match req {
+        TermRequest::Key(key) if key.action != KeyAction::Release => {
+            let control = key.mods.contains(Mods::CTRL);
+            if matches!(key.code, KeyCode::Enter | KeyCode::NumpadEnter)
+                || control && matches!(key.code, KeyCode::C | KeyCode::D | KeyCode::U)
+            {
+                return false;
+            }
+            let words = key
+                .text
+                .as_deref()
+                .is_some_and(|text| !text.is_empty() && !text.chars().any(char::is_control));
+            drafting || words && !control && !key.mods.contains(Mods::SUPER)
+        }
+        TermRequest::Raw(bytes) if bytes.iter().any(ends) => false,
+        TermRequest::Raw(bytes) => {
+            drafting || !bytes.is_empty() && bytes.iter().all(|byte| *byte >= 0x20 && *byte != 0x7f)
+        }
+        TermRequest::Paste { .. } | TermRequest::PastePicture(_) => true,
+        _ => drafting,
+    }
+}
+
 /// Rows either side of the one under the pointer that a link is looked for over: a link wraps
 /// over a few rows, not a minified file's thousands.
 const LINK_ROWS: u64 = 8;
@@ -4484,8 +4437,6 @@ struct BlockMenu {
     block: Option<CommandBlock>,
     /// Where the click landed (window coordinates), the menu's anchor.
     at: gpui::Point<Pixels>,
-    /// An agent would take the block as context, as asked when the menu opened.
-    attach: bool,
 }
 
 /// What waits on a confirmation at the tile's foot.
@@ -4504,10 +4455,6 @@ enum BlockMenuItem {
     CopyOutput,
     /// Type the command again and press ↩.
     Rerun,
-    /// The block into an agent's draft as context.
-    Attach,
-    /// The selection into an agent's draft as context.
-    AttachSelection,
     /// Select the whole block, prompt to last output row.
     SelectBlock,
     /// The selection to the clipboard.
@@ -4520,59 +4467,13 @@ enum BlockMenuItem {
     ClearScreen,
 }
 
-/// A command block as context for an agent's message: what was run and how it ended, then
-/// its output fenced (with a fence longer than any run of backticks in it).
-#[must_use]
-pub(super) fn block_context(block: &CommandBlock) -> String {
-    let failed = block.exit.filter(|&code| code != 0);
-    let text = match (&block.command, failed) {
-        (Some(command), _) if command.contains('\n') => {
-            let ended = failed.map(|code| format!(", which exited {code}")).unwrap_or_default();
-            format!("The terminal ran{ended}:\n\n```sh\n{command}\n```\n")
-        }
-        (Some(command), Some(code)) => {
-            format!("The terminal ran `{command}`, which exited {code}:\n")
-        }
-        (Some(command), None) => format!("The terminal ran `{command}`:\n"),
-        (None, _) => "From the terminal:\n".to_owned(),
-    };
-    if block.output.is_empty() {
-        return format!("{text}\n(no output)\n");
-    }
-    let longest = block.output.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest.max(2).saturating_add(1));
-    format!("{text}\n{fence}\n{}\n{fence}\n", block.output)
-}
-
-/// Selected terminal text as context for an agent's message: whose output it is, when the
-/// selection starts in a block with a command, then the text fenced (with a fence longer than
-/// any run of backticks in it).
-#[must_use]
-pub(super) fn selection_context(text: &str, block: Option<&CommandBlock>) -> String {
-    let command = block.and_then(|b| b.command.as_deref()).filter(|c| !c.trim().is_empty());
-    let from = match command {
-        Some(command) if command.contains('\n') => {
-            format!("From the terminal, what this printed:\n\n```sh\n{command}\n```\n")
-        }
-        Some(command) => format!("From the terminal, what `{command}` printed:\n"),
-        None => "From the terminal:\n".to_owned(),
-    };
-    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    let fence = "`".repeat(longest.max(2).saturating_add(1));
-    format!("{from}\n{fence}\n{text}\n{fence}\n")
-}
-
 impl BlockMenuItem {
     /// Which group of the menu it is in, a separator between two: the block's own items, the
     /// clipboard's, then the terminal's.
     const fn group(self) -> u8 {
         match self {
-            Self::CopyCommand
-            | Self::CopyOutput
-            | Self::Rerun
-            | Self::Attach
-            | Self::SelectBlock => 0,
-            Self::Copy | Self::AttachSelection | Self::Paste => 1,
+            Self::CopyCommand | Self::CopyOutput | Self::Rerun | Self::SelectBlock => 0,
+            Self::Copy | Self::Paste => 1,
             Self::Find | Self::ClearScreen => 2,
         }
     }
@@ -4584,12 +4485,7 @@ impl BlockMenuItem {
             Self::Paste => Box::new(Paste),
             Self::Find => Box::new(Find),
             Self::ClearScreen => Box::new(ClearScreen),
-            Self::AttachSelection => Box::new(AttachSelection),
-            Self::CopyCommand
-            | Self::CopyOutput
-            | Self::Rerun
-            | Self::Attach
-            | Self::SelectBlock => return None,
+            Self::CopyCommand | Self::CopyOutput | Self::Rerun | Self::SelectBlock => return None,
         })
     }
 
@@ -4598,8 +4494,6 @@ impl BlockMenuItem {
             Self::CopyCommand => "copy-command",
             Self::CopyOutput => "copy-output",
             Self::Rerun => "rerun",
-            Self::Attach => "attach",
-            Self::AttachSelection => "attach-selection",
             Self::SelectBlock => "select-block",
             Self::Copy => "copy",
             Self::Paste => "paste",
@@ -4613,9 +4507,6 @@ impl BlockMenuItem {
             Self::CopyCommand => "Copy command",
             Self::CopyOutput => "Copy output",
             Self::Rerun => "Rerun",
-            // slopty: the pane speaks of the chat, not the agent (T3's "Add to chat").
-            Self::Attach => "Add to chat",
-            Self::AttachSelection => "Add selection to chat",
             Self::SelectBlock => "Select block",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
@@ -5721,21 +5612,9 @@ mod tests {
         assert!(outlined(cx) && !filled(cx), "unfocused: its outline");
     }
 
-    /// Selected text off every block is "From the terminal", and a fence outruns the backticks
-    /// in it.
-    #[test]
-    fn a_selection_s_fence_outruns_its_backticks() {
-        assert_eq!(
-            selection_context("a ``` b", None),
-            "From the terminal:\n\n````\na ``` b\n````\n"
-        );
-    }
-
     /// Warp's block gestures. A click in the gutter beside a block selects it whole, its prompt
     /// to its last output row, and is not the program's; the palette's "Copy block output"
-    /// copies that block's output and "Attach block to agent" hands the workspace the block as
-    /// context while an agent would take it (and is not offered otherwise), and with nothing
-    /// selected both take the last block.
+    /// copies that block's output, and with nothing selected takes the last block.
     #[gpui::test]
     fn a_gutter_click_selects_a_block_and_the_palette_acts_on_it(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
@@ -5765,46 +5644,25 @@ mod tests {
 
         dispatch(cx, Box::new(CopyBlockOutput));
         assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
-        let attached = Rc::new(RefCell::new(Vec::new()));
-        let seen = Rc::clone(&attached);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::Attach(text) = event {
-                    seen.borrow_mut().push(text.clone());
-                }
-            })
-            .detach();
-        });
-        // No agent to take it: the action says so, and the menu does not offer it.
+        // slopty: no block goes to an agent from here; the menu offers none.
         let menu = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, cx| {
+            view.read_with(cx, |v, _| {
                 let block = v.state.command_block(LineIndex(4));
-                TerminalView::block_menu_items(block.as_ref(), false, v.can_attach(cx))
+                TerminalView::block_menu_items(block.as_ref(), false)
             })
         };
-        let notices = Rc::new(RefCell::new(Vec::new()));
-        let heard = Rc::clone(&notices);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::Notice(text) = event {
-                    heard.borrow_mut().push(text.clone());
-                }
-            })
-            .detach();
-        });
-        dispatch(cx, Box::new(AttachBlock));
-        assert!(attached.borrow().is_empty());
-        assert_eq!(notices.borrow().as_slice(), ["No agent to attach the block to"]);
-        assert!(!menu(cx).contains(&BlockMenuItem::Attach));
-        let probe: AttachProbe = Rc::new(|_cx: &App| true);
-        view.update(cx, |view, cx| {
-            view.set_attach_probe(probe);
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert!(menu(cx).contains(&BlockMenuItem::Attach));
-        dispatch(cx, Box::new(AttachBlock));
-        assert_eq!(attached.borrow().as_slice(), ["The terminal ran `seq 2`:\n\n```\n1\n2\n```\n"]);
+        assert_eq!(
+            menu(cx),
+            [
+                BlockMenuItem::CopyCommand,
+                BlockMenuItem::CopyOutput,
+                BlockMenuItem::Rerun,
+                BlockMenuItem::SelectBlock,
+                BlockMenuItem::Paste,
+                BlockMenuItem::Find,
+                BlockMenuItem::ClearScreen,
+            ]
+        );
 
         // Nothing selected: the last block, here the same one.
         view.update(cx, |view, _cx| view.selection = None);
@@ -6060,36 +5918,6 @@ mod tests {
         cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("hi".into())));
         dispatch(cx, Box::new(slopty_shell::composer::Paste));
         assert_eq!(drain_input(&mut rx), ["paste:hi"], "pasted into the program");
-    }
-
-    /// A block as an agent's context says what ran and how it ended, then fences its output
-    /// with a fence no run of backticks in it closes.
-    #[test]
-    fn a_block_as_context_says_what_ran_and_how_it_ended() {
-        let block = |command: Option<&str>, exit, output: &str| CommandBlock {
-            prompt: LineIndex(0),
-            end: LineIndex(1),
-            exit,
-            command: command.map(str::to_owned),
-            output: output.to_owned(),
-            whole: true,
-        };
-        assert_eq!(
-            block_context(&block(Some("false"), Some(1), "")),
-            "The terminal ran `false`, which exited 1:\n\n(no output)\n"
-        );
-        assert_eq!(
-            block_context(&block(Some("ls"), Some(0), "a\nb")),
-            "The terminal ran `ls`:\n\n```\na\nb\n```\n"
-        );
-        assert_eq!(
-            block_context(&block(Some("for x in 1 2\ndo echo $x; done"), None, "1\n2")),
-            "The terminal ran:\n\n```sh\nfor x in 1 2\ndo echo $x; done\n```\n\n```\n1\n2\n```\n"
-        );
-        assert_eq!(
-            block_context(&block(None, None, "x ``` y")),
-            "From the terminal:\n\n````\nx ``` y\n````\n"
-        );
     }
 
     #[test]
@@ -7962,6 +7790,26 @@ mod tests {
         assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "the app's chord");
     }
 
+    /// The person's unsent words in the program's line count from what they type or paste
+    /// until ↩ or ⌃C sends or drops them; a ⌘ chord, an arrow or Esc types none.
+    #[gpui::test]
+    fn words_typed_and_not_yet_sent_are_a_draft(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let drafting = |cx: &mut VisualTestContext| view.read_with(cx, |view, _| view.drafting());
+        cx.simulate_keystrokes("cmd-up left escape");
+        assert!(!drafting(cx), "no words typed");
+        cx.simulate_keystrokes("h i");
+        assert!(drafting(cx), "words typed");
+        cx.simulate_keystrokes("left backspace escape");
+        assert!(drafting(cx), "still in the line");
+        cx.simulate_keystrokes("enter");
+        assert!(!drafting(cx), "sent");
+        cx.simulate_keystrokes("x ctrl-c");
+        assert!(!drafting(cx), "dropped");
+        view.update(cx, |view, cx| view.type_text("cargo test".to_owned(), cx));
+        assert!(drafting(cx), "pasted");
+    }
+
     /// An auto-repeated key goes the way a first press does: to the predictor (it echoes
     /// locally), to the latency meter, and back to the bottom of the history.
     #[gpui::test]
@@ -8868,57 +8716,6 @@ mod tests {
         assert!(!hidden(cx), "a move shows it");
         cx.simulate_keystrokes("b");
         assert!(hidden(cx), "and the next key hides it again");
-    }
-
-    /// "Attach selection to agent" hands the workspace the selected text fenced, named after
-    /// the command whose output it is; the menu offers it only with text selected and an agent
-    /// to take it, and the action says why it does nothing otherwise.
-    #[gpui::test]
-    fn a_selection_is_attached_named_after_its_command(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        with_command_blocks(&view, cx);
-        let dispatch = |cx: &mut VisualTestContext, action: Box<dyn gpui::Action>| {
-            cx.update(|window, cx| window.dispatch_action(action, cx));
-            cx.run_until_parked();
-        };
-        let (attached, notices) =
-            (Rc::new(RefCell::new(Vec::new())), Rc::new(RefCell::new(Vec::new())));
-        let (seen, heard) = (Rc::clone(&attached), Rc::clone(&notices));
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| match event {
-                TerminalViewEvent::Attach(text) => seen.borrow_mut().push(text.clone()),
-                TerminalViewEvent::Notice(text) => heard.borrow_mut().push(text.clone()),
-                _ => {}
-            })
-            .detach();
-        });
-        let menu = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, cx| {
-                TerminalView::block_menu_items(None, v.has_selection(), v.can_attach(cx))
-            })
-        };
-        // Lines 5 and 6 are `seq 2`'s output.
-        view.update(cx, |view, _cx| {
-            view.selection = Some(Selection::run((LineIndex(5), 0), (LineIndex(6), 9)));
-        });
-        dispatch(cx, Box::new(AttachSelection));
-        assert_eq!(notices.borrow().as_slice(), ["No agent to attach the selection to"]);
-        assert!(!menu(cx).contains(&BlockMenuItem::AttachSelection));
-
-        let probe: AttachProbe = Rc::new(|_cx: &App| true);
-        view.update(cx, |view, _cx| view.set_attach_probe(probe));
-        assert!(menu(cx).contains(&BlockMenuItem::AttachSelection));
-        dispatch(cx, Box::new(AttachSelection));
-        assert_eq!(
-            attached.borrow().as_slice(),
-            ["From the terminal, what `seq 2` printed:\n\n```\n1\n2\n```\n"]
-        );
-
-        view.update(cx, |view, _cx| view.selection = None);
-        assert!(!menu(cx).contains(&BlockMenuItem::AttachSelection), "nothing selected");
-        dispatch(cx, Box::new(AttachSelection));
-        assert_eq!(notices.borrow().last().map(String::as_str), Some("Nothing selected to attach"));
-        assert_eq!(attached.borrow().len(), 1);
     }
 
     /// With the link to the worker gone, the foot says the worker is out of reach, with the

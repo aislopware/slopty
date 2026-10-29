@@ -9,13 +9,11 @@
 //! * `workers` — connecting, losing and forgetting a worker; the sync that follows.
 //! * `agents` — coding agents in terminals: badges, banners, "needs you".
 //! * [`remote`] — the clipboard shared with the workers, files to and from them, forwarded ports.
-//! * `approvals` — "Allow" and "Deny" for an agent that waits, from its note.
 //! * `turns` — agents' turns that ended unread.
 //! * [`attention`] — what reaches the person as a note, and where.
 
 mod agent_start;
 mod agents;
-mod approvals;
 pub mod attention;
 mod commands;
 mod desktop;
@@ -77,14 +75,6 @@ pub enum WorkspaceEvent {
     /// How many agents are waiting on the human right now, across every worker (the Dock
     /// badge).
     NeedsYou(usize),
-    /// A note's "Allow", "Deny" or pick found no prompt to answer, or was not taken, while the
-    /// app was away: the app says `why` in a note of its own about `route`'s session.
-    Unanswered {
-        /// The note's agent.
-        route: attention::Route,
-        /// What to say: the app's words, or those of whoever turned the answer down.
-        why: String,
-    },
     /// The person stopped or started sharing the clipboard with a machine: the app keeps it in
     /// the settings by the machine's name.
     ClipboardShared {
@@ -93,9 +83,6 @@ pub enum WorkspaceEvent {
         /// Shared now, or not.
         share: bool,
     },
-    /// Every note's "Allow" or "Deny" tapped so far was sent, or was said to have found
-    /// nothing: an app woken in the background to send one may be let go once it is out.
-    TapsSettled,
     /// Settings → Devices asked to add a device or follow a server: the app takes the run with
     /// [`WorkspaceView::take_add_device`].
     AddDevice,
@@ -141,14 +128,6 @@ pub enum WorkspaceEvent {
         chat: String,
         /// The file, absolute on the shell's machine.
         target: String,
-    },
-    /// A block or a selection attached in a shell opened for `chat`: the shell puts `text` in
-    /// that chat's draft, at the caret.
-    Attach {
-        /// The chat the shell was opened for.
-        chat: String,
-        /// The context, fenced and named after its command.
-        text: String,
     },
     /// The worker took handoff `id` back: its notice goes.
     Withdrawn {
@@ -459,8 +438,6 @@ pub struct WorkspaceView {
     finished: HashMap<attention::About, Finished>,
     /// How long a command has to run before its end is worth a mark.
     slow_command: Duration,
-    /// Agents' approvals: the taps and answers on their way.
-    approvals: approvals::Approvals,
     /// Agents' turns that ended unread.
     turns: turns::Turns,
     /// Each worker's thread hub.
@@ -535,7 +512,6 @@ impl WorkspaceView {
             server_status: None,
             finished: HashMap::new(),
             slow_command: SLOW_COMMAND,
-            approvals: approvals::Approvals::default(),
             turns: turns::Turns::default(),
             faces: faces::Faces::default(),
             view_model: view_model::Bridge::default(),

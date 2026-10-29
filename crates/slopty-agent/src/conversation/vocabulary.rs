@@ -1,7 +1,7 @@
 //! What the worker decodes from Claude Code's transcript and hooks, before the thread model.
 //!
 //! The worker is the only place that reads Claude Code's transcript (the tolerant decoder in
-//! `slopty-agent`), and `slopty_agent::observed` turns what it reads into the agent-neutral
+//! `slopty-agent`), and `slopty_agent::claude::history` turns what it reads into the agent-neutral
 //! thread model (`slopty_proto::thread`), which is what clients are sent. The types here are that
 //! decoder's vocabulary, and the parts of it the thread model and the hooks share.
 //!
@@ -16,10 +16,6 @@
 //! the last request carried, the permission mode, and when Claude Code closed it
 //! ([`Change::Turn`], keyed by the prompt that opened the turn).
 //!
-//! **Live blocks.** Where Claude Code runs Slopty's mod, the worker also hears the answer,
-//! thinking and tool input as the model writes them, before the transcript has them ([`Live`]):
-//! uncommitted text shown at the end of its thread, cleared once the transcript settles it.
-//!
 //! **Background output.** A command Claude Code runs in the background writes to a file of its
 //! own, not to the transcript. The worker tails that file while the command runs ([`Output`]);
 //! how the command ended comes with its entry.
@@ -27,9 +23,9 @@
 //! **Images.** An entry names a picture ([`Image`]) by its digest and its size, never with its
 //! bytes, which are fetched by [`Image::at`] when the picture comes into view.
 //!
-//! **Permission prompts.** A prompt the worker holds for the people who can answer it
-//! ([`PermissionPrompt`]) and its end ([`PermissionEvent`]) stay on the worker: the thread
-//! observer makes each a request on the session's thread.
+//! **Asks.** A dialog the TUI holds (a permission, a question, a plan) is answered in its
+//! terminal; the hooks say it waits on the person (`crate::hooks`), and its call's entry says
+//! how it went.
 
 use serde::{Deserialize, Serialize};
 use slopty_core::WallMs;
@@ -281,8 +277,6 @@ pub enum NoteKind {
     Info,
     /// A hook failed or stopped the turn (the text is what it said).
     Hook,
-    /// Slopty's reports handed to the agent (`<slopty-reports>`).
-    Report,
     /// What a command printed as its errors, drawn apart from its output.
     CommandError,
     /// A quiet line that is neither a failure nor the person's words: a prompt's origin, an
@@ -897,36 +891,6 @@ pub struct RateWindow {
     pub resets_at: Option<u64>,
 }
 
-/// A slash command the agent takes, for the composer's menu.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct SlashCommand {
-    /// Its name without the slash: `compact`, `frontend:component`, `cloudflare:build-agent`.
-    pub name: String,
-    /// What it does, one line.
-    pub description: String,
-    /// What its argument is, as Claude Code hints it (`<path>`, `[model]`).
-    pub argument_hint: Option<String>,
-    /// Where it comes from.
-    pub source: CommandSource,
-    /// Whether it runs a skill (a `SKILL.md`) rather than a command's file.
-    #[serde(default)]
-    pub skill: bool,
-}
-
-/// Where a [`SlashCommand`] comes from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum CommandSource {
-    /// Claude Code's own.
-    BuiltIn,
-    /// The person's: `~/.claude/commands` or `~/.claude/skills`.
-    Personal,
-    /// The project's: `.claude/commands` or `.claude/skills` in the agent's directory or one
-    /// above it.
-    Project,
-    /// An enabled plugin's command or skill, named `<plugin>:<name>`.
-    Plugin,
-}
-
 /// The end of what a background command has printed.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Output {
@@ -938,200 +902,4 @@ pub struct Output {
     pub tail: Clipped,
     /// Bytes it has written.
     pub bytes: u64,
-}
-
-/// A block the model is writing, not yet in the transcript.
-///
-/// It is the answer, thinking or a tool call's input as it streams, and never an entry. A
-/// client shows live blocks after its thread's last entry, in [`LiveId`] order, until
-/// [`Live::Clear`]. That comes once the transcript has the block (and its [`Change`] went
-/// first), or when the block was abandoned.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Live {
-    /// A new block, empty.
-    Start {
-        /// Its thread.
-        thread: ThreadId,
-        /// Which block.
-        id: LiveId,
-        /// What it is.
-        kind: LiveKind,
-    },
-    /// More of a started block: `text` goes on its end.
-    Append {
-        /// Which block.
-        id: LiveId,
-        /// The next piece.
-        text: String,
-    },
-    /// Drop the block.
-    Clear {
-        /// Which block.
-        id: LiveId,
-    },
-}
-
-/// Where a live block is: its turn, the model request within the turn and the content block
-/// within the answer. Unique within a session, subagents' turns included.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
-pub struct LiveId {
-    /// Claude Code's id for the turn.
-    pub turn: String,
-    /// The model request within the turn, from 0.
-    pub step: u32,
-    /// The content block within the answer, from 0.
-    pub block: u32,
-}
-
-/// What a live block is.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum LiveKind {
-    /// Answer text.
-    Text,
-    /// Thinking.
-    Thinking,
-    /// A tool call; its text is the input JSON as the model writes it.
-    Tool {
-        /// Its `tool_use_id`: the transcript entry that settles it has this id.
-        id: String,
-        /// The tool.
-        name: String,
-    },
-}
-
-/// A permission Claude Code asks for, or its end.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum PermissionEvent {
-    /// Claude Code asks.
-    Asked(Box<PermissionPrompt>),
-    /// The prompt is no longer waiting.
-    Settled {
-        /// [`PermissionPrompt::ask`].
-        ask: u64,
-        /// How it ended.
-        outcome: Settled,
-    },
-}
-
-/// A permission Claude Code asks for before running a tool.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct PermissionPrompt {
-    /// Why Claude Code asks, in its TUI's words, when it says.
-    pub reason: Option<String>,
-    /// Names the prompt in answers, unique in its session.
-    pub ask: u64,
-    /// The tool's name as the model called it.
-    pub tool: String,
-    /// The call it asks about (its `tool_use_id`).
-    pub call: Option<String>,
-    /// What the call would do, as a conversation entry shows a call (an edit's proposed change
-    /// as a patch).
-    pub detail: ToolDetail,
-    /// What "allow always" grants: the permission updates Claude Code suggested.
-    pub suggestions: Vec<Suggestion>,
-    /// The session's permission mode (`default`, `plan`, `acceptEdits`, …).
-    pub mode: Option<String>,
-    /// When Claude Code asked, by the worker's clock.
-    pub asked_ms: WallMs,
-    /// The call's input, as the model wrote it: what the card's title and question are worded
-    /// from (a command's description, a skill's name, an MCP tool's parameters).
-    #[serde(default)]
-    pub input: serde_json::Value,
-    /// Whether the file a write would make is there already, when the worker looked: the card
-    /// says "Create file" or "Overwrite file", as the TUI's does.
-    #[serde(default)]
-    pub exists: Option<bool>,
-    /// How much of the context window is used, in percent, when known: a plan's "Yes, clear
-    /// context (42% used) …" says it.
-    #[serde(default)]
-    pub context_used: Option<u32>,
-    /// The mode plan mode was entered from, when known: a plan approved with the context cleared
-    /// goes on in it (bypass permissions, auto mode), else with edits accepted.
-    #[serde(default)]
-    pub before_plan: Option<String>,
-    /// Only the person at the card may answer it (Claude Code's `requires_user_interaction`).
-    #[serde(default)]
-    pub needs_presence: bool,
-    /// What the worker saw on disk where the call would write, in the TUI's words, when it is
-    /// worth saying: an existing file too large to preview, one whose contents cannot be shown
-    /// in full, a symlink whose target leaves the folder.
-    #[serde(default)]
-    pub on_disk: Option<String>,
-    /// Claude Code's card would start on "No" (`default_to_no`).
-    #[serde(default)]
-    pub default_to_no: bool,
-}
-
-/// One permission update "allow always" applies.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Suggestion {
-    /// What it grants.
-    pub grant: Grant,
-    /// Where Claude Code keeps it: `session`, `localSettings`, `projectSettings`,
-    /// `userSettings`.
-    pub destination: Option<String>,
-}
-
-/// What a [`Suggestion`] grants.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Grant {
-    /// Permission rules (`Bash(npm test:*)`), added or replacing the ones there.
-    Rules {
-        /// `allow`, `deny` or `ask`.
-        behavior: String,
-        /// The rules, as Claude Code writes them in settings.
-        rules: Vec<String>,
-    },
-    /// A permission mode for the session (`acceptEdits`).
-    Mode {
-        /// The mode.
-        mode: String,
-    },
-    /// Directories the agent may work in.
-    Directories {
-        /// Absolute paths.
-        directories: Vec<String>,
-    },
-    /// An update of a kind this worker does not know; applied as Claude Code gave it.
-    Other {
-        /// Its `type`.
-        kind: String,
-    },
-}
-
-/// An answer to a permission prompt.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Verdict {
-    /// Allow this call.
-    Allow,
-    /// Allow it and apply every [`PermissionPrompt::suggestions`].
-    AllowAlways,
-    /// Refuse the call.
-    Deny {
-        /// Why, for the model; the worker words one when this is empty.
-        message: String,
-        /// Also stop the turn.
-        interrupt: bool,
-    },
-    /// Answer an `AskUserQuestion`: the call runs with these answers, as if the person had
-    /// picked them in the TUI's own dialog.
-    Answer {
-        /// One per question answered, by the question's text; the options of a multi-select
-        /// question joined with `", "`, or the words typed instead of an option.
-        answers: Vec<Answer>,
-    },
-}
-
-/// How a permission prompt stopped waiting.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum Settled {
-    /// A follower answered.
-    Answered {
-        /// The answer Claude Code was given.
-        verdict: Verdict,
-        /// Who gave it.
-        by: slopty_proto::thread::Answerer,
-    },
-    /// Claude Code stopped waiting (the turn was interrupted, the agent quit).
-    Withdrawn,
 }

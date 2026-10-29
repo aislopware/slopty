@@ -13,9 +13,6 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
         let mut config = UiSettings::default();
         config.sidebar_width = 300.0;
         config.files_panel_width = 377.0;
-        // The session card shifts the composer while it fits; these panels
-        // measure the composer centered in its column.
-        config.session_info_hidden = true;
         settings::init(config, dir.path(), cx);
     });
     let (shell, cx) = cx.add_window_view(|_, cx| {
@@ -33,6 +30,8 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
                     .unwrap()
                 })
                 .collect();
+            // slopty: each session runs in its terminal, the main column.
+            state.session_terminals = [("a", "t-a"), ("b", "t-b")].map(|(c, t)| (c.into(), t.into())).into();
             state
         });
         let mut shell = Shell::new(
@@ -88,7 +87,8 @@ impl Panel {
 struct Frame {
     // Sidebar, Files, surface host, visible conversation.
     widths: [f32; 4],
-    composer: Bounds<Pixels>,
+    /// slopty: the session's terminal, the main column's content.
+    session: Bounds<Pixels>,
     strip: Option<Bounds<Pixels>>,
 }
 
@@ -105,9 +105,7 @@ fn draw(shell: &Entity<Shell>, cx: &mut VisualTestContext, millis: u64) -> Frame
             width("right-panel"),
             width("conversation-column"),
         ],
-        composer: shell.read_with(cx, |s, cx| {
-            s.composer.read(cx).surface_bounds().get().unwrap()
-        }),
+        session: cx.debug_bounds("session-terminal").unwrap_or_default(),
         strip: cx.debug_bounds("right-titlebar-controls"),
     }
 }
@@ -131,12 +129,12 @@ fn expect(frame: Frame, widths: [f32; 4]) {
 fn continuous(before: Frame, after: Frame) {
     expect(after, before.widths);
     near(
-        f32::from(after.composer.left()),
-        f32::from(before.composer.left()),
+        f32::from(after.session.left()),
+        f32::from(before.session.left()),
     );
     near(
-        f32::from(after.composer.size.width),
-        f32::from(before.composer.size.width),
+        f32::from(after.session.size.width),
+        f32::from(before.session.size.width),
     );
     if let (Some(before), Some(after)) = (before.strip, after.strip) {
         near(f32::from(after.left()), f32::from(before.left()));
@@ -187,17 +185,9 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
             let width = frame.widths[column];
             assert!(width >= source.min(target) - 0.5 && width <= source.max(target) + 0.5);
             assert!((width - previous) * (target - source) >= -0.5);
-            // The visible composer follows its column throughout panel motion.
-            let composer_width = f32::from(frame.composer.size.width);
-            near(
-                composer_width,
-                (frame.widths[3] - 2.0 * Theme::SPACE_LG)
-                    .min(f32::from(initial.composer.size.width)),
-            );
-            near(
-                f32::from(frame.composer.left()),
-                frame.widths[0] + (frame.widths[3] - composer_width) / 2.0,
-            );
+            // slopty: the session's terminal fills its column throughout panel motion.
+            near(f32::from(frame.session.size.width), frame.widths[3]);
+            near(f32::from(frame.session.left()), frame.widths[0]);
             if frame.widths[2] > 128.0 {
                 near(
                     f32::from(frame.strip.unwrap().left()),
@@ -298,14 +288,13 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
     cx.simulate_resize(gpui::size(px(1600.0), px(900.0)));
     expect(settled(&shell, cx), ordinary.widths);
 
-    // Fullscreen clips the conversation, retaining its composer layout.
+    // Fullscreen clips the session's column, its terminal keeping its size as it goes.
     change(&shell, cx, |s, _, cx| s.toggle_right_pane_expand(cx));
     for millis in [0, 75, 180] {
         let frame = draw(&shell, cx, millis);
-        near(
-            f32::from(frame.composer.size.width),
-            f32::from(ordinary.composer.size.width),
-        );
+        if frame.session.size.width > px(0.0) {
+            near(f32::from(frame.session.size.width), f32::from(ordinary.session.size.width));
+        }
     }
     expect(draw(&shell, cx, 0), [300.0, 286.0, 1014.0, 0.0]);
     change(&shell, cx, |s, _, cx| select(s, Some("b"), cx));
@@ -339,34 +328,6 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
         near(frame.widths.iter().sum(), width);
         expect(draw(&shell, cx, 300), frame.widths);
     }
-    // A side chat's composer keeps its column's layout under the pane's mask.
-    change(&shell, cx, |s, _, cx| {
-        let chat = serde_json::from_value(serde_json::json!({
-            "id": "side", "parentChatId": "a", "deviceId": "local",
-            "archived": false, "createdAt": Utc::now(),
-        }))
-        .unwrap();
-        s.open_side_chat(chat, s.panel_key(cx), cx);
-    });
-    settled(&shell, cx);
-    let side_composer = |cx: &mut VisualTestContext| {
-        shell.read_with(cx, |s, cx| {
-            let tab = s.side_chats.values().next().unwrap();
-            tab.composer.read(cx).surface_bounds().get().unwrap()
-        })
-    };
-    let resting = side_composer(cx);
-    for _ in 0..2 {
-        change(&shell, cx, |s, _, cx| s.toggle_right_pane(cx));
-        draw(&shell, cx, 75);
-        let moving = side_composer(cx);
-        near(f32::from(moving.size.width), f32::from(resting.size.width));
-        near(
-            f32::from(moving.size.height),
-            f32::from(resting.size.height),
-        );
-        settled(&shell, cx);
-    }
     change(&shell, cx, |s, _, cx| s.toggle_right_pane(cx));
     settled(&shell, cx);
     cx.update(|_, cx| motion::set_reduced_motion(cx, true));
@@ -386,8 +347,9 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
 }
 
 /// slopty: a subagent of a call runs inside its agent's session, so its row shows that agent's
-/// pane, open and with the same tabs; an agent another agent started keeps a pane of its own.
-/// What the pane shows is kept, and comes back in a new launch once the chat is shown.
+/// pane, open and with the same tabs; an agent another agent started keeps a pane of its own,
+/// given its inspector the first time it shows. What the pane shows is kept, and comes back in a
+/// new launch once the chat is shown.
 #[gpui::test]
 fn a_subagent_shows_its_agents_pane_and_the_pane_comes_back(cx: &mut TestAppContext) {
     let (_dir, shell, cx) = setup(cx);
@@ -410,174 +372,43 @@ fn a_subagent_shows_its_agents_pane_and_the_pane_comes_back(cx: &mut TestAppCont
     let tabs = shell.read_with(cx, |shell, _| shell.right_tabs["a"].clone());
     assert!(matches!(tabs.as_slice(), [RightSurface::Diff(_)]), "{tabs:?}");
 
+    // Its agent's pane, shown the first time through it, is given the inspector.
     change(&shell, cx, |shell, _, cx| select(shell, Some("s"), cx));
     settled(&shell, cx);
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.panel_key(cx), "a");
         assert!(shell.right_pane_open(cx), "the agent's pane stays open on its subagent");
+        let tabs = &shell.right_tabs["a"];
+        assert!(matches!(tabs.as_slice(), [RightSurface::Inspector, RightSurface::Diff(_)]), "{tabs:?}");
     });
     change(&shell, cx, |shell, _, cx| select(shell, Some("o"), cx));
     settled(&shell, cx);
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.panel_key(cx), "o");
-        assert!(!shell.right_pane_open(cx), "an agent started on its own has its own pane");
+        assert_eq!(shell.right_tabs["o"], [RightSurface::Inspector], "an agent started on its own has its own pane");
+        assert!(shell.inspector_shown(cx), "open on its inspector");
     });
 
     change(&shell, cx, |shell, _, cx| shell.keep_tabs(cx));
     let kept = shell.read_with(cx, |shell, _| shell.settings.session_tabs.clone());
-    assert_eq!(kept.keys().collect::<Vec<_>>(), ["a"], "only a pane with tabs keeps them");
-    assert_eq!(kept["a"].tabs, [crate::settings::SavedSurface::Diff]);
+    assert_eq!(kept.keys().collect::<Vec<_>>(), ["a", "o"]);
+    assert_eq!(kept["a"].tabs, [crate::settings::SavedSurface::Inspector, crate::settings::SavedSurface::Diff]);
     assert_eq!(kept["a"].active, Some(0));
 
-    // A new launch: nothing open in this run, the kept tabs come back once "a" shows.
+    // A new launch: nothing open in this run, the kept tabs come back once "a" shows, and the
+    // inspector is not given twice.
     change(&shell, cx, |shell, _, cx| {
         shell.right_tabs.clear();
+        shell.inspector_given.clear();
         shell.unrestored_tabs = kept.clone();
         select(shell, Some("s"), cx);
     });
     settled(&shell, cx);
     shell.read_with(cx, |shell, cx| {
         let tabs = &shell.right_tabs["a"];
-        assert!(matches!(tabs.as_slice(), [RightSurface::Diff(_)]), "{tabs:?}");
+        assert!(matches!(tabs.as_slice(), [RightSurface::Inspector, RightSurface::Diff(_)]), "{tabs:?}");
         assert_eq!(shell.resolved_right_active(cx), tabs[0]);
-        assert!(shell.unrestored_tabs.is_empty());
+        // "o"'s wait until it shows.
+        assert_eq!(shell.unrestored_tabs.keys().collect::<Vec<_>>(), ["o"]);
     });
-}
-
-#[gpui::test]
-fn side_chat_menu_rename_keeps_the_editor_visible_without_opening_files(cx: &mut TestAppContext) {
-    let (_dir, shell, cx) = setup(cx);
-    change(&shell, cx, |shell, _, cx| {
-        shell.state.update(cx, |state, cx| {
-            state.chats.push(
-                serde_json::from_value(serde_json::json!({
-                    "id": "side", "title": "Side chat", "parentChatId": "a",
-                    "deviceId": "local", "archived": false, "createdAt": Utc::now(),
-                }))
-                .unwrap(),
-            );
-            cx.notify();
-        });
-        shell.chat_menu.open(ChatMenuState {
-            chat_id: "side".into(),
-            tab: None,
-            position: gpui::point(px(800.0), px(200.0)),
-            page: ChatMenuPage::Root,
-        });
-    });
-    settled(&shell, cx);
-    assert!(shell.read_with(cx, |shell, cx| !shell.files_panel_open(cx)));
-
-    let rename = cx.debug_bounds("chat-menu-rename").unwrap();
-    cx.simulate_click(rename.center(), Default::default());
-    settled(&shell, cx);
-
-    shell.read_with(cx, |shell, cx| {
-        assert!(
-            !shell.files_panel_open(cx),
-            "Rename must not open the explorer"
-        );
-        assert!(shell.session_info_visible(cx));
-        assert_eq!(shell.chat_rename.as_ref().unwrap().chat_id, "side");
-    });
-    let field = cx.debug_bounds("session-lanes-chat-side-title-editor").unwrap();
-    let card = cx.debug_bounds("session-lanes").unwrap();
-    assert!(field.top() >= card.top() && field.bottom() <= card.bottom());
-}
-
-#[gpui::test]
-fn side_chat_rename_leaves_takeover_to_show_its_editor(cx: &mut TestAppContext) {
-    let (_dir, shell, cx) = setup(cx);
-    change(&shell, cx, |shell, _, cx| {
-        shell.state.update(cx, |state, cx| {
-            state.chats.push(
-                serde_json::from_value(serde_json::json!({
-                    "id": "side", "title": "Side chat", "parentChatId": "a",
-                    "deviceId": "local", "archived": false, "createdAt": Utc::now(),
-                }))
-                .unwrap(),
-            );
-            cx.notify();
-        });
-        shell.toggle_right_pane(cx);
-    });
-    settled(&shell, cx);
-    change(&shell, cx, |s, _, cx| s.toggle_right_pane_expand(cx));
-    near(settled(&shell, cx).widths[3], 0.0);
-
-    change(&shell, cx, |s, _, cx| s.open_rename_chat("side".into(), cx));
-    let frame = settled(&shell, cx);
-    assert!(!shell.read_with(cx, |s, _| s.right_pane_expanded));
-    assert!(frame.widths[3] > 0.0, "the transcript column must return");
-    let field = cx.debug_bounds("session-lanes-chat-side-title-editor").unwrap();
-    let card = cx.debug_bounds("session-lanes").unwrap();
-    assert!(field.top() >= card.top() && field.bottom() <= card.bottom());
-}
-
-fn check_side_chat_rename_scroll(cx: &mut TestAppContext, width: f32, reduced_motion: bool) {
-    let (_dir, shell, cx) = setup(cx);
-    cx.simulate_resize(gpui::size(px(width), px(900.0)));
-    cx.update(|_, cx| motion::set_reduced_motion(cx, reduced_motion));
-    change(&shell, cx, |shell, _, cx| {
-        shell.state.update(cx, |state, cx| {
-            let now = Utc::now();
-            for index in 0..40 {
-                state.chats.push(
-                    serde_json::from_value(serde_json::json!({
-                        "id": format!("side-{index}"), "title": format!("Side {index}"),
-                        "parentChatId": "a", "deviceId": "local", "archived": false,
-                        "createdAt": now - chrono::Duration::minutes(index),
-                    }))
-                    .unwrap(),
-                );
-            }
-            cx.notify();
-        });
-    });
-    settled(&shell, cx);
-    assert!(cx.debug_bounds("session-lanes").is_none());
-
-    // Reveal a paged-out row from a hidden card, then a row above the new
-    // scroll position. Both directions must leave the whole editor visible.
-    for (chat, selector) in [
-        ("side-39", "session-lanes-chat-side-39-title-editor"),
-        ("side-0", "session-lanes-chat-side-0-title-editor"),
-    ] {
-        change(&shell, cx, |shell, _, cx| {
-            shell.open_rename_chat(chat.into(), cx);
-        });
-        settled(&shell, cx);
-        for _ in 0..4 {
-            cx.run_until_parked();
-            draw(&shell, cx, 100);
-        }
-        let field = cx.debug_bounds(selector).unwrap();
-        let card = cx.debug_bounds("session-lanes").unwrap();
-        assert!(
-            field.top() >= card.top() && field.bottom() <= card.bottom(),
-            "{chat}'s editor {field:?} is outside the card {card:?}"
-        );
-        cx.update(|window, cx| {
-            shell.read_with(cx, |shell, cx| {
-                let rename = shell.chat_rename.as_ref().unwrap();
-                assert_eq!(rename.chat_id, chat);
-                assert!(
-                    rename.input.focus_handle(cx).is_focused(window),
-                    "{chat}'s editor has the keyboard: pending {}, the composer has it {}",
-                    rename.focus_pending,
-                    shell.composer.focus_handle(cx).is_focused(window),
-                );
-            });
-        });
-    }
-}
-
-#[gpui::test]
-fn side_chat_rename_scrolls_to_its_row_in_a_docked_card(cx: &mut TestAppContext) {
-    check_side_chat_rename_scroll(cx, 1600.0, false);
-}
-
-#[gpui::test]
-fn side_chat_rename_scrolls_to_its_row_in_a_floating_card_without_motion(cx: &mut TestAppContext) {
-    check_side_chat_rename_scroll(cx, 1000.0, true);
 }

@@ -1,1492 +1,830 @@
-//! Claude Code on the worker, driven the way Claude's own desktop app drives it: the IO half of
-//! the adapter (`slopty_agent::claude::driven` is the codec).
+//! Claude Code in Slopty's terminals, each session read as a thread (`docs/decisions/agents.md`,
+//! "TUI-first").
 //!
-//! The person's own `claude` runs as `claude -p` speaking stream-json both ways with the control
-//! protocol ([`slopty_agent::claude::args`]), in ptyd's custody ([`custody`]), one task per
-//! running Claude Code carrying its lines (`driven`).
+//! Every Claude Code in one of the worker's terminals is the person's own TUI, typed there by
+//! hand or started by Slopty (`slopty_agent::claude::Tui`). It is found from outside: the
+//! terminal's foreground process, which the daemon reads on its tick ([`Claude::tick`]), and
+//! the record each live Claude Code keeps of itself, which names the session it writes now
+//! (`slopty_agent::claude::sessions::live_of`, for the process or the real client a managed
+//! launcher runs as its child); for one Slopty started, its session is known from the start
+//! ([`Claude::begun`]) and its hooks name the next. The session's transcript and its subagents'
+//! files are followed as the kernel reports their writes, read by the conversation decoder and
+//! mapped onto one thread per session (`slopty_agent::claude::history`), which names the
+//! terminal ([`ThreadMeta::TERMINAL_FACT`]) while the session runs there. A `/clear` or
+//! `/resume` in the TUI moves the terminal to the next session: its thread begins, and the one
+//! before ends. Nothing of the terminal's screen is read, and nothing is typed here.
 //!
-//! - **The program.** `claude` is found as the person's terminal finds it (on the daemon's `PATH`,
-//!   else their login shell's: [`crate::facts::installed`]) and runs with that `PATH` and the
-//!   variables the desktop app gives it ([`slopty_agent::claude::ENV`]). A managed launcher takes
-//!   the same arguments and hands them on. Nothing is signed in and no credential is read.
-//! - **Named before it speaks.** A new thread's session id is its start's intent id, given with
-//!   `--session-id`, so the thread ([`slopty_agent::claude::thread_of`]) is answered at once.
-//! - **Custody.** Claude Code outlives the worker: the next worker attaches its session again,
-//!   reads the thread again from the session's transcript, then what Claude Code wrote meanwhile,
-//!   and asks it again for what it still waits on (`initialize`).
-//! - **Goes on by message.** A thread whose Claude Code ended (it exited, failed, or was ended) is
-//!   exited and resumable: its next message starts Claude Code again on the session (`--resume`),
-//!   the thread read again from the transcript first, so the session has one writer.
-//! - **Once.** A start is acted on once per intent id.
-//! - **Beside the conversation** ([`settings`]): a `!` command runs in the chat's folder and goes
-//!   to Claude Code as the person's message, a permission rule is written into its scope's file,
-//!   and the person's status line command runs as the TUI runs it.
-//! - **A fork at a turn** keeps the conversation through that turn: Claude Code resumes the session
-//!   at that turn's last record into a new one (`--resume-session-at`).
-//! - **Taken up from Claude Code's sessions** (`--resume <id>`): the thread is read from the
-//!   session's transcript, seen through its last turn, and Claude Code starts with the first
-//!   message, none before. A session another live Claude Code on the machine holds ([`held`]) is
-//!   shown and not taken: nothing starts on it and no message goes to it until the other ends, as
-//!   Claude Code's own resume refuses it.
+//! - **The phase** follows the session's hooks once one is heard ([`Claude::hook`],
+//!   `slopty_agent::hooks`): at work, waiting on the person at a dialog, done or failed (its `Stop`
+//!   ends the turn, since the records that close it come after), compacting. The transcript is read
+//!   before each hook is applied, so a turn's end never shows before the turn. A session with none
+//!   (typed by hand) takes it from its transcript (a turn open is at work, one closed is done) and
+//!   from its record, which says when a dialog holds it (`Live::waiting`): waiting on the person
+//!   then, for the call the transcript has open where the dialog is about one, and back to what the
+//!   transcript says once the record no longer waits. Hooks are exact, so a session that has them
+//!   keeps them over its record, and its record over its transcript. An Esc fires no hook, so the
+//!   transcript's interrupt says it for both.
+//! - **Ended** when its Claude Code ends (its process gone, its terminal closed or exited) or its
+//!   `SessionEnd` hook says so: exited and resumable, the terminal no longer named.
+//! - **A worker that starts again** finds the sessions again at its first ticks and reads their
+//!   threads again from their transcripts; a thread that names a terminal where no Claude Code runs
+//!   by then has ended.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use slopty_agent::claude::driven::{ARGS_FACT, CUSTODY_FACT, Driven, Ran, RewindPreview};
-use slopty_agent::claude::history::Out;
-use slopty_agent::claude::{self as agent, Session};
+use slopty_agent::claude::history::{End, History, Out, asks_for};
+use slopty_agent::claude::sessions::{self, Live};
+use slopty_agent::conversation::{Body, Change, Transcripts};
+use slopty_agent::hooks::{Hook, Signal};
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::thread::wire::{Expanded, Intent, Outcome, Start};
+use slopty_proto::thread::wire::Expanded;
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, ContentRef, Delivery, Drive, Fork, IntentId, ItemId,
-    Liveness, Phase, Request, RequestState, RuleChange, SurfaceEvent, ThreadId, ThreadMeta,
-    ThreadState, TurnId,
+    Action, AgentId, ContentRef, Drive, Liveness, Phase, ThreadId, ThreadMeta, ThreadState,
+    TurnState, Wait,
 };
-use slopty_proto::visual::{AppAnswer, AppAsk};
-use slopty_pty::SpawnSpec;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use self::custody::Custody;
-use self::driven::{Task, read_again};
-use super::{Host, Seated};
-use crate::facts::Installed;
+use super::Host;
 
-pub mod custody;
-mod driven;
 pub mod held;
-pub mod settings;
 
-/// Where a thread's task says its Claude Code has gone, or the worker has, with the asks it did
-/// not take.
-type Ended = mpsc::UnboundedSender<(ThreadId, Vec<ThreadAsk>)>;
-
-/// Why a thread whose Claude Code an earlier worker left is no longer running.
-const LOST: &str = "Claude Code ended while the worker was away";
-
-/// What a client asks of the driven Claude Code threads.
-#[derive(Debug)]
-enum Ask {
-    Start {
-        id: IntentId,
-        start: Box<Start>,
-        seated: Option<Box<Seated>>,
-        reply: oneshot::Sender<Outcome>,
-    },
-    Fork {
-        thread: ThreadId,
-        id: IntentId,
-        after: Option<TurnId>,
-        reply: oneshot::Sender<Outcome>,
-    },
-    Thread {
-        thread: ThreadId,
-        ask: ThreadAsk,
-    },
-    /// The thread's agent ends, its session kept.
-    Close {
-        thread: ThreadId,
-        done: oneshot::Sender<()>,
-    },
-    /// The whole of a clipped text or picture of a thread.
-    Expand {
-        thread: ThreadId,
-        content: ContentRef,
-        reply: oneshot::Sender<Expanded>,
-    },
-    /// A page's ask of its MCP App, through the thread's Claude Code.
-    App {
-        thread: ThreadId,
-        ask: AppAsk,
-        reply: oneshot::Sender<AppAnswer>,
-    },
-}
-
-/// How long a rewind waits on Claude Code to say what it would put back before it goes on with
-/// no undo.
-const PREVIEW_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// What a client asks of one thread.
-#[derive(Debug)]
-enum ThreadAsk {
-    Send {
-        text: String,
-        attachments: Vec<String>,
-        intent: IntentId,
-        delivery: Delivery,
-    },
-    /// Slopty's reports for the agent, as a message of their own.
-    Report {
-        text: String,
-    },
-    Withdraw {
-        intent: IntentId,
-    },
-    Edit {
-        intent: IntentId,
-        text: String,
-        attachments: Vec<String>,
-    },
-    Promote {
-        intent: IntentId,
-    },
-    Move {
-        intent: IntentId,
-        before: Option<IntentId>,
-    },
-    Interrupt,
-    /// Stop one background task: a command, a monitor, a subagent's run.
-    StopTask {
-        task: String,
-    },
-    /// Move call `item`, or every blocking one, to the background.
-    Background {
-        item: Option<String>,
-    },
-    /// Run `!` command `command` for intent `intent`, then hand it over.
-    Shell {
-        command: String,
-        intent: IntentId,
-    },
-    /// What `!` command `intent` did, for Claude Code; answered unless `quiet`.
-    ShellDone {
-        ran: Ran,
-        intent: IntentId,
-        quiet: bool,
-    },
-    /// Put the files back to before turn `turn`.
-    Rewind {
-        turn: TurnId,
-    },
-    /// Take the conversation back to before turn `turn`.
-    RewindConversation {
-        turn: TurnId,
-    },
-    /// Which files a rewind to before turn `turn` would put back, nothing put back yet.
-    RewindPreview {
-        turn: TurnId,
-        reply: oneshot::Sender<RewindPreview>,
-    },
-    /// Ask side question `question` for intent `intent`, after the exchanges `history`
-    /// (question, answer).
-    Side {
-        question: String,
-        intent: IntentId,
-        history: Vec<(String, String)>,
-    },
-    /// The person named the thread `title` in Slopty: the session takes it too.
-    Rename {
-        title: String,
-    },
-    /// Connect MCP server `server` again, on the person's word.
-    McpReconnect {
-        server: String,
-    },
-    /// Turn MCP server `server` on or off, on the person's word.
-    McpEnable {
-        server: String,
-        enabled: bool,
-    },
-    /// Write a permission rule into its scope's file, then list the rules again.
-    Rule {
-        change: RuleChange,
-    },
-    /// The person acted in a mod's surface.
-    Surface {
-        surface: String,
-        element: String,
-        event: SurfaceEvent,
-    },
-    /// A page's ask of its MCP App.
-    App {
-        ask: AppAsk,
-        reply: oneshot::Sender<AppAnswer>,
-    },
-    Answer {
-        ask: AskId,
-        choice: String,
-        message: Option<String>,
-        by: Answerer,
-    },
-    SetModel {
-        model: String,
-    },
-    SetMode {
-        mode: String,
-    },
-    SetEffort {
-        effort: String,
-    },
-    SetOption {
-        option: String,
-        choice: String,
-    },
-    /// End Claude Code now, its session kept.
-    Close,
-}
-
-/// Where clients' asks go to the driven Claude Code threads. Cheap to clone.
-///
-/// A stop and an end go straight to the running thread's task (`Running`): the served loop
-/// may be busy starting another thread (finding the install takes up to seconds), and a stop
-/// must not wait behind it.
-#[derive(Clone, Debug)]
-pub struct Claude(mpsc::UnboundedSender<Ask>, Running, HeldBy);
-
-/// Where a [`Claude`]'s asks wait for [`spawn`], and where its own go back in.
-#[derive(Debug)]
-pub struct Asks(mpsc::UnboundedReceiver<Ask>, mpsc::UnboundedSender<Ask>, Running, HeldBy);
-
-/// The task of each thread's Claude Code while it runs, the session's one writer: shared by the
-/// served loop, which starts and ends them, and the handles, which stop them at once.
-type Running = Arc<parking_lot::Mutex<HashMap<ThreadId, mpsc::UnboundedSender<ThreadAsk>>>>;
-
-/// The threads whose session another live Claude Code on the machine holds ([`held`]), with
-/// the words a message to one is refused with: shared by the served loop, which finds them and
-/// lets them go when the other ends, and the handles, which refuse at once.
-type HeldBy = Arc<parking_lot::Mutex<HashMap<ThreadId, String>>>;
-
-/// Where the driven Claude Codes run and keep what they keep.
+/// Where the Claude Codes run, as the observer reads them.
 #[derive(Clone, Debug)]
 pub struct Place {
-    /// The worker's data directory: each Claude Code's standard error goes under it.
-    pub data_dir: PathBuf,
-    /// Where ptyd listens.
-    pub ptyd: PathBuf,
-    /// Where `claude` is looked for alone, when given; else as the person's terminal finds it.
-    pub path: Option<OsString>,
-    /// The home Claude Code keeps its sessions under (`~/.claude`).
+    /// The person's home, where Claude Code keeps its records.
     pub home: PathBuf,
-    /// The machine's name, as a thread whose session another Claude Code holds says it.
-    pub machine: String,
-    /// How long each Claude Code has to answer `initialize` before it is said not to have
-    /// started ([`slopty_agent::claude::driven::INIT_WAIT`] for the person's).
-    pub init_wait: std::time::Duration,
+    /// The `PATH` an agent's program is looked for on (a test's own); the person's when
+    /// `None`.
+    pub path: Option<OsString>,
+    /// The worker's data directory, where the files an agent loads are written (pi's tools).
+    pub data: PathBuf,
+}
+
+/// What the daemon's tick saw in the foreground of one terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Foreground {
+    /// A Claude Code: its process, and where it runs.
+    Claude {
+        /// The foreground process: Claude Code, or a managed launcher that runs it as its child.
+        pid: u32,
+        /// Its working directory, when the platform said.
+        cwd: Option<PathBuf>,
+    },
+    /// Another program.
+    Other,
+    /// The platform would not say: nothing is concluded.
+    Unknown,
+}
+
+/// The observer of every Claude Code in the worker's terminals. Cheap to clone.
+#[derive(Clone, Debug)]
+pub struct Claude {
+    asks: mpsc::UnboundedSender<Ask>,
+    host: Host,
+    place: Arc<Place>,
+}
+
+#[derive(Debug)]
+enum Ask {
+    Tick(Vec<(SessionId, Foreground)>),
+    Hook { terminal: SessionId, at_us: u64, payload: String },
+    Begun { terminal: SessionId, native: String, cwd: String, version: String },
+    Row { terminal: SessionId, thread: ThreadId },
 }
 
 impl Claude {
-    /// A handle, and the asks [`spawn`] takes from it.
+    /// Observe every Claude Code the ticks name, as threads of `host`.
     #[must_use]
-    pub fn channel() -> (Self, Asks) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (running, held) = (Running::default(), HeldBy::default());
-        (Self(tx.clone(), Arc::clone(&running), Arc::clone(&held)), Asks(rx, tx, running, held))
+    pub fn spawn(host: Host, place: Place) -> (Self, JoinHandle<()>) {
+        let (asks, taken) = mpsc::unbounded_channel();
+        let place = Arc::new(place);
+        let watch = Watch {
+            host: host.clone(),
+            place: Arc::clone(&place),
+            terms: HashMap::new(),
+            ticks: 0,
+        };
+        let task = tokio::spawn(watch.run(taken));
+        (Self { asks, host, place }, task)
     }
 
-    /// `ask` straight to `thread`'s running task, past the served loop; `ask` back when no task
-    /// runs it.
-    fn at_once(&self, thread: ThreadId, ask: ThreadAsk) -> Result<(), ThreadAsk> {
-        let task = self.1.lock().get(&thread).cloned();
-        match task {
-            Some(task) => task.send(ask).map_err(|mpsc::error::SendError(ask)| ask),
-            None => Err(ask),
-        }
+    /// What every terminal running a program shows in its foreground now; a terminal not named
+    /// has ended (or its program has).
+    pub fn tick(&self, seen: Vec<(SessionId, Foreground)>) {
+        let _gone = self.asks.send(Ask::Tick(seen));
     }
 
-    async fn asked(&self, ask: impl FnOnce(oneshot::Sender<Outcome>) -> Ask) -> Outcome {
-        let (reply, outcome) = oneshot::channel();
-        if self.0.send(ask(reply)).is_err() {
-            return refused("Claude Code threads are not served here");
-        }
-        outcome.await.unwrap_or_else(|_| refused("the Claude Code threads stopped"))
+    /// One of Claude Code's hooks, relayed from terminal `terminal` as it started at `at_us`
+    /// (microseconds since the epoch), its JSON `payload`. The token was checked.
+    pub fn hook(&self, terminal: SessionId, at_us: u64, payload: String) {
+        let _gone = self.asks.send(Ask::Hook { terminal, at_us, payload });
     }
 
-    /// Start a Claude Code thread for intent `id` once, as `start` says: a repeat of the id gets
-    /// the first outcome.
-    pub async fn start(&self, id: IntentId, start: Box<Start>) -> Outcome {
-        self.asked(|reply| Ask::Start { id, start, seated: None, reply }).await
+    /// Slopty started Claude Code `version` in `terminal` on session `native`, in `cwd`: it is
+    /// followed from now, before any tick or hook says so.
+    pub fn begun(&self, terminal: SessionId, native: String, cwd: String, version: String) {
+        let _gone = self.asks.send(Ask::Begun { terminal, native, cwd, version });
     }
 
-    /// Start a seated thread (an agent another started) as `start` says, once per seat: Claude
-    /// Code runs with the seat's variables and Slopty's tools, and the system text as its system
-    /// prompt's addition, kept with the thread's flags for every later run.
-    pub async fn start_seated(&self, start: Box<Start>, seated: Seated) -> Outcome {
-        let (id, seated) = (seated.intent(), Some(Box::new(seated)));
-        self.asked(|reply| Ask::Start { id, start, seated, reply }).await
+    /// Slopty started another agent's TUI in `terminal`, whose thread `thread` is a row only:
+    /// it ends with the terminal's program.
+    pub fn row(&self, terminal: SessionId, thread: ThreadId) {
+        let _gone = self.asks.send(Ask::Row { terminal, thread });
     }
 
-    /// Branch a new thread off the whole of `thread`'s session for intent `id`, once: Claude
-    /// Code resumes it into a new session (`--fork-session`).
-    pub async fn fork(&self, thread: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
-        self.asked(|reply| Ask::Fork { thread, id, after, reply }).await
-    }
-
-    /// End thread `thread`'s Claude Code, its session kept to take up again.
-    pub async fn close(&self, thread: ThreadId) {
-        if self.at_once(thread, ThreadAsk::Close).is_ok() {
-            return;
-        }
-        let (done, closed) = oneshot::channel();
-        if self.0.send(Ask::Close { thread, done }).is_ok() {
-            let _done = closed.await;
-        }
-    }
-
-    /// The whole of `content`, clipped in `thread`.
+    /// The whole of `content`, clipped in `thread`, read from its session's records.
     pub async fn expand(&self, thread: ThreadId, content: ContentRef) -> Expanded {
-        let (reply, body) = oneshot::channel();
-        if self.0.send(Ask::Expand { thread, content, reply }).is_err() {
-            return Expanded::Gone;
-        }
-        body.await.unwrap_or(Expanded::Gone)
-    }
-
-    /// What a page shown in `thread` asks of its MCP App (`resources/read`, `tools/call`),
-    /// through the session's Claude Code (`mcp_read_resource`, `mcp_call`): refused while it does
-    /// not run.
-    pub async fn app(&self, thread: ThreadId, ask: AppAsk) -> AppAnswer {
-        let (reply, answer) = oneshot::channel();
-        if self.0.send(Ask::App { thread, ask, reply }).is_err() {
-            return AppAnswer::Refused("Claude Code threads are not served here".to_owned());
-        }
-        answer.await.unwrap_or_else(|_| AppAnswer::Refused("Claude Code did not answer".to_owned()))
-    }
-
-    /// Which files a rewind of `thread` to before turn `turn` would put back, asked of its
-    /// running Claude Code's checkpoints first, so they can be kept for an undo; why not while
-    /// it does not run or cannot rewind there.
-    pub async fn rewind_preview(&self, thread: ThreadId, turn: TurnId) -> RewindPreview {
-        let (reply, answer) = oneshot::channel();
-        let asked = self.at_once(thread, ThreadAsk::RewindPreview { turn, reply });
-        if asked.is_err() {
-            return Err("Claude Code is not running".to_owned());
-        }
-        match tokio::time::timeout(PREVIEW_WAIT, answer).await {
-            Ok(Ok(preview)) => preview,
-            _ => Err("Claude Code did not answer".to_owned()),
-        }
-    }
-
-    /// The person named `thread` `title` in Slopty: its running Claude Code's session takes the
-    /// name as theirs, so Claude Code's own list of sessions agrees. One that does not run
-    /// takes it when it starts again ([`Driven::of`] keeps the name).
-    pub fn rename(&self, thread: ThreadId, title: String) {
-        let _not_running = self.at_once(thread, ThreadAsk::Rename { title });
-    }
-
-    /// Hand Slopty's reports, worded `text`, to `thread`'s Claude Code: a message of their own,
-    /// which takes the thread up again when its Claude Code ended.
-    pub fn report(&self, thread: ThreadId, text: String) -> Outcome {
-        let ask = Ask::Thread { thread, ask: ThreadAsk::Report { text } };
-        if self.0.send(ask).is_err() {
-            return refused("Claude Code threads are not served here");
-        }
-        Outcome::Done
-    }
-
-    /// What comes of intent `id` on the driven Claude Code thread `state`, from `by` when it
-    /// answers: done when it went to Claude Code (or to one started again for it), and why not
-    /// when it did not. Meant to run once per id, as [`Host::intent`] runs its decision.
-    pub fn decide(&self, state: &ThreadState, id: IntentId, ask: &Intent, by: Answerer) -> Outcome {
-        let mut thread = state.meta.id;
-        let live = state.status.liveness == Liveness::Live;
-        let goes_on = matches!(state.status.liveness, Liveness::Exited { resumable: true });
-        let subagent = state.meta.origin == ThreadMeta::SUBAGENT;
-        let asked = match ask {
-            Intent::Send { text, attachments, .. }
-                if text.trim().is_empty() && attachments.is_empty() =>
-            {
-                return refused("There is nothing to send");
-            }
-            Intent::Send { .. } if subagent => return refused("A subagent takes no message"),
-            Intent::Send { text, attachments, delivery } => {
-                if let Err(why) = super::attach::check(attachments) {
-                    return refused(&why);
-                }
-                let (text, attachments, delivery) = (text.clone(), attachments.clone(), *delivery);
-                ThreadAsk::Send { text, attachments, intent: id, delivery }
-            }
-            Intent::Withdraw { pending }
-            | Intent::Edit { pending, .. }
-            | Intent::Promote { pending }
-            | Intent::Move { pending, .. }
-                if !state.pending.iter().any(|p| p.intent == *pending) =>
-            {
-                return refused("That message is not waiting");
-            }
-            Intent::Withdraw { pending } => ThreadAsk::Withdraw { intent: *pending },
-            Intent::Move { pending, before } => {
-                ThreadAsk::Move { intent: *pending, before: *before }
-            }
-            Intent::Edit { pending, text, attachments } => {
-                if let Err(why) = super::attach::check(attachments) {
-                    return refused(&why);
-                }
-                let (text, attachments) = (text.clone(), attachments.clone());
-                ThreadAsk::Edit { intent: *pending, text, attachments }
-            }
-            Intent::Promote { pending } => ThreadAsk::Promote { intent: *pending },
-            Intent::Interrupt => {
-                // An agent that is gone wakes only by a message. One at rest has nothing left to
-                // stop, so a second stop, or one that crossed the turn's end, is done.
-                if !live {
-                    return refused("Claude Code is not running");
-                }
-                let phase = &state.status.phase;
-                if !matches!(phase, Phase::Working | Phase::NeedsYou | Phase::Waiting) {
-                    return Outcome::Done;
-                }
-                if subagent {
-                    // The subagent's run, stopped in the session that runs it.
-                    let Some(parent) = state.meta.parent.as_ref() else {
-                        return refused("This subagent's session is not known");
-                    };
-                    thread = parent.thread;
-                    ThreadAsk::StopTask { task: state.meta.native.clone() }
-                } else {
-                    ThreadAsk::Interrupt
-                }
-            }
-            Intent::StopTask { task } => {
-                if !state.tasks.iter().any(|t| t.id == *task && t.is_live()) {
-                    return refused(&format!("There is no running task {task}"));
-                }
-                if let Some(parent) = state.meta.parent.as_ref().filter(|_| subagent) {
-                    thread = parent.thread;
-                }
-                ThreadAsk::StopTask { task: task.clone() }
-            }
-            Intent::Background { item } => {
-                if let Some(item) = item
-                    && !state.items.iter().any(|i| i.id == *item)
-                {
-                    return refused(&format!("There is no call {}", item.0));
-                }
-                ThreadAsk::Background { item: item.as_ref().map(|i| i.0.clone()) }
-            }
-            Intent::Shell { .. } if subagent => return refused("A subagent takes no command"),
-            Intent::Shell { command } => {
-                if command.trim().is_empty() {
-                    return refused("There is no command to run");
-                }
-                ThreadAsk::Shell { command: command.clone(), intent: id }
-            }
-            Intent::Rewind { turn } | Intent::RewindConversation { turn } => {
-                if !state.turns.iter().any(|t| t.id == *turn && t.input.is_some()) {
-                    return refused(&format!("There is no turn {} to go back to", turn.0));
-                }
-                if matches!(ask, Intent::Rewind { .. }) {
-                    ThreadAsk::Rewind { turn: *turn }
-                } else {
-                    ThreadAsk::RewindConversation { turn: *turn }
-                }
-            }
-            Intent::Side { .. } if subagent => return refused("A subagent takes no side question"),
-            Intent::Side { question } => {
-                if question.trim().is_empty() {
-                    return refused("There is no question to ask");
-                }
-                let history = state
-                    .side
-                    .iter()
-                    .filter_map(|s| Some((s.question.clone(), s.answer.clone()?)))
-                    .collect();
-                ThreadAsk::Side { question: question.trim().to_owned(), intent: id, history }
-            }
-            Intent::McpReconnect { .. } | Intent::McpEnable { .. } if subagent => {
-                return refused("A subagent's MCP servers are its session's");
-            }
-            Intent::McpReconnect { server } | Intent::McpEnable { server, .. }
-                if !state.servers.iter().any(|s| s.name == *server) =>
-            {
-                return refused(&format!("There is no MCP server {server}"));
-            }
-            Intent::McpReconnect { server } => ThreadAsk::McpReconnect { server: server.clone() },
-            Intent::McpEnable { server, enabled } => {
-                ThreadAsk::McpEnable { server: server.clone(), enabled: *enabled }
-            }
-            Intent::Rule(change) => {
-                if let Err(why) = settings::checked(change) {
-                    return refused(&why);
-                }
-                ThreadAsk::Rule { change: change.clone() }
-            }
-            Intent::Surface { surface, element, event } => {
-                if !state.surfaces.iter().any(|s| s.id == *surface) {
-                    return refused(&format!("There is no surface {surface}"));
-                }
-                ThreadAsk::Surface {
-                    surface: surface.clone(),
-                    element: element.clone(),
-                    event: event.clone(),
-                }
-            }
-            Intent::Answer { ask, choice, message } => {
-                let Some(request) = state.requests.iter().find(|r| r.id == *ask) else {
-                    return refused(&format!("There is no request {}", ask.0));
-                };
-                match &request.state {
-                    RequestState::Open => {}
-                    RequestState::Answered { .. } => return Outcome::Done,
-                    RequestState::Released | RequestState::Withdrawn => {
-                        return refused("Claude Code no longer asks this");
-                    }
-                }
-                let offered = request.options.iter().any(|o| o.id == *choice);
-                // A dialog or a form also takes its result as a JSON object, or is put away.
-                let form = request.kind == Request::ELICITATION
-                    || request.kind.starts_with(Request::DIALOG);
-                let filled =
-                    serde_json::from_str::<serde_json::Value>(choice).is_ok_and(|v| v.is_object());
-                let put_away = [Request::CANCEL, Request::DECLINE].contains(&choice.as_str());
-                if !offered && request.questions.is_empty() && !(form && (filled || put_away)) {
-                    return refused(&format!("There is no answer {choice}"));
-                }
-                ThreadAsk::Answer {
-                    ask: ask.clone(),
-                    choice: choice.clone(),
-                    message: message.clone(),
-                    by,
-                }
-            }
-            Intent::SetModel { model } => {
-                // Claude Code lists its menu by alias (`opus`) and takes a model by its full id
-                // too (`claude-opus-5-5`), as the picker names it; it judges that one itself.
-                let offered = state.meta.models.iter().any(|m| m.id == *model);
-                if !offered && !model.starts_with(agent::MODEL_ID_PREFIX) {
-                    return refused(&format!("There is no model {model} here"));
-                }
-                ThreadAsk::SetModel { model: model.clone() }
-            }
-            Intent::SetEffort { effort } => {
-                if !state.meta.efforts.iter().any(|e| e.id == *effort) {
-                    return refused(&format!("The model has no effort {effort}"));
-                }
-                ThreadAsk::SetEffort { effort: effort.clone() }
-            }
-            Intent::SetMode { mode } => {
-                if !state.meta.modes.iter().any(|m| m.id == *mode) {
-                    return refused(&format!("Claude Code has no mode {mode}"));
-                }
-                ThreadAsk::SetMode { mode: mode.clone() }
-            }
-            Intent::SetOption { option, choice } => {
-                let offered = state
-                    .meta
-                    .models
-                    .iter()
-                    .flat_map(|m| &m.options)
-                    .any(|o| o.id == *option && o.choices.iter().any(|c| c.id == *choice));
-                if !offered {
-                    return refused(&format!("The model offers no {option} {choice}"));
-                }
-                ThreadAsk::SetOption { option: option.clone(), choice: choice.clone() }
-            }
-            Intent::End => {
-                if !live {
-                    return refused("Claude Code is not running");
-                }
-                ThreadAsk::Close
-            }
-            other => return other.unsupported(),
-        };
-        // What is held is the thread's record, answered whether Claude Code runs or not; a
-        // message or a setting takes up a thread whose Claude Code ended.
-        let held = matches!(
-            asked,
-            ThreadAsk::Withdraw { .. }
-                | ThreadAsk::Edit { .. }
-                | ThreadAsk::Promote { .. }
-                | ThreadAsk::Move { .. }
-                | ThreadAsk::Rule { .. }
-        );
-        let takes_up = matches!(
-            asked,
-            ThreadAsk::Send { .. }
-                | ThreadAsk::Shell { .. }
-                | ThreadAsk::Side { .. }
-                | ThreadAsk::SetModel { .. }
-                | ThreadAsk::SetMode { .. }
-                | ThreadAsk::SetEffort { .. }
-                | ThreadAsk::Rewind { .. }
-                | ThreadAsk::RewindConversation { .. }
-        ) && goes_on;
-        if !live && !held && !takes_up {
-            return refused("Claude Code is not running");
-        }
-        // Another Claude Code holds the session: nothing goes to it until that one ends.
-        if takes_up && let Some(words) = self.2.lock().get(&thread) {
-            return refused(words);
-        }
-        let asked = if matches!(
-            asked,
-            ThreadAsk::Interrupt | ThreadAsk::StopTask { .. } | ThreadAsk::Close
-        ) {
-            match self.at_once(thread, asked) {
-                Ok(()) => return Outcome::Done,
-                Err(asked) => asked,
-            }
-        } else {
-            asked
-        };
-        if self.0.send(Ask::Thread { thread, ask: asked }).is_err() {
-            return refused("Claude Code threads are not served here");
-        }
-        Outcome::Done
+        let Some(root) = root_of(&self.host, thread) else { return Expanded::Gone };
+        let home = self.place.home.clone();
+        tokio::task::spawn_blocking(move || {
+            sessions::expand(&home, Path::new(&root.cwd), &root.native, &content)
+        })
+        .await
+        .unwrap_or(Expanded::Gone)
     }
 }
 
-/// Whether `state` is a Claude Code thread, which this worker drives.
+/// Whether `state` is a thread of a Claude Code session.
 #[must_use]
 pub fn is_claude(state: &ThreadState) -> bool {
     state.meta.agent.is(AgentId::CLAUDE_CODE)
 }
 
-/// Serve the driven Claude Code threads in `host`, run where `place` says, taking the asks of
-/// their [`Claude`].
-///
-/// First every thread an earlier worker left with Claude Code in ptyd's custody is taken up
-/// again; one whose Claude Code ptyd no longer holds is left exited and resumable.
-pub fn spawn(
+/// How many ticks after the observer starts a thread that names a terminal with no Claude Code
+/// is left as it is: the worker's terminals are being taken back from ptyd meanwhile.
+const SETTLE_TICKS: u32 = 4;
+
+/// How many ticks a session Slopty started may go without its Claude Code in the foreground
+/// before it is taken to have ended: a launcher takes a moment to start it.
+const START_TICKS: u32 = 8;
+
+/// The observer's own task: every terminal's Claude Code.
+struct Watch {
     host: Host,
-    place: Place,
-    Asks(mut asks, again, running, held): Asks,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let (ended_tx, mut ended) = mpsc::unbounded_channel();
-        let custody = Custody::new(place.ptyd.clone());
-        let mut served =
-            Served { host, custody, place, launcher: None, running, held, ended: ended_tx, again };
-        served.take_up().await;
-        loop {
-            tokio::select! {
-                ask = asks.recv() => match ask {
-                    Some(Ask::Start { id, start, seated, reply }) => {
-                        let outcome =
-                            Box::pin(served.begin(id, &start, seated.map(|s| *s))).await;
-                        let _gone = reply.send(outcome);
-                    }
-                    Some(Ask::Fork { thread, id, after, reply }) => {
-                        let outcome = Box::pin(served.fork(thread, id, after)).await;
-                        let _gone = reply.send(outcome);
-                    }
-                    Some(Ask::Thread { thread, ask }) => served.route(thread, vec![ask]).await,
-                    Some(Ask::Close { thread, done }) => {
-                        let task = served.running.lock().get(&thread).cloned();
-                        if let Some(task) = task {
-                            let _gone = task.send(ThreadAsk::Close);
+    place: Arc<Place>,
+    terms: HashMap<SessionId, Term>,
+    ticks: u32,
+}
+
+/// What is known of one terminal's Claude Code.
+#[derive(Default)]
+struct Term {
+    /// Its process, once a tick saw it.
+    pid: Option<u32>,
+    /// The session followed now.
+    session: Option<Followed>,
+    /// Sessions that ended here while the process lives, which its record may still name for
+    /// a moment.
+    ended: HashSet<String>,
+    /// When the last hook taken started, in microseconds since the epoch.
+    hooked_us: u64,
+    /// Ticks since the session began with no Claude Code seen in the foreground.
+    unseen: u32,
+    /// Another agent's thread that is a row only, ended with the terminal's program.
+    row: Option<ThreadId>,
+    /// Whether a tick has named the terminal: one opened since a tick was read is not in it.
+    seen: bool,
+    /// The version of its Claude Code, once known: a session its hook begins after `/clear`
+    /// runs in the same process.
+    version: String,
+}
+
+/// A session followed on its own task, which ends on [`Say::End`] or once the observer goes.
+struct Followed {
+    native: String,
+    thread: ThreadId,
+    says: mpsc::UnboundedSender<Say>,
+    /// What its record last said it waits on the person for, as the session was told.
+    waits: Option<Wait>,
+}
+
+/// What a followed session's task is told.
+#[derive(Debug)]
+enum Say {
+    /// A hook said this of the session, at this time.
+    Signal(Signal, WallMs),
+    /// Its record says its name now.
+    Named(String),
+    /// Its record says it waits on the person for this (`None`: no longer), since this time.
+    Waits(Option<Wait>, WallMs),
+    /// The session ended here.
+    End(WallMs),
+}
+
+/// How a session to follow is known.
+struct Begin {
+    terminal: SessionId,
+    native: String,
+    cwd: String,
+    version: String,
+    transcript: PathBuf,
+}
+
+impl Watch {
+    async fn run(mut self, mut asks: mpsc::UnboundedReceiver<Ask>) {
+        while let Some(ask) = asks.recv().await {
+            match ask {
+                Ask::Tick(seen) => self.ticked(seen),
+                Ask::Hook { terminal, at_us, payload } => self.hooked(terminal, at_us, &payload),
+                Ask::Begun { terminal, native, cwd, version } => {
+                    let term = self.terms.entry(terminal).or_default();
+                    // Its first hook can come before word of the start: the session is
+                    // followed already, by the path the hook named.
+                    if term.session.as_ref().is_some_and(|f| f.native == native) {
+                        if !version.is_empty() {
+                            term.version = version;
                         }
-                        let _gone = done.send(());
+                        continue;
                     }
-                    Some(Ask::Expand { thread, content, reply }) => served.expand(thread, content, reply),
-                    Some(Ask::App { thread, ask, reply }) => served.app(thread, ask, reply),
-                    None => return,
-                },
-                Some((thread, left)) = ended.recv() => {
-                    {
-                        let mut running = served.running.lock();
-                        if running.get(&thread).is_some_and(mpsc::UnboundedSender::is_closed) {
-                            running.remove(&thread);
-                        }
-                    }
-                    if !left.is_empty() {
-                        served.route(thread, left).await;
-                    }
+                    let transcript =
+                        sessions::transcript(&self.place.home, Path::new(&cwd), &native);
+                    self.follow(Begin { terminal, native, cwd, version, transcript });
+                }
+                Ask::Row { terminal, thread } => {
+                    self.terms.entry(terminal).or_default().row = Some(thread);
                 }
             }
         }
-    })
-}
-
-/// The driven Claude Code threads, as [`spawn`] serves them.
-struct Served {
-    host: Host,
-    custody: Custody,
-    place: Place,
-    /// Found once it is found; looked for again until then.
-    launcher: Option<Installed>,
-    /// The task of each thread's Claude Code while it runs: the session's one writer.
-    running: Running,
-    /// The threads whose session another Claude Code holds.
-    held: HeldBy,
-    /// Told by a task when its Claude Code has gone.
-    ended: Ended,
-    /// Where what the served threads do on their own comes back in (a `!` command that ended).
-    again: mpsc::UnboundedSender<Ask>,
-}
-
-impl Served {
-    async fn launcher(&mut self) -> Result<Installed, String> {
-        if let Some(launcher) = &self.launcher {
-            return Ok(launcher.clone());
-        }
-        let found = crate::facts::installed("claude", self.place.path.clone())
-            .await
-            .ok_or_else(|| "Claude Code is not installed".to_owned())?;
-        self.launcher = Some(found.clone());
-        Ok(found)
     }
 
-    /// Take up again every thread whose Claude Code an earlier worker left in ptyd's custody;
-    /// let go of what ptyd holds that no thread names; leave exited any thread left running
-    /// whose Claude Code is gone.
-    async fn take_up(&self) {
-        let held = match self.custody.sessions().await {
-            Ok(held) => held,
-            Err(why) => {
-                tracing::warn!("the Claude Codes in ptyd's keeping are not known: {why}");
+    /// A tick: each Claude Code's session as its record names it, and every one that ended.
+    fn ticked(&mut self, seen: Vec<(SessionId, Foreground)>) {
+        self.ticks = self.ticks.saturating_add(1);
+        let named: HashSet<SessionId> = seen.iter().map(|(id, _)| *id).collect();
+        let absent: Vec<SessionId> =
+            self.terms.keys().filter(|id| !named.contains(id)).copied().collect();
+        for terminal in absent {
+            let Some(term) = self.terms.get_mut(&terminal) else { continue };
+            term.unseen = term.unseen.saturating_add(1);
+            if term.seen || term.unseen > START_TICKS {
+                tracing::debug!(%terminal, "an agent's terminal ended");
+                if let Some(row) = term.row.take() {
+                    ended(&self.host, row, WallMs::now());
+                }
+                self.end(terminal, WallMs::now());
+                self.terms.remove(&terminal);
+            }
+        }
+        for (terminal, fg) in seen {
+            if let Some(term) = self.terms.get_mut(&terminal) {
+                term.seen = true;
+            }
+            match fg {
+                Foreground::Claude { pid, cwd } => self.claude_at(terminal, pid, cwd.as_deref()),
+                Foreground::Other => self.other_at(terminal),
+                Foreground::Unknown => {}
+            }
+        }
+        if self.ticks == SETTLE_TICKS {
+            self.sweep();
+        }
+    }
+
+    /// A Claude Code runs in the foreground of `terminal` as `pid`, in `cwd`.
+    fn claude_at(&mut self, terminal: SessionId, pid: u32, cwd: Option<&Path>) {
+        let term = self.terms.entry(terminal).or_default();
+        term.pid = Some(pid);
+        term.seen = true;
+        term.unseen = 0;
+        let Some(live) = record_of(&self.place.home, pid) else { return };
+        if let (Some(name), Some(followed)) = (&live.name, &term.session)
+            && followed.native == live.session
+        {
+            let _gone = followed.says.send(Say::Named(name.clone()));
+        }
+        let current = term.session.as_ref().map(|f| f.native.as_str());
+        if current == Some(live.session.as_str()) {
+            self.waits(terminal, &live);
+            return;
+        }
+        if term.ended.contains(&live.session) {
+            return;
+        }
+        let cwd = live.cwd.clone().or_else(|| cwd.map(|c| c.to_string_lossy().into_owned()));
+        let Some(cwd) = cwd else { return };
+        let transcript = sessions::transcript(&self.place.home, Path::new(&cwd), &live.session);
+        let version = live.version.clone().unwrap_or_default();
+        tracing::info!(%terminal, session = live.session, "a Claude Code's session, by its record");
+        let native = live.session.clone();
+        self.follow(Begin { terminal, native, cwd, version, transcript });
+        self.waits(terminal, &live);
+    }
+
+    /// Tell the session followed in `terminal` what its record `live` says it waits on, when
+    /// that changed.
+    fn waits(&mut self, terminal: SessionId, live: &Live) {
+        let followed = self.terms.get_mut(&terminal).and_then(|t| t.session.as_mut());
+        let Some(followed) = followed.filter(|f| f.native == live.session) else { return };
+        let wait = live.waiting();
+        if followed.waits == wait {
+            return;
+        }
+        followed.waits.clone_from(&wait);
+        let at = live.status_at.unwrap_or_else(WallMs::now);
+        let _gone = followed.says.send(Say::Waits(wait, at));
+    }
+
+    /// Another program is in the foreground of `terminal`: its Claude Code ended, unless its
+    /// process still lives (an editor it opened holds the terminal).
+    fn other_at(&mut self, terminal: SessionId) {
+        let Some(term) = self.terms.get_mut(&terminal) else { return };
+        if term.session.is_none() {
+            return;
+        }
+        let ended = if let Some(pid) = term.pid {
+            !i32::try_from(pid).is_ok_and(crate::ports::alive)
+        } else {
+            term.unseen = term.unseen.saturating_add(1);
+            term.unseen > START_TICKS
+        };
+        if ended {
+            tracing::info!(%terminal, "a Claude Code ended");
+            self.end(terminal, WallMs::now());
+            if let Some(term) = self.terms.get_mut(&terminal) {
+                term.pid = None;
+                term.ended.clear();
+            }
+        }
+    }
+
+    /// End every thread an earlier worker left naming a terminal where no Claude Code was found.
+    fn sweep(&self) {
+        let followed: HashSet<ThreadId> = self
+            .terms
+            .values()
+            .flat_map(|t| t.session.as_ref().map(|f| f.thread).into_iter().chain(t.row))
+            .collect();
+        let left = self.host.visit(|s| {
+            (s.meta.terminal().is_some() && !followed.contains(&s.meta.id)).then_some(s.meta.id)
+        });
+        for thread in left {
+            tracing::info!(%thread, "a Claude Code thread whose terminal no longer runs it ended");
+            ended(&self.host, thread, WallMs::now());
+        }
+    }
+
+    /// A hook from `terminal`: one older than the last taken is passed over, since Claude Code
+    /// runs them all at once.
+    fn hooked(&mut self, terminal: SessionId, at_us: u64, payload: &str) {
+        let Some(hook) = Hook::parse(payload) else {
+            tracing::debug!(%terminal, "a hook that is no hook's JSON");
+            return;
+        };
+        let term = self.terms.entry(terminal).or_default();
+        if at_us < term.hooked_us {
+            tracing::debug!(%terminal, event = hook.event, "a hook older than the last, passed over");
+            return;
+        }
+        term.hooked_us = at_us;
+        let at = wall_of(at_us);
+        let signal = hook.signal();
+        let native = hook.session_id.clone().filter(|s| slopty_agent::claude::is_session_id(s));
+        let current = term.session.as_ref().map(|f| f.native.clone());
+        match (&signal, native) {
+            // The session began here: a new one after `/clear`, or the one taken up.
+            (Signal::Began, Some(native)) if current.as_deref() != Some(native.as_str()) => {
+                term.ended.remove(&native);
+                let cwd = hook.cwd.clone().unwrap_or_default();
+                let transcript = hook.transcript_path.clone().map_or_else(
+                    || sessions::transcript(&self.place.home, Path::new(&cwd), &native),
+                    PathBuf::from,
+                );
+                tracing::info!(%terminal, session = native, source = ?hook.source, "a Claude Code's session, by its hook");
+                let version = term.version.clone();
+                self.follow(Begin { terminal, native, cwd, version, transcript });
+                self.say(terminal, Say::Signal(Signal::Began, at));
+            }
+            (Signal::Ended, Some(native)) if current.as_deref() == Some(native.as_str()) => {
+                tracing::info!(%terminal, session = native, reason = ?hook.reason, "a Claude Code's session ended");
+                self.end(terminal, at);
+                if let Some(term) = self.terms.get_mut(&terminal) {
+                    term.ended.insert(native);
+                }
+            }
+            // A session no tick has named yet (its record unread): its hook names its files.
+            (_, Some(native)) if current.is_none() && hook.transcript_path.is_some() => {
+                let cwd = hook.cwd.clone().unwrap_or_default();
+                let transcript = hook.transcript_path.map(PathBuf::from).unwrap_or_default();
+                let version = term.version.clone();
+                self.follow(Begin { terminal, native, cwd, version, transcript });
+                self.say(terminal, Say::Signal(signal, at));
+            }
+            (_, Some(native)) if current.as_deref() != Some(native.as_str()) => {
+                tracing::debug!(%terminal, session = native, event = hook.event, "a hook of a session not followed here");
+            }
+            _ => self.say(terminal, Say::Signal(signal, at)),
+        }
+    }
+
+    /// Follow `at`'s session in its terminal, in place of the one there before.
+    fn follow(&mut self, at: Begin) {
+        let terminal = at.terminal;
+        self.end(terminal, WallMs::now());
+        let (native, version) = (at.native.clone(), at.version.clone());
+        let thread = slopty_agent::claude::thread_of(&native);
+        let (says, told) = mpsc::unbounded_channel();
+        drop(tokio::spawn(read(self.host.clone(), self.place.home.clone(), at, told)));
+        let followed = Followed { native, thread, says, waits: None };
+        let term = self.terms.entry(terminal).or_default();
+        if !version.is_empty() {
+            term.version = version;
+        }
+        term.session = Some(followed);
+    }
+
+    /// End the session followed in `terminal`, if one is, at `at`.
+    fn end(&mut self, terminal: SessionId, at: WallMs) {
+        let Some(followed) = self.terms.get_mut(&terminal).and_then(|t| t.session.take()) else {
+            return;
+        };
+        let _gone = followed.says.send(Say::End(at));
+    }
+
+    fn say(&self, terminal: SessionId, say: Say) {
+        if let Some(followed) = self.terms.get(&terminal).and_then(|t| t.session.as_ref()) {
+            let _gone = followed.says.send(say);
+        }
+    }
+}
+
+/// The wall time `at_us` microseconds after the epoch.
+fn wall_of(at_us: u64) -> WallMs {
+    let ms = Duration::from_micros(at_us).as_millis();
+    WallMs::from_millis(u64::try_from(ms).unwrap_or(u64::MAX))
+}
+
+/// The record Claude Code `pid` keeps of itself, or the one its child keeps when `pid` is a
+/// managed launcher that runs the real client beneath it.
+fn record_of(home: &Path, pid: u32) -> Option<Live> {
+    if let Some(live) = sessions::live_of(home, pid) {
+        return Some(live);
+    }
+    let pid = i32::try_from(pid).ok()?;
+    let children = crate::ports::child_pids(pid);
+    let below = children.iter().flat_map(|child| crate::ports::child_pids(*child));
+    children
+        .iter()
+        .copied()
+        .chain(below)
+        .filter_map(|child| u32::try_from(child).ok())
+        .find_map(|child| sessions::live_of(home, child))
+}
+
+/// How often a followed session's files are looked at besides the kernel's word: the output
+/// of its background commands, and a volume that cannot report a write.
+const LOOK: Duration = Duration::from_secs(1);
+
+/// Follow one session: its thread begun (again), its files read as they grow, what its hooks
+/// say applied, until it ends.
+async fn read(host: Host, home: PathBuf, at: Begin, mut heard: mpsc::UnboundedReceiver<Say>) {
+    let terminal = at.terminal;
+    let mut reader = Reader::begin(&host, &home, at);
+    // The follower takes each list sent after it starts, the first one too.
+    let (paths, lists) = watch::channel(Vec::new());
+    let mut files = crate::fswatch::follow(lists, crate::fswatch::Limits::default());
+    paths.send_replace(reader.paths());
+    let mut look = tokio::time::interval(LOOK);
+    look.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            changed = files.next() => if changed.is_none() { break },
+            _ = look.tick() => {}
+            say = heard.recv() => match say {
+                None => break,
+                Some(Say::End(at)) => {
+                    let Some(back) = reader.read_off(&host).await else { return };
+                    reader = back;
+                    reader.end(&host, at);
+                    return;
+                }
+                Some(say) => {
+                    // A hook comes once Claude Code wrote what it says of: the transcript is
+                    // read first, so a turn's end never shows before the turn, and a dialog its
+                    // record says is open finds the call it is about.
+                    if matches!(say, Say::Signal(..) | Say::Waits(..)) {
+                        let Some(back) = reader.read_off(&host).await else { return };
+                        reader = back;
+                    }
+                    reader.say(&host, say);
+                    continue;
+                }
+            },
+        }
+        let Some(back) = reader.read_off(&host).await else { return };
+        reader = back;
+        paths.send_if_modified(|now| {
+            let next = reader.paths();
+            let moved = *now != next;
+            *now = next;
+            moved
+        });
+    }
+    tracing::debug!(%terminal, "a session's follower stopped");
+}
+
+/// One session's thread as its records and hooks make it.
+struct Reader {
+    history: History,
+    transcripts: Transcripts,
+    main: PathBuf,
+    cwd: String,
+    home: PathBuf,
+    /// Whether a hook was heard: the phase follows the hooks then, not the record or the
+    /// transcript.
+    hooked: bool,
+    /// Whether the phase waits on the person because the record says so ([`Say::Waits`]): the
+    /// transcript leaves it alone until the record no longer does.
+    asked: bool,
+    /// The calls the transcript has written with no result yet, the latest last, while no hook
+    /// is heard: what a dialog the record says is open is about.
+    open: Vec<Open>,
+}
+
+/// A call written with no result yet.
+struct Open {
+    thread: slopty_agent::conversation::ThreadId,
+    id: String,
+    name: String,
+    input: serde_json::Value,
+}
+
+/// The most calls kept open at once: a session's dialogs are about its latest.
+const OPEN_CALLS: usize = 64;
+
+/// Claude Code's tool that asks the person a question, and the one that asks them to approve a
+/// plan: a dialog about either is a question or a plan, whatever the record calls it.
+const QUESTION_TOOL: &str = "AskUserQuestion";
+const PLAN_TOOL: &str = "ExitPlanMode";
+
+/// The wait kinds a dialog is said by (`slopty_proto::thread::Wait`).
+const PERMISSION: &str = "permission";
+const QUESTION: &str = "question";
+const PLAN: &str = "plan";
+
+impl Reader {
+    /// Begin `at`'s thread: the one held of its session taken up again from nothing, else a new
+    /// one, naming its terminal.
+    fn begin(host: &Host, home: &Path, at: Begin) -> Self {
+        let Begin { terminal, native, cwd, version, transcript } = at;
+        let thread = slopty_agent::claude::thread_of(&native);
+        let now = WallMs::now();
+        let mut history = match host.meta(thread) {
+            Some((mut meta, _status)) => {
+                // Read, not driven: nothing to switch to from here.
+                meta.drive = Drive::named(Drive::OBSERVED);
+                meta.models.clear();
+                meta.modes.clear();
+                meta.efforts.clear();
+                History::of(meta, &[])
+            }
+            None => History::new(&native, &version, &cwd, &[], now),
+        };
+        take(host, history.drain());
+        if !version.is_empty() {
+            take(host, history.version(&version));
+        }
+        take(host, history.fact(ThreadMeta::TERMINAL_FACT, Some(&terminal.to_string())));
+        take(host, history.status(Phase::Idle, None, Liveness::Live, now));
+        Self {
+            history,
+            transcripts: Transcripts::default(),
+            main: transcript,
+            cwd,
+            home: home.to_path_buf(),
+            hooked: false,
+            asked: false,
+            open: Vec::new(),
+        }
+    }
+
+    /// The files to follow: the main transcript, and every subagent file found so far.
+    fn paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self
+            .transcripts
+            .read_files()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let main = self.main.to_string_lossy().into_owned();
+        if !paths.contains(&main) {
+            paths.insert(0, main);
+        }
+        let agents = slopty_agent::conversation::subagents_dir(&self.main);
+        paths.push(agents.to_string_lossy().into_owned());
+        paths
+    }
+
+    /// Read what the files gained, off the runtime's threads. `None` when the reading panicked.
+    async fn read_off(mut self, host: &Host) -> Option<Self> {
+        let host = host.clone();
+        tokio::task::spawn_blocking(move || {
+            self.read(&host);
+            self
+        })
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, "a session's transcript read failed"))
+        .ok()
+    }
+
+    fn read(&mut self, host: &Host) {
+        let changes = self.transcripts.read(&self.main, &[]);
+        let outputs = self.transcripts.outputs();
+        if changes.is_empty() && outputs.is_empty() {
+            return;
+        }
+        if !self.hooked {
+            self.calls(&changes);
+        }
+        take(host, self.history.transcript(&changes, &outputs));
+        take(host, self.phase_from_transcript());
+    }
+
+    /// Keep the calls `changes` leave open, the latest last.
+    fn calls(&mut self, changes: &[Change]) {
+        for change in changes {
+            match change {
+                Change::Upsert { thread, entry } => {
+                    let Body::Tool(call) = &entry.body else { continue };
+                    self.open.retain(|o| o.id != entry.id);
+                    if call.result.is_none() {
+                        let input = slopty_agent::conversation::call_input(&call.detail);
+                        let (thread, id, name) =
+                            (thread.clone(), entry.id.clone(), call.name.clone());
+                        self.open.push(Open { thread, id, name, input });
+                    }
+                }
+                Change::Remove { id, .. } => self.open.retain(|o| o.id != *id),
+                Change::Reset { thread: Some(thread) } => self.open.retain(|o| o.thread != *thread),
+                Change::Reset { thread: None } => self.open.clear(),
+                Change::Tasks { .. } | Change::Turn { .. } => {}
+            }
+        }
+        let over = self.open.len().saturating_sub(OPEN_CALLS);
+        drop(self.open.drain(..over));
+    }
+
+    /// What the transcript says of the phase: the whole of it with no hooks, an interrupt
+    /// alone with them (it fires none).
+    fn phase_from_transcript(&mut self) -> Vec<Out> {
+        let Some(turn) = self.history.last_turn() else { return Vec::new() };
+        let (state, started, ended) = (turn.state.clone(), turn.started_ms, turn.ended_ms);
+        let status = self.history.phase().cloned();
+        let at_work =
+            status.as_ref().is_some_and(|s| matches!(s.phase, Phase::Working | Phase::NeedsYou));
+        let since = status.as_ref().map_or(WallMs::ZERO, |s| s.since_ms);
+        let phase = match state {
+            TurnState::Interrupted if at_work && ended.is_some_and(|e| e >= since) => {
+                Phase::Stopped
+            }
+            _ if self.hooked || self.asked => return Vec::new(),
+            state => phase_of(&state),
+        };
+        if status.as_ref().is_some_and(|s| s.phase == phase) {
+            return Vec::new();
+        }
+        let at = ended.unwrap_or(started);
+        self.history.status(phase, None, Liveness::Live, at)
+    }
+
+    fn say(&mut self, host: &Host, say: Say) {
+        let outs = match say {
+            Say::Signal(signal, at) => {
+                self.hooked = true;
+                self.asked = false;
+                self.open.clear();
+                self.signal(signal, at)
+            }
+            Say::Waits(wait, at) => self.waits(wait, at),
+            Say::Named(name) => self.history.named(&name),
+            Say::End(at) => {
+                self.end(host, at);
                 Vec::new()
             }
         };
-        let threads = self.host.visit(|s| {
-            let root = is_claude(s) && s.meta.origin != ThreadMeta::SUBAGENT;
-            let custody = s.meta.facts.get(CUSTODY_FACT).and_then(|c| c.parse::<SessionId>().ok());
-            let live = s.status.liveness == Liveness::Live;
-            (root && (live || custody.is_some())).then_some((s.meta.id, custody))
-        });
-        let mut claimed = Vec::new();
-        for (thread, custody) in threads {
-            let info = custody.and_then(|id| held.iter().find(|s| s.id == id));
-            match info {
-                Some(info) => {
-                    claimed.push(info.id);
-                    self.reattach(thread, info.id, info.pid, info.exited.is_none()).await;
-                }
-                None => lost(&self.host, thread),
-            }
+        take(host, outs);
+    }
+
+    /// What the record says the session waits on since `at`, for a session none of whose hooks
+    /// is heard: waiting on the person while it does, and what the transcript says once it no
+    /// longer does.
+    fn waits(&mut self, wait: Option<Wait>, at: WallMs) -> Vec<Out> {
+        let live = Liveness::Live;
+        if self.hooked {
+            return Vec::new();
         }
-        for orphan in held.iter().filter(|s| !claimed.contains(&s.id)) {
-            tracing::info!(session = %orphan.id, "a piped session no thread names: closed");
-            self.custody.close(orphan.id).await;
+        match wait {
+            Some(wait) => {
+                self.asked = true;
+                let wait = self.worded(wait);
+                self.history.status(Phase::NeedsYou, Some(wait), live, at)
+            }
+            None if std::mem::take(&mut self.asked) => {
+                let phase =
+                    self.history.last_turn().map_or(Phase::Idle, |turn| phase_of(&turn.state));
+                self.history.status(phase, None, live, at)
+            }
+            None => Vec::new(),
         }
     }
 
-    /// Take up `thread`'s Claude Code, session `session` (child `pid`) in ptyd, `running` while
-    /// its child lives: the thread read again from the transcript, then what Claude Code wrote
-    /// while no worker held it.
-    async fn reattach(&self, thread: ThreadId, session: SessionId, pid: u32, running: bool) {
-        let Some((state, _)) = self.host.state(thread) else { return };
-        let taken = match self.custody.take(session, pid).await {
-            Ok(taken) => taken,
-            Err(why) => {
-                tracing::warn!(%thread, "its Claude Code could not be taken up: {why}");
-                lost(&self.host, thread);
-                return;
-            }
+    /// `wait` said of the call it is about, when the record says a permission or a question
+    /// and the transcript has a call open: the latest, since a dialog holds the session until it
+    /// is answered. A dialog of Claude Code's own (input) is said in the record's words.
+    fn worded(&self, wait: Wait) -> Wait {
+        let Some(open) = self.open.last() else { return wait };
+        let kind = match (open.name.as_str(), wait.kind.as_str()) {
+            (QUESTION_TOOL, PERMISSION | QUESTION) => QUESTION,
+            (PLAN_TOOL, PERMISSION) => PLAN,
+            (_, PERMISSION) => PERMISSION,
+            _ => return wait,
         };
-        self.custody.read(session).await;
-        let records = match self.records(&state.meta).await {
-            Ok(records) => records,
-            Err(why) => {
-                // Kept as it is rather than read again from nothing: its Claude Code is ended,
-                // and its next message tries the transcript again.
-                say(&self.host, thread, "unread", &format!("{UNREAD}: {why}"));
-                self.custody.close(session).await;
-                lost(&self.host, thread);
-                return;
-            }
-        };
-        let (driven, outs) = read_again(&state, &records, running);
-        take(&self.host, outs);
-        tracing::info!(%thread, %session, "a Claude Code taken up again");
-        self.serve(thread, driven, session, taken, Vec::new());
+        Wait { kind: kind.to_owned(), text: asks_for(&open.name, &open.input) }
     }
 
-    /// The records of `meta`'s session, as Claude Code wrote them, or why they cannot be read.
-    async fn records(&self, meta: &ThreadMeta) -> Result<Vec<serde_json::Value>, String> {
-        let (home, cwd, native) =
-            (self.place.home.clone(), PathBuf::from(&meta.cwd), meta.native.clone());
-        let read =
-            tokio::task::spawn_blocking(move || agent::sessions::records(&home, &cwd, &native))
-                .await;
-        let why = match read {
-            Ok(Ok(records)) => return Ok(records),
-            Ok(Err(e)) => e.to_string(),
-            Err(e) => e.to_string(),
-        };
-        tracing::warn!(thread = %meta.id, "its transcript could not be read: {why}");
-        Err(why)
+    fn signal(&mut self, signal: Signal, at: WallMs) -> Vec<Out> {
+        let live = Liveness::Live;
+        match signal {
+            Signal::Began => self.history.status(Phase::Idle, None, live, at),
+            Signal::Working => self.history.status(Phase::Working, None, live, at),
+            Signal::Asks { kind, text } => {
+                let wait = Wait { kind: kind.to_owned(), text };
+                self.history.status(Phase::NeedsYou, Some(wait), live, at)
+            }
+            // The turn ends with its Stop: the records that close it come after the hook.
+            Signal::Done => {
+                let mut outs = self.history.ended(&End::Complete, at);
+                outs.extend(self.history.status(Phase::Done, None, live, at));
+                outs
+            }
+            Signal::Failed(_) => {
+                let mut outs = self.history.ended(&End::Failed(None), at);
+                outs.extend(self.history.status(Phase::Failed, None, live, at));
+                outs
+            }
+            Signal::Compacting(on) => self.history.compacting(on),
+            Signal::Ended | Signal::Nothing => Vec::new(),
+        }
     }
 
-    /// Start the thread of intent `id` as `start` says, once. A start that names one of Claude
-    /// Code's sessions (`--resume <id>`) takes it up again: in the thread this worker keeps of
-    /// it when there is one, else in a new thread read from the session's transcript.
-    async fn begin(&mut self, id: IntentId, start: &Start, seated: Option<Seated>) -> Outcome {
-        if let Some(outcome) = self.host.started(id) {
-            return outcome;
-        }
-        if let Err(why) = checked(start) {
-            return self.host.record_start(id, refused(&why));
-        }
-        // A Claude Code too old to drive is not started at all: the person is told to update it.
-        if let Ok(launch) = self.launcher().await
-            && let Some(why) = launch.version.as_deref().and_then(agent::too_old)
-        {
-            return self.host.record_start(id, refused(&why));
-        }
-        let resumed = match resumed_of(&start.args) {
-            Ok(resumed) => resumed.map(str::to_owned),
-            Err(why) => return self.host.record_start(id, refused(&why)),
-        };
-        let prompt = start.prompt.clone().filter(|p| !p.trim().is_empty());
-        let prompt = prompt.or_else(|| (!start.attachments.is_empty()).then(String::new));
-        let first: Vec<ThreadAsk> = prompt
-            .map(|text| ThreadAsk::Send {
-                text,
-                attachments: start.attachments.clone(),
-                intent: id,
-                delivery: Delivery::Steer,
-            })
-            .into_iter()
-            .collect();
-        // A session another Claude Code holds is not taken up: with a first message the start
-        // is refused, and the person keeps their words; without, it opens to be read.
-        let holder = match &resumed {
-            Some(native) if !self.running.lock().contains_key(&agent::thread_of(native)) => {
-                self.holder(native).await
-            }
-            _ => None,
-        };
-        if let Some(holder) = holder.as_ref().filter(|_| !first.is_empty()) {
-            return self.host.record_start(id, refused(&holder.words(&self.place.machine)));
-        }
-        if let Some(native) = &resumed {
-            let thread = agent::thread_of(native);
-            if self.host.state(thread).is_some_and(|(s, _)| is_claude(&s)) {
-                if let Some(holder) = holder {
-                    self.hold(thread, holder);
-                }
-                self.route(thread, first).await;
-                return self.host.record_start(id, Outcome::Started { thread });
-            }
-        }
-        let native = resumed.clone().unwrap_or_else(|| id.to_string());
-        // The mode the person's terminal would start in, named: `claude -p` given none starts
-        // in Manual on a third-party provider.
-        let mode = start.mode.clone().unwrap_or_else(|| {
-            agent::offers::starting_mode_in(&self.place.home, Path::new(&start.cwd))
-        });
-        let mut kept = agent::kept(start.model.as_deref(), Some(&mode), start.effort.as_deref());
-        if let Some(seated) = &seated {
-            kept = seat_args(kept, seated);
-        }
-        let mut begun = None;
-        let outcome = self.host.start(id, || {
-            let mut driven = Driven::new(&native, &start.cwd, WallMs::now());
-            let mut outs = driven.drain();
-            outs.extend(driven.started_with(&kept));
-            let meta = driven.meta().clone();
-            begun = Some((driven, outs));
-            Ok(meta)
-        });
-        let (Outcome::Started { thread }, Some((driven, outs))) = (&outcome, begun) else {
-            return outcome;
-        };
-        let thread = *thread;
-        take(&self.host, outs);
-        if let Some(seated) = &seated {
-            self.host.seated(thread, seated);
-        }
-        let session = match resumed {
-            Some(native) => Session::Resume(native),
-            None => Session::New(native),
-        };
-        if matches!(session, Session::Resume(_)) {
-            // A session taken up again is read from its transcript before the first message.
-            // A new thread: one whose transcript cannot be read loses nothing shown, and
-            // says why it starts empty.
-            let Some((state, _)) = self.host.state(thread) else { return outcome };
-            let read = self.records(&state.meta).await;
-            let (mut driven, outs) = read_again(&state, read.as_deref().unwrap_or_default(), false);
-            take(&self.host, outs);
-            if let Err(why) = read {
-                say(&self.host, thread, "unread", &format!("{UNREAD}: {why}"));
-            }
-            // Taken up, it opens in front of the person, and what it held they read where it
-            // ran: seen through its last turn, so it reads so on a device the turns reach
-            // after the open.
-            let last = self.host.state(thread).and_then(|(s, _)| s.last_turn().map(|t| t.id));
-            if let Some(last) = last {
-                self.host.apply(thread, vec![Action::Seen(last)]);
-            }
-            if first.is_empty() {
-                // Nothing to say yet: Claude Code starts with the first message. Until then the
-                // thread rests as one whose Claude Code ended, and goes on by a message.
-                take(&self.host, driven.exited(None, WallMs::now()));
-                if let Some(holder) = holder {
-                    self.hold(thread, holder);
-                }
-            } else {
-                self.run(thread, driven, session, first).await;
-            }
-        } else {
-            self.run(thread, driven, session, first).await;
-        }
-        outcome
+    /// The session ended here at `at`: exited and resumable, its terminal no longer named.
+    fn end(&mut self, host: &Host, at: WallMs) {
+        let mut outs = self.history.gone(at);
+        outs.extend(self.history.fact(ThreadMeta::TERMINAL_FACT, None));
+        take(host, outs);
+        tracing::debug!(cwd = self.cwd, home = %self.home.display(), "a session's thread ended");
     }
+}
 
-    /// Branch a new thread off `from`'s session for intent `id`, once: Claude Code, run for the
-    /// new thread on a session of the intent's id, resumes `from`'s into it (`--fork-session`),
-    /// all of it, or through turn `after` (`--resume-session-at` that turn's last record).
-    ///
-    /// `after` names the last turn at or before it: a client names "the turn before" a message by
-    /// its number less one. Before the first turn ([`TurnId::BEFORE`], a rewind of the whole
-    /// conversation) nothing is shared, and the new thread is a session of its own in the folder.
-    async fn fork(&mut self, from: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
-        if let Some(outcome) = self.host.started(id) {
-            return outcome;
-        }
-        let Some((state, _)) = self.host.state(from).filter(|(s, _)| is_claude(s)) else {
-            return self.host.record_start(id, refused("There is no such Claude Code thread here"));
-        };
-        let last = state.last_turn().map(|t| t.id);
-        let after = after.map(|after| {
-            let turns = state.turns.iter().map(|t| t.id);
-            turns.filter(|id| *id <= after && *id != TurnId::BEFORE).max().unwrap_or(TurnId::BEFORE)
-        });
-        let fresh = after == Some(TurnId::BEFORE);
-        // A turn before the last: the record the next turn's prompt follows is that turn's last.
-        let at = match after.filter(|after| Some(*after) != last && !fresh) {
-            Some(after) => {
-                let records = match self.records(&state.meta).await {
-                    Ok(records) => records,
-                    Err(why) => {
-                        let why = format!("Couldn't read its transcript: {why}");
-                        return self.host.record_start(id, refused(&why));
-                    }
-                };
-                match resume_at(&state, after, &records) {
-                    Ok(at) => Some(at),
-                    Err(why) => return self.host.record_start(id, refused(&why)),
-                }
-            }
-            None => None,
-        };
-        let native = id.to_string();
-        let mut begun = None;
-        let outcome = self.host.start(id, || {
-            let turn = if at.is_some() || fresh { after } else { last };
-            // Claude Code writes the conversation with its first message: before it there is none.
-            if turn.is_none() {
-                return Err("There is nothing to fork yet".to_owned());
-            }
-            let mut driven = Driven::new(&native, &state.meta.cwd, WallMs::now());
-            let mut outs = driven.drain();
-            outs.extend(driven.started_with(&kept_args(&state.meta)));
-            outs.extend(driven.forked(Fork { thread: from, turn }));
-            let meta = driven.meta().clone();
-            begun = Some((driven, outs));
-            Ok(meta)
-        });
-        let (Outcome::Started { thread }, Some((driven, outs))) = (&outcome, begun) else {
-            return outcome;
-        };
-        let thread = *thread;
-        take(&self.host, outs);
-        let mut driven = driven;
-        if !fresh {
-            // What it shares is read from the session it branches off, through the record it
-            // resumes at: Claude Code tells a resumed session's past to nobody, and the copy it
-            // makes is written only with the fork's first message.
-            match self.records(&state.meta).await {
-                Ok(records) => {
-                    let shared = shared_through(records, at.as_deref());
-                    if let Some((forked, _)) = self.host.state(thread) {
-                        let (read, outs) = read_again(&forked, &shared, false);
-                        take(&self.host, outs);
-                        driven = read;
-                    }
-                }
-                Err(why) => say(&self.host, thread, "unread", &format!("{UNREAD}: {why}")),
-            }
-        }
-        let session = if fresh {
-            Session::New(native)
-        } else {
-            Session::Fork { from: state.meta.native.clone(), id: native, at }
-        };
-        self.run(thread, driven, session, Vec::new()).await;
-        outcome
+/// The phase a turn in `state` leaves the session in.
+const fn phase_of(state: &TurnState) -> Phase {
+    match state {
+        TurnState::Active => Phase::Working,
+        TurnState::Complete => Phase::Done,
+        TurnState::Interrupted => Phase::Stopped,
+        TurnState::Failed { .. } => Phase::Failed,
     }
+}
 
-    /// `asks` for `thread`: to its Claude Code while one runs. Else a message takes the thread
-    /// up again; a setting is kept for the next run; anything else is dropped, its intent
-    /// already answered.
-    async fn route(&mut self, thread: ThreadId, asks: Vec<ThreadAsk>) {
-        let mut left = Vec::new();
-        let asks = self.beside(thread, asks);
-        for ask in asks {
-            let Some(task) = self.running.lock().get(&thread).cloned() else {
-                left.push(ask);
-                continue;
+/// End `thread`, which no follower holds: exited and resumable, naming no terminal.
+fn ended(host: &Host, thread: ThreadId, at: WallMs) {
+    host.update(thread, |state| {
+        let mut meta = state.meta.clone();
+        let mut actions = Vec::new();
+        if meta.facts.remove(ThreadMeta::TERMINAL_FACT).is_some() {
+            actions.push(Action::Meta(Box::new(meta)));
+        }
+        if state.status.liveness == Liveness::Live {
+            let phase = match state.status.phase {
+                Phase::Working | Phase::NeedsYou | Phase::Waiting => Phase::Stopped,
+                other => other,
             };
-            if let Err(mpsc::error::SendError(ask)) = task.send(ask) {
-                left.push(ask);
-            }
+            let liveness = Liveness::Exited { resumable: true };
+            let status = slopty_proto::thread::Status { phase, wait: None, liveness, since_ms: at };
+            actions.push(Action::Status(status));
         }
-        if left.is_empty() {
-            return;
-        }
-        self.running.lock().remove(&thread);
-        let Some((state, _)) = self.host.state(thread).filter(|(s, _)| is_claude(s)) else {
-            return;
-        };
-        let mut sends = Vec::new();
-        let mut kept = kept_args(&state.meta);
-        let mut queue = slopty_agent::queue::Queue::of(&state.pending);
-        let mut shown = None;
-        for ask in left {
-            match ask {
-                // A rewind takes the thread up again too: only its Claude Code holds the
-                // checkpoints and the conversation.
-                ThreadAsk::Send { .. }
-                | ThreadAsk::Report { .. }
-                | ThreadAsk::ShellDone { .. }
-                | ThreadAsk::Rewind { .. }
-                | ThreadAsk::RewindConversation { .. }
-                | ThreadAsk::RewindPreview { .. } => {
-                    sends.push(ask);
-                }
-                ThreadAsk::App { reply, .. } => {
-                    let _gone =
-                        reply.send(AppAnswer::Refused("Claude Code is not running".to_owned()));
-                }
-                ThreadAsk::Withdraw { intent } => shown = queue.withdraw(intent).or(shown),
-                ThreadAsk::Edit { intent, text, attachments } => {
-                    shown = queue.edit(intent, &text, attachments, ()).or(shown);
-                }
-                ThreadAsk::Move { intent, before } => {
-                    shown = queue.move_to(intent, before).or(shown);
-                }
-                ThreadAsk::Promote { intent } => {
-                    if let Some((held, ())) = queue.take(intent) {
-                        queue.release();
-                        shown = Some(queue.shown());
-                        sends.push(ThreadAsk::Send {
-                            text: held.text,
-                            attachments: held.attachments,
-                            intent,
-                            delivery: Delivery::Steer,
-                        });
-                    }
-                }
-                ThreadAsk::SetModel { model } => kept = with_flag(kept, agent::MODEL_FLAG, &model),
-                ThreadAsk::SetMode { mode } => {
-                    kept = with_flag(kept, agent::PERMISSION_MODE_FLAG, &mode);
-                }
-                ThreadAsk::SetEffort { effort } => {
-                    kept = with_flag(kept, agent::EFFORT_FLAG, &effort);
-                }
-                other => tracing::debug!(%thread, ?other, "an ask of a Claude Code not running"),
-            }
-        }
-        if let Some(shown) = shown {
-            self.host.apply(thread, vec![shown]);
-        }
-        if kept != kept_args(&state.meta) {
-            let json = serde_json::to_string(&kept).unwrap_or_default();
-            self.host.update(thread, |state| {
-                let mut meta = state.meta.clone();
-                meta.facts.insert(ARGS_FACT.to_owned(), json);
-                (vec![Action::Meta(Box::new(meta))], ())
-            });
-        }
-        if sends.is_empty() || state.meta.origin == ThreadMeta::SUBAGENT {
-            return;
-        }
-        // Another Claude Code took the session up since: the messages wait in the queue.
-        if let Some(holder) = self.holder(&state.meta.native).await {
-            let mut queue = slopty_agent::queue::Queue::of(&state.pending);
-            for send in sends {
-                if let ThreadAsk::Send { text, attachments, intent, .. } = send {
-                    let _shown = queue.hold(intent, &text, attachments, (), false);
-                }
-            }
-            self.host.apply(thread, vec![queue.shown()]);
-            self.hold(thread, holder);
-            return;
-        }
-        // Read again from the transcript, the thread goes on in a Claude Code of its own.
-        let Some((state, _)) = self.host.state(thread) else { return };
-        let records = match self.records(&state.meta).await {
-            Ok(records) => records,
-            Err(why) => {
-                // Kept as it is rather than read again from nothing: the messages wait in its
-                // queue, and the next one tries the transcript again.
-                let mut queue = slopty_agent::queue::Queue::of(&state.pending);
-                for send in sends {
-                    if let ThreadAsk::Send { text, attachments, intent, .. } = send {
-                        let _shown = queue.hold(intent, &text, attachments, (), false);
-                    }
-                }
-                self.host.apply(thread, vec![queue.shown()]);
-                say(&self.host, thread, "unread", &format!("{UNREAD}: {why}"));
-                return;
-            }
-        };
-        let (driven, outs) = read_again(&state, &records, false);
-        take(&self.host, outs);
-        self.run(thread, driven, Session::Resume(state.meta.native.clone()), sends).await;
-    }
-
-    /// The live Claude Code elsewhere on the machine that holds session `native`, if one does.
-    async fn holder(&self, native: &str) -> Option<held::Holder> {
-        let (home, native) = (self.place.home.clone(), native.to_owned());
-        tokio::task::spawn_blocking(move || held::holder(&home, &native)).await.ok().flatten()
-    }
-
-    /// `thread`'s session is held by `holder`: the thread says so, refuses every message, and
-    /// is let go, saying so, once the other ends.
-    fn hold(&self, thread: ThreadId, holder: held::Holder) {
-        let words = holder.words(&self.place.machine);
-        if self.held.lock().insert(thread, words.clone()).is_some() {
-            return;
-        }
-        tracing::info!(%thread, pid = holder.pid, "its session is held by another Claude Code");
-        say(&self.host, thread, "held", &words);
-        let (host, held) = (self.host.clone(), Arc::clone(&self.held));
-        drop(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(HELD_CHECK).await;
-                let looked = holder.clone();
-                if tokio::task::spawn_blocking(move || looked.lives()).await.unwrap_or(false) {
-                    continue;
-                }
-                held.lock().remove(&thread);
-                tracing::info!(%thread, "the other Claude Code let its session go");
-                say(&host, thread, "freed", FREED);
-                return;
-            }
-        }));
-    }
-
-    /// Run Claude Code for `thread` on `session`, with the thread's own flags, and serve it
-    /// until it ends; `first`, what it is asked once it runs.
-    async fn run(
-        &mut self,
-        thread: ThreadId,
-        driven: Driven,
-        session: Session,
-        first: Vec<ThreadAsk>,
-    ) {
-        let mut driven = driven;
-        let launch = match self.launcher().await {
-            Ok(launch) => match launch.version.as_deref().and_then(agent::too_old) {
-                Some(why) => Err(why),
-                None => Ok(launch),
-            },
-            Err(why) => Err(why),
-        };
-        let launch = match launch {
-            Ok(launch) => launch,
-            Err(why) => {
-                take(&self.host, driven.exited(Some(&why), WallMs::now()));
-                return;
-            }
-        };
-        let meta = driven.meta().clone();
-        let mut command = vec![launch.program.to_string_lossy().into_owned()];
-        // Slopty's tools come with every run, given afresh: never kept with the thread's flags,
-        // so a thread taken up again after an update runs the CLI installed now.
-        let kept = match self.host.tools_cli() {
-            Some(cli) => slopty_agent::mcp::with_mcp(kept_args(&meta), &cli),
-            None => kept_args(&meta),
-        };
-        command.extend(agent::args(&session, &kept));
-        let mut env = vec![("PATH".to_owned(), launch.path.to_string_lossy().into_owned())];
-        env.extend(agent::ENV.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())));
-        if let Some(seated) = self.host.seated_of(thread) {
-            env.extend(self.host.env_of(&seated));
-        }
-        let id = SessionId::new();
-        let dir = self.place.data_dir.join("claude");
-        let stderr = dir.join(format!("{id}.log"));
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            tracing::warn!(dir = %dir.display(), "Claude Code's error files have no folder: {e}");
-        }
-        let spec = SpawnSpec {
-            command,
-            cwd: Some(PathBuf::from(&meta.cwd)),
-            env,
-            size: slopty_proto::terminal::TermSize::default(),
-        };
-        let taken = match self.custody.spawn(id, spec, stderr.clone()).await {
-            Ok(taken) => taken,
-            Err(why) => {
-                tracing::warn!(%thread, "Claude Code could not start: {why}");
-                let why = format!("Couldn't start Claude Code: {why}");
-                take(&self.host, driven.exited(Some(&why), WallMs::now()));
-                return;
-            }
-        };
-        tracing::info!(%thread, session = %id, "started Claude Code");
-        let id_text = id.to_string();
-        take(&self.host, driven.fact(CUSTODY_FACT, Some(&id_text)));
-        take(&self.host, driven.branch(branch_in(Path::new(&meta.cwd)).as_deref()));
-        self.serve(thread, driven, id, taken, first);
-    }
-
-    /// Serve `thread`'s Claude Code, session `session` in ptyd, over `taken`.
-    fn serve(
-        &self,
-        thread: ThreadId,
-        mut driven: Driven,
-        session: SessionId,
-        taken: custody::Taken,
-        first: Vec<ThreadAsk>,
-    ) {
-        let socket = std::os::unix::net::UnixStream::from(taken.socket);
-        let socket =
-            socket.set_nonblocking(true).and_then(|()| tokio::net::UnixStream::from_std(socket));
-        let socket = match socket {
-            Ok(socket) => socket,
-            Err(e) => {
-                tracing::warn!(%thread, "Claude Code's socket could not be read: {e}");
-                return;
-            }
-        };
-        let stderr = self.place.data_dir.join("claude").join(format!("{session}.log"));
-        driven.set_init_wait(self.place.init_wait);
-        let task = Task::new(
-            self.host.clone(),
-            thread,
-            driven,
-            self.custody.clone(),
-            (session, stderr, self.place.home.clone()),
-        );
-        let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(task.serve(socket, taken.backlog, first, rx, self.ended.clone()));
-        self.running.lock().insert(thread, tx);
-    }
-
-    /// What of `asks` the worker does itself beside Claude Code: a `!` command runs on a task of
-    /// its own and comes back by [`Self::again`] once it ended; a rule is written into its
-    /// scope's file, then the rules listed again where Claude Code runs. The rest goes on.
-    fn beside(&self, thread: ThreadId, asks: Vec<ThreadAsk>) -> Vec<ThreadAsk> {
-        let mut rest = Vec::new();
-        for ask in asks {
-            match ask {
-                ThreadAsk::Shell { command, intent } => self.shell(thread, command, intent),
-                ThreadAsk::Rule { change } => {
-                    let Some((state, _)) = self.host.state(thread) else { continue };
-                    let cwd = PathBuf::from(&state.meta.cwd);
-                    if let Err(why) = settings::change_rule(&self.place.home, &cwd, &change) {
-                        tracing::warn!(%thread, "a permission rule was not written: {why}");
-                        let said = format!("The rule was not written: {why}");
-                        say(&self.host, thread, "rule", &said);
-                        continue;
-                    }
-                    rest.push(ThreadAsk::Rule { change });
-                }
-                other => rest.push(other),
-            }
-        }
-        rest
-    }
-
-    /// Run `!` command `command` of `thread` for intent `intent` on a task of its own; what it
-    /// did comes back as [`ThreadAsk::ShellDone`].
-    fn shell(&self, thread: ThreadId, command: String, intent: IntentId) {
-        let Some((state, _)) = self.host.state(thread) else { return };
-        let (host, again, home) = (self.host.clone(), self.again.clone(), self.place.home.clone());
-        let cwd = PathBuf::from(&state.meta.cwd);
-        tokio::spawn(async move {
-            let ran = settings::run_shell(&host, thread, &cwd, &command, intent).await;
-            let quiet = !settings::answers_bang(&home, &cwd);
-            let ask = ThreadAsk::ShellDone { ran, intent, quiet };
-            let _gone = again.send(Ask::Thread { thread, ask });
-        });
-    }
-
-    /// A page's ask of its app, to the session's Claude Code where it runs.
-    fn app(&self, thread: ThreadId, ask: AppAsk, reply: oneshot::Sender<AppAnswer>) {
-        let root = root_of(&self.host, thread).map_or(thread, |meta| meta.id);
-        let task = self.running.lock().get(&root).cloned();
-        match task {
-            Some(task) => {
-                if let Err(mpsc::error::SendError(ThreadAsk::App { reply, .. })) =
-                    task.send(ThreadAsk::App { ask, reply })
-                {
-                    let _gone = reply.send(AppAnswer::Refused("Claude Code ended".to_owned()));
-                }
-            }
-            None => {
-                let _gone = reply.send(AppAnswer::Refused("Claude Code is not running".to_owned()));
-            }
-        }
-    }
-
-    /// Answer `reply` with the whole of `content`, clipped in `thread`, read from its session's
-    /// transcript on the blocking pool.
-    fn expand(&self, thread: ThreadId, content: ContentRef, reply: oneshot::Sender<Expanded>) {
-        let Some(root) = root_of(&self.host, thread) else {
-            let _gone = reply.send(Expanded::Gone);
-            return;
-        };
-        let home = self.place.home.clone();
-        drop(tokio::task::spawn_blocking(move || {
-            let cwd = PathBuf::from(&root.cwd);
-            let body = agent::sessions::expand(&home, &cwd, &root.native, &content);
-            let _gone = reply.send(body);
-        }));
-    }
-}
-
-/// The records a fork shares of its session's `records` (the main transcript's, then each
-/// subagent's): the main ones through record `at`, else all of them, and every subagent's.
-fn shared_through(records: Vec<serde_json::Value>, at: Option<&str>) -> Vec<serde_json::Value> {
-    let Some(at) = at else { return records };
-    let sidechain = |r: &serde_json::Value| {
-        r.get("isSidechain").and_then(serde_json::Value::as_bool) == Some(true)
-    };
-    let Some(last) = records.iter().position(|r| {
-        !sidechain(r) && r.get("uuid").and_then(serde_json::Value::as_str) == Some(at)
-    }) else {
-        return records;
-    };
-    records
-        .into_iter()
-        .enumerate()
-        .filter(|(n, r)| *n <= last || sidechain(r))
-        .map(|(_, r)| r)
-        .collect()
-}
-
-/// The last record of turn `after` of `state`, as `records` (its session's) hold it: the one the
-/// next turn's prompt follows.
-fn resume_at(
-    state: &ThreadState,
-    after: TurnId,
-    records: &[serde_json::Value],
-) -> Result<String, String> {
-    if !state.turns.iter().any(|t| t.id == after) {
-        return Err(format!("There is no turn {} to fork from", after.0));
-    }
-    let next = state
-        .turns
-        .iter()
-        .filter(|t| t.id > after)
-        .min_by_key(|t| t.id)
-        .and_then(|t| t.input.as_ref())
-        .ok_or("The turn after it is not known")?;
-    let prompt = next.0.split_once(':').map_or(next.0.as_str(), |(record, _)| record);
-    records
-        .iter()
-        .find(|r| r.get("uuid").and_then(serde_json::Value::as_str) == Some(prompt))
-        .and_then(|r| r.get("parentUuid").and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
-        .ok_or_else(|| "That turn's place in the session is not in its transcript".to_owned())
+        (actions, ())
+    });
 }
 
 /// The session thread `thread` is (or is a subagent of).
 fn root_of(host: &Host, thread: ThreadId) -> Option<ThreadMeta> {
     let mut at = thread;
     for _ in 0..16 {
-        let (state, _) = host.state(at)?;
-        if state.meta.origin != ThreadMeta::SUBAGENT {
-            return Some(state.meta);
+        let (meta, _) = host.meta(at)?;
+        if meta.origin != ThreadMeta::SUBAGENT {
+            return Some(meta);
         }
-        at = state.meta.parent?.thread;
+        at = meta.parent?.thread;
     }
     None
 }
 
-/// What is wrong with `start` for Claude Code, if anything.
-fn checked(start: &Start) -> Result<(), String> {
-    if !start.agent.is(AgentId::CLAUDE_CODE) {
-        return Err(format!("{} is not Claude Code", start.agent.0));
-    }
-    if start.drive.as_ref().is_some_and(|d| !d.is(Drive::DRIVEN)) {
-        return Err("Claude Code is only driven".to_owned());
-    }
-    if let Some(mode) =
-        start.mode.as_deref().filter(|m| !slopty_agent::claude::offers::startable_mode(m))
-    {
-        return Err(format!("Claude Code starts in no mode {mode}"));
-    }
-    if let Some(effort) =
-        start.effort.as_deref().filter(|e| !slopty_agent::claude::offers::startable_effort(e))
-    {
-        return Err(format!("Claude Code takes no effort {effort}"));
-    }
-    super::attach::check(&start.attachments)?;
-    if !Path::new(&start.cwd).is_dir() {
-        return Err(format!("There is no folder {} here", start.cwd));
-    }
-    Ok(())
-}
-
-/// The session a client's start asks Claude Code to take up again in [`Start::args`]
-/// (`--resume <id>`), when it asks; why not, in words, for any other argument.
-fn resumed_of(args: &[String]) -> Result<Option<&str>, String> {
-    match args {
-        [] => Ok(None),
-        [flag, session] if flag == agent::RESUME_FLAG && agent::is_session_id(session) => {
-            Ok(Some(session))
-        }
-        _ => Err("Claude Code takes no arguments from a start but --resume <id>".to_owned()),
-    }
-}
-
-/// `kept` with a seat's own: its system text as the system prompt's addition.
-fn seat_args(kept: Vec<String>, seated: &Seated) -> Vec<String> {
-    let mut kept = kept;
-    if let Some(system) = seated.system.as_deref().filter(|s| !s.trim().is_empty()) {
-        kept.push(format!("--append-system-prompt={system}"));
-    }
-    kept
-}
-
-/// The flags `meta`'s Claude Code was started with, as its thread keeps them.
-fn kept_args(meta: &ThreadMeta) -> Vec<String> {
-    meta.facts.get(ARGS_FACT).and_then(|json| serde_json::from_str(json).ok()).unwrap_or_default()
-}
-
-/// `kept` with `flag` given `value`, in place of any value it had.
-fn with_flag(kept: Vec<String>, flag: &str, value: &str) -> Vec<String> {
-    let prefix = format!("{flag}=");
-    let mut kept: Vec<String> = kept.into_iter().filter(|a| !a.starts_with(&prefix)).collect();
-    kept.push(format!("{prefix}{value}"));
-    kept
-}
-
-/// The branch checked out in the repository `cwd` is in, if it is in one.
-fn branch_in(cwd: &Path) -> Option<String> {
-    cwd.ancestors().find(|dir| dir.join(".git").exists()).and_then(crate::repo::branch_of)
-}
-
-/// `thread`, whose Claude Code is gone with nothing to say how it ended, ended as it was left:
-/// what it asked withdrawn, its turn under way stopped, exited and resumable.
-fn lost(host: &Host, thread: ThreadId) {
-    tracing::info!(%thread, "{LOST}");
-    host.update(thread, |state| {
-        let mut actions = slopty_agent::driven::cut_short(state, true, WallMs::now());
-        let mut meta = state.meta.clone();
-        if meta.facts.remove(CUSTODY_FACT).is_some() {
-            actions.push(Action::Meta(Box::new(meta)));
-        }
-        (actions, ())
-    });
-}
-
-/// How often a held session's other Claude Code is looked for.
-const HELD_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// What a thread says once the other Claude Code that held its session ended.
-const FREED: &str = "The other Claude Code on this session ended. A message here continues it.";
-
-/// What a thread says when its transcript cannot be read.
-const UNREAD: &str = "Couldn't read its transcript, so the thread was kept as it was";
-
-/// Say `text` on `thread`, a notice of the worker's own, its id from `kind` and the time.
-fn say(host: &Host, thread: ThreadId, kind: &str, text: &str) {
-    let Some((state, _)) = host.state(thread) else { return };
-    let now = WallMs::now();
-    let notice = slopty_proto::thread::Item {
-        id: ItemId(format!("{kind}-{}", now.as_millis())),
-        turn: state.last_turn().map_or(TurnId::BEFORE, |t| t.id),
-        at_ms: now,
-        body: slopty_proto::thread::ItemBody::Notice(slopty_proto::thread::Notice::new(
-            slopty_proto::thread::Notice::INFO,
-            slopty_proto::thread::Clipped::whole(text),
-        )),
-    };
-    host.apply(thread, vec![Action::ItemCompleted(notice)]);
-}
-
-/// Put what the codec made into the host: a thread begun anew if the host holds it already.
+/// Put what the mapping made into the host: a thread begun anew if the host holds it already.
 fn take(host: &Host, outs: Vec<Out>) {
     for out in outs {
         match out {
@@ -1506,8 +844,4 @@ fn take(host: &Host, outs: Vec<Out>) {
             }
         }
     }
-}
-
-fn refused(reason: &str) -> Outcome {
-    Outcome::Refused { reason: reason.to_owned() }
 }

@@ -1,9 +1,7 @@
 //! What the shell reads about agents that its source kept beside its engine: the harness
-//! descriptors and title settings (`registry`), the Claude Code model catalogue (`claude`), and
-//! which agents write titles and how each installs (`harness`). Slopty's workers run the agents;
-//! these are the shell's view of them.
+//! descriptors (`registry`) and how each agent installs (`harness`). Slopty's workers run the
+//! agents; these are the shell's view of them.
 
-pub mod claude;
 pub mod harness;
 pub mod registry;
 

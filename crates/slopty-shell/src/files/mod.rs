@@ -1,11 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Workspace file browsing surface.
 
-use std::{
-    collections::HashMap,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::{collections::HashMap, time::Duration};
 
 use gpui::{
     Context, Entity, EventEmitter, FocusHandle, ListAlignment, ListState, Pixels, Point, Render,
@@ -53,7 +49,6 @@ pub(crate) enum FileColumn {
     Byte(u64),
 }
 
-static NEXT_REVIEW_COMMENT_FLUSH_SOURCE: AtomicU64 = AtomicU64::new(1);
 use crate::surface_chrome::toolbar;
 
 /// A file document opened by absolute path beyond the workspace root — a
@@ -431,11 +426,6 @@ pub(crate) fn workspace_path_drag_ghost(
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilesEvent {
-    AddToChat {
-        path: String,
-        is_directory: bool,
-        origin: mutations::WorkspaceInteractionOrigin,
-    },
     /// Pause autosave under these paths while a confirmation is open; an
     /// empty list releases the hold.
     HoldMutation {
@@ -501,7 +491,6 @@ pub struct FilesSurface {
     tree_delete: Option<rename::TreeDelete>,
     state: Entity<AppState>,
     chat_id: String,
-    review_comment_flush_source: u64,
     presentation: FilesPresentation,
     editor_path: Option<String>,
     request_context: Option<FilesRequestContext>,
@@ -831,9 +820,7 @@ impl FilesSurface {
         });
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Edited => this.on_search_edited(cx),
-            ComposerInputEvent::Submitted
-            | ComposerInputEvent::ModifiedSubmitted
-            | ComposerInputEvent::MentionAccept => this.activate_search_result(cx),
+            ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => this.activate_search_result(cx),
             ComposerInputEvent::MentionNavigate(delta) => {
                 let len = this.search_state.visible_len();
                 if len > 0 {
@@ -848,18 +835,12 @@ impl FilesSurface {
                 }
             }
             ComposerInputEvent::MentionDismiss => this.close_search(cx),
-            ComposerInputEvent::PastedImages(_)
-            | ComposerInputEvent::PastedPaths(_)
-            | ComposerInputEvent::PastedText { .. }
-            | ComposerInputEvent::OpenAttachment(_)
-            | ComposerInputEvent::CursorMoved
-            | ComposerInputEvent::ViewportChanged => {}
+            ComposerInputEvent::CursorMoved | ComposerInputEvent::ViewportChanged => {}
         });
         let observe = cx.observe(&state, |this: &mut Self, _, cx| {
             if this.sync_target(cx) {
                 this.ensure_loaded(cx);
             }
-            this.sync_active_markdown_comments(cx);
         });
         // The list state exposes no scroll handle, so the floating rail
         // bridges scroll activity through the scroll handler (the
@@ -886,8 +867,6 @@ impl FilesSurface {
             tree_delete: None,
             state,
             chat_id,
-            review_comment_flush_source: NEXT_REVIEW_COMMENT_FLUSH_SOURCE
-                .fetch_add(1, Ordering::Relaxed),
             presentation,
             editor_path: editor_path.clone(),
             request_context: None,
@@ -1378,7 +1357,6 @@ impl FilesSurface {
         self.mutation_error = None;
         self.release_git_status();
         self.suspend_images(cx);
-        self.cancel_review_comment_flush(cx);
         self.loads.clear();
         self.watch_task = None;
         self.watch_sequence = None;

@@ -16,25 +16,9 @@
 //! the system hands a delegate installed any later no tap that launched the app. Taps wait in a
 //! process-wide queue until the app listens ([`taps`]).
 //!
-//! A note may carry buttons ([`Category`]): the approval note's "Allow" and "Deny" answer a
-//! held permission prompt where the note is, without bringing the app forward, and "Show" opens
-//! the tile. An agent's other notes ([`REPLYING`]) take a reply typed where the note is, sent to
-//! the agent as a message ([`Tap::text`]). A small question's options are its note's buttons
-//! instead ([`Note::picking`]): their category is made for their labels and registered as the
-//! note goes out, beside the ones already registered ([`register_then`] for a pushed note), and
-//! a press answers with the option at its place among the request's ([`Pressed::Pick`]). A
-//! press that finds nothing
-//! listening for taps (an iOS
-//! app the press launched in the background, with no window) goes to the answer the app installed
-//! for it ([`answer_unheard`]). The categories are registered with the centre when [`System`] is
-//! made, which does not prompt either. A pressed button comes back as a [`Tap`] with its
-//! [`Tap::action`].
-//!
-//! A button answered in the background ([`Tap::finished_later`]) may have woken a suspended
-//! app, and the system lets it run until the delegate says it is done with the response. So
-//! the delegate holds that word until the app says its answers are out or given up
-//! ([`taps_finished`]), rather than saying it the moment the tap is handed on, when the answer
-//! has not even found its link.
+//! A note carries no buttons: it answers nothing, and a tap opens the session it is about
+//! (`docs/decisions/ui.md`, "A session is its terminal, its inspector beside it"). The centre's
+//! categories are declared empty when [`System`] is made, which does not prompt either.
 //!
 //! `BackgroundGrace` keeps an iOS app running for the short time the system grants after it
 //! leaves the screen, so the links stay up and what arrives just after the phone is pocketed
@@ -43,8 +27,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-
-use slopty_proto::thread::wire::NoteChoice;
 
 #[cfg(target_vendor = "apple")]
 pub mod pushed;
@@ -59,8 +41,6 @@ pub mod info {
     pub const SESSION: &str = "session";
     /// The thread, for a note about one with no terminal.
     pub const THREAD: &str = "thread";
-    /// The thread's request an approval note answers.
-    pub const ASK: &str = "ask";
     /// The note's own identifier ([`super::Note::id`]). A pushed note is shown under the
     /// opaque collapse id it was pushed with, so this is how the app knows it as its own.
     pub const NOTE: &str = "note";
@@ -78,13 +58,6 @@ pub struct Note {
     pub body: String,
     /// What a tap hands back ([`Tap::info`]), carried in the notification's `userInfo`.
     pub info: BTreeMap<String, String>,
-    /// Its buttons, when it has any.
-    pub category: Option<Category>,
-    /// The labels of a question's options as buttons of their own, in its order
-    /// ([`Note::picking`]): a category of their own, registered as the note goes out, takes
-    /// [`Self::category`]'s place. Each answers the note's request with the option at its
-    /// place ([`Pressed::Pick`]).
-    pub picks: Vec<String>,
     /// No sound: it only says more about a note already up under its identifier, which
     /// sounded when it came.
     pub silent: bool,
@@ -93,83 +66,6 @@ pub struct Note {
     /// uses it, and lets them take it away. The level wants its entitlement, which wants a
     /// provisioning profile; without one the system shows the note as an ordinary one.
     pub urgent: bool,
-}
-
-impl Note {
-    /// `self` with the labels `picks` as its buttons: each a button of its own, `pick.0` on,
-    /// whose press answers with the option at its place ([`Pressed::of`]). At most
-    /// [`NoteChoice::MAX`] are offered; none leaves it as it was.
-    #[must_use]
-    pub fn picking(mut self, picks: &[String]) -> Self {
-        let picks = picks.get(..picks.len().min(NoteChoice::MAX)).unwrap_or_default();
-        self.picks = picks.to_vec();
-        self
-    }
-}
-
-/// The identifier of a note's `n`th pick's button.
-#[must_use]
-pub fn pick_id(n: usize) -> String {
-    format!("{PICK}{n}")
-}
-
-/// The category of a note with `picks` as its buttons: one per set of labels, so notes asking
-/// the same choices share it, named by their FNV-1a hash.
-#[must_use]
-pub fn picking_id(picks: &[String]) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in picks.iter().flat_map(|p| p.bytes().chain(std::iter::once(0x1f))) {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("{PICKING}{hash:016x}")
-}
-
-/// What a note's button answers its request with: Allow or Deny, which find the choice that
-/// allows or denies once among the request's, or a question's option by its place.
-///
-/// A pick carries its place, not its choice: a choice repeats the whole question, and four of
-/// them would not fit a push. Whoever answers looks the choice up among the request's own
-/// buttons ([`Self::choice`]), read where it is answered.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Pressed {
-    /// "Allow".
-    Allow,
-    /// "Deny".
-    Deny,
-    /// One of a question's options ([`Note::picking`]), by its place among them.
-    Pick(usize),
-}
-
-impl Pressed {
-    /// What `tap` answers, when it is a press of "Allow", "Deny" or a pick.
-    #[must_use]
-    pub fn of(tap: &Tap) -> Option<Self> {
-        match tap.action.as_deref()? {
-            ALLOW => Some(Self::Allow),
-            DENY => Some(Self::Deny),
-            action => {
-                let n: usize = action.strip_prefix(PICK)?.parse().ok()?;
-                (n < NoteChoice::MAX).then_some(Self::Pick(n))
-            }
-        }
-    }
-
-    /// The choice it answers a request offering `options`, with `picks` as its note's buttons,
-    /// with: Allow's and Deny's once, as the request words it, and the pick's at its place.
-    /// None when the request offers no such answer.
-    #[must_use]
-    pub fn choice(
-        self,
-        options: &[slopty_proto::thread::Choice],
-        picks: &[NoteChoice],
-    ) -> Option<String> {
-        match self {
-            Self::Allow => slopty_proto::thread::once(options, true).map(|c| c.id.clone()),
-            Self::Deny => slopty_proto::thread::once(options, false).map(|c| c.id.clone()),
-            Self::Pick(n) => picks.get(n).map(|p| p.choice.clone()),
-        }
-    }
 }
 
 /// A note the system shows in its Notification Centre ([`delivered`]): one posted here, or
@@ -185,149 +81,13 @@ pub struct Delivered {
     pub body: String,
 }
 
-/// A notification the human tapped, or one of its buttons.
+/// A notification the human tapped.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Tap {
     /// The note's identifier.
     pub id: String,
     /// The note's [`Note::info`]: every string key with a string value in its `userInfo`.
     pub info: BTreeMap<String, String>,
-    /// The button pressed ([`Action::id`]); `None` for the note itself.
-    pub action: Option<String>,
-    /// What the person typed, for a button that takes words ([`ActionKind::Text`]).
-    pub text: Option<String>,
-}
-
-impl Tap {
-    /// Whether the app works on this tap after the delegate has handed it on: a button that
-    /// answers where the note is ([`ActionKind::Unlocked`], [`ActionKind::Destructive`]), with
-    /// the app left in the background. The note itself and a button that brings the app
-    /// forward are done once handed on.
-    #[must_use]
-    pub fn finished_later(&self) -> bool {
-        let Some(action) = self.action.as_deref() else { return false };
-        // A pick answers where the note is, as Allow does.
-        if action.starts_with(PICK) {
-            return true;
-        }
-        CATEGORIES
-            .iter()
-            .find_map(|category| category.action(action))
-            .is_some_and(|action| action.kind != ActionKind::Foreground)
-    }
-}
-
-/// A button on a note.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Action {
-    /// What a press hands back as [`Tap::action`].
-    pub id: &'static str,
-    /// Its words, sentence case.
-    pub title: &'static str,
-    /// What the system does with a press beside handing it back.
-    pub kind: ActionKind,
-}
-
-/// How the system treats a press of an [`Action`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ActionKind {
-    /// Answered where the note is, the app left in the background; a locked iPhone asks to be
-    /// unlocked first, as it does for anything that acts on the person's behalf.
-    Unlocked,
-    /// Answered where the note is, drawn in the destructive style.
-    Destructive,
-    /// Brings the app forward.
-    Foreground,
-    /// Takes words typed where the note is, then answered there as [`Self::Unlocked`] is: the
-    /// field's button and the words it shows while empty.
-    Text {
-        /// The field's button.
-        send: &'static str,
-        /// What the empty field shows.
-        placeholder: &'static str,
-    },
-}
-
-/// A kind of note and the buttons it carries, registered with the centre once.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Category {
-    /// Its identifier, which a note names.
-    pub id: &'static str,
-    /// Its buttons, in the order they show.
-    pub actions: &'static [Action],
-}
-
-impl Category {
-    /// The button with identifier `id`.
-    #[must_use]
-    pub fn action(&self, id: &str) -> Option<&'static Action> {
-        self.actions.iter().find(|action| action.id == id)
-    }
-}
-
-/// [`APPROVAL`]'s button that allows the call.
-pub const ALLOW: &str = "allow";
-/// [`APPROVAL`]'s button that refuses it.
-pub const DENY: &str = "deny";
-/// [`APPROVAL`]'s and [`REPLYING`]'s button that opens the app where the note points.
-pub const SHOW: &str = "show";
-/// [`REPLYING`]'s button that takes a reply to the agent.
-pub const REPLY: &str = "reply";
-/// The start of a pick's button identifier ([`Note::picking`]): `pick.0`, `pick.1`…
-pub const PICK: &str = "pick.";
-/// The start of a picking note's category identifier ([`picking_id`]).
-pub const PICKING: &str = "slopty.pick.";
-
-/// How "Allow" and "Deny" are pressed: where the note is, the app left in the background. On
-/// iOS a press may launch an app the system ended, with no scene and so no GPUI and no links;
-/// the app answers such a press without them ([`answer_unheard`]).
-const VERDICT: (ActionKind, ActionKind) = (ActionKind::Unlocked, ActionKind::Destructive);
-
-/// An agent asking for a permission that "Allow" or "Deny" answers whole.
-pub const APPROVAL: Category = Category {
-    id: "slopty.approval",
-    actions: &[
-        Action { id: ALLOW, title: "Allow", kind: VERDICT.0 },
-        Action { id: DENY, title: "Deny", kind: VERDICT.1 },
-        Action { id: SHOW, title: "Show", kind: ActionKind::Foreground },
-    ],
-};
-
-/// An agent's note with nothing to allow or deny: it asks something, finished, or failed. The
-/// reply goes to it as a message, where the note is.
-pub const REPLYING: Category = Category {
-    id: "slopty.reply",
-    actions: &[
-        Action {
-            id: REPLY,
-            title: "Reply",
-            kind: ActionKind::Text { send: "Send", placeholder: "Message the agent" },
-        },
-        Action { id: SHOW, title: "Show", kind: ActionKind::Foreground },
-    ],
-};
-
-/// Every category a note may name: what [`System`] registers.
-pub const CATEGORIES: [Category; 2] = [APPROVAL, REPLYING];
-
-/// The tap a response to note `id` makes, as the delegate hands it on.
-///
-/// `action` is the response's action identifier: `default` (the system's for the note itself)
-/// is a tap on the note, `dismiss` (the system's for a note swept away) is no tap at all, and
-/// anything else is a button. `text` is what the person typed into a button that takes words.
-#[must_use]
-pub fn tap_of(
-    id: String,
-    info: BTreeMap<String, String>,
-    (action, text): (&str, Option<String>),
-    (default, dismiss): (&str, &str),
-) -> Option<Tap> {
-    if action == dismiss {
-        return None;
-    }
-    let action = (action != default).then(|| action.to_owned());
-    let text = text.filter(|_| action.is_some());
-    Some(Tap { id, info, action, text })
 }
 
 /// Whether notes reach the person.
@@ -448,9 +208,8 @@ impl Notifier for Memory {
 
 #[cfg(target_vendor = "apple")]
 pub use apple::{
-    System, answer_unheard, ask, ask_quietly, content_of, deliver_launching, delivered, install,
-    open_settings, post_alone, register_then, settings, take_back, tap_finished, taps,
-    taps_finished,
+    System, ask, ask_quietly, content_of, delivered, install, open_settings, settings, take_back,
+    taps,
 };
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
@@ -469,19 +228,16 @@ mod apple {
     };
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
-        UNNotification, UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
-        UNNotificationCategoryOptions, UNNotificationDefaultActionIdentifier,
-        UNNotificationDismissActionIdentifier, UNNotificationInterruptionLevel,
+        UNNotification, UNNotificationDefaultActionIdentifier, UNNotificationInterruptionLevel,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-        UNNotificationSettings, UNNotificationSound, UNTextInputNotificationAction,
-        UNTextInputNotificationResponse, UNUserNotificationCenter,
+        UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
         UNUserNotificationCenterDelegate,
     };
     use parking_lot::Mutex;
     use tokio::sync::mpsc::error::SendError;
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-    use super::{ActionKind, Alerts, CATEGORIES, Category, Note, Notifier, Tap};
+    use super::{Alerts, Note, Notifier, Tap};
 
     /// Where the person's answer stands. Completion handlers write it from the framework's
     /// queues, so it sits behind a lock.
@@ -531,49 +287,9 @@ mod apple {
         (own.unwrap_or_else(|| shown.clone()), shown)
     }
 
-    /// What answers a press nobody listens for, once the app installed it ([`answer_unheard`]).
-    static UNHEARD: Mutex<Option<fn(Tap)>> = Mutex::new(None);
-
-    /// Answer with `answer` every press that acts where the note is, while nothing listens.
-    ///
-    /// Such a press is one [`Tap::finished_later`] says so of. An iOS app the press launched or
-    /// woke in the background has no window, and so nothing that listens for taps. `answer`
-    /// owns the press, and says [`taps_finished`] once its answer is out or given up. It is
-    /// installed while the app finishes launching, before the press can arrive.
-    pub fn answer_unheard(answer: fn(Tap)) {
-        *UNHEARD.lock() = Some(answer);
-    }
-
-    /// Hand on `tap` as the delegate hands on the response that launched the app.
-    ///
-    /// It is taken before any scene connects: a self-test's stand-in for a press of a note's
-    /// button on a killed app, which only a finger makes (`slopty_app::e2e_launch_tap`). Taken from
-    /// `application:didFinishLaunchingWithOptions:`, after [`answer_unheard`] and [`install`].
-    pub fn deliver_launching(tap: Tap) {
-        deliver(tap);
-    }
-
-    /// Hand `tap` to the app, or hold it until the app listens. A press that answers where the
-    /// note is goes to [`answer_unheard`]'s answer instead, while nothing listens.
+    /// Hand `tap` to the app, or hold it until the app listens.
     pub(super) fn deliver(tap: Tap) {
-        let unheard = *UNHEARD.lock();
         let mut inbox = INBOX.lock();
-        let unheld = match &*inbox {
-            Inbox::Held(_) => true,
-            Inbox::Listening(listener) => listener.is_closed(),
-        };
-        if let Some(answer) = unheard
-            && unheld
-            && tap.finished_later()
-        {
-            drop(inbox);
-            tracing::debug!(
-                id = tap.id,
-                "a press with nothing listening: answered without a window"
-            );
-            answer(tap);
-            return;
-        }
         let tap = match &*inbox {
             Inbox::Listening(listener) => match listener.send(tap) {
                 Ok(()) => return,
@@ -585,78 +301,6 @@ mod apple {
         match &mut *inbox {
             Inbox::Held(held) => held.push(tap),
             Inbox::Listening(_) => *inbox = Inbox::Held(vec![tap]),
-        }
-    }
-
-    /// What tells the system the app is done with one response.
-    pub(super) struct Finish(Box<dyn FnOnce() + Send>);
-
-    impl Finish {
-        /// `finish` is what says it.
-        pub(super) fn new(finish: impl FnOnce() + Send + 'static) -> Self {
-            Self(Box::new(finish))
-        }
-    }
-
-    /// The word owed to the system for each tap the app still works on ([`Tap::finished_later`]),
-    /// by its note's id ([`Tap::id`]), oldest first. The delegate may run off the main thread,
-    /// the app says it on the main one.
-    static UNFINISHED: Mutex<Vec<(String, Finish)>> = Mutex::new(Vec::new());
-
-    /// Owe the system `finish` for the tap on note `id` until [`tap_finished`] or
-    /// [`taps_finished`].
-    pub(super) fn finish_later(id: &str, finish: Finish) {
-        UNFINISHED.lock().push((id.to_owned(), finish));
-    }
-
-    /// The app's answer to the tap on note `id` is out, or given up: tell the system it is done
-    /// with that response, and only that one.
-    ///
-    /// A press handed on since keeps the app awake for its own answer. Nothing when nothing is
-    /// owed for it.
-    pub fn tap_finished(id: &str) {
-        let all = std::mem::take(&mut *UNFINISHED.lock());
-        let (mine, rest): (Vec<_>, Vec<_>) = all.into_iter().partition(|(of, _)| of == id);
-        UNFINISHED.lock().extend(rest);
-        let owed: Vec<Finish> = mine.into_iter().map(|(_, finish)| finish).collect();
-        if !owed.is_empty() {
-            tracing::debug!(id, taps = owed.len(), "tap finished");
-        }
-        for Finish(finish) in owed {
-            finish();
-        }
-    }
-
-    /// The app gives up on every tap handed on so far: tell the system it is done with each
-    /// response it was owed, so it may suspend the app again. Nothing when nothing is owed.
-    pub fn taps_finished() {
-        let owed = std::mem::take(&mut *UNFINISHED.lock());
-        if !owed.is_empty() {
-            tracing::debug!(taps = owed.len(), "taps finished");
-        }
-        for (_, Finish(finish)) in owed {
-            finish();
-        }
-    }
-
-    /// A response's completion handler, kept past the delegate call that was handed it.
-    struct Owed(RcBlock<dyn Fn()>);
-
-    #[expect(
-        clippy::non_send_fields_in_send_ty,
-        reason = "the block is called once, from one thread at a time, as the safety comment says"
-    )]
-    // SAFETY: Blocks runtime rule: a heap block's retain and release (`Block_copy`,
-    // `Block_release`) are atomic. UserNotifications rule: the centre calls its delegate, and
-    // so hands it this handler, on a queue of its own choosing ("possibly off the main thread"
-    // above), so the handler is one the framework expects to be called from another thread.
-    // It is moved once into the ledger and called once, by whoever takes it out.
-    unsafe impl Send for Owed {}
-
-    impl Owed {
-        /// Tell the system the app is done with the response.
-        fn say(&self) {
-            self.0.call(());
         }
     }
 
@@ -720,9 +364,9 @@ mod apple {
     }
 
     impl System {
-        /// The notification centre with its delegate [installed](install): taps arrive on
-        /// [`taps`], and a note that comes in while the app is in front goes to the list without
-        /// a banner.
+        /// The notification centre with its delegate [installed](install) and no categories: taps
+        /// arrive on [`taps`], and a note that comes in while the app is in front goes to the
+        /// list without a banner.
         ///
         /// A process that is not an app bundle gets no centre (`in_bundle`): its notes are
         /// dropped, and on macOS the Dock still shows the badge. Nothing here prompts; the
@@ -737,7 +381,8 @@ mod apple {
             }
             install();
             let center = UNUserNotificationCenter::currentNotificationCenter();
-            merge_categories(None, || ());
+            // A note answers nothing, so no kind of note has buttons.
+            center.setNotificationCategories(&NSSet::new());
             let state = Arc::new(Mutex::new(State { auth: Auth::Unasked, badge: None }));
             let read = Arc::clone(&state);
             read_settings(move |alerts| {
@@ -1099,204 +744,23 @@ mod apple {
         }
     }
 
-    /// `category` as the centre registers it.
-    fn category(category: &Category) -> Retained<UNNotificationCategory> {
-        let actions: Vec<Retained<UNNotificationAction>> = category
-            .actions
-            .iter()
-            .map(|action| {
-                let (id, title) = (NSString::from_str(action.id), NSString::from_str(action.title));
-                let options = match action.kind {
-                    ActionKind::Unlocked => UNNotificationActionOptions::AuthenticationRequired,
-                    ActionKind::Destructive => UNNotificationActionOptions::Destructive,
-                    ActionKind::Foreground => UNNotificationActionOptions::Foreground,
-                    ActionKind::Text { send, placeholder } => {
-                        return Retained::into_super(
-                            UNTextInputNotificationAction::actionWithIdentifier_title_options_textInputButtonTitle_textInputPlaceholder(
-                                &id,
-                                &title,
-                                UNNotificationActionOptions::AuthenticationRequired,
-                                &NSString::from_str(send),
-                                &NSString::from_str(placeholder),
-                            ),
-                        );
-                    }
-                };
-                UNNotificationAction::actionWithIdentifier_title_options(&id, &title, options)
-            })
-            .collect();
-        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
-            &NSString::from_str(category.id),
-            &NSArray::from_retained_slice(&actions),
-            &NSArray::new(),
-            UNNotificationCategoryOptions::empty(),
-        )
-    }
-
-    /// The category of a note with `picks` as its buttons: each answers where the note is, as
-    /// Allow does, then "Show".
-    fn picking(picks: &[String]) -> Retained<UNNotificationCategory> {
-        let mut actions: Vec<Retained<UNNotificationAction>> = picks
-            .iter()
-            .enumerate()
-            .map(|(n, pick)| {
-                UNNotificationAction::actionWithIdentifier_title_options(
-                    &NSString::from_str(&super::pick_id(n)),
-                    &NSString::from_str(pick),
-                    UNNotificationActionOptions::AuthenticationRequired,
-                )
-            })
-            .collect();
-        actions.push(UNNotificationAction::actionWithIdentifier_title_options(
-            &NSString::from_str(super::SHOW),
-            &NSString::from_str("Show"),
-            UNNotificationActionOptions::Foreground,
-        ));
-        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
-            &NSString::from_str(&super::picking_id(picks)),
-            &NSArray::from_retained_slice(&actions),
-            &NSArray::new(),
-            UNNotificationCategoryOptions::empty(),
-        )
-    }
-
-    /// The most picking categories the centre keeps: past it the oldest set gives way, and a
-    /// note still up from then shows only its tap.
-    const PICKINGS_KEPT: usize = 64;
-
-    /// Register the app's own categories with the picking ones already registered, and `extra`
-    /// when given, then call `then` once the centre lists them.
-    ///
-    /// The centre holds one set for the app and its notification extension alike, and setting
-    /// it replaces the whole of it, so the picks another process registered are read first
-    /// and kept. Its handlers run on a queue of the centre's own, hence `Send`.
-    fn merge_categories(extra: Option<Vec<String>>, then: impl FnOnce() + Send + 'static) {
-        let then = Mutex::new(Some(then));
-        let extra = Mutex::new(extra);
-        let read = RcBlock::new(move |set: std::ptr::NonNull<NSSet<UNNotificationCategory>>| {
-            // SAFETY: UserNotifications rule: the set handed to the completion handler is a
-            // valid object for the duration of the call.
-            let set = unsafe { set.as_ref() };
-            let extra = extra.lock().take();
-            let wanted = extra.as_deref().map(super::picking_id);
-            let mut kept: Vec<Retained<UNNotificationCategory>> = set
-                .iter()
-                .filter(|c| c.identifier().to_string().starts_with(super::PICKING))
-                .filter(|c| Some(c.identifier().to_string()) != wanted)
-                .collect();
-            let had =
-                wanted.is_some() && set.iter().any(|c| Some(c.identifier().to_string()) == wanted);
-            let based = CATEGORIES
-                .iter()
-                .all(|base| set.iter().any(|c| c.identifier().to_string() == base.id));
-            let ready = then.lock().take();
-            if had && based {
-                if let Some(ready) = ready {
-                    ready();
-                }
-                return;
-            }
-            let over = kept.len().saturating_sub(PICKINGS_KEPT.saturating_sub(1));
-            kept.drain(..over);
-            let mut all: Vec<Retained<UNNotificationCategory>> =
-                CATEGORIES.iter().map(category).collect();
-            all.extend(kept);
-            all.extend(extra.as_deref().map(picking));
-            let center = UNUserNotificationCenter::currentNotificationCenter();
-            center.setNotificationCategories(&NSSet::from_retained_slice(&all));
-            // The set takes effect on the centre's queue: a read after it is answered once it
-            // has, so a note added then finds its buttons.
-            let ready = Mutex::new(ready);
-            let settled =
-                RcBlock::new(move |_set: std::ptr::NonNull<NSSet<UNNotificationCategory>>| {
-                    let ready = ready.lock().take();
-                    if let Some(ready) = ready {
-                        ready();
-                    }
-                });
-            center.getNotificationCategoriesWithCompletionHandler(&settled);
-        });
-        UNUserNotificationCenter::currentNotificationCenter()
-            .getNotificationCategoriesWithCompletionHandler(&read);
-    }
-
-    /// Register the category `note`'s picks need, if it has any, then call `then`.
-    ///
-    /// It is what the notification extension does before it hands back a pushed note with a
-    /// question's options as its buttons. Outside an app bundle, or with no picks, `then` runs
-    /// at once.
-    pub fn register_then(note: &Note, then: impl FnOnce() + Send + 'static) {
-        if note.picks.is_empty() || !in_bundle() {
-            then();
-            return;
-        }
-        merge_categories(Some(note.picks.clone()), then);
-    }
-
     /// Hand `note` to the centre now: a nil trigger delivers at once, and the identifier
     /// replaces whatever is up under it.
     fn add(center: &UNUserNotificationCenter, note: &Note) {
-        add_then(center, note, || ());
-    }
-
-    /// [`add`], then `then` once the centre has taken the note or refused it.
-    /// The centre calls its completion handler on a queue of its own, so `then` is `Send`.
-    fn add_then(
-        center: &UNUserNotificationCenter,
-        note: &Note,
-        then: impl FnOnce() + Send + 'static,
-    ) {
-        // A question's options want their category registered before the note goes out.
-        if !note.picks.is_empty() {
-            let note = note.clone();
-            merge_categories(Some(note.picks.clone()), move || {
-                let center = UNUserNotificationCenter::currentNotificationCenter();
-                add_content(&center, &note, &content_of(&note), then);
-            });
-            return;
-        }
-        add_content(center, note, &content_of(note), then);
-    }
-
-    /// Add `content`, `note`'s, to the centre under `note`'s identifier, then call `then`.
-    fn add_content(
-        center: &UNUserNotificationCenter,
-        note: &Note,
-        content: &UNMutableNotificationContent,
-        then: impl FnOnce() + Send + 'static,
-    ) {
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
             &NSString::from_str(&note.id),
-            content,
+            &content_of(note),
             None,
         );
         let id = note.id.clone();
-        let then = Mutex::new(Some(then));
         let added = RcBlock::new(move |error: *mut NSError| {
             // SAFETY: UserNotifications rule: a non-null error is a valid `NSError` for the
             // duration of the completion handler.
             if let Some(error) = unsafe { error.as_ref() } {
                 tracing::warn!(id, error = %error.localizedDescription(), "note not delivered");
             }
-            let then = then.lock().take();
-            if let Some(then) = then {
-                then();
-            }
         });
         center.addNotificationRequest_withCompletionHandler(&request, Some(&added));
-    }
-
-    /// Show `note` with no [`System`], then call `done` once the centre has it.
-    ///
-    /// It is what an app answering a press with no window ([`answer_unheard`]) says when its
-    /// answer did not land, before the system may suspend it again. Notes are allowed, the
-    /// person having just pressed a button on one. Outside an app bundle `done` runs at once.
-    pub fn post_alone(note: &Note, done: impl FnOnce() + Send + 'static) {
-        if !in_bundle() {
-            done();
-            return;
-        }
-        add_then(&UNUserNotificationCenter::currentNotificationCenter(), note, done);
     }
 
     /// `note` as the system shows it: what the app posts, and what the notification extension
@@ -1310,11 +774,6 @@ mod apple {
         }
         if note.urgent {
             content.setInterruptionLevel(UNNotificationInterruptionLevel::TimeSensitive);
-        }
-        if !note.picks.is_empty() {
-            content.setCategoryIdentifier(&NSString::from_str(&super::picking_id(&note.picks)));
-        } else if let Some(category) = note.category {
-            content.setCategoryIdentifier(&NSString::from_str(category.id));
         }
         let mut info = note.info.clone();
         info.insert(super::info::NOTE.to_owned(), note.id.clone());
@@ -1359,8 +818,9 @@ mod apple {
         unsafe impl NSObjectProtocol for Delegate {}
 
         unsafe impl UNUserNotificationCenterDelegate for Delegate {
-            /// The person opened a note or pressed one of its buttons, possibly off the main
-            /// thread: its identifier, `userInfo` and the button go to the app ([`deliver`]).
+            /// The person opened a note, possibly off the main thread: its identifier and
+            /// `userInfo` go to the app ([`deliver`]). Only the note itself opens: a note has no
+            /// buttons, and one swept away is nothing to hand on.
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
             fn did_receive(
                 &self,
@@ -1368,38 +828,17 @@ mod apple {
                 response: &UNNotificationResponse,
                 done: &block2::DynBlock<dyn Fn()>,
             ) {
-                let request = response.notification().request();
-                // SAFETY: UserNotifications rule: the action identifiers are constant strings the
+                // SAFETY: UserNotifications rule: the action identifier is a constant string the
                 // framework exports, valid once it is loaded, which linking it guarantees.
-                let system = unsafe {
-                    (
-                        UNNotificationDefaultActionIdentifier.to_string(),
-                        UNNotificationDismissActionIdentifier.to_string(),
-                    )
-                };
-                let (id, shown) = ids_of(&request);
-                if id != shown {
-                    SHOWN_AS.lock().insert(id.clone(), shown);
-                }
-                let typed = response
-                    .downcast_ref::<UNTextInputNotificationResponse>()
-                    .map(|typed| typed.userText().to_string());
-                let tap = super::tap_of(
-                    id,
-                    strings(&request.content().userInfo()),
-                    (&response.actionIdentifier().to_string(), typed),
-                    (&system.0, &system.1),
-                );
-                if let Some(tap) = tap {
-                    tracing::debug!(id = tap.id, action = ?tap.action, "note opened");
-                    if tap.finished_later() {
-                        // Owed before the tap goes, so the app's word cannot come first.
-                        let owed = Owed(done.copy());
-                        finish_later(&tap.id, Finish::new(move || owed.say()));
-                        deliver(tap);
-                        return;
+                let opened = unsafe { UNNotificationDefaultActionIdentifier };
+                if response.actionIdentifier().isEqualToString(opened) {
+                    let request = response.notification().request();
+                    let (id, shown) = ids_of(&request);
+                    if id != shown {
+                        SHOWN_AS.lock().insert(id.clone(), shown);
                     }
-                    deliver(tap);
+                    tracing::debug!(id, "note opened");
+                    deliver(Tap { id, info: strings(&request.content().userInfo()) });
                 }
                 done.call(());
             }
@@ -1528,109 +967,9 @@ mod tests {
         assert_eq!(memory.delivered(), ["a"]);
     }
 
-    /// The approval note carries "Allow", "Deny" and "Show", registered with every other
-    /// category. The answers act where the note is (allowing only on an unlocked device), on
-    /// iOS too ([`answer_unheard`]); only "Show" brings the app forward.
-    #[test]
-    fn the_approval_note_answers_in_place_and_shows_on_demand() {
-        assert!(CATEGORIES.contains(&APPROVAL));
-        let kinds: Vec<(&str, &str, ActionKind)> =
-            APPROVAL.actions.iter().map(|a| (a.id, a.title, a.kind)).collect();
-        let (allow, deny) = (ActionKind::Unlocked, ActionKind::Destructive);
-        assert_eq!(
-            kinds,
-            [(ALLOW, "Allow", allow), (DENY, "Deny", deny), (SHOW, "Show", ActionKind::Foreground),]
-        );
-        assert_eq!(APPROVAL.action(DENY).map(|a| a.title), Some("Deny"));
-        assert_eq!(APPROVAL.action("maybe"), None);
-        let ids: std::collections::BTreeSet<&str> = CATEGORIES.iter().map(|c| c.id).collect();
-        assert_eq!(ids.len(), CATEGORIES.len(), "category identifiers are unique");
-    }
-
-    /// An agent's other notes take a reply where the note is, unlocked, and "Show" opens it.
-    #[test]
-    fn the_reply_note_takes_words_where_it_is() {
-        assert!(CATEGORIES.contains(&REPLYING));
-        let reply = REPLYING.action(REPLY).expect("a reply button");
-        assert_eq!(reply.title, "Reply");
-        assert!(matches!(reply.kind, ActionKind::Text { send: "Send", .. }));
-        assert_eq!(REPLYING.action(SHOW).map(|a| a.kind), Some(ActionKind::Foreground));
-        assert_eq!(REPLYING.action(ALLOW), None, "nothing to allow");
-    }
-
-    /// Only a button answered in the background keeps the system waiting on the app: the note
-    /// itself, "Show", and a button no category has are done once handed on.
-    #[test]
-    fn only_an_answer_in_the_background_is_finished_later() {
-        let tap = |action: Option<&str>| Tap {
-            id: "n".into(),
-            action: action.map(str::to_owned),
-            ..Tap::default()
-        };
-        assert!(tap(Some(ALLOW)).finished_later());
-        assert!(tap(Some(DENY)).finished_later());
-        assert!(tap(Some(REPLY)).finished_later(), "a reply is sent where the note is");
-        assert!(!tap(Some(SHOW)).finished_later());
-        assert!(!tap(None).finished_later());
-        assert!(!tap(Some("maybe")).finished_later());
-    }
-
-    /// What the system is owed is said once each, when the app's answer to that tap is out,
-    /// and only then: a tap's finish leaves another's owed, and giving up says the rest. With
-    /// nothing owed, nothing is said.
-    #[cfg(target_vendor = "apple")]
-    #[test]
-    fn the_system_hears_a_tap_is_done_once_its_answer_is_out() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let said = Arc::new(AtomicUsize::new(0));
-        for id in ["first-note", "second-note"] {
-            let said = Arc::clone(&said);
-            apple::finish_later(
-                id,
-                apple::Finish::new(move || {
-                    said.fetch_add(1, Ordering::SeqCst);
-                }),
-            );
-        }
-        assert_eq!(said.load(Ordering::SeqCst), 0, "owed, not said");
-        tap_finished("first-note");
-        assert_eq!(said.load(Ordering::SeqCst), 1, "its own only");
-        tap_finished("first-note");
-        assert_eq!(said.load(Ordering::SeqCst), 1, "once");
-        taps_finished();
-        assert_eq!(said.load(Ordering::SeqCst), 2, "the rest, given up");
-        taps_finished();
-        assert_eq!(said.load(Ordering::SeqCst), 2, "nothing more owed");
-    }
-
-    /// The delegate's routing: the system's default identifier is the note itself, its dismiss
-    /// identifier is nothing to hand on, and any other is the button pressed.
-    #[test]
-    fn a_response_becomes_a_tap_or_a_button_press() {
-        let system = ("com.apple.UNNotificationDefaultActionIdentifier", "dismissed");
-        let info = BTreeMap::from([("session".to_owned(), "s".to_owned())]);
-        let open = tap_of("n".to_owned(), info.clone(), (system.0, None), system);
-        assert_eq!(
-            open,
-            Some(Tap { id: "n".to_owned(), info: info.clone(), action: None, text: None })
-        );
-        let allow = tap_of("n".to_owned(), info.clone(), (ALLOW, None), system);
-        assert_eq!(allow.and_then(|t| t.action), Some(ALLOW.to_owned()));
-        let reply = tap_of("n".to_owned(), info.clone(), (REPLY, Some("go on".into())), system);
-        assert_eq!(
-            reply.map(|t| (t.action, t.text)),
-            Some((Some(REPLY.to_owned()), Some("go on".to_owned()))),
-            "the words come with the press"
-        );
-        assert_eq!(tap_of("n".to_owned(), info, (system.1, None), system), None, "swept away");
-    }
-
     #[cfg(target_vendor = "apple")]
     #[test]
     fn a_tap_before_the_app_listens_arrives_once_it_does_exactly_once() {
-        static ANSWERED: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
         let tap = |id: &str| Tap { id: id.to_owned(), ..Tap::default() };
         apple::deliver(tap("launch"));
         let mut listening = taps();
@@ -1652,23 +991,5 @@ mod tests {
             "a tap nobody heard waits for the next listener"
         );
         assert!(again.try_recv().is_err(), "with nothing replayed");
-        drop(again);
-
-        // With nothing listening, a press that answers where the note is goes to the answer
-        // the app installed for it; the note's own tap and "Show" still wait for the window.
-        answer_unheard(|tap| ANSWERED.lock().push(tap.id));
-        let press = |id: &str, action: &str| Tap {
-            id: id.to_owned(),
-            action: Some(action.to_owned()),
-            ..Tap::default()
-        };
-        apple::deliver(press("allowed", ALLOW));
-        apple::deliver(press("shown", SHOW));
-        assert_eq!(*ANSWERED.lock(), ["allowed"], "answered without a window");
-        let mut window = taps();
-        assert_eq!(window.try_recv().ok().map(|t| t.id), Some("shown".to_owned()), "held");
-        apple::deliver(press("while up", DENY));
-        assert_eq!(window.try_recv().ok().map(|t| t.id), Some("while up".to_owned()));
-        assert_eq!(*ANSWERED.lock(), ["allowed"], "a window listening answers itself");
     }
 }

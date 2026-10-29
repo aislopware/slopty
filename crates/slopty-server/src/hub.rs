@@ -29,8 +29,9 @@
 //! watches the whole fleet.
 //!
 //! The agents' verbs are the hub's own too (`agents`): an agent starts another on any worker
-//! ([`Verb::AgentStart`]), which records it as the child's parent, and the parent hears of its
-//! children through its own hooks (`crate::deliver`).
+//! ([`Verb::AgentStart`]), which records it as the child's parent; the parent reads and waits
+//! on its children, and words for an agent are typed into its terminal by the worker that holds
+//! it (`docs/decisions/agents.md`, "TUI-first").
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -48,12 +49,10 @@ use slopty_proto::orchestration::{
     ThreadOf, Verb,
 };
 use slopty_proto::server::{
-    AgentReport, Facts, FromServer, Liveness, Refusal, Registration, ToServer, WorkerInfo,
+    Facts, FromServer, Liveness, Refusal, Registration, ToServer, WorkerInfo,
 };
 use slopty_proto::terminal::{SessionState, SessionSummary};
-use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
-
-use crate::deliver::Deliveries;
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 mod agents;
 mod awake;
@@ -146,8 +145,6 @@ struct Inner {
     log: Mutex<Log>,
     /// The log's next sequence number, for [`Verb::Events`] to wait on.
     head: watch::Sender<u64>,
-    /// Wakes the loop that delivers words to the agents ([`Hub::deliver_reports`]).
-    deliver: Arc<Notify>,
     /// The `settings.toml` the server follows, whose `[server]` another device reads and edits
     /// ([`Verb::Settings`]), once the daemon gave it.
     settings_file: std::sync::OnceLock<std::path::PathBuf>,
@@ -179,8 +176,6 @@ struct State {
     forgets: VecDeque<Forget>,
     /// Every worker's thread rows, the ladder made of them, and where the person is.
     board: ladder::Board,
-    /// Words on their way to the agents.
-    deliveries: Deliveries,
     /// What the agents' verbs keep: the person's autonomy setting, the terminals agents
     /// drove, the clones under way.
     agents: agents::Agents,
@@ -307,9 +302,8 @@ impl Hub {
         let log = Mutex::new(Log { ring: VecDeque::with_capacity(EVENT_LOG), first, next: first });
         let (head, _none) = watch::channel(first);
         let state = Mutex::new(state);
-        let deliver = Arc::new(Notify::new());
         let settings_file = std::sync::OnceLock::new();
-        let inner = Inner { name, lan, state, events, persist, log, head, deliver, settings_file };
+        let inner = Inner { name, lan, state, events, persist, log, head, settings_file };
         Self { inner: Arc::new(inner) }
     }
 
@@ -370,61 +364,6 @@ impl Hub {
     #[must_use]
     pub fn downgrade(&self) -> WeakHub {
         WeakHub(Arc::downgrade(&self.inner))
-    }
-
-    /// Take up the words the store kept on their way to the agents, before any link is
-    /// served: what was outstanding goes again as each worker registers.
-    pub(crate) fn adopt_deliveries(&self, kept: crate::deliver::Kept) {
-        let mut state = self.inner.state.lock();
-        state.deliveries.adopt(kept, tokio::time::Instant::now(), WallMs::now());
-        drop(state);
-        self.inner.deliver.notify_one();
-    }
-
-    /// The reports on their way to the agents, as the store keeps them.
-    #[must_use]
-    pub(crate) fn deliveries_file(&self) -> crate::deliver::Kept {
-        self.inner.state.lock().deliveries.kept(tokio::time::Instant::now(), WallMs::now())
-    }
-
-    /// Keep the reports on their way to the agents in `store`: as they are now, then after
-    /// each burst of changes settles, until the hub is gone. The changes are watched from the
-    /// call, so none made before the keeper first runs is missed.
-    pub(crate) fn keep_deliveries(
-        &self,
-        store: crate::store::DeliveryStore,
-    ) -> impl Future<Output = ()> + use<> {
-        let mut changes = self.inner.state.lock().deliveries.changes();
-        changes.mark_changed();
-        let hub = self.downgrade();
-        async move {
-            while changes.changed().await.is_ok() {
-                tokio::time::sleep(crate::store::SETTLE).await;
-                changes.mark_unchanged();
-                let Some(kept) = hub.upgrade().map(|h| h.deliveries_file()) else { return };
-                if let Err(e) = store.save(&kept).await {
-                    tracing::warn!(path = %store.path().display(), error = %e, "reports not kept");
-                }
-            }
-        }
-    }
-
-    /// Deliver reports to the agents they are for, when each falls due, until the hub is gone.
-    pub async fn deliver_reports(hub: WeakHub) {
-        let Some(wake) = hub.upgrade().map(|h| Arc::clone(&h.inner.deliver)) else { return };
-        loop {
-            let notified = wake.notified();
-            let Some(next) = hub.upgrade().map(|h| h.deliver_due()) else { return };
-            match next {
-                Some(at) => {
-                    tokio::select! {
-                        () = tokio::time::sleep_until(at) => {}
-                        () = notified => {}
-                    }
-                }
-                None => notified.await,
-            }
-        }
     }
 
     /// The server's name.
@@ -564,9 +503,8 @@ impl Hub {
             (true, Vec::new(), opened)
         };
         let (name, liveness) = (info.name.clone(), info.liveness);
-        self.happen(Happening::Worker { worker, name: name.clone(), liveness });
+        self.happen(Happening::Worker { worker, name, liveness });
         self.announce(FromServer::Worker(info));
-        self.machine_seen(&mut state, worker, &name, true);
         state.board.linked(worker, true);
         if !replaced.is_empty() {
             self.announce(FromServer::Directory(listing(&state)));
@@ -583,31 +521,9 @@ impl Hub {
                 .collect();
             ladder::programs_back(&mut state.board, worker, &waiting);
         }
-        let mut open: Vec<SessionId> = state
-            .workers
-            .get(&worker)
-            .map(|e| e.sessions.iter().map(|s| s.id).collect())
-            .unwrap_or_default();
-        open.extend(
-            state.board.live_seats().into_iter().filter(|t| t.worker == worker).map(|t| t.session),
-        );
         for summary in opened {
             self.happen(Happening::SessionOpened { worker, summary: Box::new(summary) });
         }
-        // What was sent to a seat that closed while the server was away waits for its agent's
-        // next; what was sent and never handed over goes again.
-        for term in state.deliveries.gone_on(worker, &open) {
-            state.deliveries.closed(term);
-        }
-        let now = tokio::time::Instant::now();
-        let mut unsent = false;
-        for batch in state.deliveries.outstanding_on(worker) {
-            unsent |= !Self::push_batch(&mut state, &batch, now);
-        }
-        if unsent {
-            self.inner.deliver.notify_one();
-        }
-        self.unpark_deliveries(&mut state);
         if reshaped || !replaced.is_empty() {
             self.persist(&state);
         }
@@ -695,9 +611,9 @@ impl Hub {
             Verb::Wake { worker } => self.wake(worker).await,
             Verb::WorkerFacts { worker } => self.worker_facts(worker).await,
             Verb::AgentStart(start) => self.agent_start(from, key, *start).await,
-            Verb::AgentTell { agent, text } => self.agent_tell(caller, from, agent, &text),
+            Verb::AgentTell { agent, text } => self.agent_tell(caller, from, agent, &text).await,
             Verb::AgentWait { agents, all, timeout_ms } => {
-                self.agent_wait(from, &agents, all, timeout_ms).await
+                self.agent_wait(&agents, all, timeout_ms).await
             }
             Verb::AgentStop { agent } => self.agent_stop(caller, from, agent).await,
             Verb::Agents => self.agents(),
@@ -714,24 +630,14 @@ impl Hub {
                 opened
             }
             Verb::ReadThread { of, view, after } => match self.thread_on(of) {
-                Ok(of) => {
-                    let read = self.forward(key, Verb::ReadThread { of, view, after }).await;
-                    if let (Some(reader), ThreadOf::On { thread, .. }) = (from, of) {
-                        self.inner.state.lock().deliveries.seen(reader, thread);
-                    }
-                    read
-                }
+                Ok(of) => self.forward(key, Verb::ReadThread { of, view, after }).await,
                 Err(refused) => refused,
             },
-            Verb::AnswerRequest { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "a request is the person's to answer, never an agent's; it waits in the \
-                 agent's thread and on the person's devices",
+            // Each agent asks in its own TUI, which takes the person's answer there alone.
+            Verb::AnswerRequest { .. } => error(
+                ErrorCode::Unsupported,
+                "an agent asks in its own terminal, and the person answers it there",
             ),
-            Verb::AnswerRequest { of, ask, choice, message } => match self.thread_on(of) {
-                Ok(of) => self.forward(key, Verb::AnswerRequest { of, ask, choice, message }).await,
-                Err(refused) => refused,
-            },
             Verb::SendMessage { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
                 "only the person sends a thread a message this way; an agent tells another \
@@ -978,6 +884,18 @@ impl Hub {
         let Some(worker) = target(&verb) else {
             return error(ErrorCode::Invalid, "this verb names no worker");
         };
+        self.forward_to(worker, key, verb, deadline).await
+    }
+
+    /// Ask `worker` for `verb` and wait at most `deadline` for its answer: [`Self::forward`]'s
+    /// way, for a verb whose worker the hub found itself (an agent's).
+    async fn forward_to(
+        &self,
+        worker: WorkerId,
+        key: Option<IdempotencyKey>,
+        verb: Verb,
+        deadline: Duration,
+    ) -> Outcome {
         let (id, generation, tx, reply) = match self.expect_reply(worker) {
             Ok(pending) => pending,
             Err(outcome) => return outcome,
@@ -1064,19 +982,10 @@ impl Hub {
         }
     }
 
-    /// A terminal ended: logged; what was sent to it and never handed over waits for its
-    /// agent's next seat.
+    /// A terminal ended: logged.
     fn session_closed(&self, state: &mut State, term: TermRef) {
         self.happen(Happening::SessionClosed { term });
-        state.deliveries.closed(term);
         state.agents.closed(term.session);
-    }
-
-    /// An agent may have a seat now for words that waited for one.
-    fn unpark_deliveries(&self, state: &mut State) {
-        if state.deliveries.unpark() {
-            self.inner.deliver.notify_one();
-        }
     }
 
     fn announce(&self, msg: FromServer) {
@@ -1151,8 +1060,7 @@ impl Hub {
         tracing::info!(%worker, name = %entry.info.name, "worker gone");
         let info = entry.info.clone();
         let name = info.name.clone();
-        self.happen(Happening::Worker { worker, name: name.clone(), liveness: Liveness::Gone });
-        self.machine_seen(&mut state, worker, &name, false);
+        self.happen(Happening::Worker { worker, name, liveness: Liveness::Gone });
         drop(state);
         self.announce(FromServer::Worker(info));
     }
@@ -1264,7 +1172,6 @@ impl Lease {
                 } else {
                     entry.sessions.push(summary.clone());
                     hub.happen(Happening::SessionOpened { worker, summary: Box::new(summary) });
-                    hub.unpark_deliveries(&mut state);
                 }
             }
             ToServer::SessionClosed { session, .. } => {
@@ -1276,15 +1183,11 @@ impl Lease {
             ToServer::Cloning { clone, phase, percent } => {
                 tracing::debug!(%worker, clone, phase, ?percent, "a clone moves");
             }
-            ToServer::Report(AgentReport::Delivered { session, batch }) => {
-                hub.delivered(&mut state, TermRef { worker, session }, batch);
-            }
             ToServer::Threads(frame) => {
                 state.board.take(worker, frame);
                 for (terminal, agent) in state.board.rung_moves(worker) {
                     hub.happen(Happening::Rung { worker, terminal, agent });
                 }
-                hub.rows_moved(&mut state);
             }
             // A ping proves the link's stream, which the link itself answers and times
             // (`link::read_worker`); `last_seen_ms` above is all it changes here.
@@ -1292,7 +1195,9 @@ impl Lease {
             ToServer::Hello { .. }
             | ToServer::Request { .. }
             | ToServer::Presence(_)
-            | ToServer::PushDevice { .. } => {
+            | ToServer::PushDevice { .. }
+            // No words are delivered through a worker any more, so none is said delivered.
+            | ToServer::Report(_) => {
                 tracing::debug!(%worker, "ignored a message a worker does not send");
             }
         }
@@ -1345,6 +1250,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::AgentWait { .. }
         | Verb::AgentStop { .. }
         | Verb::Agents
+        | Verb::AnswerRequest { .. }
         | Verb::BranchBring { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::ReadFile { worker, .. }
@@ -1372,9 +1278,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::AgentStatus { term }
         | Verb::ResizeTerminal { term, .. }
         | Verb::Close { term } => Some(term.worker),
-        Verb::ReadThread { of, .. }
-        | Verb::AnswerRequest { of, .. }
-        | Verb::SendMessage { of, .. } => {
+        Verb::ReadThread { of, .. } | Verb::SendMessage { of, .. } => {
             match of {
                 ThreadOf::On { worker, .. } => Some(*worker),
                 // The server finds the worker first ([`Hub::thread_on`]).
@@ -1693,12 +1597,6 @@ pub(crate) mod tests {
                 of: ThreadOf::On { worker, thread: ThreadId::new() },
                 view: ThreadView::Activity,
                 after: None,
-            },
-            Verb::AnswerRequest {
-                of: ThreadOf::On { worker, thread: ThreadId::new() },
-                ask: slopty_proto::thread::AskId("3".to_owned()),
-                choice: "allow".to_owned(),
-                message: None,
             },
             Verb::CaptureStill {
                 worker,
