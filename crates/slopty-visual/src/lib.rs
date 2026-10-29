@@ -223,7 +223,15 @@ impl Visual {
             result
         };
         randomseed.call::<()>(seed)?;
-        let returned = call(&|| lua.load(source).set_name("=visual").eval::<Value>())?;
+        // Source, never bytecode: mlua reads a chunk that leads as Luau bytecode
+        // does as bytecode, which Luau never checks, and a script of a few such
+        // bytes wrote past a buffer (fuzz target `visual`).
+        let returned = call(&|| {
+            lua.load(source)
+                .set_name("=visual")
+                .set_mode(mlua::chunk::ChunkMode::Text)
+                .eval::<Value>()
+        })?;
         let view = match returned {
             Value::Function(view) => view,
             Value::Table(tree) => lua.create_function(move |_, ()| Ok(tree.clone()))?,

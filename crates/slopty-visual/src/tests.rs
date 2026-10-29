@@ -110,6 +110,16 @@ fn the_sandbox_has_no_io_and_bounds_time_and_memory() {
     assert!(Visual::load("ui.text = nil return ui.text 'x'", 1).is_err());
 }
 
+/// A script is source: one that Luau would read as bytecode is refused, never run. Luau checks
+/// no bytecode, and read as bytecode these few bytes (a version byte, then a string table) wrote
+/// past a buffer (fuzz target `visual`).
+#[test]
+fn a_script_is_never_loaded_as_bytecode() {
+    let found = format!("\u{3}=\u{2}{}\0\0\0{}", "3".repeat(11), "3".repeat(56));
+    let err = Visual::load(&found, 1).err().unwrap();
+    assert!(err.message.contains("binary chunk"), "{}", err.message);
+}
+
 #[test]
 fn random_data_is_stable_across_renders() {
     let script = r#"
