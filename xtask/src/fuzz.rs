@@ -164,8 +164,10 @@ fn targets(root: &Utf8Path) -> Result<Vec<String>> {
 /// The regression inputs and the committed corpora through their targets, on a plain build of
 /// the fuzz crate: what the gate runs. Its target dir is the shell's (a gate lane's own), else
 /// `target/fuzz/test`, named by flag: a `CARGO_TARGET_DIR` set here would reach every rustc's
-/// environment, which the compile cache keys units by.
+/// environment, which the compile cache keys units by. Never under `DOCS_RS`, which an Apple
+/// lint off a Mac sets: libghostty-vt-sys then builds no library to link.
 pub fn replay(sh: &Shell) -> Result<()> {
+    ensure!(sh.var_os("DOCS_RS").is_none(), "the fuzz replay links libghostty-vt: unset DOCS_RS");
     let dir: &[&str] = if sh.var_os("CARGO_TARGET_DIR").is_some() {
         &[]
     } else {

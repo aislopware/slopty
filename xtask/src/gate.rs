@@ -1953,26 +1953,33 @@ fn lint_linux_xtask(sh: &Shell) -> Result<()> {
 pub fn lint_host(sh: &Shell) -> Result<()> {
     let host = TRIPLES[0];
     let live = crate::e2e::LIVE;
-    let (cargo, _env) = crate::tools::apple_cargo(sh, false)?;
-    let workspace = quiet_step(
-        &format!("clippy {host}"),
-        cmd!(
-            sh,
-            "{cargo} clippy --locked --keep-going --workspace --all-targets --features {live} --target {host} -- -D warnings"
-        ),
-    );
-    let fuzz = if sh.path_exists("fuzz/Cargo.toml") {
-        let fuzz = quiet_step(
-            "clippy (fuzz)",
+    let fuzz = sh.path_exists("fuzz/Cargo.toml");
+    let (workspace, fuzz_lint) = {
+        let (cargo, _env) = crate::tools::apple_cargo(sh, false)?;
+        let workspace = quiet_step(
+            &format!("clippy {host}"),
             cmd!(
                 sh,
-                "{cargo} clippy --manifest-path fuzz/Cargo.toml --locked --all-targets --target {host} -- -D warnings"
+                "{cargo} clippy --locked --keep-going --workspace --all-targets --features {live} --target {host} -- -D warnings"
             ),
         );
-        fuzz.and_then(|()| crate::fuzz::replay(sh))
-    } else {
-        Ok(())
+        let fuzz_lint = if fuzz {
+            quiet_step(
+                "clippy (fuzz)",
+                cmd!(
+                    sh,
+                    "{cargo} clippy --manifest-path fuzz/Cargo.toml --locked --all-targets --target {host} -- -D warnings"
+                ),
+            )
+        } else {
+            Ok(())
+        };
+        (workspace, fuzz_lint)
     };
+    // The replay links its targets, so it runs once the lint's environment is gone: off a Mac
+    // that sets `DOCS_RS`, and libghostty-vt-sys built under it leaves its library out (run
+    // 40970413571).
+    let fuzz = fuzz_lint.and_then(|()| if fuzz { crate::fuzz::replay(sh) } else { Ok(()) });
     both(workspace, fuzz)
 }
 
