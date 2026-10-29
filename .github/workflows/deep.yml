@@ -172,9 +172,9 @@ jobs:
           if-no-files-found: ignore
 
   # What calls no Apple framework, on arm Linux beside each other: the fuzzers (no target calls
-  # Apple code), the property tests of the wire, media and grid crates, and every crate's
-  # features checked for the Mac as the gate's host clippy checks it there, through zig
-  # (`tools::apple_cargo`).
+  # Apple code; libFuzzer, then AFL++ through ziggy, on one corpus), the property tests of the
+  # wire, media and grid crates, and every crate's features checked for the Mac as the gate's
+  # host clippy checks it there, through zig (`tools::apple_cargo`).
   linux-deep:
     name: ${{ matrix.check }}
     if: github.event.schedule != '0 7 * * 6'
@@ -184,8 +184,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Two minutes a target: the terminal target's surface is the widest.
-          - { check: fuzz, run: deep fuzz --time 120, slug: fuzz, tools: --tool cargo-fuzz }
+          # Two minutes a target on the runner's four cores, one under each engine: what one
+          # engine finds, the other starts from, and the terminal target's surface is the widest.
+          - check: fuzz
+            run: deep fuzz --time 60 --jobs 4 --ziggy
+            slug: fuzz
+            tools: --tool cargo-fuzz
           - check: proptest
             run: nightly run --only proptest
             slug: proptest
@@ -241,6 +245,15 @@ jobs:
       - run: cargo xtask setup ${{ matrix.tools }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # The fuzzers' second engine: ziggy runs AFL++, which cargo-afl builds (with its runtime
+      # for this toolchain) and instruments the targets for, on stable, where no LLVM plugin is
+      # wanted.
+      - if: matrix.slug == 'fuzz'
+        run: |
+          cargo binstall --no-confirm --locked ziggy@1.7.3 cargo-afl@0.18.2
+          cargo afl config --build --force
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: |
           mkdir -p target/deep
           cargo xtask ${{ matrix.run }} 2>&1 | tee target/deep/report.log
@@ -266,7 +279,8 @@ jobs:
             ~/.cargo/git/db/
           key: ${{ steps.cargo-home.outputs.cache-primary-key }}
           enableCrossOsArchive: true
-      # The fuzzers' crashes (an input for `cargo xtask fuzz --keep`) and logs too.
+      # The fuzzers' crashes (an input for `cargo xtask fuzz --keep`) and logs too, AFL++'s own
+      # among them.
       - if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -277,6 +291,33 @@ jobs:
             target/nightly/**/*.log
             target/fuzz/artifacts
             target/fuzz/logs
+            target/fuzz/ziggy/out/*/logs
+          if-no-files-found: ignore
+
+  # The vendored QUIC stack's own suites (`cargo xtask deep noq`), whose random-interaction
+  # proptest draws new cases every night; `noq.yml` runs them on every change to the stack.
+  noq:
+    if: github.event.schedule != '0 7 * * 6'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
+        with:
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - run: |
+          mkdir -p target/deep
+          cargo xtask deep noq 2>&1 | tee target/deep/report.log
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deep-noq
+          path: target/deep/report.log
           if-no-files-found: ignore
 
   # Miri interprets the pure crates' tests, which build on Linux as they do here.
@@ -367,7 +408,7 @@ jobs:
   # cancelled run says nothing, and the weekly mutation run alone closes nothing, since a missed
   # mutant is a finding and not a failure.
   report:
-    needs: [wait, mac, linux-deep, linux, mutants]
+    needs: [wait, mac, linux-deep, noq, linux, mutants]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:

@@ -25,10 +25,13 @@ runs:
   using: composite
   steps:
     # A named version: without one the action asks the GitHub API for the latest release, and
-    # that call timing out failed whole runs.
+    # that call timing out failed whole runs. 0.19 hands cargo a unit's metadata as soon as rustc
+    # writes it on a miss, so its dependents start before its codegen ends; 0.18 held them for
+    # the whole compile (docs/decisions/tooling.md, "taplo comes from its release, and CI's
+    # sccache is 0.19").
     - uses: mozilla-actions/sccache-action@v0.0.11
       with:
-        version: v0.18.0
+        version: v0.19.0
     - shell: bash
       env:
         KEY_ID: ${{ inputs.r2-access-key-id }}

@@ -1,0 +1,68 @@
+name: noq
+
+# The vendored QUIC stack's own suites (`cargo xtask deep noq`, docs/TESTING.md "Beyond the
+# layers") on every change to the stack, to the toolchain it builds with, or to the command: on
+# arm Linux, and on macOS, where noq-udp's patches to Apple's batched send path run. Deep runs
+# them on Linux every night too.
+on:
+  push:
+    branches: [ gate ]
+    paths:
+      - "vendor/noq-proto/**"
+      - "vendor/noq-udp/**"
+      - "rust-toolchain.toml"
+      - "xtask/src/deep.rs"
+      - ".github/workflows/noq.yml"
+  pull_request:
+    paths:
+      - "vendor/noq-proto/**"
+      - "vendor/noq-udp/**"
+      - "rust-toolchain.toml"
+      - "xtask/src/deep.rs"
+      - ".github/workflows/noq.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+
+jobs:
+  noq:
+    name: noq (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-24.04-arm, xcode-27 ]
+    steps:
+      - uses: actions/checkout@v7
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
+        with:
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - run: |
+          mkdir -p target/deep
+          cargo xtask deep noq 2>&1 | tee target/deep/report.log
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: noq-${{ matrix.os }}
+          path: target/deep/report.log
+          if-no-files-found: ignore
