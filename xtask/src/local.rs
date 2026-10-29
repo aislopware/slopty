@@ -62,6 +62,7 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
     // `.cargo/config.toml` names it relative to the tree: the checkout's is the one every build
     // shares.
     sh.set_var("LIBGHOSTTY_VT_SYS_PREBUILT_DIR", root.join("target").join(crate::prune::PREBUILT));
+    crate::tools::use_zig_for(&sh, &tree)?;
     sh.set_var(LOCAL, "1");
     // nextest's setup script runs `$SLOPTY_XTASK spawned-bins`, else `cargo xtask`, which built a
     // whole xtask in every lane's directory (~740 MB each) after any change to xtask or the lock.

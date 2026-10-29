@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use libghostty_vt::Terminal;
-use libghostty_vt::terminal::{ProgramNeed as VtNeed, ProgramState as VtState};
+use libghostty_vt::terminal::{ProgramStatusKind as VtKind, ProgramStatusState as VtState};
 use slopty_proto::terminal::{ProgramState, ProgramStatus};
 
 use super::Pending;
@@ -59,10 +59,11 @@ pub(super) fn install(
             // A state a later libghostty adds.
             _ => return,
         };
-        let need = match report.need() {
-            VtNeed::Permission => Some(ProgramStatus::PERMISSION),
-            VtNeed::Question => Some(ProgramStatus::QUESTION),
-            VtNeed::Auth => Some(ProgramStatus::AUTH),
+        // A kind a later libghostty adds is no need this one knows to show.
+        let need = match report.kind() {
+            Ok(VtKind::Permission) => Some(ProgramStatus::PERMISSION),
+            Ok(VtKind::Question) => Some(ProgramStatus::QUESTION),
+            Ok(VtKind::Auth) => Some(ProgramStatus::AUTH),
             _ => None,
         };
         let status = ProgramStatus {

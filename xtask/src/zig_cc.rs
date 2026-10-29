@@ -72,7 +72,7 @@ pub fn arguments(target: &str, args: &[String]) -> Vec<String> {
 
 /// The directory of zig's library, from `zig env` (`.lib_dir = "…"`, or `"lib_dir": "…"` in
 /// the JSON older zigs print).
-fn lib_dir(env: &str) -> Option<&str> {
+pub fn lib_dir(env: &str) -> Option<&str> {
     let (_, rest) = env.split_once("lib_dir")?;
     // JSON's key ends in a quote of its own.
     let rest = rest.strip_prefix('"').unwrap_or(rest);
@@ -93,7 +93,7 @@ pub fn run(target: &str, cxx: bool, args: &[String]) -> Result<()> {
     zig.args(["-isystem", &darwin]).args(arguments(target, args));
     // `cc` hands its SDK to the compiler as `SDKROOT` too, which zig would take for the sysroot.
     zig.env_remove("SDKROOT");
-    Err(zig.exec()).context("run zig (is zig 0.16 on PATH?)")
+    Err(zig.exec()).context("run zig (is the zig vendor/ghostty names on PATH?)")
 }
 
 #[cfg(test)]

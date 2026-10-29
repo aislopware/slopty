@@ -1093,13 +1093,13 @@ more full-window layer.
     server and the stand-ins the tests spawn, built natively in the tests' profile, then nextest
     (the doctests were deleted on 2026-10-10, see below). No workspace hack, whose features pull in GPUI.
   - **The job.** `linux` in `.github/workflows/ci.yml`, on `ubuntu-24.04` (x86_64), beside the
-    gate's matrix, so the run takes no longer. zig comes from `mlugg/setup-zig` at 0.16.0, the
-    minimum the vendored ghostty names. The image's unused SDKs are deleted first, since it keeps
-    about 14 GB free.
+    gate's matrix, so the run takes no longer. zig comes from `mlugg/setup-zig` at the minimum
+    the vendored ghostty names (0.16.0 then; "zig is the one the pinned ghostty names", below).
+    The image's unused SDKs are deleted first, since it keeps about 14 GB free.
   - **Every job's zig is pinned.** The Mac lanes, the release and the deep runs took
     `brew install zig`, which became 0.17 on 2026-10-03, and Ghostty's `build.zig` does not
-    build under 0.17. They take `mlugg/setup-zig` at 0.16.0 too, as `cargo xtask setup` asks
-    locally (`tools::ZIG`).
+    build under 0.17. They take `mlugg/setup-zig` at 0.16.0 too, as `cargo xtask setup` asked
+    locally (since 2026-10-29 every job's zig is the one ghostty's manifest names).
   - **What the runner lacks.** The job installs zsh, fish and tmux for the PTY's shell tests and
     raises `net.core.rmem_max` to 8 MiB for the endpoint's receive buffer (2026-10-03, after
     the first run; `docs/decisions/platform.md`, "The Linux lane's first run").
@@ -1400,8 +1400,8 @@ more full-window layer.
     allocator it was given, as `graphics::PngDecoder` already does.
   - Waiting upstream: #94 (secure random) makes `set_png_decoder` unsafe and process-wide. The
     engine sets the decoder per terminal (`GhosttyEngine::new`); once #94 lands it moves to
-    once at start-up. #89–#92 (paste, snapshot, streamed formatting, unsupported sequences) are
-    still open and stay on the fork.
+    once at start-up (done 2026-10-29, `replace_png_decoder`). #89–#92 (paste, snapshot,
+    streamed formatting, unsupported sequences) are still open and stay on the fork.
 
 - ✅ **ghostty takes upstream `c3203ea4`** (2026-10-06, fork `02fe7604`, libghostty-rs `88358b7a`).
   Its three commits release the renderer's shaders when the render thread exits (#14542) and
@@ -2788,3 +2788,74 @@ more full-window layer.
   call on a Mac now names the triple (`gate::mac_target`: the test build, nextest, the spawned
   binaries, `check`'s and the warm gate's), so each unit is built once. Off a Mac nothing
   changes; the Linux lanes build for their host as before.
+
+- ✅ **zig is the one the pinned ghostty names, with ghostty's patch for iOS** (2026-10-29,
+  upstream sync; zig 0.17.0, ghostty `9b3d82208`). ghostty-org moved to zig 0.17.0, and so did
+  the binding's upstream: zig 0.16 cannot build the new ghostty, nor 0.17 the old one.
+  - **One pin.** The vendored ghostty's `build.zig.zon` (`minimum_zig_version`) names the zig,
+    and nothing else does. xtask reads it (`tools::ghostty_zig`), and so does every CI job,
+    through `.github/actions/zig`, which hands it to `mlugg/setup-zig` and fails on a manifest
+    that names none. The workflows held `version: 0.16.0` nine times and `tools::ZIG` once,
+    kept equal by a test; a ghostty bump now moves every zig with the gitlink.
+  - **Both sides of a bump build at once.** Lanes check trees at different gitlinks while a
+    bump is in flight, and libghostty-vt-sys runs the `zig` on `PATH` and keys its prebuilt
+    library by that zig's version. A check here, a gate lane and an e2e build put the zig of
+    their tree's series first on `PATH` (`tools::use_zig_for`): the one there when it fits,
+    else Homebrew's keg of that series, which stays installed beside the linked one (`zig@0.16`
+    beside `zig` 0.17). So a lane at the old gitlink keeps building with 0.16 and hitting its
+    prebuilt entries while a lane at the new one builds with 0.17. On a runner the action has
+    set up the tree's own already. Builds outside a check (`cargo xtask linux`, a bundle) take
+    `PATH`'s, which `cargo xtask setup` and the Linux builds check (`tools::zig_problem`).
+  - **zig 0.17.0 cannot compile libghostty-vt for iOS with safety checks on.** `processReplace`
+    analyses `spawnDarwin`, which reads a `null_file.fd` that iOS's `NullFile` lacks. Measured
+    against ghostty `9b3d82208`, for `aarch64-apple-ios-sim`: unpatched, Debug and ReleaseSafe
+    fail and ReleaseFast, which compiles that path out, passes. With the patch all three pass,
+    and the binding's tests run in the simulator.
+  - **The patch.** ghostty builds with zig 0.17.0 plus its
+    `nix/patches/zig-0.17-ios-process-replace.patch`, a 13-line backport of zig `0bfd34342b`
+    that guards the call with `process.can_spawn`. There is no 0.17.1.
+    - `cargo xtask setup` puts ghostty's `nix/patches/zig-<series>-*.patch` into the library of
+      the zig that builds the checkout's ghostty: Homebrew's on a Mac, pinned, and the action's
+      in every CI job that runs setup after it (the release builds ReleaseFast without). The
+      file is renamed into place and keeps its mode, since Homebrew's are read-only.
+    - A hunk already in is left as it is. A hunk found in neither form fails setup, since that
+      zig is not the one the patch was made for. A ghostty with no patch for its zig gets none.
+    - A test holds the patches setup finds to the ones ghostty's `flake.nix` applies, so a bump
+      that adds, drops or renames one fails there.
+  - **Why patch when ReleaseFast builds.** Slopty's builds pin ReleaseFast
+    (`LIBGHOSTTY_VT_SYS_OPTIMIZE`), so none needs the patch today. A Debug or ReleaseSafe
+    lib-vt, the one with zig's safety checks, would fail only on iOS, and only for whoever
+    turned the mode on to chase a bug. Building with the zig ghostty itself builds with costs
+    one file rewrite in setup.
+  - **Rejected:**
+    - Slopty downloading and patching its own zig: every job already gets the pinned zig from
+      the action, and a second copy would need its own path into cargo, cargo-zigbuild and
+      `zig cc`.
+    - A version file of Slopty's own: it would restate what ghostty's manifest already says,
+      and could disagree with it.
+    - Staying on 0.16: ghostty's `build.zig` refuses it.
+
+- ✅ **libghostty-rs takes upstream `9ede35b`, and sets the PNG decoder without `unsafe`**
+  (2026-10-29, fork `787576b`, ghostty `9b3d82208`). Eight of the fork's commits went as
+  upstream's: program status, the semantic prompt and reset effects, the secure random source,
+  unknown OSC commands, titles as C strings and the bounded unsupported-sequence callbacks.
+  - **Upstream's #94 landed.** `set_png_decoder` is unsafe and process-wide, because it writes
+    libghostty's hook while another thread's terminal may be reading it. That is the engine's
+    case, with a terminal on each session's thread, and the engine is `forbid(unsafe_code)`.
+    - The fork adds `kitty::graphics::replace_png_decoder`. The decoder sits behind the
+      binding's lock, and every way to make a terminal first points the hook at it, once for
+      the process. Swapping the decoder never writes the hook, so the setter is safe from any
+      thread at any time.
+    - The engine hands its decoder over once (`PNG_DECODER`), which is what the 2026-10-09
+      entry waited for.
+    - With no decoder set, a PNG fails as invalid data rather than an unsupported medium.
+      Slopty always sets one.
+  - **Bytes from the program.** Titles, the working directory and clipboard MIME types are
+    bytes now.
+    - A title is decoded lossily, so a title that is not UTF-8 still shows.
+    - An `OSC 7` working directory that is not UTF-8 names no directory: the URI is ASCII,
+      with its path percent-encoded.
+    - The program status `need` is `ProgramStatusKind`, and a kind this build doesn't know is
+      no need.
+  - **`vt_write_until(data, boundaries)`** replaces `vt_write_until_ground`, after ghostty's
+    `ghostty_terminal_vt_write_until`. Slopty calls only `vt_write`.

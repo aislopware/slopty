@@ -610,6 +610,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     let sh = Shell::new()?;
     sh.change_dir(&tree);
     sh.set_var("LIBGHOSTTY_VT_SYS_PREBUILT_DIR", root.join("target").join(crate::prune::PREBUILT));
+    crate::tools::use_zig_for(&sh, &tree)?;
     let target_arg = format!("--target-dir={target}");
     crate::e2e::build_app(&sh, &[&target_arg])?;
     // The simulator's app, built here with this Mac's Xcode into the same target dir.

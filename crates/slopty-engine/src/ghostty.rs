@@ -57,6 +57,9 @@ pub use read::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 /// and a program can write anything into an OSC.
 const NOTIFICATION_CHARS: usize = 512;
 
+/// Whether libghostty has the PNG decoder, which is one for the whole process.
+static PNG_DECODER: std::sync::Once = std::sync::Once::new();
+
 /// How long a program may hold synchronized output (mode 2026) before the engine ends the hold
 /// itself: libghostty has no clock, so a program that never releases one would freeze its
 /// screen.
@@ -442,10 +445,13 @@ impl GhosttyEngine {
         // limit is the contract; lift the byte cap so it governs.
         term.set_scrollback_max_bytes(None)?;
         term.set_scrollback_max_lines(Some(config.scrollback_lines as usize))?;
-        // Kitty graphics: a storage limit turns the protocol on; the decoder is per thread,
-        // and the engine lives on its session's thread.
+        // Kitty graphics: a storage limit turns the protocol on, and the PNG decoder, one for
+        // every terminal of the process, is handed over once.
         term.set_kitty_image_storage_limit(graphics::KITTY_STORAGE_BYTES)?;
         graphics::allow_media(&mut term)?;
+        PNG_DECODER.call_once(|| {
+            kitty_graphics::replace_png_decoder(Some(Box::new(graphics::PngDecoder)));
+        });
         // A kitty clipboard write (OSC 5522) is buffered whole before the callback sees it, up
         // to 64 MiB by default; nothing past the session's ceiling would be passed on anyway.
         term.set_clipboard_write_max_bytes(Some(MAX_OSC52_BYTES))?;
@@ -453,7 +459,6 @@ impl GhosttyEngine {
         // Kitty and WezTerm have it: an emoji sequence or a flag is one wide cell, not a cell
         // per code point. A program can still turn it off.
         term.set_default_mode(Mode::GRAPHEME_CLUSTER, true)?;
-        kitty_graphics::set_png_decoder(Some(Box::new(graphics::PngDecoder)))?;
         let dark = slopty_theme::TerminalPalette::DARK.wire();
         set_colors(&mut term, &dark)?;
         let light = Rc::new(std::cell::Cell::new(is_light(dark.bg)));
@@ -608,7 +613,7 @@ impl GhosttyEngine {
             && !title.is_empty()
         {
             out.extend_from_slice(b"\x1b]2;");
-            out.extend_from_slice(title.as_bytes());
+            out.extend_from_slice(title);
             out.extend_from_slice(b"\x1b\\");
         }
         let reported = self.reported.borrow();
@@ -2478,13 +2483,16 @@ fn install_callbacks(
     })?;
     let (for_title, title_reported) = (Rc::clone(events), Rc::clone(reported));
     term.on_title_changed(move |t| {
-        let title = t.title().unwrap_or_default().to_owned();
+        // The program's bytes, which libghostty passes on unchecked.
+        let title = String::from_utf8_lossy(t.title().unwrap_or_default()).into_owned();
         title_reported.borrow_mut().titled = !title.is_empty();
         for_title.borrow_mut().push(EngineEvent::Title(title));
     })?;
     let (for_pwd, pwd_reported) = (Rc::clone(events), Rc::clone(reported));
     term.on_pwd_changed(move |t| {
-        let pwd = t.pwd().unwrap_or_default();
+        // An `OSC 7` URI is ASCII, its path percent-encoded: bytes that are not UTF-8 name no
+        // directory.
+        let pwd = std::str::from_utf8(t.pwd().unwrap_or_default()).unwrap_or_default();
         if let Some(path) = cwd_from_osc7(pwd) {
             pwd.clone_into(&mut pwd_reported.borrow_mut().pwd);
             for_pwd.borrow_mut().push(EngineEvent::Cwd(path));
@@ -2495,7 +2503,7 @@ fn install_callbacks(
         // Only the system clipboard; selection/primary are X11 notions with no counterpart
         // on the clients. Reads (OSC 52 `?`, OSC 5522) are answered by [`clipboard`].
         let text = (write.location() == ClipboardLocation::Standard)
-            .then(|| write.contents().find(|c| c.mime.starts_with("text/plain")))
+            .then(|| write.contents().find(|c| c.mime.starts_with(b"text/plain")))
             .flatten()
             .map(|c| String::from_utf8_lossy(c.data).into_owned());
         let result = match text {

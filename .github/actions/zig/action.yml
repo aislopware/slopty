@@ -1,0 +1,30 @@
+# zig for a job: the one the vendored ghostty builds with, its `build.zig.zon`'s
+# `minimum_zig_version`, which xtask reads too (`tools::ghostty_zig`). That manifest is zig's one
+# pin, so a ghostty bump moves every job's zig with it (docs/decisions/tooling.md, "zig is the
+# one the pinned ghostty names"). The job checks the submodules out first, and its
+# `xtask setup` puts ghostty's patches into the zig's standard library after.
+name: zig
+description: Install the zig the vendored ghostty builds with.
+inputs:
+  use-cache:
+    description: >-
+      Whether to keep zig's own caches in the Actions cache: libghostty-vt-sys never reads them
+      (it passes its own --cache-dir), and they took 2.3 GB of the 10 GB quota.
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - id: version
+      shell: bash
+      run: |
+        version=$(sed -n 's/^[[:space:]]*\.minimum_zig_version = "\([^"]*\)".*/\1/p' vendor/ghostty/build.zig.zon)
+        if [ -z "$version" ]; then
+          echo "::error file=vendor/ghostty/build.zig.zon::names no minimum_zig_version"
+          exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - uses: mlugg/setup-zig@v2
+      with:
+        version: ${{ steps.version.outputs.version }}
+        use-cache: ${{ inputs.use-cache }}

@@ -22,11 +22,21 @@ zed itself so it is never behind zed while longbridge lags.
   change that adds or drops a proc-macro dependency also needs `cargo xtask ci-profile`, which
   rewrites `.cargo/ci-profile.toml` (CI compiles the proc macros unoptimised; the gate's tools
   lane fails while the file is stale, and `cargo gate --fix` rewrites it).
-- `cargo xtask setup` installs tools (binstall) and initialises submodules, then runs
-  `cargo xtask doctor`: it times the first launch of fresh binaries, and when `XProtect` scans
-  them it names the app to switch on under System Settings → Privacy & Security → Developer
-  Tools (the terminal, or the multiplexer if builds run inside one; only you can switch it). It
-  also checks the free space against the floor below.
+- `cargo xtask setup` installs tools (binstall) and initialises submodules, puts ghostty's
+  patches into its zig's standard library, then runs `cargo xtask doctor`.
+  - zig is the one `vendor/ghostty/build.zig.zon` names (`minimum_zig_version`, 0.17 since
+    2026-10-29), which CI's jobs read too (`.github/actions/zig`). On a Mac it is Homebrew's,
+    linked and pinned (`brew install zig && brew link --overwrite zig && brew pin zig`); a check
+    of a tree at another ghostty takes Homebrew's keg of that tree's series (`zig@0.16`) while
+    it is installed, so lanes on both sides of a bump build at once.
+  - ghostty's patch (zig `0bfd34342b`, in no release yet) lets libghostty-vt build for iOS in
+    Debug and ReleaseSafe; without it only ReleaseFast, the mode Slopty's builds pin, does. Run
+    setup again after Homebrew reinstalls zig. It refuses a zig whose library the patch was not
+    made for.
+  - The doctor times the first launch of fresh binaries, and when `XProtect` scans them it
+    names the app to switch on under System Settings → Privacy & Security → Developer Tools
+    (the terminal, or the multiplexer if builds run inside one; only you can switch it). It
+    also checks the free space against the floor below.
 - **Checks run where they return soonest** (`docs/decisions/tooling.md`, "Checks run where they
   return soonest"). `cargo xtask remote -p <crate> [-p <crate>…]` commits the working tree beside
   the real index (`--only <path>`, repeatable: `HEAD` plus the edits under those paths alone, so

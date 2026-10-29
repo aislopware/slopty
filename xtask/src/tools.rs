@@ -4,6 +4,9 @@ use anyhow::{Context as _, Result, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use xshell::{Shell, cmd};
 
+mod zig;
+pub use zig::{patch_zig, use_zig_for, zig_for, zig_problem};
+
 /// Every triple we build for. Host first.
 pub const TRIPLES: [&str; 3] =
     ["aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim"];
@@ -298,25 +301,6 @@ pub fn has(sh: &Shell, name: &str) -> bool {
 /// the Metal toolchain component is downloaded.
 pub fn has_metal(sh: &Shell) -> bool {
     cmd!(sh, "xcrun -sdk macosx metal --version").quiet().ignore_stderr().read().is_ok()
-}
-
-/// The zig the vendored ghostty builds with: its `build.zig` minimum, and CI's `setup-zig`.
-pub const ZIG: &str = "0.16";
-
-/// Homebrew's way to that zig, kept from being shadowed or upgraded by a newer `zig` (an
-/// unrelated `brew install` upgraded it to 0.17 once, which ghostty's `build.zig` refuses).
-const ZIG_HOW: &str = "`brew unlink zig; brew install zig@0.16 && brew link --force zig@0.16 \
-                       && brew pin zig@0.16`";
-
-/// What is wrong with the zig on `PATH` for building libghostty-vt, if anything.
-pub fn zig_problem(sh: &Shell) -> Option<String> {
-    let Ok(version) = cmd!(sh, "zig version").quiet().ignore_stderr().read() else {
-        return Some(format!("zig {ZIG} is needed to build libghostty-vt: {ZIG_HOW}"));
-    };
-    let version = version.trim();
-    let fits =
-        version.strip_prefix(ZIG).is_some_and(|rest| rest.is_empty() || rest.starts_with('.'));
-    (!fits).then(|| format!("zig {version} is on PATH; libghostty-vt builds with {ZIG}: {ZIG_HOW}"))
 }
 
 /// Run a command, printing it first so the log reads like a script, and its wall time after.

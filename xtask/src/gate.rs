@@ -287,6 +287,7 @@ fn lane_shell(
     if let Some(target) = gate_dir.parent() {
         sh.set_var("LIBGHOSTTY_VT_SYS_PREBUILT_DIR", target.join(crate::prune::PREBUILT));
     }
+    crate::tools::use_zig_for(&sh, tree)?;
     if share {
         let jobs = LANES.iter().find(|(n, _)| *n == name).map_or(4, |(_, j)| *j);
         sh.set_var("CARGO_BUILD_JOBS", jobs.to_string());
@@ -2352,8 +2353,8 @@ let windows = cfg!(windows);
         }
     }
 
-    /// Every job's zig is the pinned one, every sccache setup names its version, and the deep
-    /// checks take only some of the macOS runners.
+    /// Every job's zig is the one the pinned ghostty names, every sccache setup names its
+    /// version, and the deep checks take only some of the macOS runners.
     #[test]
     fn ci_runs_the_linux_lane_on_linux() {
         let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
@@ -2365,8 +2366,6 @@ let windows = cfg!(windows);
             workflow.contains("lane: clippy-linux\n            os: ubuntu-24.04"),
             "clippy for Linux takes a Linux runner, not one of the five Macs"
         );
-        let zig = format!("version: {}.", crate::tools::ZIG);
-        assert!(workflow.contains(&zig), "CI's zig is the one setup asks for");
         let deep = std::fs::read_to_string(path.with_file_name("deep.yml")).expect("deep.yml");
         let action = std::fs::read_to_string(path.with_file_name("../actions/sccache/action.yml"))
             .expect("the sccache action");
@@ -2374,8 +2373,18 @@ let windows = cfg!(windows);
             action.contains("sccache-action@v0.0.11\n      with:\n        version: v"),
             "the sccache setup names its version, or asks the API"
         );
+        // zig's one pin is the vendored ghostty's manifest, which the zig action reads as
+        // `tools::ghostty_zig` does, and then names to setup-zig.
+        let zig = std::fs::read_to_string(path.with_file_name("../actions/zig/action.yml"))
+            .expect("the zig action");
+        let read = zig.find("vendor/ghostty/build.zig.zon").expect("it reads ghostty's manifest");
+        let named = zig.find("version: ${{ steps.version.outputs.version }}").expect("it names it");
+        assert!(read < named && zig.contains("minimum_zig_version"), "{zig}");
+        assert_eq!(zig.matches("mlugg/setup-zig@").count(), 1, "{zig}");
         for name in ["ci.yml", "check.yml", "e2e.yml", "deep.yml"] {
             let jobs = std::fs::read_to_string(path.with_file_name(name)).expect("a workflow");
+            assert!(!jobs.contains("setup-zig"), "{name}: zig through the one action");
+            assert!(jobs.contains("uses: ./.github/actions/zig"), "{name} builds with zig");
             assert!(!jobs.contains("brew install zig"), "Homebrew's zig is whatever it is today");
             assert!(!jobs.contains("sccache-action@"), "{name}: sccache through the one action");
             assert!(!jobs.contains("SCCACHE_GHA_ENABLED"), "{name}: the action picks the backend");

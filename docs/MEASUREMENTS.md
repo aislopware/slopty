@@ -17878,3 +17878,27 @@ thread's samples off each of the chat's animation frames.
 ```sh
 sample $(pgrep -x slopty-app) 3 -mayDie
 ```
+
+## 2026-10-30 — libghostty-vt's zig build, zig 0.16 against 0.17
+
+What a prebuilt miss costs after the move to zig 0.17 (`docs/decisions/tooling.md`, "zig is the
+one the pinned ghostty names"). `libghostty-vt-sys` alone, in a fresh target dir, on this Mac
+beside other lanes' builds (load 4–9), for `aarch64-apple-darwin`, ReleaseFast, no prebuilt
+directory, zig's packages fetched beforehand; each side twice, the second round in the other
+order:
+
+| | wall | `libghostty-vt.a` | dylib |
+|---|---|---|---|
+| zig 0.16.0, ghostty `65c41da6f`, binding `64a2e11` | 62 s, 61 s | 12 MB | 2.1 MB |
+| zig 0.17.0, ghostty `9b3d82208`, binding `787576b` | 58 s, 55 s | 13 MB | 2.3 MB |
+
+The new pair builds no slower, so the head of a CI job's critical path on a miss stays where it
+was. The library is a tenth larger, with 205 upstream commits and the new compiler together.
+
+```sh
+cd .research/libghostty-rs   # a worktree at each binding commit
+PATH=/opt/homebrew/opt/zig@0.16/bin:$PATH GHOSTTY_SOURCE_DIR=<ghostty at 65c41da6f> \
+  LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast cargo build -q -p libghostty-vt-sys --target-dir /tmp/t-old
+PATH=/opt/homebrew/opt/zig/bin:$PATH GHOSTTY_SOURCE_DIR=$PWD/../../vendor/ghostty \
+  LIBGHOSTTY_VT_SYS_OPTIMIZE=ReleaseFast cargo build -q -p libghostty-vt-sys --target-dir /tmp/t-new
+```

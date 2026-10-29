@@ -141,10 +141,7 @@ jobs:
           restore-keys: cargo-home-
           enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-          use-cache: false
+      - uses: ./.github/actions/zig
       # As in the gate (`ci.yml`): Ghostty's zig packages fetched ahead of the build, with
       # retries and a bound. Left to the build script, a fetch that stalled held asan, loom and
       # coverage silent until their 240-minute timeout (run 37156507396).
@@ -233,10 +230,7 @@ jobs:
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
       - uses: cargo-bins/cargo-binstall@main
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-          use-cache: false
+      - uses: ./.github/actions/zig
       - uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg

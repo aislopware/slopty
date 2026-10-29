@@ -169,6 +169,16 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId], tools: &[String]) -> Re
         step("the Metal toolchain", &cmd!(sh, "xcodebuild -downloadComponent MetalToolchain"))?;
     }
     step("git submodules", &cmd!(sh, "git submodule update --init --recursive --depth 1"))?;
+    // ghostty's patches to the standard library of its zig, which come with the submodule:
+    // zig 0.17.0 builds libghostty-vt for iOS with safety checks on only with them
+    // (`tools::patch_zig`). CI's jobs run setup after `.github/actions/zig`, so their zig is
+    // patched as a Mac's is. Without that zig there is nothing to patch.
+    let ghostty = crate::tools::repo_root()?.join("vendor/ghostty");
+    if let Ok(zig) = crate::tools::zig_for(sh, &ghostty) {
+        for file in crate::tools::patch_zig(sh, &ghostty, &zig)? {
+            println!("  ✓ ghostty's patch put into {file}");
+        }
+    }
     if lanes.is_empty() {
         // What only the user can fix; a probe that cannot run is not a failed setup.
         if let Err(error) = crate::doctor::run(sh) {

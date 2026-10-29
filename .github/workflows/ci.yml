@@ -131,15 +131,10 @@ jobs:
       # overrides from config files only.
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       # libghostty-vt-sys builds its library with zig in the lanes that build it, and the Apple
-      # lints on Linux compile their build scripts' C with it: the version libghostty-vt pins, as
-      # Homebrew's `zig` moved to 0.17, which Ghostty's build.zig does not take.
+      # lints on Linux compile their build scripts' C with it: the zig the vendored ghostty
+      # names, not Homebrew's, which moves on its own.
       - if: matrix.lane != 'tools'
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-          # Its cache holds zig's own caches, which libghostty-vt-sys never reads (it passes its
-          # own --cache-dir), and took 2.3 GB of the 10 GB quota sccache lives in.
-          use-cache: false
+        uses: ./.github/actions/zig
       # libghostty-vt built once per set of inputs (`LIBGHOSTTY_VT_SYS_PREBUILT_DIR`), the head
       # of the build in most lanes: kept per lane, since each builds its own triples, and keyed
       # by the ghostty revision and the binding's, which a new entry needs. The build checks
@@ -338,11 +333,8 @@ jobs:
       # `package."*"` gave them opt-level 3 (xtask/src/ci_profile.rs). Cargo reads package
       # overrides from config files only.
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
-      # libghostty-vt-sys builds its library with zig, the version it pins.
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
-          use-cache: false
+      # libghostty-vt-sys builds its library with zig.
+      - uses: ./.github/actions/zig
       - id: ghostty
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
@@ -538,10 +530,11 @@ jobs:
       - run: cargo binstall --no-confirm git-cliff@2.14.2 cargo-zigbuild@0.23.4
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      # zig builds libghostty-vt and links every Linux binary, the version libghostty-vt pins.
-      - uses: mlugg/setup-zig@v2
+      # zig builds libghostty-vt and links every Linux binary; its caches keep what it compiled
+      # to link them.
+      - uses: ./.github/actions/zig
         with:
-          version: 0.16.0
+          use-cache: "true"
       # The vault's client, the version `xtask/src/vault.rs` was proven against, by the installer
       # of that release's commit, which checks the download's SHA-256.
       - run: |
