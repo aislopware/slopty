@@ -23,6 +23,9 @@ const PROMPT: &str = "List the machines";
 /// What only the `machines` call's whole result says: each machine's liveness.
 const RESULT_WORDS: &str = "liveness";
 
+/// The press that shows a call's output past its first lines, named with the output's size.
+const FULL_OUTPUT: &str = "Show full output";
+
 /// The terminal the session runs in, once it shows the stand-in's answer.
 fn answered_terminal(dump: &Dump) -> Option<&slopty_e2e::TerminalInfo> {
     dump.terminals
@@ -58,7 +61,7 @@ fn opener<'a>(dump: &'a Dump, pressed: &[String]) -> Option<&'a A11yNode> {
                         || label.to_lowercase().contains("machines")
                         || label.starts_with("Called ")
                         || label.starts_with("Ran ")
-                        || label.starts_with("Show full output"))
+                        || label.starts_with(FULL_OUTPUT))
             })
     })
 }
@@ -128,6 +131,8 @@ async fn a_session_is_its_terminal_and_its_inspector_opens_a_call_whole() {
     );
     drv.ok(&slopty_e2e::Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
     tokio::time::sleep(SETTLE).await;
-    goldens(drv, &renders, "session-inspector-call", &[]).await;
+    // The result's size counts the facts of the machine the run is on (its address, load,
+    // memory, displays), so the press that shows the rest, named with that size, is left out.
+    goldens(drv, &renders, "session-inspector-call", &[FULL_OUTPUT]).await;
     stack.shutdown().await;
 }

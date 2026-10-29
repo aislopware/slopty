@@ -258,7 +258,7 @@ pub fn thread_of(id: &str) -> String {
 }
 
 /// Take up the past session first asked `title` from History: its terminal is the main column,
-/// the inspector shown beside it.
+/// the inspector shown beside it, and the pointer off the window.
 pub async fn resume(drv: &mut Driver, title: &str) -> Dump {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     let (closed, open) = ("History: past Claude Code sessions", "History, open");
@@ -272,6 +272,10 @@ pub async fn resume(drv: &mut Driver, title: &str) -> Dump {
     .await;
     let (x, y) = middle(holding(&listed, "Button", &row).unwrap());
     drv.click(x, y).await.unwrap();
+    // Taken up, the session's own row joins the list above History and moves History's header
+    // to where the pointer pressed, so its hover and tooltip would show in whatever frame is
+    // read next: the pointer leaves the window.
+    drv.ok(&Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
     let opened = seen(drv, "the session in its terminal", STEP, |d| {
         holding(d, "Button", &row).is_none() && d.a11y.iter().any(|n| n.role == "Terminal")
     })

@@ -293,7 +293,9 @@ impl WorkspaceView {
     }
 
     /// The terminal an agent runs in now, each with its thread's chat: the threads' rows name
-    /// them (`ThreadMeta::TERMINAL_FACT`).
+    /// them (`ThreadMeta::TERMINAL_FACT`). Only a session's own thread is its terminal's: a
+    /// subagent runs inside its agent's TUI (the shell shows it in its agent's panes), so a
+    /// subagent's row that names the terminal too never takes it from its agent.
     fn live_agent_terminals(&self, cx: &App) -> HashMap<SessionId, String> {
         self.hubs()
             .flat_map(|(_, hub)| {
@@ -302,6 +304,7 @@ impl WorkspaceView {
                     .rows()
                     .rows
                     .values()
+                    .filter(|row| row.parent.is_none())
                     .filter_map(|row| Some((row.terminal()?, row.id.to_string())))
                     .collect::<Vec<_>>()
             })
@@ -695,6 +698,61 @@ mod tests {
                 .collect()
         });
         assert_eq!(held, [(ItemKind::Terminal { session: opened }, Some("chat-1".to_owned()))]);
+    }
+
+    /// A subagent runs inside its agent's TUI, and its row may name that terminal too (its thread
+    /// begun from its agent's record). The terminal stays its agent's session whichever of the
+    /// two threads' ids sorts first, so the shell, following the terminal, never moves from the
+    /// session to its subagent; and once the agent left it, a subagent's stale word for it makes
+    /// it no agent's.
+    #[gpui::test]
+    fn a_subagent_never_takes_its_agents_terminal(cx: &mut TestAppContext) {
+        use slopty_core::WallMs;
+        use slopty_proto::thread::wire::TableFrame;
+        use slopty_proto::thread::{Cursor, Link, ThreadId, ThreadMeta};
+
+        let workspace = cx.new(|_| WorkspaceView::new(Theme::default()));
+        let cx = cx.add_empty_window();
+        workspace.update(cx, |v, cx| v.add_worker(KEY, "studio".to_owned(), cx));
+        let _rx = link(&workspace, cx, mac(|_| {}), Vec::new());
+        let terminal = SessionId::new();
+        let id = |n: u8| -> ThreadId {
+            format!("00000000-0000-8000-8000-0000000000{n:02}").parse().expect("a thread id")
+        };
+        let row = |thread: ThreadId, parent: Option<ThreadId>, in_terminal: bool| {
+            let mut state = crate::conversation::thread::fixtures::empty();
+            state.meta.id = thread;
+            state.meta.parent = parent.map(|thread| Link {
+                thread,
+                item: slopty_proto::thread::ItemId("toolu_1".to_owned()),
+            });
+            if in_terminal {
+                state.meta.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), terminal.to_string());
+            }
+            state.row(WallMs::ZERO)
+        };
+        workspace.update(cx, |v, cx| v.threads_linked(KEY, cx));
+        let mut seq = 0;
+        let mut terminals = |rows: Vec<_>, cx: &mut VisualTestContext| {
+            seq = u64::saturating_add(seq, 1);
+            workspace.update(cx, |v, cx| {
+                let cursor = Cursor { epoch: 1, seq };
+                v.thread_table(KEY, &TableFrame::Snapshot { cursor, rows }, cx);
+                v.live_session_terminals(cx)
+            })
+        };
+        // The subagent's id sorting after its agent's, then before it.
+        for (agent, subagent) in [(id(1), id(2)), (id(2), id(1))] {
+            let rows = vec![row(agent, None, true), row(subagent, Some(agent), true)];
+            assert_eq!(
+                terminals(rows, cx),
+                BTreeMap::from([(agent.to_string(), terminal.to_string())]),
+                "the terminal is the agent's session, not its subagent's"
+            );
+        }
+        let (agent, subagent) = (id(1), id(2));
+        let left = vec![row(agent, None, false), row(subagent, Some(agent), true)];
+        assert_eq!(terminals(left, cx), BTreeMap::new(), "no agent's once its agent left it");
     }
 
     /// A terminal a tab showed when the app last ran, asked for again by its id: one its

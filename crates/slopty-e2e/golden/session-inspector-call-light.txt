@@ -16,7 +16,6 @@ Button │ Copy message
 Button │ MCP slopty · machines
 Code │ slopty · machines⏎{}
 Code │ [{"worker":"7ee7bc23-d948-bc06-1956-95be56974ce1","name":"session","liveness":"online","address":"127.0.0.1:$PORT","os":"macos","os_version":"27.0.1","arch":"aa…
-Button │ Show full output (876 B)
 Paragraph │ Done: List the machines
 Button │ Copy message
 Splitter │ Resize side pane
