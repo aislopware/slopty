@@ -103,19 +103,29 @@ pub fn promote(sh: &Shell, opts: &PromoteOpts) -> Result<()> {
     Ok(())
 }
 
-/// Whether the run has `gate` jobs and every one of them passed; `promote` and `release` are not
-/// lanes.
+/// Whether the run's gate passed whole; `promote` and `release` are not lanes.
 fn gate_passed(sh: &Shell, id: u64) -> Result<bool> {
     let id = id.to_string();
     let jobs = cmd!(sh, "gh run view {id} --json jobs --jq .jobs[]|[.name,.conclusion]|@tsv")
         .quiet()
         .read()?;
-    let lanes: Vec<(&str, &str)> = jobs
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .filter(|(name, _)| name.starts_with("gate"))
-        .collect();
-    Ok(!lanes.is_empty() && lanes.iter().all(|(_, conclusion)| *conclusion == "success"))
+    Ok(lanes_passed(&jobs))
+}
+
+/// Whether every lane of one of the gate's two sets passed, as ci.yml's `promote` asks: the hosted
+/// matrix with the linux job, or both warm runners (`SLOPTY_RUNNERS` picks which runs, and the
+/// other is skipped). `jobs` is one `name\tconclusion` line per job.
+fn lanes_passed(jobs: &str) -> bool {
+    let lanes = || {
+        jobs.lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|(name, _)| name.starts_with("gate"))
+    };
+    let passed = |warm: bool| {
+        let mut set = lanes().filter(|(name, _)| name.starts_with("gate (warm") == warm).peekable();
+        set.peek().is_some() && set.all(|(_, done)| done == "success")
+    };
+    passed(true) || passed(false)
 }
 
 pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
@@ -278,5 +288,32 @@ fn outcome(sh: &Shell, run: &Run, conclusion: &str, head: &str) -> Result<()> {
                 run.url
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lanes_passed;
+
+    /// Main moves on the hosted lanes with the warm jobs skipped, on both warm runners with the
+    /// hosted ones skipped, and on nothing less: ci.yml's `promote` condition.
+    #[test]
+    fn the_gate_passes_on_either_whole_set() {
+        let hosted = "gate (tools)\tsuccess\ngate (linux)\tsuccess\n";
+        let warm_skipped = "gate (warm ${{ matrix.host }})\tskipped\n";
+        let promote = "promote\tfailure\n";
+        assert!(lanes_passed(&format!("{hosted}{warm_skipped}{promote}")));
+        let warm = "gate (warm mac)\tsuccess\ngate (warm linux)\tsuccess\n";
+        let hosted_skipped = "gate (${{ matrix.lane }})\tskipped\ngate (linux)\tskipped\n";
+        assert!(lanes_passed(&format!("{hosted_skipped}{warm}")));
+
+        assert!(!lanes_passed(&format!(
+            "gate (tools)\tfailure\ngate (linux)\tsuccess\n{warm_skipped}"
+        )));
+        assert!(!lanes_passed(&format!(
+            "{hosted_skipped}gate (warm mac)\tsuccess\ngate (warm linux)\tcancelled\n"
+        )));
+        assert!(!lanes_passed(&format!("{hosted_skipped}{warm_skipped}")), "nothing ran");
+        assert!(!lanes_passed(promote), "no gate job at all");
     }
 }
