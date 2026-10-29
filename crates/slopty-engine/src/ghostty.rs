@@ -146,8 +146,9 @@ pub struct GhosttyEngine {
     last_kept: std::cell::Cell<Option<u64>>,
     /// Search's text of the rows that scrolled into history, and the last needle's hits.
     history: search::History,
-    /// A write since the last colour check carried an OSC or a reset, and the next write
-    /// checks again in case the sequence was split across the two.
+    /// A write that could change the colours or the pointer left the parser inside a
+    /// sequence, so the next write checks them again: a read may split a sequence anywhere,
+    /// and across any number of writes.
     colours_touched: bool,
     /// The tail of the last chunk when it ended inside a possible alternate-screen switch
     /// (`ESC [ ? 10`), so a switch split across two reads is still seen before it completes.
@@ -193,6 +194,16 @@ pub struct GhosttyEngine {
     /// prompt gives it a status or takes it, which dirties no row in libghostty. The next
     /// frame reads them again and sends those the viewers hold otherwise.
     remarked_rows: BTreeSet<u64>,
+    /// Each row that holds a mark (a prompt start, a command's end or output start, a block's
+    /// line) while it is on the screen, with the line its marks are kept at. Content moves on
+    /// the screen without going to the history (a scroll region scrolled, lines inserted or
+    /// deleted), libghostty moving a tracked row with it as each operation does, and the marks
+    /// go where their row goes: in the write that wrote them or in any later one, however the
+    /// output was split into writes. A row in the history moves no more and is let go.
+    pinned: Vec<(u64, TrackedGridRef)>,
+    /// A block's lines moved with its rows: the next frame sends every block, since the news
+    /// of one replaces only the block at its own prompt.
+    blocks_moved: bool,
     /// The OSC 133 command blocks of the active screen, oldest first (see [`read`]).
     commands: std::collections::VecDeque<read::Block>,
     /// The primary screen's blocks while the alternate screen is up, as `primary_anchor`.
@@ -243,6 +254,7 @@ struct PrimaryMarks {
     epoch: u32,
     exit_marks: BTreeMap<u64, Option<u8>>,
     prompt_starts: BTreeSet<u64>,
+    pinned: Vec<(u64, TrackedGridRef)>,
 }
 
 /// The rows the viewers that follow the diffs hold, as the last diff (or resize) left them:
@@ -472,7 +484,7 @@ impl GhosttyEngine {
         let hold = Rc::new(std::cell::Cell::new(None));
         install_render_hold(&mut term, &render, &hold)?;
         let marks = Rc::new(RefCell::new(Vec::new()));
-        install_marks(&mut term, &marks)?;
+        install_marks(&mut term, &marks, &events, &reported, &progress)?;
         status::install(&mut term, &marks)?;
         let clipboard = Rc::new(RefCell::new(clipboard::Reads::default()));
         clipboard::install(&mut term, &clipboard)?;
@@ -525,6 +537,8 @@ impl GhosttyEngine {
             prompt_starts: BTreeSet::new(),
             forced_rows: BTreeSet::new(),
             remarked_rows: BTreeSet::new(),
+            pinned: Vec::new(),
+            blocks_moved: false,
             commands: std::collections::VecDeque::new(),
             primary_commands: std::collections::VecDeque::new(),
             commands_ended: 0,
@@ -895,6 +909,7 @@ impl GhosttyEngine {
         self.prompt_starts.clear();
         self.forced_rows.clear();
         self.remarked_rows.clear();
+        self.pinned.clear();
         self.commands.clear();
         self.block_news.clear();
         self.screen_runs.clear();
@@ -961,6 +976,7 @@ impl GhosttyEngine {
             bytes = rest;
         }
         self.restoring = false;
+        self.pin_screen_marks();
         // The replay's blocks were numbered as it went; the restored ones go out whole.
         self.block_news.clear();
         if !bytes.is_empty() {
@@ -983,6 +999,12 @@ impl GhosttyEngine {
             tracing::error!(error = %e, "engine settle failed; invalidating line numbering");
             self.bump_epoch();
         }
+        // The marks counted before this write first, then this write's own, each tracked to
+        // the end of the write.
+        if let Err(e) = self.follow_marks() {
+            tracing::warn!(error = %e, "following the marked rows failed; their marks stay");
+            self.pinned.clear();
+        }
         self.take_marks();
     }
 
@@ -1004,9 +1026,12 @@ impl GhosttyEngine {
                     }
                     // Its row went out of the history in the same write: counted at the oldest
                     // line, so a command end still ends its command.
-                    let y = row.and_then(|r| r.point(PointSpace::Screen).ok().flatten());
+                    let y = row.as_ref().and_then(|r| r.point(PointSpace::Screen).ok().flatten());
                     let line = self.base.saturating_add(y.map_or(0, |p| u64::from(p.y)));
                     self.record_mark(mark, line, col);
+                    if let Some(row) = row.filter(|_| y.is_some()) {
+                        self.pin(line, row);
+                    }
                 }
                 Pending::Reset => self.forget_screen(),
                 Pending::Status(report) => {
@@ -1017,6 +1042,99 @@ impl GhosttyEngine {
             }
         }
         self.spare_marks = taken;
+    }
+
+    /// Track the row of the marks kept at `line`, unless it is tracked already.
+    fn pin(&mut self, line: u64, row: TrackedGridRef) {
+        if !self.pinned.iter().any(|(at, _)| *at == line) {
+            self.pinned.push((line, row));
+        }
+    }
+
+    /// Track the rows on the screen that hold the marks a checkpoint brought back.
+    fn pin_screen_marks(&mut self) {
+        let Ok(history) = self.term.scrollback_rows().map(|n| n as u64) else { return };
+        let screen = self.base.saturating_add(history);
+        let lines: BTreeSet<u64> = self
+            .prompt_starts
+            .range(screen..)
+            .copied()
+            .chain(self.exit_marks.range(screen..).map(|(&line, _)| line))
+            .chain(self.block_lines().filter(|&line| line >= screen))
+            .collect();
+        for line in lines {
+            let Ok(y) = u32::try_from(line.saturating_sub(self.base)) else { continue };
+            if let Ok(row) = self.term.track_grid_ref(Point::Screen(PointCoordinate { x: 0, y })) {
+                self.pin(line, row);
+            }
+        }
+    }
+
+    /// Move each mark with its row where content moved on the screen since its line was
+    /// counted ([`Self::pinned`]), and let go of the rows that went into the history.
+    fn follow_marks(&mut self) -> Result<(), EngineError> {
+        if self.pinned.is_empty() {
+            return Ok(());
+        }
+        let history = self.term.scrollback_rows()? as u64;
+        let base = self.base;
+        let mut moved = Vec::new();
+        self.pinned.retain_mut(|(line, row)| {
+            let y = row.point(PointSpace::Screen).ok().flatten().map(|p| u64::from(p.y));
+            let now = y.map(|y| base.saturating_add(y));
+            if now != Some(*line) {
+                moved.push((*line, now));
+            }
+            match (now, y) {
+                (Some(now), Some(y)) => {
+                    *line = now;
+                    y >= history
+                }
+                _ => false,
+            }
+        });
+        if !moved.is_empty() {
+            self.move_marks(&moved);
+        }
+        Ok(())
+    }
+
+    /// The marks kept at each line `moved` names go to the line it says, or away with a row
+    /// that is gone; the rows whose prompt that changes are sent again.
+    fn move_marks(&mut self, moved: &[(u64, Option<u64>)]) {
+        let reach = |line: u64| line..=line.saturating_add(EXIT_LOOKBACK_ROWS);
+        let touched: BTreeSet<u64> = moved
+            .iter()
+            .flat_map(|&(from, to)| reach(from).chain(to.into_iter().flat_map(reach)))
+            .collect();
+        let before: Vec<_> =
+            touched.iter().map(|&l| prompt_at(&self.exit_marks, &self.prompt_starts, l)).collect();
+        // Every moved mark is taken out before any is put back: rows that traded places trade
+        // their marks.
+        let (mut starts, mut exits, mut forced) = (Vec::new(), Vec::new(), Vec::new());
+        for &(from, to) in moved {
+            if self.prompt_starts.remove(&from) {
+                starts.extend(to);
+            }
+            if let Some(exit) = self.exit_marks.remove(&from) {
+                exits.extend(to.map(|to| (to, exit)));
+            }
+            if self.forced_rows.remove(&from) {
+                forced.extend(to);
+            }
+        }
+        self.prompt_starts.extend(starts);
+        self.exit_marks.extend(exits);
+        self.forced_rows.extend(forced);
+        let map: BTreeMap<u64, Option<u64>> = moved.iter().copied().collect();
+        if self.move_blocks(&map) {
+            self.blocks_moved = true;
+        }
+        for (&line, was) in touched.iter().zip(before) {
+            if prompt_at(&self.exit_marks, &self.prompt_starts, line) != was {
+                self.remarked_rows.insert(line);
+            }
+        }
     }
 
     /// The program's status records changed: the viewers are told the whole set.
@@ -1032,10 +1150,6 @@ impl GhosttyEngine {
     /// every line the numbering, the marks and the command blocks refer to is gone. A new
     /// numbering starts with no marks, and no blocks but a command still running.
     fn forget_screen(&mut self) {
-        // libghostty clears the title without a callback for it.
-        if std::mem::take(&mut self.reported.borrow_mut().titled) {
-            self.events.borrow_mut().push(EngineEvent::Title(String::new()));
-        }
         self.primary_anchor = None;
         self.primary_marks = None;
         self.primary_commands.clear();
@@ -1063,11 +1177,7 @@ impl GhosttyEngine {
         }
         match mark {
             osc133::Mark::PromptStart => {
-                // The shell has the terminal back, so whatever reported progress has ended,
-                // cleared or not.
-                if self.progress.replace(Progress::default()).state != ProgressState::None {
-                    self.events.borrow_mut().push(EngineEvent::Progress(Progress::default()));
-                }
+                // The progress it ends went in its place among the reports (`install_marks`).
                 if self.program.prompt() {
                     self.program_moved();
                 }
@@ -1102,6 +1212,7 @@ impl GhosttyEngine {
                     epoch: self.epoch,
                     exit_marks: std::mem::take(&mut self.exit_marks),
                     prompt_starts: std::mem::take(&mut self.prompt_starts),
+                    pinned: std::mem::take(&mut self.pinned),
                 });
                 self.bump_epoch();
                 self.reanchor()?;
@@ -1119,6 +1230,7 @@ impl GhosttyEngine {
                     self.epoch = parked.epoch;
                     self.exit_marks = parked.exit_marks;
                     self.prompt_starts = parked.prompt_starts;
+                    self.pinned = parked.pinned;
                 }
                 _ => self.bump_epoch(),
             }
@@ -1225,7 +1337,7 @@ impl GhosttyEngine {
             && dirty == Dirty::Clean
             && self.cursor_sent == Some(cursor)
             && (graphics_gen == self.graphics_gen || hold.is_some())
-            && (self.block_news.is_empty() || hold.is_some())
+            && ((self.block_news.is_empty() && !self.blocks_moved) || hold.is_some())
             && !forcing
             && (hold.is_some() || self.remarked_rows.is_empty())
             && !self.discipline_changed
@@ -1236,7 +1348,7 @@ impl GhosttyEngine {
         // one after the storage changed; otherwise the clients move them up themselves.
         let above_due = take != Take::Diff || full || graphics_gen != self.graphics_gen;
         // Every block goes with a frame every viewer takes whole; otherwise the news.
-        let blocks_due = take != Take::Diff || full;
+        let blocks_due = take != Take::Diff || full || (self.blocks_moved && hold.is_none());
         if take != Take::Joiner && hold.is_none() {
             self.graphics_gen = graphics_gen;
         }
@@ -1687,6 +1799,9 @@ impl GhosttyEngine {
                 }
                 let blocks = if blocks_due {
                     self.block_news.clear();
+                    if take != Take::Joiner {
+                        self.blocks_moved = false;
+                    }
                     Some(Blocks { whole: true, marks: self.block_marks() })
                 } else if self.block_news.is_empty() || hold.is_some() {
                     None
@@ -2522,21 +2637,44 @@ fn install_callbacks(
 /// cursor where the shell wrote it: the terminal has applied the bytes before the sequence and
 /// none after it. The cursor's row is tracked, not counted, because the rest of the write may
 /// scroll it or evict history above it before the engine settles.
+///
+/// What a mark or a reset does to what the session reports (the progress a prompt ends, the
+/// title a reset clears) is done here, in its place among the reports the same write makes,
+/// whose callbacks report them as they come: done once the write settled, a progress report
+/// or a title after it in the same write was undone, and the state told depended on where
+/// the output was split into writes.
 fn install_marks(
     term: &mut Terminal<'static, 'static>,
     marks: &Rc<RefCell<Vec<Pending>>>,
+    events: &Events,
+    reported: &Rc<RefCell<Reported>>,
+    progress: &Rc<std::cell::Cell<Progress>>,
 ) -> Result<(), EngineError> {
-    let for_marks = Rc::clone(marks);
+    let (for_marks, for_events, shown) = (Rc::clone(marks), Rc::clone(events), Rc::clone(progress));
     term.on_semantic_prompt(move |t, event| {
         let Some(mark) = osc133::Mark::of(event) else { return };
+        // The shell has the terminal back, so whatever reported progress has ended, cleared
+        // or not.
+        if mark == osc133::Mark::PromptStart
+            && shown.replace(Progress::default()).state != ProgressState::None
+        {
+            for_events.borrow_mut().push(EngineEvent::Progress(Progress::default()));
+        }
         let (Ok(y), Ok(col), Ok(screen)) = (t.cursor_y(), t.cursor_x(), t.active_screen()) else {
             return;
         };
         let row = t.track_grid_ref(Point::Active(PointCoordinate { x: 0, y: u32::from(y) })).ok();
         for_marks.borrow_mut().push(Pending::Mark { mark, row, col, screen });
     })?;
-    let for_reset = Rc::clone(marks);
-    term.on_reset(move |_| for_reset.borrow_mut().push(Pending::Reset))?;
+    let (for_reset, for_events, reported) =
+        (Rc::clone(marks), Rc::clone(events), Rc::clone(reported));
+    term.on_reset(move |_| {
+        // libghostty clears the title without a callback for it.
+        if std::mem::take(&mut reported.borrow_mut().titled) {
+            for_events.borrow_mut().push(EngineEvent::Title(String::new()));
+        }
+        for_reset.borrow_mut().push(Pending::Reset);
+    })?;
     Ok(())
 }
 
@@ -2676,9 +2814,10 @@ fn overrides(term: &Terminal<'_, '_>) -> Result<ColorOverrides, EngineError> {
 
 /// Whether `bytes` may change the colours or the pointer shape: OSC sequences set them (the
 /// colours 4, 10-12, 104, 110-112 and 21, the pointer 22) and RIS (`ESC c`) resets the colours.
+/// An escape that ends the bytes may begin either in the next write.
 fn may_touch_osc_state(bytes: &[u8]) -> bool {
     memchr::memchr_iter(0x1b, bytes)
-        .any(|at| matches!(bytes.get(at.saturating_add(1)), Some(b']' | b'c')))
+        .any(|at| matches!(bytes.get(at.saturating_add(1)), None | Some(b']' | b'c')))
 }
 
 impl GhosttyEngine {
@@ -2709,13 +2848,13 @@ impl GhosttyEngine {
         self.after_dnd();
         // libghostty has no colour-change or pointer-change callback. The current colours
         // against the defaults are eight reads and two palette copies, so they and the pointer
-        // are looked at only after a write that could have changed them, and once more after
-        // that for a sequence split across two writes.
-        let touched = may_touch_osc_state(bytes);
-        if !touched && !std::mem::replace(&mut self.colours_touched, false) {
+        // are looked at only after a write that could have changed them, and after each write
+        // that follows it until the parser is out of the sequence it was in: a read splits a
+        // sequence anywhere, right after its escape too, and across any number of writes.
+        if !self.colours_touched && !may_touch_osc_state(bytes) {
             return;
         }
-        self.colours_touched = touched;
+        self.colours_touched = self.term.is_vt_ground().is_ok_and(|ground| !ground);
         if let Ok(shape) = self.term.mouse_shape().map(convert::pointer)
             && shape != self.pointer
         {
@@ -3740,6 +3879,7 @@ mod tests {
         });
         assert_eq!(colours.and_then(|c| c.bg), Some([0x12, 0x34, 0x56]));
         assert!(may_touch_osc_state(b"x\x1bc"));
+        assert!(may_touch_osc_state(b"x\x1b"), "an escape the next write may go on from");
         assert!(!may_touch_osc_state(b"plain \x1b[31m text"));
     }
 
@@ -3764,8 +3904,47 @@ mod tests {
         e.write(b"\x1b]22;col-res");
         e.write(b"ize\x1b\\");
         assert_eq!(pointers(&e), [PointerShape::ColResize], "split across two writes");
+        // As a PTY read splits it: a byte at a time (fuzz target `terminal`, byte chunking).
+        for split in [&b"\x1b]22;grab\x07"[..], b"\x1b]22;col-resize\x1b\\"] {
+            split.chunks(1).for_each(|byte| e.write(byte));
+        }
+        assert_eq!(
+            pointers(&e),
+            [PointerShape::Grab, PointerShape::ColResize],
+            "a byte at a time, from right after the escape"
+        );
         e.write(b"\x1b]22;text\x07");
         assert_eq!(pointers(&e), [PointerShape::Text], "the I-beam asked for again");
+    }
+
+    /// What a reset or a prompt does to the session's title and progress comes in its place
+    /// among the reports around it, however the output is split into writes. Fuzz target
+    /// `terminal`, byte chunking: done once the write had settled, it undid a title or a
+    /// progress report later in the same write.
+    #[test]
+    fn a_reset_and_a_prompt_act_in_their_place_among_the_reports() {
+        let bytes =
+            b"\x1b]9;4;1;20\x07\x1b]2;old\x07\x1bc\x1b]2;new\x07\x1b]133;A\x07$ \x1b]9;4;1;5\x07";
+        let told = |writes: &[&[u8]]| {
+            let mut e = engine(20, 3);
+            for write in writes {
+                e.write(write);
+            }
+            let (mut title, mut progress) = (None, Progress::default());
+            for event in e.drain_events() {
+                match event {
+                    EngineEvent::Title(now) => title = Some(now),
+                    EngineEvent::Progress(now) => progress = now,
+                    _ => {}
+                }
+            }
+            (title, progress)
+        };
+        let whole = told(&[bytes]);
+        let set = Progress { state: ProgressState::Set, percent: Some(5) };
+        assert_eq!(whole, (Some("new".to_owned()), set), "in one write");
+        let one: Vec<&[u8]> = bytes.chunks(1).collect();
+        assert_eq!(told(&one), whole, "a byte at a time");
     }
 
     /// An empty `OSC 22` gives the pointer back: the engine reports the I-beam the terminal
@@ -4899,6 +5078,32 @@ mod tests {
         assert_eq!(start, LineIndex(0));
         assert_eq!(lines[0].links[0].uri, "https://x.y/");
         assert_eq!((lines[0].links[0].col, lines[0].links[0].len), (2, 4));
+    }
+
+    /// A prompt's marks go with its row when a scroll region moves it on the screen, whether
+    /// the scroll comes in the write that marked the row or in a later one. Fuzz target
+    /// `terminal`, byte chunking: written a byte at a time, the marks stayed on the lines they
+    /// were written at, and the prompt moved under them read as a continuation.
+    #[test]
+    fn a_prompt_mark_follows_its_row_through_a_scroll_region() {
+        // A command's end on row 2 and the next prompt on row 3, inside a region of rows 1-5,
+        // then a line feed at the region's bottom: both rows move up one.
+        let prompt =
+            b"\x1b[2;6r\x1b[3;1Hout\x1b]133;D;3\x07\x1b[4;1H\x1b]133;A\x07$ \x1b]133;B\x07ls";
+        let scroll = b"\x1b[6;1H\n".as_slice();
+        let marks = |writes: &[&[u8]]| -> Vec<SemanticMark> {
+            let mut e = engine(10, 8);
+            for write in writes {
+                e.write(write);
+            }
+            e.full_frame(0).unwrap().updates.iter().map(|u| u.line.mark).collect()
+        };
+        let bytes = [prompt.as_slice(), scroll].concat();
+        let whole = marks(&[&bytes]);
+        assert_eq!(whole[2], SemanticMark::Prompt { exit: Some(3), input: Some(2) }, "{whole:?}");
+        assert_eq!(marks(&[prompt, scroll]), whole, "the scroll in a later write");
+        let one: Vec<&[u8]> = bytes.chunks(1).collect();
+        assert_eq!(marks(&one), whole, "a byte at a time");
     }
 
     #[test]

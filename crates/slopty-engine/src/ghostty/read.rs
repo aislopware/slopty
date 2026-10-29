@@ -8,6 +8,7 @@
 //! formatted, so a read near the end of a 50 000-line history costs its own rows, not the
 //! history's ten milliseconds.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
@@ -177,6 +178,35 @@ impl GhosttyEngine {
     }
 
     /// A block started or ended: news for the next frame, where its last word stands.
+    /// Every line the blocks are kept at.
+    pub(super) fn block_lines(&self) -> impl Iterator<Item = u64> + '_ {
+        self.commands
+            .iter()
+            .flat_map(|b| [Some(b.prompt), b.output, b.end.map(|e| e.line)].into_iter().flatten())
+    }
+
+    /// Each block line `moved` names goes to the line it says, its row moved on the screen;
+    /// one whose row is gone stays, read from where it was. Whether any moved.
+    pub(super) fn move_blocks(&mut self, moved: &BTreeMap<u64, Option<u64>>) -> bool {
+        let mut any = false;
+        let mut follow = |line: &mut u64| {
+            if let Some(&Some(now)) = moved.get(line) {
+                *line = now;
+                any = true;
+            }
+        };
+        for block in &mut self.commands {
+            follow(&mut block.prompt);
+            if let Some(output) = &mut block.output {
+                follow(output);
+            }
+            if let Some(end) = &mut block.end {
+                follow(&mut end.line);
+            }
+        }
+        any
+    }
+
     fn note_block(&mut self, mark: BlockMark) {
         if self.block_news.last().is_some_and(|m| m.prompt == mark.prompt) {
             self.block_news.pop();
