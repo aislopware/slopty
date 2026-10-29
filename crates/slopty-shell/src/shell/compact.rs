@@ -589,7 +589,9 @@ impl Shell {
                     step.take(this, cx);
                     return;
                 }
-                Self::set_compact_sessions(false, cx);
+                // TUI-first: the picker is the whole new session, so it stands over Chats, as the
+                // project picker does; the session it starts takes the screen (a chat chosen
+                // leaves Chats), and put away it leaves Chats as it was, never an empty page.
                 this.open_new_session(None, cx);
             }))
             .child(plate)
@@ -1697,6 +1699,18 @@ mod tests {
             Shell::set_compact_sessions(true, cx);
         });
         assert_eq!(offers(cx), ["New session"], "back on Chats, a chat can start");
+        // Its press puts the new-session picker over Chats, and put away it leaves Chats up.
+        let capsule = cx.debug_bounds("compact-new-session").expect("the capsule").center();
+        cx.simulate_click(capsule, gpui::Modifiers::default());
+        let picked = a11y(cx);
+        shell.update(cx, |shell, cx| {
+            assert!(shell.new_session.is_some(), "the press opens the new-session picker");
+            assert!(shell.compact_sessions_up(cx), "over the Chats page, which stays");
+            shell.close_new_session_picker(cx);
+            assert!(shell.compact_sessions_up(cx), "put away, Chats is as it was");
+        });
+        assert!(picked.contains(&(gpui::Role::TabList, "Agent".to_owned())), "{picked:?}");
+        assert!(picked.contains(&(gpui::Role::Group, "Chats".to_owned())), "{picked:?}");
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
                 state.spaces.clear();
