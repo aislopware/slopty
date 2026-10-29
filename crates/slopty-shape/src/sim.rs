@@ -8,6 +8,9 @@
 //! * NAT rebinding, where the address a socket's peers see it at changes mid-flow;
 //! * reordering, off unless [`Faults::reorder`] asks for it.
 //!
+//! A send takes a batch of datagrams, as the real sockets' batched sends and GSO do, so noq
+//! builds its packets as it does on them.
+//!
 //! Nothing here reads a real clock or does I/O. Under `#[tokio::test(start_paused = true)]`
 //! tokio's clock jumps to the next packet or timer whenever every task waits, and noq's
 //! `TokioRuntime` reads that same clock, so a whole QUIC connection runs in virtual time: a
@@ -19,6 +22,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
 use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -411,6 +415,18 @@ fn kind(datagram: &[u8]) -> &'static str {
     }
 }
 
+/// Datagrams one send may carry: what macOS's batched `sendmsg_x` takes (`noq_udp::BATCH_SIZE`
+/// there), which Slopty's endpoints use (`slopty_net::udp`); Linux's GSO takes more. Every
+/// platform's sim batches alike, so a seed runs the same everywhere. A batch's datagrams after
+/// the first are cut to the first one's size, which splits a burst of frames across packets as
+/// the real sockets do; with one datagram a send, no seed could split the client's
+/// `NEW_CONNECTION_ID` frames (docs/decisions/transport.md, "A lone `NEW_CONNECTION_ID` is no
+/// stateless reset").
+const BATCH: NonZeroUsize = match NonZeroUsize::new(32) {
+    Some(batch) => batch,
+    None => NonZeroUsize::MIN,
+};
+
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// FNV-1a over `bytes`, from `hash`.
@@ -494,6 +510,12 @@ impl UdpSender for Sender {
     ) -> Poll<io::Result<()>> {
         self.net.fabric.lock().send(self.end, transmit);
         Poll::Ready(Ok(()))
+    }
+
+    /// A batch, as the real sockets take one: noq then builds a send as it does on them, where
+    /// each datagram after the first is cut to the first one's size.
+    fn max_transmit_segments(&self) -> NonZeroUsize {
+        BATCH
     }
 }
 

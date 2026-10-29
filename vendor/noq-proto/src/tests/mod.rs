@@ -1366,6 +1366,7 @@ impl CoalescedDatagram {
             ecn: self.ecn,
             first_decode: self.first_decode,
             remaining: self.remaining,
+            routed_by_cid: true,
         }))
     }
 }

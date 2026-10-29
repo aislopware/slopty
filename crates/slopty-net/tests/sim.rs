@@ -12,6 +12,7 @@ mod tests {
     use std::future::Future;
     use std::io::{self, IoSliceMut};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::num::NonZeroUsize;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -874,6 +875,10 @@ mod tests {
             }
             Poll::Ready(Ok(()))
         }
+
+        fn max_transmit_segments(&self) -> NonZeroUsize {
+            self.inner.max_transmit_segments()
+        }
     }
 
     /// 256 kB from the worker to the client over a [`NARROW`] path, as full packets: how long
@@ -961,6 +966,10 @@ mod tests {
             }
             Poll::Ready(Ok(()))
         }
+
+        fn max_transmit_segments(&self) -> NonZeroUsize {
+            self.inner.max_transmit_segments()
+        }
     }
 
     /// A dial where every datagram arrives twice, and what it took.
@@ -985,6 +994,56 @@ mod tests {
         for seed in GATE_SEEDS {
             let took = simulate(seed, doubled).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
             assert!(took < LOSSY_DIAL, "seed {seed}: the dial took {took:?}");
+        }
+    }
+
+    // (j) Connection IDs split across a batch.
+
+    /// [`hop`] at a fifth lost each way, with up to 2 ms more each way, as a loaded host's timers
+    /// add to a real link.
+    fn jittery() -> Faults {
+        Faults::over(Link { delay: ms(5), jitter: ms(2), loss: 0.2, ..Link::CLEAR })
+    }
+
+    /// The dial and 150 keys through [`jittery`], each 4 ms after the last, as
+    /// `typing_through_a_lossy_link_lands_once_in_order` (the worker's e2e) types them: why the
+    /// dial failed or an end closed, if one did.
+    async fn split_ids(seed: u64) -> Result<(), String> {
+        let mut pair = link(jittery(), seed).await?;
+        let keys = 150;
+        let typed = type_through(&mut pair, keys, ms(4), None, ms(0), |_| {}).await;
+        match (pair.client.close_reason(), pair.worker.close_reason()) {
+            (None, None) => {}
+            (client, worker) => {
+                return Err(format!(
+                    "closed: the client's end {client:?}, the worker's {worker:?}"
+                ));
+            }
+        }
+        assert_once_in_order(&typed, keys, seed);
+        assert_one_connection(&pair, seed).await;
+        Ok(())
+    }
+
+    /// The seed of [`split_ids`] that failed before patch 33 (`vendor/noq-proto/SLOPTY.md`), the
+    /// only one of the first 3000. The client issues its four connection IDs at once, and a batch
+    /// that resends them after a loss is cut to its short first datagram's size, so a
+    /// `NEW_CONNECTION_ID` can leave as the last frame of its packet. The worker takes the first
+    /// of the client's IDs it reads as the one to send to at once, and under the null packet key,
+    /// with no AEAD tag, a packet that ends in that ID's frame ends in the very reset token the
+    /// worker then holds for the client. The worker took one for a stateless reset, dropped the
+    /// connection without a word and answered the client's next packets with resets of its own:
+    /// the dial failed with "reset by peer" after 321 ms.
+    const LONE_CID: u64 = 172;
+
+    /// A `NEW_CONNECTION_ID` that ends a packet is no stateless reset, however the batches that
+    /// carry the client's IDs split them: the cause of the worker's e2e
+    /// `typing_through_a_lossy_link_lands_once_in_order` failing on the gate (2026-10-30,
+    /// `docs/decisions/transport.md`, "A lone `NEW_CONNECTION_ID` is no stateless reset").
+    #[test]
+    fn a_lone_new_connection_id_is_no_stateless_reset() {
+        for seed in GATE_SEEDS.chain([LONE_CID]) {
+            simulate(seed, split_ids).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
         }
     }
 
@@ -1048,6 +1107,12 @@ mod tests {
         }
         println!("end of a 60 s outage: {}", spread(ended));
         println!("dial after it: {} ({:?} real)", spread(redials), wall_since(started));
+
+        let started = wall();
+        for seed in NIGHTLY_SEEDS {
+            simulate(seed, split_ids).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        }
+        println!("150 keys through a jittery fifth lost: held ({:?} real)", wall_since(started));
 
         let started = wall();
         let slowest: Vec<Duration> =

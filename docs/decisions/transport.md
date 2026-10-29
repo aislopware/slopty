@@ -1653,8 +1653,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (delay, jitter, loss, rate, queue). On top of that it adds three faults the relay cannot
     give: blackouts, which lose what is sent and what is in flight; NAT rebinding, where a
     socket's peers see it at a new address and the old mapping is gone; and reordering, off by
-    default. `slopty_net::endpoint::bind_on(socket, server, seed)` builds the shipped endpoint
-    and transport config on such a socket, and `WorkerListener::on` listens on it.
+    default. A send takes up to 32 datagrams, as macOS's batched `sendmsg_x` does (Linux's GSO
+    takes more), so noq builds its packets as on the real sockets, each datagram of a batch
+    after the first cut to the first one's size. `slopty_net::endpoint::bind_on(socket, server,
+    seed)` builds the shipped endpoint and transport config on such a socket, and
+    `WorkerListener::on` listens on it.
   - noq's `TokioRuntime` reads tokio's clock, so under `start_paused` the whole connection runs
     in virtual time. A 60 s outage costs milliseconds, and a load on the machine changes what
     a run costs, never what it measures. `bind_on`'s seed also seeds noq's endpoint generator
@@ -1662,13 +1665,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     to the packet: `a_seed_repeats_its_run` compares two runs' delivery digests. Before the
     probe seed, a flooded link's echo times differed between two runs of one seed.
   - `crates/slopty-net/tests/sim.rs` runs a real dial, control stream and session stream. It
-    covers five cases: the handshake at 20 % loss each way; keys typed into a 30 s outage; an
-    outage past the 45 s idle timeout, then a new dial; a NAT rebinding mid-typing; and keys
-    beside a flood on a 2 Mbit/s lossy link. Each checks every key and echo once and in order,
-    on one connection. The gate runs 8 seeds of each plus two pinned seeds (0.6 s). The
-    ignored `every_scenario_holds_across_the_seed_sweep` runs 200 seeds of each at night
-    (about 30 s) and prints the numbers. A scenario still running after 600 simulated seconds
-    fails with its seed, since keep-alives keep a stuck run's clock moving.
+    covers the handshake at 20 % loss each way; keys typed into a 30 s outage; an outage past
+    the 45 s idle timeout, then a new dial; a NAT rebinding mid-typing; keys beside a flood on a
+    2 Mbit/s lossy link; a dial on a path that delivers every datagram twice; and 150 keys
+    through a fifth lost each way with 2 ms of jitter. Each that types checks every key and
+    echo once and in order, on one connection. The gate runs 8 seeds of each plus three pinned
+    seeds (1.2 s). The ignored `every_scenario_holds_across_the_seed_sweep` runs 200 seeds of
+    each at night (about 35 s) and prints the numbers. A scenario still running after 600
+    simulated seconds fails with its seed, since keep-alives keep a stuck run's clock moving.
   - Not the relay for this. The relay runs on the real clock between real sockets, so an
     outage costs its full length, the results move with the machine's load, and it cannot
     rebind or reorder. It stays the tool for real-time measurements and the e2e lanes.
@@ -1700,16 +1704,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the worker never sent the client another byte. Fixed as noq-proto patch 10
     (`vendor/noq-proto/SLOPTY.md`). Test: `a_nat_rebinding_moves_the_connection_without_a_reconnect`
     (seed 10 loses the first challenge).
-  - **The one-off gate failure is not reproduced.** `typing_through_a_lossy_link_lands_once_in_order`
-    once failed at connect with "connection lost: closed by peer: 0". No seed of the simulation
-    closes a dial that way. Its dials failed only as "no answer", the stranded client above. A
-    relay run can reach that too, since load changes which retransmissions draw the fixed
-    seed's losses. A
-    code-0 close with no reason is noq's implicit close when the worker's last handle to a
-    connection drops. In slopty-net that happens only when `listen::greet` gives up on a peer
-    (10 s without a control stream or a hello, or a failed read). Past the greeting, it
-    happens on the worker app's own error paths in `conn::run`. Those need the worker app on
-    the simulated network to test, and that crate has another owner.
+  - **Found by it: a lone `NEW_CONNECTION_ID` taken for a stateless reset** (2026-10-30). Once
+    the simulated sockets took a batch a send, the worker e2e's typing
+    (`typing_through_a_lossy_link_lands_once_in_order`: 150 keys 4 ms apart through a fifth
+    lost each way), with 2 ms of jitter, failed on 1 seed of the first 3000 with "reset by
+    peer". That is the e2e's gate failure of 2026-10-29, worked out from the code and its log
+    rather than by rerunning it ("A lone `NEW_CONNECTION_ID` is no stateless reset", below).
+    The September one-off ("connection lost: closed by peer: 0" at connect) was not this: a
+    false reset drains without a CONNECTION_CLOSE, so the client reads "reset by peer", and
+    macOS sent one datagram a call until 2026-09-30. Its log is gone and nothing has shown it
+    since. A code-0 close with no reason is noq's implicit close when the worker's last handle
+    to a connection drops: in slopty-net only when `listen::greet` gives up on a peer (10 s
+    without a control stream or a hello, or a failed read), past the greeting on the worker
+    app's own error paths in `conn::run`.
 - ✅ **A dual-stack port no IPv4 socket holds** (2026-09-29, the fill's "no answer"). About
   one fresh dial in 10 000 to a server on a loopback port timed out. The cause was the port,
   not the crypto. The client endpoint binds `[::]:0` dual-stack, and XNU's allocator for it
@@ -2020,15 +2027,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Rejected: a tag on the null crypto.** A keyed checksum would end every packet in bytes
     no frame writes. It would cost bytes and hashing on every packet of the input and frame
     paths to guard a check that belongs to noq.
-  - **Not taken: skipping the check for a packet that decrypted and was routed by one of the
-    connection's own IDs** (the RFC allows it). Under the null crypto every packet decrypts, so
-    this would close the last way a real packet can end in the compared token. That way needs
-    a short-header packet whose last frame is the NEW_CONNECTION_ID for the ID in use. The
-    client compares the server's handshake token, which no NEW_CONNECTION_ID carries. The
-    server compares the token of the client's sequence-1 ID, and noq writes the client's
-    NEW_CONNECTION_ID frames in ascending sequence (`PendingNewCids::pop`), so that frame ends
-    a packet only when it is sent alone. No run or seed here produced one, and the skip needs
-    the endpoint to pass the routing to the connection.
+  - **Taken since: skipping the check for a datagram one of the connection's own IDs routed**
+    (2026-10-30, patch 33). This entry left it out on the reckoning that the worker compares
+    the token of the client's sequence-1 ID, written first of the client's
+    `NEW_CONNECTION_ID` frames (`PendingNewCids::pop`), so its frame ends a packet only when
+    sent alone, and no run or seed had sent it so. The worker in fact takes the first of the
+    client's IDs it reads, and a batched send can leave any of them alone: "A lone
+    `NEW_CONNECTION_ID` is no stateless reset", below.
   - Tests: `a_long_header_packet_ending_in_the_token_is_no_stateless_reset` and
     `a_short_header_packet_ending_in_the_token_is_a_stateless_reset` (noq-proto,
     `packet_crypto.rs`). `a_path_that_delivers_every_datagram_twice_still_connects`
@@ -2177,3 +2182,63 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_worker_whose_stream_stalls_turns_unreachable_within_six_seconds` and the worker's
     `a_server_that_stops_answering_its_pings_is_dialled_again` do the same to each side of the
     worker's server link.
+- ✅ **A lone `NEW_CONNECTION_ID` is no stateless reset** (2026-10-30, the gate's red of
+  2026-10-29). The worker e2e `typing_through_a_lossy_link_lands_once_in_order` failed on the
+  gate (run 40920324532, the macOS worker shard). 68 ms after it accepted the client through
+  the shaping relay, and before the first key, the worker logged its connection closed with
+  "reset by peer". The typing task's send then failed and nothing reached the screen. The
+  client was alive and holding the connection, so the worker had taken one of the client's
+  own packets for a stateless reset.
+  - **How.** Under the null crypto a packet ends in its last frame ("A resent Initial is not a
+    stateless reset", above), and a `NEW_CONNECTION_ID` frame ends in the reset token of the
+    ID it issues. The client issues four IDs right after the handshake. The worker moves to
+    the first of them it reads, at once (noq's "enable clientside stateless resets"), and from
+    then on compares the last 16 bytes of the client's short-header packets with that ID's
+    token. A batched send (Apple's `sendmsg_x`, on since 2026-09-30, and Linux's GSO) cuts each
+    datagram after the first to the first one's size, so when a probe timeout resends the four
+    IDs behind a short first datagram, they split across packets and one can go alone, the last
+    frame of its packet. When the packets ahead of it are lost, the worker reads the lone one
+    first and moves to its ID; the next copy of that packet ends in the token the worker now
+    compares. The worker drains without a CONNECTION_CLOSE, its endpoint answers the client's
+    next packets with genuine resets, and the client fails with "reset by peer" too.
+  - **Why the simulation missed it.** Its sockets took one datagram a send, so noq built no
+    batch and no seed could split the IDs. `slopty_shape::sim` now takes 32 a send, as the
+    macOS sockets do, and every earlier scenario holds with it. Then the e2e's typing with
+    2 ms of jitter failed on seed 172 of the first 3000: the dial, "reset by peer" after
+    321 ms. A trace of another such run showed the IDs split as 1 to 3 and 4 alone, both copies
+    of the first packet lost, the worker on ID 4, and `got stateless reset` on the next copy of
+    the lone frame. Batches move two of the nightly sweep's 200-seed numbers, from one datagram
+    a send: the dial at a fifth lost reads p99 831 ms and max 949 ms (780 ms and 1.832 s), and
+    the flooded echo's per-seed p99 reads 243 ms at its p99 (235 ms) and its per-seed p50
+    49/62/64 ms (48/62/63). The outages, the dial after one and the rebinding read the same.
+  - **The fix is noq-proto patch 33** (`vendor/noq-proto/SLOPTY.md`), the skip the 10-01 entry
+    did not take. The endpoint tells the connection whether one of the connection's own
+    non-empty IDs routed the datagram, and the connection does not compare such a datagram
+    with the token. A genuine reset's ID is unpredictable bits, so the endpoint finds its
+    connection by the token, and it is still taken. RFC 9000 §10.3.1 lets an endpoint skip the
+    check for a datagram whose packet it processes, and under the null crypto every packet
+    decrypts, so no real packet reads as a reset any more.
+  - **Rejected: a tag on the null crypto**, as on 10-01: bytes and hashing on every packet to
+    guard a check that belongs to noq.
+  - **Rejected: padding after a `NEW_CONNECTION_ID` that ends a packet.** It spends bytes on
+    every such packet to steer around a receiver's check that stays wrong.
+  - **Rejected: keeping the worker on the handshake ID until the client's sequence 1
+    arrives.** A lone sequence-1 frame still ends in its token, so the failure gets rarer, not
+    gone, and until the move the worker cannot take a restarted client's reset.
+  - **Ruled out: a genuine reset from another Slopty process.** Every process shares the
+    connection-ID and reset keys ("The stateless reset a restarted host sends now arrives",
+    above), so any Slopty endpoint handed one of the worker's packets answers with a reset the
+    worker takes, which RFC 9000 §10.3.2 warns of. Here that needs a stray sender to reach the
+    relay's ephemeral port within those 68 ms, so that the relay takes it for the client and
+    hands it the worker's packets. The batch split alone accounts for the log, and over the
+    tailnet only admitted peers reach a worker.
+  - **Tests.** `a_lone_new_connection_id_is_no_stateless_reset` (`crates/slopty-net/tests/sim.rs`)
+    runs that typing on the gate's 8 seeds and seed 172, which failed before the fix; none of
+    the first 3000 seeds fails after it, and the nightly sweep runs it on 200. Genuine resets
+    are still taken: noq's `client_stateless_reset` and `server_stateless_reset`, and
+    `a_restarted_worker_resets_the_old_connection_within_a_keep_alive` and
+    `a_ping_draws_a_restarted_worker_s_reset_at_once` (`crates/slopty-net/tests/loopback.rs`).
+  - **The e2e stays.** The simulation tests the transport alone. The e2e runs the worker app
+    with a real program, its input copies racing the streams on both ends, and the client's
+    terminal state, over real sockets through the relay, and checks each key lands once, in
+    order, with no resync. Nothing else covers that path end to end.

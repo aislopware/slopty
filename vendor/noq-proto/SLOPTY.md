@@ -1,4 +1,4 @@
-# noq-proto, vendored with thirty-two patches
+# noq-proto, vendored with thirty-three patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -316,6 +316,33 @@ congestion snapshot takes BBR3's own state (patches 7 and 14). The `noq` crate's
 receive buffer per batch) change noq's runtime and endpoint driver, which come from crates.io;
 Slopty's socket (`slopty_net::udp`) retries a failed receive as noq 1.3.0's runtime does, so the
 `EMSGSIZE` case they guard against does not arise here.
+
+33. `fix(proto): Take a stateless reset only from a datagram its own connection IDs did not route`
+
+   After patch 17, `unprotect_header` still compared the last 16 bytes of every short-header
+   packet with the peer's reset token, a packet that decrypted included. Behind an AEAD a packet
+   ends in its tag. Under Slopty's null crypto it ends in its last frame, and a
+   `NEW_CONNECTION_ID` ends in the very token it hands over. A server moves to the first of the
+   client's IDs it reads, at once ("enable clientside stateless resets"), and takes that ID's
+   token as the peer's. The client issues its four IDs together; a batched send (Apple's
+   `sendmsg_x`, Linux GSO) cuts each datagram after the first to the first one's size, so a
+   batch that resends them after a loss can carry one alone, the last frame of its packet. When
+   such a packet carried the ID the server had moved to, it ended in that ID's token. Slopty's
+   worker took it for a stateless reset, drained without a CONNECTION_CLOSE and answered the
+   client with resets of its own, and the client failed with "reset by peer"
+   (docs/decisions/transport.md, "A lone `NEW_CONNECTION_ID` is no stateless reset").
+   `ConnectionIndex::get` now also says whether one of the connection's own non-empty IDs found
+   it, the endpoint hands that over as `DatagramConnectionEvent::routed_by_cid`, and
+   `handle_decode` compares no packet of such a datagram. A stateless reset's connection ID is
+   unpredictable bits (RFC 9000 §10.3), so a genuine one is found by its token, the index's last
+   step, and is still taken; §10.3.1 lets an endpoint skip the check for a datagram whose packet
+   it processes. The datagram that creates a connection is never compared. Upstream compares
+   every packet, which behind a tag never goes wrong. Tests: Slopty's
+   `a_lone_new_connection_id_is_no_stateless_reset` (`crates/slopty-net/tests/sim.rs`, whose
+   seed 172 failed before it), and for genuine resets noq's `client_stateless_reset` and
+   `server_stateless_reset` with Slopty's
+   `a_restarted_worker_resets_the_old_connection_within_a_keep_alive` and
+   `a_ping_draws_a_restarted_worker_s_reset_at_once` (`crates/slopty-net/tests/loopback.rs`).
 
 A probe-up exit for an app-limited round (leaving `ProbeBW_UP` when a round ends
 app-limited) was tried beside patches 11 to 13 and not taken. The draft and Linux keep such a

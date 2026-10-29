@@ -170,6 +170,7 @@ impl Endpoint {
                 ecn,
                 first_decode,
                 remaining,
+                routed_by_cid: false, // Corrected later for existing connections
             },
             Err(PacketDecodeError::UnsupportedVersion {
                 src_cid,
@@ -212,7 +213,9 @@ impl Endpoint {
 
         let dst_cid = event.first_decode.dst_cid();
 
-        if let Some(route_to) = self.index.get(&network_path, &event.first_decode) {
+        if let Some((route_to, routed_by_cid)) = self.index.get(&network_path, &event.first_decode)
+        {
+            event.routed_by_cid = routed_by_cid;
             event.path_id = match route_to {
                 RouteDatagramTo::Incoming(_) => PathId::ZERO,
                 RouteDatagramTo::Connection(_, path_id) => path_id,
@@ -1148,27 +1151,32 @@ impl ConnectionIndex {
         }
     }
 
-    /// Find the existing connection that `datagram` should be routed to, if any
-    fn get(&self, network_path: &FourTuple, datagram: &PartialDecode) -> Option<RouteDatagramTo> {
+    /// Find the existing connection that `datagram` should be routed to, if any, and whether
+    /// one of that connection's own non-empty connection IDs found it
+    fn get(
+        &self,
+        network_path: &FourTuple,
+        datagram: &PartialDecode,
+    ) -> Option<(RouteDatagramTo, bool)> {
         if !datagram.dst_cid().is_empty()
             && let Some(&route) = self.connection_ids.get(&datagram.dst_cid())
         {
-            return Some(route);
+            return Some((route, true));
         }
         if (datagram.is_initial() || datagram.is_0rtt())
             && let Some(&ch) = self.connection_ids_initial.get(&datagram.dst_cid())
         {
-            return Some(ch);
+            return Some((ch, !datagram.dst_cid().is_empty()));
         }
         if datagram.dst_cid().is_empty() {
             if let Some(&ch) = self.incoming_connection_remotes.get(network_path) {
                 // Never multipath because QUIC-MULTIPATH 1.1 mandates the use of non-zero
                 // length CIDs.  So this is always PathId::ZERO.
-                return Some(RouteDatagramTo::Connection(ch, PathId::ZERO));
+                return Some((RouteDatagramTo::Connection(ch, PathId::ZERO), false));
             }
             if let Some(&ch) = self.outgoing_connection_remotes.get(&network_path.remote) {
                 // Like above, QUIC-MULTIPATH 1.1 mandates the use of non-zero length CIDs.
-                return Some(RouteDatagramTo::Connection(ch, PathId::ZERO));
+                return Some((RouteDatagramTo::Connection(ch, PathId::ZERO), false));
             }
         }
         let data = datagram.data();
@@ -1180,7 +1188,7 @@ impl ConnectionIndex {
         self.connection_reset_tokens
             .get(network_path.remote, &data[data.len() - RESET_TOKEN_SIZE..])
             .cloned()
-            .map(|ch| RouteDatagramTo::Connection(ch, PathId::ZERO))
+            .map(|ch| (RouteDatagramTo::Connection(ch, PathId::ZERO), false))
     }
 }
 

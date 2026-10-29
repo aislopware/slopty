@@ -27,6 +27,16 @@ pub(crate) struct DatagramConnectionEvent {
     pub(crate) ecn: Option<EcnCodepoint>,
     pub(crate) first_decode: PartialDecode,
     pub(crate) remaining: Option<BytesMut>,
+    /// Whether the endpoint found the connection by the datagram's destination connection ID:
+    /// one the connection issued, or the one a client chose for its Initial and 0-RTT packets.
+    ///
+    /// A stateless reset's connection ID is unpredictable bits (RFC 9000 §10.3), so such a
+    /// datagram is no reset, and the connection does not compare its last 16 bytes with the
+    /// peer's reset token: §10.3.1 lets an endpoint skip the check for a datagram whose packet it
+    /// processes. Under a packet key without an AEAD tag the check is wrong for it besides, since
+    /// such a packet ends in its last frame, and a `NEW_CONNECTION_ID` ends in the very token
+    /// it hands over.
+    pub(crate) routed_by_cid: bool,
 }
 
 /// Events sent from a Connection to an Endpoint

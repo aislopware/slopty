@@ -2253,6 +2253,7 @@ impl Connection {
                 ecn,
                 first_decode,
                 remaining,
+                routed_by_cid,
             }) => {
                 let span = trace_span!("pkt", %path_id);
                 let _guard = span.enter();
@@ -2274,7 +2275,8 @@ impl Connection {
                 rx.bytes += first_decode.len() as u64;
                 let data_len = first_decode.len();
 
-                self.handle_decode(now, network_path, path_id, ecn, first_decode);
+                let may_reset = !routed_by_cid;
+                self.handle_decode(now, network_path, path_id, ecn, first_decode, may_reset);
                 // The current `path` might have changed inside `handle_decode` since the packet
                 // could have triggered a migration. The packet might also belong to an unknown
                 // path and have been rejected. Make sure the data received is accounted for the
@@ -2285,7 +2287,7 @@ impl Connection {
 
                 if let Some(data) = remaining {
                     self.path_stats.get_mut(path_id).udp_rx.bytes += data.len() as u64;
-                    self.handle_coalesced(now, network_path, path_id, ecn, data);
+                    self.handle_coalesced(now, network_path, path_id, ecn, data, may_reset);
                 }
 
                 if let Some(path) = self.paths.get_mut(&path_id) {
@@ -3986,7 +3988,8 @@ impl Connection {
         )?;
         self.qlog.emit_packet_received(qlog, now);
         if let Some(data) = remaining {
-            self.handle_coalesced(now, network_path, path_id, ecn, data);
+            // The datagram that made this connection is no stateless reset.
+            self.handle_coalesced(now, network_path, path_id, ecn, data, false);
         }
 
         self.qlog.emit_recovery_metrics(
@@ -4188,6 +4191,7 @@ impl Connection {
         self.set_loss_detection_timer(now, PathId::ZERO)
     }
 
+    /// `may_reset` as [`Self::handle_decode`] takes it, for the datagram these packets close.
     fn handle_coalesced(
         &mut self,
         now: Instant,
@@ -4195,6 +4199,7 @@ impl Connection {
         path_id: PathId,
         ecn: Option<EcnCodepoint>,
         data: BytesMut,
+        may_reset: bool,
     ) {
         let Some(path) = self.paths.get_mut(&path_id) else {
             trace!(%path_id, "discarding coalesced datagram tail for unknown path");
@@ -4217,7 +4222,7 @@ impl Connection {
             ) {
                 Ok((partial_decode, rest)) => {
                     remaining = rest;
-                    self.handle_decode(now, network_path, path_id, ecn, partial_decode);
+                    self.handle_decode(now, network_path, path_id, ecn, partial_decode, may_reset);
                 }
                 Err(e) => {
                     trace!("malformed header: {}", e);
@@ -4232,6 +4237,11 @@ impl Connection {
     /// Processes the entire packet, starting with removing header protection, then handling
     /// a stateless reset if needed, and decrypting and processing the frames in the payload
     /// if not a stateless reset.
+    ///
+    /// `may_reset` is whether the datagram could be a stateless reset at all: one the endpoint
+    /// routed here by one of this connection's own connection IDs cannot
+    /// ([`DatagramConnectionEvent::routed_by_cid`]), so its trailing bytes are not compared
+    /// with the peer's reset token.
     fn handle_decode(
         &mut self,
         now: Instant,
@@ -4239,12 +4249,11 @@ impl Connection {
         path_id: PathId,
         ecn: Option<EcnCodepoint>,
         partial_decode: PartialDecode,
+        may_reset: bool,
     ) {
         let qlog = QlogRecvPacket::new(partial_decode.len());
-        if let Some(decoded) = self
-            .crypto_state
-            .unprotect_header(partial_decode, self.peer_params.stateless_reset_token)
-        {
+        let reset_token = self.peer_params.stateless_reset_token.filter(|_| may_reset);
+        if let Some(decoded) = self.crypto_state.unprotect_header(partial_decode, reset_token) {
             self.handle_packet(
                 now,
                 network_path,
