@@ -1,0 +1,17 @@
+Window
+Group │ Chats
+Button │ Filter projects: All projects
+Label │ No chats yet
+Button │ History: past Claude Code sessions
+Button │ New session
+TabList │ Tabs
+Tab │ Chats
+Tab │ Settings
+Tab │ Search
+MultilineTextInput │ Search projects… (focused)
+TabList │ Agent
+Tab │ Claude Code
+Tab │ Codex
+Tab │ pi
+Tab │ Terminal
+Button │ Start Claude Code in home

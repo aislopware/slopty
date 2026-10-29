@@ -2,6 +2,7 @@ Window
 Button │ Filter projects: All projects
 Button │ Done, 2
 Button │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
+Status │ Done
 Button │ Say hello
 Status │ Done
 Button │ Inactive, 0

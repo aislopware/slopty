@@ -10628,6 +10628,34 @@ What costs the most is the boot: 40–50 s from a clean clone, most of it macOS 
 logging in. A suspended base (`tart suspend`) would resume in seconds, but a suspendable guest
 has no audio device, so it waits for a live test that does not need sound.
 
+## 2026-10-30 — the e2e guest's simulator, from `bootstatus` to settled
+
+How long an iOS simulator in the e2e guest (`slopty-27-e2e`: 4 cores, 6 GB, macOS 27, iOS 27.0)
+keeps the guest busy after `simctl bootstatus -b` says it has booted. The guest's CPU was read
+with `top -l 3 -s 4 -n 0` in the guest (`tart exec`), the idle share of each sample after the
+first. Other lanes were building on this Mac throughout.
+
+| simulator | boot to `bootstatus` | guest at 0 % idle | settled (≥ 50 % idle twice) |
+| --- | --- | --- | --- |
+| clone of a pristine shut down at `bootstatus` | — | over 14 minutes (probe stopped) | the spare made the same way: 18–20 minutes after its boot |
+| clone of a simulator left up until it settled (probe) | 22 s | to 164 s | 218 s after the boot (94 % idle), 90–95 % after |
+| the iPhone run's clone of the settled pristine | 71.5 s with the app's install | — | 138 s after the install |
+| the iPad pristine (booted once at `bootstatus` before), settled on its next use | 14.2 s | — | 314 s after the boot |
+| the iPad run's clone of it, once settled | 398.5 s with that settle and the app's install | — | 132 s after the install |
+| the next iPad run's spare, booted when the run before ended | 22.4 s with the app's install | — | 19 s after the install |
+| the same, with this Mac's lanes building | 97.1 s with the app's install | — | 31 s after the install |
+| clones with this Mac's lanes building (iPhone, iPad) | 90.0, 123.8 s with the app's install | — | 291, 192 s after the install |
+
+While the guest was busy, the processes at the top were `SetStoreUpdateService`,
+`MTLCompilerService`, `MercuryPosterExtension`, `photolibraryd`, `assetsd`, `triald`,
+`corespotlightd` and `WindowServer`. The iPhone case's four tests then passed in 52 s. Run beside
+that work, the same tests matched every golden but failed twice on time (the worker's address,
+an agent's start, each past 30 s).
+
+Rerun: `SLOPTY_LANE=<lane> cargo xtask remote -p slopty-e2e --e2e ios --sim iphone` (or
+`--sim ipad`). The run prints the settle (`… settled <n>s after`), and a pristine made or
+settled prints its own (`booted Slopty iPad in … , settled … after`).
+
 ## 2026-09-30 — projects on the server at a large fleet's state, placement in CEL (release)
 
 What the server's project state costs the hub (review item: deltas, not whole tasks; debounced,

@@ -2596,7 +2596,7 @@ more full-window layer.
     runs, the VM process at 0.2–3 % on the host. Its display stays 1024×768: the app case's
     window sizes are drawn against it, and a smaller one would move the frames. Up, the guest
     holds 9–10 GB of this Mac's memory after a simulator run; it stops after 20 idle minutes.
-  - Tests: `remote::guest::tests::{the_simulator_is_found_by_name_or_made_on_the_newest_ios,
+  - Tests: `remote::guest::tests::{the_simulator_is_found_by_name,
     a_base_is_made_from_the_live_lane_s}` (`xtask`; the second live, ignored), and the runs
     above.
 - ✅ **A lane's directory is one check's at a time** (2026-10-17). Two `remote` runs under one

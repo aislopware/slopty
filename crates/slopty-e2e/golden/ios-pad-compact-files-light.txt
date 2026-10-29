@@ -1,20 +1,11 @@
 Window
-Button │ Filter projects: All projects
-Button │ Done, 1
-Button │ Say hello
-Button │ Inactive, 0
-Button │ History: past Claude Code sessions
-Button │ Server: e2e-server, Connected
-Button │ Settings
-Splitter │ Resize sidebar
+Group
+Terminal │ shell │ >
+Heading │ Say hello
 Article │ You
 Paragraph │ Say hello
+Article │ Claude Code
 Paragraph │ Done: Say hello
-Button │ Attach images
-MultilineTextInput │ Do anything…
-Button │ Model: Opus 5.5, High
-Button │ Send message
-Button │ Mode: Auto
 Group │ Workspace files
 SearchInput │ Search files
 Button │ Show hidden files
@@ -22,10 +13,15 @@ Tree │ Workspace file tree (focused)
 TreeItem │ src
 TreeItem │ README.md
 Splitter │ Resize files panel
-Button │ Show chat details
+Splitter │ Resize side pane
+Button │ Hide inspector
+Button │ Inspector
+Button │ Close Inspector
+Button │ New tab
+Button │ Expand side pane
 Button │ Hide files panel
-Button │ Show side pane
+Button │ Hide side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ New chat
+Button │ New session

@@ -53,7 +53,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   to hand out, while a private target is always available and never disturbs presentation;
   iOS is unified memory, so `getBytes` reads the shared texture without a blit. Pixel size is
   the drawable's (points × screen scale, the same truncation the layout uses), so a golden is
-  the full screen at 3× on the iPhone 17 Pro and 2× on the iPad Pro 13": several hundred KB of
+  the full screen at 3× on the iPhone 18 Pro and 2× on the iPad Pro 13": several hundred KB of
   flat UI each, compressed well by PNG. Tolerance is the app self-test's 1 % of pixels with
   the 24-value channel slack (hinting, the cursor, the RTT readout); goldens are per device,
   `ios-phone-*.png` and `ios-pad-*.png`, chosen by the viewport width the dump reports
@@ -1425,6 +1425,90 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   strictest, oxlint with tsgolint, oxfmt, `claude plugin validate --strict`, and `claude plugin
   test` on the kit's mocked clock, about 2 s a change, plus Stryker. Logic stays in Rust; the
   mod only debounces and relays.
+
+- ✅ **A simulator is the device of its line that a runtime takes** (2026-10-30). The iPhone
+  case failed on a runner before any test: `simctl create` of the fixed iPhone 17 Pro on the
+  newest runtime said "Incompatible device". The image of 2026-10-29 added iOS 27.1 (24A94401),
+  a runtime made for the iPhone Duo alone, beside 27.0, which takes the iPhone 18 Pro the image
+  now ships. A fixed device on the newest runtime breaks whenever an image adds a runtime made
+  for one device or drops a device type.
+  - Now `ios::choose_simulator` reads `simctl list runtimes -j` (each runtime's
+    `supportedDeviceTypes`) and `simctl list devicetypes -j`, and pairs a device type only with
+    an available runtime of the floor or newer that takes it. Per kind it takes the newest of the
+    line the goldens are drawn on (the standard-size Pro iPhone, the 13-inch iPad Pro), newest by
+    the runtime the device needs and then its model; with none of that line, the newest of the
+    family. A tie (the M5 iPad Pro's 12 and 16 GB) goes to the lower identifier, so each run
+    makes the same device. The runtime is the newest that takes it.
+  - The line, not simply the newest device, keeps the screen class the frames are drawn at: the
+    newest iPhone on that image is the Duo, whose screen would move every frame. A new
+    generation of the line still moves the device forward, and its goldens are taken again once.
+  - The runner (`ios::simulator_udid`) and the guest's pristine simulators (`make_base`) choose
+    alike: on that image, the iPhone 18 Pro and the iPad Pro 13-inch (M5) on iOS 27.0. The 18
+    Pro's screen is the 17 Pro's (402 × 874 pt at 3×, the same sensor bar), so the phone's
+    frames keep their size.
+  - Test: `ios::tests::the_simulator_is_the_newest_of_its_line_a_runtime_takes` (that image's
+    lists, a runtime that dropped the old device, a family with no device of the line, the
+    floor, "27.10" after "27.2"). The guest's
+    `remote::guest::tests::the_simulator_is_found_by_name` keeps only the finding by name.
+
+- ✅ **The e2e guest draws as the runners do** (2026-10-30). Made again from the Cirrus image,
+  the guest failed the app's picture golden that a runner had taken: the person's bubble was
+  lit (the glows and their dithering, a hairline ring) where the golden was flat, and History's
+  header was still in its hover fade. The runners' image turns "graphic effects" off
+  (`configure-system.sh` in `actions/runner-images`: `reduceMotion` and `reduceTransparency`),
+  and the app reads both from the system: `lit::plain_display` keeps the flat wash under less
+  transparency, and a hover fades only with motion. The goldens are shared, so the two places
+  must draw alike.
+  - Now `remote::guest::up` writes the runners' two settings on every boot
+    (`RUNNERS_DISPLAY`), as it does the update keys, so a guest made before takes them. With
+    them the picture's frames match the runner's golden at 0.009 %, from 0.148 % with a seam.
+  - The other way round (transparency on in both places) would put the light and the frosted
+    surfaces in the goldens, but it means a step against the runners' image in every e2e job and
+    every app golden taken again. The light stays checked meanwhile: by
+    `lit::tests::the_persons_message_is_lit_in_the_themes_hues_and_flat_when_asked`, and in the
+    iOS goldens, whose simulator keeps its own transparency on.
+
+- ✅ **The iOS goldens show the TUI-first layout** (2026-10-30), taken once in the guest on the
+  iPhone 18 Pro and the iPad Pro 13-inch (M5). A session is its terminal (`session`); its
+  inspector is a sheet over it on a phone and a pane beside it on an iPad (`inspector`), with the
+  shell under it (`terminal`), the files, Chats and the new-session picker.
+  - On a phone, "New session" left Chats for a page of its own under the picker. That page said
+    "No session open" and "Pick one in the sidebar" on a screen that has no sidebar. Its close
+    only put the picker away, and going back took a second tap. Now the capsule puts the picker
+    over Chats, as its project picker does. A session started from it takes the screen; a tap
+    outside it leaves Chats as it was (`shell/compact.rs`;
+    `before_any_project_the_capsule_offers_the_step_a_chat_needs` and the e2e).
+  - The inspector names moments of the run: a message's time beside its Copy, a turn's done
+    line. Masks found by those lines' nodes left a clock uncovered in the first runs, so the
+    bands between the inspector's words, across the sheet or the pane, are left out of the
+    pixels as well (`inspector_bands`).
+  - The words had left out every node centred in any of those masks, so they hung on where a
+    band fell. The sidebar's footer (the server, Settings) sat in a Copy's band across the
+    window. The side pane's splitter, centred on the seam that one band starts at, was in the
+    words in one run and not in the next, with no pixel changed. Now the pixels leave out the
+    bands, and the words leave out only the done line and the Copy, each by its own box. Every
+    other node says the same in every run.
+
+- ✅ **An iOS run starts once its simulator has settled** (2026-10-30). In the remade guest, the
+  iPhone case matched every golden and still failed two tests on time: the worker printed no
+  address within 30 s (`compact`), and an agent did not start within 30 s (`pages`). `simctl
+  bootstatus -b` returns once a simulator has booted, not once it is done. Its daemons then held
+  all four of the guest's cores at 0 % idle: SetStoreUpdateService, MTLCompilerService,
+  photolibraryd, triald, corespotlightd and WindowServer. The pristine simulators had been shut
+  down at `bootstatus`, so every clone did that work again, for 18–20 minutes. A clone of one
+  left up until it was done booted in 22 s and was at 90 % idle 3.5 minutes later.
+  - Now `remote::guest::pristine` leaves a simulator up after its first boot until it settles
+    (`settle`: the guest's CPU half idle or more on two 4 s samples in a row, for at most 40
+    minutes). It then marks the simulator settled in its own directory. One not marked (made
+    before, or its settle cut short) is settled again before use. A run waits the same way, for
+    at most 10 minutes, after it installs the app: 132–138 s for a clone, and up to 291 s with
+    this Mac's lanes building; 19–31 s for a spare booted as the run before ended.
+  - Longer test timeouts would have hidden the cause. The tests would pass slower beside a
+    guest at every core, and fail again whenever the work outlasted them. The settle is measured
+    where it happens, and the run prints how long it took.
+  - Test: `remote::guest::tests::the_guest_s_idleness_is_top_s_samples_after_the_first` (`top`'s
+    first sample skipped, output without two samples or an idle share refused).
+
 - ✅ **Fuzz corpora are regression tests, and two engines grow them** (2026-10-30). This is
   item 5 of "Simulation, models and mutants carry the tests" (above). Until now, what the
   fuzzers had covered lived only in CI's cache, where an eviction lost it. The gate linted the

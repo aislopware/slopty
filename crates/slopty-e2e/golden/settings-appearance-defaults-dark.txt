@@ -29,6 +29,7 @@ Button │ Pink
 Button │ Reset Glass to default
 Button │ Glass: Opaque
 Switch │ Pause animations in background
+Switch │ Smooth scrolling
 Button │ Interface font: Geist
 Button │ Interface font size: 16 px
 Button │ Terminal font: Geist Mono

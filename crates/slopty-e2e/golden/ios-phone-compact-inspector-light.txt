@@ -1,0 +1,21 @@
+Window (focused)
+Group
+Terminal │ shell │ >
+Group │ Navigation
+Heading │ Say hello
+Button │ Back to Chats
+Button │ Show files
+Button │ Hide inspector
+Dialog │ Inspector
+Button │ Expand inspector
+Heading │ Inspector
+Button │ Close inspector
+Heading │ Say hello
+Article │ You
+Paragraph │ Say hello
+Article │ Claude Code
+Paragraph │ Done: Say hello
+Article │ You
+Paragraph │ Carry on
+Article │ Claude Code
+Paragraph │ Done: Carry on

@@ -1,17 +1,17 @@
 //! The phone's anatomy on the simulator (`cargo xtask e2e ios --sim iphone|ipad`): a phone
 //! opens on its Chats page (the large title, the chat list, the capsule and the tab bar, with no
-//! sidebar foot). Before any project the capsule adds one; after it, "New session" takes the whole
-//! screen for the new chat under a navigation bar (its title and a close button, none of the
-//! desktop's sidebar and history cluster), and its close goes back. An iPad keeps the shell's
-//! columns, the sidebar beside the chat. Each state is a golden in light and in dark,
-//! `ios-<device>-compact-*`.
+//! sidebar foot). Before any project the capsule adds one, and the phone lands on the project's
+//! page under a navigation bar (a close, none of the desktop's sidebar and history cluster),
+//! whose close goes back. After it, "New session" puts the picker of projects and agents over
+//! Chats, and a tap outside it puts it away. An iPad keeps the shell's columns, the sidebar
+//! beside the chat. Each state is a golden in light and in dark, `ios-<device>-compact-*`.
 
 use std::path::Path;
 use std::time::Duration;
 
 use slopty_e2e::harness::{Simulator, Stack, artifacts_dir};
-use slopty_e2e::snapshot::{PixelRect, assert_matches_masked};
-use slopty_e2e::{Command, Driver, Dump};
+use slopty_e2e::snapshot::{PixelRect, assert_matches_apart};
+use slopty_e2e::{A11yNode, Command, Driver, Dump, WindowInfo};
 
 /// Per-step wait.
 pub const STEP: Duration = Duration::from_secs(30);
@@ -64,6 +64,7 @@ async fn touch_targets(drv: &mut Driver, state: &str) {
 /// Render the frame in light and in dark against `golden/ios-<device>-compact-<state>-*.png`;
 /// light again after.
 pub async fn goldens(drv: &mut Driver, dir: &Path, device: &str, state: &str) {
+    let window = drv.dump().await.unwrap().window;
     for (dark, appearance) in [(false, "light"), (true, "dark")] {
         drv.ok(&Command::Appearance { dark }).await.unwrap();
         tokio::time::sleep(SETTLE).await;
@@ -75,24 +76,69 @@ pub async fn goldens(drv: &mut Driver, dir: &Path, device: &str, state: &str) {
         // golden. The reply's row is masked across the window, its date left of the Copy.
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
         let px = |v: f32| (v * frame.scale).max(0.0).round() as u32;
-        let masks: Vec<PixelRect> = frame
-            .a11y
-            .iter()
-            .filter_map(|n| {
-                let label = n.label.as_deref()?;
-                let [x, y, w, h] = n.bounds;
-                if label.contains("Worked for ") {
-                    Some([px(x - 4.0), px(y - 4.0), px(w + 8.0), px(h + 8.0)])
-                } else if n.role == "Button" && label == "Copy message" {
-                    Some([0, px(y - 4.0), frame.image.width(), px(h + 8.0)])
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_matches_masked(&name, &frame, TOLERANCE, &artifacts_dir(), &masks).unwrap();
+        let mut pixels: Vec<PixelRect> = Vec::new();
+        // In words, only those nodes, each by its own box: a band across the window would also
+        // drop whatever node is centred in it (the sidebar's footer, level with a Copy), and the
+        // words would hang on where the bands fall.
+        let mut words: Vec<PixelRect> = Vec::new();
+        for n in &frame.a11y {
+            let Some(label) = n.label.as_deref() else { continue };
+            let [x, y, w, h] = n.bounds;
+            let own = [px(x - 4.0), px(y - 4.0), px(w + 8.0), px(h + 8.0)];
+            if label.contains("Worked for ") {
+                pixels.push(own);
+                words.push(own);
+            } else if n.role == "Button" && label == "Copy message" {
+                pixels.push([0, px(y - 4.0), frame.image.width(), px(h + 8.0)]);
+                words.push(own);
+            }
+        }
+        // Pixels alone: what a band hides has no node, and a node centred in one (the splitter
+        // on the seam) says the same in every run.
+        pixels.extend(
+            inspector_bands(&frame.a11y, window)
+                .into_iter()
+                .map(|[x, y, w, h]| [px(x), px(y), px(w), px(h)]),
+        );
+        assert_matches_apart(&name, &frame, TOLERANCE, &artifacts_dir(), (&pixels, &words))
+            .unwrap();
     }
     drv.ok(&Command::Appearance { dark: false }).await.unwrap();
+}
+
+/// The inspector's bands between its words, across its width, in points: where its lines that
+/// name a moment of the run sit (a message's time beside its Copy, a turn's done line), which the
+/// iOS tree has no node for. The inspector is the phone's sheet, else what lies right of the
+/// session's terminal and down to the window's foot (an iPad's pane, beside the terminal and the
+/// shell under it); none while it is shut.
+fn inspector_bands(a11y: &[A11yNode], window: WindowInfo) -> Vec<[f32; 4]> {
+    let sheet = a11y.iter().find(|n| n.role == "Dialog" && n.label.as_deref() == Some("Inspector"));
+    let (window_width, window_height) = (window.width, window.height);
+    let pane = || {
+        let [x, y, width, _] = a11y.iter().find(|n| n.role == "Terminal")?.bounds;
+        let right = x + width;
+        (right < window_width - 1.0).then_some([right, y, window_width - right, window_height - y])
+    };
+    let Some([left, top, width, height]) = sheet.map(|n| n.bounds).or_else(pane) else {
+        return Vec::new();
+    };
+    let inside = |n: &&A11yNode| {
+        let [x, y, ..] = n.bounds;
+        x >= left - 0.5 && x < left + width && y >= top - 0.5 && y < top + height
+    };
+    let mut words: Vec<(f32, f32)> = a11y
+        .iter()
+        .filter(|n| matches!(n.role.as_str(), "Paragraph" | "Heading"))
+        .filter(inside)
+        .map(|n| (n.bounds[1], n.bounds[1] + n.bounds[3]))
+        .collect();
+    words.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let ends = words.iter().map(|&(_, bottom)| bottom);
+    let starts = words.iter().skip(1).map(|&(start, _)| start).chain(std::iter::once(top + height));
+    ends.zip(starts)
+        .filter(|(end, start)| start > end)
+        .map(|(end, start)| [left, end, width, start - end])
+        .collect()
 }
 
 /// The Chats page is up.
@@ -156,23 +202,25 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
     tap(drv, "Button", "Close").await;
     drv.wait_for("Chats with its project", STEP, chats_page).await.unwrap();
 
-    // "New session" takes the screen for the new session, under the phone's
-    // navigation bar: its title and a close, none of the desktop's sidebar and history cluster.
+    // "New session" puts its picker over Chats: the project, and the agent whose TUI starts
+    // there. None of the desktop's sidebar and history cluster, and no page of its own.
     tap(drv, "Button", "New session").await;
-    let page = drv.wait_for("the new session", STEP, |d| !chats_page(d)).await.unwrap();
-    let bar = page.a11y_node("Group", Some("Navigation")).map(|n| n.bounds);
-    let [_, bar_top, _, bar_height] = bar.unwrap_or_else(|| panic!("{:#?}", page.a11y));
-    assert!(page.a11y_node("Heading", Some("New session")).is_some(), "{:#?}", page.a11y);
-    let close = page.a11y_node("Button", Some("Close")).map(|n| n.bounds).unwrap();
-    assert!(close[1] >= bar_top && close[1] + close[3] <= bar_top + bar_height + 0.5, "{close:?}");
+    let picker = |d: &Dump| d.a11y_node("TabList", Some("Agent")).is_some();
+    let page = drv.wait_for("the new-session picker", STEP, picker).await.unwrap();
+    assert!(chats_page(&page), "over Chats: {:#?}", page.a11y);
+    assert!(page.a11y_node("Group", Some("Navigation")).is_none(), "{:#?}", page.a11y);
+    let start =
+        |d: &Dump| d.a11y.iter().any(|n| n.label.as_deref() == Some("Start Claude Code in home"));
+    assert!(start(&page), "the project, to start Claude Code in: {:#?}", page.a11y);
     for desktop in ["Toggle left sidebar", "Back", "Forward"] {
         assert!(page.a11y_node("Button", Some(desktop)).is_none(), "{desktop}: {:#?}", page.a11y);
     }
     goldens(drv, &dir, device, "new-session").await;
 
-    // Its close goes back to Chats.
-    tap(drv, "Button", "Close").await;
-    drv.wait_for("the Chats page again", STEP, chats_page).await.unwrap();
+    // A tap outside it, between the status bar and its card, puts it away: Chats as it was.
+    let field = page.a11y_node("MultilineTextInput", None).map(|n| n.bounds).unwrap();
+    drv.ui_tap(page.window.width / 2.0, field[1] / 2.0).await.unwrap();
+    drv.wait_for("the Chats page again", STEP, |d| chats_page(d) && !picker(d)).await.unwrap();
 
     // Settings from the tab bar, and back from its page to Chats.
     tap(drv, "Tab", "Settings").await;
@@ -185,7 +233,7 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
 }
 
 /// A node of `d` whose label or value holds `words`, whatever its role.
-pub fn saying<'a>(d: &'a Dump, words: &str) -> Option<&'a slopty_e2e::A11yNode> {
+pub fn saying<'a>(d: &'a Dump, words: &str) -> Option<&'a A11yNode> {
     let holds = |s: Option<&str>| s.is_some_and(|s| s.contains(words));
     d.a11y.iter().find(|n| holds(n.label.as_deref()) || holds(n.value.as_deref()))
 }

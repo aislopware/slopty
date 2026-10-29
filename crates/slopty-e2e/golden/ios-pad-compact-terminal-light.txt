@@ -7,24 +7,28 @@ Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Article │ You
-Paragraph │ Say hello
-Paragraph │ Done: Say hello
-Button │ Attach images
-MultilineTextInput │ Do anything…
-Button │ Model: Opus 5.5, High
-Button │ Send message
-Button │ Mode: Auto
+Group
+Terminal │ shell │ >
 Tab │ Terminal 1
 Button │ Close Terminal 1
 Button │ New terminal
 Button │ Hide terminal
 Group (focused)
-Terminal │ shell │ $SCRATCH/repo %
-Button │ Show chat details
+Terminal │ shell │ 87/repo %
+Heading │ Say hello
+Article │ You
+Paragraph │ Say hello
+Article │ Claude Code
+Paragraph │ Done: Say hello
+Splitter │ Resize side pane
+Button │ Hide inspector
+Button │ Inspector
+Button │ Close Inspector
+Button │ New tab
+Button │ Expand side pane
 Button │ Show files panel
-Button │ Show side pane
+Button │ Hide side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward
-Button │ New chat
+Button │ New session

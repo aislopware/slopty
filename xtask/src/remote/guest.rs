@@ -42,9 +42,10 @@ const BASE: &str = "slopty-27-xcode";
 /// macOS build.
 const ORIGIN: &str = "slopty-27";
 
-/// The iOS simulator runtime the runners' newest is (iOS 27.0: `xcode-27` carries no other,
-/// under Xcode 27.0 or the 27.1 the workflows select, read on run 39151273840); downloaded into
-/// the base by build, anonymously (`xcodebuild -downloadPlatform`).
+/// The iOS simulator runtime the runners' simulators run on (iOS 27.0: on the image of
+/// 2026-10-29 the only other is 27.1, which takes the iPhone Duo alone, so `ios::choose_simulator`
+/// makes neither kind on it there); downloaded into the base by build, anonymously
+/// (`xcodebuild -downloadPlatform`).
 const IOS_RUNTIME: &str = "24A434";
 
 /// The base's disk, in GB: macOS 12, Xcode 13, the runtime 8, and room for the runs.
@@ -55,6 +56,14 @@ const DISK_GB: &str = "90";
 /// stays, measured against 8 and 10 GB"). Set on every boot, so a guest made before a change
 /// takes it.
 const MEMORY_MB: &str = "6144";
+
+/// The display as the runners' image leaves it (`images/macos/scripts/build/configure-system.sh`
+/// in `actions/runner-images`, "Disable graphic effects in System"): motion and transparency
+/// reduced. The app reads both from the system (under less transparency a message's light and a
+/// frosted surface stay flat), and a golden holds in the guest and on a runner alike only when
+/// both draw the same.
+const RUNNERS_DISPLAY: &str = "defaults write com.apple.universalaccess reduceMotion -bool true && \
+     defaults write com.apple.universalaccess reduceTransparency -bool true";
 
 /// The account the guest logs in as.
 const USER: &str = "admin";
@@ -421,8 +430,9 @@ fn up(home: &Path) -> Result<String> {
     }
     tart_out(home, &["set", GUEST, "--memory", MEMORY_MB])?;
     let ip = boot(home, GUEST, &[])?;
-    // On every boot, so a guest cloned from a base made before takes it.
+    // On every boot, so a guest cloned from a base made before takes them.
     ssh(home, &ip, crate::vm::NO_UPDATES)?;
+    ssh(home, &ip, RUNNERS_DISPLAY)?;
     Ok(ip)
 }
 
@@ -467,9 +477,10 @@ fn boot(home: &Path, name: &str, args: &[String]) -> Result<String> {
 
 /// Make [`BASE`] from [`ORIGIN`], once: a disk of [`DISK_GB`], this Mac's Xcode (the simulator
 /// case builds the app here, with it, and the guest runs `simctl`), the runners' iOS runtime, the
-/// two simulators booted once, no Spotlight indexing (it ran at a core after every boot), no crash
-/// dialog (a window left over a crashed test's app). About
-/// 28 minutes at this Mac's load: the runtime's 8.5 GB download and the simulators' first boots.
+/// two simulators booted once and settled, no Spotlight indexing (it ran at a core after every
+/// boot), no crash dialog (a window left over a crashed test's app). About 28 minutes at this
+/// Mac's load for the runtime's 8.5 GB download and the simulators' first boots, and up to 20
+/// more for each simulator to settle.
 fn make_base(home: &Path, base: &str) -> Result<()> {
     println!("  making the e2e base {base} from {ORIGIN}: Xcode and iOS runtime {IOS_RUNTIME}");
     let making = format!("{base}-making");
@@ -530,8 +541,8 @@ fn fill_base(home: &Path, making: &str) -> Result<()> {
              defaults write com.apple.CrashReporter DialogType none"
         ),
     )?;
-    // Each simulator's first boot migrates its data, 1–14 minutes: done once here, not in the
-    // first run of every clone.
+    // Each simulator's first boot migrates its data, 1–14 minutes, and its daemons' work after
+    // takes up to 20: done once here, not in the first run of every clone.
     for sim in [crate::ios::SimKind::Iphone, crate::ios::SimKind::Ipad] {
         pristine(home, making, sim)?;
     }
@@ -963,25 +974,98 @@ fn simctl(home: &Path, guest: &str, args: &[&str]) -> Result<String> {
     tart_out(home, &all)
 }
 
-/// `guest`'s pristine simulator for `sim`, shut down: never booted by a run, only cloned. Made
-/// on the newest iOS runtime when there is none, and booted once, since a simulator's first boot
-/// (its data migrated) takes 1–14 minutes; its UDID.
+/// `guest`'s pristine simulator for `sim`, shut down: never booted by a run, only cloned; its
+/// UDID. Made, when there is none, as the device the runtimes there take
+/// (`ios::choose_simulator`, as a runner makes its own), then booted once and left up until it
+/// has settled ([`settle`]), so a clone carries none of that work. A simulator past `bootstatus`
+/// is not done: its daemons held all four of the guest's cores for 18–20 minutes after a first
+/// boot, and a clone of one shut down at `bootstatus` did all of it again. A clone of a settled
+/// one was done in 3.5 minutes. One not marked [`SETTLED`] (its settle cut short) is settled
+/// again before it is used.
 fn pristine(home: &Path, guest: &str, sim: crate::ios::SimKind) -> Result<String> {
     let name = sim.name();
+    let dir = |udid: &str| format!("/Users/{USER}/Library/Developer/CoreSimulator/Devices/{udid}");
     let devices = simctl(home, guest, &["list", "devices", "available", "-j"])?;
-    if let Some(udid) = named_device(&devices, name)? {
-        return Ok(udid);
-    }
-    let runtimes = simctl(home, guest, &["list", "runtimes", "-j"])?;
-    let runtime = newest_ios(&runtimes)?.with_context(|| format!("no iOS runtime in {guest}"))?;
-    println!("  creating simulator {name:?} on {runtime} in {guest}");
+    let udid = if let Some(udid) = named_device(&devices, name)? {
+        if tart_out(home, &["exec", guest, "ls", &dir(&udid)])?.lines().any(|l| l == SETTLED) {
+            return Ok(udid);
+        }
+        println!("  settling simulator {name:?} in {guest}: booted before, never settled");
+        udid
+    } else {
+        let runtimes = simctl(home, guest, &["list", "runtimes", "-j"])?;
+        let devicetypes = simctl(home, guest, &["list", "devicetypes", "-j"])?;
+        let chosen = crate::ios::choose_simulator(sim, &runtimes, &devicetypes)?
+            .with_context(|| format!("no iOS runtime in {guest} takes an {}", sim.family()))?;
+        println!("  creating simulator {name:?} in {guest}: {}", chosen.described);
+        simctl(home, guest, &["create", name, &chosen.device_type, &chosen.runtime])?
+    };
     let started = Instant::now();
-    let udid = simctl(home, guest, &["create", name, sim.device_type(), &runtime])?;
-    simctl(home, guest, &["boot", &udid])?;
     simctl(home, guest, &["bootstatus", &udid, "-b"])?;
+    let booted = started.elapsed();
+    let settled = settle(home, guest, PRISTINE_SETTLE)?;
     simctl(home, guest, &["shutdown", &udid])?;
-    println!("  booted {name} once in {guest} ({:.1?})", started.elapsed());
+    match settled {
+        Some(after) => {
+            tart_out(home, &["exec", guest, "touch", &format!("{}/{SETTLED}", dir(&udid))])?;
+            println!("  booted {name} in {guest} in {booted:.1?}, settled {after:.0?} after");
+        }
+        None => println!(
+            "  booted {name} in {guest} in {booted:.1?}, still busy {PRISTINE_SETTLE:?} after: \
+             settled again on its next use"
+        ),
+    }
     Ok(udid)
+}
+
+/// The file in a pristine simulator's directory that says [`pristine`] let it settle.
+const SETTLED: &str = "slopty-settled";
+
+/// The share of the guest's CPU left idle, in percent, over which a simulator booted in it has
+/// settled: 0–35 while its daemons run (`SetStoreUpdateService`, `MTLCompilerService`,
+/// `photolibraryd`, `triald` and `WindowServer`, each up to a core), 60–99 after. A test started
+/// before waited past its 30 s for the worker's address and the agent's start.
+const SETTLED_IDLE: f64 = 50.0;
+
+/// The longest [`pristine`] leaves a simulator up to settle: a first boot's work took 18–20
+/// minutes.
+const PRISTINE_SETTLE: Duration = Duration::from_mins(40);
+
+/// The longest a run waits for its simulator to settle: a clone of a settled one took 132–138 s
+/// after the app's install, and up to 291 s with this Mac's lanes building; a spare booted as
+/// the run before ended took 19–31 s.
+const RUN_SETTLE: Duration = Duration::from_mins(10);
+
+/// Wait, for at most `most`, until `guest`'s CPU is at least [`SETTLED_IDLE`] idle on two
+/// samples in a row; how long it took, or `None` if it was still busy.
+fn settle(home: &Path, guest: &str, most: Duration) -> Result<Option<Duration>> {
+    let started = Instant::now();
+    loop {
+        // `top` itself waits between its samples: 8 s a round.
+        let top = tart_out(home, &["exec", guest, "top", "-l", "3", "-s", "4", "-n", "0"])?;
+        if idle_after_first(&top)?.iter().all(|&idle| idle >= SETTLED_IDLE) {
+            return Ok(Some(started.elapsed()));
+        }
+        if started.elapsed() >= most {
+            return Ok(None);
+        }
+    }
+}
+
+/// The CPU's idle share, in percent, of each sample `top -l <n> -n 0` printed but the first,
+/// which counts from the boot rather than from the sample before.
+fn idle_after_first(top: &str) -> Result<Vec<f64>> {
+    let mut idle = Vec::new();
+    for usage in top.lines().filter_map(|l| l.trim().strip_prefix("CPU usage:")) {
+        let share = usage
+            .split(',')
+            .find_map(|part| part.trim().strip_suffix("% idle"))
+            .with_context(|| format!("no idle share in `CPU usage:{usage}`"))?;
+        idle.push(share.parse::<f64>().with_context(|| format!("the idle share {share:?}"))?);
+    }
+    ensure!(idle.len() >= 2, "`top` printed {} CPU samples, not two or more:\n{top}", idle.len());
+    idle.remove(0);
+    Ok(idle)
 }
 
 /// The name of a run's simulator, cloned from the pristine one for `sim`.
@@ -996,10 +1080,10 @@ fn spare_device(sim: crate::ios::SimKind) -> String {
 
 /// Clone and boot the next run's simulator for `sim` while the guest is idle, unless one is
 /// there: a process of its own, left to run; at most one spare, for the device used last. A clone's
-/// boot took 34–96 s idle and 445 s with this Mac's lanes building, all of it on a run's way
-/// before; the next run takes the spare as it is, booted or still booting, and clones its own only
-/// when there is none. Nothing runs in a spare before a run takes it, so it is as fresh as one
-/// cloned for the run.
+/// boot took 34–96 s idle and 445 s with this Mac's lanes building, and its settle 3.5 minutes
+/// more, all of it on a run's way before; the next run takes the spare as it is, booted, booting
+/// or settling, and clones its own only when there is none. Nothing runs in a spare before a run
+/// takes it, so it is as fresh as one cloned for the run.
 fn spare(home: &Path, sim: crate::ios::SimKind) {
     use std::os::unix::process::CommandExt as _;
     let name = spare_device(sim);
@@ -1037,7 +1121,7 @@ fn spare(home: &Path, sim: crate::ios::SimKind) {
 /// pristine one, so every run starts as a runner's freshly made simulator does: no app data,
 /// notifications not yet asked, the keyboard, appearance and pasteboard as made (a simulator
 /// the runs kept kept the app's notification grant, and every iOS frame showed it). A clone of a
-/// migrated simulator boots in a reboot's time.
+/// migrated simulator boots in a reboot's time, and the tests wait until it has settled.
 fn simulator(home: &Path, sim: crate::ios::SimKind, app: &Path) -> Result<String> {
     let started = Instant::now();
     let name = run_device(sim);
@@ -1058,7 +1142,18 @@ fn simulator(home: &Path, sim: crate::ios::SimKind, app: &Path) -> Result<String
     // Boots it if it is not yet (a spare its process has not booted yet), else waits for it.
     simctl(home, GUEST, &["bootstatus", &udid, "-b"])?;
     simctl(home, GUEST, &["install", &udid, app.as_str()])?;
-    println!("  {how} {} in {GUEST} and installed the app ({:.1?})", sim.name(), started.elapsed());
+    let installed = started.elapsed();
+    let sim = sim.name();
+    // The tests start once its daemons are done, not at every core beside them.
+    match settle(home, GUEST, RUN_SETTLE)? {
+        Some(after) => println!(
+            "  {how} {sim} in {GUEST} and installed the app ({installed:.1?}), settled {after:.0?} after"
+        ),
+        None => println!(
+            "  {how} {sim} in {GUEST} and installed the app ({installed:.1?}), still busy \
+             {RUN_SETTLE:?} after: a test may wait past its time"
+        ),
+    }
     Ok(udid)
 }
 
@@ -1122,30 +1217,6 @@ fn devices(json: &str) -> Result<Vec<Device>> {
     }
     let list: List = serde_json::from_str(json).context("simctl's device list")?;
     Ok(list.devices.into_values().flatten().collect())
-}
-
-/// The newest available iOS runtime's identifier, from `simctl list runtimes -j`.
-fn newest_ios(json: &str) -> Result<Option<String>> {
-    #[derive(serde::Deserialize)]
-    struct List {
-        runtimes: Vec<Runtime>,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Runtime {
-        identifier: String,
-        version: String,
-        platform: String,
-        is_available: bool,
-    }
-    let version = |v: &str| -> Vec<u32> { v.split('.').map_while(|n| n.parse().ok()).collect() };
-    let list: List = serde_json::from_str(json).context("simctl's runtime list")?;
-    Ok(list
-        .runtimes
-        .into_iter()
-        .filter(|r| r.platform == "iOS" && r.is_available)
-        .max_by(|a, b| version(&a.version).cmp(&version(&b.version)))
-        .map(|r| r.identifier))
 }
 
 /// Copy into `tree_goldens` each file of `back` (the guest's goldens after the run) whose bytes
@@ -1282,10 +1353,10 @@ mod tests {
         super::tart_out(&home, &["delete", base]).expect("delete");
     }
 
-    /// The guest's simulator is found by name across runtimes, and one is made on the newest
-    /// available iOS runtime, never a newer unavailable one or another platform's.
+    /// The guest's simulator is found by name across runtimes, never by another's name; one is
+    /// made as `ios::choose_simulator` chooses (its own test).
     #[test]
-    fn the_simulator_is_found_by_name_or_made_on_the_newest_ios() {
+    fn the_simulator_is_found_by_name() {
         let devices = r#"{"devices": {
             "com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
                 {"name": "Slopty iPad", "udid": "76FFF7A1-9F82-4F1D-8E6C-2FEDA6CCF705"},
@@ -1296,13 +1367,32 @@ mod tests {
             Some("EAA99FB6-E2BE-4FFE-B921-2413AC6653E4")
         );
         assert_eq!(super::named_device(devices, "Slopty Watch").expect("parses"), None);
-        let runtimes = r#"{"runtimes": [
-            {"identifier": "ios-27-2", "version": "27.2", "platform": "iOS", "isAvailable": true},
-            {"identifier": "ios-27-10", "version": "27.10", "platform": "iOS", "isAvailable": true},
-            {"identifier": "ios-28", "version": "28.0", "platform": "iOS", "isAvailable": false},
-            {"identifier": "tvos-28", "version": "28.0", "platform": "tvOS", "isAvailable": true}
-        ]}"#;
-        assert_eq!(super::newest_ios(runtimes).expect("parses").as_deref(), Some("ios-27-10"));
+    }
+
+    /// A guest's idleness is each of `top`'s samples but the first (which counts from the boot),
+    /// as the guest's `top` prints them; output with fewer than two samples, or a sample without
+    /// its idle share, is refused rather than read as settled or busy.
+    #[test]
+    fn the_guest_s_idleness_is_top_s_samples_after_the_first() {
+        let sample = |idle: &str| {
+            format!(
+                "Processes: 567 total, 2 running, 565 sleeping, 1713 threads \n\
+                 2026/10/30 09:12:41\n\
+                 Load Avg: 1.91, 3.02, 9.47 \n\
+                 CPU usage: 4.87% user, 21.95% sys, {idle}% idle \n\
+                 SharedLibs: 501M resident, 81M data, 39M linkedit.\n"
+            )
+        };
+        let top = [sample("73.17"), sample("0.0"), sample("99.54")].concat();
+        assert_eq!(super::idle_after_first(&top).expect("parses"), [0.0, 99.54]);
+        let settled = [sample("0.0"), sample("93.93"), sample("61.33")].concat();
+        assert!(super::idle_after_first(&settled).expect("parses").iter().all(|&i| i >= 50.0));
+        let _one_sample = super::idle_after_first(&sample("99.0")).unwrap_err();
+        let _no_sample = super::idle_after_first("top: failed to read the kernel\n").unwrap_err();
+        let unshared = [sample("1.0"), "CPU usage: 4.87% user, 21.95% sys \n".to_owned()].concat();
+        let _no_idle_share = super::idle_after_first(&unshared).unwrap_err();
+        let _not_a_share =
+            super::idle_after_first(&[sample("1.0"), sample("n/a")].concat()).unwrap_err();
     }
 
     /// The guest's lanes come least recently used first, the running lane's and any name a
