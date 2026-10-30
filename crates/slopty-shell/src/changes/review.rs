@@ -1,16 +1,4 @@
 //! Find in a diff, the whitespace filter and the changed files as a tree.
-#![allow(
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_value,
-    clippy::string_slice,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::ops::Range;
 
@@ -23,9 +11,13 @@ use super::{DiffLine, FileDiff, LineKind};
 /// One match of a find in the diff: the line it is on and its bytes in that line's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffMatch {
+    /// The file's index in the diff.
     pub file: u32,
+    /// The hunk's index in the file.
     pub hunk: u32,
+    /// The line's index in the hunk.
     pub line: u32,
+    /// The match's bytes in the line's text.
     pub range: Range<usize>,
 }
 
@@ -49,16 +41,17 @@ pub fn line_matches(text: &str, query: &str) -> Vec<Range<usize>> {
     let needle: Vec<char> = needle.into_iter().map(|c| fold(c, folding)).collect();
     let hay: Vec<(usize, char)> = text.char_indices().collect();
     let mut out = Vec::new();
-    let mut i = 0;
-    while i + needle.len() <= hay.len() {
-        let hit = needle.iter().enumerate().all(|(k, c)| fold(hay[i + k].1, folding) == *c);
+    let mut i = 0_usize;
+    let past = |i: usize| i.saturating_add(needle.len());
+    while let Some(window) = hay.get(i..past(i)) {
+        let hit = window.iter().zip(&needle).all(|((_, h), c)| fold(*h, folding) == *c);
         if hit {
-            let start = hay[i].0;
-            let end = hay.get(i + needle.len()).map_or(text.len(), |(at, _)| *at);
+            let start = window.first().map_or(text.len(), |(at, _)| *at);
+            let end = hay.get(past(i)).map_or(text.len(), |(at, _)| *at);
             out.push(start..end);
-            i += needle.len();
+            i = past(i);
         } else {
-            i += 1;
+            i = i.saturating_add(1);
         }
     }
     out
@@ -71,19 +64,14 @@ pub fn find_matches(files: &[FileDiff], query: &str) -> Vec<DiffMatch> {
     if query.is_empty() {
         return out;
     }
-    for (file_ix, file) in files.iter().enumerate() {
-        for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
-            for (line_ix, line) in hunk.lines.iter().enumerate() {
+    for (file_ix, file) in (0_u32..).zip(files) {
+        for (hunk_ix, hunk) in (0_u32..).zip(&file.hunks) {
+            for (line_ix, line) in (0_u32..).zip(&hunk.lines) {
                 if line.kind == LineKind::Meta {
                     continue;
                 }
                 for range in line_matches(&line.text, query) {
-                    out.push(DiffMatch {
-                        file: file_ix as u32,
-                        hunk: hunk_ix as u32,
-                        line: line_ix as u32,
-                        range,
-                    });
+                    out.push(DiffMatch { file: file_ix, hunk: hunk_ix, line: line_ix, range });
                 }
             }
         }
@@ -92,15 +80,13 @@ pub fn find_matches(files: &[FileDiff], query: &str) -> Vec<DiffMatch> {
 }
 
 /// The next match from `active` by `delta`, wrapping at either end; the first one when none was.
-pub const fn step(active: Option<usize>, count: usize, delta: isize) -> Option<usize> {
-    if count == 0 {
-        return None;
-    }
+pub fn step(active: Option<usize>, count: usize, delta: isize) -> Option<usize> {
+    let last = count.checked_sub(1)?;
     let Some(active) = active else {
-        return Some(if delta < 0 { count - 1 } else { 0 });
+        return Some(if delta < 0 { last } else { 0 });
     };
-    let count = count as isize;
-    Some((active as isize + delta).rem_euclid(count) as usize)
+    let (active, count) = (isize::try_from(active).ok()?, isize::try_from(count).ok()?);
+    usize::try_from(active.checked_add(delta)?.checked_rem_euclid(count)?).ok()
 }
 
 /// What the find's tally says: "2 of 5", "No results", or nothing before a word is typed.
@@ -110,7 +96,7 @@ pub fn tally(query: &str, active: Option<usize>, count: usize) -> String {
     } else if count == 0 {
         "No results".to_owned()
     } else {
-        format!("{} of {count}", active.map_or(0, |a| a + 1))
+        format!("{} of {count}", active.map_or(0, |a| a.saturating_add(1)))
     }
 }
 
@@ -126,10 +112,10 @@ pub fn mark_runs(
     let mut cuts: Vec<usize> = marks.iter().flat_map(|(r, _)| [r.start, r.end]).collect();
     cuts.sort_unstable();
     cuts.dedup();
-    let mut out = Vec::with_capacity(runs.len() + cuts.len());
+    let mut out = Vec::with_capacity(runs.len().saturating_add(cuts.len()));
     let mut at = 0_usize;
     for run in runs {
-        let end = at + run.len;
+        let end = at.saturating_add(run.len);
         let mut start = at;
         for &cut in cuts.iter().filter(|&&cut| cut > at && cut < end) {
             out.push(piece(&run, start, cut, marks));
@@ -148,7 +134,7 @@ fn piece(
     marks: &[(Range<usize>, gpui::Hsla)],
 ) -> gpui::TextRun {
     let mut piece = run.clone();
-    piece.len = end - start;
+    piece.len = end.saturating_sub(start);
     if let Some((_, color)) =
         marks.iter().find(|(range, _)| range.start <= start && end <= range.end && start < end)
     {
@@ -187,7 +173,7 @@ fn same_but_space(a: &str, b: &str) -> bool {
 pub fn ignore_whitespace(files: &mut Vec<FileDiff>) {
     for file in files.iter_mut() {
         for hunk in &mut file.hunks {
-            hunk.lines = fold_block_pairs(std::mem::take(&mut hunk.lines));
+            hunk.lines = fold_block_pairs(&hunk.lines);
         }
         file.hunks.retain(|hunk| {
             hunk.lines.iter().any(|line| matches!(line.kind, LineKind::Add | LineKind::Del))
@@ -204,51 +190,41 @@ pub fn ignore_whitespace(files: &mut Vec<FileDiff>) {
 }
 
 fn count(file: &FileDiff, kind: LineKind) -> u32 {
-    file.hunks.iter().flat_map(|hunk| &hunk.lines).filter(|line| line.kind == kind).count() as u32
+    let lines = file.hunks.iter().flat_map(|hunk| &hunk.lines).filter(|line| line.kind == kind);
+    u32::try_from(lines.count()).unwrap_or(u32::MAX)
 }
 
 /// One hunk's lines with each run of deletions and the run of additions after it paired in
 /// order, a pair equal but for whitespace made context.
-fn fold_block_pairs(lines: Vec<DiffLine>) -> Vec<DiffLine> {
+fn fold_block_pairs(lines: &[DiffLine]) -> Vec<DiffLine> {
+    let starts = |run: &[DiffLine], kind| run.first().is_some_and(|line| line.kind == kind);
     let mut out = Vec::with_capacity(lines.len());
-    let mut ix = 0;
-    while ix < lines.len() {
-        if lines[ix].kind != LineKind::Del {
-            out.push(lines[ix].clone());
-            ix += 1;
+    let mut runs = lines.chunk_by(|a, b| a.kind == b.kind).peekable();
+    while let Some(dels) = runs.next() {
+        if !starts(dels, LineKind::Del) {
+            out.extend_from_slice(dels);
             continue;
         }
-        let dels_start = ix;
-        while ix < lines.len() && lines[ix].kind == LineKind::Del {
-            ix += 1;
-        }
-        let adds_start = ix;
-        while ix < lines.len() && lines[ix].kind == LineKind::Add {
-            ix += 1;
-        }
-        let dels = &lines[dels_start..adds_start];
-        let adds = &lines[adds_start..ix];
-        let paired = dels.len().min(adds.len());
+        let adds = runs.next_if(|next| starts(next, LineKind::Add)).unwrap_or_default();
         let same: Vec<bool> =
-            (0..paired).map(|k| same_but_space(&dels[k].text, &adds[k].text)).collect();
+            dels.iter().zip(adds).map(|(del, add)| same_but_space(&del.text, &add.text)).collect();
+        let same_at = |k: usize| same.get(k).copied().unwrap_or(false);
         // Deletions first, then additions, as the patch had them; a pair that is the same
         // but for whitespace leaves both and comes back as one line in the additions' place.
         for (k, del) in dels.iter().enumerate() {
-            if k < paired && same[k] {
-                continue;
+            if !same_at(k) {
+                out.push(del.clone());
             }
-            out.push(del.clone());
         }
         for (k, add) in adds.iter().enumerate() {
-            if k < paired && same[k] {
-                out.push(DiffLine {
+            match dels.get(k).filter(|_| same_at(k)) {
+                Some(del) => out.push(DiffLine {
                     kind: LineKind::Context,
-                    old_no: dels[k].old_no,
+                    old_no: del.old_no,
                     new_no: add.new_no,
                     text: add.text.clone(),
-                });
-            } else {
-                out.push(add.clone());
+                }),
+                None => out.push(add.clone()),
             }
         }
     }
@@ -263,8 +239,11 @@ fn fold_block_pairs(lines: Vec<DiffLine>) -> Vec<DiffLine> {
 /// file, which names its index in the diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeRow {
+    /// How deep it sits: 0 at the top.
     pub depth: usize,
+    /// Its name: a folder's joined chain, or the file's own.
     pub name: String,
+    /// The file's index in the diff; `None` for a folder.
     pub file: Option<usize>,
     /// The folder's or the file's whole path.
     pub path: String,
@@ -301,13 +280,13 @@ fn walk(node: &Node, depth: usize, prefix: &str, rows: &mut Vec<TreeRow>) {
         let mut child = child;
         // A folder holding one folder and nothing else reads as one row.
         while child.files.is_empty() && child.dirs.len() == 1 {
-            let (next, grand) = child.dirs.iter().next().expect("one folder");
+            let Some((next, grand)) = child.dirs.first_key_value() else { break };
             name = format!("{name}/{next}");
             child = grand;
         }
         let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
         rows.push(TreeRow { depth, name, file: None, path: path.clone() });
-        walk(child, depth + 1, &path, rows);
+        walk(child, depth.saturating_add(1), &path, rows);
     }
     let mut files = node.files.clone();
     files.sort_by(|a, b| a.0.cmp(&b.0));
@@ -350,7 +329,7 @@ diff --git a/src/ui/b.rs b/src/ui/b.rs
         assert_eq!(find_matches(&files, "Value").len(), 1, "a capital asks for case");
         let first = &matches[0];
         assert_eq!((first.file, first.hunk, first.line), (0, 0, 1));
-        assert_eq!(&files[0].hunks[0].lines[1].text[first.range.clone()], "Value");
+        assert_eq!(files[0].hunks[0].lines[1].text.get(first.range.clone()), Some("Value"));
         assert_eq!(step(None, 5, 1), Some(0));
         assert_eq!(step(None, 5, -1), Some(4));
         assert_eq!(step(Some(4), 5, 1), Some(0), "wraps forward");
@@ -359,14 +338,14 @@ diff --git a/src/ui/b.rs b/src/ui/b.rs
         assert_eq!(tally("value", Some(1), 5), "2 of 5");
         assert_eq!(tally("zzz", None, 0), "No results");
         assert_eq!(tally("", None, 0), "");
-        assert!(find_matches(&files, "").is_empty());
+        assert!(find_matches(&files, "").is_empty(), "no words, no matches");
     }
 
     #[test]
     fn matches_keep_their_bytes_beyond_ascii() {
         let ranges = line_matches("é Été été", "été");
         assert_eq!(ranges.len(), 2);
-        assert_eq!(&"é Été été"[ranges[0].clone()], "Été");
+        assert_eq!("é Été été".get(ranges[0].clone()), Some("Été"));
         assert!(line_matches("aaaa", "aa").len() == 2, "matches do not overlap");
     }
 

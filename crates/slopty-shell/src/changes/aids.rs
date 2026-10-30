@@ -1,16 +1,7 @@
 //! The Changes pane's find bar, whitespace toggle and file tree.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Focusable as _, Hsla, SharedString, Window, div, px};
@@ -18,7 +9,7 @@ use gpui::{AnyElement, App, Context, Focusable as _, Hsla, SharedString, Window,
 use super::review::{self, DiffMatch};
 use super::{
     Changes, DiffFind, DiffRow, FindInDiff, FindNextInDiff, FindPreviousInDiff, ToggleDiffTree,
-    add_color, body_rows, del_color,
+    add_color, body_rows, del_color, row_ix,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion::HoverFade as _;
@@ -93,7 +84,7 @@ impl Changes {
 
     /// Match the find's words against the diff as it now reads, keeping the active match where
     /// it still is.
-    pub(super) fn refresh_find(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_find(&mut self, cx: &Context<Self>) {
         let Some(find) = &self.find else { return };
         let query = find.input.read(cx).text().to_owned();
         let key = self.parsed.as_ref().map(|parsed| parsed.key.clone()).unwrap_or_default();
@@ -133,14 +124,15 @@ impl Changes {
         let file_ix = found.file as usize;
         self.open_file_body(file_ix);
         let Some(range) = self.row_ranges.get(file_ix).cloned() else { return };
-        let hit = self.rows[range.clone()].iter().position(|row| match *row {
+        let Some(rows) = self.rows.get(range.clone()) else { return };
+        let hit = rows.iter().position(|row| match *row {
             DiffRow::Line { hunk, line, .. } => hunk == found.hunk && line == found.line,
             DiffRow::SplitLine { hunk, left, right, .. } => {
                 hunk == found.hunk && (left == Some(found.line) || right == Some(found.line))
             }
             _ => false,
         });
-        let Some(hit) = hit.map(|at| at + range.start) else { return };
+        let Some(hit) = hit.map(|at| at.saturating_add(range.start)) else { return };
         self.list.scroll_to(gpui::ListOffset {
             item_ix: hit.saturating_sub(FIND_CONTEXT_ROWS).max(range.start),
             offset_in_item: px(0.0),
@@ -152,8 +144,11 @@ impl Changes {
         let Some(file) = self.parsed.as_ref().and_then(|p| p.files.get(file_ix)).cloned() else {
             return;
         };
-        let folding = self.row_ranges.get(file_ix).and_then(|range| self.rows.get(range.start + 1))
-            == Some(&DiffRow::FoldingBody { file: file_ix as u32 });
+        let folding = self
+            .row_ranges
+            .get(file_ix)
+            .and_then(|range| self.rows.get(range.start.saturating_add(1)))
+            == Some(&DiffRow::FoldingBody { file: row_ix(file_ix) });
         let collapsed = self.folds.get(&file.path).is_some_and(|fold| fold.collapsed);
         if !collapsed && !folding {
             return;
@@ -161,8 +156,8 @@ impl Changes {
         let fold = self.folds.entry(file.path.clone()).or_default();
         fold.collapsed = false;
         fold.toggled_at = None;
-        let body = body_rows(file_ix as u32, &file, self.mode);
-        self.replace_file_body(file_ix, body);
+        let body = body_rows(row_ix(file_ix), &file, self.mode);
+        self.replace_file_body(file_ix, &body);
     }
 
     /// Bring file `file_ix`'s header to the top of the diff.
@@ -189,12 +184,14 @@ impl Changes {
         let at = (file, hunk, line);
         let start = self.found.partition_point(|m| key(m) < at);
         let active = self.found_active;
-        self.found[start..]
+        self.found
+            .get(start..)
+            .unwrap_or_default()
             .iter()
             .enumerate()
             .take_while(|(_, m)| key(m) == at)
             .map(|(k, m)| {
-                let loud = active == Some(start + k);
+                let loud = active == Some(start.saturating_add(k));
                 (m.range.clone(), theme.warning.opacity(if loud { 0.55 } else { 0.22 }))
             })
             .collect()
@@ -215,11 +212,7 @@ impl Changes {
     // ---- drawing ----
 
     /// The trailing toolbar's review aids: find, the files' tree and whitespace.
-    pub(super) fn render_aid_controls(
-        &self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> [AnyElement; 3] {
+    pub(super) fn render_aid_controls(&self, theme: &Theme, cx: &Context<Self>) -> [AnyElement; 3] {
         let find =
             Self::header_toggle("changes-find", crate::icons::MAGNIFER, self.find.is_some(), theme)
                 .action_hint(
@@ -269,7 +262,7 @@ impl Changes {
     }
 
     /// The find card floating over the diff's top right.
-    pub(super) fn render_find(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_find(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
         let find = self.find.as_ref()?;
         let query = find.input.read(cx).text().to_owned();
         let tally = review::tally(&query, self.found_active, self.found.len());
@@ -356,7 +349,7 @@ impl Changes {
             return None;
         }
         let parsed = self.parsed.as_ref()?;
-        let files = parsed.files.clone();
+        let files = Arc::clone(&parsed.files);
         let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
         let rows = review::diff_tree(&paths);
         let selected = self.tree_selected;
@@ -412,7 +405,8 @@ impl Changes {
                     .aria_label(SharedString::from(row.path.clone()))
                     .h(px(TREE_ROW_HEIGHT))
                     .mx(px(4.0))
-                    .pl(px(6.0 + row.depth as f32 * TREE_INDENT))
+                    .pl(px(f32::from(u16::try_from(row.depth).unwrap_or(u16::MAX))
+                        .mul_add(TREE_INDENT, 6.0)))
                     .pr(px(6.0))
                     .flex()
                     .flex_row()

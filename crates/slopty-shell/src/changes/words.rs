@@ -6,16 +6,10 @@
 //! above the edited one never takes its place. The tokens a pair does not share (their longest
 //! common subsequence left out) are the changed spans. A line with no partner that alike is
 //! rewritten or new, not edited, and lights nothing.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::ops::Range;
 
-use super::{Hunk, LineKind};
+use super::{DiffLine, Hunk, LineKind};
 
 /// The longest run of deleted or added lines that pairs: past it, lines are rewritten rather than
 /// edited, and lighting words in them only adds noise.
@@ -26,38 +20,59 @@ const MOST_TOKENS: usize = 400;
 /// The share of their words and marks two lines must have in common to read as one line edited.
 const LIKENESS: f32 = 0.5;
 
+/// Each line's changed spans, byte ranges into its text, indexed like the lines.
+type LineSpans = Vec<Vec<Range<usize>>>;
+
 /// The changed spans of each of `hunk`'s lines, byte ranges into its text, indexed like its lines.
-pub(super) fn hunk_words(hunk: &Hunk) -> Vec<Vec<Range<usize>>> {
-    let lines = &hunk.lines;
-    let mut words = vec![Vec::new(); lines.len()];
-    let mut at = 0;
-    while at < lines.len() {
-        let dels = lines[at..].iter().take_while(|line| line.kind == LineKind::Del).count();
-        let adds = lines[at + dels..].iter().take_while(|line| line.kind == LineKind::Add).count();
-        if dels == 0 || adds == 0 {
-            at += dels.max(1) + adds;
-            continue;
+pub(super) fn hunk_words(hunk: &Hunk) -> LineSpans {
+    let mut words = Vec::with_capacity(hunk.lines.len());
+    let mut runs = hunk.lines.chunk_by(|a, b| a.kind == b.kind).peekable();
+    while let Some(run) = runs.next() {
+        let starts = |run: &[DiffLine], kind| run.first().is_some_and(|line| line.kind == kind);
+        let adds = if starts(run, LineKind::Del) {
+            runs.next_if(|next| starts(next, LineKind::Add))
+        } else {
+            None
+        };
+        if let Some(adds) = adds {
+            let (old, new) = run_words(run, adds);
+            words.extend(old);
+            words.extend(new);
+        } else {
+            words.extend(run.iter().map(|_| Vec::new()));
         }
-        if dels <= MOST_PAIRED && adds <= MOST_PAIRED {
-            // Each deleted line takes the likest added line after the last one taken.
-            let mut next = at + dels;
-            for old in at..at + dels {
-                let best = (next..at + dels + adds)
-                    .filter_map(|new| {
-                        Some((new, changed_words(&lines[old].text, &lines[new].text)?))
-                    })
-                    .filter(|(_, edit)| edit.likeness >= LIKENESS)
-                    .max_by(|a, b| a.1.likeness.total_cmp(&b.1.likeness));
-                if let Some((new, edit)) = best {
-                    words[old] = edit.old;
-                    words[new] = edit.new;
-                    next = new + 1;
-                }
-            }
-        }
-        at += dels + adds;
     }
     words
+}
+
+/// The changed spans of a run of deleted lines and the run of added lines after it.
+///
+/// Each deleted line takes the likest added line after the last one taken; a run past
+/// [`MOST_PAIRED`] lights nothing.
+fn run_words(dels: &[DiffLine], adds: &[DiffLine]) -> (LineSpans, LineSpans) {
+    let mut old_words = vec![Vec::new(); dels.len()];
+    let mut new_words = vec![Vec::new(); adds.len()];
+    if dels.len() > MOST_PAIRED || adds.len() > MOST_PAIRED {
+        return (old_words, new_words);
+    }
+    let mut next = 0;
+    for (old, old_spans) in dels.iter().zip(&mut old_words) {
+        let best = adds
+            .iter()
+            .enumerate()
+            .skip(next)
+            .filter_map(|(ix, new)| Some((ix, changed_words(&old.text, &new.text)?)))
+            .filter(|(_, edit)| edit.likeness >= LIKENESS)
+            .max_by(|a, b| a.1.likeness.total_cmp(&b.1.likeness));
+        if let Some((ix, edit)) = best {
+            *old_spans = edit.old;
+            if let Some(new_spans) = new_words.get_mut(ix) {
+                *new_spans = edit.new;
+            }
+            next = ix.saturating_add(1);
+        }
+    }
+    (old_words, new_words)
 }
 
 /// `text` as tokens: runs of word characters, runs of spaces, and every other character alone.
@@ -81,11 +96,10 @@ fn tokens(text: &str) -> Vec<Range<usize>> {
     let mut last: Option<Class> = None;
     for (at, ch) in text.char_indices() {
         let this = class(ch);
+        let end = at.saturating_add(ch.len_utf8());
         match out.last_mut() {
-            Some(run) if this != Class::Mark && last.as_ref() == Some(&this) => {
-                run.end = at + ch.len_utf8();
-            }
-            _ => out.push(at..at + ch.len_utf8()),
+            Some(run) if this != Class::Mark && last.as_ref() == Some(&this) => run.end = end,
+            _ => out.push(at..end),
         }
         last = Some(this);
     }
@@ -108,38 +122,34 @@ fn changed_words(old: &str, new: &str) -> Option<Edit> {
     if a.len() > MOST_TOKENS || b.len() > MOST_TOKENS {
         return None;
     }
-    let (ta, tb): (Vec<&str>, Vec<&str>) =
-        (a.iter().map(|r| &old[r.clone()]).collect(), b.iter().map(|r| &new[r.clone()]).collect());
-    // The longest common subsequence's lengths of every pair of suffixes.
-    let width = tb.len() + 1;
-    let mut table = vec![0_u16; (ta.len() + 1) * width];
-    for i in (0..ta.len()).rev() {
-        for j in (0..tb.len()).rev() {
-            table[i * width + j] = if ta[i] == tb[j] {
-                table[(i + 1) * width + j + 1] + 1
-            } else {
-                table[(i + 1) * width + j].max(table[i * width + j + 1])
-            };
-        }
-    }
-    let (mut kept_a, mut kept_b) = (vec![false; ta.len()], vec![false; tb.len()]);
+    // A token's range always lies on the line's char boundaries.
+    let ta: Vec<&str> = a.iter().map(|range| old.get(range.clone()).unwrap_or_default()).collect();
+    let tb: Vec<&str> = b.iter().map(|range| new.get(range.clone()).unwrap_or_default()).collect();
+    let lcs = suffix_lcs(&ta, &tb);
+    let lcs_at = |i: usize, j: usize| lcs.get(i).and_then(|row| row.get(j)).copied().unwrap_or(0);
+    // Walk one longest common subsequence from the front, marking the tokens it keeps.
+    let (mut kept_a, mut kept_b) = (Vec::with_capacity(ta.len()), Vec::with_capacity(tb.len()));
     let (mut i, mut j) = (0, 0);
     let mut shared_word = false;
     let mut shared: u16 = 0;
-    while i < ta.len() && j < tb.len() {
-        if ta[i] == tb[j] {
-            kept_a[i] = true;
-            kept_b[j] = true;
-            shared_word |= ta[i].chars().any(char::is_alphanumeric);
-            shared += u16::from(!ta[i].trim().is_empty());
-            i += 1;
-            j += 1;
-        } else if table[(i + 1) * width + j] >= table[i * width + j + 1] {
-            i += 1;
+    while let (Some(x), Some(y)) = (ta.get(i), tb.get(j)) {
+        let (below, across) = (i.saturating_add(1), j.saturating_add(1));
+        if x == y {
+            kept_a.push(true);
+            kept_b.push(true);
+            shared_word |= x.chars().any(char::is_alphanumeric);
+            shared = shared.saturating_add(u16::from(!x.trim().is_empty()));
+            (i, j) = (below, across);
+        } else if lcs_at(below, j) >= lcs_at(i, across) {
+            kept_a.push(false);
+            i = below;
         } else {
-            j += 1;
+            kept_b.push(false);
+            j = across;
         }
     }
+    kept_a.resize(ta.len(), false);
+    kept_b.resize(tb.len(), false);
     if !shared_word {
         return None;
     }
@@ -150,6 +160,32 @@ fn changed_words(old: &str, new: &str) -> Option<Edit> {
         new: spans(&b, &kept_b),
         likeness: f32::from(shared) / f32::from(larger),
     })
+}
+
+/// The longest common subsequence's length of every pair of suffixes.
+///
+/// Row `i`, column `j` is that of `a[i..]` and `b[j..]`; the last row and column are 0. Both sides
+/// are at most [`MOST_TOKENS`] long, so every length fits a `u16`.
+fn suffix_lcs(a: &[&str], b: &[&str]) -> Vec<Vec<u16>> {
+    let mut rows = Vec::with_capacity(a.len().saturating_add(1));
+    let mut below = vec![0_u16; b.len().saturating_add(1)];
+    for x in a.iter().rev() {
+        // Built right to left: `right` is the cell just filled, `down` and `diagonal` the row
+        // below's cells under it and under its right neighbour.
+        let mut row = vec![0_u16];
+        let mut right = 0_u16;
+        for ((y, &down), &diagonal) in
+            b.iter().rev().zip(below.iter().rev().skip(1)).zip(below.iter().rev())
+        {
+            right = if x == y { diagonal.saturating_add(1) } else { down.max(right) };
+            row.push(right);
+        }
+        row.reverse();
+        rows.push(std::mem::replace(&mut below, row));
+    }
+    rows.push(below);
+    rows.reverse();
+    rows
 }
 
 /// The changed tokens of a line merged into spans, a run of them one span.
@@ -170,7 +206,6 @@ fn spans(tokens: &[Range<usize>], kept: &[bool]) -> Vec<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::changes::DiffLine;
 
     fn line(kind: LineKind, text: &str) -> DiffLine {
         DiffLine { kind, old_no: None, new_no: None, text: text.to_owned() }
@@ -197,7 +232,7 @@ mod tests {
         let words = hunk_words(&hunk);
         assert_eq!(words[1], Vec::<Range<usize>>::new(), "nothing removed");
         assert!(words[2].is_empty(), "the new line is new, not edited");
-        let lit: Vec<&str> = words[3].iter().map(|span| &new[span.clone()]).collect();
+        let lit: Vec<&str> = words[3].iter().filter_map(|span| new.get(span.clone())).collect();
         assert_eq!(lit, [", {name}"]);
         assert!(words[0].is_empty() && words[4].is_empty() && words[5].is_empty());
 
