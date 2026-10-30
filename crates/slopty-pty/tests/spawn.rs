@@ -39,10 +39,10 @@ mod spawn {
         // pseudo-terminals, which the gate's tests lane counts against its budget
         // (`xtask/src/ptys.rs`).
         let in_flight = Arc::new(tokio::sync::Semaphore::new(16));
-        let spawns: Vec<_> = (0..120_usize)
+        let mut spawns: tokio::task::JoinSet<()> = (0..120_usize)
             .map(|i| {
                 let (missing, in_flight) = (missing.clone(), Arc::clone(&in_flight));
-                tokio::spawn(async move {
+                async move {
                     let _slot = in_flight.acquire_owned().await.unwrap();
                     let pty = Pty::open(TermSize::default()).unwrap();
                     let spec = SpawnSpec {
@@ -63,15 +63,20 @@ mod spawn {
                             assert!(e.to_string().contains("chdir"), "shell {i}: {e}");
                         }
                     }
-                })
+                }
             })
             .collect();
-        let all = async {
-            for spawn in spawns {
-                spawn.await.unwrap();
-            }
-        };
-        tokio::time::timeout(Duration::from_secs(60), all).await.expect("no child hung");
+        // A child that hangs between fork and exec never comes back, so a minute in which none
+        // comes back while some are out is one hung. A bound on all of them grew with their
+        // count and the machine's speed instead: under ThreadSanitizer the 120 take 27 s on a
+        // Mac alone, and ran past the minute on a runner beside the other tests, one back every
+        // 0.6 s (Deep run 41018723691).
+        while let Some(joined) = tokio::time::timeout(Duration::from_secs(60), spawns.join_next())
+            .await
+            .expect("no child hung")
+        {
+            joined.unwrap();
+        }
         stop.store(true, Ordering::Relaxed);
         for thread in churn {
             thread.join().unwrap();
