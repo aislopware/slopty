@@ -1,4 +1,4 @@
-//! slopty: a page an agent showed, as a view beside the session ([`RightSurface::Page`]): a card's
+//! A page an agent showed, as a view beside the session ([`RightSurface::Page`]): a card's
 //! "Open in pane" asks through [`PagePaneAsk`], and the view docks beside the session with the
 //! keyboard; "Bring back" (or closing the view) puts the page back in its card. Each piece is a
 //! call from the shell's own match on the view.

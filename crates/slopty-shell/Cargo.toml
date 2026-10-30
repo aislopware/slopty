@@ -5,12 +5,6 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# slopty: the data comes from Slopty's view model (`slopty-ui::view_model`) through the
-# `RpcService` installed as `EngineService`. Voice, dictation, the orb, appshots, the updater,
-# sign-in, sync, agent accounts, the pull-request pages, Git History, the terminal emulator
-# (Slopty's terminals are libghostty's), the examples and the Linux and Windows browser hosts are
-# not taken (docs/decisions/ui.md), nor the dependencies only they used.
-
 [dependencies]
 slopty-veil = { path = "../slopty-veil" }
 url = "2"
@@ -32,7 +26,7 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slopty-markdown = { path = "../slopty-markdown" }
-# slopty: zatex, Slopty's copy of zeron's maths typesetter (`markdown/math.rs`).
+# The maths typesetter (`markdown/math.rs`).
 slopty-math = { path = "../slopty-math", features = ["bundled"] }
 base64 = "0.23"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
@@ -43,7 +37,7 @@ merman = { version = "0.9", default-features = false, features = ["all-diagrams"
 unicode-segmentation = "1"
 unicode-width = "0.2"
 fontdb = "0.24"
-# slopty: the code a phone or iPad scans for the server (`settings::invite`): the matrix alone.
+# The code a phone or iPad scans for the server (`settings::invite`): the matrix alone.
 qrcode = { version = "0.14.1", default-features = false }
 ttf-parser = "0.25.1"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -53,7 +47,7 @@ tracing = "0.1"
 data-encoding.workspace = true
 sha2 = "0.11"
 thiserror = "2"
-# slopty: one rust-embed 8 in the graph, the workspace's.
+# One rust-embed 8 in the graph, the workspace's.
 rust-embed = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -70,16 +64,16 @@ objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKNavigationDeleg
 gpui = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 
-# slopty: upstream's fixture features are cut with the examples they built; they are declared so
-# the check stays on for everything else. Upstream builds leave helpers dead on macOS whose only
-# callers are Linux-only tests or test paths; Slopty's own CI is Linux.
+# The code still names the fixture features in its cfgs, so they are declared and the cfg check
+# stays on for everything else. Dead code is allowed: helpers whose only callers are Linux-only
+# tests are dead on macOS.
 [lints.rust]
 dead_code = "allow"
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(feature, values("browser-fixture", "compact-picker-fixture", "project-palette-fixture"))',
 ] }
 
-# slopty: upstream trips these default lints; they keep upstream's code as written.
+# Clippy lints this code trips, allowed by name.
 [lints.clippy]
 assertions_on_constants = "allow"
 assign_op_pattern = "allow"
@@ -120,7 +114,7 @@ unnecessary_sort_by = "allow"
 unnecessary_unwrap = "allow"
 useless_conversion = "allow"
 
-# slopty: upstream docs that Slopty's rustdoc check (private items, warnings denied) trips.
+# Rustdoc lints these docs trip under the check (private items, warnings denied), allowed by name.
 [lints.rustdoc]
 bare_urls = "allow"
 broken_intra_doc_links = "allow"

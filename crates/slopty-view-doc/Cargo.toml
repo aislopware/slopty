@@ -5,8 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# slopty: upstream code that clippy 1.99's defaults flag, allowed by name rather than edited, so
-# the copy stays diffable (`vendor/slopty/README.md`).
+# Clippy lints this code trips, allowed by name.
 [lints.clippy]
 cloned_ref_to_slice_refs = "allow"
 explicit_counter_loop = "allow"
@@ -19,7 +18,7 @@ serde_json = "1"
 thiserror = "2"
 similar = "3"
 
-# slopty: upstream docs that Slopty's rustdoc check (private items, warnings denied) trips.
+# Rustdoc lints these docs trip under the check (private items, warnings denied), allowed by name.
 [lints.rustdoc]
 broken_intra_doc_links = "allow"
 invalid_html_tags = "allow"

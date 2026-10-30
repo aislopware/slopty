@@ -1,6 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Constants carried over from slopty `packages/session-doc/src/constants.ts`.
-//! Per the original design these are starting points — re-measure with real heavy sessions.
+//! Limits and cadences of transcripts and commands. The parts split an entry past
+//! [`MSG_INLINE_MAX`]; a command lives [`COMMAND_DEFAULT_TTL_MS`] unless it says otherwise.
 
 /// Max bytes for a single message entry before continuation splitting.
 pub const MSG_INLINE_MAX: usize = 256 * 1024;

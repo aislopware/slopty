@@ -248,7 +248,7 @@ impl Command {
             Self::Theme(AppearanceMode::System) => "Appearance: System",
             Self::Theme(AppearanceMode::Light) => "Appearance: Light",
             Self::Theme(AppearanceMode::Dark) => "Appearance: Dark",
-            Self::ArchiveThread => "Archive session", // slopty
+            Self::ArchiveThread => "Archive session",
             Self::Window(command) => command.label,
         }
     }
@@ -505,7 +505,7 @@ impl Shell {
                     palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
                 }
                 this.search_palette_workspace(cx);
-                this.search_palette_chat_words(cx); // slopty
+                this.search_palette_chat_words(cx);
                 cx.notify();
             }
         });
@@ -522,7 +522,7 @@ impl Shell {
             files: WorkspaceQuery::default(),
             files_ready: None,
             content: WorkspaceQuery::default(),
-            chat_words: ChatWordsQuery::default(), // slopty
+            chat_words: ChatWordsQuery::default(),
             uses: self.settings.palette_uses.clone(),
             _search_events: events,
         });
@@ -885,7 +885,7 @@ impl Shell {
                 window.dispatch_action((command.action)(), cx)
             }
             RowKind::Chat(id) => self.open_chat(id, cx),
-            RowKind::ChatWords(found) => self.open_chat(found.chat_id, cx), // slopty
+            RowKind::ChatWords(found) => self.open_chat(found.chat_id, cx),
             RowKind::File { path, is_dir } => {
                 self.open_palette_path(path, is_dir, None, window, cx)
             }

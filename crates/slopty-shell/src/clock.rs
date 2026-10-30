@@ -1,4 +1,4 @@
-//! slopty: the shell's one clock. What the shell draws reads the moment of the frame being drawn
+//! The shell's one clock. What the shell draws reads the moment of the frame being drawn
 //! ([`gpui::App::frame_time`]), and what an event stamps reads the same clock between frames, so
 //! a frame drawn twice at one moment draws alike (the retained check, the self-test's dump, the
 //! fuzzer's `wall clock` oracle) and a headless test's clock is the dispatcher's, which moves only

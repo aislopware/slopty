@@ -1,14 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Animation kit — the slopty motion catalog as reusable helpers over gpui
+//! Animation kit — the shell's motion catalog as reusable helpers over gpui
 //! [`Animation`]/[`AnimationExt`].
 //!
-//! Catalog (docs/research/feature-inventory.md §1.12):
+//! Catalog:
 //! - `fade-in`   0.5s  cubic-bezier(0.16,1,0.3,1), translateY 4→0 (entrances)
 //! - `fade-quick` 0.15s
-//! - `menu-in`   0.14s scale 0.96 + translateY −2 (popovers)
-//! - `dialog-in` 0.18s scale 0.96→1
+//! - `menu-in`   0.14s translateY −2→0 (popovers)
+//! - `dialog-in` 0.18s fade + 2px rise
 //! - `splash-out` 0.5s opacity + translateY −6, 0.15s delay
-//! - `slopty-pulse` 2.4s staggered cell opacity 0.08→1, scale 0.9→1 (loaders)
+//! - the pulse loader: 2.4s staggered cell opacity 0.08→1, scale 0.9→1
 //! - `gradient-spin-pulse` 750ms per-cell phase wave (working indicator)
 //! - 200ms ease-out width/height transitions (sidebar/panes)
 //!
@@ -324,7 +324,7 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
                     cx.background_executor().timer(PULSE_TICK).await;
                 }
                 let parked = cx.update(|cx| {
-                    let now = cx.background_executor().now(); // slopty
+                    let now = cx.background_executor().now();
                     let clock = cx.default_global::<PulseClock>();
                     clock.leases.retain(|_, lease| lease.until > now);
                     if clock.leases.is_empty() {
@@ -453,7 +453,7 @@ impl CubicBezier {
     }
 }
 
-/// slopty's signature entrance curve — CSS `cubic-bezier(0.16, 1, 0.3, 1)`.
+/// The signature entrance curve — CSS `cubic-bezier(0.16, 1, 0.3, 1)`.
 pub const EASE_OUT_EXPO: CubicBezier = CubicBezier::new(0.16, 1.0, 0.3, 1.0);
 /// CSS `ease-out` — width/height transitions.
 pub const EASE_OUT: CubicBezier = CubicBezier::new(0.0, 0.0, 0.58, 1.0);
@@ -627,7 +627,7 @@ pub const CHEVRON: MotionSpec = MotionSpec::new(200, EASE);
 /// scroll, a fixed-duration gentle ease, never percent-of-remaining).
 pub const SCROLL_GLIDE: MotionSpec = MotionSpec::new(500, EASE_IN_OUT);
 /// Tailwind's default transition curve — CSS `cubic-bezier(0.4, 0, 0.2, 1)`
-/// (`transition-colors` et al. carry it unless overridden; slopty never does).
+/// (`transition-colors` et al. carry it unless overridden).
 pub const EASE_TAILWIND: CubicBezier = CubicBezier::new(0.4, 0.0, 0.2, 1.0);
 /// CSS `transition-colors` default: 150ms over [`EASE_TAILWIND`] — the temporal
 /// blend every interactive hover wash rides in the original.
@@ -777,7 +777,7 @@ where
 }
 
 /// Popover entrance: fade + translateY −2→0 over [`MENU_IN`].
-/// (slopty also scales 0.96→1; divs have no scale transform in gpui — approximated.)
+/// (No scale 0.96→1: divs have no scale transform in gpui.)
 pub fn menu_in<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E>
 where
     E: Styled + IntoElement + 'static,
@@ -884,13 +884,12 @@ pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
 // ---------------------------------------------------------------------------
 //
 // gpui `.hover()` styles snap by construction — the style applies the frame
-// the pointer enters. The original slopty puts Tailwind `transition-colors`
-// (150ms, cubic-bezier(0.4, 0, 0.2, 1)) on every interactive wash, so hover
-// states FADE. This is the manual-drive tween for that (the shell `WidthTween`
-// pattern — never `with_animation`, whose element-id-keyed clock replays on
-// remount): a per-element-key hover progress, advanced from wall time on each
-// evaluation, with the render tail requesting frames while any fade is
-// mid-flight.
+// the pointer enters. Every interactive wash here fades instead, over Tailwind's
+// `transition-colors` (150ms, cubic-bezier(0.4, 0, 0.2, 1)). This is the
+// manual-drive tween for that (the shell `WidthTween` pattern — never
+// `with_animation`, whose element-id-keyed clock replays on remount): a
+// per-element-key hover progress, advanced from wall time on each evaluation,
+// with the render tail requesting frames while any fade is mid-flight.
 //
 // The store is a main-thread `thread_local` rather than a gpui Global so the
 // many free-function element builders (window-control buttons, popover menu

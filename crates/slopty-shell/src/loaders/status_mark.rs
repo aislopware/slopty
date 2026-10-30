@@ -1,4 +1,4 @@
-//! slopty: one status mark that morphs between a run's states (Clanker UI's `StatusMark`;
+//! One status mark that morphs between a run's states (Clanker UI's `StatusMark`;
 //! `.research/design-inspiration-2026-10-19.md` item 1), in place of a check, a spinner and a dot
 //! swapped on a hard cut:
 //!

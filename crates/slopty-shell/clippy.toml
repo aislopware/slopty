@@ -1,7 +1,7 @@
 # Copied UI code keeps clippy's defaults, not the workspace's settings, so it stays diffable with
 # the source it was copied from (docs/decisions/ui.md).
 
-# slopty: the shell reads the time through `crate::clock` alone (the frame's moment, or the
+# The shell reads the time through `crate::clock` alone (the frame's moment, or the
 # dispatcher's clock between frames), so a frame drawn twice at one moment draws alike
 # (docs/decisions/testing.md, "Every clock in the shell is the frame's").
 disallowed-methods = [

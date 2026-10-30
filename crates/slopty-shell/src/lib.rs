@@ -1,17 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3d2f1e6), see THIRD_PARTY_NOTICES.md
-//! slopty-shell — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
-//! diff pane.
+//! slopty-shell — the window, drawn on gpui (`docs/ARCHITECTURE.md` §4,
+//! `docs/decisions/layout.md`): the titlebar, the session list, each session's terminal and the
+//! views summoned beside it.
 //!
-//! Design: ARCHITECTURE.md §4; animation catalog docs/research/feature-inventory.md
-//! §1.12; virtualization/markdown techniques docs/research/mugen-pretext.md.
-//!
-//! M3a foundation:
-//! - [`theme`] — always-dark monochrome theme (oklch-derived neutrals), a gpui Global;
-//! - [`motion`] — the slopty animation catalog over gpui `Animation` + cubic-bezier;
-//! - [`state`] — `AppState` entity + `EngineHandle` (connect-or-embed engine);
-//! - [`settings`] — persisted pane widths/collapse flags;
-//! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
-//! - [`loaders`] — slopty pulse loader, gradient spinner, boot splash.
+//! - [`theme`] — the theme's colours, light and dark, a gpui Global;
+//! - [`motion`] — the animation catalog over gpui `Animation` + cubic-bezier;
+//! - [`state`] — `AppState` entity + `EngineHandle`, the view model's client;
+//! - [`settings`] — the persisted settings, the pane widths among them;
+//! - [`shell`] — the window: titlebar, sidebar, terminal, the views beside it and the gate;
+//! - [`loaders`] — the pulse loader, the gradient spinner and the boot splash.
 
 // Tests read the wall clock as they please; the shell itself only through `clock`.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
@@ -233,9 +230,9 @@ pub fn start(
             }
         })
         .detach();
-        cx.set_global(state::EngineService(config.service.clone())); // slopty
+        cx.set_global(state::EngineService(config.service.clone()));
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
-        invariants::watch(&state, cx); // slopty
+        invariants::watch(&state, cx);
 
         // Graceful teardown: an in-process engine drains live runs and flushes
         // doc snapshots before the process exits (remote engines outlive us).
@@ -307,7 +304,7 @@ pub fn open_chat(chat_id: String, cx: &mut App) {
 }
 
 /// A clicked banner: bring Slopty forward on its chat, reopening the main window first if ⌘W
-/// closed it. slopty: harness-update banners are gone, so every target is a chat.
+/// closed it. Every banner's target is a chat.
 fn open_notification_target(target: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
     activate_main_window(cx);
     // A note of a chat archived or deleted since brings Slopty forward and opens nothing,
@@ -420,9 +417,8 @@ fn open_main_window(
                 // from the missing `set_menus` call (nil `NSApp.mainMenu`), not
                 // from window kind/level, and `appears_transparent` only affects
                 // the titlebar, not the menu bar.
-                // macOS: frameless-inset chrome like the original Electron app
-                // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15 —
-                // feature-inventory §1.1). The strip is custom-drawn. Windows
+                // macOS: frameless-inset chrome, the traffic lights at 14,15. The strip is
+                // custom-drawn. Windows
                 // still needs a native title for taskbar previews and Alt+Tab. On
                 // Linux/Windows `appears_transparent` hides the system titlebar
                 // for our custom-drawn chrome; harmless where unsupported.
@@ -437,7 +433,7 @@ fn open_main_window(
                 // Drag + start_window_move) — mark the content view app-owned
                 // so AppKit neither dead-zones the strip nor delays clicks.
                 app_owns_titlebar_drag: true,
-                // Linux: request client-side decorations — slopty draws its own
+                // Linux: request client-side decorations — Slopty draws its own
                 // unified titlebar and (under CSD) its own caption buttons
                 // (shell.rs `render_linux_caption_controls`). Leaving this unset
                 // requests SERVER decorations, which stacked a compositor

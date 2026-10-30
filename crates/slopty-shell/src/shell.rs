@@ -1,12 +1,13 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 77a3c0f), see THIRD_PARTY_NOTICES.md
-//! The app shell (slopty `__root.tsx`): sidebar column + main panel + optional
-//! right "Changes" pane, plus the boot splash and the connection gate.
+//! The shell's window (`docs/decisions/layout.md`): one row of chrome, the session list beside
+//! the session's terminal, and the views summoned beside the terminal ([`RightSurface`]: changes,
+//! files, a file, the browser, a diff, the inspector, a remote screen, a page), plus the boot
+//! splash and the connection gate.
 //!
-//! Layout is slopty's: collapsible drag-resizable sidebar (224–400px, default
-//! 256) with a gentle 180–240ms width transition; main panel with an h-11 header,
-//! content outlet, and a reserved h-6 status strip so later content never
-//! shifts; right pane scaffold (360px floor, default 520), hidden by default.
-//! Widths/collapsed state persist to `ui-settings.json` (debounced).
+//! The sidebar drags between `settings::SIDEBAR_MIN` and `settings::SIDEBAR_MAX` wide
+//! (`settings::SIDEBAR_DEFAULT` at first) and puts away to its rail; a view beside the terminal
+//! is at least `settings::RIGHT_PANE_MIN` wide (`settings::RIGHT_PANE_DEFAULT` at first). The
+//! widths and whether the sidebar is put away persist to `ui-settings.json`, debounced.
 //!
 //! Resize handles use gpui's drag-and-drop pattern (an `on_drag` with an empty
 //! ghost view + `on_drag_move::<Marker>` on the root), the same idiom as Zed's
@@ -292,11 +293,11 @@ const STARTS_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 pub struct JumpSession(pub usize);
 
 // ---------------------------------------------------------------------------
-// Traffic-light-aware titlebar layout (feature-inventory §1.1)
+// Traffic-light-aware titlebar layout
 // ---------------------------------------------------------------------------
 
 /// Where the top-left window-control cluster starts, in px from the window's
-/// left edge (slopty window-controls.tsx: `left: fullscreen ? 12 : 88`). The
+/// left edge: 88, or 12 in fullscreen. The
 /// frameless hiddenInset chrome puts the macOS traffic lights at {14,15};
 /// fullscreen hides them and the cluster reclaims the inset.
 pub fn titlebar_cluster_start(fullscreen: bool) -> f32 {
@@ -331,7 +332,7 @@ pub fn caption_buttons_width(count: usize) -> f32 {
 }
 
 /// Where the cluster's first button starts, from the window's left edge.
-/// `linux_left_captions` is the number of caption buttons slopty draws at the
+/// `linux_left_captions` is the number of caption buttons Slopty draws at the
 /// top-left on Linux (GNOME `close:…` layouts) — the app cluster follows them
 /// at the shared 2px rhythm.
 pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool, linux_left_captions: usize) -> f32 {
@@ -345,8 +346,8 @@ pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool, linux_left_captio
 }
 
 /// (Re-)apply the whole app keymap: clears every binding, restores the text fields'
-/// map, then binds the customizable shortcuts from `keymap` (feature-inventory
-/// §1.4). Invalid persisted combos fall back to that shortcut's default.
+/// map, then binds the customizable shortcuts from `keymap`. Invalid persisted combos fall
+/// back to that shortcut's default.
 /// Everything is written in US keys and bound where the active keyboard layout
 /// types them (see [`localize_key_bindings`]); re-run on a layout switch.
 pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
@@ -534,7 +535,7 @@ fn localize_binding(
     }
 }
 
-/// The settings sections (feature-inventory §1.5 routes).
+/// The settings sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsSection {
     Devices,
@@ -594,8 +595,7 @@ impl SettingsSection {
         matches!(self, Self::Harnesses | Self::Files)
     }
 
-    /// Sidebar + header label (slopty settings-sidebar.tsx SECTIONS / __root.tsx
-    /// `settingsTitle` — the same strings in both places).
+    /// The section's label, in the settings sidebar and the header alike.
     pub fn label(self) -> &'static str {
         match self {
             SettingsSection::Devices => "Devices",
@@ -604,7 +604,7 @@ impl SettingsSection {
             SettingsSection::Files => "Files",
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Shortcuts => "Shortcuts",
-            SettingsSection::Archived => "Archived sessions", // slopty
+            SettingsSection::Archived => "Archived sessions",
         }
     }
 }
@@ -673,8 +673,7 @@ fn workspace_file_title(path: &str) -> SharedString {
     path.rsplit('/').next().unwrap_or(path).to_string().into()
 }
 
-/// One route-history entry (slopty parity: the renderer's TanStack memory
-/// history — every route the user visited, browser-style).
+/// One route-history entry: a route the person visited, kept browser-style.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavEntry {
     /// A chat route; the id of the selected chat ("" = the new-chat canvas).
@@ -682,8 +681,8 @@ pub enum NavEntry {
     Settings(SettingsSection),
 }
 
-/// Browser-style navigation history for the titlebar back/forward buttons
-/// (slopty window-controls.tsx semantics): every route change pushes an entry;
+/// Browser-style navigation history for the titlebar back/forward buttons:
+/// every route change pushes an entry;
 /// Back/Forward walk the stack without changing it; pushing while behind the
 /// tip truncates the entries ahead (a new branch, exactly like a browser).
 #[derive(Debug)]
@@ -716,9 +715,8 @@ impl NavHistory {
         self.index += 1;
     }
 
-    /// Swap the current entry in place without growing the stack — the native
-    /// equivalent of a `replace: true` navigation (slopty's boot redirect from
-    /// `/` into the last-used chat leaves no dead Back target behind).
+    /// Swap the current entry in place without growing the stack, so a redirect (the boot
+    /// canvas into the last-used chat) leaves no dead Back target behind.
     pub fn replace(&mut self, entry: NavEntry) {
         self.entries[self.index] = entry;
     }
@@ -733,7 +731,7 @@ impl NavHistory {
     }
 
     /// Memory history keeps every entry, so "behind the last entry" is exactly
-    /// "can go forward" (slopty window-controls.tsx).
+    /// "can go forward".
     pub fn can_forward(&self) -> bool {
         self.index + 1 < self.entries.len()
     }
@@ -861,9 +859,9 @@ impl WidthTween {
         }
     }
 
-    /// A panel column moving from `from` to `to` over [`PANEL_RESIZE`]. slopty: one 240 ms
+    /// A panel column moving from `from` to `to` over [`PANEL_RESIZE`]: one 240 ms
     /// whatever the distance, as opencode's panel; the quint ease-out covers a wide move early
-    /// and lands soft, so it no longer needs stretching by distance (item 12).
+    /// and lands soft, so it needs no stretching by distance (item 12).
     fn panel(from: f32, to: f32, now: std::time::Instant) -> Self {
         Self {
             duration: PANEL_RESIZE.total().mul_f32(motion::speed_scale()),
@@ -1243,7 +1241,7 @@ pub struct Shell {
     /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
     /// drag to the compositor (zed's platform-titlebar pattern).
     titlebar_should_move: bool,
-    /// The caption buttons slopty itself draws on Linux under client-side
+    /// The caption buttons Slopty itself draws on Linux under client-side
     /// decorations, per side, already filtered to what the compositor
     /// supports — `None` off Linux or under server decorations (where the WM
     /// draws real buttons). Re-resolved every frame at the top of `render`.
@@ -1362,8 +1360,8 @@ impl Shell {
             _ => Route::Chat,
         };
         // More capture knobs of the same kind: `SLOPTY_OPEN_DIALOG=rename`
-        // opens that dialog for the first chat once chats land (slopty: `add-space` the
-        // add-project palette; no delete, no model menu);
+        // opens that dialog for the first chat once chats land (`add-space` the
+        // add-project palette);
         // `SLOPTY_FORCE_GATE=signin|org|failed` renders that gate regardless of
         // real auth state (display-only — for styling passes).
         let debug_dialog = std::env::var("SLOPTY_OPEN_DIALOG").ok();
@@ -1395,8 +1393,8 @@ impl Shell {
             // first frame's clearance isn't zero (the measure corrects it).
             archived_open: true,
             archived_shown: 0,
-            sidebar_group_shown: std::collections::HashMap::new(), // slopty
-            sidebar_collapsed_groups: sidebar_status::shut_at_first(), // slopty
+            sidebar_group_shown: std::collections::HashMap::new(),
+            sidebar_collapsed_groups: sidebar_status::shut_at_first(),
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -1408,11 +1406,11 @@ impl Shell {
             view_handles: std::collections::HashMap::new(),
             pane_keyboard_pending: false,
             unrestored_tabs: settings.session_tabs.clone(),
-            closed_tabs: Vec::new(),       // slopty
-            last_archive: None,            // slopty
-            open_in: popover::Popup::default(), // slopty
-            past_sessions: past_sessions::PastSessions::default(), // slopty
-            inbox: inbox::Inbox::default(), // slopty
+            closed_tabs: Vec::new(),
+            last_archive: None,
+            open_in: popover::Popup::default(),
+            past_sessions: past_sessions::PastSessions::default(),
+            inbox: inbox::Inbox::default(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -1468,7 +1466,7 @@ impl Shell {
             add_space: None,
             project_crumb_menu: popover::Popup::default(),
             command_palette: None,
-            picker: None, // slopty
+            picker: None,
             search_warm: None,
             recent_files: std::collections::HashMap::new(),
             pending_change: None,
@@ -1493,8 +1491,8 @@ impl Shell {
             active_chat: String::new(),
             active_owner: None,
             sidebar_prev_order: Vec::new(),
-            sidebar_keys: spaces::SidebarKeys::default(), // slopty
-            route_shown: None, // slopty
+            sidebar_keys: spaces::SidebarKeys::default(),
+            route_shown: None,
             sidebar_resort: std::collections::HashMap::new(),
             sidebar_new_keys: std::collections::HashSet::new(),
             resort_epoch: 0,
@@ -1532,7 +1530,7 @@ impl Shell {
             _session_terminal_events: session_terminal_events,
             session_terminal,
             window_ground: Default::default(),
-            landed: None, // slopty
+            landed: None,
             inspector,
             followed_terminal: None,
             new_session: None,
@@ -1673,8 +1671,7 @@ impl Shell {
             self.active_owner = Some((selected.clone(), owner));
             self.active_chat = selected;
             // Route history: a chat switch is a navigation. The very first
-            // selection off the untouched boot canvas REPLACES that entry —
-            // slopty's `/` route redirected into the last-used chat, leaving no
+            // selection off the untouched boot canvas REPLACES that entry, leaving no
             // dead Back target. Walking history lands here too, but the
             // destination already equals `current()`, so the push dedups.
             if matches!(self.route, Route::Chat) {
@@ -3494,13 +3491,10 @@ impl Shell {
         Some(div().flex_none().h_full().w(px(width)).into_any_element())
     }
 
-    /// The header's content row with the animated left inset — the native port
-    /// of slopty __root.tsx `transition-[padding-left] duration-200 ease-out` +
-    /// `style={{ paddingLeft: headerInset }}`: on sidebar toggles (and macOS
-    /// fullscreen flips) the SAME element's padding tweens, so the title
-    /// glides to its new x-position. Route changes SNAP: the tween is killed
-    /// by every route transition (slopty remounts the keyed header variants —
-    /// instant swap, zero horizontal motion).
+    /// The header's content row with the animated left inset: on sidebar toggles (and macOS
+    /// fullscreen flips) the SAME element's padding tweens over 200 ms ease-out, so the title
+    /// glides to its new x-position. Route changes SNAP: every route transition kills the tween
+    /// (an instant swap, no horizontal motion).
     /// Where unified-titlebar content (tabs / the settings label) starts: past
     /// the traffic lights + control cluster, riding the fullscreen inset tween.
     pub(super) fn title_bar_content_start(&self) -> f32 {
@@ -3514,7 +3508,7 @@ impl Shell {
     }
 
     /// Make a titlebar strip drag the window — zed's platform-titlebar
-    /// pattern (slopty's `.drag` region): mark it a [`WindowControlArea::Drag`]
+    /// pattern: mark it a [`WindowControlArea::Drag`]
     /// (macOS app-owned titlebar), hand the drag to the compositor once the
     /// pointer moves with the button down, and double-click zooms.
     fn titlebar_drag_region(
@@ -3674,7 +3668,7 @@ impl Shell {
         )
     }
 
-    /// Which caption buttons slopty itself must draw on Linux: under
+    /// Which caption buttons Slopty itself must draw on Linux: under
     /// client-side decorations (the Wayland default) nobody else will —
     /// without these the window has NO minimize/maximize/close at all.
     /// Server-side decorations (X11 WMs, KDE with SSD) already draw real
@@ -3735,7 +3729,7 @@ impl Shell {
     }
 
     /// Right padding titlebar content needs to clear the platform's caption
-    /// controls (native Windows cluster / slopty-drawn Linux buttons).
+    /// controls (native Windows cluster / Slopty-drawn Linux buttons).
     pub(super) fn titlebar_right_pad(&self, base: f32) -> f32 {
         titlebar_right_padding(
             cfg!(target_os = "windows"),
@@ -4415,7 +4409,7 @@ impl Shell {
                     let archive =
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
                             .id("chat-menu-archive")
-                            .role(gpui::Role::MenuItem) // slopty
+                            .role(gpui::Role::MenuItem)
                             .aria_label("Archive")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.archive_chat(archive_id.clone(), cx)
@@ -4435,7 +4429,7 @@ impl Shell {
                         let open_id = chat_id.clone();
                         let row = popover::menu_row(&theme, false, format!("chat-menu-open-in-{chat_id}"))
                             .id("chat-menu-open-in")
-                            .role(gpui::Role::MenuItem) // slopty
+                            .role(gpui::Role::MenuItem)
                             .aria_label("Open in\u{2026}")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.open_open_in(open_id.clone(), position, cx)
@@ -4464,7 +4458,7 @@ impl Shell {
             overlays.push(overlay);
         }
         overlays.extend(self.render_picker(viewport, window, cx));
-        overlays.extend(self.render_new_session_picker(viewport, window, cx)); // slopty
+        overlays.extend(self.render_new_session_picker(viewport, window, cx));
         overlays.extend(self.render_inbox(window, cx));
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
             overlays.push(overlay);
@@ -4665,7 +4659,7 @@ impl Shell {
                         .child(
                             div()
                                 .id("onboarding-line")
-                                .role(gpui::Role::Label) // slopty
+                                .role(gpui::Role::Label)
                                 .aria_label(line)
                                 .mt(px(6.0))
                                 .text_size(crate::typography::ui_rems(13.0))
@@ -4888,7 +4882,7 @@ impl Shell {
 
     fn render_gate_card(&mut self, error: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        // Backend unreachable: quiet centered copy (slopty Gate `Failed`),
+        // Backend unreachable: quiet centered copy,
         // plus a Retry affordance (the native engine doesn't self-redial).
         let content: AnyElement = div()
                 .flex()
@@ -4929,8 +4923,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .justify_center()
-                    // Keyed per phase (slopty App.tsx `<div key={phase}
-                    // className="animate-in">`): every gate swap replays the
+                    // Keyed per phase: every gate swap replays the
                     // 0.5s entrance instead of mutating one animated element.
                     .child(motion::fade_in(
                         "gate-card-failed",
@@ -4942,7 +4935,7 @@ impl Shell {
 
 }
 
-/// The sign-in gate's faint grid backdrop (slopty styles.css `.bg-grid`):
+/// The gate's faint grid backdrop:
 /// 44px hairlines at white 3.5%, with the radial mask approximated by edge
 /// gradients back into the page background (gpui has no mask-image).
 fn grid_backdrop(theme: &Theme) -> AnyElement {
@@ -5031,8 +5024,7 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A size-6 icon button for the titlebar strip (slopty window-controls.tsx:
-/// `grid size-6 place-items-center rounded-md text-muted-foreground`).
+/// A 24 px icon button for the titlebar strip, its glyph centred in the muted ink.
 // The caller names it with `action_hint` (its tooltip, key and accessible name).
 fn window_control_button(
     id: impl Into<SharedString>,
@@ -5074,8 +5066,7 @@ fn window_control_button_with(
         .items_center()
         .justify_center()
         .rounded(px(6.0))
-        // slopty window-controls.tsx: `transition-colors` — the wash fades; the header
-        // buttons' wash, so the strip's controls agree (M24).
+        // The wash fades, the header buttons' wash, so the strip's controls agree (M24).
         .bg(motion::hover_blend(
             &fade_key,
             crate::theme::wash(0.0),
@@ -5131,7 +5122,7 @@ const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
 const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
 
 /// Right padding for titlebar content: past the native Windows caption
-/// cluster, or past slopty's own Linux caption buttons (10px edge inset +
+/// cluster, or past Slopty's own Linux caption buttons (10px edge inset +
 /// the button row) when the layout puts any on the right.
 fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f32) -> f32 {
     base + if is_windows {
@@ -5185,7 +5176,7 @@ fn windows_caption_button(
         .child(glyph)
 }
 
-/// A Linux caption button in slopty's own cluster style (24px, rounded-6,
+/// A Linux caption button in Slopty's own cluster style (24px, rounded-6,
 /// 16px linear icon). gpui's `WindowControlArea` hit-testing is inert on
 /// Linux, so unlike the Windows cluster these carry explicit click handlers
 /// (`minimize_window` / `zoom_window` / `remove_window`), the same calls
@@ -5237,8 +5228,7 @@ fn linux_caption_button(
         )
 }
 
-/// A size-7 icon button for the main-panel header (slopty __root.tsx:
-/// `grid size-7 place-items-center rounded-md text-muted-foreground`).
+/// A 28 px icon button for the main-panel header, its glyph centred in the muted ink.
 // The caller names it with `action_hint` (its tooltip, key and accessible name).
 fn header_icon_button(
     id: &'static str,
@@ -5272,8 +5262,7 @@ fn header_icon_button_with(
         .items_center()
         .justify_center()
         .rounded(px(6.0))
-        // slopty __root.tsx header buttons: `transition-colors`.
-        // The theme's one table of wash steps, as every icon toggle's
+        // The wash fades, from the theme's one table of wash steps, as every icon toggle's
         // (`surface_chrome::icon_button_frame`): a latched button under the pointer still
         // answers, a step past its latch.
         .bg({
@@ -5787,7 +5776,7 @@ impl Render for Shell {
                             .into_any_element(),
                         None => self.render_titlebar_cluster(cx),
                     })
-                    .children(compact_inspector) // slopty
+                    .children(compact_inspector)
                     .children(overlays);
                 let session = matches!(self.route, Route::Chat) && {
                     let state = self.state.read(cx);
@@ -6223,7 +6212,7 @@ mod tests {
 
     #[test]
     fn titlebar_cluster_matches_slopty_window_controls() {
-        // slopty window-controls.tsx: `left: fullscreen ? 12 : 88` — the
+        // 88, or 12 in fullscreen: the
         // cluster clears the {14,15} traffic lights, and reclaims the inset
         // when fullscreen hides them.
         assert_eq!(titlebar_cluster_start(false), 88.0);
@@ -6323,7 +6312,7 @@ mod tests {
     #[test]
     fn nav_push_truncates_the_forward_branch() {
         // a → b → c, back to a, then push d: the b/c branch is gone (browser
-        // semantics — slopty's memory history PUSH truncates entries ahead).
+        // semantics: a push truncates the entries ahead).
         let mut nav = NavHistory::new(chat("a"));
         nav.push(chat("b"));
         nav.push(chat("c"));
@@ -6592,7 +6581,7 @@ mod exit_regressions {
         window
             .update(cx, |shell, _, cx| {
                 // Toggles that write the store directly (the notification and diff switches,
-                // ...). slopty: Compact mode and Esc-to-stop are no longer settings.
+                // ...).
                 settings::update(SavePolicy::Immediate, cx, |s| {
                     s.notifications_enabled = !before.notifications_enabled;
                     s.diff_wrap = !before.diff_wrap;

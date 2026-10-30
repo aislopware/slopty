@@ -1,8 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
-//! Synced entity rows (workspace doc) and local projections.
-//!
-//! In slopty these were synced Postgres rows; in slopty they live in the per-org
-//! workspace Loro doc (see ARCHITECTURE.md §2.2) with the same field surface.
+//! The entities the view model serves the shell: devices, projects (spaces), chats and their
+//! sessions, the links to the server, and the requests and answers of a machine's files, git,
+//! pull requests, project actions and terminals.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,8 +15,7 @@ pub struct Device {
     pub name: String,
     pub platform: String,
     pub last_seen_at: Option<DateTime<Utc>>,
-    /// First registration time (slopty devices.created_at — the Devices page
-    /// "Added …" fragment). Optional so pre-existing docs stay readable.
+    /// First registration time, for the Devices page's "Added …" fragment.
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     /// App version the device's engine last booted with — fleet staleness at a
@@ -174,7 +172,7 @@ pub struct Chat {
     pub last_message_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     /// Harness-native session id of the chat's latest run — engine-owned resume
-    /// continuity across engine restarts (slopty's `chats.harness_session_id`).
+    /// continuity across engine restarts.
     /// Empty string = explicit
     /// "do not resume" tombstone after a rejected resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]

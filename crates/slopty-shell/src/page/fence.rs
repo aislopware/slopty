@@ -1,5 +1,5 @@
-//! slopty: a chart fence in a reply (```` ```vega-lite ````, ```` ```vega ````,
-//! ```` ```plotly ````) drawn as a page of its own (Slopty's own; not in zeron).
+//! A chart fence in a reply (```` ```vega-lite ````, ```` ```vega ````, ```` ```plotly ````)
+//! drawn as a page of its own.
 //!
 //! The fence's JSON becomes a page card like any page an agent shows, its key
 //! `slopty-fence:{row}-chart-{n}`: the view model reads the fence here ([`fence`]) and builds

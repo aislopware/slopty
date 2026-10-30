@@ -8,7 +8,7 @@ description = "GPU rendering for agent visuals: shaders and 3D scenes drawn offs
 
 [dependencies]
 slopty-visual = { path = "../slopty-visual" }
-# Already GPUI's renderer on Linux; here it draws offscreen on every desktop. slopty: the
+# Already GPUI's renderer on Linux; here it draws offscreen on every desktop. The
 # workspace's, at the revision GPUI builds (one wgpu in the graph).
 wgpu = { workspace = true, features = ["glsl"] }
 pollster = "1.0"
@@ -18,8 +18,7 @@ tracing.workspace = true
 # Test textures and environment maps.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
-# slopty: upstream code that clippy 1.99's defaults flag, allowed by name rather than edited, so
-# the copy stays diffable (docs/decisions/ui.md).
+# Clippy lints this code trips, allowed by name.
 [lints.clippy]
 chunks_exact_to_as_chunks = "allow"
 manual_slice_fill = "allow"

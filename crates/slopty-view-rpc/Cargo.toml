@@ -6,8 +6,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# slopty: device rooms, sync and the WebSocket transport are cut, and with them slopty-view-proto,
-# anyhow, uuid and the slopty-view-doc the device-room tests used.
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -20,7 +18,3 @@ tracing = "0.1"
 
 # Deterministic stalled-transport deadlines.
 tokio = { version = "1", features = ["full", "test-util"] }
-
-# slopty: upstream docs that Slopty's rustdoc check (private items, warnings denied) trips.
-[lints.rustdoc]
-broken_intra_doc_links = "allow"

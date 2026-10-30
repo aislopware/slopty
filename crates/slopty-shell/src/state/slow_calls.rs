@@ -1,4 +1,4 @@
-//! slopty: a call the person waits on that runs past ten seconds says so in one toast ("Waiting
+//! A call the person waits on that runs past ten seconds says so in one toast ("Waiting
 //! on studio · List folders"), which goes when the call answers. Calls meant to run long
 //! (watches, streams, clones, installs, updates, attachment reads, a device being set up) never raise it.
 //!

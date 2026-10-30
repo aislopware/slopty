@@ -1,20 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! Session doc schema over `loro` — Rust port of `packages/session-doc/src/schema.ts`.
-//!
-//! Container layout (MUST stay shape-compatible with the TS edge/tail materializer):
-//! - `meta`:     LoroMap  { chatId: string, schemaVersion: number }         (host-only writer)
-//! - `messages`: LoroList of LoroMap {
-//!   id, role, parts: LoroList<part map>, createdAt, deviceId, status?,
-//!   continuationOf?, durationMs? }
-//! - `commands`: LoroList of LoroMap {
-//!   id, kind, payload(json), issuedBy, issuedAt, basedOn?, expiresAt?, status, resolution? }
-//! - `queue`:    LoroMovableList of LoroMap {
-//!   id, text, attachments?, issuedBy, issuedAt, editedAt? }        (any device writes)
-//!
-//! Part maps: { id, kind: "text"|"reasoning"|"tool"|"input"|"error"|"image", text?: LoroText,
-//! reasoning?: LoroText, call?: json, isError?, questions?: json, resolved?, message? }.
-//! Text bodies are **LoroText** so streaming appends RLE-merge (1.03x oplog overhead vs
-//! 125x for whole-value rewrites).
+//! A transcript's entry: a message of the person's, or an answer of the agent's with its parts,
+//! as the view model's transcript watch (`WatchDocMessages`) carries it.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +14,7 @@ pub enum MessageRole {
     System,
 }
 
-/// One entry in the doc's `messages` list (`SessionMessageEntry` in TS).
+/// One entry of a transcript.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMessageEntry {
@@ -43,8 +29,7 @@ pub struct SessionMessageEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_of: Option<String>,
     /// Wall-clock length of this assistant turn, stamped when the segment
-    /// finishes. Absent on user rows, live streams, and docs written before
-    /// the field existed.
+    /// finishes. Absent on user rows and live streams.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
 }

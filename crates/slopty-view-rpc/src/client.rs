@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Client side: request/stream multiplexing over string frames + the WebSocket dialer.
+//! Client side: calls and streams multiplexed over one pair of string channels.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,9 +10,9 @@ use tokio::sync::{mpsc, oneshot};
 use crate::{ClientFrame, RpcError, ServerFrame};
 
 /// Per-stream queue depth. Bounded: route_frame awaits a full queue, pausing
-/// the connection reader — transport backpressure instead of unbounded growth
-/// when a consumer stalls behind a fast producer (watch frames every 120ms
-/// during streaming used to pile up whole-transcript payloads here).
+/// the connection reader — backpressure rather than unbounded growth when a
+/// consumer stalls behind a fast producer, such as a transcript's watch while
+/// a turn streams.
 const STREAM_QUEUE_CAP: usize = 256;
 
 enum Pending {
@@ -34,8 +34,8 @@ impl Shared {
     }
 }
 
-/// A multiplexing RPC client over any string-frame duplex ([`crate::memory_client`] or
-/// [`connect_ws`]). Cheap to clone-by-Arc internally; use one per connection.
+/// A multiplexing RPC client over a string-frame duplex ([`crate::memory_client`], or a
+/// test's own through [`RpcClient::new`]); use one per connection.
 pub struct RpcClient {
     out: mpsc::Sender<String>,
     shared: Arc<Shared>,
@@ -169,7 +169,7 @@ impl RpcClient {
         serde_json::from_value(value).map_err(|e| RpcError::BadParams(e.to_string()))
     }
 
-    /// Legacy streaming request. Cancellation on receiver drop is only detected
+    /// Streaming request. Cancellation on receiver drop is only detected
     /// when another item arrives. Prefer `subscribe_scoped` for owned streams.
     pub async fn subscribe(
         &self,
@@ -222,8 +222,8 @@ impl RpcClient {
 
     /// Streaming request with a server acknowledgement before returning.
     ///
-    /// Use this for optional/versioned stream methods: an older server's
-    /// `unknown method` is returned distinctly instead of looking like an empty stream.
+    /// Use this for a stream the service may not answer: its `unknown method` comes back
+    /// as an error rather than looking like an empty stream.
     pub async fn subscribe_checked(
         &self,
         method: &str,

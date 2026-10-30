@@ -390,8 +390,9 @@ mod tests {
     }
 
     /// What one start costs, `FSEVENTS_STARTS` times (5 unless set). Run several at once to see
-    /// fseventsd take the starts one at a time: `for i in 1 2 3 4; do cargo nextest run -p
-    /// slopty-worker --lib --run-ignored only one_start_after_another --no-capture & done`.
+    /// fseventsd take the starts one at a time: `for i in 1 2 3 4; do
+    /// cargo nextest run -p slopty-worker --lib --run-ignored only one_start_after_another
+    /// --no-capture & done`.
     #[test]
     #[ignore = "a measurement: cargo nextest run -p slopty-worker --lib --run-ignored only one_start_after_another --no-capture"]
     fn one_start_after_another() {

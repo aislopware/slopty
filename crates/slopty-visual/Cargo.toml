@@ -10,7 +10,7 @@ description = "Sandboxed Luau runtime for agent visuals: scripts build a native 
 # Luau, vendored and built by `cc` (`luau0-src`); it builds and runs on iOS too
 # (docs/decisions/ui.md, "Agent visuals adopted").
 mlua = { version = "0.12.2", features = ["luau"] }
-# The GLSL compiler wgpu uses, so a shader is validated exactly as it will run. slopty: the
+# The GLSL compiler wgpu uses, so a shader is validated exactly as it will run. The
 # workspace's, at the wgpu revision GPUI builds (one naga in the graph).
 naga = { workspace = true, features = ["glsl-in"] }
 # glTF models (`s:model`): `.glb` or self-contained `.gltf`.
@@ -21,7 +21,6 @@ thiserror.workspace = true
 # Images embedded in glTF models as data URIs.
 base64 = "0.23"
 
-# slopty: upstream code that clippy 1.99's defaults flag, allowed by name rather than edited, so
-# the copy stays diffable (docs/decisions/ui.md).
+# Clippy lints this code trips, allowed by name.
 [lints.clippy]
 chunks_exact_to_as_chunks = "allow"

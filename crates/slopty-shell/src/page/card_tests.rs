@@ -1,4 +1,4 @@
-//! slopty: a page's card as assistive tech reads it: a PDF's first page, a CSV's table, the
+//! A page's card as assistive tech reads it: a PDF's first page, a CSV's table, the
 //! header's actions, and the line it leaves while its page shows in the pane. Each test draws a
 //! real card in a test window, its page served by a stand-in host, and judges by the
 //! accessibility tree.

@@ -1,4 +1,4 @@
-//! slopty: the words a changed line changed, lit inside it (Hunk's and AgentCraft's intraline
+//! The words a changed line changed, lit inside it (Hunk's and AgentCraft's intraline
 //! marks; `.research/design-inspiration-2026-10-19.md` item 14). In a run of deleted lines followed
 //! by a run of added ones, each at most [`MOST_PAIRED`] long, each deleted line pairs, in order,
 //! with the added line most like it: lines are split into words, spaces and single marks, and two

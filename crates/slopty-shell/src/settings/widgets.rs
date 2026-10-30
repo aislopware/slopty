@@ -254,7 +254,7 @@ pub fn rail<V: 'static>(
     reach: impl Fn(&mut V) -> &mut PageScroll + Copy + 'static,
 ) -> Option<AnyElement> {
     let metrics = scroll.metrics()?;
-    popover::schedule_scrollbar_hide(&mut scroll.bar, move |view: &mut V| &mut reach(view).bar, cx); // slopty
+    popover::schedule_scrollbar_hide(&mut scroll.bar, move |view: &mut V| &mut reach(view).bar, cx);
     let (now, reduced) = (cx.frame_time(), cx.reduce_motion());
     let strip = scroll.bar.render_rail(theme, metrics, now, reduced)?;
     // Its fade is the shell rail's, a GPUI animation from the linger's wake.

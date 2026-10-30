@@ -16,5 +16,3 @@ ttf-parser.workspace = true
 # data;
 # a face is only parsed (and its pages touched) once something uses it.
 bundled = [  ]
-
-# slopty: no dev-dependencies: tiny-skia drew only the examples, which are not taken.

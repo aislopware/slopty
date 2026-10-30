@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Durable command ledger — port of `packages/session-doc/src/commands.ts`.
+//! A session's durable command ledger: run, steer, interrupt and input-answer commands with
+//! their outcomes, and [`evaluate_command`], which decides what to do with one.
 //!
-//! Rules (verbatim from slopty's design):
+//! Rules:
 //! 1. Each device inserts only its own entries; entries are append-only and immutable.
 //! 2. The chat's HOST is the sole writer of command outcomes; a composer may only set
 //!    `cancelled` on its own still-pending entries.

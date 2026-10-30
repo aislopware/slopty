@@ -1,8 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
-//! slopty-view-proto — wire types shared by engine, UI, and RPC.
-//!
-//! Ported from slopty's `packages/control/src/wire.ts` + `packages/harness/src/types.ts`.
-//! Context occupancy is replicated per chat; billing `Usage` remains a harness passthrough.
+//! slopty-view-proto — the wire types the shell and its view model share: devices, projects,
+//! chats and sessions with what the shell asks of a machine's files, git and terminals
+//! ([`entities`]), what an agent does ([`agent`]), and the derivations every surface draws
+//! alike ([`view`]).
 
 pub mod agent;
 pub mod change_request_assessment;

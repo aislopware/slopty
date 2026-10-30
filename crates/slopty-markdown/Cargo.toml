@@ -7,8 +7,7 @@ publish.workspace = true
 
 # Block-level markdown model + append-incremental reparse. Shared by the gpui
 # desktop transcript and the mobile layout core, so it stays UI-free.
-# slopty: upstream code that clippy 1.99's defaults flag, allowed by name rather than edited, so
-# the copy stays diffable (`vendor/slopty/README.md`).
+# Clippy lints this code trips, allowed by name.
 [lints.clippy]
 enum_variant_names = "allow"
 

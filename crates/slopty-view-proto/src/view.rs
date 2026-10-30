@@ -37,8 +37,8 @@ pub enum Indicator {
 }
 
 /// A `Working`/`AwaitingInput` session older than this is treated as dead — a
-/// crashed backend must never show an eternal "Working" (feature-inventory
-/// §1.12). Engines heartbeat sessions well inside this window.
+/// crashed backend must never show an eternal "Working". Engines heartbeat sessions well
+/// inside this window.
 pub const SESSION_STALE_MS: i64 = 45_000;
 
 /// Staleness-checked indicator for a session row. Pure.
@@ -178,7 +178,7 @@ pub fn sort_chats(chats: &mut [Chat]) {
 // Boot gate
 // ---------------------------------------------------------------------------
 
-/// The app gate (slopty's App.tsx phases). Pure.
+/// The app gate's phase: what the window shows before the shell. Pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatePhase {
     /// Booting / probing — splash covers this.
@@ -341,8 +341,7 @@ pub fn group_chats<'a>(chats: impl IntoIterator<Item = &'a Chat>) -> Vec<ChatGro
     groups
 }
 
-/// Compact relative time ("now", "5m", "3h", "2d", "1w", …) — no "ago" suffix;
-/// port of slopty's `formatTimeAgo`.
+/// Compact relative time ("now", "5m", "3h", "2d", "1w", …) — no "ago" suffix.
 pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let s = now.signed_duration_since(then).num_seconds().max(0);
     // Under a minute reads as "now" — otherwise 45–59s floors to a bare "0m".
@@ -372,7 +371,7 @@ pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     format!("{}y", d / 365)
 }
 
-/// Session-row sub-line, "project · branch" (slopty `chatLocation`): the repo
+/// Session-row sub-line, "project · branch": the repo
 /// checkout identity. Either part may be missing; empty when both are. A
 /// projectless chat names no project and no folder.
 pub fn chat_location(chat: &Chat) -> Option<String> {
@@ -410,8 +409,8 @@ pub fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Per-kind chip label + one-line detail. Labels match slopty's `describeTool`
-/// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
+/// Per-kind chip label + one-line detail, one derivation for every surface that names a
+/// tool.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
     let (label, detail) = tool_chip_content_raw(call);
     (label, single_line(&detail))

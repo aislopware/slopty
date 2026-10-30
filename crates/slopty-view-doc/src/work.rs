@@ -1,5 +1,4 @@
-//! slopty: a chat's background work, as the inspector's list of what runs reads it (Slopty's
-//! own; not in zeron).
+//! A chat's background work, as the inspector's list of what runs reads it.
 //!
 //! The view model serves it on `slopty.WatchWork` ([`crate::calls::WATCH_WORK`]) for one chat:
 //! one [`WorkTray`] each time anything in it changes. It is the agent's own background tasks

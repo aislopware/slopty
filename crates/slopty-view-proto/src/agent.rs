@@ -185,9 +185,8 @@ pub struct RunRequest {
     /// Absolute paths of image attachments already staged on the run device
     /// (composer uploads: UploadChunk/UploadCommit → durable path). The same
     /// paths also ride the prompt text as `Attached images (local files …)`
-    /// refs (slopty's `withAttachments` transport — that's what persists in the
-    /// doc); this field additionally lets a harness inline the bytes as image
-    /// content blocks. Additive + serde-defaulted for wire compat.
+    /// refs; this field also lets a harness inline the bytes as image content
+    /// blocks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
     /// Host-side isolated-worktree creation (see [`WorktreeSpec`]): when set,
@@ -638,8 +637,6 @@ pub enum DoneStatus {
 }
 
 /// The normalized streaming event every harness emits.
-///
-/// Mirrors slopty's `AgentEvent` tagged enum.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AgentEvent {

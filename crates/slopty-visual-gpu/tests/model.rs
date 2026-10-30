@@ -1,4 +1,4 @@
-//! slopty: a glTF model drawn by `s:model`, on the software renderer and on the GPU, judged by
+//! A glTF model drawn by `s:model`, on the software renderer and on the GPU, judged by
 //! numbers: the image's size, and how many of its pixels the model covers.
 
 use std::collections::HashMap;

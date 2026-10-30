@@ -401,8 +401,7 @@ impl TerminalPanel {
     }
 
     /// The chat's host device when it differs from the connected engine's own —
-    /// the PTY lives on the chat's device (feature-inventory §2.1 "terminals
-    /// live on the chat's host device"), so every terminal RPC for a remote
+    /// the PTY lives on the chat's device, so every terminal RPC for a remote
     /// chat needs the `targetDeviceId` passthrough. Without it the local
     /// engine checks the chat's cwd against its OWN filesystem and fails with
     /// "Session working directory is unavailable" (user report).
@@ -509,11 +508,11 @@ impl TerminalPanel {
         tabs.tabs.iter().find(|tab| tab.key == key)?.terminal_id.as_deref()
     }
 
-    /// OpenTerminal, then show the session's view. slopty: the view streams
+    /// OpenTerminal, then show the session's view. The view streams
     /// its own session; nothing is subscribed here. `again` names a terminal
     /// the tab showed when the app last ran, which it shows again, or closes
     /// when it has ended.
-    #[expect(clippy::too_many_arguments, reason = "slopty: zeron's open plus the one again")]
+    #[expect(clippy::too_many_arguments, reason = "an open's arguments plus the terminal to show again")]
     fn spawn_session(
         chat: String,
         key: u64,
@@ -750,7 +749,7 @@ impl Render for TerminalPanel {
             .unwrap_or_default();
         let look = TerminalLook::of(cx);
         let hosted = id.and_then(|id| live::terminal(&id, &look, cx));
-        self.drawn = hosted.as_ref().map(|hosted| hosted.view.clone()); // slopty
+        self.drawn = hosted.as_ref().map(|hosted| hosted.view.clone());
         // The hold follows the view shown, and lets go of one no longer shown.
         let shown = hosted.as_ref().map(|hosted| hosted.view.entity_id());
         if let Some(was) = self.held_view.filter(|was| Some(*was) != shown) {

@@ -1,4 +1,4 @@
-//! slopty: a copy control's glyph that answers a copy with a check drawn in, not swapped in
+//! A copy control's glyph that answers a copy with a check drawn in, not swapped in
 //! (HextaUI's button state; `.research/design-inspiration-2026-10-19.md` item 12). The copy glyph
 //! fades over [`COPY_FADE`] while the check waits, then the check is drawn stroke by stroke over
 //! 180 ms, 180 ms in, in the success green; the copy glyph comes back once the control's "Copied"

@@ -1,5 +1,5 @@
-//! slopty: a page an agent shows inline (Slopty's own `show_page`, an MCP App's UI, an `.html` or
-//! `.svg` file), as the transcript's page card reads it (Slopty's own; not in zeron).
+//! A page an agent shows inline (Slopty's own `show_page`, an MCP App's UI, an `.html` or `.svg`
+//! file), as the transcript's page card reads it.
 //!
 //! The card is the shell's (`slopty_shell::page`); the web view in it is the app's, handed over by
 //! the page key [`PageCard::page`] through `slopty_shell::live`, as a terminal's is. What the page

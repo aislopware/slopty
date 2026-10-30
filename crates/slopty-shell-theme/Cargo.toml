@@ -5,8 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# slopty: upstream code that clippy 1.99's defaults flag, allowed by name rather than edited, so
-# the copy stays diffable (`vendor/slopty/README.md`).
+# Clippy lints this code trips, allowed by name.
 [lints.clippy]
 derivable_impls = "allow"
 if_same_then_else = "allow"
@@ -14,7 +13,6 @@ too_many_arguments = "allow"
 
 [dependencies]
 data-encoding.workspace = true
-# slopty: theme import is gone with the theme library, and json5, plist and anyhow with it.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

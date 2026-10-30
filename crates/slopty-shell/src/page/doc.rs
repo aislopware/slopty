@@ -1,5 +1,5 @@
-//! slopty: files a page card draws itself rather than in a web view (Slopty's own; not in
-//! zeron): a PDF's pages, drawn by `PDFKit` in the app, and a CSV or TSV file's table.
+//! Files a page card draws itself rather than in a web view: a PDF's pages, drawn by `PDFKit` in
+//! the app, and a CSV or TSV file's table.
 //!
 //! A PDF shows its first page in the card, fitted whole within the inline cap, labelled
 //! "page 1 of N"; the pane shows every page. A table shows its first rows in the card in the

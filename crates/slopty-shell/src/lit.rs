@@ -1,4 +1,4 @@
-//! slopty: the person's message as a faintly lit surface, after Amp's "alchemy glow"
+//! The person's message as a faintly lit surface, after Amp's "alchemy glow"
 //! (`.research/amp-study-2026-10-19.md`, item 4). Over the bubble's wash lie three soft
 //! glows: the theme's accent high on the left, and a cool blue and a warm clay rising from
 //! beyond its right edge. In dark, a hairline of the text's own ink rings it. A high-contrast

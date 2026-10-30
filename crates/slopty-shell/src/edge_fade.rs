@@ -86,7 +86,7 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         band_top: None,
         band_bottom: None,
         inset_top: 0.0,
-        inset_bottom: 0.0, // slopty
+        inset_bottom: 0.0,
         outset_bottom: 0.0,
         top,
         bottom,
@@ -97,8 +97,8 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         scroll_x: None,
         smooth_overflow_x: false,
         grow_x: false,
-        hidden_y: None, // slopty
-        clear_right: 0.0, // slopty
+        hidden_y: None,
+        clear_right: 0.0,
         child: child.into_any_element(),
     }
 }
@@ -108,7 +108,7 @@ pub struct EdgeFaded {
     band_top: Option<f32>,
     band_bottom: Option<f32>,
     inset_top: f32,
-    inset_bottom: f32, // slopty
+    inset_bottom: f32,
     outset_bottom: f32,
     top: bool,
     bottom: bool,
@@ -379,11 +379,11 @@ impl EdgeFaded {
         let fade = (top || bottom || left || right).then(|| {
             let mut bounds = bounds;
             bounds.size.width += px(outset_right);
-            bounds.size.width = (bounds.size.width - px(self.clear_right)).max(px(0.0)); // slopty
+            bounds.size.width = (bounds.size.width - px(self.clear_right)).max(px(0.0));
             let inset = px(self.inset_top).min(bounds.size.height);
             bounds.origin.y += inset;
             bounds.size.height -= inset;
-            bounds.size.height -= px(self.inset_bottom).min(bounds.size.height); // slopty
+            bounds.size.height -= px(self.inset_bottom).min(bounds.size.height);
             bounds.size.height += px(self.outset_bottom);
             bounds.size.height = bounds.size.height.max(px(0.0));
             EdgeFade {

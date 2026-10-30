@@ -1,4 +1,4 @@
-//! slopty: the inbox (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a
+//! The inbox (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a
 //! feed"): the titlebar's eye, with a dot while anything calls, and behind it a list of what
 //! needs the person, what failed and what finished unseen, across every project and machine,
 //! then what is at work. Ordered by how loud each calls ([`super::marks::Mark::urgency`]), each

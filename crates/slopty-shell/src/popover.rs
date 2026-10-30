@@ -1,7 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Popover / menu primitives: an anchored floating layer with the `menu-in`
 //! animation, outside-click dismissal, and pure keyboard-navigation + search
-//! reducers shared by every picker and menu (feature-inventory §1.12 popovers).
+//! reducers shared by every picker and menu.
 //!
 //! gpui pattern (examples/popover.rs at the pinned rev): the trigger element
 //! conditionally children a `deferred(anchored().child(content))` — deferred
@@ -97,7 +97,7 @@ impl<T> Default for Popup<T> {
 impl<T> Popup<T> {
     pub fn open(&mut self, value: T) {
         self.inner = Some((value, None));
-        self.return_focus = None; // slopty
+        self.return_focus = None;
     }
 
     /// [`Self::open`] for a menu that takes the keyboard into `menu_focus`: once it
@@ -352,7 +352,7 @@ pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
 // Elements
 // ---------------------------------------------------------------------------
 
-/// The floating-menu surface (slopty `.glass-surface` + `menuSurface`):
+/// The floating-menu surface:
 /// Shared floating surface used by palettes, popovers, dropdowns and menus.
 /// Mount helpers supply the same 16px backdrop blur as the composer.
 /// Corner radius must match the frost wrapper's mask.
@@ -1010,9 +1010,9 @@ fn modal_with(
     .into_any_element()
 }
 
-/// One menu row (slopty `menuItem`): `gap-2.5 rounded-lg px-2 py-1.5
+/// One menu row: `gap-2.5 rounded-lg px-2 py-1.5
 /// text-[13px]`, active = `bg-white/10 text-foreground`, hover wash
-/// `white/[0.08]` fading over `transition-colors` (floating-styles.ts) via the
+/// `white/[0.08]` fading over `transition-colors` via the
 /// per-`fade_key` [`motion::hover_blend`]. The caller adds the id/click
 /// listener — `fade_key` must be unique app-wide and stable across frames
 /// (the id string is a good choice).
@@ -1053,7 +1053,7 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
 
 /// [`menu_row`] with a distinct keyboard-navigation highlight: a selected row
 /// carries the full `bg-white/10` wash, the keyboard cursor the lighter
-/// `bg-white/[0.08]` (slopty's `data-[highlighted]` styling) — two selected-
+/// `bg-white/[0.08]` — two selected-
 /// looking rows never appear at once.
 pub fn menu_row_nav(
     theme: &Theme,
@@ -1088,8 +1088,8 @@ pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
         .child(SharedString::from(label.to_owned()))
 }
 
-/// Hairline divider between menu sections (slopty `MenuSeparator`:
-/// `mx-1 my-1 h-px bg-white/[0.07]`).
+/// Hairline divider between menu sections
+/// (`mx-1 my-1 h-px bg-white/[0.07]`).
 pub fn menu_separator() -> gpui::Div {
     // Full-bleed: negative margins cancel the card's inset so the hairline
     // runs border to border (user request).
@@ -1447,8 +1447,7 @@ pub fn picker_divider() -> gpui::Div {
         .bg(hairline(0.08))
 }
 
-/// A bordered trailing menu section (slopty picker action groups /
-/// branch-picker worktree block: `mt-1 flex flex-col gap-0.5 border-t
+/// A bordered trailing menu section (a picker's action group: `mt-1 flex flex-col gap-0.5 border-t
 /// border-white/[0.06] pt-1` — the hairline runs edge-to-edge of the card's
 /// p-1 inset, unlike [`menu_separator`]'s mx-1).
 pub fn menu_section() -> gpui::Div {
@@ -1463,7 +1462,7 @@ pub fn menu_section() -> gpui::Div {
 }
 
 // ---------------------------------------------------------------------------
-// Dialog primitives (slopty dialog.tsx / sidebar dialogs.tsx)
+// Dialog primitives
 // ---------------------------------------------------------------------------
 
 /// Centered dialog with the shared popover surface. A filled drop shadow
@@ -1517,7 +1516,7 @@ pub fn dialog_field(input: AnyElement) -> gpui::Div {
 }
 
 /// Ghost button (`btnGhost`): quiet text, hover wash fading over
-/// `transition-colors` (slopty dialogs.tsx). Caller adds id + click; `fade_key`
+/// `transition-colors`. Caller adds id + click; `fade_key`
 /// as in [`menu_row`].
 pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) -> gpui::Div {
     let fade_key = fade_key.into();
@@ -1583,8 +1582,8 @@ pub fn btn_danger(theme: &Theme, label: &str) -> gpui::Div {
         .child(SharedString::from(label.to_string()))
 }
 
-/// Pulsing skeleton rows shown while a list loads (slopty:
-/// `h-7 animate-pulse rounded-md bg-white/[0.04]`).
+/// Pulsing skeleton rows shown while a list loads
+/// (`h-7 animate-pulse rounded-md bg-white/[0.04]`).
 pub fn skeleton_rows(
     _id: &'static str,
     _theme: &Theme,
@@ -2082,7 +2081,7 @@ impl MenuScrollbarState {
 /// scroll motion instead of sticking until the next unrelated render. Call
 /// once per render after the rail's activity note
 /// ([`MenuScrollbarState::note_scroll`] / [`MenuScrollbarState::note_scroll_offset`]);
-/// one wake per motion. slopty: the fade begins as the wake runs, and `reach` finds `bar` on
+/// one wake per motion. The fade begins as the wake runs, and `reach` finds `bar` on
 /// the view then.
 pub fn schedule_scrollbar_hide<T: 'static>(
     bar: &mut MenuScrollbarState,

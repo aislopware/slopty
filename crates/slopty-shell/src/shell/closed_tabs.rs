@@ -1,4 +1,4 @@
-//! slopty: the views closed last, opened again (⇧⌘T, as a browser does). The window keeps the
+//! The views closed last, opened again (⇧⌘T, as a browser does). The window keeps the
 //! last twenty it closed, in the form a session's panes are kept across launches (`kept_tabs`),
 //! each with the session it stood beside; the key brings back the newest closed beside the
 //! session shown, docked at its right with the keyboard. A shell is not kept: closing it ends

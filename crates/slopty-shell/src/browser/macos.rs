@@ -10,7 +10,7 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel,
 };
-use objc2_app_kit::{NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSScreen, NSView}; // slopty
+use objc2_app_kit::{NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSScreen, NSView};
 use objc2_foundation::{
     NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSObject,
     NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString,
@@ -121,7 +121,7 @@ impl BrowserData {
     }
 }
 
-/// What Safari adds to WebKit's user agent (slopty): its version, read from the Safari on this
+/// What Safari adds to WebKit's user agent: its version, read from the Safari on this
 /// Mac, and the WebKit build Safari has said since it froze it.
 fn safari_user_agent() -> String {
     const PLIST: &str = "/Applications/Safari.app/Contents/Info.plist";

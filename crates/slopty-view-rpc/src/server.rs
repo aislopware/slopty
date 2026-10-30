@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Server side: dispatch loop over string frames + the WebSocket acceptor.
+//! Server side: the dispatch loop over string frames.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ pub async fn serve_connection(
 ) {
     let mut running: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
     while let Some(payload) = inbound.recv().await {
-        // ndjson: a transport may batch several frames per message.
+        // One frame per line; a message may carry several.
         for line in payload.lines() {
             let line = line.trim();
             if line.is_empty() {

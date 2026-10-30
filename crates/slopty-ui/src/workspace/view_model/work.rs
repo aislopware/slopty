@@ -1,4 +1,4 @@
-//! slopty: what a chat's thread says beside its transcript: its tray of background work and its
+//! What a chat's thread says beside its transcript: its tray of background work and its
 //! dock ([`slopty_view_doc::calls`]), read-only. The agent's TUI does everything that acts on
 //! them (`docs/decisions/agents.md`, "TUI-first").
 

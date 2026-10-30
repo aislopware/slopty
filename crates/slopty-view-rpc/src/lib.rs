@@ -1,17 +1,16 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! slopty-view-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
-//! transports.
+//! slopty-view-rpc — the calls the shell makes of Slopty's view model
+//! (`slopty_ui::view_model::ViewModel`), in process.
 //!
-//! Framing: ndjson envelopes, one JSON object per WebSocket text message (or per line on
-//! byte transports), matching the shape of slopty's Effect RPC without the Effect runtime:
+//! A call is a JSON envelope on a pair of string channels, one object per line:
 //!
 //! - client → server: `{id, method, params}` to invoke, `{id, cancel: true}` to stop a stream;
 //! - server → client: `{id, ok}` / `{id, err}` for unary calls,
 //!   `{id, item}`* then `{id, done: true}` (or `{id, err}`) for streams.
 //!
-//! The server dispatches into an [`RpcService`]; the [`RpcClient`] offers `call` and
-//! `subscribe`. Both ends run over any pair of string channels, so the in-memory transport
-//! ([`memory_client`]) exercises the exact same code path as the WebSocket one.
+//! The server dispatches into an [`RpcService`]; the [`RpcClient`] offers `call` and the
+//! subscriptions. [`memory_client`] joins the two over in-process channels, the one transport;
+//! a test hands [`RpcClient::new`] a duplex of its own.
 
 use std::sync::Arc;
 
@@ -25,8 +24,8 @@ mod server;
 pub use client::{RpcClient, RpcSubscription};
 pub use server::serve_connection;
 
-/// RPC method names — single source of truth for both ends.
-/// Full surface: docs/research/feature-inventory.md §2.
+/// The method names the shell calls and the view model answers, one list for both ends;
+/// `slopty_view_doc::calls` names the view model's own calls beyond these.
 pub mod methods {
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
@@ -39,42 +38,29 @@ pub mod methods {
     // the excerpt.
     pub const SEARCH_CHATS: &str = "SearchChats";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
-    /// Explicit user navigation, `{chatId}`. Prioritizes this device's sync
-    /// connection; automatic subscriptions and retries must not call it.
     pub const FOCUS_CHAT: &str = "FocusChat";
-    /// Nudge every open room client to verify liveness NOW (window focus,
-    /// app foregrounded). No params; IPC-only. Each room ignores the hint
-    /// unless it has been broadcast-quiet ≥30s, so this is cheap to spam.
     pub const PROBE_SYNC: &str = "ProbeSync";
-    /// Pushed edge-connectivity posture (`slopty_view_proto::Connectivity`):
-    /// current value first, then every change — the connection pill /
-    /// composer-honesty / queued-badge feed. No params; IPC-only.
+    /// The links to the server and the machines (`slopty_view_proto::Connectivity`): the
+    /// current value first, then every change, for the connection pill. No params.
     pub const WATCH_CONNECTIVITY: &str = "WatchConnectivity";
     pub const WATCH_CHATS: &str = "WatchChats";
     pub const WATCH_DEVICES: &str = "WatchDevices";
     pub const WATCH_SESSIONS: &str = "WatchSessions";
-    /// Spaces registry (device+folder pairs) from the workspace doc.
+    /// The projects, each a folder on a device, as the workspace keeps them.
     pub const WATCH_SPACES: &str = "WatchSpaces";
-    /// Entity mutations against the workspace doc (feature-inventory §2 DataRpc).
-    /// Params are tagged `{op: createChat|createSpace|renameSpace|deleteSpace|
-    /// renameChat|setChatArchived|deleteChat|renameDevice|markChatSeen, …}`.
+    /// A change to a chat or a project, tagged `{op: markChatSeen|renameChat|setChatArchived|
+    /// createSpace|renameSpace|deleteSpace, …}`; any other op fails with its name.
     pub const MUTATE: &str = "Mutate";
-    /// This engine's identity → `{deviceId}` (IPC-only; never relay-forwarded —
-    /// the answer is about whichever engine you are directly connected to).
+    /// This machine → `{deviceId}`: its worker's id once the app knows there is one, the
+    /// view model's own id while there is none.
     pub const LOCAL_DEVICE: &str = "LocalDevice";
-    /// This engine runtime's fixed device and workspace identity.
+    /// The view model's fixed device and workspace identity.
     pub const ENGINE_INFO: &str = "EngineInfo";
-    /// Readiness barrier for the engine runtime. The call completes once stores
-    /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";
-    /// Ask a headless IPC owner to drain its runtime and exit successfully.
-    /// Headed IPC owners do not implement this method: closing another app's
-    /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
     pub const AUTH_STATUS: &str = "AuthStatus";
-    // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
     pub const SIGN_IN: &str = "SignIn";
-    // Repos / worktrees / folders (ControlRpc, relay-forwardable).
+    // Repositories, branches and folders on a device.
     pub const CLONE_REPO: &str = "CloneRepo";
     pub const LIST_BRANCHES: &str = "ListBranches";
     pub const LIST_REFS: &str = "ListRefs";
@@ -87,8 +73,8 @@ pub mod methods {
     pub const SEARCH_HOME_FOLDERS: &str = "SearchHomeFolders";
     /// The new-project picker closed: drop the host's home index if unpinned.
     pub const RELEASE_HOME_FOLDER_SEARCH: &str = "ReleaseHomeFolderSearch";
-    // Device-local workspace filesystem operations. All are relay-forwardable;
-    // WatchWorkspaceFiles is the only streaming method in this group.
+    // A device's files, asked of the worker the call names; WatchWorkspaceFiles is the only
+    // stream in this group.
     pub const LIST_WORKSPACE_DIRECTORY: &str = "ListWorkspaceDirectory";
     pub const SEARCH_WORKSPACE_FILES: &str = "SearchWorkspaceFiles";
     /// Start or keep alive a workspace's search index (fire-and-forget warm).
@@ -106,25 +92,23 @@ pub mod methods {
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
-    // Terminals (ControlRpc, relay-forwardable).
+    // Terminals.
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const CLOSE_TERMINAL: &str = "CloseTerminal";
-    /// Checkout-diff stream for the target device's chats (DataRpc,
-    /// relay-forwardable — diffs are produced where the checkout lives).
+    /// Checkout-diff stream for the target device's chats, made on the worker where the
+    /// checkout lives.
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
     pub const WATCH_WORKSPACE_GIT_STATUS: &str = "WatchWorkspaceGitStatus";
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
-    // Attachments read back (ControlRpc, relay-forwardable — target the chat's host device).
+    // Attachments read back from the chat's machine.
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
-    /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
-    /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
+    /// What a transcript left out of its thread, by `{blobRef: "<chatId>/<item>"}`: a tool
+    /// call's whole output, an edit's whole diff, a picture or a visual, read whole from its
+    /// worker.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
-    // Updates (ControlRpc, relay-forwardable — a device applies its own binary's update).
-    /// Download + apply the newest release on the target device (symlink-managed
-    /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
     // The person's one setting for how freely agents act, `[agents] autonomy` in
     // Slopty's settings: `{ "autonomy": "auto" | "full" | "ask" }` read and written.
@@ -149,7 +133,7 @@ pub enum RpcError {
     UnknownMethod(String),
     #[error("bad params: {0}")]
     BadParams(String),
-    /// Stable machine-readable capability failure preserved across transports.
+    /// A capability failure, by its machine-readable code.
     #[error("capability error: {0}")]
     Capability(String),
     #[error("{0}")]
@@ -229,9 +213,8 @@ pub fn parse_params<T: serde::de::DeserializeOwned>(
     serde_json::from_value(params).map_err(|e| RpcError::BadParams(e.to_string()))
 }
 
-/// Spawn an in-memory server for `service` and return a connected client.
-/// Same envelopes, same dispatch loop as the WebSocket path — the in-process UI
-/// transport (ARCHITECTURE §1 "zero serialization shortcuts").
+/// Spawn an in-memory server for `service` and return a connected client: how the shell
+/// reaches its view model.
 pub fn memory_client(service: Arc<dyn RpcService>) -> RpcClient {
     let (client_out, server_in) = tokio::sync::mpsc::channel::<String>(256);
     let (server_out, client_in) = tokio::sync::mpsc::channel::<String>(256);

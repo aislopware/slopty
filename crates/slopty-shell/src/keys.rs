@@ -1,4 +1,4 @@
-//! slopty: how a key reads wherever Slopty names one: a tooltip, a menu row, the palette, the
+//! How a key reads wherever Slopty names one: a tooltip, a menu row, the palette, the
 //! shortcuts page and the accessibility tree (`docs/decisions/ui.md`, "Tooltips name the action
 //! and its key").
 //!

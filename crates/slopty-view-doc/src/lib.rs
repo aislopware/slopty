@@ -1,19 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! slopty-view-doc — session & workspace Loro doc schemas and the typed mirror layer.
-//!
-//! Port of slopty's `packages/session-doc`. The schema SHAPE (container names, part maps with
-//! LoroText bodies, command entries) is kept identical to the TS implementation so the edge's
-//! tail materializer and any TS peer remain compatible.
-//!
-//! Load-bearing invariant (measured in slopty, `oplog-shape.test.ts`): message parts are a
-//! LoroList of part maps whose text bodies live in **LoroText** — streaming appends RLE-merge at
-//! ~1.03x oplog overhead, whereas rewriting whole part values costs ~125x.
-//!
-//! Only the transcript, part and command types the interface reads live here
-//! (`vendor/slopty/README.md`).
-
-// Slopty's own shapes: the calls beyond `slopty_view_rpc::methods`, the dock, the tray, a page's
-// card and a part's facts.
+//! slopty-view-doc — the shapes the view model serves the shell beyond the wire types
+//! (`slopty_view_proto`): a transcript's entries and parts ([`schema`], [`parts`],
+//! [`part_kinds`]) and the frames its watch sends ([`transcript_delta`]); what a session says
+//! beside its terminal ([`dock`], [`work`]) and the pages it shows ([`page_card`]); the calls
+//! that serve them ([`calls`]); and a session's command ledger ([`commands`]).
 pub mod calls;
 pub mod commands;
 pub mod constants;

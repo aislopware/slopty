@@ -176,10 +176,10 @@ impl HarnessesPage {
             pending_toggle: None,
             installing: None,
             install_task: None,
-            install_run: None, // slopty
-            autonomy: None, // slopty
-            autonomy_select: widgets::SelectState::default(), // slopty
-            autonomy_task: None, // slopty
+            install_run: None,
+            autonomy: None,
+            autonomy_select: widgets::SelectState::default(),
+            autonomy_task: None,
         };
         page.load(cx);
         page
@@ -323,7 +323,7 @@ impl HarnessesPage {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        self.load_autonomy(engine.clone(), None, cx); // slopty
+        self.load_autonomy(engine.clone(), None, cx);
         let params = self.with_target(serde_json::json!({}));
 
         self.harnesses = Loadable::Loading;
@@ -817,7 +817,7 @@ impl HarnessesPage {
                                         widgets::ghost_action(&theme)
                                             .id(("harness-install", ix))
                                             .flex_none()
-                                            .role(gpui::Role::Button) // slopty
+                                            .role(gpui::Role::Button)
                                             .aria_label(format!("Install {}", descriptor.name))
                                             .when(self.installing.is_none(), |el| {
                                                 el.on_click(cx.listener(move |this, _, _, cx| {
@@ -834,7 +834,7 @@ impl HarnessesPage {
                                     widgets::ghost_action(&theme)
                                         .id(("harness-cancel-install", ix))
                                         .flex_none()
-                                        .role(gpui::Role::Button) // slopty
+                                        .role(gpui::Role::Button)
                                         .aria_label(format!("Cancel installing {}", descriptor.name))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             cx.stop_propagation();
@@ -956,7 +956,7 @@ impl Render for HarnessesPage {
         };
         crate::toast::take_error(&mut self.error, cx);
         let switcher = self.render_device_switcher(&theme, cx);
-        let autonomy = self.render_autonomy(&theme, cx); // slopty
+        let autonomy = self.render_autonomy(&theme, cx);
 
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
@@ -986,7 +986,7 @@ impl Render for HarnessesPage {
                                     Some(switcher.into_any_element()),
                                 ))
                                 .child(body)
-                                .child(autonomy), // slopty
+                                .child(autonomy),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),

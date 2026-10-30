@@ -2,9 +2,8 @@
 //! Attachments: the pictures a transcript's message carries, read back from the machine that
 //! holds them, their decoded-image cache and the full-size preview lightbox.
 //!
-//! Ports of slopty's `control/message-attachments.ts` (`parseUserMessageImages`: a message's
-//! pictures ride its plain text as a trailer of paths, which the view model writes) and
-//! `lib/transcript-attachment-cache.ts` (decoded-image cache keyed by `(deviceId, path)`).
+//! A message's pictures ride its plain text as a trailer of paths, which the view model writes
+//! ([`parse_user_message_images`]); the decoded images are cached by `(deviceId, path)`.
 //!
 //! TUI-first, nothing is staged or uploaded here: the GUI sends the agent nothing.
 
@@ -23,15 +22,15 @@ use crate::state::EngineHandle;
 use crate::theme::ink;
 use slopty_view_rpc::methods;
 
-/// The largest attachment read back (use-attachments.ts `MAX_ATTACHMENT_BYTES`).
+/// The largest attachment read back.
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
-/// state.ts `MAX_ATTACHMENT_READ_CHUNKS` — bounds the read-back loop.
+/// The most chunks one read-back takes, which bounds its loop.
 const MAX_READ_CHUNKS: usize = 1_000;
 /// How much of a file's first chunk a head reader sees, as base64 (64 KiB of bytes).
 const HEAD_B64: usize = 64 * 1024 / 3 * 4;
 
 // ---------------------------------------------------------------------------
-// Text transport (message-attachments.ts)
+// Text transport
 // ---------------------------------------------------------------------------
 
 /// Whether an attachment ref names an image, as opposed to any other file.
@@ -98,8 +97,7 @@ fn name_from_path(path: &str) -> String {
 
 /// Find the refs trailer: a blank line, then a line starting (case-insensitive)
 /// with `Attached images (local files` and ending `):`. Returns
-/// `(body_end, refs_start)` byte offsets — the tolerant equivalent of slopty's
-/// `ATTACHED_IMAGES_RE`.
+/// `(body_end, refs_start)` byte offsets.
 fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
     let lower = content.to_ascii_lowercase();
     let needle = "\n\nattached images (local files";
@@ -121,8 +119,7 @@ fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// message-attachments.ts `parseUserMessageImages`: split the visible prompt
-/// from its attachment-ref trailer.
+/// Split the visible prompt from its attachment-ref trailer.
 pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
     let Some((body_end, refs_start)) = find_refs_marker(content) else {
         return ParsedUserMessage {
@@ -157,7 +154,7 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Read-back (state.ts readAttachmentImage)
+// Read-back
 // ---------------------------------------------------------------------------
 
 fn with_target(mut params: serde_json::Value, target_device_id: Option<&str>) -> serde_json::Value {
@@ -167,8 +164,8 @@ fn with_target(mut params: serde_json::Value, target_device_id: Option<&str>) ->
     params
 }
 
-/// Per-read deadline (desktop state.ts): a stalled-but-open relay link never fails an RPC on
-/// its own, so every read races a timer.
+/// Per-read deadline: a stalled but open link to the machine never fails a call on its own, so
+/// every read races a timer.
 const READ_CHUNK_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Race an RPC against `timeout` on the gpui background executor (these
@@ -196,7 +193,7 @@ pub struct LoadedAttachmentImage {
 }
 
 /// `ReadAttachmentChunk` loop: 45KB base64 chunks until `done` (bounded, with
-/// the same stuck-offset guard as slopty's `readAttachmentImage`). Returns the
+/// a guard against an offset that stops moving). Returns the
 /// file's name, MIME type and bytes.
 pub(crate) async fn read_attachment_bytes(
     engine: &EngineHandle,
@@ -330,7 +327,7 @@ pub async fn read_attachment_image(
 }
 
 // ---------------------------------------------------------------------------
-// Transcript image cache (transcript-attachment-cache.ts)
+// Transcript image cache
 // ---------------------------------------------------------------------------
 
 /// A decoded transcript image, ready for `img(...)`.
@@ -346,7 +343,7 @@ pub enum AttachmentSnapshot {
     Loading,
     Loaded(CachedAttachmentImage),
     /// Load failed; `retry_in` is how long until `begin_load_for` would hand out
-    /// another attempt (the exponential 2s→15s ladder from user-attachments.tsx).
+    /// another attempt (an exponential ladder from 2 s to 15 s).
     Error {
         retry_in: Duration,
     },
@@ -612,7 +609,7 @@ pub(crate) fn store_error_for(source: &AttachmentKey) {
 }
 
 // ---------------------------------------------------------------------------
-// Preview lightbox (attachment-ui.tsx AttachmentPreviewDialog)
+// Preview lightbox
 // ---------------------------------------------------------------------------
 
 /// A full-size preview target (staged strip or transcript thumbnail).
@@ -704,7 +701,7 @@ pub(crate) fn lightbox_with_size(
     let caption_top = (viewport.height + fitted_h) / 2.0 + px(12.0);
     let on_close = std::rc::Rc::new(on_close);
     let close_on_key = on_close.clone();
-    let close_on_button = on_close.clone(); // slopty
+    let close_on_button = on_close.clone();
     let press_state = preview.viewer.clone();
     let click_state = preview.viewer.clone();
     // A close a screen reader and a finger reach (a phone has no Escape), clear of the
@@ -1139,7 +1136,7 @@ mod generated_image_tests {
     }
 
     #[tokio::test]
-    #[ignore = "slopty: gpui-fast makes its Mac platform on the main thread only, and a test runs on another"]
+    #[ignore = "gpui-fast makes its Mac platform on the main thread only, and a test runs on another"]
     async fn an_image_read_back_never_accepts_an_empty_body() {
         let executor = gpui_platform::background_executor();
         let engine = EngineHandle::from_test_client(slopty_view_rpc::memory_client(Arc::new(
@@ -1152,7 +1149,7 @@ mod generated_image_tests {
     }
 
     #[tokio::test]
-    #[ignore = "slopty: gpui-fast makes its Mac platform on the main thread only, and a test runs on another"]
+    #[ignore = "gpui-fast makes its Mac platform on the main thread only, and a test runs on another"]
     async fn generated_image_chunk_reader_targets_owner_and_bounds_decode() {
         let executor = gpui_platform::background_executor();
         for (width, target, expected, succeeds) in [

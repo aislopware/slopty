@@ -1,4 +1,4 @@
-//! slopty: the remote window and desktop views ([`RightSurface::Screen`]), summoned beside a
+//! The remote window and desktop views ([`RightSurface::Screen`]), summoned beside a
 //! session as the browser is: the palette's command, the title, the body and the close, each a
 //! call from the shell's own match on the view.
 

@@ -17,7 +17,7 @@ fn chat_sync_pill_caption(chat: &slopty_view_proto::ChatConnectivity) -> Option<
     }
 }
 
-/// Sidebar resort glide (feature-inventory §1.6): 260ms
+/// Sidebar resort glide: 260ms
 /// `cubic-bezier(0.22,1,0.36,1)` per-row translate, the View Transitions
 /// equivalent.
 const RESORT: MotionSpec = MotionSpec::new(260, motion::EASE_RESORT);
@@ -136,9 +136,9 @@ pub(super) fn sidebar_faded_label(
     .fade_label_overflow(&overflow)
 }
 
-/// Square action beside the account trigger in the sidebar footer.
+/// Square action beside the server trigger in the sidebar footer.
 const SIDEBAR_FOOTER_ACTION_SIZE: f32 = SIDEBAR_FOOTER_BUTTON_SIZE;
-/// Breathing room between the account trigger and its adjacent action.
+/// Breathing room between the server trigger and its adjacent action.
 const SIDEBAR_FOOTER_ACTION_GAP: f32 = 4.0;
 
 /// A chat row's inline title editor, swapped in for its faded title while
@@ -173,11 +173,8 @@ fn chat_title_editor(
         .into_any_element()
 }
 
-/// The sidebar footer's profile label and the account menu's identity line.
-/// Anything without a signed-in account reads "Local"; the menu carries the
-/// storage/sync detail.
-// The foot names the server this client follows, not an account: its name, a line
-// saying whether the link is up, and that state for the avatar's dot (`None` without a server).
+/// The server this client follows, as the sidebar's foot names it: its name, a line saying
+/// whether the link is up, and that state for the avatar's dot (`None` without a server).
 fn sidebar_server_identity(
     server: Option<&slopty_view_proto::ServerPresence>,
 ) -> (SharedString, SharedString, Option<bool>) {
@@ -714,8 +711,7 @@ impl Shell {
         })
         .flatten();
         let card_id = id.clone();
-        // Hover fades over transition-colors (slopty session-row.tsx) — both
-        // the wash and the title brighten ride the same 150ms blend.
+        // Hover fades: the wash and the title's brightening ride the same 150ms blend.
         let fade_key = format!("{row_id}-hover");
         let rest_bg = if selected {
             selected_wash
@@ -1129,15 +1125,10 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Chat-mode sidebar (spaces overhaul): window-control strip, the Spaces
-    /// section (folder + device rows, add-space), the global Active sessions
-    /// list, the notice strip, and the UserMenu (§1.6).
-    /// Global connection health, with selected-chat queue and storage status.
-    /// Persistence failures take precedence even when the network is offline.
-    /// No surface,
-    /// no border (v0.2.12 feedback): a bare spinner + faint caption while
-    /// reconnecting; an amber dot only when the OS says offline. The
-    /// transport error belongs in logs, not the sidebar.
+    /// The connection pill: the link's health, with the selected chat's queue and a failure to
+    /// save. A failure to save takes precedence even while the network is offline. No surface
+    /// and no border: a bare spinner and a faint caption while reconnecting, an amber dot only
+    /// when the OS says offline. The transport's error belongs in the logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use slopty_view_proto::ConnectivityState as S;
         let conn = self.state.read(cx).connectivity.clone();
@@ -1397,12 +1388,9 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The sidebar's bottom row: account menu on the left, settings toggle on
-    /// the right. Shared by the chat sidebar and the settings page so both
-    /// sit in one position. Local runtimes advertise their storage boundary
-    /// and offer sync; synced runtimes offer sign-out.
-    /// Account, settings, and the Pull requests entry. Chat and Settings both
-    /// render this exact row so the footer holds still across the swap.
+    /// The sidebar's bottom row: the server menu and the settings button. The chat sidebar
+    /// and the settings page both render this exact row, so the footer holds still across the
+    /// swap.
     pub(super) fn render_sidebar_footer_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("sidebar-footer-row")
@@ -1531,9 +1519,8 @@ impl Shell {
                 motion::hover_blend("user-menu-trigger", theme.text.opacity(0.8), theme.text)
             })
             .cursor_pointer()
-            // user-menu.tsx trigger: hover `bg-white/[0.04]`, open state
-            // (`data-[state=open]`) the slightly stronger `bg-white/[0.06]`;
-            // the hover wash fades over `transition-colors`.
+            // A faint wash under the pointer and a slightly stronger one while the menu is open;
+            // the hover wash fades.
             .bg(if open {
                 theme.glass_hover()
             } else {
@@ -1559,7 +1546,7 @@ impl Shell {
                 cx.notify();
             }))
             .child(
-                // Avatar: white circle, initial in near-black (slopty user-menu.tsx).
+                // Avatar: white circle, initial in near-black.
                 div()
                     .size(px(SIDEBAR_FOOTER_AVATAR_SIZE))
                     .flex_none()

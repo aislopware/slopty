@@ -1,5 +1,4 @@
-//! slopty: what a session says beside its terminal, read-only: the inspector reads it (Slopty's
-//! own; not in zeron).
+//! What a session says beside its terminal, read-only: the inspector reads it.
 //!
 //! The view model serves it on `slopty.WatchDock` ([`crate::calls::WATCH_DOCK`]) for one chat:
 //! one [`ChatDock`] each time anything in it changes. It mirrors the agent's own prompt box as

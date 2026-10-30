@@ -1,14 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Delta frames for `WatchDocMessages`.
 //!
-//! The watch used to re-serialize the entire transcript on every 120ms commit
-//! tick (measured at 1.13MB per frame on a 1.6MB chat, ~4 copies deep through
-//! the RPC hop). A frame is now either a full `reset` (first frame, and the
-//! fallback when a diff would approach transcript size) or the changed
-//! entries only — during streaming that is one entry per tick.
+//! A frame is either a full `reset` (the first frame, and the fallback when a diff would
+//! approach the transcript's size) or the changed entries only, which while a turn streams is one
+//! entry per tick. A whole transcript on every tick measured 1.13MB a frame on a 1.6MB chat.
 //!
-//! Both viewports share this module (the `slopty_view_proto::view` rule: derivations
-//! that must not diverge per surface live in one place).
+//! The view model makes the frames and the shell applies them, both through this module, so
+//! the two never disagree on a transcript.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,7 +21,7 @@ pub struct TranscriptUpdate {
     #[serde(flatten)]
     pub frame: TranscriptFrame,
     /// Historical content included in this update, independent of reset/delta
-    /// encoding. Omitted on ordinary live updates and by older engines.
+    /// encoding. Omitted on ordinary live updates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_baseline: Option<TranscriptBaseline>,
 }
@@ -207,8 +205,8 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
 }
 
 /// Diff two transcript states into a frame. An entry is upserted when it is
-/// new, its content changed, or its predecessor changed (a Loro list merge can
-/// interleave a remote entry mid-list). Falls back to `Reset` when the delta
+/// new, its content changed, or its predecessor changed (an entry can arrive
+/// mid-list). Falls back to `Reset` when the delta
 /// would carry most of the transcript anyway.
 pub fn diff_transcript(
     prev: &[SessionMessageEntry],
