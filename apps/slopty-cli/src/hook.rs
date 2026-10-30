@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use slopty_proto::ctl::{CtlReply, CtlRequest, SESSION_TOKEN_ENV};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use crate::workerctl;
 
@@ -37,13 +37,10 @@ pub async fn run(data_dir: &Path) -> ExitCode {
     let at_us = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
-    let mut payload = String::new();
-    let mut stdin = tokio::io::stdin().take(MAX_PAYLOAD.saturating_add(1));
-    let read = stdin.read_to_string(&mut payload).await;
-    if read.is_err() || stdin.limit() == 0 {
+    let Some(payload) = payload(tokio::io::stdin()).await else {
         tracing::debug!("a hook's payload could not be read whole");
         return ExitCode::SUCCESS;
-    }
+    };
     let (Ok(Some(session)), Ok(token)) =
         (crate::handoff::session(), std::env::var(SESSION_TOKEN_ENV))
     else {
@@ -58,6 +55,15 @@ pub async fn run(data_dir: &Path) -> ExitCode {
         Err(_elapsed) => tracing::debug!("the worker did not answer the hook in time"),
     }
     ExitCode::SUCCESS
+}
+
+/// The hook's JSON, read whole from `input`: `None` when it does not read as text or runs past
+/// [`MAX_PAYLOAD`].
+async fn payload(input: impl AsyncRead + Unpin) -> Option<String> {
+    let mut payload = String::new();
+    let mut input = input.take(MAX_PAYLOAD.saturating_add(1));
+    let read = input.read_to_string(&mut payload).await;
+    (read.is_ok() && input.limit() > 0).then_some(payload)
 }
 
 /// `payload` without the tool's output; as it is when it is not a JSON object.
@@ -75,6 +81,19 @@ fn lean(payload: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A payload is relayed up to [`MAX_PAYLOAD`] and not past it, nor one that is not text.
+    #[tokio::test]
+    async fn a_payload_is_read_whole_up_to_its_cap() {
+        let most = usize::try_from(MAX_PAYLOAD).unwrap();
+        let whole = vec![b'a'; most];
+        let read = payload(whole.as_slice()).await.expect("all of it");
+        assert_eq!(read.len(), most);
+        let over = vec![b'a'; most.saturating_add(1)];
+        assert_eq!(payload(over.as_slice()).await, None, "one byte too long");
+        assert_eq!(payload(&b"{\"a\":\"\xff\"}"[..]).await, None, "not text");
+        assert_eq!(payload(&b""[..]).await.as_deref(), Some(""));
+    }
 
     /// A tool's output is left out of what is relayed, everything else kept; a payload that is
     /// not an object goes as it came.

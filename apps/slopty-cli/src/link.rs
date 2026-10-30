@@ -470,6 +470,21 @@ mod tests {
 
     use super::*;
 
+    /// A server on another build is dialled again only after a good while, which leaves the
+    /// backoff where it was; any other failure waits the backoff's next step.
+    #[tokio::test]
+    async fn a_server_on_another_build_waits_long_and_others_back_off() {
+        let mut redial = Redial::default();
+        let before = format!("{redial:?}");
+        let wrong = slopty_net::WrongBuild { peer: "0.3.0".to_owned() };
+        let other_build = anyhow::Error::from(UpdateNotice::server("hub", &wrong));
+        assert_eq!(redial_after(&other_build, &mut redial), slopty_net::redial::WRONG_BUILD);
+        assert_eq!(format!("{redial:?}"), before, "the backoff is untouched");
+        let wait = redial_after(&anyhow::anyhow!("cannot reach the server"), &mut redial);
+        assert!(!wait.is_zero() && wait <= slopty_net::redial::MAX, "{wait:?}");
+        assert_ne!(format!("{redial:?}"), before, "the backoff moved on");
+    }
+
     /// A verb whose answer was lost goes again under the same key, a fresh one when the caller
     /// gave none, through a worker still coming back, and as the same bytes rather than a copy;
     /// one never sent is not retried, and one the link dropped is not sent again.
