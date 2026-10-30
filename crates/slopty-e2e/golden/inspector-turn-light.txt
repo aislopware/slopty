@@ -17,8 +17,9 @@ Article │ You
 Paragraph │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate a task "Survey files" and a task "Write notes". 2) TaskUpdate "Survey files" to in_progress. 3) Glob "*.rs". 4) Grep for "println" with output mode content. 5) Bash: `printf 'one\ntwo\n'` with a description. 6) Bash: `ls missing-file` (it fails; that is expected). 7) Bash with run_in_background true: `sleep 1; echo bg-finished`. 8) Write notes.md containing two lines: "# Notes" and "main.rs prints hello". 9) Use the Agent tool (subagent_type general-purpose, description "Count lines", run_in_background false) to count the lines in main.rs with Read; tell it to reply with just the number. 10) TaskUpdate both tasks to completed.
 Button │ Expand message
 Button │ Copy message
-Status │ Background command "Run background sleep and echo marker" completed (exit code 0) │ completed
+Status │ Background command "Sleep one second then echo a marker, in background" completed (exit code 0) │ completed
 Paragraph │ done
+Paragraph │ One thing doesn't add up. Glob for *.rs and the println Grep both returned nothing, but the subagent reported that main.rs has 3 lines. I didn't check which is right. A quick ls of the project directory would settle it.
 Group │ notes.md +2 −0
 Button │ Copy message
 Splitter │ Resize side pane
