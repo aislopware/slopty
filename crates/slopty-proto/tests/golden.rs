@@ -120,6 +120,17 @@ mod golden {
         snap("client_term_clear", &ClientMsg::Term { session: session(), req: TermRequest::Clear });
     }
 
+    /// ↩ on an ended session's bar, what the worker says once its program runs again, and why
+    /// it did not.
+    #[test]
+    fn restart() {
+        let restart = ClientMsg::Term { session: session(), req: TermRequest::Restart };
+        snap("client_term_restart", &restart);
+        snap("worker_term_restarted", &TermEvent::Restarted);
+        let refused = TermError::Restart("its program still runs".to_owned());
+        snap("worker_term_error_restart", &TermEvent::Error(refused));
+    }
+
     #[test]
     fn search() {
         snap(

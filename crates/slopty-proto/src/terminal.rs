@@ -331,6 +331,12 @@ pub enum TermRequest {
         /// Where they landed, in item order.
         landed: Option<Vec<String>>,
     },
+    /// Start the session's program again once it has ended: the person pressed ↩ on the bar
+    /// that says it ended. The worker runs it again under the same id, so its item, its row and
+    /// its tab stay: the same command in the same directory below the old screen and a divider,
+    /// as a restored session runs, and an agent's TUI by its thread, its conversation taken up
+    /// again. Refused while the program runs.
+    Restart,
 }
 
 /// The MIME type a drop of files is offered as.
@@ -459,6 +465,7 @@ impl TermRequest {
             Self::Attach { .. }
             | Self::Detach
             | Self::Close
+            | Self::Restart
             | Self::Resize(_)
             | Self::Drive { .. }
             | Self::FetchLines { .. }
@@ -709,6 +716,10 @@ pub enum TermError {
     /// The session stream to this client could not be opened.
     #[error("The terminal's stream did not open: {0}")]
     Stream(String),
+    /// [`TermRequest::Restart`] was refused, or its program did not start: why, in the
+    /// person's words.
+    #[error("The terminal did not start again: {0}")]
+    Restart(String),
 }
 
 /// Worker → client on the session stream.
@@ -853,6 +864,10 @@ pub enum TermEvent {
     /// The program's status records changed (`OSC 7501`): the whole set, by id. Sent on attach
     /// while it holds any.
     ProgramStatus(Vec<ProgramStatus>),
+    /// The session's program, which had ended ([`Self::Exited`]), started again
+    /// ([`TermRequest::Restart`]): the session runs, and its frames go on below the old screen
+    /// and a divider.
+    Restarted,
 }
 
 /// The pointer a program asks for over the grid with `OSC 22`, by its W3C cursor name.
