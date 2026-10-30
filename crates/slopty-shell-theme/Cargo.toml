@@ -2,14 +2,13 @@
 name = "slopty-shell-theme"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Slopty's theme model and its built-in themes"
 
-# Clippy lints this code trips, allowed by name.
-[lints.clippy]
-derivable_impls = "allow"
-if_same_then_else = "allow"
-too_many_arguments = "allow"
+[lints]
+workspace = true
 
 [dependencies]
 data-encoding.workspace = true

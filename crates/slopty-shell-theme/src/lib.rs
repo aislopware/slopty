@@ -2,8 +2,28 @@
 //! Slopty's source-neutral theme domain model.
 //!
 //! Runtime code consumes complete [`ThemeVariant`] values.
+
+#![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 // The built-in themes are the whole set: there is no theme import or theme library
 // (`docs/decisions/ui.md`, "A curated few themes").
+
+/// A built-in colour from a CSS hex literal, parsed when the crate compiles: a literal that is
+/// not CSS hex fails the build, so no built-in colour is parsed (or can fail) at run time.
+macro_rules! hex {
+    ($value:literal) => {
+        const {
+            match $crate::Color::from_css_hex($value) {
+                Some(color) => color,
+                None => panic!(concat!($value, " is not a CSS hex colour")),
+            }
+        }
+    };
+}
 
 mod builtins;
 
@@ -14,27 +34,35 @@ use std::str::FromStr;
 pub use builtins::builtin_registry;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+/// Whether a theme is light or dark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Appearance {
+    /// Light text on a dark ground.
     #[default]
     Dark,
+    /// Dark text on a light ground.
     Light,
 }
 
 impl Appearance {
+    /// Both appearances, light first.
     pub const ALL: [Self; 2] = [Self::Light, Self::Dark];
 
-    pub fn is_dark(self) -> bool {
+    /// Whether this is [`Appearance::Dark`].
+    pub const fn is_dark(self) -> bool {
         matches!(self, Self::Dark)
     }
 }
 
+/// How a theme's surfaces are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SurfaceTreatment {
+    /// Solid fills.
     #[default]
     Opaque,
+    /// Translucent fills over the window's blur.
     Frosted,
 }
 
@@ -43,16 +71,21 @@ pub enum SurfaceTreatment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SurfacePreference {
+    /// Whatever the theme recommends.
     #[default]
     ThemeDefault,
+    /// Always [`SurfaceTreatment::Frosted`].
     Frosted,
+    /// Always [`SurfaceTreatment::Opaque`].
     Opaque,
 }
 
 impl SurfacePreference {
+    /// Every preference, in the order settings lists them.
     pub const ALL: [Self; 3] = [Self::ThemeDefault, Self::Frosted, Self::Opaque];
 
-    pub fn resolve(self, recommended: SurfaceTreatment) -> SurfaceTreatment {
+    /// The treatment to draw with, given the theme's `recommended` one.
+    pub const fn resolve(self, recommended: SurfaceTreatment) -> SurfaceTreatment {
         match self {
             Self::ThemeDefault => recommended,
             Self::Frosted => SurfaceTreatment::Frosted,
@@ -64,32 +97,93 @@ impl SurfacePreference {
 /// A color serialized as `#rrggbb` or `#rrggbbaa`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color {
+    /// Red, 0 to 255.
     pub r: u8,
+    /// Green, 0 to 255.
     pub g: u8,
+    /// Blue, 0 to 255.
     pub b: u8,
+    /// Opacity, 0 (clear) to 255 (opaque).
     pub a: u8,
 }
 
+/// A colour channel from 0.0..=255.0, rounded to the nearest step.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped into 0..=255 first; there is no checked f32 → u8"
+)]
+const fn channel(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
 impl Color {
+    /// Opaque black.
     pub const BLACK: Self = Self::rgb(0, 0, 0);
+    /// Opaque white.
     pub const WHITE: Self = Self::rgb(255, 255, 255);
 
+    /// An opaque colour.
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b, a: 255 }
     }
 
+    /// A colour with its opacity.
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }
 
-    pub fn with_alpha(self, alpha: f32) -> Self {
-        Self { a: (alpha.clamp(0.0, 1.0) * 255.0).round() as u8, ..self }
+    /// The colour of a CSS hex colour (`#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`), or `None`
+    /// when `value` is not one of those.
+    pub const fn from_css_hex(value: &str) -> Option<Self> {
+        const fn nibble(digit: u8) -> Option<u8> {
+            match digit {
+                b'0'..=b'9' => Some(digit.wrapping_sub(b'0')),
+                b'a'..=b'f' => Some(digit.wrapping_sub(b'a').wrapping_add(10)),
+                b'A'..=b'F' => Some(digit.wrapping_sub(b'A').wrapping_add(10)),
+                _ => None,
+            }
+        }
+        // One digit doubled (`#abc`) or two (`#aabbcc`).
+        const fn short(digit: u8) -> Option<u8> {
+            match nibble(digit) {
+                Some(n) => Some((n << 4) | n),
+                None => None,
+            }
+        }
+        const fn pair(high: u8, low: u8) -> Option<u8> {
+            match (nibble(high), nibble(low)) {
+                (Some(high), Some(low)) => Some((high << 4) | low),
+                _ => None,
+            }
+        }
+        let channels = match *value.as_bytes() {
+            [b'#', r, g, b] => (short(r), short(g), short(b), Some(255)),
+            [b'#', r, g, b, a] => (short(r), short(g), short(b), short(a)),
+            [b'#', r1, r2, g1, g2, b1, b2] => (pair(r1, r2), pair(g1, g2), pair(b1, b2), Some(255)),
+            [b'#', r1, r2, g1, g2, b1, b2, a1, a2] => {
+                (pair(r1, r2), pair(g1, g2), pair(b1, b2), pair(a1, a2))
+            }
+            _ => return None,
+        };
+        match channels {
+            (Some(r), Some(g), Some(b), Some(a)) => Some(Self { r, g, b, a }),
+            _ => None,
+        }
     }
 
+    /// This colour at opacity `alpha` (0.0 to 1.0).
+    #[must_use]
+    pub fn with_alpha(self, alpha: f32) -> Self {
+        Self { a: channel(alpha.clamp(0.0, 1.0) * 255.0), ..self }
+    }
+
+    /// This colour composited over an opaque `background`, as an opaque colour.
+    #[must_use]
     pub fn blend_over(self, background: Self) -> Self {
-        let alpha = self.a as f32 / 255.0;
+        let alpha = f32::from(self.a) / 255.0;
         let blend = |front: u8, back: u8| {
-            (front as f32 * alpha + back as f32 * (1.0 - alpha)).round() as u8
+            channel(f32::from(front).mul_add(alpha, f32::from(back) * (1.0 - alpha)))
         };
         Self::rgb(
             blend(self.r, background.r),
@@ -98,9 +192,19 @@ impl Color {
         )
     }
 
+    /// The colour `amount` (0.0 to 1.0) of the way from this one to `other`, opacity too.
+    #[must_use]
+    #[expect(
+        clippy::suboptimal_flops,
+        reason = "unfused: fused, 478 of the 1.8 M byte pairs at the themes' amounts round the \
+                  other way, moving derived theme colours by a step"
+    )]
     pub fn mix(self, other: Self, amount: f32) -> Self {
         let amount = amount.clamp(0.0, 1.0);
-        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * amount).round() as u8;
+        let mix = |a: u8, b: u8| {
+            let (a, b) = (f32::from(a), f32::from(b));
+            channel(a + (b - a) * amount)
+        };
         Self::rgba(
             mix(self.r, other.r),
             mix(self.g, other.g),
@@ -109,12 +213,15 @@ impl Color {
         )
     }
 
+    /// The WCAG contrast ratio of this colour over `background`, 1.0 to 21.0.
     pub fn contrast(self, background: Self) -> f32 {
         let foreground = if self.a == 255 { self } else { self.blend_over(background) };
         let (a, b) = (foreground.luminance(), background.luminance());
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
+    /// White or black, whichever reads better on this colour.
+    #[must_use]
     pub fn best_on_color(self) -> Self {
         if Self::WHITE.contrast(self) >= Self::BLACK.contrast(self) {
             Self::WHITE
@@ -124,6 +231,7 @@ impl Color {
     }
 
     /// Move toward black or white until the requested contrast is met.
+    #[must_use]
     pub fn ensure_contrast(self, background: Self, minimum: f32) -> Self {
         if self.contrast(background) >= minimum {
             return self;
@@ -133,8 +241,8 @@ impl Color {
         } else {
             Self::WHITE
         };
-        for step in 1..=20 {
-            let candidate = self.mix(target, step as f32 / 20.0);
+        for step in 1..=20_u8 {
+            let candidate = self.mix(target, f32::from(step) / 20.0);
             if candidate.contrast(background) >= minimum {
                 return candidate;
             }
@@ -144,16 +252,17 @@ impl Color {
 
     fn luminance(self) -> f32 {
         let linear = |channel: u8| {
-            let value = channel as f32 / 255.0;
+            let value = f32::from(channel) / 255.0;
             if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
         };
-        0.2126 * linear(self.r) + 0.7152 * linear(self.g) + 0.0722 * linear(self.b)
+        0.2126_f32
+            .mul_add(linear(self.r), 0.7152_f32.mul_add(linear(self.g), 0.0722 * linear(self.b)))
     }
 }
 
 impl fmt::Debug for Color {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
@@ -171,39 +280,7 @@ impl FromStr for Color {
     type Err = ColorParseError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let value = value.trim().strip_prefix('#').ok_or(ColorParseError)?;
-        let expand = |c: u8| (c << 4) | c;
-        let nibble = |c: u8| match c {
-            b'0'..=b'9' => Ok(c - b'0'),
-            b'a'..=b'f' => Ok(c - b'a' + 10),
-            b'A'..=b'F' => Ok(c - b'A' + 10),
-            _ => Err(ColorParseError),
-        };
-        let pair = |bytes: &[u8]| -> Result<u8, ColorParseError> {
-            Ok((nibble(bytes[0])? << 4) | nibble(bytes[1])?)
-        };
-        let bytes = value.as_bytes();
-        match bytes.len() {
-            3 => Ok(Self::rgb(
-                expand(nibble(bytes[0])?),
-                expand(nibble(bytes[1])?),
-                expand(nibble(bytes[2])?),
-            )),
-            4 => Ok(Self::rgba(
-                expand(nibble(bytes[0])?),
-                expand(nibble(bytes[1])?),
-                expand(nibble(bytes[2])?),
-                expand(nibble(bytes[3])?),
-            )),
-            6 => Ok(Self::rgb(pair(&bytes[0..2])?, pair(&bytes[2..4])?, pair(&bytes[4..6])?)),
-            8 => Ok(Self::rgba(
-                pair(&bytes[0..2])?,
-                pair(&bytes[2..4])?,
-                pair(&bytes[4..6])?,
-                pair(&bytes[6..8])?,
-            )),
-            _ => Err(ColorParseError),
-        }
+        Self::from_css_hex(value.trim()).ok_or(ColorParseError)
     }
 }
 
@@ -225,28 +302,39 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
+/// A colour that is not CSS hex.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("expected a CSS hex color (#rgb, #rgba, #rrggbb, or #rrggbbaa)")]
 pub struct ColorParseError;
 
+/// An accent the person picks over the theme's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AccentPreset {
+    /// The house violet.
     #[default]
     Slopty,
+    /// Orange.
     Orange,
+    /// Amber.
     Amber,
+    /// Green.
     Green,
+    /// Cyan.
     Cyan,
+    /// Blue.
     Blue,
+    /// Pink.
     Pink,
 }
 
 impl AccentPreset {
+    /// Every preset, in the order settings lists them.
     pub const ALL: [Self; 7] =
         [Self::Slopty, Self::Orange, Self::Amber, Self::Green, Self::Cyan, Self::Blue, Self::Pink];
 
-    pub fn label(self) -> &'static str {
+    /// The preset's name as settings shows it.
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Slopty => "Slopty",
             Self::Orange => "Orange",
@@ -258,32 +346,36 @@ impl AccentPreset {
         }
     }
 
-    pub fn color(self, appearance: Appearance) -> Color {
+    /// The preset's colour under `appearance`, before [`AccentRoles::derive`] fits it to a
+    /// background.
+    pub const fn color(self, appearance: Appearance) -> Color {
         let (dark, light) = match self {
-            Self::Slopty => ("#8b7cf6", "#5b43e8"),
-            Self::Orange => ("#fb923c", "#c2410c"),
-            Self::Amber => ("#fbbf24", "#a16207"),
-            Self::Green => ("#4ade80", "#15803d"),
-            Self::Cyan => ("#22d3ee", "#0e7490"),
-            Self::Blue => ("#60a5fa", "#2563eb"),
-            Self::Pink => ("#f472b6", "#be185d"),
+            Self::Slopty => (hex!("#8b7cf6"), hex!("#5b43e8")),
+            Self::Orange => (hex!("#fb923c"), hex!("#c2410c")),
+            Self::Amber => (hex!("#fbbf24"), hex!("#a16207")),
+            Self::Green => (hex!("#4ade80"), hex!("#15803d")),
+            Self::Cyan => (hex!("#22d3ee"), hex!("#0e7490")),
+            Self::Blue => (hex!("#60a5fa"), hex!("#2563eb")),
+            Self::Pink => (hex!("#f472b6"), hex!("#be185d")),
         };
         if appearance.is_dark() { dark } else { light }
-            .parse()
-            .expect("built-in accent colors are valid")
     }
 }
 
+/// The accent the person picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AccentSelection {
+    /// The theme's own accent.
     #[default]
     ThemeDefault,
+    /// A preset over the theme's accent.
     Preset(AccentPreset),
 }
 
 impl AccentSelection {
-    pub fn label(self) -> &'static str {
+    /// The selection's name as settings shows it.
+    pub const fn label(self) -> &'static str {
         match self {
             Self::ThemeDefault => "Theme default",
             Self::Preset(preset) => preset.label(),
@@ -291,19 +383,29 @@ impl AccentSelection {
     }
 }
 
+/// The accent in each role it plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccentRoles {
+    /// The accent itself, at 3:1 or more over the background.
     pub primary: Color,
+    /// The accent as a fill that [`on`](Self::on) reads on at 4.5:1.
     pub strong: Color,
+    /// A faint wash of the accent behind a highlighted row.
     pub wash: Color,
+    /// Text and glyphs drawn on [`strong`](Self::strong).
     pub on: Color,
+    /// Selected text's highlight.
     pub selection: Color,
+    /// The text caret.
     pub caret: Color,
+    /// What marks activity in progress.
     pub activity: Color,
+    /// The accent's light, base and deep tones, for a glyph drawn in three.
     pub glyph: [Color; 3],
 }
 
 impl AccentRoles {
+    /// The roles of accent `primary` under `appearance`, fitted to `background`.
     pub fn derive(primary: Color, appearance: Appearance, background: Color) -> Self {
         let primary = primary.ensure_contrast(background, 3.0);
         let on = primary.best_on_color();
@@ -315,10 +417,7 @@ impl AccentRoles {
             if appearance.is_dark() { Color::WHITE } else { background },
             if appearance.is_dark() { 0.28 } else { 0.18 },
         );
-        let deep = primary.mix(
-            if appearance.is_dark() { Color::BLACK } else { Color::BLACK },
-            if appearance.is_dark() { 0.18 } else { 0.26 },
-        );
+        let deep = primary.mix(Color::BLACK, if appearance.is_dark() { 0.18 } else { 0.26 });
         Self {
             primary,
             strong,
@@ -334,8 +433,11 @@ impl AccentRoles {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// The person's theme for each appearance, by variant id.
 pub struct ThemeSelection {
+    /// The light variant's id.
     pub light: String,
+    /// The dark variant's id.
     pub dark: String,
 }
 
@@ -346,10 +448,12 @@ impl Default for ThemeSelection {
 }
 
 impl ThemeSelection {
+    /// The variant id chosen for `appearance`.
     pub fn variant_id(&self, appearance: Appearance) -> &str {
         if appearance.is_dark() { &self.dark } else { &self.light }
     }
 
+    /// Choose variant `id` for `appearance`.
     pub fn set_variant(&mut self, appearance: Appearance, id: impl Into<String>) {
         if appearance.is_dark() {
             self.dark = id.into();
@@ -361,75 +465,123 @@ impl ThemeSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Where a theme comes from.
 pub struct ThemeSource {
+    /// The upstream theme's format (`native` for Slopty's own).
     pub format: String,
+    /// The upstream theme's repository.
     pub url: String,
+    /// The upstream revision it was ported from.
     pub revision: String,
+    /// The upstream licence.
     pub license: String,
+    /// `sha256:` of the resolved variant as checked in, so a curation edit changes it too.
     pub asset_hash: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A theme's interface colours, by role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeColors {
+    /// The window's ground.
     pub background: Color,
+    /// The chrome around the content.
     pub shell: Color,
+    /// A surface raised over the ground: controls, chips.
     pub raised: Color,
+    /// A card's fill.
     pub card: Color,
+    /// A dialog's fill.
     pub dialog: Color,
+    /// A popover's or menu's fill.
     pub overlay: Color,
+    /// The wash under a hovered control.
     pub hover: Color,
+    /// The wash under a pressed or current control.
     pub active: Color,
+    /// Hairlines and dividers.
     pub border: Color,
+    /// A border that must read: a focused field, a separator that carries meaning.
     pub border_strong: Color,
+    /// Body text.
     pub text: Color,
+    /// Secondary text, at 4.5:1 or more over the ground.
     pub text_muted: Color,
+    /// Tertiary text: hints, placeholders.
     pub text_faint: Color,
+    /// A solid neutral fill: the primary button.
     pub solid: Color,
+    /// Text on [`solid`](Self::solid).
     pub on_solid: Color,
+    /// Errors and destructive actions.
     pub danger: Color,
+    /// [`danger`](Self::danger) toned toward the text, for long runs of it.
     pub danger_muted: Color,
+    /// Warnings.
     pub warning: Color,
+    /// [`warning`](Self::warning) toned toward the text.
     pub warning_muted: Color,
+    /// Success.
     pub success: Color,
+    /// [`success`](Self::success) toned toward the text.
     pub success_muted: Color,
+    /// A text field's fill.
     pub input: Color,
+    /// The text cursor.
     pub cursor: Color,
+    /// An added line in a diff.
     pub diff_add: Color,
+    /// A deleted line in a diff.
     pub diff_delete: Color,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A theme's terminal colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalPalette {
+    /// The terminal's ground.
     pub background: Color,
+    /// The terminal's default text.
     pub foreground: Color,
+    /// Selected cells' highlight.
     pub selection: Color,
+    /// The 16 ANSI colours: the 8 normal, then the 8 bright.
     pub ansi: [Color; 16],
 }
 
+/// One theme in one appearance, complete: everything the interface draws with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThemeVariant {
+    /// The variant's stable id, as settings names it (`slopty-dark`).
     pub id: String,
+    /// The family it belongs to.
     pub family_id: String,
+    /// Its name as settings shows it.
     pub name: String,
     /// One short line of the theme's voice, under its name in Appearance (Amp's).
     #[serde(default)]
     pub description: String,
+    /// Light or dark.
     pub appearance: Appearance,
     /// The author's recommended treatment. Runtime applies the user's
     /// [`SurfacePreference`] before components consume the variant.
     #[serde(alias = "surfaceTreatment")]
     pub recommended_surface_treatment: SurfaceTreatment,
+    /// The interface colours.
     pub colors: ThemeColors,
+    /// The theme's own accent.
     pub accent: AccentRoles,
+    /// Code colours, by highlight kind in camel case (`stringSpecial`).
     pub syntax: BTreeMap<String, Color>,
+    /// The terminal colours.
     pub terminal: TerminalPalette,
+    /// Where the theme comes from.
     pub source: ThemeSource,
 }
 
 impl ThemeVariant {
+    /// The accent roles for `selection`: the theme's own, or a preset fitted to this theme.
     pub fn accent_for(&self, selection: AccentSelection) -> AccentRoles {
         match selection {
             AccentSelection::ThemeDefault => self.accent,
@@ -444,26 +596,35 @@ impl ThemeVariant {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// A theme and its variants.
 pub struct ThemeFamily {
+    /// The family's stable id.
     pub id: String,
+    /// Its name as settings shows it.
     pub name: String,
+    /// Its variants, one or more per appearance.
     pub variants: Vec<ThemeVariant>,
 }
 
+/// The themes on offer.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThemeRegistry {
+    /// Every family, in the order settings lists them.
     pub families: Vec<ThemeFamily>,
 }
 
 impl ThemeRegistry {
+    /// The built-in themes, the whole set.
     pub fn builtin() -> &'static Self {
         builtin_registry()
     }
 
+    /// The variant with id `id`.
     pub fn variant(&self, id: &str) -> Option<&ThemeVariant> {
         self.families.iter().flat_map(|family| &family.variants).find(|variant| variant.id == id)
     }
 
+    /// Every variant of `appearance`.
     pub fn variants_for(&self, appearance: Appearance) -> impl Iterator<Item = &ThemeVariant> {
         self.families
             .iter()
@@ -471,14 +632,16 @@ impl ThemeRegistry {
             .filter(move |variant| variant.appearance == appearance)
     }
 
+    /// The variant `selection` chooses for `appearance`, or the house's own when this registry
+    /// has no variant of that id (a theme no longer built in).
     pub fn resolve(&self, selection: &ThemeSelection, appearance: Appearance) -> &ThemeVariant {
         self.variant(selection.variant_id(appearance))
-            .or_else(|| {
-                self.variant(if appearance.is_dark() { "slopty-dark" } else { "slopty-light" })
-            })
-            .expect("the built-in registry always contains both Slopty variants")
+            .or_else(|| self.variant(builtins::house_id(appearance)))
+            .unwrap_or_else(|| builtins::house(appearance))
     }
 
+    /// Every problem with this registry's variants: duplicate ids, contrast under the WCAG
+    /// minimums, incomplete provenance.
     pub fn validate(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
         let mut ids = HashSet::new();
@@ -579,8 +742,11 @@ fn validate_contrast(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// How bad a validation issue is.
 pub enum ValidationSeverity {
+    /// Worth fixing; the theme works.
     Warning,
+    /// The theme falls short.
     Error,
 }
 
@@ -589,17 +755,24 @@ pub enum ValidationSeverity {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ValidationCategory {
+    /// The theme is malformed: a duplicate id, missing provenance.
     Structural,
+    /// A colour pair reads below its contrast minimum.
     #[default]
     Contrast,
 }
 
+/// One problem [`ThemeRegistry::validate`] found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationIssue {
+    /// The variant it is about.
     pub variant_id: String,
+    /// What kind of problem it is.
     #[serde(default)]
     pub category: ValidationCategory,
+    /// How bad it is.
     pub severity: ValidationSeverity,
+    /// The problem, in words.
     pub message: String,
 }
 
@@ -631,6 +804,7 @@ impl ValidationIssue {
         }
     }
 
+    /// Whether the theme must not be installed: a structural error.
     pub fn is_blocking(&self) -> bool {
         self.category == ValidationCategory::Structural
             && self.severity == ValidationSeverity::Error
@@ -641,19 +815,30 @@ impl ValidationIssue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VisualFixture {
+    /// The session list.
     Sidebar,
+    /// A transcript's prose.
     TranscriptMarkdown,
+    /// A transcript's code blocks.
     TranscriptCode,
+    /// The composer.
     Composer,
+    /// A picker's popover.
     PickerPopover,
+    /// The appearance settings.
     AppearanceSettings,
+    /// A diff.
     Diff,
+    /// A terminal.
     Terminal,
+    /// An empty state.
     EmptyState,
+    /// A dialog.
     Dialog,
 }
 
 impl VisualFixture {
+    /// Every scene.
     pub const ALL: [Self; 10] = [
         Self::Sidebar,
         Self::TranscriptMarkdown,
