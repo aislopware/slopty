@@ -18221,7 +18221,7 @@ gh run view <run> --json jobs --jq '.jobs[] | select(.name|test("warm")) | .step
 footprint <pid of the VM's com.apple.Virtualization.VirtualMachine>; sysctl vm.swapusage
 ```
 
-## 2026-10-30 — Deep's reds: the SIGCHLD pump, coverage's spawned binaries
+## 2026-10-30 — Deep's reds: the SIGCHLD pump, coverage's spawned binaries, the canaries
 
 What the red Deep checks of run 40862351365 cost and what their fixes changed
 (`docs/decisions/testing.md`, "Red means something"). The macOS checks run one at a time, so
@@ -18231,7 +18231,10 @@ their times add up: that night they held a Mac from 11:04 to 14:55 UTC.
 | --- | --- | --- |
 | under `ThreadSanitizer`, `tokio::process` waiting for `sh -c 'exit 0'` | 60.006 s | 4.66 ms |
 | under `ThreadSanitizer`, tokio's `SIGCHLD` stream hearing that child | 60.008 s | 4.51 ms |
+| the canary's guard: its static handler hearing that child | — | 8.2 ms |
 | coverage: the worker's end-to-end test building the binaries it spawns | 2 min 44 s of its 180 s bound | 0 (built first) |
+| the macOS checks of a night, coverage among them | 3 h 50 min | about 2 h 37 min (coverage weekly: 73 min) |
+| a job's canary on this Mac, fixture builds warm: Miri / ASan / TSan / mutants | — | 48 / 21 / 27 / 13 s |
 
 The night's macOS jobs: sanitize address 34.7 min, thread 51.6, realtime 7.9, loom 20.1, leaks
 18.7, gpui seeds 23.4, coverage 73.3. The Linux ones run beside them: features 13.2, fuzz 38.0,
@@ -18243,5 +18246,6 @@ without and then with the pump linked (`-C link-arg=…/sigchld.o`): before, lib
 
 ```sh
 gh run view 40862351365 --json jobs --jq '.jobs[] | [.name, .startedAt, .completedAt] | @tsv'
-cargo xtask deep sanitize thread -p slopty-pty   # its child-waiting tests, once left out
+cargo xtask deep canary thread     # prints "SIGCHLD heard in …", then the planted race
+cargo xtask deep canary miri; cargo xtask deep canary address; cargo xtask deep canary mutants
 ```

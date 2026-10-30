@@ -1,28 +1,40 @@
 name: Deep
+run-name: >-
+  ${{ github.event_name == 'schedule' && (github.event.schedule == '0 7 * * 6' && 'Deep weekly' || 'Deep nightly')
+  || format('Deep: {0}', inputs.checks) }}
 
 # The bug-catching checks too slow for every commit (`cargo xtask deep`, docs/TESTING.md "Beyond
 # the layers"). They run here and not on the Mac someone works on. Every day at 04:37 UTC, in the
-# gate's calmest hours (05–08Z, 7–8 gate runs an hour against 15 in the old 23–04Z window), off
-# the top of the hour, which GitHub delays under load (02:00 Bangkok started up to 4 h late),
-# since the macOS job holds one of the five slots for hours
-# (.research/dev-speed-2026-10-10.md item 5); mutation testing once a week; and on demand
-# (`gh workflow run deep.yml`, `-f mutants=true` to add mutation testing, `-f macos=false` for the
-# Linux checks alone). Each check is a job of its own, so a slow one holds no other, on Linux
-# where its crates build there and on macOS only where they need Apple's frameworks
-# (`docs/decisions/tooling.md`, "Deep's macOS jobs wait for the gate"). A failure opens (or adds
-# to) the "Deep checks failing" issue.
+# gate's calmest hours, off the top of the hour, which GitHub delays under load; the weekly ones
+# (coverage, which holds a Mac for an hour, a whole tier A crate of mutants in rotation, and the
+# Claude Code mod's seeded model) on Saturdays; and on demand (`gh workflow run deep.yml -f
+# checks=tsan,miri`, or `nightly` / `weekly` / `all`). Each check is a job of its own, so a slow
+# one holds no other, on Linux where its crates build there and on macOS only where they need
+# Apple's frameworks (`docs/decisions/tooling.md`, "Deep's macOS jobs wait for the gate").
+#
+# Every job runs its check's canary after the check: the same environment and command against a
+# defect planted for it (`cargo xtask deep canary`), which must fail it for the planted reason.
+# A check whose canary passes cannot fail, and its job goes red (docs/decisions/testing.md,
+# "Red means something"). Every job also checks that its shell stops a pipeline on
+# its first failure (pipefail), whose absence once let every check pass whatever it said.
+#
+# A scheduled run checks main as it is, resolved by the plan job: main moves only by `promote`'s
+# token, which GitHub does not count as a push, so the schedule's own commit was the last one a
+# person pushed, days old. A cadence red twice running opens an issue (one red night may be
+# the runners'); its next green closes it.
 on:
   schedule:
     - cron: "37 4 * * *"
     - cron: "0 7 * * 6"
   workflow_dispatch:
     inputs:
-      mutants:
-        description: Also run mutation testing
-        type: boolean
-        default: false
-      macos:
-        description: Run the macOS checks too
+      checks:
+        description: >-
+          What to run: `nightly`, `weekly`, `all`, or slugs (asan tsan rtsan loom leaks gpui
+          coverage fuzz proptest features noq miri mutants-day mutants-weekly claude-mod)
+        default: nightly
+      wait:
+        description: Wait for the gate's macOS jobs before the macOS checks
         type: boolean
         default: true
 
@@ -32,7 +44,7 @@ permissions:
 # `bash` named, so a step runs with pipefail. GitHub's default shell runs without it, so each
 # check's `cargo xtask … | tee` passed whatever the check said: on 2026-10-10 (run 38001943825)
 # miri, the three sanitizers, the gpui seeds and coverage failed and the fuzzers found a crash in
-# `reassemble`, and every job was green and no issue opened.
+# `reassemble`, and every job was green and no issue opened. Each job's first step checks it.
 defaults:
   run:
     shell: bash
@@ -47,15 +59,99 @@ env:
   # .github/actions/sccache's call.
 
 jobs:
+  # What this run checks, and on which commit: main's head for a scheduled run, the dispatched
+  # ref's for one by hand. Each check is one entry, with the canary that proves it can fail.
+  plan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      since: ${{ steps.plan.outputs.since }}
+      mac: ${{ steps.plan.outputs.mac }}
+      linux: ${{ steps.plan.outputs.linux }}
+      noq: ${{ steps.plan.outputs.noq }}
+      miri: ${{ steps.plan.outputs.miri }}
+      mutants-day: ${{ steps.plan.outputs.mutants-day }}
+      mutants-weekly: ${{ steps.plan.outputs.mutants-weekly }}
+      claude-mod: ${{ steps.plan.outputs.claude-mod }}
+      wait: ${{ steps.plan.outputs.wait }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          CHECKS: ${{ inputs.checks }}
+          WAIT: ${{ inputs.wait }}
+        run: |
+          if [ "$EVENT" = schedule ]; then
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+            if [ "$SCHEDULE" = "0 7 * * 6" ]; then checks=weekly; else checks=nightly; fi
+            wait=true
+          else
+            sha=$GITHUB_SHA
+            checks=$CHECKS
+            wait=$WAIT
+          fi
+          nightly="asan tsan rtsan loom leaks gpui fuzz proptest features noq miri mutants-day"
+          weekly="coverage mutants-weekly claude-mod"
+          case "$checks" in
+            nightly) chosen=$nightly ;;
+            weekly) chosen=$weekly ;;
+            all) chosen="$nightly $weekly" ;;
+            *) chosen=$(echo "$checks" | tr ',' ' ') ;;
+          esac
+          known=" $nightly $weekly "
+          for slug in $chosen; do
+            case "$known" in *" $slug "*) ;; *) echo "::error::no deep check $slug"; exit 1 ;; esac
+          done
+          # Each check: its name, its command, its canary and its slug.
+          mac='[
+            {"check":"sanitize address","run":"deep sanitize address","canary":"address","slug":"asan"},
+            {"check":"sanitize thread","run":"deep sanitize thread","canary":"thread","slug":"tsan"},
+            {"check":"sanitize realtime","run":"deep sanitize realtime","canary":"realtime","slug":"rtsan"},
+            {"check":"loom","run":"deep loom","canary":"loom","slug":"loom"},
+            {"check":"leaks","run":"deep leaks","canary":"leaks","slug":"leaks"},
+            {"check":"gpui seeds","run":"nightly run --only gpui-iterations","canary":"gpui-seeds","slug":"gpui"},
+            {"check":"coverage","run":"deep coverage","canary":"coverage","slug":"coverage"}
+          ]'
+          # Two minutes a target on the arm runner's four cores, one under each engine: what one
+          # engine finds, the other starts from, and the terminal target's surface is the widest.
+          linux='[
+            {"check":"fuzz","run":"deep fuzz --time 60 --jobs 4 --ziggy","canary":"fuzz --ziggy","slug":"fuzz","tools":"--tool cargo-fuzz"},
+            {"check":"proptest","run":"nightly run --only proptest","canary":"proptest","slug":"proptest","tools":"--tool cargo-nextest"},
+            {"check":"features","run":"deep features","canary":"features","slug":"features","tools":"--tool cargo-hack --tool cargo-zigbuild"}
+          ]'
+          # Each output computed on its own line, so a failure fails the step (`set -e` ignores
+          # one inside an `echo`'s arguments).
+          pick() { jq -c --arg chosen " $chosen " '[.[] | select(.slug as $s | $chosen | contains(" " + $s + " "))]'; }
+          has() { case " $chosen " in *" $1 "*) echo true ;; *) echo false ;; esac; }
+          mac=$(echo "$mac" | pick)
+          linux=$(echo "$linux" | pick)
+          since=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          {
+            echo "sha=$sha"
+            echo "since=$since"
+            echo "mac=$mac"
+            echo "linux=$linux"
+            echo "noq=$(has noq)"
+            echo "miri=$(has miri)"
+            echo "mutants-day=$(has mutants-day)"
+            echo "mutants-weekly=$(has mutants-weekly)"
+            echo "claude-mod=$(has claude-mod)"
+            echo "wait=$wait"
+          } >> "$GITHUB_OUTPUT"
+          echo "### Deep on ${sha:0:12}: $chosen" >> "$GITHUB_STEP_SUMMARY"
+
   # GitHub starts a schedule late when it is busy, by hours (run 38133881188, due 04:37, began
   # 10:58), into the gate's working day. The macOS checks take a Mac each for up to an hour, so
   # they start only once none of the gate's macOS jobs is queued or running, waited for here on
   # a Linux runner rather than on a Mac. A gate that never goes idle in five hours skips the
   # night's macOS checks quietly; the Linux ones run regardless.
   wait:
-    if: >-
-      github.event.schedule != '0 7 * * 6'
-      && (github.event_name != 'workflow_dispatch' || inputs.macos)
+    needs: plan
+    if: needs.plan.outputs.mac != '[]' && needs.plan.outputs.wait == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     permissions:
@@ -64,6 +160,8 @@ jobs:
       idle: ${{ steps.gate.outputs.idle }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
       - uses: ./.github/actions/sccache
         with:
@@ -82,11 +180,13 @@ jobs:
   # What needs macOS: the sanitized crates call Apple's frameworks, the loom model checks the
   # CoreAudio ring, which builds for Apple alone, `leaks` is macOS's own, the UI's tests run on
   # the Mac's GPUI, and coverage covers every crate, the Mac's among them. The rest runs on Linux
-  # (below), so a night takes a Mac for about 200 minutes instead of 290.
+  # (below).
   mac:
     name: ${{ matrix.check }}
-    needs: wait
-    if: needs.wait.outputs.idle == 'true'
+    needs: [plan, wait]
+    if: >-
+      !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mac != '[]'
+      && (needs.wait.result == 'skipped' || needs.wait.outputs.idle == 'true')
     runs-on: xcode-27
     timeout-minutes: 240
     strategy:
@@ -96,23 +196,18 @@ jobs:
       # its Mac while it waited.
       max-parallel: 1
       matrix:
-        include:
-          - { check: sanitize address, run: deep sanitize address, slug: asan }
-          - { check: sanitize thread, run: deep sanitize thread, slug: tsan }
-          - { check: sanitize realtime, run: deep sanitize realtime, slug: rtsan }
-          - { check: loom, run: deep loom, slug: loom }
-          - { check: leaks, run: deep leaks, slug: leaks }
-          - { check: gpui seeds, run: nightly run --only gpui-iterations, slug: gpui }
-          - { check: coverage, run: deep coverage, slug: coverage }
+        include: ${{ fromJSON(needs.plan.outputs.mac) }}
     steps:
       # Spotlight off: it indexes every file a build and its tests write, and on a three-core
       # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
       # their 139 s run, against 1 once off (`docs/MEASUREMENTS.md`, "the gate's reds and its
       # runners").
-      - if: runner.os == 'macOS'
-        run: sudo mdutil -a -i off
+      - run: sudo mdutil -a -i off
+      - name: pipefail
+        run: if (false | tee /dev/null); then echo "::error::a failed pipeline passed"; exit 1; fi
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.plan.outputs.sha }}
           submodules: recursive
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
       - uses: ./.github/actions/sccache
@@ -130,8 +225,7 @@ jobs:
       # The cargo cache of `ci.yml`, one entry per lock for every OS. The gate saves it on its
       # own branch, which a run on main cannot read, so the features check saves main's (below),
       # which every branch reads, the gate's included.
-      - id: cargo-home
-        uses: actions/cache/restore@v6
+      - uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -156,18 +250,24 @@ jobs:
       - run: cargo xtask setup
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - run: |
+      - name: ${{ matrix.check }}
+        run: |
           mkdir -p target/deep
           cargo xtask ${{ matrix.run }} 2>&1 | tee target/deep/report.log
-      # Each check's report: its log, the tests' JUnit and `leaks`' reports.
+      - name: canary
+        if: ${{ !cancelled() }}
+        run: cargo xtask deep canary ${{ matrix.canary }} 2>&1 | tee target/deep/canary.log
+      # Each check's report: its log, its canary's, the tests' JUnit and `leaks`' reports.
       - if: always()
         uses: actions/upload-artifact@v7
         with:
           name: deep-${{ matrix.slug }}
           path: |
             target/deep/report.log
+            target/deep/canary.log
             target/deep/**/junit.xml
             target/deep/leaks/reports
+            target/deep/cov/lcov.info
             target/nightly/**/*.log
           if-no-files-found: ignore
 
@@ -177,30 +277,20 @@ jobs:
   # host clippy checks it there, through zig (`tools::apple_cargo`).
   linux-deep:
     name: ${{ matrix.check }}
-    if: github.event.schedule != '0 7 * * 6'
+    needs: plan
+    if: needs.plan.outputs.linux != '[]'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Two minutes a target on the runner's four cores, one under each engine: what one
-          # engine finds, the other starts from, and the terminal target's surface is the widest.
-          - check: fuzz
-            run: deep fuzz --time 60 --jobs 4 --ziggy
-            slug: fuzz
-            tools: --tool cargo-fuzz
-          - check: proptest
-            run: nightly run --only proptest
-            slug: proptest
-            tools: --tool cargo-nextest
-          - check: features
-            run: deep features
-            slug: features
-            tools: --tool cargo-hack --tool cargo-zigbuild
+        include: ${{ fromJSON(needs.plan.outputs.linux) }}
     steps:
+      - name: pipefail
+        run: if (false | tee /dev/null); then echo "::error::a failed pipeline passed"; exit 1; fi
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.plan.outputs.sha }}
           submodules: recursive
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
       - uses: ./.github/actions/sccache
@@ -254,20 +344,24 @@ jobs:
           cargo afl config --build --force
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - run: |
+      - name: ${{ matrix.check }}
+        run: |
           mkdir -p target/deep
           cargo xtask ${{ matrix.run }} 2>&1 | tee target/deep/report.log
+      - name: canary
+        if: ${{ !cancelled() }}
+        run: cargo xtask deep canary ${{ matrix.canary }} 2>&1 | tee target/deep/canary.log
       # main's cargo cache entry for this lock, when none has it: every package of every
       # platform, the lock's alone (`cargo xtask deep cargo-cache`), as `ci.yml`'s tools lane
       # saves the gate's. It once ran in shell, whose prune's `grep -v` exits 1 when nothing is
       # stale, which failed the night's features check after the check had passed.
       - id: fetch
         if: >-
-          always() && github.ref == 'refs/heads/main' && matrix.slug == 'features'
+          !cancelled() && github.ref == 'refs/heads/main' && matrix.slug == 'features'
           && steps.cargo-home.outputs.cache-hit != 'true'
         run: |
           cargo xtask deep cargo-cache
-      - if: always() && steps.fetch.outcome == 'success'
+      - if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         uses: actions/cache/save@v6
         with:
           path: |
@@ -284,6 +378,7 @@ jobs:
           name: deep-${{ matrix.slug }}
           path: |
             target/deep/report.log
+            target/deep/canary.log
             target/deep/**/junit.xml
             target/nightly/**/*.log
             target/fuzz/artifacts
@@ -294,11 +389,16 @@ jobs:
   # The vendored QUIC stack's own suites (`cargo xtask deep noq`), whose random-interaction
   # proptest draws new cases every night; `noq.yml` runs them on every change to the stack.
   noq:
-    if: github.event.schedule != '0 7 * * 6'
+    needs: plan
+    if: needs.plan.outputs.noq == 'true'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
+      - name: pipefail
+        run: if (false | tee /dev/null); then echo "::error::a failed pipeline passed"; exit 1; fi
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
       - uses: ./.github/actions/sccache
         with:
@@ -307,25 +407,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
-      - run: |
+      - name: noq
+        run: |
           mkdir -p target/deep
           cargo xtask deep noq 2>&1 | tee target/deep/report.log
+      - name: canary
+        if: ${{ !cancelled() }}
+        run: cargo xtask deep canary noq 2>&1 | tee target/deep/canary.log
       - if: always()
         uses: actions/upload-artifact@v7
         with:
           name: deep-noq
-          path: target/deep/report.log
+          path: |
+            target/deep/report.log
+            target/deep/canary.log
           if-no-files-found: ignore
 
   # Miri interprets the pure crates' tests, which build on Linux as they do here.
-  linux:
-    name: miri
-    if: github.event.schedule != '0 7 * * 6'
+  miri:
+    needs: plan
+    if: needs.plan.outputs.miri == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
+      - name: pipefail
+        run: if (false | tee /dev/null); then echo "::error::a failed pipeline passed"; exit 1; fi
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.plan.outputs.sha }}
           submodules: recursive
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
       - uses: ./.github/actions/sccache
@@ -339,41 +448,126 @@ jobs:
         with:
           components: miri, rust-src
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall --no-confirm --locked cargo-nextest@0.9.146
-      - run: |
+      - run: cargo xtask setup --tool cargo-nextest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: miri
+        run: |
           mkdir -p target/deep
           cargo xtask deep miri 2>&1 | tee target/deep/report.log
+      - name: canary
+        if: ${{ !cancelled() }}
+        run: cargo xtask deep canary miri 2>&1 | tee target/deep/canary.log
       - if: always()
         uses: actions/upload-artifact@v7
         with:
           name: deep-miri
           path: |
             target/deep/report.log
+            target/deep/canary.log
             target/deep/**/junit.xml
           if-no-files-found: ignore
 
-  # Mutation testing of the core crates: which changes no test catches. Weekly, as the code it
-  # reads changes slowly and a crate takes hours; the wire crate is split over four runners.
-  mutants:
-    name: mutants ${{ matrix.package }} ${{ matrix.shard }}
-    if: github.event.schedule == '0 7 * * 6' || inputs.mutants
+  # The day's landings under mutation (`cargo xtask deep mutants --since`): every change to the
+  # code of tiers A and B in the 24 hours before the plan, all of it, which the per-change run
+  # (`mutants.yml`) samples past its cap, split over four runners in slices that keep a crate's
+  # mutants on one. Tier A's must all be caught; tier B's missed are listed as lane work until the
+  # tier has its baseline. Its tests are the Linux gate lane's, so they get that lane's shells and
+  # socket buffers (ci.yml), and the unmutated tree is tested first: a tier B test that cannot run
+  # here would otherwise read as every mutant caught.
+  mutants-day:
+    name: mutants (the day's diff, shard ${{ matrix.shard }})
+    needs: plan
+    if: needs.plan.outputs.mutants-day == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # `cargo mutants --shard k/n` counts from 0.
-          - { package: slopty-core, shard: 0/1 }
-          - { package: slopty-grid, shard: 0/1 }
-          - { package: slopty-predict, shard: 0/1 }
-          - { package: slopty-proto, shard: 0/4 }
-          - { package: slopty-proto, shard: 1/4 }
-          - { package: slopty-proto, shard: 2/4 }
-          - { package: slopty-proto, shard: 3/4 }
+        # `cargo mutants --shard k/n` counts from 0.
+        shard: [0/4, 1/4, 2/4, 3/4]
     steps:
+      - name: pipefail
+        run: if (false | tee /dev/null); then echo "::error::a failed pipeline passed"; exit 1; fi
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends zsh fish tmux
+          sudo sysctl -w net.core.rmem_max=8388608
+          { zsh -fc 'autoload -Uz compaudit; compaudit' || true; } | xargs -r sudo chmod g-w,o-w
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.plan.outputs.sha }}
+          submodules: recursive
+          fetch-depth: 0
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
+        with:
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - uses: cargo-bins/cargo-binstall@main
+      # Every proc-macro dependency unoptimised, as in the gate's Linux lane (ci.yml): a mutant's
+      # tree builds them again.
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      # libghostty-vt-sys builds its library with zig, for tier B's worker.
+      - uses: ./.github/actions/zig
+      - uses: actions/cache@v6
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      - run: cargo xtask setup --lane linux --tool cargo-mutants
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - id: name
+        run: echo "slug=${{ matrix.shard }}" | tr '/' 'o' >> "$GITHUB_OUTPUT"
+      - name: mutants since ${{ needs.plan.outputs.since }}
+        env:
+          SINCE: ${{ needs.plan.outputs.since }}
+        run: |
+          mkdir -p target/deep
+          cargo xtask deep mutants --since "$SINCE" --tier a --tier b --shard ${{ matrix.shard }} \
+            --jobs 2 --timeout 300 2>&1 | tee target/deep/report.log
+      - name: canary
+        if: ${{ !cancelled() }}
+        run: cargo xtask deep canary mutants 2>&1 | tee target/deep/canary.log
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-day-${{ steps.name.outputs.slug }}
+          path: |
+            target/deep/report.log
+            target/deep/canary.log
+            target/deep/mutants/lane-work.md
+            target/deep/mutants/*/git.diff
+            target/deep/mutants/*/mutants.out/*.txt
+            target/deep/mutants/*/mutants.out/outcomes.json
+          if-no-files-found: ignore
+
+  # A whole tier A crate under mutation, a different one each week (`--rotate`), split over four
+  # runners: what no diff touched lately. Its missed mutants are lane work and fail nothing; a
+  # run that went wrong fails.
+  mutants-weekly:
+    name: mutants (weekly crate, shard ${{ matrix.shard }})
+    needs: plan
+    if: needs.plan.outputs.mutants-weekly == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        # `cargo mutants --shard k/n` counts from 0.
+        shard: [0/4, 1/4, 2/4, 3/4]
+    steps:
+      - name: pipefail
+        run: if (false | tee /dev/null); then echo "::error::a failed pipeline passed"; exit 1; fi
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
           submodules: recursive
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
       - uses: ./.github/actions/sccache
@@ -384,28 +578,78 @@ jobs:
         with:
           toolchain: 1.99.1
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall --no-confirm --locked cargo-mutants@27.1.0
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      - run: cargo xtask setup --tool cargo-mutants --tool cargo-nextest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - id: name
-        run: echo "slug=${{ matrix.package }}-${{ matrix.shard }}" | tr '/' 'o' >> "$GITHUB_OUTPUT"
-      # A missed mutant is a finding to rank, not a failure: the report is the result.
-      - run: |
+        run: echo "slug=${{ matrix.shard }}" | tr '/' 'o' >> "$GITHUB_OUTPUT"
+      - name: mutants
+        run: |
           mkdir -p target/deep
-          cargo xtask deep mutants -p ${{ matrix.package }} --shard ${{ matrix.shard }} --jobs 2 --timeout 300 2>&1 | tee target/deep/report.log || true
+          cargo xtask deep mutants --rotate --shard ${{ matrix.shard }} --jobs 2 --timeout 300 \
+            2>&1 | tee target/deep/report.log
+      - name: canary
+        if: ${{ !cancelled() }}
+        run: cargo xtask deep canary mutants 2>&1 | tee target/deep/canary.log
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mutants-${{ steps.name.outputs.slug }}
+          name: mutants-weekly-${{ steps.name.outputs.slug }}
           path: |
             target/deep/report.log
+            target/deep/canary.log
+            target/deep/mutants/lane-work.md
             target/deep/mutants/*/mutants.out/*.txt
             target/deep/mutants/*/mutants.out/outcomes.json
           if-no-files-found: ignore
 
-  # A failing night opens an issue, or comments on the open one; a clean night closes it. A
-  # cancelled run says nothing, and the weekly mutation run alone closes nothing, since a missed
-  # mutant is a finding and not a failure.
+  # The Claude Code mod's deep check (`cargo xtask claude-mod check --deep`,
+  # xtask/src/claude_mod.rs): the gate's checks and Stryker's score (every mutant killed), and
+  # the seeded model-based property. Forced, since the check skips a tree whose mod the push left
+  # alone, which a run on main always is. The tools and the pinned Claude Code come at the
+  # versions the mod pins, so it needs no setup of its own.
+  claude-mod:
+    needs: plan
+    if: needs.plan.outputs.claude-mod == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: pipefail
+        run: if (false | tee /dev/null); then echo "::error::a failed pipeline passed"; exit 1; fi
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
+        with:
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      - name: claude-mod
+        run: |
+          mkdir -p target/deep
+          cargo xtask claude-mod check --deep --force 2>&1 | tee target/deep/report.log
+      - name: canary
+        if: ${{ !cancelled() }}
+        run: cargo xtask deep canary claude-mod 2>&1 | tee target/deep/canary.log
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deep-claude-mod
+          path: |
+            target/deep/report.log
+            target/deep/canary.log
+            target/claude-mod/*/reports/
+          if-no-files-found: ignore
+
+  # A scheduled run that failed, when the run of its cadence before it failed too, opens an issue
+  # (or adds to the open one); a green one closes it. One red night is noted in the summary
+  # only: a runner's bad night is not yet a finding. A run by hand opens and closes nothing.
   report:
-    needs: [wait, mac, linux-deep, noq, linux, mutants]
+    needs: [plan, wait, mac, linux-deep, noq, miri, mutants-day, mutants-weekly, claude-mod]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
@@ -415,20 +659,38 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      NIGHTLY: ${{ github.event.schedule != '0 7 * * 6' }}
+      SHA: ${{ needs.plan.outputs.sha }}
+      TITLE: >-
+        ${{ github.event_name == 'schedule' && (github.event.schedule == '0 7 * * 6' && 'Deep weekly' || 'Deep nightly')
+        || format('Deep: {0}', inputs.checks) }}
     steps:
       - run: |
-          failed=$(gh api "repos/$GH_REPO/actions/runs/${{ github.run_id }}/jobs" --paginate \
+          failed=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs" --paginate \
             --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | "- [\(.name)](\(.html_url))"')
-          title="Deep checks failing"
-          open=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
           if [ -n "$failed" ]; then
-            body=$(printf 'The [Deep run](%s) on %s failed:\n\n%s\n\nEach job uploads its report as an artifact.' "$RUN_URL" "${{ github.sha }}" "$failed")
+            printf '### ✘ %s red on %s\n\n%s\n' "$TITLE" "${SHA:0:12}" "$failed" >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf '### ✓ %s green on %s, every canary caught\n' "$TITLE" "${SHA:0:12}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          [ "$GITHUB_EVENT_NAME" = schedule ] || exit 0
+          issue="$TITLE red twice running"
+          open=$(gh issue list --state open --search "in:title \"$issue\"" --json number --jq '.[0].number // empty')
+          if [ -z "$failed" ]; then
             if [ -n "$open" ]; then
-              gh issue comment "$open" --body "$body"
-            else
-              gh issue create --title "$title" --body "$body"
+              gh issue close "$open" --comment "The [run]($RUN_URL) on $SHA passed."
             fi
-          elif [ -n "$open" ] && [ "$NIGHTLY" = true ]; then
-            gh issue close "$open" --comment "The [Deep run]($RUN_URL) on ${{ github.sha }} passed."
+            exit 0
+          fi
+          before=$(gh run list --workflow deep.yml --branch main --limit 30 \
+            --json databaseId,displayTitle,status,conclusion \
+            --jq "[.[] | select(.displayTitle == \"$TITLE\" and .status == \"completed\" and .databaseId != $GITHUB_RUN_ID)][0].conclusion // empty")
+          body=$(printf 'The [%s run](%s) on %s failed:\n\n%s\n\n%s' "$TITLE" "$RUN_URL" "$SHA" "$failed" \
+            "Each job uploads its report and its canary's log; a mutants job its missed mutants, as lane-work.md.")
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          elif [ "$before" = failure ]; then
+            gh label create deep --color B60205 --description "A Deep check red twice running" 2>/dev/null || true
+            gh issue create --title "$issue" --label deep --body "$body"
+          else
+            echo "The run before was $before: an issue opens if the next one fails too." >> "$GITHUB_STEP_SUMMARY"
           fi

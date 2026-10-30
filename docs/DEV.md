@@ -483,10 +483,15 @@ two macOS guests at once. To look at a guest's screen, run `tart run <name> --vn
 command of the lane does.
 
 ## Deep checks (on a schedule, not per commit)
-The `Deep` workflow (`.github/workflows/deep.yml`) runs these every day at 04:37 UTC (11:37
-Bangkok), in the gate's calmest hours and off the top of the hour, a job per check, and mutation testing on Saturdays; `gh workflow run deep.yml` starts it now
-(`-f mutants=true` adds mutation testing). Each job's report is an artifact of the run
-(`gh run download <id>`), and a failure opens or comments on the "Deep checks failing" issue.
+The `Deep` workflow (`.github/workflows/deep.yml`) runs these on main's head every day at 04:37
+UTC (11:37 Bangkok), in the gate's calmest hours and off the top of the hour, a job per check,
+each followed by its canary, and coverage, a whole crate of mutants and the Claude Code mod's
+deep check on Saturdays.
+`gh workflow run deep.yml` starts the nightly set now on the ref given (`--ref`); `-f
+checks=weekly`, `all`, or slugs such as `-f checks=tsan,miri,mutants-day` choose others, and
+`-f wait=false` starts the macOS ones without waiting for the gate's to finish. Each job's
+report is an artifact of the run (`gh run download <id>`), and a schedule red twice running
+opens or comments on its "red twice running" issue (docs/TESTING.md, "Beyond the layers").
 Here, run one check at a time, and only the smallest that proves a change: one fuzz target for
 seconds, one crate under Miri.
 
@@ -511,6 +516,9 @@ under `target/deep/`:
   takes a whole crate, or this week's tier A crate. `--timeout s`, `--shard k/n` (counting from
   0), `--jobs n` and `--baseline run|skip` go to cargo-mutants. Every run writes its missed
   mutants to `target/deep/mutants/lane-work.md`, one line a test to write.
+- `canary <check>` — the check run against a defect planted for it, which it must catch
+  (`docs/TESTING.md`, "Every check proves it can fail"); `canary fuzz --ziggy` wants AFL++ to
+  catch it too.
 - `fuzz [--time s] [--jobs n] [--ziggy]` — every fuzz target for 30 s, or `--time`, on `n`
   processes, and with `--ziggy` under AFL++ for as long again (`cargo xtask fuzz` below).
 - `noq` — the vendored QUIC stack's own suites, `vendor/noq-proto`'s and `vendor/noq-udp`'s,

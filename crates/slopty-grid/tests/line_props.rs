@@ -50,4 +50,18 @@ mod props {
             prop_assert_eq!(serde_json::from_value::<Line>(json).expect("decodes"), line);
         }
     }
+
+    proptest! {
+        // Nothing written to `proptest-regressions/`: the planted failure is not a regression.
+        #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
+        /// The proptest canary (`cargo xtask deep canary proptest`): with `SLOPTY_CANARY=proptest`
+        /// set, a property that fails from 1000 on, which the nightly's run must find and shrink
+        /// to its bound. Without it, nothing is checked.
+        #[test]
+        fn a_planted_bound_is_found_and_shrunk(n in 0_u32..u32::MAX) {
+            let planted = std::env::var_os("SLOPTY_CANARY").is_some_and(|v| v == "proptest");
+            prop_assert!(!planted || n < 1000, "the planted bound");
+        }
+    }
 }

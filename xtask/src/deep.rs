@@ -6,7 +6,9 @@
 //! `cargo gate` is the bar every commit meets; these find what the gate cannot — undefined
 //! behaviour a test only trips under Miri, a data race a sanitizer sees, a feature set that
 //! does not build alone, a test suite that would not notice a mutated line. Each one prints
-//! what it ran so the number lands in `docs/MEASUREMENTS.md` or the decision it decides.
+//! what it ran so the number lands in `docs/MEASUREMENTS.md` or the decision it decides, and
+//! each has a canary (`deep canary`, [`canary`]): a planted defect it must catch, which the
+//! Deep workflow runs beside it, so a check that could not fail turns its job red.
 
 use std::fmt::Write as _;
 
@@ -17,6 +19,7 @@ use xshell::{PushEnv, Shell, cmd};
 
 use crate::tools::{TRIPLES, quiet_step, step};
 
+mod canary;
 mod mutants;
 
 /// Crates with no framework, FFI or GPUI in their tree: Miri can interpret their tests.
@@ -178,6 +181,16 @@ pub enum DeepCmd {
     /// Mutation testing (`cargo mutants`): which changed lines no test catches, in one crate
     /// (`-p`) or in the code a diff touches (`--in-diff`, `--since`), by tier.
     Mutants(mutants::Opts),
+    /// Run one check against its planted defect, which it must catch: exits 0 when it caught
+    /// it, for the planted reason, and fails when the defect got through.
+    Canary {
+        /// The check.
+        #[arg(value_enum)]
+        check: canary::Check,
+        /// The fuzz canary under AFL++ too (`fuzz --ziggy`; Linux).
+        #[arg(long)]
+        ziggy: bool,
+    },
     /// Fetch every package `Cargo.lock` names, for every platform, and drop from the registry's
     /// cache each `.crate` it no longer names: what the features job saves as main's cargo cache.
     CargoCache,
@@ -194,6 +207,7 @@ pub fn run(sh: &Shell, cmd: &DeepCmd) -> Result<()> {
         DeepCmd::Features => features(sh),
         DeepCmd::Coverage { html } => coverage(sh, *html),
         DeepCmd::Mutants(opts) => mutants::run(sh, opts),
+        DeepCmd::Canary { check, ziggy } => canary::run(sh, *check, *ziggy),
         DeepCmd::CargoCache => cargo_cache(sh),
         DeepCmd::MutantBins => mutants::spawned(sh),
         DeepCmd::Metal { filter, no_build } => metal(sh, filter.as_deref(), *no_build),
@@ -262,7 +276,7 @@ fn miri_ready(sh: &Shell) -> Result<()> {
     Ok(())
 }
 
-/// What every Miri run shares.
+/// What every Miri run shares, its canary's too.
 fn miri_env(sh: &Shell) -> Result<Vec<PushEnv<'_>>> {
     Ok(vec![
         sh.push_env("CARGO_TARGET_DIR", deep_dir("miri")?),

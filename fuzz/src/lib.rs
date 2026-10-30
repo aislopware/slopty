@@ -80,6 +80,29 @@ pub fn contain_panics_in(crates: &'static [&'static str]) {
     }));
 }
 
+/// The byte the fuzz canary plants a crash behind (`cargo xtask deep canary fuzz`).
+///
+/// `FUZZ_PLANTED` there holds the same value. Under libFuzzer and AFL++, with
+/// `SLOPTY_CANARY=fuzz` set, every target crashes on an input that starts with it, so a run that
+/// cannot find a crash and report it fails its canary. No committed input of the canary's target
+/// starts with it.
+pub const PLANTED: u8 = 0xc4;
+
+/// The fuzz canary's planted crash, which every engine's entry point calls before its target.
+///
+/// A panic on an input that starts with [`PLANTED`] while `SLOPTY_CANARY=fuzz` is set, and
+/// nothing otherwise. The variable is read once.
+///
+/// # Panics
+///
+/// On the planted input, by design.
+pub fn canary(data: &[u8]) {
+    static PLANTED_HERE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let planted = *PLANTED_HERE
+        .get_or_init(|| std::env::var_os("SLOPTY_CANARY").is_some_and(|v| v == "fuzz"));
+    assert!(!(planted && data.first() == Some(&PLANTED)), "the planted fuzz canary");
+}
+
 /// The target named `name`.
 #[must_use]
 pub fn target(name: &str) -> Option<fn(&[u8])> {
@@ -96,10 +119,16 @@ compile_error!(
 #[macro_export]
 macro_rules! target {
     (init: $init:expr, |$data:ident| $body:expr) => {
-        ::libfuzzer_sys::fuzz_target!(init: $init, |$data: &[u8]| $body);
+        ::libfuzzer_sys::fuzz_target!(init: $init, |$data: &[u8]| {
+            $crate::canary($data);
+            $body
+        });
     };
     (|$data:ident| $body:expr) => {
-        ::libfuzzer_sys::fuzz_target!(|$data: &[u8]| $body);
+        ::libfuzzer_sys::fuzz_target!(|$data: &[u8]| {
+            $crate::canary($data);
+            $body
+        });
     };
 }
 
@@ -113,13 +142,17 @@ macro_rules! target {
             static INIT: ::std::sync::Once = ::std::sync::Once::new();
             ::ziggy::fuzz!(|$data: &[u8]| {
                 INIT.call_once(|| $init);
+                $crate::canary($data);
                 $body
             });
         }
     };
     (| $data:ident | $body:expr) => {
         fn main() {
-            ::ziggy::fuzz!(|$data: &[u8]| { $body });
+            ::ziggy::fuzz!(|$data: &[u8]| {
+                $crate::canary($data);
+                $body
+            });
         }
     };
 }

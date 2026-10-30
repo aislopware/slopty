@@ -1038,11 +1038,39 @@ impl std::fmt::Debug for Ring {
     }
 }
 
+/// What a cell holds before the decoder first writes it: silence, and under loom a NaN, which
+/// no published sample, ramp or silence equals. A render that reads a cell whose publish it was
+/// not shown (a missing release or acquire) then plays a frame the model rejects, where silence
+/// would pass as the ring running dry (`ring_model`, and its canary: `cargo xtask deep canary
+/// loom`).
+#[cfg(not(slopty_loom))]
+const UNWRITTEN: u32 = 0;
+#[cfg(slopty_loom)]
+const UNWRITTEN: u32 = f32::NAN.to_bits();
+
+/// The order [`Steer::publish`] stores `write` in: `Release`, so the device's `Acquire` load of
+/// it shows the samples stored before it. Under loom, `SLOPTY_CANARY=loom` weakens it to
+/// `Relaxed`, the defect the model must catch (`cargo xtask deep canary loom`).
+#[cfg(not(slopty_loom))]
+const fn publish_order() -> Ordering {
+    Ordering::Release
+}
+
+#[cfg(slopty_loom)]
+fn publish_order() -> Ordering {
+    static WEAKENED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let weakened =
+        *WEAKENED.get_or_init(|| std::env::var_os("SLOPTY_CANARY").is_some_and(|v| v == "loom"));
+    if weakened { Ordering::Relaxed } else { Ordering::Release }
+}
+
 impl Ring {
     /// An empty, stopped ring of [`RING_SAMPLES`] samples.
     fn new() -> Self {
         Self {
-            samples: std::iter::repeat_with(|| AtomicU32::new(0)).take(RING_SAMPLES).collect(),
+            samples: std::iter::repeat_with(|| AtomicU32::new(UNWRITTEN))
+                .take(RING_SAMPLES)
+                .collect(),
             write: AtomicUsize::new(0),
             read: AtomicUsize::new(0),
             from: AtomicUsize::new(0),
@@ -1265,7 +1293,7 @@ impl Steer {
             cell.store(sample.to_bits(), Ordering::Relaxed);
         }
         self.write = self.write.saturating_add(n);
-        ring.write.store(self.write, Ordering::Release);
+        ring.write.store(self.write, publish_order());
         let dropped = pcm.len().saturating_sub(n) / SAMPLES_PER_FRAME;
         self.trimmed_frames = self.trimmed_frames.saturating_add(dropped as u64);
     }

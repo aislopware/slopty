@@ -1620,7 +1620,17 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
 
 - ✅ **Red means something** (2026-10-30). Deep had been red every night since 10-25, and a check
   that is always red tells nothing (research §7, rank 1). Each red had its root cause found and
-  fixed at the root:
+  fixed at the root, and every check now proves, on each run, that it can fail:
+  - **Each check carries a canary** (`cargo xtask deep canary <check>`, `xtask/src/deep/canary.rs`).
+    After its check, a job runs the same environment and command against a defect planted for
+    that check, and the canary passes only when the check failed for the planted reason (its
+    report's signature, not just a failure). A canary that passes fails the job. The defects
+    wake only under `SLOPTY_CANARY`: tests of a fixture crate of its own, a crash at every fuzz
+    target's entry point, the audio ring's publishing store weakened for loom, a property of
+    the grid, a test of the kit that fails on its second seed, and a copy of the Claude Code
+    mod whose relay marks the newest draft sent when it sent an older one, which the weekly
+    seeded model must catch. Each job also checks first that a failed pipeline fails its step,
+    the lesson of run 38001943825.
   - **A flake fails** (`flaky-result = "fail"`). A pass on a retry stands only for the seven
     tests the `gate` and `warm` profiles name, which time themselves against the machine's
     load (the session actor's frame pace and checkpoint wait, the relay's short wait, the
@@ -1634,7 +1644,8 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     check builds now links a `no_std` object (`xtask/src/deep/fixtures/sigchld.rs`): its
     constructor blocks `SIGCHLD` on the main thread, which every later thread inherits, and
     starts one thread looping on `sigsuspend`, which the runtime intercepts. The handler runs in
-    5 ms instead of 60 s (MEASUREMENTS 2026-10-30, "Deep's reds").
+    5 ms instead of 60 s (MEASUREMENTS 2026-10-30, "Deep's reds"). The canary's guard test fails
+    if a child's exit takes ten seconds to be heard.
   - **The other reds, each at its root.** The sanitizers ran nextest's default profile, so on a
     runner's virtual Mac they ran the counter and `IOReport` tests the `ci` profile leaves out;
     they now take `ci` there. Coverage built the binaries tests spawn outside its instrumented
@@ -1643,7 +1654,14 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     features check passed and then failed: the cache prune's `grep -v` exits 1 when nothing is
     stale, so it moved to Rust (`deep cargo-cache`). The GPUI seeds failed on four shell tests
     that keep a process's state from one seed to the next (a selection drag, two hover fades,
-    the attachment cache), which reset now.
+    the attachment cache), which reset now. And the loom model could not see a missing
+    `Release` on the ring's write index: a stale read of a zeroed cell is silence, which the
+    model accepts, so the unwritten cells hold NaN under loom.
+  - **Main, and two nights.** A schedule checks out the last commit a person pushed, and main
+    moves by `promote`'s token, so a scheduled run resolves main's head itself. One red night
+    is noted; a cadence red twice running opens an issue (or adds to it), and its next green
+    closes it. A run by hand never touches issues. This replaces "Loud" in "The deep checks run
+    on GitHub Actions", whose issue opened on any red.
   - **Mutation in the diff** (rank 3; `docs/TESTING.md`, "Mutation in the diff"). Mutation
     testing ran four crates weekly, and a missed mutant never failed anything. Now mutants are
     made of the code a change touches, by the research's tiers. Tier A (the pure kernels) must
@@ -1651,6 +1669,12 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     listed until it has a baseline under the simulated world. Each push the gate takes runs
     tier A's diff in a workflow of its own (`mutants.yml`), capped at an even sample of 30 and
     with the baseline skipped, since the gate tests the same commit. Its own workflow keeps the
-    gate's one-run-at-a-time queue from waiting on it. Every missed mutant becomes a line of
-    `lane-work.md`, a test for a lane to write; equivalent ones go to `.cargo/mutants.toml` with
-    a reason, and `Debug`/`Display` bodies are excluded there.
+    gate's one-run-at-a-time queue from waiting on it. It runs in the gate's Linux lane's
+    environment (its shells, socket buffers and zig): cargo-mutants counts a mutant whose tests
+    fail as caught, so a setup that failed there would pass every mutant, and with the baseline
+    skipped nothing else would show it. Deep runs the day's whole diff of both
+    tiers nightly, and one whole tier A crate a week in rotation. Every missed mutant becomes a
+    line of `lane-work.md`, a test for a lane to write; equivalent ones go to
+    `.cargo/mutants.toml` with a reason, and `Debug`/`Display` bodies are excluded there.
+    Coverage moved to the weekly run: it held a Mac for over an hour a night, and the mutation
+    score is the strength measure now.

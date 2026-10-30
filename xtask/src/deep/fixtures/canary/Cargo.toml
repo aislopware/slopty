@@ -1,0 +1,15 @@
+# The planted defects each deep check must catch (`cargo xtask deep canary`; xtask/src/deep/canary.rs).
+[package]
+name = "slopty-deep-canary"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+default = [ "quick", "helpers" ]
+# The features check's planted defect: `quick` builds only beside `helpers`.
+quick = [  ]
+helpers = [  ]
+
+# A workspace of its own: the deep checks run it by its manifest, never as one of Slopty's crates.
+[workspace]

@@ -1,6 +1,7 @@
 //! The audio ring under loom: the decoder's thread and the device's render callback over every
 //! interleaving of their atomics, a load free to read any of the stores loom keeps (the last
-//! seven of each atomic), which is where a missing release or acquire shows. `cargo xtask deep
+//! seven of each atomic), which is where a missing release or acquire shows: a cell no publish
+//! was shown for still holds a NaN here (`UNWRITTEN`), which no check accepts. `cargo xtask deep
 //! loom` runs it with `--cfg slopty_loom`, where `RING_SAMPLES` is four frames and
 //! `FADE_FRAMES` one (`docs/decisions/tooling.md`, "The audio ring is model-checked with loom").
 //!

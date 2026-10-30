@@ -305,6 +305,14 @@ pub fn mutate(
     let Scope { dir, packages, diff, out } = *scope;
     let _dir = sh.push_dir(dir);
     let _env = sh.push_env("AWS_LC_SYS_CMAKE_BUILDER", "1");
+    // `.cargo/config.toml` names libghostty-vt's prebuilt directory relative to the tree, and
+    // cargo-mutants copies the tree without `target/`, so each copy ran its own minute of zig
+    // build; the tree's is the one every copy shares, as the gate's snapshots share the
+    // checkout's (`docs/decisions/tooling.md`, "libghostty-vt is built once per set of inputs").
+    // A caller's (a lane's check) stands.
+    let _prebuilt = std::env::var_os(PREBUILT_DIR)
+        .is_none()
+        .then(|| sh.push_env(PREBUILT_DIR, dir.join("target").join(crate::prune::PREBUILT)));
     // The `mutants` profile's setup script builds the binaries these packages' tests spawn in
     // each mutant's tree (`spawned`), through this xtask: the gate's own script would build the
     // whole workspace, which does not build off a Mac. The gate's returns at once.
@@ -612,6 +620,9 @@ pub fn spawned(sh: &Shell) -> Result<()> {
 
 /// Where nextest runs a setup script, the workspace it tests, which it also names in this.
 const TESTED_TREE: &str = "NEXTEST_WORKSPACE_ROOT";
+
+/// Where libghostty-vt-sys takes a prebuilt library from and publishes the one it builds.
+const PREBUILT_DIR: &str = "LIBGHOSTTY_VT_SYS_PREBUILT_DIR";
 
 #[cfg(test)]
 mod tests {

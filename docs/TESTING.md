@@ -243,14 +243,54 @@ test in the layer that can hold it. `docs/DEV.md` has the commands.
 
 They run on GitHub Actions, not on this Mac, where someone works over Parsec while other
 sessions gate (`docs/decisions/testing.md`, "The deep checks run on GitHub Actions"). The `Deep`
-workflow runs every night, each check a job of its own: on macOS the sanitizers, loom, `leaks`,
-the fuzz targets, the property tests at 4 096 cases, the GPUI scheduler seeds, the features and
-coverage; on Ubuntu, Miri. Mutation testing of the core crates runs weekly on Ubuntu, the wire
-crate split four ways. Each job uploads its report (the log, the tests' JUnit, `leaks`' reports,
-the fuzzers' crashes), and a failed night opens or adds to the "Deep checks failing" issue,
-which the next clean night closes. Two checks stay here: `deep metal` needs a GPU a hosted
-runner lacks, and the soak and bench measure this Mac. Here a check runs one at a time at
+workflow runs every night, each check a job of its own:
+- on macOS, one at a time once the gate's macOS jobs are idle: the sanitizers, loom, `leaks`
+  and the GPUI scheduler seeds;
+- on arm Linux: the fuzz targets, the property tests at 4 096 cases, the features and the QUIC
+  stack's suites;
+- on Ubuntu: Miri, and the day's landings under mutation, split four ways.
+
+On Saturdays it runs coverage on macOS, a whole tier A crate under mutation, a different one
+each week, split four ways, and the Claude Code mod's deep check (`cargo xtask claude-mod check
+--deep`), whose seeded model drives the mod through random schedules. A scheduled run checks main's head, which the run resolves itself:
+main moves by `promote`'s token, which starts no schedule, so the schedule's own commit was the
+last one a person pushed. Each job uploads its report (the log, its canary's, the tests'
+JUnit, `leaks`' reports, the fuzzers' crashes, the missed mutants). A nightly or weekly run red
+after a red run of its own cadence opens or adds to the "Deep nightly red twice running" (or
+weekly) issue, which its next green closes; one red night is a note in the run's summary, and a
+run started by hand opens and closes nothing. Two checks stay here: `deep metal` needs a GPU a
+hosted runner lacks, and the soak and bench measure this Mac. Here a check runs one at a time at
 `nice -n 19` on four cores, and `cargo xtask nightly` refuses a full run without `--all-here`.
+
+**Every check proves it can fail** (`cargo xtask deep canary <check>`; `docs/decisions/testing.md`,
+"Red means something"). A check that cannot fail says nothing when it passes, and from
+2026-10-04 to 2026-10-11 no sanitized test ran while every job was green. So each Deep job, and
+the per-change mutants, runs its canary after its check: the same environment and command
+against a defect planted for that check, which must fail it for the planted reason, the
+sanitizer's own report or the mutant that lived, and not merely fail. A canary that passes
+fails its job. The defects are tests of a fixture crate of its own
+(`xtask/src/deep/fixtures/canary`) that do nothing unless `SLOPTY_CANARY` names them, or
+plants in the crates a check runs that wake only under it:
+- Miri and `AddressSanitizer`: a read past a heap allocation's end. `ThreadSanitizer`: two
+  threads writing one counter, and a child's `SIGCHLD` that must be heard in under ten seconds.
+  `RealtimeSanitizer`: the codec's own probe, an allocation in the render callback.
+- `leaks`: 64 KiB no pointer reaches. Coverage: a called function that must read covered and an
+  uncalled one that must not. Features: a function that builds only beside another feature.
+- The fuzzers: every target's entry point crashes on an input that starts with
+  `slopty_fuzz::PLANTED`, which no committed input of the canary's target starts with. Under
+  `--ziggy` AFL++ must find it too.
+- loom: the audio ring's publishing store weakened to `Relaxed`, its unwritten cells poisoned
+  with NaN so a stale read cannot pass as silence. The property tests: a property of
+  `slopty-grid` that fails past a bound and must shrink to it. The GPUI seeds: a test of
+  `slopty-kit` that fails on its process's second seed. The QUIC suites' runner: a failing test.
+- Mutation testing: the fixture's functions mutated as a diff's are, which must report the
+  unchecked ones missed and the checked one caught.
+- The Claude Code mod: a copy whose relay marks the newest draft sent when it sent an older one
+  (a lost update), which the seeded model must catch as a schedule whose last draft never went.
+
+Each job also checks first that a failed pipeline fails its step (pipefail): every check runs
+as `cargo xtask … | tee`, and without it, on 2026-10-10, every red check passed (run
+38001943825).
 
 Four deep checks see what the rest cannot:
 - **Sanitizers and signals.** A sanitizer's runtime installs its own fatal-signal handlers, and
@@ -345,10 +385,15 @@ task a lane takes: write the test that fails on that change, or, for a change no
 apart (an equivalent mutant), add it to `.cargo/mutants.toml` or mark the function
 `#[mutants::skip]` with the reason. `Debug` and `Display` bodies are never mutated.
 
-It runs beside the gate and not in its way, on each push the gate takes
-(`.github/workflows/mutants.yml`): tier A's mutants in the diff from main, the unmutated tree
-untested (the gate tests the same commit), at most 30 of them. A change that makes more runs an
-even sample, every k-th.
+Three runs, each beside the gate and none in its way:
+- **Each change** (`.github/workflows/mutants.yml`, on every push the gate takes): tier A's
+  mutants in the diff from main, the unmutated tree untested (the gate tests the same commit),
+  at most 30 of them. A change that makes more runs an even sample, every k-th. It runs in the
+  gate's Linux lane's environment, since a mutant whose tests cannot start counts as caught.
+- **The day's landings** (Deep, nightly): tiers A and B in the 24 hours of commits before the
+  run, all of them, split four ways.
+- **A crate a week** (Deep, Saturdays): one whole tier A crate in turn (`--rotate`), split four
+  ways, for what no diff touched lately. Its missed mutants are work too.
 
 ```sh
 cargo xtask deep mutants --in-diff origin/main            # tier A in this branch's change

@@ -39,9 +39,18 @@ jobs:
     steps:
       - name: pipefail
         run: if (false | tee /dev/null); then echo "::error::a failed pipeline passed"; exit 1; fi
+      # The gate's Linux lane's shells, socket buffers and completion directories (ci.yml), for
+      # the client's tests: a setup that failed a mutant's tests would count it caught, and the
+      # unmutated tree is not tested here.
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends zsh fish tmux
+          sudo sysctl -w net.core.rmem_max=8388608
+          { zsh -fc 'autoload -Uz compaudit; compaudit' || true; } | xargs -r sudo chmod g-w,o-w
       # The whole history, so the change's merge base with main is here.
       - uses: actions/checkout@v7
         with:
+          submodules: recursive
           fetch-depth: 0
       # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
       - uses: ./.github/actions/sccache
@@ -67,6 +76,24 @@ jobs:
       # Every proc-macro dependency unoptimised, as in the gate (ci.yml): each mutant's tree
       # builds them again.
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      # libghostty-vt-sys builds its library with zig, for the daemons the client's tests spawn;
+      # the gate's Linux lane's prebuilt one, read only, which every mutant's copy shares.
+      - uses: ./.github/actions/zig
+      - id: ghostty
+        run: >-
+          echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
+          'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v6
+        with:
+          path: target/ghostty-prebuilt
+          key: ghostty-prebuilt-${{ runner.os }}-linux-${{ steps.ghostty.outputs.key }}
+      - uses: actions/cache@v6
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       # The gate's Linux lane's xtask, by the same key (ci.yml), or built and kept for it.
       - id: xtask
         uses: actions/cache/restore@v6
@@ -88,7 +115,7 @@ jobs:
           path: ~/.cache/slopty-xtask
           key: ${{ steps.xtask.outputs.cache-primary-key }}
       - run: echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
-      - run: xtask setup --tool cargo-mutants --tool cargo-nextest
+      - run: xtask setup --lane linux --tool cargo-mutants
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - name: mutants of the change
@@ -98,12 +125,17 @@ jobs:
           mkdir -p target/deep
           xtask deep mutants --in-diff "$BASE" --baseline skip --cap 30 --jobs 2 --timeout 120 \
             2>&1 | tee target/deep/report.log
+      # The planted mutants, which this run must report as missed (`cargo xtask deep canary`).
+      - name: canary
+        if: ${{ !cancelled() }}
+        run: xtask deep canary mutants 2>&1 | tee target/deep/canary.log
       - if: always()
         uses: actions/upload-artifact@v7
         with:
           name: mutants-change
           path: |
             target/deep/report.log
+            target/deep/canary.log
             target/deep/mutants/lane-work.md
             target/deep/mutants/*/git.diff
             target/deep/mutants/*/mutants.out/*.txt

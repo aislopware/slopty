@@ -1,0 +1,2 @@
+# The mutants canary's tree runs its tests under nextest, as the workspace's do (`.cargo/mutants.toml`).
+test_tool = "nextest"

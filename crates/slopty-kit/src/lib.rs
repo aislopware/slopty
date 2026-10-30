@@ -25,6 +25,8 @@
 )]
 
 pub mod a11y;
+#[cfg(test)]
+mod canary;
 pub mod clock;
 pub mod colors;
 pub mod fonts;
