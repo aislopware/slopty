@@ -98,6 +98,29 @@ impl Mark {
     pub(crate) fn hue(&self, theme: &Theme) -> Option<Hsla> {
         self.drawn().map(|state| hue(state, theme))
     }
+
+    /// How loud it calls: needs you over failed over done unseen over at work; at rest, not at
+    /// all. A shut group wears its loudest row's mark ([`loudest`]).
+    pub(crate) fn urgency(&self) -> u8 {
+        match self {
+            Self::NeedsYou(_) => 4,
+            Self::Failed => 3,
+            Self::DoneUnseen => 2,
+            Self::AtWork => 1,
+            Self::AtRest => 0,
+        }
+    }
+}
+
+/// The loudest of `marks` ([`Mark::urgency`]), the first of equals; none while all rest.
+pub(crate) fn loudest<'a>(marks: impl IntoIterator<Item = &'a Mark>) -> Option<&'a Mark> {
+    marks
+        .into_iter()
+        .filter(|mark| mark.urgency() > 0)
+        .fold(None, |loudest: Option<&Mark>, mark| match loudest {
+            Some(loudest) if loudest.urgency() >= mark.urgency() => Some(loudest),
+            _ => Some(mark),
+        })
 }
 
 /// The hue table: at work blue, needs you amber, failed red, done green. On light each takes
@@ -275,6 +298,22 @@ mod tests {
                 (None, false, None),
             ]
         );
+    }
+
+    /// A shut group wears its loudest row's mark: needs you over failed over done unseen over at
+    /// work, the first of equals; a group all at rest wears none.
+    #[test]
+    fn the_loudest_mark_speaks_for_a_group() {
+        let asks = Mark::NeedsYou(need(Some(&SessionWait { kind: SessionWait::QUESTION.into(), summary: None })));
+        let marks = [Mark::AtWork, Mark::DoneUnseen, Mark::Failed, asks.clone(), Mark::AtRest];
+        assert_eq!(loudest(&marks), Some(&asks));
+        assert_eq!(loudest(&marks[..3]), Some(&Mark::Failed));
+        assert_eq!(loudest(&marks[..2]), Some(&Mark::DoneUnseen));
+        assert_eq!(loudest(&[Mark::AtRest, Mark::AtWork]), Some(&Mark::AtWork));
+        let first = Mark::NeedsYou(need(None));
+        assert_eq!(loudest(&[first.clone(), asks]), Some(&first), "the first of equals");
+        assert_eq!(loudest(&[Mark::AtRest, Mark::AtRest]), None);
+        assert_eq!(loudest(&[] as &[Mark]), None);
     }
 
     /// One hue per state, at work blue whatever the accent and none at rest, each a hue and

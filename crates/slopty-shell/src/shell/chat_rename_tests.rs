@@ -209,16 +209,16 @@ fn add_chats(shell: &Entity<Shell>, cx: &mut VisualTestContext, ids: &[&str], ar
 #[gpui::test]
 fn rename_opens_collapsed_sessions_groups_and_the_sidebar(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    // slopty: by status, the default: the chat's collapsed status group opens.
+    // slopty: the chat's shut group opens (it has no project: "No project").
     shell.update(cx, |shell, cx| {
-        shell.sidebar_collapsed_groups.insert("status:status:done".into());
+        shell.sidebar_collapsed_groups.insert("project:".into());
         shell.settings.sidebar_collapsed = true;
         cx.notify();
     });
     redraw(cx);
     rename(&shell, cx, "newer");
     shell.read_with(cx, |shell, _| {
-        assert!(!shell.sidebar_collapsed_groups.contains("status:status:done"));
+        assert!(!shell.sidebar_collapsed_groups.contains("project:"));
         assert!(!shell.settings.sidebar_collapsed);
     });
     assert_eq!(editing(&shell, cx).as_deref(), Some("newer"));

@@ -1,8 +1,7 @@
 Window
 Button │ Filter projects: All projects
-Button │ Done, 1
+Button │ repo, 1
 Button │ Read the guide before the first run.
-Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings

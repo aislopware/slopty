@@ -5,9 +5,9 @@
 //! Compact rows drop all of that, so the card is where it lives on.
 //!
 //! slopty: it also says which machine (project @ machine), the agent and model, how long the
-//! chat has stood as it is, what it needs of the person in its agent's words, and how many
-//! subagents it has running (`sidebar_status::chat_card`); a chat with no project shows its
-//! folder. A screen reader reads it as a tooltip.
+//! chat has stood as it is, what it needs of the person in its agent's words, the last line the
+//! agent wrote, and how many subagents it has running (`sidebar_status::chat_card`); a chat with
+//! no project shows its folder. A screen reader reads it as a tooltip.
 //!
 //! The card waits out a short dwell so sweeping the pointer down the list
 //! stays quiet. Once one has shown, the card is warm: the next row's card
@@ -33,6 +33,10 @@ pub(super) struct SessionHoverCard {
     shown: Option<String>,
     pending: Option<(String, Task<()>)>,
     hidden_at: Option<Instant>,
+    /// slopty: the ports the shown card's session listens on, as its machine's shells report
+    /// them (`WATCH_PREVIEWS`, the browser's previews): the chat watched, its ports so far, and
+    /// the watch, which goes with the card.
+    ports: Option<(String, Vec<u16>, Task<()>)>,
 }
 
 impl SessionHoverCard {
@@ -102,14 +106,12 @@ impl SessionHoverCard {
     }
 }
 
-/// "21h ago" for the card's footer line ("now" stays as it is).
-// slopty: then the time in full, which the row's "21h" leaves out: "21h ago · Oct 18, 09:12".
-fn time_label(time_ago: &str, at: &str) -> String {
-    if time_ago == "now" {
-        format!("just now \u{b7} {at}")
-    } else {
-        format!("{time_ago} ago \u{b7} {at}")
-    }
+/// slopty: "Listening on 3000 · 5173", or none while it listens on nothing.
+fn ports_line(ports: &[u16]) -> Option<SharedString> {
+    (!ports.is_empty()).then(|| {
+        let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+        SharedString::from(format!("Listening on {}", ports.join(" \u{b7} ")))
+    })
 }
 
 impl Shell {
@@ -118,6 +120,7 @@ impl Shell {
     /// sidebar's render, which follows every shell notify; the shell itself
     /// only dismisses the card while the sidebar is hidden.
     pub(super) fn reconcile_session_hover_card(&mut self, cx: &mut Context<Self>) {
+        self.watch_card_ports(cx);
         let Some(target) = self.session_hover_card.target() else {
             return;
         };
@@ -173,6 +176,52 @@ impl Shell {
         cx.notify();
     }
 
+    /// slopty: keep the ports' watch on the card shown: started when a card shows, dropped when
+    /// it goes or another shows.
+    fn watch_card_ports(&mut self, cx: &mut Context<Self>) {
+        let shown = self.session_hover_card.shown.clone();
+        let watched = self.session_hover_card.ports.as_ref().map(|(chat, _, _)| chat.clone());
+        if shown == watched {
+            return;
+        }
+        self.session_hover_card.ports = None;
+        let Some(chat_id) = shown else { return };
+        let Some(engine) = self.state.read(cx).engine().cloned() else { return };
+        let watched = chat_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let Ok(mut updates) = engine
+                .client()
+                .subscribe(slopty_view_rpc::methods::WATCH_PREVIEWS, serde_json::json!({ "chatId": watched }))
+                .await
+            else {
+                return;
+            };
+            while let Some(value) = updates.recv().await {
+                let Ok(snapshot) = serde_json::from_value::<slopty_view_proto::PreviewSnapshot>(value) else {
+                    continue;
+                };
+                let mut ports: Vec<u16> = snapshot.services.iter().map(|service| service.port).collect();
+                ports.sort_unstable();
+                ports.dedup();
+                let gone = this
+                    .update(cx, |this, cx| {
+                        if let Some((chat, known, _)) = this.session_hover_card.ports.as_mut()
+                            && *chat == watched
+                            && *known != ports
+                        {
+                            *known = ports;
+                            cx.notify();
+                        }
+                    })
+                    .is_err();
+                if gone {
+                    return;
+                }
+            }
+        });
+        self.session_hover_card.ports = Some((chat_id, Vec::new(), task));
+    }
+
     pub(super) fn dismiss_session_card(&mut self, cx: &mut Context<Self>) {
         if self.session_hover_card.dismiss() {
             cx.notify();
@@ -185,21 +234,15 @@ impl Shell {
     pub(super) fn render_session_hover_card(
         &self,
         chat_id: &str,
-        time_ago: SharedString,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let now = crate::clock::utc(cx);
         // slopty: Slopty's facts of the row (`sidebar_status::chat_card`).
         let facts = super::sidebar_status::chat_card(self.state.read(cx), chat_id, now)?;
-        let (title, project, local, online, branch, change_request, at) = {
+        let (title, project, local, online, branch, change_request) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
-            // slopty: when the row's time was, in full (the row says only "21h").
-            let at = crate::settings::archived::absolute_time(
-                chat.last_message_at.unwrap_or(chat.created_at),
-                now,
-            );
             let space = state.space_for_chat(chat);
             let project = space.map(|space| SharedString::from(space.display_name().to_owned()));
             let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
@@ -225,7 +268,6 @@ impl Shell {
                 online,
                 branch,
                 change_request,
-                at,
             )
         };
 
@@ -297,12 +339,7 @@ impl Shell {
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(muted)
                             // slopty: how long it has stood as it is, said in full.
-                            .child(
-                                facts
-                                    .status
-                                    .clone()
-                                    .unwrap_or_else(|| time_label(&time_ago, &at).into()),
-                            ),
+                            .child(facts.status.clone()),
                     ),
             )
             .child(
@@ -335,6 +372,19 @@ impl Shell {
         let agent = facts.agent.clone().map(|agent| meta_row(glyph(icons::BOT), agent));
         let subagents =
             facts.subagents.clone().map(|subagents| meta_row(glyph(icons::LIST), subagents));
+        // slopty: the ports it listens on, while the card's watch has heard any.
+        let ports = self
+            .session_hover_card
+            .ports
+            .as_ref()
+            .filter(|(chat, _, _)| chat == chat_id)
+            .and_then(|(_, ports, _)| ports_line(ports));
+        let ports_row = ports.clone().map(|ports| {
+            meta_row(glyph(icons::GLOBAL), ports).debug_selector({
+                let chat_id = chat_id.to_owned();
+                move || format!("session-hover-card-ports-{chat_id}")
+            })
+        });
         // ── The pull request as one more row under the branch: its state
         // lives in the glyph's and number's color (the badge's).
         let pull_request = change_request.map(|model| {
@@ -366,7 +416,8 @@ impl Shell {
             .children(branch.clone().map(|branch| meta_row(glyph(icons::GIT_BRANCH), branch)))
             .children(pull_request)
             .children(agent)
-            .children(subagents);
+            .children(subagents)
+            .children(ports_row);
         // slopty: what the agent wants of the person, in its records' words, beside the glyph its
         // row wears for it (`marks`): the row has room for the glyph alone.
         let need = facts.need.clone().map(|need| {
@@ -408,16 +459,30 @@ impl Shell {
                         .child(words),
                 )
         });
+        // slopty: the last line the agent wrote, quiet, as its records hold it (never its screen).
+        let last = facts.last.clone().map(|last| {
+            div()
+                .debug_selector({
+                    let chat_id = chat_id.to_owned();
+                    move || format!("session-hover-card-last-{chat_id}")
+                })
+                .text_size(crate::typography::ui_rems(12.0))
+                .line_height(px(16.0))
+                .text_color(muted)
+                .line_clamp(3)
+                .child(last)
+        });
         // slopty: what a screen reader says of the card, a line per fact.
-        let need_words = facts.need.as_ref().map(|need| need.words.clone());
         let spoken = [
-            &facts.status,
-            &need_words,
-            &facts.place,
-            &facts.folder,
-            &branch,
-            &facts.agent,
-            &facts.subagents,
+            Some(&facts.status),
+            facts.need.as_ref().map(|need| &need.words),
+            facts.place.as_ref(),
+            facts.folder.as_ref(),
+            branch.as_ref(),
+            facts.agent.as_ref(),
+            facts.subagents.as_ref(),
+            ports.as_ref(),
+            facts.last.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -443,6 +508,7 @@ impl Shell {
             .when(!theme.is_frost(), |card| card.shadow_lg())
             .child(header)
             .children(need)
+            .children(last)
             .child(location);
         let card = div()
             .debug_selector({
@@ -618,7 +684,7 @@ mod tests {
                 assert_eq!(shell.session_hover_card.target(), Some("hover-test"));
                 assert_eq!(shell.session_hover_card.shown().is_some(), shown);
             });
-            let position = cx.debug_bounds("chat-time-hover-test").unwrap().center();
+            let position = cx.debug_bounds("chat-archive-hover-test").unwrap().center();
             cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::default());
             shell.read_with(cx, |shell, _| {
                 assert_eq!(shell.session_hover_card.target(), None)
@@ -781,9 +847,10 @@ mod tests {
         assert_eq!(card.shown(), None);
     }
 
+    /// The ports a session listens on read as one line, in order; listening on none says nothing.
     #[test]
-    fn the_age_reads_as_a_sentence() {
-        assert_eq!(time_label("21h", "Oct 18, 09:12"), "21h ago \u{b7} Oct 18, 09:12");
-        assert_eq!(time_label("now", "Oct 19, 06:04"), "just now \u{b7} Oct 19, 06:04");
+    fn the_ports_read_as_one_line() {
+        assert_eq!(ports_line(&[3000, 5173]).as_deref(), Some("Listening on 3000 \u{b7} 5173"));
+        assert_eq!(ports_line(&[]), None);
     }
 }

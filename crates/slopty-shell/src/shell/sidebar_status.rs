@@ -1,28 +1,35 @@
-//! Slopty's own: what a session row says about where its agent stands, after Claude desktop's
-//! Code sidebar (values and behaviour only).
+//! The session list's model (`docs/decisions/layout.md`, "The session list is stable, and its
+//! marks carry the attention"): the groups the sidebar draws, their rows in order, each row's
+//! quiet hint, and what a row's hover card says.
 //!
-//! - **Groups.** "By status" sorts rows into Needs you, Working and Done, in that order. A row
-//!   changes group only when its agent's phase changes, and inside a group rows keep the order
-//!   their sessions started in, so nothing moves on its own while the person reads. A finished
-//!   chat nobody has touched for [`INACTIVE_AFTER_HOURS`] folds into Inactive, last and shut at
-//!   first (Amp's "Inactive last 72h"), so Done holds the work of the last days.
-//! - **Needs.** A row that waits says so by its mark's glyph alone (`marks`; `docs/decisions/
-//!   layout.md`, "A state is a glyph"): the need's words ("Has a question", "Needs approval · run
-//!   cargo test") are its hover card's and a screen reader's, as are an agent's own work it waits
-//!   on and a context it summarises.
-//! - **Times.** A row's time says how long it has stood as it is ([`row_since`]): at work since
-//!   its turn began, waiting since it started to, at rest since its last answer.
-//! - **The hover card's facts.** zeron's session hover card (`session_hover_card`) also says
-//!   where a row runs (project @ machine), which agent and model, how long it has stood as it is,
-//!   what it needs of the person, and how many subagents it has running.
-//! - **Show more.** A group shows its first [`REST_FIRST`] rows at rest, then "Show N more",
-//!   which adds [`REST_PAGE`] at a time, as desktop's groups and the Archived shelf do. A row that
-//!   needs the person or is at work always shows, and so does the open chat.
+//! - **Groups.** Rows group by project: the repository across its checkouts and machines
+//!   (`slopty_view_proto::view::project_key`), or the folder of a session with no project. The
+//!   groups stand in the order of their names. Inside a group rows keep the order their sessions
+//!   started in, the newest first (`docs/decisions/ui.md`), so a row never moves on its own: not
+//!   when its state changes, not when it answers. Its state is its mark (`marks`), a need's
+//!   glyph naming the need; the need's words are its hover card's and a screen reader's, never a
+//!   line of the row (`docs/decisions/layout.md`, "A state is a glyph").
+//! - **Inactive.** A session nobody has touched for [`INACTIVE_AFTER_HOURS`] that calls for
+//!   nothing (at rest, or done) folds into Inactive at the foot, shut at first. Opened, it shows
+//!   its first [`INACTIVE_FIRST`] rows, then "Show N more", which adds [`INACTIVE_PAGE`] at a
+//!   time, as the Archived shelf does; the open chat always shows.
+//! - **The hint.** A row is one line. After its title a quiet hint says only what tells it from
+//!   the rows beside it: its machine while the list spans machines, its branch while its
+//!   project's rows stand on more than one, and its project in Inactive, where projects mix.
+//! - **Cached.** The row of a session whose machine is out of reach stays where it is, dimmed and
+//!   marked as cached: what it shows is the last word heard from there.
+//! - **The hover card** says what the row has no room for: where it runs, the agent and model,
+//!   how long it has stood as it is, what it needs in the agent's words, the last line the agent
+//!   wrote, and the subagents it has running.
+//! - **The jump.** The key to the next session that needs the person walks every session that
+//!   waits on them, then each that failed, then each finished unseen, across every project and
+//!   machine, each kind oldest first ([`needing_you`]).
 
 use chrono::{DateTime, Local, Utc};
 use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px};
 use slopty_view_proto::{Chat, ChatIndicator, Session, SessionStatus, SessionWait};
 
+use super::marks::Mark;
 use crate::icons::{self, icon};
 use crate::state::{AppState, SESSION_STALE_MS, format_time_ago};
 use crate::theme::Theme;
@@ -39,125 +46,292 @@ fn agent_name(harness: slopty_view_proto::HarnessId) -> &'static str {
     }
 }
 
-/// The groups "By status" sorts rows into, in the order they show.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) enum StatusGroup {
-    /// Waiting on the person, or failed.
-    NeedsYou,
-    /// At work, or waiting on its own work.
-    Working,
-    /// At rest: finished, stopped, or idle.
-    Done,
-    /// At rest, and untouched for [`INACTIVE_AFTER_HOURS`].
-    Inactive,
-}
-
-/// slopty: how long a finished chat rests untouched before it folds into Inactive (Amp's 72 h).
+/// How long a session that calls for nothing rests untouched before it folds into Inactive
+/// (Amp's 72 h).
 pub(super) const INACTIVE_AFTER_HOURS: i64 = 72;
 
-impl StatusGroup {
-    /// The group the row of `chat`, with display status `status` and session `session`, sits in.
-    pub(super) fn of(
-        status: ChatIndicator,
-        chat: &Chat,
-        session: Option<&Session>,
-        now: DateTime<Utc>,
-    ) -> Self {
-        match Self::phase(status, session, now) {
-            Self::Done if inactive(chat, now) => Self::Inactive,
-            group => group,
-        }
-    }
+/// The Inactive group's key.
+pub(super) const INACTIVE: &str = "inactive";
 
-    /// The group of a row's phase alone: Needs you, Working or Done.
-    fn phase(status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> Self {
-        match status {
-            ChatIndicator::AwaitingInput | ChatIndicator::Errored => Self::NeedsYou,
-            ChatIndicator::Working => Self::Working,
-            ChatIndicator::Completed | ChatIndicator::Idle => {
-                if super::marks::works_on_its_own(session, now) {
-                    Self::Working
-                } else {
-                    Self::Done
-                }
-            }
-        }
-    }
+/// The groups the sidebar opens with shut, by their keys: Inactive (Amp's).
+pub(super) fn shut_at_first() -> std::collections::HashSet<String> {
+    std::collections::HashSet::from([INACTIVE.to_owned()])
+}
 
-    /// The group's key among the sidebar's groups.
-    pub(super) fn key(self) -> &'static str {
-        match self {
-            Self::NeedsYou => "status:needs-you",
-            Self::Working => "status:working",
-            Self::Done => "status:done",
-            Self::Inactive => "status:inactive",
-        }
-    }
+/// Rows Inactive shows before "Show more", as the Archived shelf's first page.
+pub(super) const INACTIVE_FIRST: usize = 10;
 
-    /// The group's header.
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::NeedsYou => "Needs you",
-            Self::Working => "Working",
-            Self::Done => "Done",
-            Self::Inactive => "Inactive",
-        }
+/// Rows each "Show more" adds, as the Archived shelf's page.
+pub(super) const INACTIVE_PAGE: usize = 25;
+
+/// The Inactive group's header.
+const INACTIVE_LABEL: &str = "Inactive";
+
+/// The group of a session with neither project nor folder.
+const NO_PROJECT: &str = "No project";
+
+/// One group of the list: a project, a folder, or Inactive.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Group {
+    /// Its key among the sidebar's groups: `project:…`, `folder:…`, or [`INACTIVE`].
+    pub key: String,
+    /// Its header.
+    pub label: SharedString,
+    pub rows: Vec<Row>,
+    /// Rows that wait behind "Show more" (Inactive's alone, [`page`]).
+    pub hidden: usize,
+}
+
+/// One row of the list.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Row {
+    pub chat: Chat,
+    /// Its display status, seen folded in (`AppState::display_status_for`).
+    pub status: ChatIndicator,
+    pub mark: Mark,
+    /// The quiet hint after its title, when something tells the row from those beside it.
+    pub hint: Option<SharedString>,
+    /// Its machine is out of reach: the row shows the last word heard from there.
+    pub cached: bool,
+}
+
+/// What the sidebar narrows its list to: a project, a machine, both or neither (the machine is
+/// a filter, not a level: `docs/decisions/layout.md`, "The session list is stable").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Filter<'a> {
+    /// A space id: its whole project, every checkout on every machine
+    /// (`AppState::project_filter`).
+    pub project: Option<&'a str>,
+    /// A device id.
+    pub machine: Option<&'a str>,
+}
+
+impl Filter<'_> {
+    /// Whether `chat` passes the filter's machine; its project is `AppState::project_filter`'s.
+    pub(super) fn on_machine(&self, chat: &Chat) -> bool {
+        self.machine.is_none_or(|machine| chat.device_id == machine)
     }
 }
 
-/// Whether `chat` has gone untouched (no message, else since it started) for
-/// [`INACTIVE_AFTER_HOURS`].
-fn inactive(chat: &Chat, now: DateTime<Utc>) -> bool {
-    let touched = chat.last_message_at.unwrap_or(chat.created_at);
-    now.signed_duration_since(touched) >= chrono::TimeDelta::hours(INACTIVE_AFTER_HOURS)
-}
-
-/// What the Inactive group says while no chat rests in it.
-pub(super) const NO_INACTIVE: &str = "No inactive sessions";
-
-/// Whether a row with display status `status` and session `session` is at rest (Done): the rows
-/// a group pages behind "Show more".
-pub(super) fn at_rest(status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> bool {
-    StatusGroup::phase(status, session, now) == StatusGroup::Done
-}
-
-/// Rows at rest a sidebar group shows before "Show more", as the Archived shelf's first page.
-pub(super) const REST_FIRST: usize = 10;
-
-/// Rows at rest each "Show more" adds, as the Archived shelf's page.
-pub(super) const REST_PAGE: usize = 25;
-
-/// Keep of a group's `rows`, in order, those it draws while it shows `shown` rows at rest
-/// (`at_rest`): every row not at rest, the one `kept` (the open chat), and the first `shown` at
-/// rest. How many wait behind "Show more".
-pub(super) fn page_at_rest<T>(
-    rows: &mut Vec<T>,
-    shown: usize,
-    at_rest: impl Fn(&T) -> bool,
-    kept: impl Fn(&T) -> bool,
-) -> usize {
-    let before = rows.len();
-    let mut seen = 0_usize;
-    rows.retain(|row| {
-        if !at_rest(row) || kept(row) {
-            return true;
+/// The list as it stands at `now`, narrowed to `filter`; and the soonest moment after `now` it
+/// reads otherwise of time alone (a row folding into Inactive, a session going quiet), for the
+/// sidebar's clock. A machine going out of reach is the state's own transition
+/// (`AppState::next_clock_transition`).
+pub(super) fn list(
+    state: &AppState,
+    filter: Filter<'_>,
+    now: DateTime<Utc>,
+) -> (Vec<Group>, Option<DateTime<Utc>>) {
+    let mut chats = state.sidebar_chats(now, filter.project);
+    chats.retain(|(_, chat)| filter.on_machine(chat));
+    let mut machines: Vec<&str> = chats.iter().map(|(_, chat)| chat.device_id.as_str()).collect();
+    machines.sort_unstable();
+    machines.dedup();
+    let spans_machines = machines.len() > 1;
+    let mut next: Option<DateTime<Utc>> = None;
+    let mut note = |at: DateTime<Utc>| {
+        if at > now && next.is_none_or(|next| at < next) {
+            next = Some(at);
         }
-        seen = seen.saturating_add(1);
-        seen <= shown
+    };
+    let mut groups: Vec<Group> = Vec::new();
+    let mut inactive: Vec<(Row, SharedString)> = Vec::new();
+    for (status, chat) in chats {
+        let session = state.session_for(&chat.id);
+        if let Some(session) = session {
+            // `age_ms > SESSION_STALE_MS` first holds one millisecond past it.
+            note(session.updated_at + chrono::TimeDelta::milliseconds(SESSION_STALE_MS + 1));
+        }
+        let mark = Mark::of(status, session, now);
+        let row = Row {
+            chat: chat.clone(),
+            status,
+            cached: !state.device_online(&chat.device_id, now),
+            mark,
+            hint: None,
+        };
+        let (key, label) = place(state, chat);
+        let folds_at = touched(chat) + chrono::TimeDelta::hours(INACTIVE_AFTER_HOURS);
+        if matches!(row.mark, Mark::AtRest | Mark::DoneUnseen) && folds_at <= now {
+            inactive.push((row, label));
+            continue;
+        }
+        note(folds_at);
+        match groups.iter_mut().find(|group| group.key == key) {
+            Some(group) => group.rows.push(row),
+            None => groups.push(Group { key, label, rows: vec![row], hidden: 0 }),
+        }
+    }
+    groups.sort_by(|left, right| {
+        left.label.to_lowercase().cmp(&right.label.to_lowercase()).then_with(|| left.key.cmp(&right.key))
     });
-    before.saturating_sub(rows.len())
+    for group in &mut groups {
+        group.rows.sort_by(|left, right| started(&left.chat, &right.chat));
+        hints(state, &mut group.rows, spans_machines, None);
+    }
+    if !inactive.is_empty() {
+        inactive.sort_by(|(left, _), (right, _)| started(&left.chat, &right.chat));
+        let projects: Vec<SharedString> = inactive.iter().map(|(_, label)| label.clone()).collect();
+        let mut rows: Vec<Row> = inactive.into_iter().map(|(row, _)| row).collect();
+        hints(state, &mut rows, spans_machines, Some(&projects));
+        groups.push(Group { key: INACTIVE.to_owned(), label: INACTIVE_LABEL.into(), rows, hidden: 0 });
+    }
+    (groups, next)
 }
 
-/// The "Show N more" line under a sidebar group whose `hidden` rows wait, `height` tall, drawn as
-/// the Archived shelf draws its own.
-pub(super) fn show_more_row(
-    id: SharedString,
-    hidden: usize,
-    height: f32,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
+/// Keep of `group`'s rows those it draws while it shows `shown`: the first `shown`, and the
+/// open chat `selected` wherever it falls; the rest wait behind "Show more" ([`Group::hidden`]).
+pub(super) fn page(group: &mut Group, shown: usize, selected: Option<&str>) {
+    let before = group.rows.len();
+    let mut kept = 0_usize;
+    group.rows.retain(|row| {
+        kept = kept.saturating_add(1);
+        kept <= shown || selected == Some(row.chat.id.as_str())
+    });
+    group.hidden = before.saturating_sub(group.rows.len());
+}
+
+/// The rows of a shelf whose `chats`, in its order, mix projects (Archived): each with its
+/// hint as the list's rows have theirs, its project first while the shelf spans more
+/// than one.
+pub(super) fn shelf(state: &AppState, chats: Vec<Chat>, now: DateTime<Utc>) -> Vec<Row> {
+    let mut machines: Vec<&str> = chats.iter().map(|chat| chat.device_id.as_str()).collect();
+    machines.sort_unstable();
+    machines.dedup();
+    let spans_machines = machines.len() > 1;
+    let projects: Vec<SharedString> = chats.iter().map(|chat| place(state, chat).1).collect();
+    let mut rows: Vec<Row> = chats
+        .iter()
+        .map(|chat| {
+            let status = state.display_status_for(chat, now);
+            Row {
+                chat: chat.clone(),
+                status,
+                mark: Mark::of(status, state.session_for(&chat.id), now),
+                hint: None,
+                cached: !state.device_online(&chat.device_id, now),
+            }
+        })
+        .collect();
+    hints(state, &mut rows, spans_machines, Some(&projects));
+    rows
+}
+
+/// The group `chat` sits in, by key and header: its project, else its folder.
+fn place(state: &AppState, chat: &Chat) -> (String, SharedString) {
+    if let Some(space) = state.space_for_chat(chat) {
+        let name = state.representative_space(space).display_name().to_owned();
+        return (format!("project:{}", slopty_view_proto::view::project_key(space)), name.into());
+    }
+    let folder = chat
+        .source_context
+        .as_ref()
+        .map(|context| context.cwd.as_str())
+        .or(chat.cwd.as_deref())
+        .map(|cwd| cwd.trim_end_matches(['/', '\\']))
+        .filter(|cwd| !cwd.is_empty());
+    match folder {
+        Some(folder) => {
+            let leaf = folder.rsplit(['/', '\\']).next().filter(|leaf| !leaf.is_empty()).unwrap_or(folder);
+            (format!("folder:{folder}"), SharedString::from(leaf.to_owned()))
+        }
+        None => ("project:".to_owned(), NO_PROJECT.into()),
+    }
+}
+
+/// The order sessions started in, the newest first; ties by id, so the order is total.
+fn started(left: &Chat, right: &Chat) -> std::cmp::Ordering {
+    super::spaces::compare_sidebar_chats(left, right)
+}
+
+/// When `chat` was last touched: its last message, else its start.
+fn touched(chat: &Chat) -> DateTime<Utc> {
+    chat.last_message_at.unwrap_or(chat.created_at)
+}
+
+/// Give each of a group's `rows` the hint that tells it from the others: its project
+/// (`projects`, a shelf's or Inactive's, while they are not all one), its machine while the list
+/// spans machines, and its branch while the group's rows stand on more than one.
+fn hints(state: &AppState, rows: &mut [Row], spans_machines: bool, projects: Option<&[SharedString]>) {
+    let mut branches: Vec<&str> = rows.iter().filter_map(|row| branch_of(state, &row.chat)).collect();
+    branches.sort_unstable();
+    branches.dedup();
+    let spans_branches = branches.len() > 1;
+    let projects = projects.filter(|projects| projects.iter().any(|project| project != &projects[0]));
+    let lines: Vec<Option<SharedString>> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut parts: Vec<&str> = Vec::new();
+            if let Some(project) = projects.and_then(|projects| projects.get(index)) {
+                parts.push(project.as_ref());
+            }
+            if spans_machines && let Some(machine) = state.device_name(&row.chat.device_id) {
+                parts.push(machine);
+            }
+            if spans_branches && let Some(branch) = branch_of(state, &row.chat) {
+                parts.push(branch);
+            }
+            (!parts.is_empty()).then(|| SharedString::from(parts.join(" \u{b7} ")))
+        })
+        .collect();
+    for (row, line) in rows.iter_mut().zip(lines) {
+        row.hint = line;
+    }
+}
+
+/// The branch `chat` stands on, as Slopty's own git read says.
+fn branch_of<'a>(state: &'a AppState, chat: &'a Chat) -> Option<&'a str> {
+    crate::change_requests::conversation_branch(chat, &state.spaces).map(str::trim)
+}
+
+/// The sessions the "Next session that needs you" key walks, by chat id: every one that waits
+/// on the person, then each that failed, then each finished unseen, across every project and
+/// machine; each kind oldest first, by when it began to call.
+pub(super) fn needing_you(state: &AppState, now: DateTime<Utc>) -> Vec<String> {
+    let mut calls: Vec<(u8, DateTime<Utc>, &Chat)> = state
+        .overview_chats(now)
+        .into_iter()
+        .filter_map(|(status, chat)| {
+            let session = state.session_for(&chat.id);
+            let mark = Mark::of(status, session, now);
+            let since = match mark {
+                Mark::NeedsYou(_) => session.and_then(|session| session.status_since),
+                Mark::Failed | Mark::DoneUnseen => None,
+                Mark::AtWork | Mark::AtRest => return None,
+            };
+            Some((mark.urgency(), since.unwrap_or_else(|| touched(chat)), chat))
+        })
+        .collect();
+    calls.sort_by(|left, right| {
+        right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)).then_with(|| left.2.id.cmp(&right.2.id))
+    });
+    calls.into_iter().map(|(_, _, chat)| chat.id.clone()).collect()
+}
+
+impl super::Shell {
+    /// The key to the next session that needs the person ([`needing_you`]): the one after the
+    /// open one, round the end. Whether there was one to open.
+    pub(super) fn open_next_needing_you(&mut self, cx: &mut Context<Self>) -> bool {
+        let (order, selected) = {
+            let state = self.state.read(cx);
+            (needing_you(state, crate::clock::utc(cx)), state.selected_chat.clone())
+        };
+        let Some(next) = super::tabs::cycle_target(&order, selected.as_deref(), true) else {
+            return false;
+        };
+        if selected.as_deref() != Some(next.as_str()) {
+            self.open_chat(next, cx);
+        }
+        true
+    }
+}
+
+/// The "Show N more" line under Inactive while `hidden` rows wait, `height` tall, drawn as the
+/// Archived shelf draws its own.
+fn show_more_row(id: SharedString, hidden: usize, height: f32, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let id_text = id.to_string();
-    let words = SharedString::from(format!("Show {} more", hidden.min(REST_PAGE)));
+    let words = SharedString::from(format!("Show {} more", hidden.min(INACTIVE_PAGE)));
     div()
         .id(id)
         .debug_selector(move || id_text)
@@ -166,7 +340,7 @@ pub(super) fn show_more_row(
         .flex()
         .flex_row()
         .items_center()
-        // slopty: its words at the rows' title edge, past the one leading slot.
+        // At the rows' title edge, past the one leading slot.
         .gap(px(super::sidebar::SIDEBAR_LEADING_GAP))
         .px(px(Theme::SPACE_SM))
         .rounded(px(8.0))
@@ -188,45 +362,12 @@ pub(super) fn show_more_row(
         .child(words)
 }
 
-/// The line a sidebar group with no rows shows under its header (only Inactive stands empty):
-/// its key, its height with the list's gap above it, and the line, quiet as "Show more". A shut
-/// group's line is drawn for its open motion but says nothing to a screen reader.
-pub(super) fn empty_group_row(
-    collapse_key: &str,
-    open: bool,
-    theme: &Theme,
-) -> (String, f32, AnyElement) {
-    let height = super::sidebar::SIDEBAR_ROW_HEIGHT;
-    let id = format!("sidebar-group-empty-{collapse_key}");
-    let element = div()
-        .id(SharedString::from(id.clone()))
-        .debug_selector(move || id)
-        .h(px(height))
-        .flex_none()
-        .flex()
-        .items_center()
-        // slopty: at the rows' title edge.
-        .pl(px(Theme::SPACE_SM + super::sidebar::SIDEBAR_LEADING_SLOT + super::sidebar::SIDEBAR_LEADING_GAP))
-        .pr(px(Theme::SPACE_SM))
-        .text_size(crate::typography::ui_rems(13.0))
-        .text_color(theme.text_muted.opacity(0.55))
-        .when(open, |line| line.role(gpui::Role::Status).aria_label(NO_INACTIVE))
-        .child(NO_INACTIVE)
-        .into_any_element();
-    (format!("empty:{collapse_key}"), height + super::SIDEBAR_LIST_GAP, element)
-}
-
-/// The groups the sidebar opens with shut, by their collapse keys: Inactive (Amp's).
-pub(super) fn shut_at_first() -> std::collections::HashSet<String> {
-    std::collections::HashSet::from([format!("status:{}", StatusGroup::Inactive.key())])
-}
-
 impl super::Shell {
-    /// The "Show more" line under the sidebar group of `collapse_key`, when `hidden` rows wait:
-    /// its key, its height with the list's gap above it, and the line, which shows another page.
+    /// The "Show more" line under the group `key`, when `hidden` rows wait: its key, its height
+    /// with the list's gap above it, and the line, which shows another page.
     pub(super) fn render_group_more(
         &self,
-        collapse_key: &str,
+        key: &str,
         hidden: usize,
         theme: &Theme,
         cx: &mut Context<Self>,
@@ -236,16 +377,16 @@ impl super::Shell {
         }
         // As the Archived shelf's: a row's height.
         let height = super::sidebar::SIDEBAR_ROW_HEIGHT;
-        let key = collapse_key.to_owned();
-        let id = SharedString::from(format!("sidebar-group-more-{collapse_key}"));
+        let shown_key = key.to_owned();
+        let id = SharedString::from(format!("sidebar-group-more-{key}"));
         let element = show_more_row(id, hidden, height, theme)
             .on_click(cx.listener(move |this, _, _, cx| {
-                let shown = this.sidebar_group_shown.get(&key).copied().unwrap_or(REST_FIRST);
-                this.sidebar_group_shown.insert(key.clone(), shown.saturating_add(REST_PAGE));
+                let shown = this.sidebar_group_shown.get(&shown_key).copied().unwrap_or(INACTIVE_FIRST);
+                this.sidebar_group_shown.insert(shown_key.clone(), shown.saturating_add(INACTIVE_PAGE));
                 cx.notify();
             }))
             .into_any_element();
-        Some((format!("more:{collapse_key}"), height + super::SIDEBAR_LIST_GAP, element))
+        Some((format!("more:{key}"), height + super::SIDEBAR_LIST_GAP, element))
     }
 }
 
@@ -254,150 +395,8 @@ fn live(session: Option<&Session>, now: DateTime<Utc>) -> Option<&Session> {
     session.filter(|s| now.signed_duration_since(s.updated_at).num_milliseconds() <= SESSION_STALE_MS)
 }
 
-/// Order `rows` for "By status": by group, then the latest-started session first. A row's place
-/// follows only its group and when it started, never its last activity, so a republish or a new
-/// message never moves it.
-pub(super) fn order_by_status(rows: &mut [(ChatIndicator, Chat)], state: &AppState, now: DateTime<Utc>) {
-    rows.sort_by(|(left_status, left), (right_status, right)| {
-        let left_group = StatusGroup::of(*left_status, left, state.session_for(&left.id), now);
-        let right_group = StatusGroup::of(*right_status, right, state.session_for(&right.id), now);
-        left_group
-            .cmp(&right_group)
-            .then_with(|| right.created_at.cmp(&left.created_at))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-}
-
-/// The chats the "Next session that needs you" key walks: every chat that waits on the person,
-/// across projects and machines, in the order "By status" draws them, then each finished one
-/// nobody has seen.
-pub(super) fn needing_you(state: &AppState, now: DateTime<Utc>) -> Vec<String> {
-    let mut rows: Vec<(ChatIndicator, Chat)> =
-        state.overview_chats(now).into_iter().map(|(status, chat)| (status, chat.clone())).collect();
-    order_by_status(&mut rows, state, now);
-    let group = |status: ChatIndicator, chat: &Chat| StatusGroup::of(status, chat, state.session_for(&chat.id), now);
-    let needs = rows.iter().filter(|(status, chat)| group(*status, chat) == StatusGroup::NeedsYou);
-    let unseen = rows.iter().filter(|(status, chat)| {
-        matches!(group(*status, chat), StatusGroup::Done | StatusGroup::Inactive) && chat.unseen()
-    });
-    needs.chain(unseen).map(|(_, chat)| chat.id.clone()).collect()
-}
-
-/// Whether the visible chats run on machines of more than one kind, so a row's machine glyph
-/// tells them apart. slopty: two Macs would wear the one laptop on every row, which tells
-/// nothing apart; the hover card names the machine.
-pub(super) fn span_machines(state: &AppState) -> bool {
-    let kind = |device: &str| {
-        state.devices.iter().find(|known| known.id == device).map(|known| super::spaces::device_glyph(&known.platform))
-    };
-    let mut kinds = state.visible_chats().filter_map(|chat| kind(&chat.device_id));
-    let first = kinds.next();
-    kinds.any(|glyph| Some(glyph) != first)
-}
-
-/// slopty: what tells apart the rows of `chats` that share a title, by chat id: the project,
-/// when the rows of one title are not all in one, else the machine, when they are not all on
-/// one; a title no other row has, or rows nothing tells apart, have none. Two "hello" rows
-/// otherwise read as one chat twice.
-pub(super) fn title_hints<'a>(
-    state: &AppState,
-    chats: impl IntoIterator<Item = &'a Chat>,
-) -> std::collections::HashMap<String, SharedString> {
-    let rows = chats.into_iter().map(|chat| TitledRow {
-        id: chat.id.clone(),
-        title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session")).trim().to_lowercase(),
-        project: state.space_for_chat(chat).map(|space| space.display_name().to_owned()),
-        machine: state.device_name(&chat.device_id).map(str::to_owned),
-    });
-    hints(&rows.collect::<Vec<_>>())
-}
-
-/// A sidebar row as [`title_hints`] reads it.
-struct TitledRow {
-    id: String,
-    title: String,
-    project: Option<String>,
-    machine: Option<String>,
-}
-
-impl TitledRow {
-    fn project(&self) -> Option<&str> {
-        self.project.as_deref()
-    }
-
-    fn machine(&self) -> Option<&str> {
-        self.machine.as_deref()
-    }
-}
-
-/// [`title_hints`] over rows already read.
-fn hints(rows: &[TitledRow]) -> std::collections::HashMap<String, SharedString> {
-    let mut by_title: std::collections::HashMap<&str, Vec<&TitledRow>> = std::collections::HashMap::new();
-    for row in rows {
-        by_title.entry(row.title.as_str()).or_default().push(row);
-    }
-    let mut hints = std::collections::HashMap::new();
-    for same in by_title.values().filter(|same| same.len() > 1) {
-        let differ = |of: fn(&TitledRow) -> Option<&str>| same.iter().any(|row| of(row) != of(same[0]));
-        let pick: fn(&TitledRow) -> Option<&str> = if differ(TitledRow::project) {
-            TitledRow::project
-        } else if differ(TitledRow::machine) {
-            TitledRow::machine
-        } else {
-            continue;
-        };
-        for row in same {
-            if let Some(hint) = pick(row) {
-                hints.insert(row.id.clone(), SharedString::from(hint.to_owned()));
-            }
-        }
-    }
-    hints
-}
-
-impl super::Shell {
-    /// The key to the next chat that needs the person ([`needing_you`]): the one after the open
-    /// chat, round the end. Whether there was one to open.
-    pub(super) fn open_next_needing_you(&mut self, cx: &mut Context<Self>) -> bool {
-        let (order, selected) = {
-            let state = self.state.read(cx);
-            (needing_you(state, crate::clock::utc(cx)), state.selected_chat.clone())
-        };
-        let Some(next) = super::tabs::cycle_target(&order, selected.as_deref(), true) else {
-            return false;
-        };
-        if selected.as_deref() != Some(next.as_str()) {
-            self.open_chat(next, cx);
-        }
-        true
-    }
-}
-
-/// slopty: since when a row has stood as it is, which its time says: a turn at work since it
-/// began, an agent waiting (on the person or on its own work) since it started to, and a row at
-/// rest since its last answer. A turn's time is the agent's, never the last answer's: a chat at
-/// work again after a day said "1d".
-pub(super) fn row_since(
-    status: ChatIndicator,
-    chat: &Chat,
-    session: Option<&Session>,
-    now: DateTime<Utc>,
-) -> DateTime<Utc> {
-    let at_rest = chat.last_message_at.unwrap_or(chat.created_at);
-    let session = live(session, now);
-    let since = match status {
-        ChatIndicator::Working => session.and_then(|s| s.started_at.or(s.status_since)),
-        ChatIndicator::AwaitingInput => session.and_then(|s| s.status_since),
-        ChatIndicator::Completed | ChatIndicator::Idle if super::marks::works_on_its_own(session, now) => {
-            session.and_then(|s| s.status_since)
-        }
-        ChatIndicator::Completed | ChatIndicator::Idle | ChatIndicator::Errored => None,
-    };
-    since.unwrap_or(at_rest)
-}
-
 /// What a row's hover card says beyond zeron's, line by line.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ChatCard {
     /// "project @ machine", or "@ machine" for a chat with no project.
     pub place: Option<SharedString>,
@@ -405,10 +404,13 @@ pub(super) struct ChatCard {
     pub folder: Option<SharedString>,
     /// "Claude Code · opus · High"
     pub agent: Option<SharedString>,
-    /// "Working for 3m", "Waiting on you since 14:02", "Done 5m ago"
-    pub status: Option<SharedString>,
+    /// "Working for 3m", "Waiting on you since 14:02", "Done 5m ago", "Cached · studio is out of
+    /// reach"
+    pub status: SharedString,
     /// What it needs of the person, its glyph and its agent's words (`marks::need`).
     pub need: Option<super::marks::Need>,
+    /// The last line the agent wrote.
+    pub last: Option<SharedString>,
     /// "2 subagents running"
     pub subagents: Option<SharedString>,
 }
@@ -457,17 +459,32 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
         words.extend(config.reasoning.map(|level| crate::pickers::reasoning_label(level).to_owned()));
         words.join(" \u{b7} ")
     });
+    let cached = !state.device_online(&chat.device_id, now);
+    let need = match Mark::of(status, session, now) {
+        Mark::NeedsYou(need) if !cached => Some(need),
+        _ => None,
+    };
+    let last = chat
+        .last_message_preview
+        .as_deref()
+        .map(crate::transcript::single_line)
+        .filter(|line| !line.trim().is_empty())
+        .map(SharedString::from);
     let subagents = state.running_subagents_for(chat_id, now);
+    let status = if cached {
+        // What the row shows is the last word from there.
+        format!("Cached \u{b7} {} is out of reach", device.unwrap_or("its machine"))
+    } else {
+        status_words(chat, status, session, now)
+    };
     Some(ChatCard {
         place: place.map(SharedString::from),
         folder: folder.map(SharedString::from),
         agent: agent.map(SharedString::from),
-        status: status_words(chat, status, session, now).map(SharedString::from),
-        need: match super::marks::Mark::of(status, session, now) {
-            super::marks::Mark::NeedsYou(need) => Some(need),
-            _ => None,
-        },
-        subagents: (subagents > 0).then(|| {
+        status: status.into(),
+        need,
+        last,
+        subagents: (subagents > 0 && !cached).then(|| {
             SharedString::from(if subagents == 1 {
                 "1 subagent running".to_owned()
             } else {
@@ -494,14 +511,14 @@ pub(crate) fn absolute_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
 }
 
 /// How long a chat has stood as it is, for its hover card.
-fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> Option<String> {
+fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> String {
     let session = live(session, now);
     let since = session.and_then(|s| s.status_since.or(s.started_at));
     let ago = |at: DateTime<Utc>| format_time_ago(at, now);
-    let last = chat.last_message_at.unwrap_or(chat.created_at);
+    let last = touched(chat);
     // slopty: a relative time also says when, which "2d ago" alone never does.
     let when = |words: String| format!("{words} \u{b7} {}", absolute_time(last, now));
-    Some(match status {
+    match status {
         ChatIndicator::Working
             if session
                 .and_then(|s| s.waiting_on.as_ref())
@@ -541,12 +558,14 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
                 (false, age) => when(format!("Last active {age} ago")),
             }
         }
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::marks::Need;
+    use crate::loaders::status_mark::MarkState;
     use chrono::TimeDelta;
 
     /// A relative time also says when: the hour today, the date before, the year past this one.
@@ -567,7 +586,7 @@ mod tests {
         Session {
             last_completed_turn: None,
             chat_id: chat.into(),
-            device_id: "studio".into(),
+            device_id: "local".into(),
             status,
             started_at: Some(now - TimeDelta::minutes(5)),
             updated_at: now,
@@ -581,148 +600,273 @@ mod tests {
         Some(SessionWait { kind: kind.into(), summary: summary.map(str::to_owned) })
     }
 
-    // The hover card says what a waiting agent waits on, in its records' words, with the
-    // glyph its row wears for it; what an agent at work or on its own work does is its status.
-    #[test]
-    fn the_card_says_what_a_waiting_agent_waits_on() {
-        use super::super::marks::Need;
-        use crate::loaders::status_mark::MarkState;
-        let now = Utc::now();
-        let chat: Chat = serde_json::from_value(serde_json::json!({
-            "id": "a", "deviceId": "studio", "archived": false, "createdAt": now - TimeDelta::hours(1),
+    /// Chat `id` in space `space` (none for a session with no project), started `started` minutes
+    /// before `now` and last touched `touched` minutes before it, seen unless `unseen`.
+    fn chat(id: &str, space: Option<&str>, started: i64, touched: i64, now: DateTime<Utc>, unseen: bool) -> Chat {
+        let last = now - TimeDelta::minutes(touched);
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": id, "deviceId": "local", "archived": false,
+            "spaceId": space,
+            "createdAt": now - TimeDelta::minutes(started),
+            "lastMessageAt": last,
+            "lastSeenAt": if unseen { last - TimeDelta::seconds(1) } else { last },
         }))
-        .unwrap();
+        .unwrap()
+    }
+
+    fn space(id: &str, name: &str, repository: Option<&str>, device: &str) -> slopty_view_proto::Space {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "deviceId": device, "path": format!("/src/{name}"), "name": name,
+            "repositoryId": repository, "createdAt": Utc::now() - TimeDelta::days(30),
+        }))
+        .unwrap()
+    }
+
+    fn device(id: &str, seen: Option<DateTime<Utc>>) -> slopty_view_proto::Device {
+        serde_json::from_value(serde_json::json!({ "id": id, "name": id, "platform": "macos", "lastSeenAt": seen }))
+            .unwrap()
+    }
+
+    /// Two projects, one of them checked out twice (its clones are one project), and a session
+    /// with no project in a folder of its own.
+    fn state(now: DateTime<Utc>) -> AppState {
         let mut state = AppState::new();
-        state.chats = vec![chat];
-        let card = |state: &mut AppState, session: Session| {
-            state.apply_sessions(vec![session]);
-            chat_card(state, "a", now).unwrap()
-        };
-        let mut held = session("a", SessionStatus::AwaitingInput, now);
-        held.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
-        let need = card(&mut state, held.clone()).need;
-        assert_eq!(
-            need,
-            Some(Need { glyph: MarkState::Approval, words: "Needs approval \u{b7} run cargo test".into() })
-        );
-        held.waiting_on = wait(SessionWait::QUESTION, None);
-        assert_eq!(card(&mut state, held.clone()).need.map(|need| need.glyph), Some(MarkState::Question));
-        held.waiting_on = None;
-        assert_eq!(card(&mut state, held).need.map(|need| need.words), Some("Needs input".into()));
-        let mut busy = session("a", SessionStatus::Working, now);
-        busy.waiting_on = wait(SessionWait::COMPACTING, None);
-        let compacting = card(&mut state, busy);
-        assert_eq!(compacting.status.as_deref(), Some("Compacting its context"));
-        assert_eq!(compacting.need, None);
-        let resting = card(&mut state, session("a", SessionStatus::Waiting, now));
-        assert_eq!(resting.status.as_deref(), Some("Waiting on its own work for 4m"));
-        assert_eq!(resting.need, None);
+        state.local_device_id = Some("local".into());
+        state.spaces = vec![
+            space("s-zed", "zed", None, "local"),
+            space("s-app", "app", Some("repo-app"), "local"),
+            space("s-app-2", "app-worktree", Some("repo-app"), "local"),
+        ];
+        let mut loose = chat("loose", None, 50, 1, now, false);
+        loose.cwd = Some("/tmp/scratch/".into());
+        state.chats = vec![
+            chat("app-new", Some("s-app-2"), 10, 1, now, false),
+            chat("zed-old", Some("s-zed"), 60, 1, now, false),
+            chat("app-old", Some("s-app"), 40, 1, now, true),
+            loose,
+            chat("zed-new", Some("s-zed"), 5, 1, now, false),
+        ];
+        state
     }
 
-    // A row's time says how long it has stood as it is: a row at work since its turn began, not
-    // since its last answer a day before; a waiting row since it started to wait; a row at rest
-    // since its last answer.
+    fn keys(groups: &[Group]) -> Vec<(String, Vec<String>)> {
+        groups
+            .iter()
+            .map(|group| (group.label.to_string(), group.rows.iter().map(|row| row.chat.id.clone()).collect()))
+            .collect()
+    }
+
+    /// Rows group by project (a repository's checkouts are one), a session with no project by its
+    /// folder, the groups by name; inside a group rows keep the order their sessions started in,
+    /// the newest first, and no state, answer or republish moves one.
     #[test]
-    fn a_rows_time_is_how_long_it_has_stood_as_it_is() {
+    fn rows_group_by_project_in_the_order_their_sessions_started() {
         let now = Utc::now();
-        let chat: Chat = serde_json::from_value(serde_json::json!({
-            "id": "a", "deviceId": "local", "archived": false, "createdAt": now - TimeDelta::days(2),
-            "lastMessageAt": now - TimeDelta::hours(16),
-        }))
-        .unwrap();
-        let since = |status, session: &Session| row_since(status, &chat, Some(session), now);
-        let busy = session("a", SessionStatus::Working, now);
-        assert_eq!(since(ChatIndicator::Working, &busy), now - TimeDelta::minutes(5), "its turn's time");
-        let held = session("a", SessionStatus::AwaitingInput, now);
-        assert_eq!(since(ChatIndicator::AwaitingInput, &held), now - TimeDelta::minutes(4));
-        let resting = session("a", SessionStatus::Waiting, now);
-        assert_eq!(since(ChatIndicator::Idle, &resting), now - TimeDelta::minutes(4));
-        let done = session("a", SessionStatus::Done, now);
-        assert_eq!(since(ChatIndicator::Completed, &done), now - TimeDelta::hours(16), "its last answer");
-        assert_eq!(row_since(ChatIndicator::Errored, &chat, None, now), now - TimeDelta::hours(16));
-    }
-
-    // A subagent its agent left at work keeps the row at work on its own, in Working; a row at
-    // work itself is at work for its own sake, and a machine gone quiet says nothing.
-    #[test]
-    fn a_subagent_left_running_keeps_its_row_at_work() {
-        let now = Utc::now();
-        let chat: Chat = serde_json::from_value(serde_json::json!({
-            "id": "a", "deviceId": "local", "archived": false, "createdAt": now - TimeDelta::hours(1),
-        }))
-        .unwrap();
-        let mut done = session("a", SessionStatus::Done, now);
-        done.running_subagents = 2;
-        assert!(super::super::marks::works_on_its_own(Some(&done), now));
-        assert_eq!(StatusGroup::of(ChatIndicator::Completed, &chat, Some(&done), now), StatusGroup::Working);
-        done.running_subagents = 1;
-        assert_eq!(StatusGroup::of(ChatIndicator::Idle, &chat, Some(&done), now), StatusGroup::Working);
-        let mut busy = session("a", SessionStatus::Working, now);
-        busy.running_subagents = 1;
-        assert!(!super::super::marks::works_on_its_own(Some(&busy), now), "at work itself");
-        let mut stale = done.clone();
-        stale.updated_at = now - TimeDelta::minutes(2);
-        assert!(!super::super::marks::works_on_its_own(Some(&stale), now), "its machine went quiet");
-    }
-
-    // Rows of one title say what tells them apart: the project when theirs differ, else the
-    // machine; a title of its own, or rows nothing tells apart, say nothing more.
-    #[test]
-    fn rows_of_one_title_say_what_tells_them_apart() {
-        let row = |id: &str, title: &str, project: Option<&str>, machine: &str| TitledRow {
-            id: id.into(),
-            title: title.into(),
-            project: project.map(str::to_owned),
-            machine: Some(machine.into()),
-        };
-        let hinted = hints(&[
-            row("a", "hello", Some("slopty"), "studio"),
-            row("b", "hello", Some("better-update"), "studio"),
-            row("c", "fix the lexer", Some("slopty"), "studio"),
-            row("d", "tidy", Some("slopty"), "studio"),
-            row("e", "tidy", Some("slopty"), "laptop"),
-            row("f", "again", Some("slopty"), "studio"),
-            row("g", "again", Some("slopty"), "studio"),
+        let mut state = state(now);
+        let order = |state: &AppState| keys(&list(state, Filter::default(), now).0);
+        let expected = vec![
+            ("app".to_owned(), vec!["app-new".to_owned(), "app-old".to_owned()]),
+            ("scratch".to_owned(), vec!["loose".to_owned()]),
+            ("zed".to_owned(), vec!["zed-new".to_owned(), "zed-old".to_owned()]),
+        ];
+        assert_eq!(order(&state), expected);
+        let (groups, _) = list(&state, Filter::default(), now);
+        assert_eq!(groups[0].rows[1].mark, Mark::DoneUnseen, "its state is its mark");
+        // Every row's state changes, the oldest answers: nothing moves.
+        state.apply_sessions(vec![
+            session("zed-old", SessionStatus::Working, now),
+            session("app-new", SessionStatus::AwaitingInput, now),
+            session("loose", SessionStatus::Waiting, now),
         ]);
-        assert_eq!(hinted.get("a").map(SharedString::as_ref), Some("slopty"));
-        assert_eq!(hinted.get("b").map(SharedString::as_ref), Some("better-update"));
-        assert_eq!(hinted.get("c"), None, "a title of its own");
-        assert_eq!(hinted.get("d").map(SharedString::as_ref), Some("studio"), "one project, two machines");
-        assert_eq!(hinted.get("e").map(SharedString::as_ref), Some("laptop"));
-        assert!(!hinted.contains_key("f") && !hinted.contains_key("g"), "nothing tells them apart");
+        state.chats.iter_mut().for_each(|chat| chat.last_message_at = Some(now));
+        assert_eq!(order(&state), expected);
+        // A session started now leads its project.
+        state.chats.push(chat("app-newest", Some("s-app"), 0, 0, now, false));
+        assert_eq!(order(&state)[0].1, ["app-newest", "app-new", "app-old"]);
+        // The project filter narrows the list to one project, its clones in it.
+        let app = Filter { project: Some("s-app"), machine: None };
+        assert_eq!(keys(&list(&state, app, now).0)[0].1, ["app-newest", "app-new", "app-old"]);
+        assert_eq!(list(&state, app, now).0.len(), 1);
     }
 
-    // Rows sit in Needs you, Working, Done; a waiting-on-itself agent is still at work; a
-    // finished chat untouched for 72 hours is Inactive, and only a finished one.
+    /// A session nobody touched for 72 hours folds into Inactive at the foot while it calls for
+    /// nothing: at rest or done. One that needs the person, failed or works stays where it lives;
+    /// the list says when the next one folds.
     #[test]
-    fn rows_group_by_phase() {
+    fn a_session_untouched_for_three_days_folds_into_inactive_while_it_calls_for_nothing() {
         let now = Utc::now();
-        let resting = session("a", SessionStatus::Waiting, now);
-        let fresh: Chat = serde_json::from_value(serde_json::json!({
-            "id": "a", "deviceId": "local", "archived": false, "createdAt": now - TimeDelta::hours(100),
-            "lastMessageAt": now - TimeDelta::hours(71),
-        }))
-        .unwrap();
-        let of = |status, session| StatusGroup::of(status, &fresh, session, now);
-        assert_eq!(of(ChatIndicator::AwaitingInput, None), StatusGroup::NeedsYou);
-        assert_eq!(of(ChatIndicator::Errored, None), StatusGroup::NeedsYou);
-        assert_eq!(of(ChatIndicator::Working, None), StatusGroup::Working);
-        assert_eq!(of(ChatIndicator::Idle, Some(&resting)), StatusGroup::Working);
-        assert_eq!(of(ChatIndicator::Completed, None), StatusGroup::Done);
-        assert_eq!(of(ChatIndicator::Idle, None), StatusGroup::Done);
-        let mut stale = fresh.clone();
-        stale.last_message_at = Some(now - TimeDelta::hours(INACTIVE_AFTER_HOURS));
-        let of = |status, session| StatusGroup::of(status, &stale, session, now);
-        assert_eq!(of(ChatIndicator::Idle, None), StatusGroup::Inactive);
-        assert_eq!(of(ChatIndicator::Completed, None), StatusGroup::Inactive);
-        assert_eq!(of(ChatIndicator::AwaitingInput, None), StatusGroup::NeedsYou, "waits, so never");
-        assert_eq!(of(ChatIndicator::Working, None), StatusGroup::Working, "at work, so never");
-        assert!(at_rest(ChatIndicator::Idle, None, now), "paged as Done is");
-        assert!(
-            StatusGroup::NeedsYou < StatusGroup::Working
-                && StatusGroup::Working < StatusGroup::Done
-                && StatusGroup::Done < StatusGroup::Inactive
+        let mut state = state(now);
+        let days = |n: i64| n * 24 * 60;
+        state.chats = vec![
+            chat("rested", Some("s-zed"), days(5), days(3), now, false),
+            chat("unseen", Some("s-zed"), days(5), days(4), now, true),
+            chat("asking", Some("s-zed"), days(5), days(4), now, false),
+            chat("busy", Some("s-zed"), days(5), days(4), now, false),
+            chat("fresh", Some("s-app"), days(5), days(3) - 30, now, false),
+        ];
+        let mut asking = session("asking", SessionStatus::AwaitingInput, now);
+        asking.waiting_on = wait(SessionWait::QUESTION, None);
+        state.apply_sessions(vec![asking, session("busy", SessionStatus::Working, now)]);
+        let (groups, next) = list(&state, Filter::default(), now);
+        assert_eq!(
+            keys(&groups),
+            [
+                ("app".to_owned(), vec!["fresh".to_owned()]),
+                ("zed".to_owned(), vec!["asking".to_owned(), "busy".to_owned()]),
+                ("Inactive".to_owned(), vec!["rested".to_owned(), "unseen".to_owned()]),
+            ]
         );
+        assert_eq!(groups[2].key, INACTIVE);
+        let fresh = state.chats.iter().find(|chat| chat.id == "fresh").unwrap();
+        let folds = fresh.last_message_at.unwrap() + TimeDelta::hours(INACTIVE_AFTER_HOURS);
+        assert!(next.is_some_and(|next| next <= folds), "the clock wakes when it folds: {next:?}");
+        let (groups, _) = list(&state, Filter::default(), folds);
+        assert!(groups.iter().any(|group| group.key == INACTIVE && group.rows.iter().any(|row| row.chat.id == "fresh")));
+    }
+
+    /// Inactive pages its rows as the Archived shelf does, the open chat shown wherever it falls.
+    #[test]
+    fn inactive_pages_its_rows_with_the_open_chat_kept() {
+        let now = Utc::now();
+        let rows: Vec<Row> = (0..30)
+            .map(|n| Row {
+                chat: chat(&format!("c{n:02}"), None, 10_000 - n, 9_000, now, false),
+                status: ChatIndicator::Idle,
+                mark: Mark::AtRest,
+                hint: None,
+                cached: false,
+            })
+            .collect();
+        let mut group = Group { key: INACTIVE.into(), label: "Inactive".into(), rows, hidden: 0 };
+        page(&mut group, INACTIVE_FIRST, Some("c29"));
+        assert_eq!(group.rows.len(), INACTIVE_FIRST + 1, "its first page and the open chat");
+        assert_eq!(group.hidden, 30 - INACTIVE_FIRST - 1);
+        assert_eq!(group.rows.last().map(|row| row.chat.id.as_str()), Some("c29"));
+    }
+
+    /// The hint says only what tells a row from those beside it: its machine while the list
+    /// spans machines, its branch while its project's rows stand on more than one, its project
+    /// where projects mix (Inactive, Archived); with nothing to tell, a row says its title alone.
+    /// Narrowed to one machine, the list holds that machine's rows alone.
+    #[test]
+    fn the_hint_says_only_what_tells_rows_apart() {
+        let now = Utc::now();
+        let mut state = state(now);
+        let hint = |state: &AppState, id: &str| {
+            let (groups, _) = list(state, Filter::default(), now);
+            groups.into_iter().flat_map(|group| group.rows).find(|row| row.chat.id == id).and_then(|row| row.hint)
+        };
+        assert_eq!(hint(&state, "zed-old"), None, "one machine, one branch: the title alone");
+        state.devices = vec![device("local", Some(now)), device("studio", Some(now))];
+        state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id = "studio".into();
+        assert_eq!(hint(&state, "zed-new").as_deref(), Some("studio"));
+        assert_eq!(hint(&state, "zed-old").as_deref(), Some("local"));
+        // The machine is a filter, not a level: narrowed to one, the list holds its rows alone,
+        // in their projects, and no row says the machine every row shares.
+        let studio = Filter { project: None, machine: Some("studio") };
+        let (groups, _) = list(&state, studio, now);
+        assert_eq!(keys(&groups), [("zed".to_owned(), vec!["zed-new".to_owned()])]);
+        assert_eq!(groups[0].rows[0].hint, None, "one machine shown: no machine said");
+        let both = Filter { project: Some("s-app"), machine: Some("studio") };
+        assert!(list(&state, both, now).0.is_empty(), "a project with nothing on the machine shows nothing");
+        state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id = "local".into();
+        let context = |branch: &str| -> slopty_view_proto::ConversationSourceContext {
+            serde_json::from_value(serde_json::json!({
+                "checkoutId": "k", "repoRoot": "/src/app", "cwd": "/src/app", "branch": branch,
+                "observedAt": now,
+            }))
+            .unwrap()
+        };
+        for (id, branch) in [("app-old", "main"), ("app-new", "lexer")] {
+            state.chats.iter_mut().find(|chat| chat.id == id).unwrap().source_context = Some(context(branch));
+        }
+        assert_eq!(hint(&state, "app-new").as_deref(), Some("lexer"), "two branches in one project");
+        assert_eq!(hint(&state, "zed-old"), None, "its own project stands on one");
+        let rows = shelf(&state, state.chats.clone(), now);
+        let said: Vec<Option<&str>> = rows.iter().map(|row| row.hint.as_deref()).collect();
+        assert_eq!(
+            said,
+            [Some("app \u{b7} lexer"), Some("zed"), Some("app \u{b7} main"), Some("scratch"), Some("zed")],
+            "a shelf of projects says each, and the branches it spans"
+        );
+    }
+
+    /// A session whose machine is out of reach keeps its row, cached: its card says so, and asks
+    /// nothing in its name; back in reach, it is live again.
+    #[test]
+    fn a_row_whose_machine_is_out_of_reach_is_cached() {
+        let now = Utc::now();
+        let mut state = state(now);
+        state.devices = vec![device("local", Some(now)), device("studio", Some(now - TimeDelta::minutes(5)))];
+        state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id = "studio".into();
+        let mut asking = session("zed-new", SessionStatus::AwaitingInput, now);
+        asking.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
+        state.apply_sessions(vec![asking]);
+        let cached = |state: &AppState| {
+            let (groups, _) = list(state, Filter::default(), now);
+            groups.into_iter().flat_map(|group| group.rows).filter(|row| row.cached).map(|row| row.chat.id).collect::<Vec<_>>()
+        };
+        assert_eq!(cached(&state), ["zed-new"], "its row stays, cached");
+        let card = chat_card(&state, "zed-new", now).unwrap();
+        assert_eq!(card.status.as_ref(), "Cached \u{b7} studio is out of reach");
+        assert_eq!(card.need, None, "no need said from a machine out of reach");
+        state.devices[1].last_seen_at = Some(now);
+        assert!(cached(&state).is_empty());
+        let card = chat_card(&state, "zed-new", now).unwrap();
+        let need = card.need.expect("its need, live again");
+        assert_eq!((need.glyph, need.words.as_ref()), (MarkState::Approval, "Needs approval \u{b7} run cargo test"));
+    }
+
+    /// The card says what the row has no room for: the need in the agent's words, with the glyph
+    /// its row wears for it, and the last line it wrote; what an agent at work or on its own work
+    /// does is its status.
+    #[test]
+    fn the_card_says_the_need_and_the_last_words() {
+        let now = Utc::now();
+        let mut state = state(now);
+        let mut asking = session("zed-old", SessionStatus::AwaitingInput, now);
+        asking.waiting_on = wait(SessionWait::QUESTION, None);
+        state.apply_sessions(vec![asking.clone()]);
+        state.chats.iter_mut().find(|chat| chat.id == "zed-old").unwrap().last_message_preview =
+            Some("Which accent reads best\non glass?".into());
+        let card = chat_card(&state, "zed-old", now).unwrap();
+        assert_eq!(card.need, Some(Need { glyph: MarkState::Question, words: "Has a question".into() }));
+        assert_eq!(card.last.as_deref(), Some("Which accent reads best on glass?"));
+        assert!(card.status.starts_with("Waiting on you since"), "{}", card.status);
+        asking.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
+        state.apply_sessions(vec![asking.clone()]);
+        let need = chat_card(&state, "zed-old", now).unwrap().need.unwrap();
+        assert_eq!((need.glyph, need.words.as_ref()), (MarkState::Approval, "Needs approval \u{b7} run cargo test"));
+        asking.waiting_on = None;
+        state.apply_sessions(vec![asking]);
+        assert_eq!(chat_card(&state, "zed-old", now).unwrap().need.map(|need| need.words), Some("Needs input".into()));
+        let mut busy = session("zed-old", SessionStatus::Working, now);
+        busy.waiting_on = wait(SessionWait::COMPACTING, None);
+        state.apply_sessions(vec![busy]);
+        let compacting = chat_card(&state, "zed-old", now).unwrap();
+        assert_eq!((compacting.status.as_ref(), compacting.need), ("Compacting its context", None));
+        state.apply_sessions(vec![session("zed-old", SessionStatus::Waiting, now)]);
+        let resting = chat_card(&state, "zed-old", now).unwrap();
+        assert_eq!((resting.status.as_ref(), resting.need), ("Waiting on its own work for 4m", None));
+        let rested = chat_card(&state, "zed-new", now).unwrap();
+        assert_eq!((rested.need, rested.last), (None, None));
+    }
+
+    /// The jump walks every session that needs the person, then each that failed, then each
+    /// finished unseen, each kind oldest first; one at work or at rest is never one.
+    #[test]
+    fn the_jump_walks_needs_you_then_failed_then_unseen_oldest_first() {
+        let now = Utc::now();
+        let mut state = state(now);
+        let since = |chat: &str, minutes: i64| {
+            let mut asking = session(chat, SessionStatus::AwaitingInput, now);
+            asking.status_since = Some(now - TimeDelta::minutes(minutes));
+            asking
+        };
+        state.chats.push(chat("done-late", Some("s-zed"), 3, 1, now, true));
+        state.apply_sessions(vec![since("zed-new", 2), since("loose", 9), session("zed-old", SessionStatus::Working, now)]);
+        // `app-old` finished unseen 1 minute ago, `done-late` too; a tie goes by id.
+        assert_eq!(needing_you(&state, now), ["loose", "zed-new", "app-old", "done-late"]);
     }
 
     /// A sidebar alone, drawn from a shell with no engine.
@@ -736,42 +880,8 @@ mod tests {
         }
     }
 
-    fn chat(id: &str, minutes_ago: i64, now: DateTime<Utc>, unseen: bool) -> Chat {
-        let created = now - TimeDelta::minutes(minutes_ago);
-        serde_json::from_value(serde_json::json!({
-            "id": id, "title": id, "deviceId": "local", "archived": false,
-            "createdAt": created,
-            "lastMessageAt": now - TimeDelta::seconds(30),
-            "lastSeenAt": if unseen { now - TimeDelta::minutes(5) } else { now },
-        }))
-        .unwrap()
-    }
-
-    /// Four chats as Claude desktop's sidebar names them: one at work, one holding an approval,
-    /// one asking, one done and unread.
-    fn four(now: DateTime<Utc>) -> (Vec<Chat>, Vec<Session>) {
-        let chats = vec![
-            chat("working", 40, now, false),
-            chat("approval", 30, now, false),
-            chat("question", 20, now, false),
-            chat("finished", 10, now, true),
-        ];
-        let mut approval = session("approval", SessionStatus::AwaitingInput, now);
-        approval.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
-        let mut question = session("question", SessionStatus::AwaitingInput, now);
-        question.waiting_on = wait(SessionWait::QUESTION, None);
-        let sessions = vec![
-            session("working", SessionStatus::Working, now),
-            approval,
-            question,
-            session("finished", SessionStatus::Done, now),
-        ];
-        (chats, sessions)
-    }
-
-    fn sidebar(
-        cx: &mut gpui::TestAppContext,
-    ) -> (gpui::Entity<super::super::Shell>, &mut gpui::VisualTestContext) {
+    /// A sidebar over [`state`]'s chats, one of them asking, one at work.
+    fn sidebar(cx: &mut gpui::TestAppContext) -> (gpui::Entity<super::super::Shell>, &mut gpui::VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -781,7 +891,8 @@ mod tests {
         let path = dir.path().to_path_buf();
         let (host, cx) = cx.add_window_view(move |_, cx| {
             SidebarHost(cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
+                let now = Utc::now();
+                let state = cx.new(|_| state(now));
                 let shell = super::super::Shell::new(
                     state,
                     crate::state::EngineBootConfig {
@@ -790,13 +901,18 @@ mod tests {
                     },
                     cx,
                 );
-                let now = Utc::now();
-                let (chats, sessions) = four(now);
+                crate::motion::set_reduced_motion(cx, true);
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
-                    state.local_device_id = Some("local".into());
-                    state.chats = chats;
-                    state.apply_sessions(sessions);
+                    let mut asking = session("zed-old", SessionStatus::AwaitingInput, now);
+                    asking.waiting_on = wait(SessionWait::QUESTION, None);
+                    state.apply_sessions(vec![asking, session("app-new", SessionStatus::Working, now)]);
+                    for chat in &mut state.chats {
+                        chat.config = Some(
+                            serde_json::from_value(serde_json::json!({ "harness": "claude-code", "sandbox": "workspace-write" }))
+                                .expect("a chat config"),
+                        );
+                    }
                 });
                 shell
             }))
@@ -806,71 +922,6 @@ mod tests {
         (shell, cx)
     }
 
-    /// The key walks the chats that need the person, latest started first, then the finished
-    /// one nobody has seen, and comes round again; the chat at work is never one.
-    #[gpui::test]
-    fn the_needs_you_key_walks_the_waiting_then_the_unseen(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = sidebar(cx);
-        let order = shell.read_with(cx, |shell, cx| needing_you(shell.state.read(cx), Utc::now()));
-        assert_eq!(order, ["question", "approval", "finished"]);
-        let mut opened = Vec::new();
-        for _ in 0..4 {
-            shell.update(cx, |shell, cx| assert!(shell.open_next_needing_you(cx)));
-            opened.push(shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone().unwrap()));
-        }
-        assert_eq!(opened, ["question", "approval", "finished", "question"]);
-        // With nobody waiting, the key opens nothing.
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| state.chats.retain(|chat| chat.id == "working"));
-            assert!(!shell.open_next_needing_you(cx));
-        });
-    }
-
-    /// A row draws its machine's glyph only while the visible chats span more than one kind of
-    /// machine.
-    #[gpui::test]
-    fn the_machine_glyph_shows_only_across_machines(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = sidebar(cx);
-        let device = |id: &str, platform: &str| -> slopty_view_proto::Device {
-            serde_json::from_value(serde_json::json!({ "id": id, "name": id, "platform": platform }))
-                .unwrap()
-        };
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state.devices = vec![device("local", "macos"), device("studio", "linux")];
-            });
-        });
-        redraw(cx);
-        assert!(cx.debug_bounds("chat-question-machine").is_none(), "one machine: nothing to tell apart");
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| {
-                state.devices.push(device("laptop", "macos"));
-                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "working") {
-                    chat.device_id = "laptop".into();
-                }
-                cx.notify();
-            });
-        });
-        redraw(cx);
-        assert!(cx.debug_bounds("chat-question-machine").is_none(), "two Macs: the same glyph on every row");
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| {
-                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "working") {
-                    chat.device_id = "studio".into();
-                }
-                cx.notify();
-            });
-        });
-        redraw(cx);
-        assert!(cx.debug_bounds("chat-question-machine").is_some(), "two machines: each row says its own");
-        assert!(cx.debug_bounds("chat-working-machine").is_some());
-    }
-
-    fn top(cx: &mut gpui::VisualTestContext, id: &str) -> f32 {
-        let selector: &'static str = Box::leak(format!("chat-{id}").into_boxed_str());
-        f32::from(cx.debug_bounds(selector).unwrap_or_else(|| panic!("row {id}")).origin.y)
-    }
-
     fn redraw(cx: &mut gpui::VisualTestContext) {
         cx.update(|window, cx| {
             window.refresh();
@@ -878,46 +929,49 @@ mod tests {
         });
     }
 
-    // Grouped by status: Needs you over Working over Done, each row one line whose waiting rows
-    // say why by their glyph alone; and ten republishes with fresh activity move nothing.
+    fn bounds(cx: &mut gpui::VisualTestContext, selector: &str) -> Option<gpui::Bounds<gpui::Pixels>> {
+        cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
+    }
+
+    /// A row is one line, about 28 pt: the program's mark leads, the title follows with its quiet
+    /// hint, the state's mark trails in a slot kept while at rest, so every title starts and ends
+    /// at one edge.
     #[gpui::test]
-    fn by_status_groups_never_reorder_on_republish(cx: &mut gpui::TestAppContext) {
+    fn a_row_is_one_line_of_program_title_and_mark(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = sidebar(cx);
         redraw(cx);
-        let needs = [top(cx, "approval"), top(cx, "question")];
-        let (working, finished) = (top(cx, "working"), top(cx, "finished"));
-        assert!(needs.iter().all(|y| *y < working), "Needs you first: {needs:?} {working}");
-        assert!(working < finished, "Working before Done");
-        // Within Needs you: the latest started first.
-        assert!(needs[1] < needs[0], "question started after approval");
-        // Every row one line: the words of a need are the hover card's, never a line of the row.
-        for id in ["approval", "question", "working", "finished"] {
-            let row: &'static str = Box::leak(format!("chat-{id}").into_boxed_str());
-            let height = f32::from(cx.debug_bounds(row).unwrap().size.height);
-            assert_eq!(height, super::super::sidebar::SIDEBAR_ROW_HEIGHT, "{id} is one line");
+        let ids = ["zed-old", "zed-new", "app-old", "app-new", "loose"];
+        let mut edges = Vec::new();
+        for id in ids {
+            let row = bounds(cx, &format!("chat-{id}")).unwrap_or_else(|| panic!("{id}'s row"));
+            assert_eq!(f32::from(row.size.height), super::super::sidebar::SIDEBAR_ROW_HEIGHT, "{id}: one line");
+            let program = bounds(cx, &format!("chat-agent-{id}")).expect("its program's mark");
+            let title = bounds(cx, &format!("chat-title-{id}")).expect("its title");
+            let slot = bounds(cx, &format!("chat-status-{id}")).expect("its mark's slot");
+            assert!(program.right() <= title.left() && title.right() <= slot.left(), "{id}: program, title, mark");
+            edges.push((title.left(), slot.left()));
         }
-        let before: Vec<f32> = ["approval", "question", "working", "finished"].map(|id| top(cx, id)).into();
-        for round in 0..10 {
-            let now = Utc::now() + TimeDelta::seconds(round);
-            shell.update(cx, |shell, cx| {
-                shell.state.update(cx, |state, cx| {
-                    let (_, mut sessions) = four(now);
-                    for session in &mut sessions {
-                        session.updated_at = now;
-                    }
-                    // Fresh activity on the oldest row, which would lead a recency sort.
-                    if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "approval") {
-                        chat.last_message_at = Some(now);
-                    }
-                    state.apply_sessions(sessions);
-                    cx.notify();
-                });
+        assert!(edges.iter().all(|edge| *edge == edges[0]), "every title at one edge: {edges:?}");
+        for (id, marked) in [("zed-old", true), ("app-new", true), ("app-old", true), ("zed-new", false), ("loose", false)] {
+            assert_eq!(bounds(cx, &format!("chat-mark-{id}")).is_some(), marked, "{id}'s mark");
+        }
+        // Across two machines each row's hint says its own, after its title on the same line.
+        assert!(bounds(cx, "chat-hint-zed-new").is_none(), "one machine: nothing to tell apart");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let now = Utc::now();
+                state.devices = vec![device("local", Some(now)), device("studio", Some(now))];
+                state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id = "studio".into();
+                cx.notify();
             });
-            redraw(cx);
-            let after: Vec<f32> =
-                ["approval", "question", "working", "finished"].map(|id| top(cx, id)).into();
-            assert_eq!(before, after, "republish {round} moved a row");
-        }
+        });
+        redraw(cx);
+        let hint = bounds(cx, "chat-hint-zed-new").expect("its machine, after its title");
+        let title = bounds(cx, "chat-title-zed-new").unwrap();
+        let slot = bounds(cx, "chat-status-zed-new").unwrap();
+        assert!(title.left() < hint.left() && hint.right() <= slot.left(), "{title:?} {hint:?} {slot:?}");
+        let row = bounds(cx, "chat-zed-new").unwrap();
+        assert_eq!(f32::from(row.size.height), super::super::sidebar::SIDEBAR_ROW_HEIGHT, "still one line");
     }
 
     // slopty: a screen reader hears a waiting row say "Needs you", then what it needs in its
@@ -926,7 +980,18 @@ mod tests {
     // glyph").
     #[gpui::test]
     fn a_waiting_rows_need_is_its_status_description(cx: &mut gpui::TestAppContext) {
-        let (_shell, cx) = sidebar(cx);
+        let (shell, cx) = sidebar(cx);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let now = Utc::now();
+                let mut asking = session("zed-old", SessionStatus::AwaitingInput, now);
+                asking.waiting_on = wait(SessionWait::QUESTION, None);
+                let mut held = session("zed-new", SessionStatus::AwaitingInput, now);
+                held.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
+                state.apply_sessions(vec![asking, held]);
+                cx.notify();
+            });
+        });
         for _ in 0..3 {
             cx.run_until_parked();
             cx.update(|window, cx| {
@@ -959,52 +1024,96 @@ mod tests {
         );
     }
 
-    // slopty: a row draws one mark before its title (opencode's avatar slot): a result nobody
-    // has read its done mark, with no agent's mark beside it and no dot on a corner; a row at
-    // work or waiting its own; a row read and at rest its agent's mark. Every title starts at one
-    // edge.
+    /// A row's state changing never moves it: an asking row done, a done row asking, the one at
+    /// work at rest.
     #[gpui::test]
-    fn a_row_draws_one_mark_before_its_title(cx: &mut gpui::TestAppContext) {
+    fn a_rows_state_changing_never_moves_it(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = sidebar(cx);
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| {
-                for chat in &mut state.chats {
-                    chat.config = Some(
-                        serde_json::from_value(
-                            serde_json::json!({ "harness": "claude-code", "sandbox": "workspace-write" }),
-                        )
-                        .expect("a chat config"),
-                    );
-                }
-                cx.notify();
-            });
-        });
         redraw(cx);
-        let ids = ["working", "approval", "question", "finished"];
-        for id in ids {
-            let mark: &'static str = Box::leak(format!("chat-mark-{id}").into_boxed_str());
-            let agent: &'static str = Box::leak(format!("chat-agent-{id}").into_boxed_str());
-            assert!(cx.debug_bounds(mark).is_some(), "{id} says its state");
-            assert!(cx.debug_bounds(agent).is_none(), "{id}: one mark, not the agent's beside it");
-        }
-        let left = |cx: &mut gpui::VisualTestContext, id: &str| {
-            let title: &'static str = Box::leak(format!("chat-title-{id}").into_boxed_str());
-            cx.debug_bounds(title).unwrap_or_else(|| panic!("{id}'s title")).left()
+        let ids = ["app-new", "app-old", "loose", "zed-new", "zed-old"];
+        let tops = |cx: &mut gpui::VisualTestContext| -> Vec<f32> {
+            ids.iter().map(|id| f32::from(bounds(cx, &format!("chat-{id}")).unwrap().origin.y)).collect()
         };
-        let edge = left(cx, "working");
-        assert!(ids.iter().all(|id| left(cx, id) == edge), "every title at one edge");
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| {
-                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "finished") {
-                    chat.last_seen_at = chat.last_message_at;
-                }
-                cx.notify();
+        let before = tops(cx);
+        assert!(before.windows(2).all(|pair| pair[0] < pair[1]), "top to bottom: {before:?}");
+        for round in 0..4_usize {
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, cx| {
+                    let now = Utc::now() + TimeDelta::seconds(i64::try_from(round).unwrap());
+                    let statuses = [SessionStatus::Done, SessionStatus::AwaitingInput, SessionStatus::Working];
+                    let sessions = ids
+                        .iter()
+                        .enumerate()
+                        .map(|(index, id)| session(id, statuses[(index + round) % 3], now))
+                        .collect();
+                    state.apply_sessions(sessions);
+                    for chat in &mut state.chats {
+                        chat.last_message_at = Some(now);
+                    }
+                    cx.notify();
+                });
             });
+            redraw(cx);
+            assert_eq!(tops(cx), before, "round {round} moved a row");
+        }
+    }
+
+    /// A shut project wears its loudest row's mark and how many rows it holds, and a screen reader
+    /// hears both; its rows leave the keys' order. Opened, its rows come back.
+    #[gpui::test]
+    fn a_shut_project_wears_its_loudest_mark_and_a_count(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = sidebar(cx);
+        cx.update(|window, _| {
+            window.activate_window();
+            window.set_a11y_active(true);
         });
         redraw(cx);
-        assert!(cx.debug_bounds("chat-mark-finished").is_none(), "read, at rest: no state to say");
-        assert!(cx.debug_bounds("chat-agent-finished").is_some(), "its agent's mark");
-        assert_eq!(left(cx, "finished"), edge, "in the same slot");
+        let (zed, app) = ("project:s-zed", "project:repo:repo-app");
+        assert!(bounds(cx, &format!("sidebar-group-mark-{zed}")).is_none(), "open, its rows say it");
+        for key in [zed, app] {
+            let header = bounds(cx, &format!("sidebar-group-{key}")).expect("its header");
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            redraw(cx);
+            assert!(bounds(cx, &format!("sidebar-group-mark-{key}")).is_some(), "{key}: its loudest mark");
+            assert!(bounds(cx, &format!("sidebar-group-count-{key}")).is_some(), "{key}: its count");
+        }
+        // Past the fold's motion, a shut group builds no rows.
+        cx.executor().advance_clock(std::time::Duration::from_millis(400));
+        redraw(cx);
+        assert!(bounds(cx, "chat-zed-old").is_none() && bounds(cx, "chat-app-old").is_none(), "shut");
+        let heard = |cx: &mut gpui::VisualTestContext, label: &str| {
+            cx.update(|window, _| {
+                let tree = window.a11y_tree().expect("the tree built");
+                tree.nodes.iter().any(|(_, node)| node.label() == Some(label))
+            })
+        };
+        // Needs you over at rest; done unseen over at work.
+        assert!(heard(cx, "zed, 2, Needs you"), "zed's header says what it wears");
+        assert!(heard(cx, "app, 2, Done"), "app's header says what it wears");
+        let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
+        assert_eq!(order, ["loose"], "a shut group's rows take no key");
+        let header = bounds(cx, &format!("sidebar-group-{zed}")).unwrap();
+        cx.simulate_click(header.center(), gpui::Modifiers::default());
+        redraw(cx);
+        assert!(bounds(cx, "chat-zed-old").is_some(), "open again");
+        assert!(bounds(cx, &format!("sidebar-group-mark-{zed}")).is_none(), "its rows say it again");
+    }
+
+    /// The key walks the sessions that need the person, then the one finished unseen, and comes
+    /// round again; with nobody waiting it opens nothing.
+    #[gpui::test]
+    fn the_needs_you_key_walks_the_waiting_then_the_unseen(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = sidebar(cx);
+        let mut opened = Vec::new();
+        for _ in 0..3 {
+            shell.update(cx, |shell, cx| assert!(shell.open_next_needing_you(cx)));
+            opened.push(shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone().unwrap()));
+        }
+        assert_eq!(opened, ["zed-old", "app-old", "zed-old"]);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.chats.retain(|chat| chat.id == "app-new"));
+            assert!(!shell.open_next_needing_you(cx));
+        });
     }
 
     // A finished chat opened with its jump key stops saying "Done" on the next frames the window
@@ -1040,7 +1149,9 @@ mod tests {
         assert!(says_done(cx), "unseen, it says so");
         assert_eq!(stale(cx), None, "before it opens");
         frames(cx, tick, 120);
-        cx.simulate_keystrokes("cmd-2");
+        let slot = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)).iter().position(|id| id == "b");
+        let key = format!("cmd-{}", slot.expect("b's row") + 1);
+        cx.simulate_keystrokes(&key);
         frames(cx, tick, 120);
         let opened = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
         assert_eq!(opened.as_deref(), Some("b"), "the jump key opened it");
@@ -1140,54 +1251,7 @@ mod tests {
         assert!(cx.debug_bounds("user-menu-connect-phone").is_some(), "the code is offered");
     }
 
-    // Every row wears its machine's kind, in each layout, and names the machine; a chat whose
-    // machine the app does not know wears none rather than a guess.
-    #[gpui::test]
-    fn every_row_says_which_machine_it_runs_on(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = sidebar(cx);
-        let device = |id: &str, name: &str, platform: &str| -> slopty_view_proto::Device {
-            serde_json::from_value(serde_json::json!({
-                "id": id, "name": name, "platform": platform, "lastSeenAt": null,
-            }))
-            .unwrap()
-        };
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| {
-                state.devices = vec![device("local", "studio", "macos"), device("box", "box", "linux")];
-                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "working") {
-                    chat.device_id = "box".into();
-                }
-                if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "finished") {
-                    chat.device_id = "gone".into();
-                }
-            });
-        });
-        redraw(cx);
-        for id in ["approval", "question", "working"] {
-            let selector: &'static str = Box::leak(format!("chat-{id}-machine").into_boxed_str());
-            assert!(cx.debug_bounds(selector).is_some(), "{id} wears its machine");
-        }
-        assert!(cx.debug_bounds("chat-finished-machine").is_none(), "an unknown machine is not guessed");
-        assert_eq!(super::super::spaces::device_glyph("linux"), crate::icons::REMOTE_SERVER);
-        assert_eq!(super::super::spaces::device_glyph("macos"), crate::icons::LAPTOP);
-        assert_eq!(super::super::spaces::device_glyph("ios"), crate::icons::SMARTPHONE);
-    }
-
-    /// A group shows its first rows at rest and keeps the rest behind "Show more"; a row that
-    /// needs the person or works, and the open chat, always show.
-    #[test]
-    fn a_group_pages_its_rows_at_rest() {
-        // (id, at rest): every seventh needs the person; the last is the open chat.
-        let mut rows: Vec<(usize, bool)> = (0..30).map(|id| (id, id % 7 != 0)).collect();
-        let hidden = page_at_rest(&mut rows, REST_FIRST, |row| row.1, |row| row.0 == 29);
-        assert_eq!(hidden, 14, "25 at rest: ten shown, the open chat, fourteen behind");
-        assert_eq!(rows.iter().filter(|row| !row.1).count(), 5, "every row not at rest shows");
-        assert!(rows.iter().any(|row| row.0 == 29), "the open chat shows");
-        let mut few: Vec<(usize, bool)> = (0..REST_FIRST).map(|id| (id, true)).collect();
-        assert_eq!(page_at_rest(&mut few, REST_FIRST, |row| row.1, |_| false), 0, "nothing to page");
-    }
-
-    /// A shell window with `count` chats at rest in its sidebar, newest first: c00, c01…
+    /// A shell window with `count` chats at rest in its sidebar, the newest first: c00, c01…
     fn shell_with_chats(
         cx: &mut gpui::TestAppContext,
         count: usize,
@@ -1199,10 +1263,7 @@ mod tests {
             crate::app_menus::init(cx);
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             crate::composer::init(cx);
-            super::super::apply_keymap(
-                cx,
-                &crate::settings::KeymapConfig::default(),
-            );
+            super::super::apply_keymap(cx, &crate::settings::KeymapConfig::default());
         });
         let path = dir.path().to_path_buf();
         let (shell, cx) = cx.add_window_view(move |_, cx| {
@@ -1217,7 +1278,8 @@ mod tests {
             );
             crate::motion::set_reduced_motion(cx, true);
             let now = Utc::now();
-            let chats = (0..count).map(|n| chat(&format!("c{n:02}"), i64::try_from(n).unwrap(), now, false));
+            let count = i64::try_from(count).unwrap();
+            let chats = (0..count).map(|n| chat(&format!("c{n:02}"), None, n, 1, now, false));
             shell.state.update(cx, |state, _| {
                 state.connection = slopty_view_proto::view::ConnectionStatus::Ready;
                 state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
@@ -1228,37 +1290,6 @@ mod tests {
         });
         std::mem::forget(dir);
         (shell, cx)
-    }
-
-    fn shown(cx: &mut gpui::VisualTestContext, id: &str) -> bool {
-        let selector: &'static str = Box::leak(format!("chat-{id}").into_boxed_str());
-        cx.debug_bounds(selector).is_some()
-    }
-
-    /// Done shows its first ten rows, then "Show 4 more"; pressed, it shows them all and no keys
-    /// skip a row it does not draw. The open chat shows wherever it falls.
-    #[gpui::test]
-    fn a_long_group_shows_more_on_request(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = shell_with_chats(cx, 14);
-        redraw(cx);
-        const MORE: &str = "sidebar-group-more-status:status:done";
-        assert!(shown(cx, "c09") && !shown(cx, "c10"), "the first page");
-        assert!(cx.debug_bounds(MORE).is_some(), "Show more under the first page");
-        let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
-        assert_eq!(order.len(), REST_FIRST, "keys reach only the rows drawn: {order:?}");
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, _| state.selected_chat = Some("c12".into()));
-        });
-        redraw(cx);
-        assert!(shown(cx, "c12") && !shown(cx, "c11"), "the open chat shows");
-
-        let more = cx.debug_bounds(MORE).expect("Show more").center();
-        cx.simulate_click(more, gpui::Modifiers::default());
-        redraw(cx);
-        assert!((10..14).all(|n| shown(cx, &format!("c{n:02}"))), "every row now");
-        assert!(cx.debug_bounds(MORE).is_none(), "nothing left behind it");
-        let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
-        assert_eq!(order.len(), 14, "{order:?}");
     }
 
     /// Holding the jump keys' modifier numbers the first rows with their keys; let go, the
@@ -1282,12 +1313,39 @@ mod tests {
         for id in ["jump-hint-c00", "jump-hint-c01", "jump-hint-c02"] {
             assert!(cx.debug_bounds(id).is_some(), "{id} while held");
         }
+        assert!(cx.debug_bounds("chat-mark-c00").is_none() && cx.debug_bounds("chat-status-c00").is_none(), "the key in the mark's place");
         cx.simulate_modifiers_change(gpui::Modifiers::default());
         redraw(cx);
         assert!(cx.debug_bounds("jump-hint-c00").is_none(), "gone once let go");
         cx.simulate_keystrokes(&crate::settings::platform_combo("mod-2"));
         let open = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
         assert_eq!(open.as_deref(), Some("c01"), "the second row's key opens it");
+    }
+
+    /// Inactive, opened, shows its first page, then "Show N more"; pressed, every row, and no key
+    /// skips a row it does not draw.
+    #[gpui::test]
+    fn inactive_shows_more_on_request(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = shell_with_chats(cx, 14);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                for chat in &mut state.chats {
+                    chat.last_message_at = Some(Utc::now() - TimeDelta::days(4));
+                    chat.last_seen_at = chat.last_message_at;
+                }
+            });
+            shell.sidebar_collapsed_groups.remove(INACTIVE);
+        });
+        redraw(cx);
+        let more = format!("sidebar-group-more-{INACTIVE}");
+        assert!(bounds(cx, "chat-c09").is_some() && bounds(cx, "chat-c10").is_none(), "the first page");
+        let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
+        assert_eq!(order.len(), INACTIVE_FIRST, "keys reach only the rows drawn: {order:?}");
+        let more = bounds(cx, &more).expect("Show more").center();
+        cx.simulate_click(more, gpui::Modifiers::default());
+        redraw(cx);
+        assert!((10..14).all(|n| bounds(cx, &format!("chat-c{n:02}")).is_some()), "every row now");
+        assert_eq!(shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)).len(), 14);
     }
 
     #[test]

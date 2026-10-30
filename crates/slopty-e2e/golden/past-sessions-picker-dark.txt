@@ -1,10 +1,9 @@
 Window
 Button │ Filter projects: All projects
-Button │ Done, 2
+Button │ repo, 2
 Button │ Explain the parser
 Button │ Say hello
 Status │ Done
-Button │ Inactive, 0
 Button │ History, open: past Claude Code sessions
 Button │ Past session: Rename the lexer module to scanner, 1d
 Button │ Past session: Profile the startup path, 1d

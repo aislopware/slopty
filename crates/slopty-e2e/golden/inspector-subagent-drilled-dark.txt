@@ -1,10 +1,9 @@
 Window
 Button │ Filter projects: All projects
-Button │ Done, 2
+Button │ work, 2
 Button │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
 Button │ Say hello
 Status │ Done
-Button │ Inactive, 0
 Button │ History, open: past Claude Code sessions
 Status │ No past Claude Code sessions here
 Button │ Server: e2e-server, Connected
@@ -15,7 +14,7 @@ Terminal │ shell │ >
 Button │ Back to its parent
 Heading │ Count lines
 Article │ Task
-Paragraph │ Task: Use the Read tool on $SCRATCH/work/main.rs to read the file, then count its total number of lines. Reply with just the number and nothing else.
+Paragraph │ Task: Count the number of lines in the file $SCRATCH/work/main.rs. Use the Read tool on that absolute path to do it. Reply with just the number and nothing else.
 Paragraph │ 4
 Button │ Copy message
 Splitter │ Resize side pane

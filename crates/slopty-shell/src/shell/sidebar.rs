@@ -82,21 +82,29 @@ fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
         47.0 + metadata_height
     }
 }
-// slopty: one sidebar row of one line (Amp's prune of the view toggles; `docs/decisions/
-// layout.md`, "A state is a glyph"): the status slot, the title and its trailing time, 29 tall.
+// slopty: one sidebar row of one line (`docs/decisions/layout.md`, "The session list is stable"
+// and "A state is a glyph"): the program's icon, the title and its quiet hint, and the state's
+// mark, 29 tall.
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 29.0;
 
 pub(super) const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
+/// slopty: the sidebar's width while it is put away: the rail of one rolled-up mark per project
+/// (`docs/decisions/layout.md`, "The session list is stable").
+pub(super) const SIDEBAR_RAIL_WIDTH: f32 = 40.0;
+/// A rail entry's slot, and its project's icon within it.
+const RAIL_SLOT: f32 = 30.0;
+const RAIL_ICON: f32 = 18.0;
+
 /// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
-/// slopty: a sidebar row's one leading slot (its state, else its agent's mark), and the air
-/// between it and the title (opencode's 16 px avatar slot).
+/// slopty: a sidebar row's leading slot (its program's mark) and its trailing one (its state's),
+/// and the air between the leading one and the title (opencode's 16 px avatar slot).
 pub(super) const SIDEBAR_LEADING_SLOT: f32 = 16.0;
 pub(super) const SIDEBAR_LEADING_GAP: f32 = 6.0;
-/// Compact-row time slot while a text jump hint ("Ctrl+9") stands in for the
-/// time: wide enough for the widest of them at 11px on one line. In
-/// default-size pixels; scaled with the UI font via `ui_rems`.
+/// The jump hint's slot while a text hint ("Ctrl+9") stands at a row's end: wide enough for
+/// the widest of them at 11px on one line. In default-size pixels; scaled with the UI font via
+/// `ui_rems`.
 const COMPACT_JUMP_HINT_WIDTH: f32 = 42.0;
 const SIDEBAR_ACTIVE_HARNESS_TITLE_GAP: f32 = Theme::SPACE_SM;
 
@@ -253,7 +261,7 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         // The sidebar is part of the resolved theme. A second fixed-Slopty
         // palette here made imported families look split in half and froze
         // activity/glyph personality independently of the selected variant.
@@ -274,24 +282,111 @@ impl Shell {
             .flex_none()
             .overflow_hidden()
             .w(px(self.sidebar_now()))
-            // slopty: a hidden sidebar (collapsed, fit away, a phone's chat page) draws nothing,
-            // so a screen reader never reads rows that are off screen.
+            // slopty: a hidden sidebar (fit away, a phone's chat page) draws nothing, so a screen
+            // reader never reads rows that are off screen; put away, it leaves its rail.
             .when(self.sidebar_now() > 0.5, |el| {
-                el.child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+                if self.settings.sidebar_collapsed && !self.compact() {
+                    el.child(self.render_sidebar_rail(cx))
+                } else {
+                    el.child(div().h_full().pt(px(Theme::TITLEBAR_HEIGHT)).child(inner))
+                }
             })
             .into_any_element()
     }
 
-    /// One session row: context + status on line one, harness + title on line
-    /// two, and source metadata below. Working uses the live thread glyph in
-    /// the status corner. Click selects; right-click opens the context menu.
+    /// slopty: the rail the put-away sidebar leaves (`docs/decisions/layout.md`, "The session
+    /// list is stable"): per project, in the list's order, its icon wearing its loudest row's
+    /// mark (`marks::loudest`), none while the project rests, so "which one needs me" has an
+    /// answer with the list away. A press opens the project's loudest row, else its newest; a
+    /// screen reader and the tooltip say the project, its count and what its mark says. Inactive,
+    /// at rest by its nature, has no place on it.
+    fn render_sidebar_rail(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let groups = self.sidebar_list(cx);
+        self.tick_sidebar_clock(cx);
+        let mut entries: Vec<AnyElement> = Vec::new();
+        for group in groups.into_iter().filter(|group| group.key != sidebar_status::INACTIVE) {
+            let Some(first) = group.rows.first() else { continue };
+            // A cached row's mark is the last word from a machine out of reach.
+            let loudest = super::marks::loudest(group.rows.iter().filter(|row| !row.cached).map(|row| &row.mark)).cloned();
+            let target = group
+                .rows
+                .iter()
+                .find(|row| !row.cached && Some(&row.mark) == loudest.as_ref())
+                .unwrap_or(first)
+                .chat
+                .id
+                .clone();
+            let count = group.rows.len() + group.hidden;
+            let said = match loudest.as_ref().and_then(super::marks::Mark::word) {
+                Some(word) => format!("{}, {count}, {word}", group.label),
+                None => format!("{}, {count}", group.label),
+            };
+            let key = group.key.clone();
+            let mark = loudest.as_ref().and_then(|mark| {
+                super::marks::mark_element(
+                    SharedString::from(format!("sidebar-rail-mark-{key}")),
+                    format!("sidebar-rail-mark-{key}"),
+                    mark,
+                    crate::loaders::status_mark::MARK_SMALL,
+                    theme.bg,
+                )
+            });
+            // The artwork alone: the entry's own tooltip says the project and its state.
+            let art = div().size(px(RAIL_ICON)).flex_none().child(self.project_icon_art(&first.chat.id, false, cx));
+            let selector = format!("sidebar-rail-{key}");
+            entries.push(
+                div()
+                    .id(SharedString::from(selector.clone()))
+                    .debug_selector(move || selector)
+                    .relative()
+                    .size(px(RAIL_SLOT))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.glass_hover()))
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(said.clone()))
+                    .tooltip(crate::settings::widgets::text_tooltip(said))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_chat(target.clone(), cx)))
+                    .child(art)
+                    .children(mark.map(|mark| div().absolute().right(px(-1.0)).bottom(px(-1.0)).child(mark)))
+                    .into_any_element(),
+            );
+        }
+        div()
+            .id("sidebar-rail")
+            .debug_selector(|| "sidebar-rail".into())
+            .w(px(SIDEBAR_RAIL_WIDTH))
+            .h_full()
+            .pt(px(Theme::TITLEBAR_HEIGHT + SIDEBAR_LIST_PAD_TOP))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(4.0))
+            .role(gpui::Role::List)
+            .aria_label("Projects")
+            .children(entries)
+            .into_any_element()
+    }
+
+    /// One session row. The sidebar's (`search_query` none) is one line, about 28 pt
+    /// (`docs/decisions/layout.md`, "The session list is stable"): the program's icon, the title
+    /// the agent gave, and the state's mark (`marks`), with `title_hint`, quiet, after the title
+    /// only when something tells the row from those beside it (`sidebar_status`). A row whose
+    /// machine is out of reach dims and wears the cached glyph in its mark's place. The palette's
+    /// copy spells out where the chat runs, its status or time, its branch and its pull request.
+    /// Click selects; right-click opens the context menu.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_chat_row(
         &self,
         id: String,
         title: SharedString,
-        // slopty: what tells this row's title from another row's the same
-        // (`sidebar_status::title_hints`), quiet after it.
+        // slopty: what tells this row from those beside it (`sidebar_status::Row::hint`), quiet
+        // after its title.
         title_hint: Option<SharedString>,
         time_ago: SharedString,
         space_name: SharedString,
@@ -338,37 +433,11 @@ impl Shell {
         } else {
             crate::change_requests::ChangeRequestBadgeSurface::SessionRow
         };
-        // slopty: every row says which machine it runs on by that machine's kind (laptop,
-        // server, phone), so where a chat runs reads without the hover card; with every chat on
-        // one machine the glyph would say nothing, so none draws (`sidebar_status::span_machines`).
-        let spans = sidebar_status::span_machines(self.state.read(cx));
-        let machine = pr_device.as_deref().filter(|_| spans).and_then(|device_id| {
-            self.state.read(cx).devices.iter().find(|device| device.id == device_id).map(|device| {
-                (
-                    spaces::device_glyph(&device.platform),
-                    SharedString::from(format!("On {}", device.name)),
-                )
-            })
-        });
-        // slopty: the machine glyph, one element wherever the row draws it.
-        let machine_id = SharedString::from(format!("{row_id}-machine"));
-        let machine_mark = |(glyph, on): (&'static str, SharedString), color: gpui::Hsla| {
-            let selector = machine_id.to_string();
-            div()
-                .id(machine_id.clone())
-                .debug_selector(move || selector)
-                .role(gpui::Role::Image)
-                .aria_label(on)
-                .flex_none()
-                .child(icon(glyph).size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)).text_color(color))
-                .into_any_element()
-        };
         let corner_hovered = self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
         let content_id = id.clone();
         // slopty: the sidebar's rows read the sidebar's clock, as its groups do
-        // (`spaces::Shell::sidebar_chat_data`), so a row never draws a state its group was not
-        // sorted for; the palette's copy reads the shell's.
+        // (`spaces::Shell::sidebar_list`); the palette's copy reads the shell's.
         let now = if search_query.is_none() { self.sidebar_clock } else { crate::clock::utc(cx) };
         // slopty: the row stands in one of the five states (`marks`): its word, its hue and its
         // mark, one mark that morphs between them (`loaders::status_mark`), the tick cut through
@@ -379,13 +448,20 @@ impl Shell {
         let status_label = mark.word();
         let status_color = mark.hue(theme).unwrap_or(theme.text_muted);
         let shows_metadata = branch.is_some() || change_request.is_some();
+        let unread = mark.heavy() && !archived;
+        // slopty: a sidebar row whose machine is out of reach shows the last word from there
+        // (`sidebar_status::Row::cached`).
+        let cached = compact
+            && pr_device
+                .as_deref()
+                .is_some_and(|device| !self.state.read(cx).device_online(device, now));
         // slopty: a need's glyph says which need; its words are the hover card's and a screen
         // reader's, never a line of the row (`docs/decisions/layout.md`, "A state is a glyph").
+        // A cached row asks nothing in its name.
         let need = match &mark {
-            super::marks::Mark::NeedsYou(need) => Some(need.words.clone()),
+            super::marks::Mark::NeedsYou(need) if !cached => Some(need.words.clone()),
             _ => None,
         };
-        let unread = mark.heavy() && !archived;
         let mark_ground = if selected {
             crate::theme::flatten(crate::theme::glass_selected_bg(), theme.bg)
         } else {
@@ -400,42 +476,57 @@ impl Shell {
                 mark_ground,
             )
         };
-        // slopty: one leading slot says the row's state (opencode's avatar slot): the state's
-        // mark while it is at work, needs the person, failed or finished unseen, and the agent's
-        // mark at rest, where a status slot, the agent's mark and an unread
-        // dot crowded three marks before the title. The agent's mark keeps its full colour; only
-        // an archived row dims it, with the rest of the row.
         let subline = if search_query.is_some() {
             theme.text_muted
         } else {
             theme.text_muted.opacity(0.5)
         };
+        // slopty: the program's own mark leads the row (a plain terminal's the terminal glyph),
+        // in its full colour; an archived or cached row dims it with the rest of the row.
         let brand = harness.map(crate::pickers::harness_brand_icon);
+        let dimmed = archived_muted || cached;
         let agent_mark = |(path, tint): (&'static str, Option<gpui::Hsla>)| {
             icon(path)
                 .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                 .flex_none()
                 .text_color(match tint {
-                    Some(tint) if !archived_muted => tint,
+                    Some(tint) if !dimmed => tint,
                     Some(tint) => tint.opacity(0.4),
-                    None if archived_muted => subline.opacity(0.4),
+                    None if dimmed => subline.opacity(0.4),
                     None => subline.opacity(0.8),
                 })
         };
-        let compact_status = compact.then(|| {
-            let glyph = if let Some(mark) = status_mark() {
-                mark
-            } else if let Some(brand) = brand {
-                div()
-                    .debug_selector({
-                        let id = id.clone();
-                        move || format!("chat-agent-{id}") // slopty: for the tests
-                    })
-                    .child(agent_mark(brand))
-                    .into_any_element()
+        let program = compact.then(|| {
+            div()
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("chat-agent-{id}") // slopty: for the tests
+                })
+                .size(px(SIDEBAR_LEADING_SLOT))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(agent_mark(brand.unwrap_or((icons::TERMINAL, None))))
+                .into_any_element()
+        });
+        // slopty: the state's mark trails the title in a slot of its own, kept while at rest so
+        // every title ends at one edge; a cached row's slot says so instead.
+        let mark_slot = compact.then(|| {
+            let glyph = if cached {
+                Some(
+                    div()
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("chat-cached-{id}") // slopty: for the tests
+                        })
+                        .child(icon(icons::WIFI_OFF).size(px(12.0)).text_color(theme.text_muted))
+                        .into_any_element(),
+                )
             } else {
-                div().into_any_element()
+                status_mark()
             };
+            let said = if cached { Some("Cached") } else { status_label };
             div()
                 .id(SharedString::from(format!("{row_id}-status")))
                 .debug_selector({
@@ -447,19 +538,17 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                // slopty: a node needs a role to be one of the tree a screen reader reads; an idle
-                // row has nothing to say.
-                .when_some(status_label, |el, label| el.role(gpui::Role::Status).aria_label(label))
+                // slopty: a node needs a role to be one of the tree a screen reader reads; a row
+                // at rest has nothing to say. A need's words are its description.
+                .when_some(said, |el, label| el.role(gpui::Role::Status).aria_label(label))
                 .when_some(need.clone(), |el, need| el.aria_description(need))
-                .child(glyph)
+                .children(glyph)
                 .into_any_element()
         });
         let compact_jump_label = jump_label.filter(|_| compact);
-        // slopty: the sidebar's rows draw their own trailing cluster, the machine's kind in it;
-        // the palette's copy says its status here.
-        let corner_body: AnyElement = if compact {
-            div().into_any_element()
-        } else {
+        // slopty: the palette's copy says its status, or its time, in its corner; the sidebar's
+        // rows draw their own trailing cluster.
+        let corner_body: AnyElement = {
             match status_label {
                 Some(label) => {
                     // slopty: the state's mark beside its word (`marks`).
@@ -522,12 +611,7 @@ impl Shell {
                     let row_id = row_id.clone();
                     move || format!("{row_id}-corner")
                 })
-                .aria_label(if compact {
-                    "Chat actions" // slopty: the machine's kind trails the row itself
-                } else {
-                    status_label.unwrap_or("Idle")
-                })
-                .when(compact, |el| el.w(px(18.0)).justify_center())
+                .aria_label(status_label.unwrap_or("Idle"))
                 .flex_none()
                 .h(px(14.0))
                 .flex()
@@ -540,8 +624,7 @@ impl Shell {
         let selected_wash = crate::theme::glass_selected_bg();
         let select_id = id.clone();
         let menu_id = id.clone();
-        // slopty: the row as a screen reader names it, with what tells it from a row of the same
-        // title.
+        // slopty: the row as a screen reader names it, with what tells it from the rows beside it.
         let row_label = match &title_hint {
             Some(hint) => SharedString::from(format!("{title}, {hint}")),
             None => title.clone(),
@@ -566,11 +649,7 @@ impl Shell {
             && rename_input.is_none()
             && self.session_hover_card.shown() == Some(id.as_str()))
         .then(|| {
-            self.render_session_hover_card(
-                &id,
-                time_ago.clone(),
-                cx,
-            )
+            self.render_session_hover_card(&id, cx)
         })
         .flatten();
         let card_id = id.clone();
@@ -589,8 +668,11 @@ impl Shell {
         // slopty: under the pointer the selected row goes a step past its selection, as Claude
         // desktop's (`theme::selected_hover_wash`), so the pointer reads on it too.
         let hover_bg = if selected { crate::theme::selected_hover_wash() } else { hover };
-        // slopty: an unread result reads at full strength, as a selected row does.
-        let rest_text = if selected || search_query.is_some() || unread {
+        // slopty: an unread result reads at full strength, as a selected row does; a cached
+        // row recedes, as an archived one.
+        let rest_text = if cached {
+            text.opacity(if selected { 0.7 } else { 0.45 })
+        } else if selected || search_query.is_some() || unread {
             text
         } else if archived {
             text.opacity(0.55)
@@ -801,8 +883,6 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(Theme::SPACE_SM))
-                        // slopty: the machine's kind leads the place line.
-                        .children(machine.clone().map(|mark| machine_mark(mark, subline)))
                         .child(sidebar_faded_label(
                             format!("chat-device-{content_id}").into(),
                             true,
@@ -828,7 +908,7 @@ impl Shell {
                     } else {
                         SIDEBAR_ACTIVE_HARNESS_TITLE_GAP
                     }))
-                    .children(compact_status)
+                    .children(program)
                     // slopty: the palette's copy keeps the agent's mark beside its title; the
                     // sidebar's is in the leading slot.
                     .when_some(brand.filter(|_| !compact), |el, brand| el.child(agent_mark(brand)))
@@ -858,8 +938,8 @@ impl Shell {
                                             popover::search_highlight(title, search_query, theme)
                                         })),
                                 )
-                                // slopty: two rows of one title say what tells them apart, quiet
-                                // after it, as an editor's tabs of one file name do.
+                                // slopty: what tells the row from those beside it, quiet after
+                                // its title, as an editor's tabs of one file name do.
                                 .when_some(title_hint, |el, hint| {
                                     let hint_id = format!("chat-hint-{content_id}");
                                     el.child(
@@ -873,101 +953,79 @@ impl Shell {
                         )
                         .into_any_element(),
                     })
-                    // Compact trailing cluster, right-packed: one fixed slot that
-                    // shows the relative time, swaps to the archive affordance
-                    // while the row is hovered, and shows the Cmd+N jump legend
-                    // while the modifier is held. The legend wins over the hover
-                    // archive (user request). The slot's fixed width keeps the
-                    // column aligned across rows.
+                    // slopty: the sidebar row's trailing cluster: the archive control while
+                    // the row is under the pointer, then the state's mark in its slot. While the
+                    // jump keys' modifier is held, the row's key stands there instead; it wins
+                    // over the hover archive (the person's ask).
                     .when(compact, |el| {
-                        // Cmd-held legend beats the hover archive.
-                        let show_legend = compact_jump_label.is_some();
-                        let show_archive = corner_hovered && !show_legend;
-                        // The slot is 30px (holds "17m"); a text-length jump
-                        // hint widens it to a floor so "Ctrl+1" vs "Ctrl+2"
-                        // never nudges the column.
-                        let text_hint = compact_jump_label
-                            .as_ref()
-                            .is_some_and(|label| label.chars().count() > 3);
                         let archive_id = id.clone();
-                        // slopty: the machine's kind, before the time; the pull request is the
-                        // hover card's.
-                        el.children(machine.clone().map(|mark| machine_mark(mark, subline)))
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("{row_id}-corner")))
-                                .debug_selector({
-                                    let id = id.clone();
-                                    move || format!("chat-time-{id}")
-                                })
-                                .when(text_hint, |el| {
-                                    el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
-                                })
-                                .when(!text_hint, |el| el.min_w(px(30.0)))
-                                // Fixed height so swapping the time text for the
-                                // archive glyph never resizes the slot.
-                                .h(px(14.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_end()
-                                .aria_label(if show_archive {
-                                    if archived { "Unarchive" } else { "Archive" }
-                                } else {
-                                    "Chat time"
-                                })
-                                .when(show_archive, |el| {
-                                    // slopty: a button a screen reader names while it shows.
-                                    el.role(gpui::Role::Button)
-                                        .cursor_pointer()
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.dismiss_session_card(cx);
-                                                cx.stop_propagation();
-                                            }),
-                                        )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.chat_hover_resync = true;
-                                            this.set_chat_archived(
-                                                archive_id.clone(),
-                                                !archived,
-                                                cx,
-                                            );
-                                        }))
-                                        .tooltip(archive_tooltip(archived, selected))
-                        .tooltip_placement(gpui::TooltipPlacement::Above)
-                                        .tooltip_show_delay(
-                                            crate::settings::widgets::TOOLTIP_DELAY,
-                                        )
-                                })
-                                .child(if show_archive {
-                                    icon(if archived {
-                                        icons::ARCHIVE_UP_MINIMALISTIC
-                                    } else {
-                                        icons::ARCHIVE_MINIMALISTIC
+                        match compact_jump_label {
+                            Some(label) => el.child(
+                                div()
+                                    .debug_selector({
+                                        let id = format!("jump-hint-{id}"); // slopty: for the tests
+                                        move || id
                                     })
-                                    .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
                                     .flex_none()
-                                    .text_color(theme.text_muted)
-                                    .into_any_element()
-                                } else {
-                                    div()
-                                        .when(show_legend, |el| {
-                                            let id = format!("jump-hint-{id}"); // slopty: for the tests
-                                            el.debug_selector(move || id)
-                                        })
-                                        .whitespace_nowrap()
-                                        .text_right()
-                                        .text_size(crate::typography::ui_rems(11.0))
-                                        // slopty: tabular figures, so "1m" and "11m" keep the column.
-                                        .font_features(crate::typography::tabular())
-                                        .text_color(subline)
-                                        .child(compact_jump_label.unwrap_or(time_ago))
-                                        .into_any_element()
-                                }),
-                        )
+                                    // A text-length hint ("Ctrl+1") keeps one column with
+                                    // the others.
+                                    .when(label.chars().count() > 3, |el| {
+                                        el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
+                                    })
+                                    .whitespace_nowrap()
+                                    .text_right()
+                                    .text_size(crate::typography::ui_rems(11.0))
+                                    .font_features(crate::typography::tabular())
+                                    .text_color(subline)
+                                    .child(label),
+                            ),
+                            None => el
+                                .when(corner_hovered, |el| {
+                                    el.child(
+                                        div()
+                                            .id(SharedString::from(format!("{row_id}-corner")))
+                                            .debug_selector({
+                                                let id = id.clone();
+                                                move || format!("chat-archive-{id}")
+                                            })
+                                            .size(px(SIDEBAR_LEADING_SLOT))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            // slopty: a button a screen reader names while it shows.
+                                            .role(gpui::Role::Button)
+                                            .aria_label(if archived { "Unarchive" } else { "Archive" })
+                                            .cursor_pointer()
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.dismiss_session_card(cx);
+                                                    cx.stop_propagation();
+                                                }),
+                                            )
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.chat_hover_resync = true;
+                                                this.set_chat_archived(archive_id.clone(), !archived, cx);
+                                            }))
+                                            .tooltip(archive_tooltip(archived, selected))
+                                            .tooltip_placement(gpui::TooltipPlacement::Above)
+                                            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                                            .child(
+                                                icon(if archived {
+                                                    icons::ARCHIVE_UP_MINIMALISTIC
+                                                } else {
+                                                    icons::ARCHIVE_MINIMALISTIC
+                                                })
+                                                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                                                .flex_none()
+                                                .text_color(theme.text_muted),
+                                            ),
+                                    )
+                                })
+                                .children(mark_slot),
+                        }
                     }),
             )
             // Line 3 is structural, not reserved whitespace: compact states
@@ -1742,19 +1800,18 @@ mod tests {
 
     // ---- the whole sidebar drawn in a shell window ----
 
-    /// A sidebar group's header is a button a screen reader names by its group and its count and
-    /// hears open or shut, and a press folds it.
+    /// A sidebar group's header is a button a screen reader names by its project and its count and
+    /// hears open or shut; a press folds it, and shut it says the state its loudest row wears.
     #[gpui::test]
     fn a_sidebar_header_is_a_named_button_that_says_it_is_open(cx: &mut TestAppContext) {
         let (_shell, cx) = launch(cx, DESKTOP);
         let nodes = tree(cx);
-        let working = find_starting(&nodes, Role::Button, "Working, ").expect("the Working group's header");
-        assert!(working.label["Working, ".len()..].parse::<usize>().is_ok(), "its count: {working:?}");
-        assert_eq!(working.expanded, Some(true), "open: {working:?}");
-        cx.simulate_click(working.bounds.center(), gpui::Modifiers::default());
+        let app = find(&nodes, Role::Button, "app, 2").expect("the project's header");
+        assert_eq!(app.expanded, Some(true), "open: {app:?}");
+        cx.simulate_click(app.bounds.center(), gpui::Modifiers::default());
         let nodes = tree(cx);
-        let working = find_starting(&nodes, Role::Button, "Working, ").expect("the header, still");
-        assert_eq!(working.expanded, Some(false), "a press folds it: {working:?}");
+        let app = find(&nodes, Role::Button, "app, 2, Working").expect("the header, saying what it wears");
+        assert_eq!(app.expanded, Some(false), "a press folds it: {app:?}");
     }
 
     /// slopty: a group heading reads 12 medium in the muted ink, its count (Amp's) and an open
@@ -1763,11 +1820,11 @@ mod tests {
     fn a_sidebar_headers_count_shows_under_the_pointer(cx: &mut TestAppContext) {
         let (_shell, cx) = launch(cx, DESKTOP);
         let nodes = tree(cx);
-        let working = find_starting(&nodes, Role::Button, "Working, ").expect("the Working group's header");
-        let key = "status:status:working";
+        let working = find(&nodes, Role::Button, "app, 2").expect("the project's header");
+        let key = "folder:/work/app";
         let count = |cx: &mut VisualTestContext| {
             draw(cx);
-            cx.debug_bounds("sidebar-header-count-status:status:working").expect("the count holds its place")
+            cx.debug_bounds("sidebar-header-count-folder:/work/app").expect("the count holds its place")
         };
         let resting = count(cx);
         let header_key = format!("sidebar-header-{key}");
@@ -1791,25 +1848,13 @@ mod tests {
         assert!(chevron(cx) > 0.9, "and its chevron");
     }
 
-    /// slopty: a finished chat untouched for 72 hours folds into Inactive, the last group and shut
-    /// at first (Amp's); with none in it, it says so.
+    /// slopty: a session untouched for 72 hours folds into Inactive, the last group and shut at
+    /// first (Amp's), its row under its header once opened; with none in it there is no Inactive.
     #[gpui::test]
     fn a_chat_untouched_for_three_days_folds_into_inactive(cx: &mut TestAppContext) {
         let (shell, cx) = launch(cx, DESKTOP);
-        let nodes = tree(cx);
-        let inactive = find(&nodes, Role::Button, "Inactive, 0").expect("Inactive stands, empty");
-        let working = find_starting(&nodes, Role::Button, "Working, ").expect("Working");
-        assert!(inactive.bounds.top() > working.bounds.top(), "last");
-        assert_eq!(inactive.expanded, Some(false), "shut at first");
-        cx.simulate_click(inactive.bounds.center(), gpui::Modifiers::default());
-        draw(cx);
-        assert!(
-            cx.debug_bounds("sidebar-group-empty-status:status:inactive").is_some(),
-            "opened, it says it holds none"
-        );
-        assert!(find(&tree(cx), Role::Status, super::sidebar_status::NO_INACTIVE).is_some());
-
-        // The finished chat goes untouched for three days: it leaves Done for Inactive.
+        assert!(find_starting(&tree(cx), Role::Button, "Inactive").is_none(), "none rests: no Inactive");
+        // The finished chat goes untouched for three days: it leaves its project for Inactive.
         shell.update(cx, |shell, cx| {
             let now = Utc::now();
             shell.state.update(cx, |state, _| {
@@ -1821,16 +1866,19 @@ mod tests {
             cx.notify();
         });
         let nodes = tree(cx);
-        assert!(find(&nodes, Role::Button, "Inactive, 1").is_some(), "it holds the chat");
-        assert!(find_starting(&nodes, Role::Button, "Done, ").is_none(), "Done holds none now");
-        assert!(cx.debug_bounds("sidebar-group-empty-status:status:inactive").is_none());
+        let inactive = find(&nodes, Role::Button, "Inactive, 1").expect("it holds the chat");
+        let app = find(&nodes, Role::Button, "app, 1").expect("its project holds the other");
+        assert!(inactive.bounds.top() > app.bounds.top(), "last");
+        assert_eq!(inactive.expanded, Some(false), "shut at first");
+        assert!(cx.debug_bounds("chat-b").is_none(), "its row waits behind it");
+        cx.simulate_click(inactive.bounds.center(), gpui::Modifiers::default());
+        draw(cx);
         let row = cx.debug_bounds("chat-b").expect("its row, in the open group");
-        let header = find(&nodes, Role::Button, "Inactive, 1").unwrap();
-        assert!(row.top() > header.bounds.top(), "under its header");
+        assert!(row.top() > inactive.bounds.top(), "under its header");
     }
 
     /// A row at rest wears no mark: only a state worth a glance does (one that waits on the person),
-    /// while its slot keeps the titles on one edge.
+    /// while its slot keeps the titles' ends on one edge.
     #[gpui::test]
     fn a_row_at_rest_draws_no_dot(cx: &mut TestAppContext) {
         let (shell, cx) = launch(cx, DESKTOP);
@@ -1912,6 +1960,35 @@ mod tests {
         assert_eq!(filter.expanded, Some(true), "open: {filter:?}");
     }
 
+    /// slopty: the machine is a filter, not a level: narrowed to one machine, the list holds its
+    /// sessions alone, the filter names the machine after the project, and choosing the machine
+    /// again shows every machine's.
+    #[gpui::test]
+    fn the_machine_filter_narrows_the_list_to_one_machine(cx: &mut TestAppContext) {
+        let (shell, cx) = launch(cx, DESKTOP);
+        let device = |id: &str| -> slopty_view_proto::Device {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": id, "platform": "linux", "lastSeenAt": Utc::now(),
+            }))
+            .unwrap()
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.devices = vec![device("local"), device("studio")];
+                state.chats.iter_mut().find(|chat| chat.id == "b").unwrap().device_id = "studio".into();
+            });
+            shell.toggle_machine_filter("studio".into(), cx);
+        });
+        let nodes = tree(cx);
+        assert!(find(&nodes, Role::Button, "Filter projects: All projects \u{b7} studio").is_some(), "it names the machine");
+        assert_eq!(shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)), ["b"], "its sessions alone");
+        assert!(cx.debug_bounds("chat-a").is_none(), "another machine's row is not drawn");
+        shell.update(cx, |shell, cx| shell.toggle_machine_filter("studio".into(), cx));
+        draw(cx);
+        assert_eq!(shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)), ["a", "b"], "every machine's again");
+        assert!(shell.read_with(cx, |shell, _| shell.settings.machine_filter.is_none()));
+    }
+
     fn init_settings_test(
         saved: settings::UiSettings,
         dir: &std::path::Path,
@@ -1979,17 +2056,19 @@ mod tests {
         })
     }
 
-    // slopty: the sidebar's rows say their times by the sidebar's clock, not the wall's, so a
-    // sidebar built again says what the one shown says; the clock ticks when a shown time next
-    // reads differently.
+    // slopty: the sidebar's list reads the sidebar's clock, not the wall's, so a sidebar built
+    // again lists what the one shown lists; the clock ticks when a row next folds into Inactive.
     #[gpui::test]
-    fn the_sidebars_times_read_its_clock_and_tick_when_they_change(cx: &mut TestAppContext) {
+    fn the_sidebars_list_reads_its_clock_and_ticks_when_a_row_folds(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         init_settings_test(settings::UiSettings::default(), dir.path(), cx);
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
-        // A clock taken five minutes ago, a chat that moved half a minute before it.
+        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
+        // A clock taken five minutes ago, a chat that folds two minutes after it: folded by the
+        // wall's clock, not yet by the sidebar's.
         let clock = Utc::now() - chrono::Duration::minutes(5);
-        let moved = clock - chrono::Duration::seconds(30);
+        let folds = clock + chrono::Duration::minutes(2);
+        let moved = folds - chrono::Duration::hours(super::sidebar_status::INACTIVE_AFTER_HOURS);
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
@@ -1999,7 +2078,7 @@ mod tests {
                 state.chats = vec![
                     serde_json::from_value(serde_json::json!({
                         "id": "a", "title": "Chat a", "deviceId": "local", "archived": false,
-                        "createdAt": moved, "lastMessageAt": moved,
+                        "createdAt": moved, "lastMessageAt": moved, "lastSeenAt": moved,
                     }))
                     .unwrap(),
                 ];
@@ -2011,15 +2090,15 @@ mod tests {
             window.refresh();
             window.draw(cx).clear(cx);
         });
+        assert!(cx.debug_bounds("chat-a").is_some(), "in its project by the sidebar's clock");
         shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.sidebar_time_ago(moved).as_ref(), "now", "the sidebar's clock, not 5m");
             let due = shell.sidebar_clock_tick.as_ref().map(|(due, _)| *due);
-            assert_eq!(due, Some(moved + chrono::Duration::seconds(60)), "ticks when it reads 1m");
+            assert_eq!(due, Some(folds), "ticks when it folds");
         });
     }
 
     // slopty: the sidebar under a resting pointer draws as a frame from scratch would: on a row
-    // whose hover card comes up, and on the rows "Show more" brings under it.
+    // whose hover card comes up, and on the rows Inactive's "Show more" brings under it.
     #[gpui::test]
     fn the_sidebar_under_a_resting_pointer_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -2033,17 +2112,19 @@ mod tests {
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
+                // Untouched for days, so they rest in Inactive, which pages them.
                 state.chats = (0..12)
                     .map(|n| {
                         serde_json::from_value(serde_json::json!({
                             "id": format!("c{n}"), "title": format!("Say hello {n}"),
                             "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(n),
+                            "createdAt": Utc::now() - chrono::Duration::hours(80) - chrono::Duration::minutes(n),
                         }))
                         .unwrap()
                     })
                     .collect();
             });
+            shell.sidebar_collapsed_groups.remove(super::sidebar_status::INACTIVE);
             // The gate and splash are set behind the shell's back: it draws them on its next
             // frame only when told.
             cx.notify();
@@ -2065,7 +2146,7 @@ mod tests {
         stale.extend(stale_sidebar(cx).map(|s| format!("on the row: {s}")));
         settle(cx, crate::settings::widgets::TOOLTIP_DELAY * 3);
         stale.extend(stale_sidebar(cx).map(|s| format!("its card up: {s}")));
-        let more = cx.debug_bounds("sidebar-group-more-status:status:done");
+        let more = cx.debug_bounds("sidebar-group-more-inactive");
         if let Some(more) = more {
             cx.simulate_click(more.center(), gpui::Modifiers::default());
             settle(cx, std::time::Duration::from_millis(50));

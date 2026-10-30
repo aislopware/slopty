@@ -20,7 +20,7 @@ use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
 use crate::state::time_ago_changes;
 use slopty_view_proto::{
-    ChatIndicator, Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
+    Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
 };
 
@@ -98,13 +98,15 @@ mod sidebar_row_tests {
         assert_eq!(order, ids(&["a", "b", "c"]));
         let state = shell.read_with(cx, |shell, _| shell.state.clone());
 
+        // slopty: the archive pill stands at the row's end while the row is under the pointer.
         let row = cx.debug_bounds("chat-a").unwrap();
         cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
-        let pointer = cx.debug_bounds("chat-time-a").unwrap().center();
+        cx.run_until_parked();
+        let pointer = cx.debug_bounds("chat-archive-a").unwrap().center();
         cx.simulate_mouse_move(pointer, None, gpui::Modifiers::default());
         for (archived, next) in [
-            ("a", Some(("b", "chat-time-b"))),
-            ("b", Some(("c", "chat-time-c"))),
+            ("a", Some(("b", "chat-archive-b"))),
+            ("b", Some(("c", "chat-archive-c"))),
             ("c", None),
         ] {
             cx.simulate_click(pointer, gpui::Modifiers::default());
@@ -136,8 +138,8 @@ mod sidebar_row_tests {
             // slopty: the row's fade out, run to its end on the test's clock.
             cx.executor().advance_clock(crate::motion::HOVER_FADE.total().mul_f32(crate::motion::speed_scale()));
             cx.run_until_parked();
-            // Its Archived-section copy shares the row key and must not stay lit. slopty: grouped
-            // by status the row's fade is in its last frame here, not lit.
+            // Its Archived-section copy shares the row key and must not stay lit. slopty: the
+            // row's fade is in its last frame here, not lit.
             let lit = crate::motion::hover_t(&format!("chat-{archived}-hover"));
             assert!(lit < 0.01, "chat-{archived} still lit at {lit}");
             let expected = next.map(|(next, _)| format!("chat-{next}"));
@@ -201,14 +203,8 @@ impl SidebarKeys {
     }
 }
 
-struct ActiveChatRow {
-    status: ChatIndicator,
-    chat: slopty_view_proto::Chat,
-    group: Option<(String, String)>,
-}
-
-// slopty: rows keep the order their sessions started in, newest first, so nothing moves on its
-// own; the Sort choice is gone (`docs/decisions/ui.md`, "The sidebar groups by status").
+// slopty: the Archived shelf lists its rows newest first; the live list keeps the order its
+// sessions started in (`sidebar_status::list`).
 pub(super) fn compare_sidebar_chats(
     left: &slopty_view_proto::Chat,
     right: &slopty_view_proto::Chat,
@@ -348,6 +344,36 @@ pub(super) fn sidebar_disclosure_header(
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
 }
 
+/// slopty: what a shut group's header wears at its end: how many rows it holds, and its loudest
+/// row's mark (`marks::loudest`), so "which one needs me" has an answer with the group shut.
+fn group_rollup(key: &str, count: usize, loudest: Option<&super::marks::Mark>, theme: &Theme) -> AnyElement {
+    let count_id = format!("sidebar-group-count-{key}");
+    div()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .child(
+            div()
+                .debug_selector(move || count_id)
+                .text_size(crate::typography::ui_rems(SIDEBAR_HEADER_TEXT))
+                .font_features(crate::typography::tabular())
+                .text_color(theme.text_muted)
+                .child(SharedString::from(count.to_string())),
+        )
+        .children(loudest.and_then(|mark| {
+            super::marks::mark_element(
+                SharedString::from(format!("sidebar-group-mark-{key}")),
+                format!("sidebar-group-mark-{key}"),
+                mark,
+                crate::loaders::status_mark::MARK_SMALL,
+                theme.bg,
+            )
+        }))
+        .into_any_element()
+}
+
 /// slopty: how far a sidebar fade `key` reveals what it shows only under the pointer: wholly on
 /// a touch screen, where nothing hovers.
 pub(super) fn sidebar_hover_reveal(key: &str) -> f32 {
@@ -371,6 +397,8 @@ pub(super) fn sidebar_header_glyph(theme: &Theme) -> gpui::Hsla {
 pub(super) enum SpacesMenuRow {
     All,
     Space(String),
+    // slopty: a machine, by device id: the list narrowed to its sessions (`sidebar_status::Filter`).
+    Machine(String),
     AddSpace,
 }
 
@@ -1161,7 +1189,27 @@ impl Shell {
                 .into_iter()
                 .map(|ix| SpacesMenuRow::Space(projects[ix][0].id.clone())),
         );
+        // slopty: the machines after the projects, while there is more than one to tell apart:
+        // the machine is a filter, not a level (`docs/decisions/layout.md`).
+        if state.devices.len() > 1 {
+            let machines: Vec<String> = state.devices.iter().map(|device| device.name.clone()).collect();
+            rows.extend(
+                popover::filter_indices(&query, &machines)
+                    .into_iter()
+                    .map(|ix| SpacesMenuRow::Machine(state.devices[ix].id.clone())),
+            );
+        }
         rows
+    }
+
+    /// slopty: narrow the sidebar to machine `device_id`'s sessions, or to every machine's
+    /// again when it is the one already shown.
+    pub(super) fn toggle_machine_filter(&mut self, device_id: String, cx: &mut Context<Self>) {
+        self.settings.machine_filter =
+            (self.settings.machine_filter.as_deref() != Some(device_id.as_str())).then_some(device_id);
+        self.close_spaces_menu(cx);
+        self.schedule_save(cx);
+        cx.notify();
     }
 
     /// The repository the sidebar filter names, if any — any checkout's row
@@ -1236,6 +1284,7 @@ impl Shell {
         match row {
             SpacesMenuRow::All => self.set_space_filter(None, cx),
             SpacesMenuRow::Space(id) => self.set_space_filter(Some(id), cx),
+            SpacesMenuRow::Machine(id) => self.toggle_machine_filter(id, cx),
             SpacesMenuRow::AddSpace => {
                 self.close_spaces_menu(cx);
                 self.open_add_space(cx);
@@ -1327,6 +1376,16 @@ impl Shell {
                 }
                 None => (SharedString::from("All projects"), None, false),
             }
+        };
+        // slopty: the machine the list is narrowed to follows the project, out of reach or not.
+        let (label, offline) = match self.settings.machine_filter.as_deref() {
+            Some(id) => {
+                let state = self.state.read(cx);
+                let name = state.device_name(id).unwrap_or("?");
+                let reached = state.device_online(id, crate::clock::utc(cx));
+                (SharedString::from(format!("{label} \u{b7} {name}")), offline || !reached)
+            }
+            None => (label, offline),
         };
         let art = match &space {
             Some(space) => {
@@ -1527,12 +1586,15 @@ impl Shell {
         // Each row is a whole repository: its artwork and name, plus the
         // offline glyph when no device holding it is reachable. Consume
         // `rows` to avoid cloning the list children per frame.
+        // slopty: a machine's row draws its kind's glyph (`device_glyph`) in the artwork's place.
+        let machine = self.settings.machine_filter.clone();
         let details: Vec<(
             SpacesMenuRow,
             SharedString,
             Option<slopty_view_proto::Space>,
             bool,
             bool,
+            Option<&'static str>,
         )> = {
             let state = self.state.read(cx);
             rows.into_iter()
@@ -1543,7 +1605,21 @@ impl Shell {
                         None,
                         false,
                         filter.is_none(),
+                        None,
                     ),
+                    SpacesMenuRow::Machine(id) => {
+                        let device = state.devices.iter().find(|device| device.id == id);
+                        let online = state.device_online(&id, crate::clock::utc(cx));
+                        let selected = machine.as_deref() == Some(id.as_str());
+                        (
+                            SpacesMenuRow::Machine(id),
+                            SharedString::from(device.map_or("?", |device| device.name.as_str()).to_owned()),
+                            None,
+                            !online,
+                            selected,
+                            Some(device_glyph(device.map_or("", |device| device.platform.as_str()))),
+                        )
+                    }
                     SpacesMenuRow::Space(id) => match state.space_row(&id) {
                         Some(space) => {
                             let key = slopty_view_proto::view::project_key(space);
@@ -1560,6 +1636,7 @@ impl Shell {
                                 Some(space.clone()),
                                 offline,
                                 selected,
+                                None,
                             )
                         }
                         None => {
@@ -1570,6 +1647,7 @@ impl Shell {
                                 None,
                                 false,
                                 selected,
+                                None,
                             )
                         }
                     },
@@ -1585,15 +1663,19 @@ impl Shell {
         let profile = self.active_profile_key(cx);
         let icons: Vec<AnyElement> = details
             .iter()
-            .map(|(_, _, space, _, selected)| match space {
-                Some(space) => self.project_icons.render(
+            .map(|(_, _, space, _, selected, glyph)| match (space, glyph) {
+                (Some(space), _) => self.project_icons.render(
                     &self.state,
                     Some(space),
                     profile.clone(),
                     *selected,
                     cx,
                 ),
-                None => icon(icons::FOLDER)
+                (None, Some(glyph)) => icon(glyph)
+                    .size(px(14.0))
+                    .text_color(theme.text_muted)
+                    .into_any_element(),
+                (None, None) => icon(icons::FOLDER)
                     .size(px(14.0))
                     .text_color(theme.text_muted)
                     .into_any_element(),
@@ -1611,7 +1693,7 @@ impl Shell {
                     // Same scroll budget as the composer project menu.
                     .max_h(px(224.0))
                     .children(details.into_iter().zip(icons).enumerate().map(
-                        |(ix, ((row, label, _, offline, selected), art))| {
+                        |(ix, ((row, label, _, offline, selected, _), art))| {
                             let menu_space = match &row {
                                 SpacesMenuRow::Space(id) => Some(id.clone()),
                                 _ => None,
@@ -1712,87 +1794,56 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Flat top-to-bottom chat ids exactly as [`Self::render_active_rows`]
-    /// draws them: the user's sort, device grouping and local-device
-    /// promotion. Jump shortcuts and session cycling read
-    /// this projection so keyboard order never drifts from the screen.
-    pub(super) fn sidebar_visible_order(&self, cx: &Context<Self>) -> Vec<String> {
-        let filter = self.settings.space_filter.clone();
-        let state = self.state.read(cx);
-        let now = self.sidebar_clock; // slopty: the sidebar's clock
-        let mut rows: Vec<(ChatIndicator, slopty_view_proto::Chat)> = state
-            .sidebar_chats(now, filter.as_deref())
-            .into_iter()
-            .map(|(status, chat)| (status, chat.clone()))
-            .collect();
-        rows.sort_by(|left, right| compare_sidebar_chats(&left.1, &right.1));
-        // slopty: by status, the order the rows draw in (`render_active_rows`).
-        super::sidebar_status::order_by_status(&mut rows, state, now);
-        let statuses: std::collections::HashMap<String, ChatIndicator> =
-            rows.iter().map(|(status, chat)| (chat.id.clone(), *status)).collect();
-        let chats: Vec<slopty_view_proto::Chat> = rows.into_iter().map(|(_, chat)| chat).collect();
-        // slopty: the rows group by status, as drawn.
-        {
-            let mut groups: Vec<(String, Vec<slopty_view_proto::Chat>)> = Vec::new();
-            for chat in chats {
-                let key = super::sidebar_status::StatusGroup::of(
-                    statuses.get(&chat.id).copied().unwrap_or(ChatIndicator::Idle),
-                    &chat,
-                    state.session_for(&chat.id),
-                    now,
-                )
-                .key()
-                .to_owned();
-                if let Some((_, existing)) = groups.iter_mut().find(|(group, _)| group == &key) {
-                    existing.push(chat);
-                } else {
-                    groups.push((key, vec![chat]));
-                }
-            }
-            // slopty: the rows past a group's "Show more" are not drawn, so no key reaches them.
-            let selected = state.selected_chat.as_deref();
-            for (key, rows) in &mut groups {
-                super::sidebar_status::page_at_rest(
-                    rows,
-                    self.sidebar_group_page(key),
-                    |chat| {
-                        let status = statuses.get(&chat.id).copied().unwrap_or(ChatIndicator::Idle);
-                        super::sidebar_status::at_rest(status, state.session_for(&chat.id), now)
-                    },
-                    |chat| selected == Some(chat.id.as_str()),
-                );
-            }
-            // slopty: nor do a shut group's.
-            groups
-                .into_iter()
-                .filter(|(key, _)| {
-                    !self.sidebar_collapsed_groups.contains(&self.sidebar_group_collapse_key(key))
-                })
-                .flat_map(|(_, rows)| rows)
-                .map(|chat| chat.id)
-                .collect::<Vec<_>>()
+    /// slopty: what the sidebar narrows its list to: the project filter and the machine filter.
+    pub(super) fn sidebar_filter(&self) -> super::sidebar_status::Filter<'_> {
+        super::sidebar_status::Filter {
+            project: self.settings.space_filter.as_deref(),
+            machine: self.settings.machine_filter.as_deref(),
         }
+    }
+
+    /// The list as the sidebar draws it (`sidebar_status::list`) under the sidebar's filter, by
+    /// the sidebar's clock, Inactive paged behind its "Show more"; notes when it next reads
+    /// otherwise, for the clock's tick.
+    pub(super) fn sidebar_list(&self, cx: &App) -> Vec<super::sidebar_status::Group> {
+        let state = self.state.read(cx);
+        let (mut groups, next) = super::sidebar_status::list(
+            state,
+            self.sidebar_filter(),
+            self.sidebar_clock, // slopty: the sidebar's clock
+        );
+        if let Some(next) = next {
+            self.note_sidebar_change(next);
+        }
+        let selected = state.selected_chat.as_deref();
+        for group in groups.iter_mut().filter(|group| group.key == super::sidebar_status::INACTIVE) {
+            let shown = self
+                .sidebar_group_shown
+                .get(&group.key)
+                .copied()
+                .unwrap_or(super::sidebar_status::INACTIVE_FIRST);
+            super::sidebar_status::page(group, shown, selected);
+        }
+        groups
+    }
+
+    /// Flat top-to-bottom chat ids exactly as [`Self::render_active_rows`] draws them: the
+    /// groups in order, without a shut group's rows or those behind a "Show more". Jump
+    /// shortcuts and session cycling read this projection so keyboard order never drifts from
+    /// the screen.
+    pub(super) fn sidebar_visible_order(&self, cx: &Context<Self>) -> Vec<String> {
+        self.sidebar_list(cx)
+            .into_iter()
+            .filter(|group| !self.sidebar_collapsed_groups.contains(&group.key))
+            .flat_map(|group| group.rows)
+            .map(|row| row.chat.id)
+            .collect()
     }
 
     /// Hover targets include the paged Archived shelf, unlike jump shortcuts.
     pub(super) fn sidebar_hover_card_row_visible(&self, chat_id: &str, cx: &Context<Self>) -> bool {
-        if self
-            .sidebar_visible_order(cx)
-            .iter()
-            .any(|id| id == chat_id)
-        {
-            let state = self.state.read(cx);
-            return state
-                .chats
-                .iter()
-                .find(|chat| chat.id == chat_id)
-                .is_some_and(|chat| {
-                    self.sidebar_group_key(state, chat).is_none_or(|group| {
-                        !self
-                            .sidebar_collapsed_groups
-                            .contains(&self.sidebar_group_collapse_key(&group))
-                    })
-                });
+        if self.sidebar_visible_order(cx).iter().any(|id| id == chat_id) {
+            return true;
         }
         self.archived_open
             && self
@@ -1802,61 +1853,34 @@ impl Shell {
                 .any(|chat| chat.id == chat_id)
     }
 
-    /// slopty: the status group a chat's row sits under.
-    fn sidebar_group_key(&self, state: &AppState, chat: &slopty_view_proto::Chat) -> Option<String> {
-        let now = self.sidebar_clock; // slopty: the sidebar's clock
-        let status = state.display_status_for(chat, now);
-        Some(
-            super::sidebar_status::StatusGroup::of(status, chat, state.session_for(&chat.id), now)
-                .key()
-                .to_owned(),
-        )
-    }
-
-    // slopty: the rows at rest group `group` shows before "Show more" (`sidebar_status`).
-    fn sidebar_group_page(&self, group: &str) -> usize {
-        let key = self.sidebar_group_collapse_key(group);
-        self.sidebar_group_shown.get(&key).copied().unwrap_or(super::sidebar_status::REST_FIRST)
-    }
-
-    /// slopty: a status group's key in `sidebar_collapsed_groups`.
-    fn sidebar_group_collapse_key(&self, group: &str) -> String {
-        format!("status:{group}")
-    }
-
-    /// Open whatever hides `chat_id`'s sidebar row — the sidebar itself, the
-    /// Archived disclosure, its status group, the Archived page — so
-    /// an inline rename has a row to draw on. Each disclosure opens with its
-    /// usual motion. False when the project filter hides the row (the filter
-    /// is the user's to clear); the sidebar notice says why.
+    /// Open whatever hides `chat_id`'s sidebar row — the sidebar itself, its shut group, the
+    /// Inactive page, the Archived disclosure and its page — so an inline rename has a row to
+    /// draw on. Each disclosure opens with its usual motion. False when the project filter
+    /// hides the row (the filter is the user's to clear); the sidebar notice says why.
     pub(super) fn reveal_sidebar_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
-        let (active, archived) = {
+        let group = {
             let state = self.state.read(cx);
-            let active = state
-                .sidebar_chats(crate::clock::utc(cx), self.settings.space_filter.as_deref())
+            let (groups, _) = super::sidebar_status::list(state, self.sidebar_filter(), self.sidebar_clock);
+            groups
                 .into_iter()
-                .find(|(_, chat)| chat.id == chat_id)
-                .map(|(_, chat)| chat.clone());
-            let archived = self
-                .archived_sidebar_chats(cx)
-                .iter()
-                .position(|chat| chat.id == chat_id);
-            (active, archived)
+                .find(|group| group.rows.iter().any(|row| row.chat.id == chat_id))
+                .map(|group| group.key)
         };
-        if active.is_none() && archived.is_none() {
-            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t rename this session here. Clear the project filter, then rename it.", cx);
+        let archived = self
+            .archived_sidebar_chats(cx)
+            .iter()
+            .position(|chat| chat.id == chat_id);
+        if group.is_none() && archived.is_none() {
+            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t rename this session here. Clear the sidebar\u{2019}s filter, then rename it.", cx);
             return false;
         }
-        if let Some(chat) = &active {
-            if let Some(group) = self.sidebar_group_key(self.state.read(cx), chat) {
-                let collapse_key = self.sidebar_group_collapse_key(&group);
-                if self.sidebar_collapsed_groups.remove(&collapse_key) {
-                    self.queue_sidebar_reveal(&format!("group:{collapse_key}"));
-                }
-                // slopty: a row past its group's "Show more" shows the whole group.
-                if !self.sidebar_visible_order(cx).contains(&chat.id) {
-                    self.sidebar_group_shown.insert(collapse_key, usize::MAX);
-                }
+        if let Some(key) = group {
+            if self.sidebar_collapsed_groups.remove(&key) {
+                self.queue_sidebar_reveal(&format!("group:{key}"));
+            }
+            // slopty: a row behind Inactive's "Show more" shows the whole group.
+            if !self.sidebar_visible_order(cx).iter().any(|id| id == chat_id) {
+                self.sidebar_group_shown.insert(key, usize::MAX);
             }
         } else if let Some(index) = archived {
             if !self.archived_open {
@@ -1898,24 +1922,6 @@ impl Shell {
         }
     }
 
-    /// An active session's row and its status group (Needs you, Working, Done).
-    fn sidebar_chat_data(
-        &self,
-        status: ChatIndicator,
-        chat: slopty_view_proto::Chat,
-        state: &AppState,
-    ) -> ActiveChatRow {
-        let now = self.sidebar_clock; // slopty: the sidebar's clock
-        let session = state.session_for(&chat.id);
-        let group = super::sidebar_status::StatusGroup::of(status, &chat, session, now);
-        let group = Some((group.key().to_owned(), group.label().to_owned()));
-        ActiveChatRow {
-            status,
-            chat: chat.clone(),
-            group,
-        }
-    }
-
     /// slopty: how long ago `then` was, by the sidebar's clock; notes when that next reads
     /// differently, for the clock's tick.
     pub(super) fn sidebar_time_ago(&self, then: chrono::DateTime<Utc>) -> SharedString {
@@ -1941,8 +1947,8 @@ impl Shell {
         let Some(at) = self.sidebar_clock_next.take() else {
             return;
         };
-        // At least once a minute, as the shell's clock wakes: groups and times move with it.
-        let at = at.min(crate::clock::utc(cx) + chrono::Duration::minutes(1));
+        // slopty: nothing else moves with the clock: a session or machine going quiet is the
+        // state's own transition, which draws the sidebar again (`AppState::next_clock_transition`).
         if self.sidebar_clock_tick.as_ref().is_some_and(|(due, _)| *due <= at) {
             return;
         }
@@ -1959,87 +1965,27 @@ impl Shell {
         self.sidebar_clock_tick = Some((at, task));
     }
 
+    /// The live list's keyed rows (`sidebar_status::list`): each group's header and, open, its
+    /// rows; shut, its header wears its loudest row's mark and how many rows it holds.
     pub(super) fn render_active_rows(
         &mut self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
-        let now = self.sidebar_clock; // slopty: the sidebar's clock, not the wall's
-        let filter = self.settings.space_filter.clone();
-        let rows: Vec<ActiveChatRow> = {
-            let state = self.state.read(cx);
-            let mut chats: Vec<_> = state
-                .sidebar_chats(now, filter.as_deref())
-                .into_iter()
-                .map(|(status, chat)| (status, chat.clone()))
-                .collect();
-            chats.sort_by(|left, right| {
-                compare_sidebar_chats(&left.1, &right.1)
-            });
-            // slopty: by status, rows keep the order they started in, inside their group.
-            super::sidebar_status::order_by_status(&mut chats, state, now);
-            chats
-                .into_iter()
-                .map(|(status, chat)| self.sidebar_chat_data(status, chat, state))
-                .collect()
-        };
-        // slopty: rows of one title say what tells them apart (`sidebar_status::title_hints`).
-        let title_hints = super::sidebar_status::title_hints(self.state.read(cx), rows.iter().map(|row| &row.chat));
+        let groups = self.sidebar_list(cx);
         // slopty: Tab reaches the open chat's row, or the first with none open (`SidebarKeys`);
         // the rows of chats gone let their focus go.
         {
             let selected = self.state.read(cx).selected_chat.clone();
-            self.sidebar_keys.stop = selected
-                .filter(|id| rows.iter().any(|row| &row.chat.id == id))
-                .or_else(|| rows.first().map(|row| row.chat.id.clone()));
+            let mut rows = groups.iter().flat_map(|group| &group.rows);
+            let first = rows.next().map(|row| row.chat.id.clone());
+            let listed = |id: &String| groups.iter().flat_map(|group| &group.rows).any(|row| &row.chat.id == id);
+            self.sidebar_keys.stop = selected.filter(listed).or(first);
             let state = self.state.read(cx);
             self.sidebar_keys
                 .focus
                 .borrow_mut()
                 .retain(|id, _| state.chats.iter().any(|chat| &chat.id == id));
-        }
-        let mut regular_groups: Vec<(Option<(String, String)>, Vec<ActiveChatRow>)> = Vec::new();
-        for row in rows {
-            if let Some((_, existing)) = regular_groups
-                .iter_mut()
-                .find(|(group, _)| group == &row.group)
-            {
-                existing.push(row);
-            } else {
-                regular_groups.push((row.group.clone(), vec![row]));
-            }
-        }
-        // slopty: Inactive stands last while the sidebar lists any chat, saying so when none
-        // rests in it (Amp's).
-        let inactive = super::sidebar_status::StatusGroup::Inactive;
-        if !regular_groups.is_empty()
-            && !regular_groups
-                .iter()
-                .any(|(group, _)| group.as_ref().is_some_and(|(key, _)| key == inactive.key()))
-        {
-            regular_groups.push((
-                Some((inactive.key().to_owned(), inactive.label().to_owned())),
-                Vec::new(),
-            ));
-        }
-        // slopty: each group shows its first rows at rest, then "Show more" (`sidebar_status`).
-        let mut group_hidden = std::collections::HashMap::new();
-        {
-            let state = self.state.read(cx);
-            let selected = state.selected_chat.as_deref();
-            for (group, rows) in &mut regular_groups {
-                let Some((key, _)) = group else { continue };
-                let hidden = super::sidebar_status::page_at_rest(
-                    rows,
-                    self.sidebar_group_page(key),
-                    |row| {
-                        let session = state.session_for(&row.chat.id);
-                        super::sidebar_status::at_rest(row.status, session, now)
-                    },
-                    |row| selected == Some(row.chat.id.as_str()),
-                );
-                group_hidden.insert(key.clone(), hidden);
-            }
         }
         let selected = self.state.read(cx).selected_chat.clone();
         // Re-checked at render so the chips drop the FRAME a popover opens,
@@ -2056,29 +2002,26 @@ impl Shell {
             .map(|(index, id)| (id, index))
             .collect();
         let mut rendered = Vec::new();
-        for (group, rows) in regular_groups {
+        for group in groups {
+            let super::sidebar_status::Group { key, label, rows, hidden } = group;
+            // slopty: a shut group speaks for its rows with the loudest mark among those still
+            // heard (a cached row's is the last word from a machine out of reach).
+            let loudest = super::marks::loudest(rows.iter().filter(|row| !row.cached).map(|row| &row.mark)).cloned();
+            let row_count = rows.len() + hidden;
+            let shown_rows = rows.len();
+            let motion_key = format!("group:{key}");
+            let collapsed = self.sidebar_collapsed_groups.contains(&key);
+            // slopty: a shut group builds no rows while no motion shows them, so neither the frame
+            // nor a screen reader holds rows that are not on screen.
+            let draws = !collapsed
+                || self.sidebar_disclosure_motion.get(&motion_key).is_some_and(|motion| motion.animating(self.now()));
             let mut rendered_rows = Vec::with_capacity(rows.len());
-            for row in rows {
-                let ActiveChatRow {
-                    status,
-                    chat,
-                    group: _,
-                } = row;
-                // slopty: how long the row has stood as it is (`sidebar_status::row_since`).
-                let time_ago = {
-                    let since = super::sidebar_status::row_since(
-                        status,
-                        &chat,
-                        self.state.read(cx).session_for(&chat.id),
-                        now,
-                    );
-                    self.sidebar_time_ago(since)
-                };
+            for row in rows.into_iter().filter(|_| draws) {
+                let super::sidebar_status::Row { chat, status, hint, .. } = row;
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = chat.config.as_ref().map(|c| c.harness);
                 let height = SIDEBAR_ROW_HEIGHT;
-                // Only rows a jump slot can reach wear a chip; row 10 onward
-                // keeps its time-ago.
+                // Only rows a jump slot can reach wear a chip.
                 let jump_slot = visible_slots.get(&chat.id).copied();
                 let jump_label: Option<SharedString> = if jump_hints && let Some(slot) = jump_slot {
                     let combo = keymap.get(ShortcutId::JumpSession(slot));
@@ -2092,8 +2035,8 @@ impl Shell {
                         &chat.title.clone().unwrap_or_else(|| "New session".into()),
                     )
                     .into(),
-                    title_hints.get(&chat.id).cloned(),
-                    time_ago,
+                    hint,
+                    SharedString::default(),
                     SharedString::default(),
                     None,
                     None,
@@ -2116,27 +2059,13 @@ impl Shell {
                     .into_any_element();
                 rendered_rows.push((format!("c:{}", chat.id), height, element));
             }
-
-            let Some((key, label)) = group else {
-                rendered.extend(rendered_rows);
-                continue;
-            };
-            let collapse_key = self.sidebar_group_collapse_key(&key);
-            let motion_key = format!("group:{collapse_key}");
-            let collapsed = self.sidebar_collapsed_groups.contains(&collapse_key);
-            let row_count = rendered_rows.len();
-            // slopty: the rows at rest past its page wait behind "Show more".
-            let hidden = group_hidden.get(&key).copied().unwrap_or(0);
-            rendered_rows.extend(self.render_group_more(&collapse_key, hidden, theme, cx));
-            if row_count == 0 {
-                rendered_rows.push(super::sidebar_status::empty_group_row(&collapse_key, !collapsed, theme));
-            }
+            // slopty: Inactive's rows past its page wait behind "Show more".
+            let more = self.render_group_more(&key, hidden, theme, cx);
             let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
-                + rendered_rows
-                    .iter()
-                    .map(|(_, height, _)| *height)
-                    .sum::<f32>()
-                + SIDEBAR_LIST_GAP * row_count.saturating_sub(1) as f32;
+                + SIDEBAR_ROW_HEIGHT * shown_rows as f32
+                + more.as_ref().map_or(0.0, |(_, height, _)| *height)
+                + SIDEBAR_LIST_GAP * shown_rows.saturating_sub(1) as f32;
+            rendered_rows.extend(more.filter(|_| draws));
             self.begin_queued_sidebar_reveal(&motion_key, !collapsed, body_height);
             let body = div()
                 .w_full()
@@ -2145,46 +2074,51 @@ impl Shell {
                 .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
                 .gap(px(SIDEBAR_LIST_GAP))
                 .children(rendered_rows.into_iter().map(|(_, _, row)| row));
-            let visible_label: SharedString = label.into();
             let chevron = self.sidebar_disclosure_chevron(&motion_key, !collapsed, theme);
-            let toggle_key = collapse_key.clone();
+            let rollup = collapsed.then(|| group_rollup(&key, row_count, loudest.as_ref(), theme));
+            let toggle_key = key.clone();
             let toggle_motion_key = motion_key.clone();
-            let header =
-                sidebar_disclosure_header(
-                    theme,
-                    SharedString::from(format!("sidebar-group-{collapse_key}")),
-                    &collapse_key,
-                    None,
-                    visible_label,
-                    Some(row_count + hidden), // slopty: with those behind Show more
-                    None,
-                    chevron,
-                    !collapsed,
-                    None,
-                )
-                // slopty: Needs you names the key that walks it, across every project and machine.
-                .when(key == super::sidebar_status::StatusGroup::NeedsYou.key(), |el| {
-                    el.tooltip(crate::settings::widgets::action_tooltip(
-                        "Next session that needs you",
-                        Keys::Action(Box::new(super::NextNeedsYou)),
-                    ))
-                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
-                    this.sidebar_group_shown.remove(&toggle_key); // slopty: its first page again
-                    this.begin_sidebar_disclosure_motion(
-                        &toggle_motion_key,
-                        if was_open { body_height } else { 0.0 },
-                        if was_open { 0.0 } else { body_height },
-                    );
-                    if was_open {
-                        this.sidebar_collapsed_groups.insert(toggle_key.clone());
-                    } else {
-                        this.sidebar_collapsed_groups.remove(&toggle_key);
-                    }
-                    cx.notify();
-                }));
+            let header = sidebar_disclosure_header(
+                theme,
+                SharedString::from(format!("sidebar-group-{key}")),
+                &key,
+                None,
+                label.clone(),
+                // slopty: open, its count fades in under the pointer; shut, it stands beside the
+                // loudest mark.
+                (!collapsed).then_some(row_count),
+                rollup,
+                chevron,
+                !collapsed,
+                None,
+            )
+            .debug_selector({
+                let selector = format!("sidebar-group-{key}"); // slopty: for the tests
+                move || selector
+            })
+            // slopty: shut, a screen reader hears what the header wears.
+            .when(collapsed, |header| {
+                let words = match loudest.as_ref().and_then(super::marks::Mark::word) {
+                    Some(word) => format!("{label}, {row_count}, {word}"),
+                    None => format!("{label}, {row_count}"),
+                };
+                header.aria_label(SharedString::from(words))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
+                this.sidebar_group_shown.remove(&toggle_key); // slopty: its first page again
+                this.begin_sidebar_disclosure_motion(
+                    &toggle_motion_key,
+                    if was_open { body_height } else { 0.0 },
+                    if was_open { 0.0 } else { body_height },
+                );
+                if was_open {
+                    this.sidebar_collapsed_groups.insert(toggle_key.clone());
+                } else {
+                    this.sidebar_collapsed_groups.remove(&toggle_key);
+                }
+                cx.notify();
+            }));
             let body = self.render_sidebar_disclosure_body(
                 &motion_key,
                 !collapsed,
@@ -2201,22 +2135,23 @@ impl Shell {
                 .child(header)
                 .child(body)
                 .into_any_element();
-            rendered.push((format!("g:{collapse_key}"), height, element));
+            rendered.push((format!("g:{key}"), height, element));
         }
         SidebarSessionRows { rows: rendered }
     }
 
-    /// The Archived shelf's chats under the project filter, in sidebar order.
+    /// The Archived shelf's chats under the sidebar's filter, in sidebar order.
     fn archived_sidebar_chats(&self, cx: &App) -> Vec<slopty_view_proto::Chat> {
         let state = self.state.read(cx);
-        let in_filter = state.project_filter(self.settings.space_filter.as_deref());
+        let filter = self.sidebar_filter();
+        let in_filter = state.project_filter(filter.project);
         let mut rows: Vec<slopty_view_proto::Chat> = state
             .chats
             .iter()
             // Spawned children stay out of the Archived section too — the
             // same top-level rule as `visible_chats`.
             .filter(|c| c.archived && c.is_top_level())
-            .filter(|chat| in_filter(chat))
+            .filter(|chat| in_filter(chat) && filter.on_machine(chat))
             .cloned()
             .collect();
         rows.sort_by(|left, right| compare_sidebar_chats(left, right));
@@ -2237,14 +2172,8 @@ impl Shell {
         if rows.is_empty() {
             return None;
         }
-        let rows: Vec<_> = {
-            let state = self.state.read(cx);
-            rows.into_iter()
-                .map(|chat| {
-                    self.sidebar_chat_data(state.display_status_for(&chat, now), chat, state)
-                })
-                .collect()
-        };
+        // slopty: each says its project while the shelf holds more than one (`sidebar_status::shelf`).
+        let rows = super::sidebar_status::shelf(self.state.read(cx), rows, now);
         let total = rows.len();
         let open = self.archived_open;
         let shown = self.archived_shown.max(INITIAL);
@@ -2296,8 +2225,6 @@ impl Shell {
                 .flex_col()
                 .pt(px(SIDEBAR_DISCLOSURE_BODY_INSET))
                 .gap(px(SIDEBAR_LIST_GAP));
-            let title_hints =
-                super::sidebar_status::title_hints(self.state.read(cx), rows.iter().map(|row| &row.chat));
             for row in rows.into_iter().take(shown) {
                 let chat = row.chat;
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
@@ -2308,8 +2235,8 @@ impl Shell {
                         &chat.title.clone().unwrap_or_else(|| "New session".into()),
                     )
                     .into(),
-                    title_hints.get(&chat.id).cloned(),
-                    self.sidebar_time_ago(chat.last_message_at.unwrap_or(chat.created_at)),
+                    row.hint,
+                    SharedString::default(),
                     SharedString::default(),
                     None,
                     None,

@@ -451,6 +451,11 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
+    /// slopty: the sidebar's machine filter, beside the project's: a device id, or `None` for
+    /// every machine (`docs/decisions/layout.md`, "the machine is a quiet subtitle on a row and
+    /// a filter, not a level").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine_filter: Option<String>,
     /// Master switch for session notification chimes. `SLOPTY_DISABLE_SOUND`
     /// overrides every per-event preference below.
     pub sound_enabled: bool,
@@ -551,6 +556,7 @@ impl Default for UiSettings {
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
+            machine_filter: None, // slopty
             sound_enabled: true,
             sound_completion_enabled: true,
             sound_input_enabled: true,
@@ -1205,6 +1211,7 @@ impl UiSettings {
             last_project_action_by_space_id,
             open_tabs,
             space_filter,
+            machine_filter,
             sound_enabled,
             sound_completion_enabled,
             sound_input_enabled,
@@ -1830,6 +1837,7 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
+            machine_filter: Some("studio".into()), // slopty
             sound_enabled: false,
             sound_completion_enabled: false,
             sound_input_enabled: true,
@@ -1882,6 +1890,7 @@ mod tests {
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(json.contains(r#""diffWrap": true"#));
+        assert!(json.contains(r#""machineFilter": "studio""#)); // slopty
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""openWebLinksInSlopty": false"#));
         assert!(json.contains(r#""conversationWidth": "wide""#));

@@ -306,7 +306,7 @@ impl Shell {
     /// Artwork for a chat's project, shared by every space of the project:
     /// the representative's name and color, read from this device's checkout
     /// when there is one (no round trip), else from the representative.
-    fn project_icon_art(
+    pub(super) fn project_icon_art(
         &self,
         chat_id: &str,
         selected: bool,

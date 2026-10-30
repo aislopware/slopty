@@ -1,10 +1,9 @@
 Window
 Button │ Filter projects: All projects
-Button │ Done, 2
+Button │ work, 2
 Button │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
 Button │ Say hello
 Status │ Done
-Button │ Inactive, 0
 Button │ History, open: past Claude Code sessions
 Status │ No past Claude Code sessions here
 Button │ Server: e2e-server, Connected

@@ -192,7 +192,7 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
   the titlebar identity and a pane header.
   - Tests: `loaders::status_mark::tests::{a_need_draws_its_own_glyph,
     a_working_ring_closes_round_a_question}` and `shell::sidebar_status::tests::{
-    the_card_says_what_a_waiting_agent_waits_on, a_waiting_rows_need_is_its_status_description}`.
+    the_card_says_the_need_and_the_last_words, a_waiting_rows_need_is_its_status_description}`.
 
 - ✅ **The palette as built (2026-10-30)** (terminal-craft #7, rex §3.7). One list in sections,
   no tabs: with nothing typed, the recent files then the commands; typed, the commands, then
@@ -214,3 +214,64 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     running_a_command_counts_toward_its_rank, a_commands_row_says_where_it_stands,
     tab_and_control_n_step_the_highlight}` and
     `shell::chrome_tests::the_palette_keeps_its_top_as_its_results_change`.
+
+- ✅ **The stable list as built (2026-10-30).** `shell::sidebar_status::list` builds the list,
+  and `spaces` draws it.
+  - Groups: a project, the repository across its checkouts and machines
+    (`slopty_view_proto::view::project_key`), or else the folder of a session with no project.
+    Groups stand in name order. Within a group, rows keep the order their sessions started in,
+    newest first. No state change, answer or republish moves a row.
+  - Inactive: a session untouched for 72 hours that calls for nothing (at rest, or done unseen)
+    folds into Inactive at the foot. Inactive is shut at first, shows its rows ten then 25 at a
+    time, and is absent while it holds none. It is the one group that pages.
+  - A row is one line, 29 pt: the program's mark (the agent's own icon, else a terminal glyph),
+    the agent's title, a quiet hint after the title, and the state's mark trailing.
+    - The hint shows only when it tells rows apart: the machine while the list spans machines,
+      the branch while a project's rows stand on more than one branch, and the project in
+      Inactive and Archived, where projects mix. It is also part of the row's spoken name.
+    - The mark's slot stays at rest, so every title ends at one edge, and Archive shows before
+      it under the pointer.
+    - The row's time is gone: the hover card says how long the row has stood as it is.
+  - A shut project wears its loudest row's mark (needs you over failed over done unseen over at
+    work) and its count, and a screen reader hears both.
+  - A row whose machine is out of reach stays where it is, dimmed, with a wifi-off glyph in its
+    mark's slot. Its hover card says it is cached and names the machine, and it says no need in
+    the session's name.
+  - The hover card also gives the last line the agent wrote (its records' preview).
+  - The next-needs-you key (⌘., until the inbox takes ⌘J) walks every session that needs the
+    person, then each that failed, then each done unseen, across projects and machines, each
+    kind oldest first.
+  - Deleted with them: the Needs you / Working / Done groups, the row's time and machine glyph,
+    the separate duplicate-title hint (now the one hint), every group's Show more but Inactive's,
+    and Inactive's empty line.
+  - Tests: `shell::sidebar_status::tests::{rows_group_by_project_in_the_order_their_sessions_started,
+    a_session_untouched_for_three_days_folds_into_inactive_while_it_calls_for_nothing,
+    the_hint_says_only_what_tells_rows_apart, a_row_whose_machine_is_out_of_reach_is_cached,
+    the_jump_walks_needs_you_then_failed_then_unseen_oldest_first,
+    a_row_is_one_line_of_program_title_and_mark, a_rows_state_changing_never_moves_it,
+    a_shut_project_wears_its_loudest_mark_and_a_count, inactive_shows_more_on_request}`,
+    `shell::marks::tests::the_loudest_mark_speaks_for_a_group`,
+    `shell::sidebar::tests::{a_chat_untouched_for_three_days_folds_into_inactive,
+    the_sidebars_list_reads_its_clock_and_ticks_when_a_row_folds}` and the e2e
+    `sidebar_paging::every_state_reads_at_a_glance`.
+
+- ✅ **The machine filter, the rail and the card's ports (2026-10-30).**
+  - The machine is a filter beside the project's, kept in `machine_filter`. The sidebar's filter
+    menu lists the machines after the projects while there is more than one, each with its kind's
+    glyph and the out-of-reach glyph. Choosing one narrows the list, the Archived shelf and the
+    keys to its sessions, and the filter names it after the project ("All projects · studio").
+    Choosing it again shows every machine's. A machine that leaves the person's machines clears
+    the filter; one out of reach keeps it.
+  - Put away, the sidebar leaves a 40 pt rail: one entry per project in the list's order, its
+    artwork wearing its loudest row's mark (a cached row's mark is not heard), none while it
+    rests. Pressing an entry opens that row, else the project's newest. The tooltip and a screen
+    reader give the project, its count and its state. Inactive has no entry, and the rail is no
+    seam to drag.
+  - The hover card lists the ports the session's machine reports for it ("Listening on 3000 ·
+    5173"), from the same watch the browser's previews use, held only while the card shows.
+  - A shut group builds no rows unless its motion shows them, so neither the frame nor a screen
+    reader holds rows that are off screen.
+  - Tests: `shell::sidebar_status::tests::the_hint_says_only_what_tells_rows_apart`,
+    `shell::sidebar::tests::the_machine_filter_narrows_the_list_to_one_machine`,
+    `shell::session_hover_card::tests::the_ports_read_as_one_line` and
+    `settings::tests::round_trip` (the filter kept).

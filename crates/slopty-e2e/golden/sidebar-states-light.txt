@@ -1,22 +1,20 @@
 Window
 Button │ Filter projects: All projects
-Button │ Needs you, 1
+Button │ better-update, 1
+Button │ hello
+Status │ Done
+Button │ slopty, 6
 Button │ ask which accent reads best on glass
 Status │ Needs you
-Button │ Working, 2
 Button │ hold a survey of the crates for dead code
 Status │ Working
 Button │ hold the settings split into pages
 Status │ Working
-Button │ Done, 4
 Button │ Refactor the pairing handshake so a phone that scans an expired code learns why…
 Status │ Done
-Button │ hello, slopty
-Status │ Done
-Button │ hello, better-update
+Button │ hello
 Status │ Done
 Button │ Tidy the README's install section
-Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
