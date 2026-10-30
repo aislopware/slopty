@@ -343,6 +343,7 @@ fn hosted(view: LiveView) -> Hosted {
         exit: None,
         progress: None,
         drop: None,
+        ground: None,
     }
 }
 
