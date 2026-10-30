@@ -1,4 +1,4 @@
-//! A check's crates checked on this Mac, at full power, beside the runners.
+//! A check's crates checked on this Mac beside the runners, at a priority below the e2e guests.
 //!
 //! `cargo xtask remote -p <crate>…` checks the commit it made of the tree (`HEAD` and the lane's
 //! own paths). Its crates' fmt, host clippy, rustdoc, shear, typos and tests run here, where an
@@ -51,6 +51,11 @@ pub fn dir(root: &Utf8Path, lane: &str) -> Utf8PathBuf {
 /// each step as `xtask check` does.
 pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Result<Outcome> {
     let started = Instant::now();
+    // At `nice 10`, which every build and test it starts inherits: the e2e guests (8 of the 10
+    // cores) and the person's own session come first, and a check takes what they leave. Beside
+    // the lanes' builds at full priority a guest ran at loads of 136 to 321 on its 4 cores and a
+    // worker missed its 30 s start (`docs/decisions/testing.md`, "Two e2e guests").
+    rustix::process::setpriority_process(None, 10).context("lower the check's priority")?;
     // The volume keeps its floor through the build, and after it for the next.
     crate::prune::before_build();
     let dir = dir(root, lane);
