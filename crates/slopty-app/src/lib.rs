@@ -79,8 +79,6 @@ pub struct Workspace {
     directory_cache: tokio::sync::watch::Sender<server::Cache>,
     /// Every worker's items, links, threads, terminals and screens.
     view: Entity<WorkspaceView>,
-    /// The system asks for motion to be reduced (polled with the settings).
-    reduce_motion: bool,
     /// Each transfer in flight, standing as a toast with its stop.
     transfer_toasts: std::collections::HashMap<slopty_core::XferId, u64>,
     theme: Theme,
@@ -290,7 +288,6 @@ impl Workspace {
             server_generation: 0,
             directory_cache,
             view,
-            reduce_motion: slopty_platform::reduce_motion(),
             transfer_toasts: std::collections::HashMap::new(),
             theme: Theme::default(),
             settings: Settings::default(),
@@ -468,18 +465,6 @@ impl Workspace {
             if active && self.server_caller().is_some() {
                 Self::look_at_notes(cx);
             }
-        }
-    }
-
-    /// The system's Reduce Motion setting changed. What moves reads it as it is drawn, and a
-    /// view drawn from the last frame read it then: every window is drawn again from scratch.
-    /// GPUI's own animations (gpui-kit's among them) follow GPUI's flag, which is set with it.
-    fn set_reduce_motion(&mut self, on: bool, cx: &mut Context<Self>) {
-        if self.reduce_motion != on {
-            tracing::info!(on, "reduce motion");
-            self.reduce_motion = on;
-            cx.set_reduce_motion(on);
-            cx.refresh_windows();
         }
     }
 
@@ -1401,12 +1386,12 @@ pub fn open_workspace(cx: &mut App, handle: tokio::runtime::Handle) {
         ws
     });
     bind_terminal_keys(&workspace, cx);
+    // What the system says of Reduce Motion now, for the shell to start from as it opens the
+    // window; the watch below says each change after.
+    system_motion_heard(slopty_platform::reduce_motion(), cx);
     let window = interface::open(&workspace, runtime, loaded, cx);
     // Every draw of the window, timed for the stream's overlay and the self-test's numbers.
     let _timed = window.update(cx, |_, window, cx| slopty_kit::frames::watch(window, cx).detach());
-    // GPUI's own animations hold still as the system asks, as Slopty's do, and follow the
-    // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
-    cx.set_reduce_motion(slopty_platform::reduce_motion());
     watch_reduce_motion(&workspace, cx);
     watch_resumes(&workspace, &slopty_platform::resume::System, cx);
     hangs::watch(cx);
@@ -1497,22 +1482,29 @@ fn pasteboard() -> Rc<dyn slopty_platform::pasteboard::Pasteboard> {
     Rc::new(IosPasteboard::general())
 }
 
-/// Follow the system's Reduce Motion as it changes: the watch hands each change to the app.
+/// Follow the system's Reduce Motion as it changes: the watch hands each change to the shell
+/// ([`system_motion_heard`]). The workspace keeps the watch; when it goes, the channel closes
+/// and so does this.
 fn watch_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let watch = slopty_platform::motion::watch_reduce_motion(move |on| {
         let _closed = tx.send(on);
     });
     workspace.update(cx, |ws, _cx| ws.motion_watch = Some(watch));
-    let workspace = workspace.downgrade();
     cx.spawn(async move |cx| {
         while let Some(on) = rx.recv().await {
-            if workspace.update(cx, |ws, cx| ws.set_reduce_motion(on, cx)).is_err() {
-                return;
-            }
+            cx.update(|cx| system_motion_heard(on, cx));
         }
     })
     .detach();
+}
+
+/// The system's Reduce Motion setting, as heard. The shell weighs it against a paused
+/// background and the self-test's hold and writes GPUI's flag alone, which draws every window
+/// again when it flips: a flag the app wrote would override them.
+fn system_motion_heard(on: bool, cx: &mut App) {
+    tracing::info!(on, "system reduce motion");
+    slopty_shell::motion::set_system(on, cx);
 }
 
 /// Hear what may have killed the links under the app (the Mac waking, an unlock, a return to
@@ -1652,6 +1644,27 @@ mod tests {
         let view = cx.new(|_| WorkspaceView::new(Theme::default()));
         let seen = settings::Seen::of(&path);
         cx.new(|cx| Workspace::new(view, handle, path, seen, cache, cx))
+    }
+
+    /// What the system says of Reduce Motion reaches GPUI's flag only through the shell, so a
+    /// paused background and the self-test's hold stand as the system turns it off.
+    #[gpui::test]
+    fn a_paused_background_and_a_hold_stand_as_the_system_changes(cx: &TestAppContext) {
+        use slopty_shell::motion::{self, ReduceMotion};
+        cx.update(|cx| {
+            system_motion_heard(true, cx);
+            motion::init(ReduceMotion::System, true, cx);
+            assert!(cx.reduce_motion(), "the shell starts from what was heard");
+            motion::window_activation_changed(false, cx);
+            system_motion_heard(false, cx);
+            assert!(cx.reduce_motion(), "a paused background stands");
+            motion::window_activation_changed(true, cx);
+            assert!(!cx.reduce_motion(), "in front, the system's word holds");
+            motion::hold(true, cx);
+            system_motion_heard(true, cx);
+            system_motion_heard(false, cx);
+            assert!(cx.reduce_motion(), "the self-test's hold stands");
+        });
     }
 
     /// A worker the server forgot is said as done, with the check a confirmation wears, and a

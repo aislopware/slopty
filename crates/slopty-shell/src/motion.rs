@@ -1529,6 +1529,12 @@ struct MotionState {
 
 impl Global for MotionState {}
 
+/// The OS's setting as the app heard it before [`init`] installed the state, for `init` to take
+/// and start from.
+struct HeardSystem(bool);
+
+impl Global for HeardSystem {}
+
 fn state_mut(cx: &mut App) -> Option<&mut MotionState> {
     cx.has_global::<MotionState>()
         .then(|| cx.global_mut::<MotionState>())
@@ -1552,13 +1558,8 @@ pub fn resolve(
 /// Install the motion state and set the flag before the first window opens,
 /// so boot animations already honor it.
 pub fn init(preference: ReduceMotion, pause_in_background: bool, cx: &mut App) {
-    cx.set_global(MotionState {
-        preference,
-        pause_in_background,
-        system: false,
-        active: true,
-        held: None,
-    });
+    let system = cx.has_global::<HeardSystem>() && cx.remove_global::<HeardSystem>().0;
+    cx.set_global(MotionState { preference, pause_in_background, system, active: true, held: None });
     refresh_system(cx);
     apply(cx);
 }
@@ -1618,9 +1619,10 @@ pub fn hold(reduced: bool, cx: &mut App) {
     }
 }
 
-/// Main-window focus moved. Regaining focus also re-reads the OS setting:
-/// changing it means visiting System Settings, so coming back is the moment
-/// it can have moved, without holding a platform notification observer.
+/// Main-window focus moved. Regaining focus also re-reads the OS setting where no watch hears it
+/// (Windows, Linux): changing it means visiting the system's settings, so coming back is the
+/// moment it can have moved. A Mac, iPhone and iPad say each change through the app's watch
+/// ([`set_system`]).
 pub fn window_activation_changed(active: bool, cx: &mut App) {
     // Only the app installs motion state. Test windows activate too, and the
     // Linux portal read would wake the deterministic scheduler from a D-Bus
@@ -1642,8 +1644,14 @@ fn set_window_active(active: bool, cx: &mut App) {
     apply(cx);
 }
 
-fn set_system(system: bool, cx: &mut App) {
+/// The OS's Reduce Motion setting, as the app's watch heard it (`slopty_platform::motion`).
+///
+/// The shell alone writes GPUI's flag: it follows this, while a paused background and a hold
+/// stand whatever the OS says. Heard before [`init`], it is kept for `init` to start from, so
+/// the first window's frames already honour it.
+pub fn set_system(system: bool, cx: &mut App) {
     let Some(state) = state_mut(cx) else {
+        cx.set_global(HeardSystem(system));
         return;
     };
     state.system = system;
@@ -1659,20 +1667,6 @@ fn apply(cx: &mut App) {
     });
     // gpui refreshes every window only when the flag actually flips.
     set_reduced_motion(cx, reduced);
-}
-
-#[cfg(target_os = "macos")]
-fn refresh_system(cx: &mut App) {
-    // objc2; objc 0.2 is banned in the workspace (deny.toml).
-    use objc2::runtime::{AnyObject, Bool};
-    use objc2::{class, msg_send};
-    let reduce = unsafe {
-        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        let reduce: Bool =
-            msg_send![workspace, accessibilityDisplayShouldReduceMotion];
-        reduce.as_bool()
-    };
-    set_system(reduce, cx);
 }
 
 /// "Show animations in Windows" (Settings → Accessibility → Visual effects).
@@ -1707,22 +1701,9 @@ fn refresh_system(cx: &mut App) {
     .detach();
 }
 
-/// Reduce Motion (Settings, Accessibility, Motion) on an iPhone or iPad.
-#[cfg(all(target_os = "ios", not(test)))]
-fn refresh_system(cx: &mut App) {
-    #[link(name = "UIKit", kind = "framework")]
-    unsafe extern "C" {
-        fn UIAccessibilityIsReduceMotionEnabled() -> bool;
-    }
-    // SAFETY: a UIKit accessibility getter with no arguments, called on the main thread.
-    let reduce = unsafe { UIAccessibilityIsReduceMotionEnabled() };
-    set_system(reduce, cx);
-}
-
-#[cfg(any(
-    all(target_os = "ios", test),
-    not(any(target_os = "macos", target_os = "ios", windows, target_os = "linux"))
-))]
+/// A Mac, iPhone and iPad have nothing to read here: the app's watch hears Reduce Motion as it
+/// changes and says it with [`set_system`].
+#[cfg(not(any(windows, target_os = "linux")))]
 fn refresh_system(_cx: &mut App) {}
 
 // A line of text that is alive while its work runs (opencode's `text-shimmer`): a band of

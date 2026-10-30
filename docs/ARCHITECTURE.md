@@ -1093,8 +1093,9 @@ update of the view there would count as a change and build it again with the are
 frame. Reduce Motion is watched rather than polled: on the Mac an observer of
 `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`, on iOS of
 `UIAccessibilityReduceMotionStatusDidChangeNotification` (`slopty_platform::motion::watch_reduce_motion`),
-and a change reaches the workspace, the icons' spinners, GPUI's own flag (which gpui-kit's
-animations follow) and every window. A
+and a change reaches the shell (`slopty_shell::motion::set_system`), which alone writes GPUI's
+flag, weighing it against a paused background and the self-test's hold. Every animation follows
+the flag, gpui-kit's among them, and GPUI draws every window again when it flips. A
 view a sash or a drop moves is built again in its new place: the fork replays a view only where
 it was drawn.
 `retained::stale` checks all of it: it draws the same state from scratch and diffs the painted
