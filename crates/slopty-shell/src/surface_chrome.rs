@@ -1,13 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Shared metrics for sidebar surface toolbars and their controls.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::float_cmp_const,
-    clippy::needless_pass_by_ref_mut,
-    clippy::option_option,
-    reason = "shell lint migration: slice D"
-)]
 
 use gpui::prelude::*;
 use gpui::{Div, div, px};
@@ -204,13 +196,15 @@ pub fn tab(id: impl Into<gpui::ElementId>, selected: bool, theme: &Theme) -> gpu
 /// [`Self::sync`] each render with whether the dialog shows.
 pub struct ModalFocus {
     focus: gpui::FocusHandle,
-    /// What had the keyboard when the dialog took it; `Some` while the dialog holds it.
-    restore: Option<Option<gpui::FocusHandle>>,
+    /// Whether the dialog holds the keyboard.
+    holding: bool,
+    /// What had the keyboard when the dialog took it, while it holds it.
+    restore: Option<gpui::FocusHandle>,
 }
 
 impl ModalFocus {
-    pub(crate) fn new(cx: &mut gpui::App) -> Self {
-        Self { focus: cx.focus_handle(), restore: None }
+    pub(crate) fn new(cx: &gpui::App) -> Self {
+        Self { focus: cx.focus_handle(), holding: false, restore: None }
     }
 
     /// The handle the dialog's card tracks.
@@ -221,19 +215,21 @@ impl ModalFocus {
     /// The dialog shows (`shown`) or not, this render: as it opens it takes the keyboard, as
     /// it closes it gives the keyboard back to what had it (or to nothing, when that is gone).
     pub(crate) fn sync(&mut self, shown: bool, window: &mut gpui::Window, cx: &mut gpui::App) {
-        match (shown, self.restore.is_some()) {
+        match (shown, self.holding) {
             (true, false) => {
-                self.restore = Some(window.focused(cx));
+                self.holding = true;
+                self.restore = window.focused(cx);
                 window.focus(&self.focus, cx);
             }
             (false, true) => {
+                self.holding = false;
+                let restore = self.restore.take();
                 if self.focus.contains_focused(window, cx) || window.focused(cx).is_none() {
-                    match self.restore.take().flatten() {
+                    match restore {
                         Some(restore) => window.focus(&restore, cx),
                         None => window.blur(cx),
                     }
                 }
-                self.restore = None;
             }
             _ => {}
         }
@@ -335,14 +331,14 @@ mod tests {
     impl Render for Stops {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::dark();
-            let presses = self.presses.clone();
+            let presses = Rc::clone(&self.presses);
             let first = div()
                 .id("first")
                 .w(px(40.0))
                 .h(px(20.0))
                 .rounded(px(6.0))
                 .bg(RED)
-                .on_click(move |_, _, _| presses.set(presses.get() + 1));
+                .on_click(move |_, _, _| presses.set(presses.get().saturating_add(1)));
             let first = match self.wear {
                 Wear::Ring => key_stop(first, &theme),
                 Wear::Inset => key_stop_inset(first, &theme),
@@ -367,7 +363,7 @@ mod tests {
         cx.update(|cx| cx.set_global(Theme::dark()));
         let presses = Rc::new(Cell::new(0));
         let (view, cx) = cx.add_window_view({
-            let presses = presses.clone();
+            let presses = Rc::clone(&presses);
             move |_, cx| Stops { wear, presses, holder: cx.focus_handle() }
         });
         let holder = cx.update(|_, cx| view.read(cx).holder.clone());
@@ -417,6 +413,7 @@ mod tests {
     /// The keyboard ring is 2 px of the accent 2 px clear of the control, and drawing it moves
     /// neither the control nor its neighbour (M8).
     #[gpui::test]
+    #[expect(clippy::float_cmp_const, reason = "the ring's width is pinned to the pixel")]
     fn a_keyboard_stop_rings_clear_of_its_edge_and_moves_nothing(cx: &mut gpui::TestAppContext) {
         let (_, _, cx) = stops(Wear::Ring, cx);
         let (quads, scale) = draw(cx);
@@ -457,6 +454,7 @@ mod tests {
 
     /// A row's ring sits just inside its edge, where a list's clip cannot cut it.
     #[gpui::test]
+    #[expect(clippy::float_cmp_const, reason = "the ring's width is pinned to the pixel")]
     fn an_inset_ring_sits_inside_the_edge(cx: &mut gpui::TestAppContext) {
         let (_, _, cx) = stops(Wear::Inset, cx);
         let (quads, scale) = draw(cx);
@@ -495,15 +493,16 @@ mod tests {
     /// A 20 pt control in a [`press_target`] takes a press 2 pt past its edge and keeps its
     /// place in the row.
     #[gpui::test]
+    #[expect(clippy::float_cmp_const, reason = "the target's width is pinned to the pixel")]
     fn a_press_target_reaches_past_a_small_control(cx: &mut gpui::TestAppContext) {
         struct Row(Rc<Cell<usize>>);
         impl Render for Row {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let presses = self.0.clone();
+                let presses = Rc::clone(&self.0);
                 div().p(px(10.0)).flex().child(div().w(px(30.0)).h(px(20.0))).child(
                     press_target("target", 20.0)
                         .debug_selector(|| "target".to_owned())
-                        .on_click(move |_, _, _| presses.set(presses.get() + 1))
+                        .on_click(move |_, _, _| presses.set(presses.get().saturating_add(1)))
                         .child(div().debug_selector(|| "drawn".to_owned()).size(px(20.0))),
                 )
             }
@@ -511,7 +510,7 @@ mod tests {
         cx.update(|cx| cx.set_global(Theme::dark()));
         let presses = Rc::new(Cell::new(0));
         let (_, cx) = cx.add_window_view({
-            let presses = presses.clone();
+            let presses = Rc::clone(&presses);
             move |_, _| Row(presses)
         });
         draw(cx);

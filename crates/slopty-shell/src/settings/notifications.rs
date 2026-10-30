@@ -6,14 +6,6 @@
 //! choose (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a feed"). The
 //! page holds a working copy, a flip emits [`NotificationsEvent::Changed`], and the shell keeps
 //! it: a device-local UI setting.
-#![allow(
-    missing_copy_implementations,
-    missing_debug_implementations,
-    missing_docs,
-    clippy::clone_on_ref_ptr,
-    clippy::trivially_copy_pass_by_ref,
-    reason = "shell lint migration: slice D"
-)]
 
 use gpui::prelude::*;
 use gpui::{Context, EventEmitter, Window, div, px};
@@ -22,12 +14,18 @@ use crate::popover;
 use crate::settings::widgets;
 use crate::theme::Theme;
 
-#[derive(Debug, Clone)]
+/// What the Notifications page asks its owner to keep.
+#[derive(Debug, Clone, Copy)]
 pub enum NotificationsEvent {
     /// The switch flipped: keep its new state.
-    Changed { desktop: bool },
+    Changed {
+        /// Whether the system's notes are on.
+        desktop: bool,
+    },
 }
 
+/// Settings → Notifications.
+#[derive(Debug)]
 pub struct NotificationsPage {
     scroll: widgets::PageScroll,
     desktop: bool,
@@ -40,6 +38,7 @@ fn is_switch_activation(key: &str, is_held: bool) -> bool {
 }
 
 impl NotificationsPage {
+    /// The page, its switch at `desktop`.
     pub fn new(desktop: bool, _cx: &mut Context<Self>) -> Self {
         Self { scroll: widgets::PageScroll::default(), desktop }
     }
@@ -48,12 +47,6 @@ impl NotificationsPage {
         self.desktop = !self.desktop;
         cx.emit(NotificationsEvent::Changed { desktop: self.desktop });
         cx.notify();
-    }
-
-    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if self.scroll.set_list_hovered(*hovered) {
-            cx.notify();
-        }
     }
 }
 
@@ -112,7 +105,7 @@ impl Render for NotificationsPage {
             .id("notifications-page-host")
             .relative()
             .size_full()
-            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .on_hover(widgets::PageScroll::hover_listener(cx, |page| &mut page.scroll))
             .child(
                 crate::edge_fade::edge_faded(
                     16.0,
@@ -155,7 +148,7 @@ mod tests {
         let (page, cx) = cx.add_window_view(|_, cx| NotificationsPage::new(true, cx));
         let said = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         cx.update(|_, cx| {
-            let said = said.clone();
+            let said = std::rc::Rc::clone(&said);
             cx.subscribe(&page, move |_, event: &NotificationsEvent, _| {
                 let NotificationsEvent::Changed { desktop } = event;
                 said.borrow_mut().push(*desktop);

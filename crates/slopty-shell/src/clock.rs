@@ -1,15 +1,11 @@
-//! The shell's one clock. What the shell draws reads the moment of the frame being drawn
-//! ([`gpui::App::frame_time`]), and what an event stamps reads the same clock between frames, so
-//! a frame drawn twice at one moment draws alike (the retained check, the self-test's dump, the
-//! fuzzer's `wall clock` oracle) and a headless test's clock is the dispatcher's, which moves only
-//! when the test moves it. The wall clock is read here alone; clippy refuses it elsewhere in the
-//! shell (`clippy.toml`, `disallowed-methods`).
-#![allow(
-    clippy::allow_attributes_without_reason,
-    clippy::arithmetic_side_effects,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice D"
-)]
+//! The shell's one clock.
+//!
+//! What the shell draws reads the moment of the frame being drawn ([`gpui::App::frame_time`]),
+//! and what an event stamps reads the same clock between frames, so a frame drawn twice at one
+//! moment draws alike (the retained check, the self-test's dump, the fuzzer's `wall clock`
+//! oracle) and a headless test's clock is the dispatcher's, which moves only when the test moves
+//! it. The wall clock is read here alone; clippy refuses it elsewhere in the shell
+//! (`clippy.toml`, `disallowed-methods`).
 
 use std::cell::Cell;
 use std::time::Instant;
@@ -22,9 +18,10 @@ pub fn now(cx: &App) -> Instant {
     cx.frame_time()
 }
 
-/// The wall date at the moment the frame being drawn shows ([`now`]): the dates a row says
-/// ("2m ago", "online") read it, so they stand still within a frame drawn twice. While the
-/// self-test pins the clock ([`pin`]), the date it pinned.
+/// The wall date at the moment the frame being drawn shows ([`now`]).
+///
+/// The dates a row says ("2m ago", "online") read it, so they stand still within a frame drawn
+/// twice. While the self-test pins the clock ([`pin`]), it is the date the pin names.
 pub fn utc(cx: &App) -> DateTime<Utc> {
     cx.try_global::<Pinned>().and_then(|pinned| pinned.0).unwrap_or_else(|| utc_at(cx.frame_time()))
 }
@@ -34,9 +31,11 @@ struct Pinned(Option<DateTime<Utc>>);
 
 impl gpui::Global for Pinned {}
 
-/// Read every date the shell draws as at `at_ms`, Unix milliseconds, from now on, or by the wall
-/// clock again for `None` (and for a moment no date can hold): the self-test's `PinClock`, so a
-/// golden that shows an age ("now", "5m") or a date holds the same one whenever it is taken. A
+/// Read every date the shell draws as at `at_ms`, Unix milliseconds, from now on.
+///
+/// `None` (or a moment no date can hold) reads the wall clock again. This is the self-test's
+/// `PinClock`, so a golden that shows an age ("now", "5m") or a date holds the same one whenever
+/// it is taken. A
 /// surface that keeps the date it last read (a page's clock, the session list's) reads the pin
 /// the next time it reads the clock, as its state moves or its tick comes, so a test pins before
 /// the step it draws. The caller draws the window again.
@@ -66,7 +65,7 @@ pub fn event_now() -> Instant {
 
 /// A stopwatch's start, for what measures work (a log line's milliseconds, a frame's cost, a
 /// deadline a task waits out): never what a frame draws.
-#[expect(clippy::disallowed_methods)] // a measure of work, not a moment drawn
+#[expect(clippy::disallowed_methods, reason = "a measure of work, not a moment drawn")]
 pub fn stopwatch() -> Instant {
     Instant::now()
 }
@@ -87,11 +86,13 @@ thread_local! {
 
 /// The wall date at the monotonic moment `at`: the date read once with a moment, moved by the
 /// time between, and read again only when the two clocks drift apart.
-#[expect(clippy::disallowed_methods)] // the shell's one wall-clock read
+#[expect(clippy::disallowed_methods, reason = "the shell's one wall-clock read")]
 pub fn utc_at(at: Instant) -> DateTime<Utc> {
     let (mono, wall) = (Instant::now(), Utc::now());
     let (mono, wall) = ANCHOR.with(|anchor| match anchor.get() {
-        Some((then, date)) if (shift(date, then, mono) - wall).abs() < DRIFT => (then, date),
+        Some((then, date)) if shift(date, then, mono).signed_duration_since(wall).abs() < DRIFT => {
+            (then, date)
+        }
         _ => {
             anchor.set(Some((mono, wall)));
             (mono, wall)
@@ -105,9 +106,9 @@ fn shift(date: DateTime<Utc>, mono: Instant, at: Instant) -> DateTime<Utc> {
     let delta =
         |d: std::time::Duration| chrono::TimeDelta::from_std(d).unwrap_or(chrono::TimeDelta::MAX);
     let moved = if at >= mono {
-        date.checked_add_signed(delta(at - mono))
+        date.checked_add_signed(delta(at.duration_since(mono)))
     } else {
-        date.checked_sub_signed(delta(mono - at))
+        date.checked_sub_signed(delta(mono.duration_since(at)))
     };
     moved.unwrap_or(date)
 }
@@ -123,7 +124,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert_eq!(utc_at(at), first);
         let later = utc_at(at + std::time::Duration::from_secs(90));
-        assert_eq!(later - first, chrono::TimeDelta::seconds(90));
+        assert_eq!(later.signed_duration_since(first), chrono::TimeDelta::seconds(90));
     }
 
     /// A pinned date holds however the clock moves, and the wall clock runs again once the pin
@@ -141,7 +142,10 @@ mod tests {
         assert!(running(cx), "unpinned, the wall clock runs");
         let before = cx.update(|cx| utc(cx));
         cx.executor().advance_clock(std::time::Duration::from_secs(90));
-        assert_eq!(cx.update(|cx| utc(cx)) - before, chrono::TimeDelta::seconds(90));
+        assert_eq!(
+            cx.update(|cx| utc(cx)).signed_duration_since(before),
+            chrono::TimeDelta::seconds(90)
+        );
         cx.update(|cx| pin(Some(u64::MAX), cx));
         assert!(running(cx), "a moment no date holds pins nothing");
     }

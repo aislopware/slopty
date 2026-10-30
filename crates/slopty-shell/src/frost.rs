@@ -8,7 +8,6 @@
 //! the blur — washes, dividers, and borders intermittently got snapshotted and
 //! blurred away (user reports). Inside one layer the blur/content relationship
 //! is structural: blur first, then shadow, tint, border, rows, text.
-#![allow(missing_debug_implementations, missing_docs, reason = "shell lint migration: slice D")]
 
 use gpui::{
     AnyElement, App, Bounds, Corners, Element, GlobalElementId, InspectorElementId, IntoElement,
@@ -27,10 +26,20 @@ pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) ->
     Frosted { corner_radius, blur_radius, child: child.into_any_element() }
 }
 
+/// The element [`frosted`] builds: its card in one scene layer behind a backdrop blur.
 pub struct Frosted {
     corner_radius: f32,
     blur_radius: f32,
     child: AnyElement,
+}
+
+impl std::fmt::Debug for Frosted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Frosted")
+            .field("corner_radius", &self.corner_radius)
+            .field("blur_radius", &self.blur_radius)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Element for Frosted {
@@ -114,8 +123,15 @@ pub fn layered(child: impl IntoElement) -> Layered {
     Layered { child: child.into_any_element() }
 }
 
+/// The element [`layered`] builds: its child in a nested scene layer.
 pub struct Layered {
     child: AnyElement,
+}
+
+impl std::fmt::Debug for Layered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Layered").finish_non_exhaustive()
+    }
 }
 
 impl Element for Layered {

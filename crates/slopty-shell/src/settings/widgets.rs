@@ -184,6 +184,7 @@ impl RenderOnce for DropdownRows {
 /// `.relative()` host carrying only the list-hover `on_hover` around the
 /// `.overflow_y_scroll().track_scroll(&self.scroll.scroll)` page, with
 /// [`popover::rail`] supplying the rail and all of its listeners.
+#[derive(Debug)]
 pub struct PageScroll {
     /// Tracked by the page's scrolling list directly — including the appshots
     /// half of the shortcuts page, which renders from its own file.
@@ -210,6 +211,19 @@ impl ScrollRailHost for PageScroll {
 impl PageScroll {
     pub fn set_list_hovered(&mut self, hovered: bool) -> bool {
         self.bar.set_list_hovered(hovered)
+    }
+
+    /// The `on_hover` listener of a page's host: the rail shows while the pointer is over the
+    /// page whose [`PageScroll`] `scroll` reaches.
+    pub fn hover_listener<V: 'static>(
+        cx: &Context<V>,
+        scroll: fn(&mut V) -> &mut Self,
+    ) -> impl Fn(&bool, &mut Window, &mut gpui::App) + 'static {
+        cx.listener(move |view, hovered: &bool, _, cx| {
+            if scroll(view).set_list_hovered(*hovered) {
+                cx.notify();
+            }
+        })
     }
 
     fn set_bar_hovered(&mut self, hovered: bool) -> bool {

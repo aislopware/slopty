@@ -34,21 +34,7 @@
 //! it as a zoom). A press ends a glide too. Off under reduced motion.
 //!
 //! A macOS web page's wheel never reaches the root: AppKit hands it to the
-//! page, and `browser::macos` glides it on the same [`Glide`].
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::private_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::manual_midpoint,
-    clippy::map_with_unused_argument_over_ranges,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    reason = "shell lint migration: slice D"
-)]
+//! page, and `browser::macos` glides it on the same `Glide`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -264,6 +250,10 @@ impl Segment {
     }
 
     /// What the leg has still to travel after `now`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "an f32 delta scaled by a fraction in 0..=1 fits f32"
+    )]
     fn remaining(&self, now: Instant) -> Point<f32> {
         let left = 1.0 - self.ease.value(self.time(now));
         let axis = |delta: f32| (f64::from(delta) * left) as f32;
@@ -318,24 +308,24 @@ impl Bezier {
 
     fn new(x1: f64, y1: f64, x2: f64, y2: f64) -> Self {
         let (cx, cy) = (3.0 * x1, 3.0 * y1);
-        let (bx, by) = (3.0 * (x2 - x1) - cx, 3.0 * (y2 - y1) - cy);
+        let (bx, by) = ((x2 - x1).mul_add(3.0, -cx), (y2 - y1).mul_add(3.0, -cy));
         Self { ax: 1.0 - cx - bx, bx, cx, ay: 1.0 - cy - by, by, cy }
     }
 
     fn x(&self, t: f64) -> f64 {
-        ((self.ax * t + self.bx) * t + self.cx) * t
+        self.ax.mul_add(t, self.bx).mul_add(t, self.cx) * t
     }
 
     fn y(&self, t: f64) -> f64 {
-        ((self.ay * t + self.by) * t + self.cy) * t
+        self.ay.mul_add(t, self.by).mul_add(t, self.cy) * t
     }
 
     fn dx(&self, t: f64) -> f64 {
-        (3.0 * self.ax * t + 2.0 * self.bx) * t + self.cx
+        (3.0 * self.ax).mul_add(t, 2.0 * self.bx).mul_add(t, self.cx)
     }
 
     fn dy(&self, t: f64) -> f64 {
-        (3.0 * self.ay * t + 2.0 * self.by) * t + self.cy
+        (3.0 * self.ay).mul_add(t, 2.0 * self.by).mul_add(t, self.cy)
     }
 
     /// The parameter where the curve reaches `x`: Newton's method, then
@@ -365,7 +355,7 @@ impl Bezier {
             } else {
                 high = t;
             }
-            t = (low + high) / 2.0;
+            t = f64::midpoint(low, high);
         }
         t
     }
@@ -382,7 +372,7 @@ impl Bezier {
     }
 }
 
-fn intercept(root: &Rc<RefCell<Root>>, event: &ScrollEvent, window: &mut Window, cx: &mut App) {
+fn intercept(root: &Rc<RefCell<Root>>, event: &ScrollEvent, window: &Window, cx: &mut App) {
     let mut state = root.borrow_mut();
     if state.replaying {
         return;
@@ -403,7 +393,7 @@ fn intercept(root: &Rc<RefCell<Root>>, event: &ScrollEvent, window: &mut Window,
     if !state.scheduled {
         state.scheduled = true;
         drop(state);
-        schedule(root.clone(), window);
+        schedule(Rc::clone(root), window);
     }
 }
 
@@ -446,8 +436,15 @@ fn frame(root: Rc<RefCell<Root>>, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// The element [`smooth_scroll`] builds: its child, with wheel notches turned into glides.
 pub struct SmoothScroll {
     child: AnyElement,
+}
+
+impl std::fmt::Debug for SmoothScroll {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmoothScroll").finish_non_exhaustive()
+    }
 }
 
 impl Element for SmoothScroll {
@@ -498,7 +495,7 @@ impl Element for SmoothScroll {
         let root = window.with_global_id("smooth-scroll".into(), |id, window| {
             window.with_element_state(id, |root: Option<Rc<RefCell<Root>>>, _| {
                 let root = root.unwrap_or_default();
-                (root.clone(), root)
+                (Rc::clone(&root), root)
             })
         });
         #[cfg(target_os = "macos")]
@@ -506,7 +503,7 @@ impl Element for SmoothScroll {
         // First in its capture phase, where nothing in the tree can stop it:
         // a press (a scrollbar grab, a click to stop) always takes over from a
         // glide.
-        let press = root.clone();
+        let press = Rc::clone(&root);
         window.on_mouse_event(move |_: &MouseDownEvent, phase, _, _| {
             if phase == DispatchPhase::Capture {
                 press.borrow_mut().glide.stop();
@@ -553,7 +550,7 @@ mod tests {
     fn land(glide: &mut Glide, now: &mut Instant, frame: Duration) -> Vec<Point<f32>> {
         let mut slices = Vec::new();
         while glide.active() {
-            *now += frame;
+            *now = now.checked_add(frame).unwrap();
             slices.push(glide.advance(*now));
             assert!(slices.len() < 500, "the glide never landed");
         }
@@ -669,16 +666,16 @@ mod tests {
 
     #[test]
     fn the_curve_does_not_depend_on_frame_rate() {
-        let position = |frame: Duration, frames: u32| {
+        let position = |frame: Duration, frames: usize| {
             let mut now = Instant::now();
             let mut glide = Glide::default();
             glide.push(point(0.0, 3.0), now);
-            (0..frames)
-                .map(|_| {
-                    now += frame;
-                    glide.advance(now).y
-                })
-                .sum::<f32>()
+            std::iter::repeat_with(|| {
+                now = now.checked_add(frame).unwrap();
+                glide.advance(now).y
+            })
+            .take(frames)
+            .sum::<f32>()
         };
         let at_60hz = position(Duration::from_millis(16), 3);
         let at_120hz = position(FRAME, 6);
@@ -739,7 +736,7 @@ mod tests {
         (scroll, cx)
     }
 
-    fn init(cx: &mut TestAppContext) -> tempfile::TempDir {
+    fn init(cx: &TestAppContext) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
@@ -766,7 +763,7 @@ mod tests {
     /// One frame later: run the queued frame callbacks and draw. Returns how
     /// many callbacks ran.
     fn next_frame(cx: &mut VisualTestContext) -> usize {
-        CLOCK.set(CLOCK.get().map(|now| now + FRAME));
+        CLOCK.set(CLOCK.get().and_then(|now| now.checked_add(FRAME)));
         cx.update(|window, cx| {
             let ran = window.simulate_next_frame(cx);
             window.draw(cx).clear(cx);
@@ -863,7 +860,7 @@ mod tests {
             &|cx| {
                 cx.simulate_event(ModifiersChangedEvent {
                     modifiers: Modifiers::control(),
-                    capslock: Default::default(),
+                    capslock: gpui::Capslock::default(),
                 });
             },
         ];

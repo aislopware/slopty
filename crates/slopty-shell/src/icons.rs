@@ -8,20 +8,9 @@
 //!   the same style.
 //! - The harness brand marks (`claude-mark`, `openai-mark`, `cursor-mark`): gpui tints SVGs with
 //!   the text color, so the Claude mark's brand orange is applied at the call site
-//!   ([`CLAUDE_BRAND`]).
+//!   ([`claude_brand`]).
 //!
 //! Icons render via [`icon`]: `icon(icons::PAPERCLIP).size(px(16.)).text_color(…)`.
-#![allow(
-    missing_copy_implementations,
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    clippy::assert_is_empty,
-    clippy::string_slice,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unreadable_literal,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::borrow::Cow;
 
@@ -32,7 +21,10 @@ use gpui::{
 
 macro_rules! icon_assets {
     ($(($const_name:ident, $path:literal)),+ $(,)?) => {
-        $(pub const $const_name: &str = concat!("icons/", $path, ".svg");)+
+        $(
+            #[doc = concat!("The asset path of the `", $path, "` icon.")]
+            pub const $const_name: &str = concat!("icons/", $path, ".svg");
+        )+
 
         /// Serves the embedded control icons to gpui's SVG renderer.
         struct ControlAssets;
@@ -244,6 +236,7 @@ icon_assets![
 
 /// Serves both the compact control-icon set and the complete file-identity
 /// icon theme through the single asset source registered at app startup.
+#[derive(Debug, Clone, Copy)]
 pub struct Assets;
 
 impl AssetSource for Assets {
@@ -264,23 +257,24 @@ impl AssetSource for Assets {
 /// The Claude mark's brand orange (`#D97757`) — slopty keeps it even on the
 /// monochrome surface.
 pub fn claude_brand() -> Hsla {
-    gpui::rgb(0xd97757).into()
+    gpui::rgb(0xd9_77_57).into()
 }
 
-/// An icon element for an embedded asset path. Size and colour are set by the
-/// caller (`.size(..)`, `.text_color(..)`), matching the web app's
-/// `[&_svg]:size-4` idiom.
-/// GPUI's SVG painter reads the SVG's own text color; a color on its parent
-/// does not provide the paint input. Always set `.text_color(..)` on the icon.
+/// An icon element for an embedded asset path.
+///
+/// Size and colour are set by the caller (`.size(..)`, `.text_color(..)`), matching the web
+/// app's `[&_svg]:size-4` idiom. GPUI's SVG painter reads the SVG's own text color; a color on its
+/// parent does not provide the paint input. Always set `.text_color(..)` on the icon.
 pub fn icon(path: &'static str) -> Svg {
     svg().path(path).flex_none()
 }
 
-/// The Slopty Icons sidebar glyph ("Sidebar" / "Right
-/// sidebar"): a rounded frame holding a panel whose width morphs 5.5 → 1.75
-/// as the sidebar closes. gpui SVGs are static, so it is drawn from quads in
-/// the source's 24-unit space, scaled to `size`. `open` is the morph progress
-/// (1 = open; drive it with [`crate::motion::state_t`]); `right` mirrors it.
+/// The Slopty Icons sidebar glyph ("Sidebar" / "Right sidebar").
+///
+/// It is a rounded frame holding a panel whose width morphs 5.5 → 1.75 as the sidebar closes.
+/// gpui SVGs are static, so it is drawn from quads in the source's 24-unit space, scaled to
+/// `size`. `open` is the morph progress (1 = open; drive it with [`crate::motion::state_t`]);
+/// `right` mirrors it.
 pub fn sidebar_glyph(open: f32, right: bool, size: f32, color: Hsla) -> Div {
     let s = size / 24.0;
     // `<rect x=3 y=4 w=18 h=16 rx=4 stroke-width=1.75>`: the centered stroke
@@ -403,11 +397,9 @@ mod tests {
         let assets = Assets;
         let values = |text: &str, attribute: &str| -> Vec<String> {
             let key = format!("{attribute}=\"");
-            text.match_indices(&key)
-                .filter_map(|(at, _)| {
-                    let rest = &text[at + key.len()..];
-                    rest.find('"').map(|end| rest[..end].to_owned())
-                })
+            text.split(key.as_str())
+                .skip(1)
+                .filter_map(|rest| rest.split_once('"').map(|(value, _)| value.to_owned()))
                 .collect()
         };
         let mut stroked = 0;
@@ -428,7 +420,7 @@ mod tests {
                     "{path}: stroke {width} in a {side} box is not 1.75 in 24"
                 );
             }
-            let root = &text[..text.find('>').unwrap()];
+            let (root, _) = text.split_once('>').unwrap();
             for attribute in ["stroke-linecap", "stroke-linejoin"] {
                 assert_eq!(values(root, attribute), ["round"], "{path}: {attribute} on its root");
                 assert!(
@@ -447,7 +439,7 @@ mod tests {
 
     #[test]
     fn list_filters_by_prefix() {
-        assert!(!Assets.list("icons/").unwrap().is_empty());
-        assert!(Assets.list("fonts/").unwrap().is_empty());
+        assert!(!Assets.list("icons/").unwrap().is_empty(), "the icons are listed");
+        assert!(Assets.list("fonts/").unwrap().is_empty(), "no icon is listed under fonts/");
     }
 }

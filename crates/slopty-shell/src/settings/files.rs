@@ -1,18 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Settings → Files: local preferences for workspace-file editing.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::enum_variant_names,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::too_many_arguments,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::unused_self,
-    reason = "shell lint migration: slice D"
-)]
 
 use gpui::prelude::*;
 use gpui::{Context, EventEmitter, Window, div, px};
@@ -23,14 +10,21 @@ use crate::theme::Theme;
 
 const DELAY_OPTIONS: [u64; 5] = [300, 600, 900, 1_500, 3_000];
 
+/// A Files preference the person changed, for the shell to keep and apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(clippy::enum_variant_names, reason = "shell lint migration: seam, callers in slice A")]
 pub enum FilesSettingsEvent {
+    /// Autosave turned on or off.
     AutosaveChanged(bool),
+    /// The autosave delay, in milliseconds.
     AutosaveDelayChanged(u64),
+    /// Word wrap in the editor turned on or off.
     WordWrapChanged(bool),
+    /// Whether the file tree shows ignored and hidden files.
     ShowAllFilesChanged(bool),
 }
 
+/// Settings → Files.
 pub struct FilesSettingsPage {
     scroll: widgets::PageScroll,
     autosave_enabled: bool,
@@ -42,7 +36,19 @@ pub struct FilesSettingsPage {
 
 impl EventEmitter<FilesSettingsEvent> for FilesSettingsPage {}
 
+impl std::fmt::Debug for FilesSettingsPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilesSettingsPage")
+            .field("autosave_enabled", &self.autosave_enabled)
+            .field("autosave_delay_ms", &self.autosave_delay_ms)
+            .field("word_wrap", &self.word_wrap)
+            .field("show_all_files", &self.show_all_files)
+            .finish_non_exhaustive()
+    }
+}
+
 impl FilesSettingsPage {
+    /// The page, showing the preferences as kept.
     pub fn new(
         autosave_enabled: bool,
         autosave_delay_ms: u64,
@@ -60,6 +66,7 @@ impl FilesSettingsPage {
         }
     }
 
+    /// Show word wrap as `word_wrap`, changed elsewhere.
     pub fn set_word_wrap(&mut self, word_wrap: bool, cx: &mut Context<Self>) {
         if self.word_wrap == word_wrap {
             return;
@@ -68,6 +75,7 @@ impl FilesSettingsPage {
         cx.notify();
     }
 
+    /// Show the file tree's filter as `show_all_files`, changed elsewhere.
     pub fn set_show_all_files(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
         if self.show_all_files == show_all_files {
             return;
@@ -78,12 +86,11 @@ impl FilesSettingsPage {
 
     // A row whose value is not its default offers "Reset", and only then (M10).
     fn reset(
-        &self,
         id: &'static str,
         label: &str,
         is_default: bool,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
         reset: impl Fn(&mut Self, &mut Context<Self>) + 'static,
     ) -> Option<gpui::Stateful<gpui::Div>> {
         widgets::reset_action(theme, id, label, is_default).map(|button| {
@@ -92,12 +99,6 @@ impl FilesSettingsPage {
                 cx.notify();
             }))
         })
-    }
-
-    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if self.scroll.set_list_hovered(*hovered) {
-            cx.notify();
-        }
     }
 }
 
@@ -125,7 +126,7 @@ impl Render for FilesSettingsPage {
             .options(
                 DELAY_OPTIONS.into_iter().map(|delay| {
                     widgets::SelectOption::new(if delay >= 1_000 {
-                        format!("{} s", delay as f32 / 1_000.0)
+                        format!("{} s", std::time::Duration::from_millis(delay).as_secs_f32())
                     } else {
                         format!("{delay} ms")
                     })
@@ -138,7 +139,9 @@ impl Render for FilesSettingsPage {
             )
             .width(112.0)
             .on_select(|page, ix, _, cx| {
-                let delay = DELAY_OPTIONS[ix];
+                let Some(&delay) = DELAY_OPTIONS.get(ix) else {
+                    return;
+                };
                 page.autosave_delay_ms = delay;
                 cx.emit(FilesSettingsEvent::AutosaveDelayChanged(delay));
                 cx.notify();
@@ -155,7 +158,7 @@ impl Render for FilesSettingsPage {
                             .flex_col()
                             .child(widgets::row_title(&theme, "Autosave")),
                     )
-                    .children(self.reset(
+                    .children(Self::reset(
                         "files-autosave-reset",
                         "Autosave",
                         !autosave_enabled,
@@ -197,7 +200,7 @@ impl Render for FilesSettingsPage {
                                 .flex_col()
                                 .child(widgets::row_title(&theme, "Autosave delay")),
                         )
-                        .children(self.reset(
+                        .children(Self::reset(
                             "files-autosave-delay-reset",
                             "Autosave delay",
                             selected == crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS,
@@ -222,7 +225,7 @@ impl Render for FilesSettingsPage {
                             .flex_col()
                             .child(widgets::row_title(&theme, "Word wrap")),
                     )
-                    .children(self.reset(
+                    .children(Self::reset(
                         "files-word-wrap-reset",
                         "Word wrap",
                         !word_wrap,
@@ -269,7 +272,7 @@ impl Render for FilesSettingsPage {
                                 ],
                             )),
                     )
-                    .children(self.reset(
+                    .children(Self::reset(
                         "files-show-all-reset",
                         "Show hidden files",
                         !show_all_files,
@@ -308,7 +311,7 @@ impl Render for FilesSettingsPage {
             .id("files-settings-page-host")
             .relative()
             .size_full()
-            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .on_hover(widgets::PageScroll::hover_listener(cx, |page| &mut page.scroll))
             .child(
                 crate::edge_fade::edge_faded(
                     16.0,
@@ -359,7 +362,7 @@ mod tests {
             )
         });
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = events.clone();
+        let seen = std::rc::Rc::clone(&events);
         let _events = cx
             .update(|_, cx| cx.subscribe(&page, move |_, event, _| seen.borrow_mut().push(*event)));
         let draw = |cx: &mut gpui::VisualTestContext| {

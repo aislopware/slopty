@@ -1,24 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ eabad36), see THIRD_PARTY_NOTICES.md
-//! Settings → Shortcuts: a table of the rebindable
-//! bindings — click a combo to record (Esc cancels), live conflict detection,
-//! per-row Reset and Restore defaults. Changes emit [`ShortcutsEvent`]; the
-//! shell persists them and re-applies the app keymap.
-#![allow(
-    let_underscore_drop,
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    clippy::clone_on_ref_ptr,
-    clippy::fn_params_excessive_bools,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::too_long_first_doc_paragraph,
-    clippy::too_many_arguments,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice D"
-)]
+//! Settings → Shortcuts: a table of the rebindable bindings.
+//!
+//! Click a combo to record (Esc cancels), with live conflict detection, per-row Reset and Restore
+//! defaults. Changes emit [`ShortcutsEvent`]; the shell persists them and re-applies the app
+//! keymap.
 
 use gpui::prelude::*;
 use gpui::{Context, Entity, EventEmitter, FocusHandle, Keystroke, SharedString, Window, div, px};
@@ -43,17 +28,15 @@ pub enum RecordOutcome {
     Set(String),
 }
 
-/// `key` is what the layout reported; `equivalents` that layout's
-/// [`KeyEquivalents`]. The combo stores the US key behind it, the spelling
-/// defaults use (AZERTY ⌘& records as "mod-1"), so stored-combo conflict
-/// checks keep seeing one chord per key. A key no stored combo can reach is
-/// unusable.
+/// What one keystroke does while recording: `key` as the layout reported it, held with
+/// `modifiers`.
+///
+/// `equivalents` is that layout's [`KeyEquivalents`]. The combo stores the US key behind it, the
+/// spelling defaults use (AZERTY ⌘& records as "mod-1"), so stored-combo conflict checks keep
+/// seeing one chord per key. A key no stored combo can reach is unusable.
 pub fn record_key(
     key: &str,
-    ctrl: bool,
-    alt: bool,
-    shift: bool,
-    cmd: bool,
+    modifiers: gpui::Modifiers,
     equivalents: &KeyEquivalents,
 ) -> RecordOutcome {
     if key.eq_ignore_ascii_case("escape") {
@@ -62,18 +45,21 @@ pub fn record_key(
     let Some(key) = canonical_key(key, equivalents) else {
         return RecordOutcome::Ignored;
     };
-    match combo_from_keystroke(ctrl, alt, shift, cmd, &key) {
+    let gpui::Modifiers { control, alt, shift, platform, .. } = modifiers;
+    match combo_from_keystroke(control, alt, shift, platform, &key) {
         Some(combo) => RecordOutcome::Set(combo),
         None => RecordOutcome::Ignored,
     }
 }
 
+/// What the Shortcuts page asks the shell to do.
 #[derive(Debug, Clone)]
 pub enum ShortcutsEvent {
     /// The keymap changed — persist + re-apply.
     KeymapChanged(KeymapConfig),
 }
 
+/// Settings → Shortcuts.
 pub struct ShortcutsPage {
     scroll: widgets::PageScroll,
     /// Working copy (kept in sync with the shell via change events).
@@ -90,8 +76,19 @@ pub struct ShortcutsPage {
 
 impl EventEmitter<ShortcutsEvent> for ShortcutsPage {}
 
+impl std::fmt::Debug for ShortcutsPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShortcutsPage")
+            .field("keymap", &self.keymap)
+            .field("recording", &self.recording)
+            .field("conflict_notice", &self.conflict_notice)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ShortcutsPage {
-    pub fn new(state: Entity<AppState>, keymap: KeymapConfig, cx: &mut Context<Self>) -> Self {
+    /// The page over `keymap`, the working copy it edits.
+    pub fn new(state: Entity<AppState>, keymap: KeymapConfig, cx: &Context<Self>) -> Self {
         Self {
             scroll: widgets::PageScroll::default(),
             keymap,
@@ -110,11 +107,13 @@ impl ShortcutsPage {
         // Bound actions run before Div key listeners. Intercept first so a
         // conflicting chord is recorded/refused instead of running its action.
         self.recording_interceptor = Some(cx.intercept_keystrokes(move |event, window, cx| {
-            let _ = page.update(cx, |page, cx| {
-                if page.focus.is_focused(window) {
-                    page.record_keystroke(&event.keystroke, cx);
-                }
-            });
+            if let Some(page) = page.upgrade() {
+                page.update(cx, |page, cx| {
+                    if page.focus.is_focused(window) {
+                        page.record_keystroke(&event.keystroke, cx);
+                    }
+                });
+            }
         }));
         self.recording_blur = Some(cx.on_blur(&self.focus, window, |this, _, cx| {
             this.stop_recording();
@@ -131,7 +130,7 @@ impl ShortcutsPage {
         self.recording_interceptor = None;
     }
 
-    fn commit(&mut self, cx: &mut Context<Self>) {
+    fn commit(&self, cx: &mut Context<Self>) {
         cx.emit(ShortcutsEvent::KeymapChanged(self.keymap.clone()));
         cx.notify();
     }
@@ -140,15 +139,7 @@ impl ShortcutsPage {
         let Some(recording) = self.recording else {
             return;
         };
-        let mods = &keystroke.modifiers;
-        match record_key(
-            &keystroke.key,
-            mods.control,
-            mods.alt,
-            mods.shift,
-            mods.platform,
-            &key_equivalents(cx),
-        ) {
+        match record_key(&keystroke.key, keystroke.modifiers, &key_equivalents(cx)) {
             RecordOutcome::Cancelled => {
                 self.stop_recording();
                 cx.notify();
@@ -177,9 +168,8 @@ impl ShortcutsPage {
         id: ShortcutId,
         ix: usize,
         gx: usize,
-        recording: Option<ShortcutId>,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::Div {
         widgets::card_row(theme, gx == 0)
             .child(
@@ -198,44 +188,102 @@ impl ShortcutsPage {
                         ))
                     }),
             )
-            .child(self.render_binding_control(id, ix, recording, theme, cx))
+            .child(self.render_binding_control(id, ix, theme, cx))
     }
 
+    /// Reset (when customized) plus the click-to-record combo chip; recording inverts it to the
+    /// accent wash.
     fn render_binding_control(
         &self,
         id: ShortcutId,
         ix: usize,
-        recording: Option<ShortcutId>,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::Div {
-        let page = cx.entity().downgrade();
-        let reset_page = page.clone();
-        binding_control(
-            id,
-            ix,
-            self.keymap.get(id),
-            recording == Some(id),
-            theme,
-            move |_, cx| {
-                reset_page
-                    .update(cx, |this, cx| {
-                        this.keymap.reset(id);
-                        this.stop_recording();
-                        this.commit(cx);
+        let accent = theme.accent;
+        let combo = self.keymap.get(id).to_owned();
+        let is_recording = self.recording == Some(id);
+        let non_default = combo != id.default_combo();
+        let chip_text: SharedString = if is_recording {
+            "Press keys…".into()
+        } else {
+            // The glyphs every other place writes a key in ("⇧⌘A").
+            crate::keys::combo_text(&combo)
+        };
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(20.0))
+            .when(non_default && !is_recording, |el| {
+                el.child(
+                    div()
+                        .id(("shortcut-reset", ix))
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Reset {} shortcut", id.label()))
+                        .min_h(px(24.0))
+                        .tab_index(0)
+                        .map(|el| crate::surface_chrome::focus_ring(el, theme))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_muted)
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.keymap.reset(id);
+                            this.stop_recording();
+                            this.commit(cx);
+                        }))
+                        .child(SharedString::from("Reset")),
+                )
+            })
+            .child(
+                div()
+                    .id(("shortcut-combo", ix))
+                    .role(gpui::Role::Button)
+                    .aria_label(format!(
+                        "Change {} shortcut: {}",
+                        id.label(),
+                        crate::keys::combo_text(&combo)
+                    ))
+                    .tab_index(0)
+                    .min_w(px(96.0))
+                    .h(px(widgets::SELECT_HEIGHT))
+                    .px(px(12.0))
+                    .rounded(px(8.0))
+                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .font_family(theme.font_mono.clone())
+                    .text_size(crate::typography::ui_rems(12.0))
+                    .cursor_pointer()
+                    .map(|el| {
+                        if is_recording {
+                            // Recording draws its edge inside the chip, so the chip never grows.
+                            el.bg(accent.opacity(0.16))
+                                .outline_ring(gpui::Outline {
+                                    color: accent.opacity(0.55),
+                                    width: px(1.0),
+                                    offset: px(-1.0),
+                                })
+                                .text_color(theme.text)
+                        } else {
+                            // Same glass wash as the settings dropdowns.
+                            let hover_key = format!("shortcut-combo-{ix}-hover");
+                            el.bg(crate::motion::hover_blend(
+                                &hover_key,
+                                widgets::select_fill(theme, false),
+                                widgets::select_fill(theme, true),
+                            ))
+                            .hover_fade(hover_key)
+                            .text_color(theme.text)
+                        }
                     })
-                    .ok();
-            },
-            move |window, cx| {
-                page.update(cx, |this, cx| this.start_recording(id, window, cx)).ok();
-            },
-        )
-    }
-
-    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if self.scroll.set_list_hovered(*hovered) {
-            cx.notify();
-        }
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_recording(id, window, cx);
+                    }))
+                    .child(chip_text),
+            )
     }
 
     /// The shared rail under the id of whichever page is showing.
@@ -256,97 +304,6 @@ impl popover::ScrollRailHost for ShortcutsPage {
     fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
         self.scroll.rail_scroll()
     }
-}
-
-/// Reset (when customized) plus the click-to-record combo chip; recording
-/// inverts it to the accent wash. Shared by Settings → Shortcuts and the
-/// feature pages that own a shortcut ([`ShortcutField`]).
-fn binding_control(
-    id: ShortcutId,
-    ix: usize,
-    combo: &str,
-    is_recording: bool,
-    theme: &Theme,
-    on_reset: impl Fn(&mut Window, &mut gpui::App) + 'static,
-    on_record: impl Fn(&mut Window, &mut gpui::App) + 'static,
-) -> gpui::Div {
-    let accent = theme.accent;
-    let combo = combo.to_owned();
-    let non_default = combo != id.default_combo();
-    let chip_text: SharedString = if is_recording {
-        "Press keys…".into()
-    } else {
-        // The glyphs every other place writes a key in ("⇧⌘A").
-        crate::keys::combo_text(&combo)
-    };
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(20.0))
-        .when(non_default && !is_recording, |el| {
-            el.child(
-                div()
-                    .id(("shortcut-reset", ix))
-                    .role(gpui::Role::Button)
-                    .aria_label(format!("Reset {} shortcut", id.label()))
-                    .min_h(px(24.0))
-                    .tab_index(0)
-                    .map(|el| crate::surface_chrome::focus_ring(el, theme))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(theme.text_muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(theme.text))
-                    .on_click(move |_, window, cx| on_reset(window, cx))
-                    .child(SharedString::from("Reset")),
-            )
-        })
-        .child(
-            div()
-                .id(("shortcut-combo", ix))
-                .role(gpui::Role::Button)
-                .aria_label(format!(
-                    "Change {} shortcut: {}",
-                    id.label(),
-                    crate::keys::combo_text(&combo)
-                ))
-                .tab_index(0)
-                .min_w(px(96.0))
-                .h(px(widgets::SELECT_HEIGHT))
-                .px(px(12.0))
-                .rounded(px(8.0))
-                .map(|el| crate::surface_chrome::focus_ring(el, theme))
-                .flex()
-                .items_center()
-                .justify_center()
-                .font_family(theme.font_mono.clone())
-                .text_size(crate::typography::ui_rems(12.0))
-                .cursor_pointer()
-                .map(|el| {
-                    if is_recording {
-                        // Recording draws its edge inside the chip, so the chip never grows.
-                        el.bg(accent.opacity(0.16))
-                            .outline_ring(gpui::Outline {
-                                color: accent.opacity(0.55),
-                                width: px(1.0),
-                                offset: px(-1.0),
-                            })
-                            .text_color(theme.text)
-                    } else {
-                        // Same glass wash as the settings dropdowns.
-                        let hover_key = format!("shortcut-combo-{ix}-hover");
-                        el.bg(crate::motion::hover_blend(
-                            &hover_key,
-                            widgets::select_fill(theme, false),
-                            widgets::select_fill(theme, true),
-                        ))
-                        .hover_fade(hover_key)
-                        .text_color(theme.text)
-                    }
-                })
-                .on_click(move |_, window, cx| on_record(window, cx))
-                .child(chip_text),
-        )
 }
 
 /// Why `combo` cannot be bound to `id`, if it cannot. Conflicts never
@@ -420,7 +377,7 @@ impl Render for ShortcutsPage {
             let ids = ShortcutId::ALL.into_iter().filter(|&id| group(id) == name);
             for (gx, id) in ids.enumerate() {
                 let ix = ShortcutId::ALL.iter().position(|&a| a == id).unwrap_or(0);
-                card = card.child(self.render_row(id, ix, gx, recording, &theme, cx));
+                card = card.child(self.render_row(id, ix, gx, &theme, cx));
             }
             groups.push(widgets::section(&theme, name, card).into_any_element());
         }
@@ -440,7 +397,7 @@ impl Render for ShortcutsPage {
             .id("shortcuts-page-host")
             .relative()
             .size_full()
-            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .on_hover(widgets::PageScroll::hover_listener(cx, |page| &mut page.scroll))
             .child(
                 crate::edge_fade::edge_faded(
                     16.0,
@@ -515,7 +472,7 @@ mod tests {
         use std::cell::Cell;
         use std::rc::Rc;
         let fired = Rc::new(Cell::new(false));
-        let observed = fired.clone();
+        let observed = Rc::clone(&fired);
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
@@ -551,33 +508,32 @@ mod tests {
     #[test]
     fn recording_outcomes() {
         let us = KeyEquivalents::default();
-        assert_eq!(record_key("escape", false, false, false, false, &us), RecordOutcome::Cancelled);
-        assert_eq!(record_key("Escape", true, false, false, false, &us), RecordOutcome::Cancelled);
+        let cmd = gpui::Modifiers::command();
+        assert_eq!(record_key("escape", gpui::Modifiers::none(), &us), RecordOutcome::Cancelled);
+        assert_eq!(record_key("Escape", gpui::Modifiers::control(), &us), RecordOutcome::Cancelled);
+        assert_eq!(record_key("s", cmd, &us), RecordOutcome::Set("mod-s".into()));
         assert_eq!(
-            record_key("s", false, false, false, true, &us),
-            RecordOutcome::Set("mod-s".into())
-        );
-        assert_eq!(
-            record_key("k", false, true, true, true, &us),
+            record_key("k", gpui::Modifiers { alt: true, ..gpui::Modifiers::command_shift() }, &us),
             RecordOutcome::Set("mod-alt-shift-k".into())
         );
         // Apple-only: elsewhere ctrl IS the primary and records as "mod".
         #[cfg(target_vendor = "apple")] // an iPad's ⌘ too
         assert_eq!(
-            record_key("tab", true, false, true, false, &us),
+            record_key("tab", gpui::Modifiers::control_shift(), &us),
             RecordOutcome::Set("ctrl-shift-tab".into())
         );
         // Bare modifiers stay recording.
-        assert_eq!(record_key("shift", false, false, true, false, &us), RecordOutcome::Ignored);
-        assert_eq!(record_key("ctrl", true, false, false, false, &us), RecordOutcome::Ignored);
+        assert_eq!(record_key("shift", gpui::Modifiers::shift(), &us), RecordOutcome::Ignored);
+        assert_eq!(record_key("ctrl", gpui::Modifiers::control(), &us), RecordOutcome::Ignored);
     }
 
     #[test]
     fn azerty_records_the_us_key_behind_each_chord() {
         let azerty = crate::settings::azerty_key_equivalents();
+        let cmd = gpui::Modifiers::command();
         // ⌘& is AZERTY's ⌘1: it records as the default's own spelling, so
         // the conflict check sees Jump to session 1 holding it.
-        let RecordOutcome::Set(combo) = record_key("&", false, false, false, true, &azerty) else {
+        let RecordOutcome::Set(combo) = record_key("&", cmd, &azerty) else {
             panic!("expected Set");
         };
         assert_eq!(combo, "mod-1");
@@ -585,26 +541,14 @@ mod tests {
             conflict_owner(&KeymapConfig::default(), ShortcutId::NewSession, &combo),
             Some(ShortcutId::JumpSession(0))
         );
-        assert_eq!(
-            record_key(":", false, false, false, true, &azerty),
-            RecordOutcome::Set("mod-/".into())
-        );
+        assert_eq!(record_key(":", cmd, &azerty), RecordOutcome::Set("mod-/".into()));
         // ⌘⇧è types 7, where AZERTY puts US ⌘&.
-        assert_eq!(
-            record_key("7", false, false, false, true, &azerty),
-            RecordOutcome::Set("mod-&".into())
-        );
+        assert_eq!(record_key("7", cmd, &azerty), RecordOutcome::Set("mod-&".into()));
         // Letters and keys AZERTY keeps in place record as typed.
-        assert_eq!(
-            record_key("é", false, false, false, true, &azerty),
-            RecordOutcome::Set("mod-2".into())
-        );
-        assert_eq!(
-            record_key("b", false, false, false, true, &azerty),
-            RecordOutcome::Set("mod-b".into())
-        );
+        assert_eq!(record_key("é", cmd, &azerty), RecordOutcome::Set("mod-2".into()));
+        assert_eq!(record_key("b", cmd, &azerty), RecordOutcome::Set("mod-b".into()));
         // No US key lands on AZERTY's @ key: nothing stored could reach it.
-        assert_eq!(record_key("@", false, false, false, true, &azerty), RecordOutcome::Ignored);
+        assert_eq!(record_key("@", cmd, &azerty), RecordOutcome::Ignored);
     }
 
     #[test]
@@ -648,7 +592,7 @@ mod tests {
         // helper names the owner) — conflicts never persist into the keymap.
         let keymap = KeymapConfig::default();
         let RecordOutcome::Set(combo) =
-            record_key("r", false, false, false, true, &KeyEquivalents::default())
+            record_key("r", gpui::Modifiers::command(), &KeyEquivalents::default())
         else {
             panic!("expected Set");
         };

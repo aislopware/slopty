@@ -1,12 +1,7 @@
-//! The code a phone or iPad scans to connect to the server (Settings → Devices' "Connect a
-//! phone"): the link the app gives (`ServerInvite`) drawn as a QR code, with the address it
-//! carries and how to use it, or why there is none.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_precision_loss,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice D"
-)]
+//! The code a phone or iPad scans to connect to the server.
+//!
+//! In Settings → Devices' "Connect a phone", the link the app gives (`ServerInvite`) is drawn as
+//! a QR code, with the address it carries and how to use it, or why there is none.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Hsla, div, px};
@@ -20,7 +15,7 @@ use crate::theme::Theme;
 pub const CODE_SIDE: f32 = 208.0;
 /// Light modules round the code on every side, as the QR standard (ISO/IEC 18004) asks: a
 /// scanner finds the code's edge by them.
-pub const QUIET: usize = 4;
+pub const QUIET: u16 = 4;
 
 /// The field the code is drawn on and its modules' colour, whatever the appearance: a scanner
 /// needs dark modules on a light field, and an inverted code is one many scanners do not read.
@@ -32,9 +27,9 @@ pub const fn inks() -> (Hsla, Hsla) {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Matrix {
     /// Modules a side, the quiet zone's included.
-    pub side: usize,
+    pub side: u16,
     /// Each run of dark modules: its row, its first column and its length.
-    pub runs: Vec<(usize, usize, usize)>,
+    pub runs: Vec<(u16, u16, u16)>,
 }
 
 impl Matrix {
@@ -43,16 +38,21 @@ impl Matrix {
     pub fn of(link: &str) -> Option<Self> {
         let code = qrcode::QrCode::with_error_correction_level(link, qrcode::EcLevel::M).ok()?;
         let width = code.width();
-        let side = QUIET * 2 + width;
+        // A code is at most 177 modules a side (version 40).
+        let side = u16::try_from(width).ok()?.checked_add(QUIET)?.checked_add(QUIET)?;
         let mut runs = Vec::new();
-        for (row, modules) in code.to_colors().chunks(width.max(1)).enumerate() {
+        for (row, modules) in (0_u16..).zip(code.to_colors().chunks(width.max(1))) {
             let mut from = None;
             let dark = modules.iter().map(|&c| c == qrcode::Color::Dark).chain([false]);
-            for (col, dark) in dark.enumerate() {
+            for (col, dark) in (0_u16..).zip(dark) {
                 match (dark, from) {
                     (true, None) => from = Some(col),
                     (false, Some(first)) => {
-                        runs.push((row + QUIET, first + QUIET, col - first));
+                        runs.push((
+                            row.saturating_add(QUIET),
+                            first.saturating_add(QUIET),
+                            col.saturating_sub(first),
+                        ));
                         from = None;
                     }
                     _ => {}
@@ -64,21 +64,21 @@ impl Matrix {
 
     /// Whole points a module, as large as [`CODE_SIDE`] allows.
     pub fn module(&self) -> f32 {
-        (CODE_SIDE / self.side.max(1) as f32).floor().max(1.0)
+        (CODE_SIDE / f32::from(self.side.max(1))).floor().max(1.0)
     }
 
     /// The code drawn on its light field.
     fn element(self) -> gpui::Canvas<()> {
         let module = self.module();
-        let side = module * self.side as f32;
+        let side = module * f32::from(self.side);
         let (paper, ink) = inks();
         gpui::canvas(
             |_, _, _| {},
             move |bounds, (), window, _| {
                 window.paint_quad(gpui::fill(bounds, paper).corner_radii(px(8.0)));
                 for &(row, col, len) in &self.runs {
-                    let at = gpui::point(px(col as f32 * module), px(row as f32 * module));
-                    let run = gpui::size(px(len as f32 * module), px(module));
+                    let at = gpui::point(px(f32::from(col) * module), px(f32::from(row) * module));
+                    let run = gpui::size(px(f32::from(len) * module), px(module));
                     window.paint_quad(gpui::fill(gpui::Bounds::new(bounds.origin + at, run), ink));
                 }
             },
@@ -134,15 +134,18 @@ mod tests {
     fn the_code_keeps_its_quiet_zone() {
         let code = Matrix::of("slopty://connect?server=mac-studio.tail1234.ts.net:45560")
             .expect("a link fits a code");
-        let far = code.side - QUIET;
+        let far = code.side.saturating_sub(QUIET);
         for &(row, col, len) in &code.runs {
             assert!((QUIET..far).contains(&row), "row {row} in the quiet zone");
-            assert!(col >= QUIET && col + len <= far, "run {col}+{len} in the quiet zone");
+            assert!(
+                col >= QUIET && col.saturating_add(len) <= far,
+                "run {col}+{len} in the quiet zone"
+            );
         }
         assert!(code.runs.contains(&(QUIET, QUIET, 7)), "the top-left finder's edge");
         let module = code.module();
         assert!(module >= 4.0 && module.fract() == 0.0, "{module}");
-        assert!(module * code.side as f32 <= CODE_SIDE, "{module} × {}", code.side);
+        assert!(module * f32::from(code.side) <= CODE_SIDE, "{module} × {}", code.side);
     }
 
     /// Dark modules on a light field, whichever the appearance.

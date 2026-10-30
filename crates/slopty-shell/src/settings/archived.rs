@@ -2,17 +2,6 @@
 //! Settings → Archived: archived sessions across devices, with Unarchive (Mutate
 //! setChatArchived false).
 //! A session's record is its agent's own, so Slopty archives and never deletes.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice D"
-)]
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, px};
@@ -36,6 +25,7 @@ fn archive_page(total: usize, requested: usize) -> usize {
     requested.min(total.saturating_sub(1) / ARCHIVE_PAGE_SIZE)
 }
 
+/// Settings → Archived.
 pub struct ArchivedPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
@@ -43,17 +33,28 @@ pub struct ArchivedPage {
     /// Chat with an in-flight unarchive (button shows working state).
     busy: Option<String>,
     page: usize,
-    task: Option<Task<()>>,
+    task: Option<Task<anyhow::Result<()>>>,
     /// The moment the rows say how long ago they moved by: taken as the state moves and
     /// on [`Self::clock_tick`], never as the page is built, so a page built again (from scratch,
     /// or for a hover) says what the one shown says.
     clock: chrono::DateTime<chrono::Utc>,
     /// The clock taken again when the soonest row's time next reads differently.
-    clock_tick: Option<Task<()>>,
+    clock_tick: Option<Task<anyhow::Result<()>>>,
     _observe: Subscription,
 }
 
+impl std::fmt::Debug for ArchivedPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArchivedPage")
+            .field("busy", &self.busy)
+            .field("page", &self.page)
+            .field("clock", &self.clock)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ArchivedPage {
+    /// The page over `state`'s archived sessions.
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |page, _, cx| {
             page.take_clock(cx);
@@ -76,7 +77,7 @@ impl ArchivedPage {
 
     /// Take the clock now, and again when the soonest archived chat's time next reads
     /// differently ([`crate::state::time_ago_changes`]), drawing the page then.
-    fn take_clock(&mut self, cx: &mut Context<Self>) {
+    fn take_clock(&mut self, cx: &Context<Self>) {
         self.clock = crate::clock::utc(cx);
         let now = self.clock;
         let next = archived_chats(&self.state.read(cx).chats)
@@ -87,24 +88,26 @@ impl ArchivedPage {
             .min();
         self.clock_tick = next.map(|at| {
             // A hair past the change, so the clock taken then reads it.
-            let wait =
-                (at - now).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
+            let wait = at
+                .signed_duration_since(now)
+                .to_std()
+                .unwrap_or_default()
+                .saturating_add(std::time::Duration::from_millis(5));
             cx.spawn(async move |page, cx| {
                 cx.background_executor().timer(wait).await;
                 page.update(cx, |page, cx| {
                     page.take_clock(cx);
                     cx.notify();
                 })
-                .ok();
             })
         });
     }
 
-    fn unarchive(&mut self, chat_id: String, cx: &mut Context<Self>) {
+    fn unarchive(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        self.busy = Some(chat_id.clone());
+        self.busy = Some(chat_id.to_owned());
         self.error = None;
         let params = serde_json::json!({
             "op": "setChatArchived",
@@ -120,15 +123,8 @@ impl ArchivedPage {
                 }
                 cx.notify();
             })
-            .ok();
         }));
         cx.notify();
-    }
-
-    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if self.scroll.set_list_hovered(*hovered) {
-            cx.notify();
-        }
     }
 }
 
@@ -161,7 +157,12 @@ impl Render for ArchivedPage {
                 self.page = page;
                 self.scroll.reset();
             }
-            let rows = archived.into_iter().skip(self.page * 40).take(40).cloned().collect();
+            let rows = archived
+                .into_iter()
+                .skip(self.page.saturating_mul(ARCHIVE_PAGE_SIZE))
+                .take(ARCHIVE_PAGE_SIZE)
+                .cloned()
+                .collect();
             let names = state.devices.iter().map(|d| (d.id.clone(), d.name.clone())).collect();
             (rows, names, count)
         };
@@ -233,7 +234,7 @@ impl Render for ArchivedPage {
                             .aria_disabled(is_busy)
                             .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.unarchive(chat_id.clone(), cx);
+                                this.unarchive(&chat_id, cx);
                             }))
                             .child(SharedString::from(if is_busy {
                                 "Unarchiving…"
@@ -309,8 +310,8 @@ impl Render for ArchivedPage {
                 )
                 .child(format!(
                     "{}–{} of {}",
-                    page * ARCHIVE_PAGE_SIZE + 1,
-                    ((page + 1) * ARCHIVE_PAGE_SIZE).min(count),
+                    page.saturating_mul(ARCHIVE_PAGE_SIZE).saturating_add(1),
+                    page.saturating_add(1).saturating_mul(ARCHIVE_PAGE_SIZE).min(count),
                     count
                 ))
                 .child(
@@ -319,12 +320,13 @@ impl Render for ArchivedPage {
                         .role(gpui::Role::Button)
                         .aria_label("Next archived sessions")
                         .tab_index(0)
-                        .when((page + 1) * ARCHIVE_PAGE_SIZE >= count, |el| {
-                            el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
-                        })
+                        .when(
+                            page.saturating_add(1).saturating_mul(ARCHIVE_PAGE_SIZE) >= count,
+                            |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default(),
+                        )
                         .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.page = archive_page(count, this.page + 1);
+                            this.page = archive_page(count, this.page.saturating_add(1));
                             this.scroll.reset();
                             cx.notify();
                         }))
@@ -336,7 +338,7 @@ impl Render for ArchivedPage {
             .id("archived-page-host")
             .relative()
             .size_full()
-            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .on_hover(widgets::PageScroll::hover_listener(cx, |page| &mut page.scroll))
             .child(
                 crate::edge_fade::edge_faded(
                     16.0,
@@ -450,7 +452,7 @@ mod tests {
     fn the_rows_times_move_on_by_the_page_s_own_clock(cx: &mut gpui::TestAppContext) {
         let now = cx.update(|cx| crate::clock::utc(cx));
         let mut archived = chat("a", true);
-        archived.created_at = now - chrono::Duration::seconds(30);
+        archived.created_at = now.checked_sub_signed(chrono::Duration::seconds(30)).unwrap();
         let at = archived.created_at;
         let state = cx.new(|_| {
             let mut state = AppState::new();
@@ -458,10 +460,10 @@ mod tests {
             state
         });
         let page = cx.new(|cx| ArchivedPage::new(state, cx));
-        let drawn = std::rc::Rc::new(std::cell::Cell::new(0));
+        let drawn = std::rc::Rc::new(std::cell::Cell::new(0_usize));
         let _drawn = cx.update(|cx| {
-            let drawn = drawn.clone();
-            cx.observe(&page, move |_, _| drawn.set(drawn.get() + 1))
+            let drawn = std::rc::Rc::clone(&drawn);
+            cx.observe(&page, move |_, _| drawn.set(drawn.get().saturating_add(1)))
         });
         let says = |cx: &mut gpui::TestAppContext| {
             page.read_with(cx, |page, _| crate::state::format_time_ago(at, page.clock))

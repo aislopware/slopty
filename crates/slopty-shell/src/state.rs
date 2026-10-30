@@ -383,10 +383,6 @@ pub(crate) struct CanvasTarget {
     reason = "the views read the state's lists as fields; its watches, caches and pending work \
               stay its own"
 )]
-#[expect(
-    clippy::field_scoped_visibility_modifiers,
-    reason = "shell lint migration: seam, callers in slice B"
-)]
 pub struct AppState {
     /// Where the engine connection stands: connecting, ready or failed.
     pub connection: ConnectionStatus,
@@ -454,7 +450,8 @@ pub struct AppState {
     pub window_active: bool,
     transcript_baselines: HashMap<String, Arc<slopty_view_doc::TranscriptBaseline>>,
     transcript_cache: std::collections::VecDeque<CachedTranscript>,
-    pub(crate) prepared_transcripts: HashMap<String, Arc<crate::transcript::PreparedTranscript>>,
+    /// Each session's rows as the background job prepared them, by chat id.
+    pub prepared_transcripts: HashMap<String, Arc<crate::transcript::PreparedTranscript>>,
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
     pub transcript_revision: u64,
