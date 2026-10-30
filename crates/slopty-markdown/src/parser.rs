@@ -2011,6 +2011,13 @@ fn heading_level(level: HeadingLevel) -> u8 {
 /// What ends a line in CommonMark: `\n`, `\r\n`, or a `\r` alone.
 const LINE_ENDS: [char; 2] = ['\n', '\r'];
 
+// slopty: one place finds where a line begins, for the definition scan and the reparse boundary.
+/// Where the last line of `text` begins: just past its last line ending, or
+/// at 0 when it has none.
+fn last_line_start(text: &str) -> usize {
+    text.trim_end_matches(|c| !LINE_ENDS.contains(&c)).len()
+}
+
 /// Streaming parser: appends reparse only from the last stable top-level block
 /// boundary (snapped back to a line start so indentation context survives).
 #[derive(Debug, Default)]
@@ -2110,7 +2117,7 @@ impl IncrementalParser {
         // The delta may complete a line begun earlier — rescan from that line's
         // start when checking for definitions. A line ends at `\n`, `\r\n` or a
         // lone `\r`, as CommonMark (and pulldown-cmark) end one.
-        let scan_from = self.source.rfind(LINE_ENDS).map(|i| i + 1).unwrap_or(0);
+        let scan_from = last_line_start(&self.source);
         self.source.push_str(delta);
         if !self.full_only && has_link_defs(&self.source[scan_from..]) {
             self.full_only = true;
@@ -2172,10 +2179,7 @@ impl IncrementalParser {
         // block after a lone `\r` snapped into the block before it, and the
         // tail's reparse added that block's last lines again as a block of
         // their own.
-        let boundary = self.source[..boundary]
-            .rfind(LINE_ENDS)
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        let boundary = last_line_start(&self.source[..boundary]);
 
         let tail = parse_at(&self.source[boundary..], boundary);
         self.last_parse_bytes = self.source.len() - boundary;
@@ -2552,6 +2556,42 @@ mod tests {
                 prev = cur.clone();
             }
         }
+    }
+
+    /// What streaming is for: however long a reply grows, each append
+    /// reparses only the tail it can change, and the blocks before that tail
+    /// are the ones the last update gave, so their render caches hold.
+    #[test]
+    fn appends_reparse_only_the_tail() {
+        let units = [
+            "# Heading\n\n",
+            "Prose with **bold** and `code` in it.\n\n",
+            "```\nlet x = 1;\n```\n\n",
+            "> a quoted line\n\n",
+            "- one item\n\nafter the list\n\n",
+            "costs $5 and $x$ is math\n\n",
+        ];
+        let longest = units.iter().map(|unit| unit.len()).max().unwrap();
+        let text: String = units.iter().cycle().take(240).copied().collect();
+        let mut p = IncrementalParser::new();
+        let mut at = 0;
+        while at < text.len() {
+            let end = (at + 5).min(text.len());
+            let before = p.tree().clone();
+            p.append(&text[at..end]);
+            at = end;
+            let (tree, stable) = (p.tree(), p.stable_prefix_blocks());
+            assert!(
+                p.last_parse_bytes() <= 8 * longest,
+                "at {at} of {}: reparsed {} bytes",
+                text.len(),
+                p.last_parse_bytes()
+            );
+            assert!(stable <= before.len(), "at {at}: {stable} of {} blocks", before.len());
+            assert_eq!(tree.blocks[..stable], before.blocks[..stable], "at {at}");
+            assert!(stable + 4 >= tree.len(), "at {at}: {stable} of {} blocks", tree.len());
+        }
+        assert_eq!(p.tree(), &parse_full(&text));
     }
 
     #[test]
