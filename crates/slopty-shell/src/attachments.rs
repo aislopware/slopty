@@ -327,7 +327,7 @@ fn retry_delay(attempts: u32) -> Duration {
     Duration::from_millis((2_000u64 << attempts.min(3)).min(15_000))
 }
 
-/// Retained encoded bytes plus estimated CPU/GPU pixels for normalized PNGs.
+/// Retained encoded bytes plus estimated CPU/GPU pixels for normalized PNG images.
 /// Generated images are always evictable and individually fit this budget.
 /// Legacy user attachments retain their existing protection behavior.
 const IMAGE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;

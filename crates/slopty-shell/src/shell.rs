@@ -312,7 +312,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         if Keystroke::parse_with_os(&candidate, crate::keys::OS).is_ok() {
             candidate
         } else {
-            tracing::warn!(%combo, "unparseable shortcut combo; using default");
+            tracing::warn!(%combo, "unparsable shortcut combo; using default");
             platform_combo(fallback)
         }
     }
@@ -5160,7 +5160,7 @@ mod tests {
 
     #[test]
     fn every_default_shortcut_binds_on_this_platform() {
-        // `apply_keymap` silently falls back on an unparseable combo, so a
+        // `apply_keymap` silently falls back on an unparsable combo, so a
         // default gpui cannot parse would ship as a dead shortcut.
         for id in crate::settings::ShortcutId::ALL {
             let combo = platform_combo(id.default_combo());

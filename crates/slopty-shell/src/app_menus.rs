@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn app_bindings_use_platform_settings_convention() {
-        // `KeyBinding::new` panics on unparseable combos, so constructing the
+        // `KeyBinding::new` panics on unparsable combos, so constructing the
         // table is itself the parse check.
         let find = |bindings: &[KeyBinding], name: &str| {
             bindings.iter().find(|binding| binding.action().name() == name).map(|binding| {

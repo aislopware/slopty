@@ -34,6 +34,10 @@ metalness = "metalness"
 oint = "oint"
 hom = "hom"
 multline = "multline"
+# test data in the shell's tests
+ond = "ond"         # "second" selected from mid-word (`slopty_shell::markdown::selection`)
+caf = "caf"         # "café" after one backspace (`slopty_shell::composer`)
+informe = "informe" # Spanish for "report", a file name in the shell's link tests
 
 [default.extend-identifiers]
 # the `image` crate's `Delay::from_numer_denom_ms`
@@ -52,7 +56,4 @@ extend-exclude = [
     "fuzz/regressions/",
     # Upstream's minified chart libraries, vendored byte for byte (`web::page::libs`).
     "crates/slopty-platform/assets/page-libs/",
-    # The copied UI crates keep their text as written, so a sync's merge sees only real edits
-    # (`xtask/zeron.toml`, docs/decisions/ui.md).
-    "crates/slopty-shell/",
 ]

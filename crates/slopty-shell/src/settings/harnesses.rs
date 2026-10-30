@@ -657,7 +657,7 @@ impl HarnessesPage {
                 };
                 // The one enabled harness left can't be switched off — the
                 // composer needs something to run — but only when it could
-                // actually run: an uninstalled last harness stays togglable
+                // actually run: an uninstalled last harness stays toggleable
                 // (its hint says to turn it off) and the composer handles the
                 // resulting empty set (mirrors the engine guard).
                 let last_enabled = enabled && enabled_count == 1 && installed;

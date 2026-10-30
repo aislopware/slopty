@@ -135,7 +135,7 @@ impl EngineBackend for ServiceEngine {
     async fn shutdown(&self) {}
 }
 
-/// Cheaply clonable handle to whichever backend won the probe.
+/// Cheaply cloneable handle to whichever backend won the probe.
 #[derive(Clone)]
 pub struct EngineHandle {
     inner: Arc<dyn EngineBackend>,

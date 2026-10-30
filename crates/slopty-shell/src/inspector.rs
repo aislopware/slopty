@@ -1628,7 +1628,7 @@ mod tests {
     /// The TUI's placeholders are found wherever they stand, a picture's and a long paste's
     /// alike; brackets of the person's own, or one left open, are words.
     #[test]
-    fn the_prompt_boxs_placeholders_are_drawn_apart_from_its_words() {
+    fn the_prompt_box_placeholders_are_drawn_apart_from_its_words() {
         let text = "Look at [Image #1] and [Pasted text #2 +5 lines], not [this] or [Image #3";
         let found: Vec<&str> = placeholders(text).into_iter().map(|range| &text[range]).collect();
         assert_eq!(found, ["[Image #1]", "[Pasted text #2 +5 lines]"]);
