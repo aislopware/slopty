@@ -449,6 +449,20 @@ pub fn open_link(chat: &str, url: &str, cx: &mut App) -> bool {
     open(chat, url, cx)
 }
 
+/// How bright a pane without the keyboard is drawn, of its own brightness.
+///
+/// `WezTerm`'s transform at brightness 0.85 and saturation 1.0 (`docs/decisions/terminal.md`,
+/// "Unfocused panes dim by brightness alone"). A terminal's element paints it over its grid
+/// ([`dim`]), and the shell over the room a dimmed pane leaves to the window's edge (an iPad's
+/// home indicator band).
+pub const UNFOCUSED_BRIGHTNESS: f32 = 0.85;
+
+/// What paints [`UNFOCUSED_BRIGHTNESS`] over what lies under it.
+///
+/// The frame is blended in its encoded values (a `BGRA8Unorm` drawable), so black at this alpha
+/// scales every channel alike, the hue and saturation untouched.
+pub const UNFOCUSED_SHADE: Hsla = Hsla { h: 0.0, s: 0.0, l: 0.0, a: 1.0 - UNFOCUSED_BRIGHTNESS };
+
 type DimFn = dyn Fn(&AnyView, bool, &mut App);
 
 /// How the app dims one of its terminals.

@@ -338,7 +338,7 @@ impl Shell {
         });
         let mut session = Some(session);
         for pane in panes.panes() {
-            let dimmed = many && pane != focused;
+            let dimmed = dims(&panes, pane);
             let content = match pane {
                 Pane::Session => {
                     self.session_terminal.update(cx, |panel, cx| panel.set_dimmed(dimmed, cx));
@@ -528,6 +528,33 @@ impl Shell {
             }
         }
     }
+}
+
+/// Whether `pane` is drawn dimmed among `panes`: one without the keyboard while the view shows
+/// more than one. Its terminal, if it is one, is painted at the dim (`live::dim`).
+fn dims(panes: &Panes, pane: Pane) -> bool {
+    panes.len() > 1 && panes.zoomed().is_none() && pane != panes.focused()
+}
+
+/// Where the terminals `panes` draws dimmed, laid out in `area` on `grid`, meet the area's foot:
+/// the left edge and width of each. On an iPad the room under the view, the home indicator's,
+/// takes their dim there (`compact_frame`), so each reads dimmed down to the window's edge as on
+/// the Mac; a view is never dimmed.
+pub(super) fn dimmed_feet(
+    panes: &Panes,
+    area: gpui::Bounds<Pixels>,
+    grid: Option<Grid>,
+) -> Vec<(Pixels, Pixels)> {
+    let foot = area.bottom() - px(0.5);
+    panes
+        .layout(area, grid)
+        .panes
+        .into_iter()
+        .filter(|(pane, at)| {
+            !matches!(pane, Pane::View(_)) && dims(panes, *pane) && at.bottom() >= foot
+        })
+        .map(|(_, at)| (at.left(), at.size.width))
+        .collect()
 }
 
 /// A pane's name in ids and selectors.

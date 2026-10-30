@@ -652,10 +652,9 @@ fn row_in_band(
     y + line_height + below > clip_top && y - above < clip_bottom
 }
 
-/// How bright an unfocused pane is painted, of its own brightness: `WezTerm`'s transform at
-/// brightness 0.85 and saturation 1.0 (`docs/decisions/terminal.md`, "Unfocused panes dim by
-/// brightness alone").
-pub const UNFOCUSED_BRIGHTNESS: f32 = 0.85;
+/// How bright an unfocused pane is painted, of its own brightness: the shell's, which dims the
+/// room the pane leaves to the window's edge alike.
+pub use slopty_shell::live::UNFOCUSED_BRIGHTNESS;
 
 /// The element.
 #[derive(Debug)]
@@ -2393,11 +2392,9 @@ impl Element for TerminalElement {
             window.paint_quad(fill(bounds, wash));
         }
         if prepared.dimmed {
-            // The frame is blended in its encoded values (a `BGRA8Unorm` drawable), so black at
-            // this alpha scales every channel of what lies under it alike: HSB brightness times
-            // `UNFOCUSED_BRIGHTNESS`, hue and saturation untouched, the text as sharp as before.
-            let shade = Hsla { h: 0.0, s: 0.0, l: 0.0, a: 1.0 - UNFOCUSED_BRIGHTNESS };
-            window.paint_quad(fill(bounds, shade));
+            // HSB brightness times `UNFOCUSED_BRIGHTNESS`, hue and saturation untouched, the text
+            // as sharp as before.
+            window.paint_quad(fill(bounds, slopty_shell::live::UNFOCUSED_SHADE));
         }
         // Keystroke → paint is timed when this frame reaches the glass, not now.
         if self.view.read(cx).latency_waiting() {
