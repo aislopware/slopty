@@ -3064,3 +3064,53 @@ more full-window layer.
   - **Tests.** ghostty's `zig build test-lib-vt -Dtest-filter=vt`, upstream's "Terminal vt
     cursor preserves pending wrap at the right margin" among them; `slopty-engine`, and the
     fuzz regressions the gate replays.
+
+- ✅ **Upstream sync of 2026-10-30, second round: gpui-fast `838b03e9`, zed `99e70ee4`; what is
+  drawn again follows the opacity paint applies.** gpui-fast imports zed's two GPUI commits
+  since `e20d19d3` (`af91154d`, merged in `838b03e9`); longbridge stays at `07b42ebf` and
+  gpui-kit at `89e64d35`. Slopty's GPUI pins move from `e6d22255` to `838b03e9`.
+  - **Animations on the executor clock** (zed #66317). Upstream times animations and springs
+    with `cx.background_executor().now()` instead of `Instant::now()`, so tests that advance the
+    fake clock step them by it. gpui-fast already did: `fast::frame_time` reads that clock once
+    as each frame starts, and every animation of the frame stands at it. The fork keeps its
+    copy; upstream's `test_spring_animation_preserves_velocity_when_retargeted` passes on it.
+  - **A cached view repaints when its inherited opacity changes** (zed #65951). Upstream adds
+    the opacity to a cached view's reuse key and has a `div` apply its opacity in prepaint as
+    well as paint. gpui-fast's retained views already kept the opacity prepaint sees (its
+    `RetainedContext`) and its `div` already applied it in prepaint, so a plain fade was right.
+    The `div` now takes upstream's placement around `fast::rounded_clip`'s hook, and the fork's
+    own push/pop hook that did the same is gone.
+  - **The case upstream's commit is really about**: an ancestor's hover or drag-over style
+    depends on the frame's hit test, which only paint has, so prepaint only foresees the opacity
+    paint applies, and a view reused there was copied at the old one (a `div` without an id
+    never shows prepaint its hover). Upstream keys on the opacity painted and redraws the next
+    frame when it differs. The fork keeps two: the opacity prepaint foresaw, which decides
+    whether a view is drawn again, and the one paint applied, which what it copies holds.
+    Copied under another, the view and the views and elements nested in it are built on the
+    next frame, which is asked for. The same holds for element retention (an element root drawn
+    again is checked at paint, and a stale one is not drawn again) and for scroll layers (a
+    layer composited, or a list keeping its rows, under another opacity is painted afresh next
+    frame). Opacities compare by bits, as upstream's do, so a NaN opacity still reuses.
+    - **Rejected:** upstream's single painted key: under a hover prepaint never sees, the
+      foreseen and painted opacities differ on every frame, so every frame that builds the
+      wrapper builds the view again and every scrolled frame repaints a layer instead of
+      compositing it; with two, it is drawn again as long as the hover lasts. Applying the
+      alpha at replay (upstream's own follow-up): every primitive kind, the natives and a
+      layer's tiles would be re-multiplied, for a case that costs one frame.
+    - Asking for the frame does not mark an animation (`fast::retained::build_next_frame`):
+      `request_animation_frame` from a scroll layer's owner drops the layer as animating.
+  - **Tests.** `fast/tests/inherited_opacity.rs` drives a view, a cached view, a view holding
+    one, an element and a scroll layer through a fade, a pointer entering and leaving, and a
+    wrapper growing under a still pointer, with the retained check on (each frame drawn again
+    is compared with one drawn from scratch); each case fails with the paint-time check taken
+    out, the layer's through the check itself. Upstream's `cached_view_follows_inherited_opacity`
+    passes, and so does all of gpui's lib (976 tests).
+  - **Cost.** One 32-bit compare at paint per view, element root and scroll layer drawn again,
+    and one per view built; a record's context is copied only on a frame whose paint finds
+    another opacity than prepaint foresaw. gpui's headless benches (`release-fast`, this Mac
+    while other lanes built) did not move past run-to-run noise. 60 panel views with none, one
+    and six notified per frame (`retained_bench`): 0.314, 1.099 and 2.308 ms a frame before,
+    0.292, 1.038 and 1.817 after. A 100-row quote board under element retention
+    (`element_bench`, 0, 1 and 10 rows changed): 0.806, 0.868 and 0.973 ms before, 0.751,
+    0.782 and 0.832 after. The from-scratch column, which the change barely touches, moved as
+    much (7.53 to 7.00 ms): the load moved, not the code.
