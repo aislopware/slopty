@@ -1,8 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 77a3c0f), see THIRD_PARTY_NOTICES.md
-//! The shell's window (`docs/decisions/layout.md`): one row of chrome, the session list beside
-//! the session's terminal, and the views summoned beside the terminal ([`RightSurface`]: changes,
-//! files, a file, the browser, a diff, the inspector, a remote screen, a page), plus the boot
-//! splash and the connection gate.
+//! The shell's window (`docs/decisions/layout.md`).
+//!
+//! One row of chrome, the session list beside the session's terminal, and the views summoned
+//! beside the terminal ([`RightSurface`]: changes, files, a file, the browser, a diff, the
+//! inspector, a remote screen, a page), plus the boot splash and the connection gate.
 //!
 //! The sidebar drags between `settings::SIDEBAR_MIN` and `settings::SIDEBAR_MAX` wide
 //! (`settings::SIDEBAR_DEFAULT` at first) and puts away to its rail; a view beside the terminal
@@ -12,41 +13,6 @@
 //! Resize handles use gpui's drag-and-drop pattern (an `on_drag` with an empty
 //! ghost view + `on_drag_move::<Marker>` on the root), the same idiom as Zed's
 //! dock. Double-clicking a handle resets that pane to its default width.
-#![allow(
-    let_underscore_drop,
-    missing_copy_implementations,
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    rustdoc::private_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::derive_partial_eq_without_eq,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::float_cmp_const,
-    clippy::indexing_slicing,
-    clippy::items_after_statements,
-    clippy::len_without_is_empty,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::manual_midpoint,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::unreachable,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    clippy::unwrap_used,
-    clippy::used_underscore_binding,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -57,7 +23,7 @@ use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Empty, Entity, FocusHandle, Focusable as _,
     IntoElement, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseUpEvent,
     NavigationDirection, Pixels, Point, Render, SharedString, Subscription, Task, Window,
-    WindowControlArea, actions, div, px,
+    WindowControlArea, div, px,
 };
 #[cfg(test)] // the shell's tests set a workspace scope through `use super::*`
 use slopty_view_proto::WorkspaceScope;
@@ -149,22 +115,47 @@ mod chrome_tests; // the chrome as a person and assistive tech meet it // an age
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
-actions!(
-    shell,
-    [
-        SaveFile,
-        ToggleSidebar,
-        ToggleChanges,
-        ToggleFiles,
-        AddSpacePalette,
-        ToggleCommandPalette,
-        NewSession,
-        OpenSettings,
-        NextSession,
-        PrevSession,
-        ArchiveSession
-    ]
-);
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    use gpui::actions;
+
+    actions!(
+        shell,
+        [
+            /// Save the file that has the keyboard.
+            SaveFile,
+            /// Put the sidebar away to its rail, or bring it back.
+            ToggleSidebar,
+            /// Summon the session's changes beside its terminal, or give the terminal the
+            /// keyboard back.
+            ToggleChanges,
+            /// Summon the session's files beside its terminal, or give the terminal the
+            /// keyboard back.
+            ToggleFiles,
+            /// Open the New Project flow, or close it.
+            AddSpacePalette,
+            /// Open the command palette, or close it.
+            ToggleCommandPalette,
+            /// Start a new session.
+            NewSession,
+            /// Open Settings, or close it.
+            OpenSettings,
+            /// Select the next session in the sidebar's list.
+            NextSession,
+            /// Select the previous session in the sidebar's list.
+            PrevSession,
+            /// Archive the selected session.
+            ArchiveSession,
+        ]
+    );
+}
+pub use actions::{
+    AddSpacePalette, ArchiveSession, NewSession, NextSession, OpenSettings, PrevSession, SaveFile,
+    ToggleChanges, ToggleCommandPalette, ToggleFiles, ToggleSidebar,
+};
 
 /// Run [`restore_mounted_focus`] after this frame, judged against it only while the focus is
 /// where the frame found it. A frame drawn while an input is dispatched (a key draws a dirty
@@ -175,7 +166,7 @@ pub(crate) fn defer_mounted_focus_restore(
     root: FocusHandle,
     preferred: FocusHandle,
     unfocused: FocusHandle,
-    window: &mut Window,
+    window: &Window,
     cx: &mut App,
 ) {
     let focused = window.focused(cx);
@@ -283,13 +274,9 @@ fn chat_copy_path(chat: &slopty_view_proto::Chat) -> Option<&str> {
 /// POSIX path to a Windows viewport (no drive, so `Path::is_absolute` says
 /// no) or a drive path to a POSIX one.
 fn is_host_absolute_path(path: &str) -> bool {
-    let bytes = path.as_bytes();
     path.starts_with('/')
         || path.starts_with("\\\\")
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'\\' | b'/'))
+        || matches!(path.as_bytes(), [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
 }
 
 /// How long a started session's main column says "Starting…" while no terminal shows.
@@ -297,7 +284,7 @@ const STARTS_WITHIN: Duration = Duration::from_secs(15);
 
 /// Open the session at `slot` (zero-based) of the sidebar's active list. One
 /// action carrying the slot, rather than nine near-identical action types.
-#[derive(Clone, PartialEq, Eq, Action)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Action)]
 #[action(namespace = shell, no_json)]
 pub struct JumpSession(pub usize);
 
@@ -305,10 +292,10 @@ pub struct JumpSession(pub usize);
 // Traffic-light-aware titlebar layout
 // ---------------------------------------------------------------------------
 
-/// Where the top-left window-control cluster starts, in px from the window's
-/// left edge: 88, or 12 in fullscreen. The
-/// frameless hiddenInset chrome puts the macOS traffic lights at {14,15};
-/// fullscreen hides them and the cluster reclaims the inset.
+/// Where the top-left window-control cluster starts, in px from the window's left edge.
+///
+/// 88, or 12 in fullscreen. The frameless hiddenInset chrome puts the macOS traffic lights at
+/// {14,15}; fullscreen hides them and the cluster reclaims the inset.
 pub const fn titlebar_cluster_start(fullscreen: bool) -> f32 {
     if fullscreen { 12.0 } else { 88.0 }
 }
@@ -326,7 +313,7 @@ pub const TITLEBAR_ACTION_EDGE_INSET: f32 = 6.0;
 /// Width of the persistent top-left button cluster itself: the 24px sidebar toggle.
 pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0;
 /// Horizontal inset owned by the titlebar control row itself. Keep this value
-/// paired with [`Self::titlebar_spacer`]: using a different number for the
+/// paired with [`Shell::titlebar_spacer`]: using a different number for the
 /// spacer shifts every control while leaving the declared cluster geometry
 /// unchanged.
 const TITLEBAR_CLUSTER_PAD: f32 = 10.0;
@@ -336,11 +323,12 @@ pub const fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
     if is_macos { titlebar_cluster_start(fullscreen) } else { 10.0 }
 }
 
-/// (Re-)apply the whole app keymap: clears every binding, restores the text fields'
-/// map, then binds the customizable shortcuts from `keymap`. Invalid persisted combos fall
-/// back to that shortcut's default.
-/// Everything is written in US keys and bound where the active keyboard layout
-/// types them (see [`localize_key_bindings`]); re-run on a layout switch.
+/// (Re-)apply the whole app keymap.
+///
+/// It clears every binding, restores the text fields' map, then binds the customizable
+/// shortcuts from `keymap`. Invalid persisted combos fall back to that shortcut's default.
+/// Everything is written in US keys and bound where the active keyboard layout types them
+/// (see `localize_key_bindings`); re-run on a layout switch.
 pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     fn valid_or_default(combo: &str, fallback: &str) -> String {
         let candidate = platform_combo(combo);
@@ -512,15 +500,21 @@ fn localize_binding(
 /// The settings sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsSection {
+    /// The devices Slopty reaches, and adding one.
     Devices,
     /// Which harnesses the composer offers (enable/disable toggles) —
     /// labeled "Providers".
     Harnesses,
     #[default]
+    /// Theme, fonts and the window's look.
     Appearance,
+    /// How files open and show.
     Files,
+    /// When and how Slopty notifies.
     Notifications,
+    /// The keyboard shortcuts, each rebindable.
     Shortcuts,
+    /// The archived sessions, restored or deleted.
     Archived,
 }
 
@@ -612,24 +606,33 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
 /// What the main outlet shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
+    /// The selected session (or the new-session canvas).
     Chat,
+    /// Settings, at a section.
     Settings(SettingsSection),
 }
 
-/// A view summoned beside a session's terminal as a pane of its own (`docs/decisions/layout.md`,
-/// "No permanent right column"): the session's files, a file of them, its changes, a web page, its
-/// inspector, a remote window or desktop, or a page an agent showed.
+/// A view summoned beside a session's terminal as a pane of its own.
+///
+/// `docs/decisions/layout.md`, "No permanent right column": the session's files, a file of
+/// them, its changes, a web page, its inspector, a remote window or desktop, or a page an agent
+/// showed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RightSurface {
     /// The session's files, the explorer of its folder.
     Files,
+    /// A file open in the editor, by its surface's id.
     File(u64),
+    /// A web page, by its browser's id.
     Browser(u64),
+    /// A diff, by its id.
     Diff(u64),
-    // The session's inspector, one per chat, following it (`crate::inspector`).
+    /// The session's inspector, one per chat, following it (`crate::inspector`).
     Inspector,
-    Screen(u64), // a remote window or desktop (`live_surfaces`)
-    Page(u64),   // a page an agent showed (`page_panes`)
+    /// A remote window or desktop (`live_surfaces`), by its id.
+    Screen(u64),
+    /// A page an agent showed (`page_panes`), by its id.
+    Page(u64),
 }
 
 // What a remote window tab's chip wears: the window glyph for a window (its choice's id
@@ -650,79 +653,86 @@ fn workspace_file_title(path: &str) -> SharedString {
 pub enum NavEntry {
     /// A chat route; the id of the selected chat ("" = the new-chat canvas).
     Chat(String),
+    /// Settings, at a section.
     Settings(SettingsSection),
 }
 
-/// Browser-style navigation history for the titlebar back/forward buttons:
-/// every route change pushes an entry;
-/// Back/Forward walk the stack without changing it; pushing while behind the
-/// tip truncates the entries ahead (a new branch, exactly like a browser).
+/// Browser-style navigation history for the titlebar back/forward buttons.
+///
+/// Every route change pushes an entry; Back/Forward walk the stack without changing it;
+/// pushing while behind the tip truncates the entries ahead (a new branch, exactly like a
+/// browser).
 #[derive(Debug)]
 pub struct NavHistory {
-    entries: Vec<NavEntry>,
-    index: usize,
+    /// The entries Back walks to, the oldest first.
+    behind: Vec<NavEntry>,
+    /// The entry the window shows.
+    current: NavEntry,
+    /// The entries Forward walks to, the nearest last.
+    ahead: Vec<NavEntry>,
 }
 
 impl NavHistory {
-    pub fn new(initial: NavEntry) -> Self {
-        Self { entries: vec![initial], index: 0 }
+    /// A history holding only `initial`.
+    pub const fn new(initial: NavEntry) -> Self {
+        Self { behind: Vec::new(), current: initial, ahead: Vec::new() }
     }
 
-    pub fn current(&self) -> &NavEntry {
-        &self.entries[self.index]
+    /// The entry the window shows.
+    pub const fn current(&self) -> &NavEntry {
+        &self.current
     }
 
     /// Record a route change. Re-navigating to the current route is a no-op
     /// (selecting the already-selected chat never happened as a navigation);
     /// otherwise any forward branch is truncated and the entry appended.
     pub fn push(&mut self, entry: NavEntry) {
-        if *self.current() == entry {
+        if self.current == entry {
             return;
         }
-        self.entries.truncate(self.index + 1);
-        self.entries.push(entry);
-        self.index += 1;
+        self.ahead.clear();
+        self.behind.push(std::mem::replace(&mut self.current, entry));
     }
 
     /// Swap the current entry in place without growing the stack, so a redirect (the boot
     /// canvas into the last-used chat) leaves no dead Back target behind.
     pub fn replace(&mut self, entry: NavEntry) {
-        self.entries[self.index] = entry;
+        self.current = entry;
     }
 
+    /// Whether Back has an entry to land on.
     pub const fn can_back(&self) -> bool {
-        self.index > 0
+        !self.behind.is_empty()
     }
 
     /// The entry Back would land on.
     pub fn previous(&self) -> Option<&NavEntry> {
-        self.index.checked_sub(1).map(|index| &self.entries[index])
+        self.behind.last()
     }
 
     /// Memory history keeps every entry, so "behind the last entry" is exactly
     /// "can go forward".
     pub const fn can_forward(&self) -> bool {
-        self.index + 1 < self.entries.len()
+        !self.ahead.is_empty()
     }
 
+    /// Step back one entry and return it, or `None` at the oldest.
     pub fn back(&mut self) -> Option<NavEntry> {
-        if !self.can_back() {
-            return None;
-        }
-        self.index -= 1;
-        Some(self.current().clone())
+        let previous = self.behind.pop()?;
+        self.ahead.push(std::mem::replace(&mut self.current, previous));
+        Some(self.current.clone())
     }
 
+    /// Step forward one entry and return it, or `None` at the newest.
     pub fn forward(&mut self) -> Option<NavEntry> {
-        if !self.can_forward() {
-            return None;
-        }
-        self.index += 1;
-        Some(self.current().clone())
+        let next = self.ahead.pop()?;
+        self.behind.push(std::mem::replace(&mut self.current, next));
+        Some(self.current.clone())
     }
 
-    pub const fn len(&self) -> usize {
-        self.entries.len()
+    /// How many entries the history holds, the current one with them: never fewer than one.
+    pub const fn entry_count(&self) -> usize {
+        self.behind.len().saturating_add(self.ahead.len()).saturating_add(1)
     }
 }
 
@@ -858,10 +868,12 @@ fn shell_clock_wake(state: &AppState, now: DateTime<Utc>) -> DateTime<Utc> {
         .as_deref()
         .is_some_and(|id| state.indicator_for(id, now) == Indicator::Working);
     if working {
-        return now + chrono::TimeDelta::seconds(1);
+        return now.checked_add_signed(chrono::TimeDelta::seconds(1)).unwrap_or(now);
     }
-    DateTime::from_timestamp((now.timestamp().div_euclid(60) + 1) * 60, 0)
-        .unwrap_or(now + chrono::TimeDelta::minutes(1))
+    let next_minute = now.timestamp().div_euclid(60).saturating_add(1).saturating_mul(60);
+    DateTime::from_timestamp(next_minute, 0)
+        .or_else(|| now.checked_add_signed(chrono::TimeDelta::minutes(1)))
+        .unwrap_or(now)
 }
 
 /// A one-shot redraw timer, re-armed on every render for the view's next
@@ -881,22 +893,22 @@ impl ClockRedraw {
         wake: DateTime<Utc>,
         now: DateTime<Utc>,
         slot: fn(&mut V) -> &mut Self,
-        cx: &mut Context<V>,
+        cx: &Context<V>,
     ) {
         if self.task.is_some() && self.wake_at.is_some_and(|at| at <= wake) {
             return;
         }
-        let delay = (wake - now).to_std().unwrap_or_default();
+        let delay = wake.signed_duration_since(now).to_std().unwrap_or_default();
         self.wake_at = Some(wake);
         self.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(delay).await;
-            this.update(cx, |view, cx| {
+            // A gone view has nothing to redraw.
+            let _gone = this.update(cx, |view, cx| {
                 let clock = slot(view);
                 clock.wake_at = None;
                 clock.task = None;
                 cx.notify();
-            })
-            .ok();
+            });
         }));
     }
 }
@@ -933,6 +945,8 @@ enum PendingExit {
     Quit,
 }
 
+/// The shell's window: its chrome, the session list, the session's terminal and the views
+/// summoned beside it.
 pub struct Shell {
     state: Entity<AppState>,
     sidebar_pane: Entity<SidebarPane>,
@@ -958,25 +972,24 @@ pub struct Shell {
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
-    pub(super) archived_open: bool,
-    pub(super) archived_shown: usize,
+    archived_open: bool,
+    archived_shown: usize,
     // How many rows a paged sidebar group shows before "Show more", by its collapse key
     // (`sidebar_status`); a group not named shows its first page.
-    pub(super) sidebar_group_shown: std::collections::HashMap<String, usize>,
+    sidebar_group_shown: std::collections::HashMap<String, usize>,
     /// Ephemeral shut sidebar groups, by collapse key (`sidebar_status`).
-    pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
+    sidebar_collapsed_groups: std::collections::HashSet<String>,
     /// In-flight disclosure tweens of the sidebar's groups and Archived.
-    pub(super) sidebar_disclosure_motion:
-        std::collections::HashMap<String, SidebarDisclosureMotion>,
+    sidebar_disclosure_motion: std::collections::HashMap<String, SidebarDisclosureMotion>,
     /// Disclosures a reveal (an inline rename of a hidden row) just opened;
     /// each starts its motion on the render that knows its height.
-    pub(super) sidebar_reveal_motions: std::collections::HashSet<String>,
+    sidebar_reveal_motions: std::collections::HashSet<String>,
     /// The jump-hint overlay: true while the held modifiers exactly match a
     /// jump shortcut, which swaps the first nine rows' time-ago for their
     /// key-cap chip (t3code's `showJumpHints`). Frame-transient — window
     /// deactivation clears it, so a chip cannot stick after an app switch
     /// swallows the key-up.
-    pub(super) jump_hints: bool,
+    jump_hints: bool,
     /// Each session view's panes, by its panel key (`panes.rs`).
     panes: std::collections::HashMap<String, panes::Panes>,
     /// The shells opened beside a session (⌘D), by their number.
@@ -1214,7 +1227,17 @@ pub struct Shell {
     _transcript_invalidation: Subscription,
 }
 
+impl std::fmt::Debug for Shell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shell")
+            .field("route", &self.route)
+            .field("sidebar_collapsed", &self.settings.sidebar_collapsed)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Shell {
+    /// The shell over `state`, booting its engine as `boot` says.
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
         motion::run_on(cx.background_executor().clone()); // hover flips on the dispatcher's clock
         let observation = cx.observe(&state, |this: &mut Self, state, cx| {
@@ -1369,7 +1392,7 @@ impl Shell {
             files_settings_sub: None,
             appearance_settings_sub: None,
             chat_menu: popover::Popup::default(),
-            chat_copy_intent: Default::default(),
+            chat_copy_intent: popover::HoverIntent::default(),
             chat_copy_bounds: None,
             chat_copy_left: false,
             chat_rename: None,
@@ -1386,13 +1409,13 @@ impl Shell {
             pending_change: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
-            project_icons: Default::default(),
+            project_icons: project_icon::ProjectIcons::default(),
             chat_status_hover: None,
             sidebar_clock: crate::clock::utc(cx),
             sidebar_clock_next: std::cell::Cell::new(None),
             sidebar_clock_tick: None,
             chat_hover_resync: false,
-            session_hover_card: Default::default(),
+            session_hover_card: session_hover_card::SessionHoverCard::default(),
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
             user_menu: popover::Popup::default(),
@@ -1441,7 +1464,7 @@ impl Shell {
             _inspector_events: inspector_events,
             _session_terminal_events: session_terminal_events,
             session_terminal,
-            window_ground: Default::default(),
+            window_ground: crate::window_appearance::WindowGround::default(),
             landed: None,
             inspector,
             followed_terminal: None,
@@ -1587,7 +1610,9 @@ impl Shell {
             // destination already equals `current()`, so the push dedups.
             if matches!(self.route, Route::Chat) {
                 let entry = NavEntry::Chat(self.active_chat.clone());
-                if self.nav.len() == 1 && *self.nav.current() == NavEntry::Chat(String::new()) {
+                if self.nav.entry_count() == 1
+                    && *self.nav.current() == NavEntry::Chat(String::new())
+                {
                     self.nav.replace(entry);
                 } else {
                     self.nav.push(entry);
@@ -1610,13 +1635,13 @@ impl Shell {
                     self.splash = SplashPhase::FadingOut;
                     self.splash_task = Some(cx.spawn(async move |this, cx| {
                         cx.background_executor()
-                            .timer(SPLASH_OUT.total() + Duration::from_millis(30))
+                            .timer(SPLASH_OUT.total().saturating_add(Duration::from_millis(30)))
                             .await;
-                        this.update(cx, |shell, cx| {
+                        // A gone shell has no splash to put away.
+                        let _gone = this.update(cx, |shell, cx| {
                             shell.splash = SplashPhase::Gone;
                             cx.notify();
-                        })
-                        .ok();
+                        });
                     }));
                 }
             }
@@ -1702,7 +1727,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn suspend_file_images(&mut self, cx: &mut Context<Self>) {
+    fn suspend_file_images(&self, cx: &mut Context<Self>) {
         for files in self.files.values().chain(self.file_surfaces.values()) {
             files.update(cx, FilesSurface::suspend_images);
         }
@@ -1730,7 +1755,7 @@ impl Shell {
     /// Appearance settings page, which owns the control. The typography
     /// global is the canonical store and persists on its own; this only
     /// propagates the change to already-open surfaces.
-    pub(crate) fn set_code_font_size(&mut self, code_font_size: f32, cx: &mut Context<Self>) {
+    pub(crate) fn set_code_font_size(&self, code_font_size: f32, cx: &mut Context<Self>) {
         let surfaces =
             self.files.values().chain(self.file_surfaces.values()).cloned().collect::<Vec<_>>();
         for surface in surfaces {
@@ -1825,10 +1850,14 @@ impl Shell {
             }
             self.browsers.clear();
             self.browser_subs.clear();
-            self.browser_context = browser_profile
-                .clone()
-                .map(crate::browser::BrowserContext::for_profile)
-                .unwrap_or_default();
+            // iOS opens pages in the system browser and keeps no website data.
+            #[cfg(target_os = "macos")]
+            {
+                self.browser_context = browser_profile
+                    .clone()
+                    .map(crate::browser::BrowserContext::for_profile)
+                    .unwrap_or_default();
+            }
             self.browser_profile = browser_profile;
         }
     }
@@ -1851,7 +1880,7 @@ impl Shell {
                 Some(chat.device_id.as_str()) != state.local_device_id.as_deref()
             })
         };
-        self.browser_seq += 1;
+        self.browser_seq = self.browser_seq.saturating_add(1);
         let id = self.browser_seq;
         let browser = cx.new(|cx| {
             crate::browser::BrowserSurface::new(self.browser_context.clone(), remote, window, cx)
@@ -1891,21 +1920,20 @@ impl Shell {
 
     /// A fresh view of the session's changes beside it, with a scope and base of its own: one
     /// kept across launches comes back so, and several can stand at once.
-    fn add_diff_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_diff_surface(&mut self, window: &Window, cx: &mut Context<Self>) {
         let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
         self.register_diff_surface(changes, window, cx);
     }
 
     /// Open or focus a session-owned editor tab. The explorer is independent.
-    fn add_file_surface(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_file_surface(&mut self, path: String, window: &Window, cx: &mut Context<Self>) {
         let owner = (self.active_chat.clone(), self.state.clone());
         self.add_file_surface_at(owner, path, None, window, cx);
     }
 
     /// The chat and state a transcript link resolves in: the main chat's, or
     /// an open side chat's own (its chat row may not reach the main list yet).
-    fn link_owner(&self, chat_id: &str, cx: &App) -> Option<(String, Entity<AppState>)> {
-        let _ = cx;
+    fn link_owner(&self, chat_id: &str) -> Option<(String, Entity<AppState>)> {
         (chat_id == self.active_chat).then(|| (chat_id.to_owned(), self.state.clone()))
     }
 
@@ -1916,7 +1944,7 @@ impl Shell {
         owner: (String, Entity<AppState>),
         path: String,
         location: Option<(u32, Option<FileColumn>)>,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         if self.active_chat.is_empty() || owner.0.is_empty() {
@@ -1935,7 +1963,7 @@ impl Shell {
             return;
         }
 
-        self.file_surface_seq += 1;
+        self.file_surface_seq = self.file_surface_seq.saturating_add(1);
         let id = self.file_surface_seq;
         let file = cx.new(|cx| {
             FilesSurface::new_editor(
@@ -2059,41 +2087,46 @@ impl Shell {
         &mut self,
         chat_id: &str,
         target: &str,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        use crate::workspace_links::FileLinkResolution;
         let owner_state =
-            self.link_owner(chat_id, cx).map_or_else(|| self.state.clone(), |(_, state)| state);
+            self.link_owner(chat_id).map_or_else(|| self.state.clone(), |(_, state)| state);
         let roots = owner_state.read(cx).file_link_roots(chat_id);
         let root_refs: Vec<&str> = roots.iter().map(|root| root.root.as_str()).collect();
-        use crate::workspace_links::FileLinkResolution;
         let (owner_chat, link) = match crate::workspace_links::first_root_owning(target, root_refs)
         {
-            Some(FileLinkResolution::Owned { root, link }) => match roots[root].chat.as_deref() {
-                Some(owner) => (owner.to_owned(), link),
-                // A linking chat without a checkout of its own resolves in
-                // its own file context, as before.
-                None if root == 0 => (chat_id.to_owned(), link),
-                // A project root past the linking chat's own has no chat of
-                // its own, and its relative path would name a different file
-                // under the linking chat's checkout: read it by absolute path
-                // through the linking chat, which keeps it editable only
-                // inside that checkout.
-                None => (
-                    chat_id.to_owned(),
-                    crate::workspace_links::WorkspaceFileLink {
-                        path: roots[root].absolute(&link).to_string_lossy().into_owned(),
-                        outside: true,
-                        ..link
-                    },
-                ),
+            Some(FileLinkResolution::Owned { root, link }) => match roots.get(root) {
+                Some(owning) => match owning.chat.as_deref() {
+                    Some(owner) => (owner.to_owned(), link),
+                    // A linking chat without a checkout of its own resolves in
+                    // its own file context, as before.
+                    None if root == 0 => (chat_id.to_owned(), link),
+                    // A project root past the linking chat's own has no chat of
+                    // its own, and its relative path would name a different file
+                    // under the linking chat's checkout: read it by absolute path
+                    // through the linking chat, which keeps it editable only
+                    // inside that checkout.
+                    None => (
+                        chat_id.to_owned(),
+                        crate::workspace_links::WorkspaceFileLink {
+                            path: owning.absolute(&link).to_string_lossy().into_owned(),
+                            outside: true,
+                            ..link
+                        },
+                    ),
+                },
+                // `first_root_owning` names one of `roots`; past them the link resolves in
+                // the linking chat's own file context.
+                None => (chat_id.to_owned(), link),
             },
             // An absolute path no known root owns is still a file link: it
             // opens read-only through the linking chat's own file context.
             Some(FileLinkResolution::Outside(link)) => (chat_id.to_owned(), link),
             None => return false,
         };
-        let Some(owner) = self.link_owner(&owner_chat, cx) else {
+        let Some(owner) = self.link_owner(&owner_chat) else {
             return false;
         };
 
@@ -2134,10 +2167,10 @@ impl Shell {
     fn register_diff_surface(
         &mut self,
         changes: Entity<Changes>,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
-        self.diff_seq += 1;
+        self.diff_seq = self.diff_seq.saturating_add(1);
         let id = self.diff_seq;
         let sub =
             cx.subscribe_in(
@@ -2176,10 +2209,14 @@ impl Shell {
         cx.notify();
     }
 
+    /// Whether the window may close now: `true` when no open file holds unsaved edits, else
+    /// `false` with the first unsaved file shown and the close held for its answer.
     pub fn prepare_window_close(&mut self, cx: &mut Context<Self>) -> bool {
         self.prepare_exit(PendingExit::CloseWindow, cx)
     }
 
+    /// Whether the app may quit now: `true` when no open file holds unsaved edits, else
+    /// `false` with the first unsaved file shown and the quit held for its answer.
     pub fn prepare_quit(&mut self, cx: &mut Context<Self>) -> bool {
         self.prepare_exit(PendingExit::Quit, cx)
     }
@@ -2235,7 +2272,6 @@ impl Shell {
     ) {
         let x = f32::from(event.event.position.x);
         let sample = sidebar_drag_sample(x, self.sidebar_resize_edge, self.reduced_motion.get());
-        let was_collapsed = self.settings.sidebar_collapsed;
         self.settings.sidebar_width = sample.width;
         self.settings.sidebar_collapsed = false;
         self.pane_resize_dragging = Some(PaneResizeKind::Sidebar);
@@ -2249,7 +2285,6 @@ impl Shell {
         self.pane_resize_active = sample.edge.is_none().then_some(PaneResizeKind::Sidebar);
         self.sidebar_resize_edge = sample.edge;
         self.schedule_save(cx);
-        let _ = was_collapsed;
         cx.notify();
     }
 
@@ -2288,7 +2323,7 @@ impl Shell {
         self.settings_base = current;
     }
 
-    fn retry_engine(&mut self, cx: &mut Context<Self>) {
+    fn retry_engine(&self, cx: &mut Context<Self>) {
         AppState::bootstrap(self.state.clone(), self.boot.clone(), cx);
     }
 
@@ -2299,7 +2334,7 @@ impl Shell {
     fn route_outlet(&mut self, frame: gpui::Div) -> AnyElement {
         let settings = matches!(self.route, Route::Settings(_));
         let (was, changes) = self.route_shown.unwrap_or((settings, 0));
-        let changes = changes + u64::from(was != settings);
+        let changes = changes.saturating_add(u64::from(was != settings));
         self.route_shown = Some((settings, changes));
         if changes == 0 {
             motion::fade_in("phase-app", frame).into_any_element()
@@ -2317,7 +2352,7 @@ impl Shell {
     /// Close the user menu through the exit animation (no-op when closed).
     /// The open chat's unseen result marked seen. Never from a render: a change to
     /// the state while a frame draws reaches none of the views that watch it.
-    fn mark_open_chat_seen(&mut self, cx: &mut Context<Self>) {
+    fn mark_open_chat_seen(&self, cx: &mut Context<Self>) {
         let unseen = self
             .state
             .read(cx)
@@ -2424,12 +2459,7 @@ impl Shell {
 
     /// Wrap a chat-menu row in the hover surface that feeds
     /// [`Self::hover_chat_menu_row`]. The row keeps its own hover fade.
-    fn chat_menu_hover_row(
-        &self,
-        key: u8,
-        row: impl IntoElement,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn chat_menu_hover_row(key: u8, row: impl IntoElement, cx: &Context<Self>) -> AnyElement {
         div()
             .id(("chat-menu-hover", key as usize))
             .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
@@ -2449,11 +2479,11 @@ impl Shell {
     /// The chat menu's Copy row: opens its submenu beside the menu on hover
     /// (or click), on whichever side has room.
     fn render_chat_copy_trigger(
-        &mut self,
+        &self,
         chat_id: &str,
         open: bool,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let entity = cx.entity().downgrade();
         let exit_entity = entity.clone();
@@ -2477,7 +2507,7 @@ impl Shell {
                     gpui::canvas(
                         move |bounds, window, cx| {
                             let left = bounds.right() + px(244.0) > window.viewport_size().width;
-                            let _ = entity.update(cx, |this, cx| {
+                            let _gone = entity.update(cx, |this, cx| {
                                 if this.chat_copy_left != left {
                                     this.chat_copy_left = left;
                                     cx.notify();
@@ -2495,7 +2525,7 @@ impl Shell {
                                     if phase != gpui::DispatchPhase::Bubble {
                                         return;
                                     }
-                                    let _ = exit_entity.update(cx, |this, cx| {
+                                    let _gone = exit_entity.update(cx, |this, cx| {
                                         let (bounds, left) =
                                             (this.chat_copy_bounds, this.chat_copy_left);
                                         if this.chat_copy_intent.contains_pointer(
@@ -2529,10 +2559,10 @@ impl Shell {
 
     /// The Copy submenu's card: what can be copied for this chat.
     fn render_chat_copy_submenu(
-        &mut self,
+        &self,
         chat_id: &str,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let chat = self.state.read(cx).chats.iter().find(|chat| chat.id == chat_id).cloned();
         let harness_link = chat.as_ref().and_then(crate::links::harness_conversation_link);
@@ -2584,7 +2614,8 @@ impl Shell {
             .child(
                 gpui::canvas(
                     move |bounds, _, cx| {
-                        let _ = entity.update(cx, |this, _| this.chat_copy_bounds = Some(bounds));
+                        let _gone =
+                            entity.update(cx, |this, _| this.chat_copy_bounds = Some(bounds));
                     },
                     |_, (), _, _| {},
                 )
@@ -2713,8 +2744,8 @@ impl Shell {
         page.update(cx, DevicesPage::open_add_device);
     }
 
-    // The app's menu (Add a machine, Connect to a server): Settings → Devices with Add
-    // device open on that choice.
+    /// The app's menu (Add a machine, Connect to a server): Settings → Devices with Add
+    /// device open on that choice.
     pub fn open_add_device_on(
         &mut self,
         choice: settings::add_device::Choice,
@@ -2727,7 +2758,7 @@ impl Shell {
         page.update(cx, |page, cx| page.open_add_device_on(choice, cx));
     }
 
-    // A link that names a server: Add device on "A server", the address filled in.
+    /// A link that names a server: Add device on "A server", the address filled in.
     pub fn open_add_device_with_server(&mut self, address: String, cx: &mut Context<Self>) {
         self.open_settings(SettingsSection::Devices, cx);
         let state = self.state.clone();
@@ -2736,7 +2767,7 @@ impl Shell {
         page.update(cx, |page, cx| page.open_add_device_with_server(address, cx));
     }
 
-    // The app's menu (Settings…): Settings where they were left.
+    /// The app's menu (Settings…): Settings where they were left.
     pub fn open_settings_from_menu(&mut self, cx: &mut Context<Self>) {
         self.open_last_settings(cx);
     }
@@ -2847,7 +2878,7 @@ impl Shell {
     fn settings_outlet(
         &mut self,
         section: SettingsSection,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match section {
@@ -3004,11 +3035,11 @@ impl Shell {
         };
         self.mutate_task = Some(cx.spawn(async move |this, cx| {
             if let Err(err) = engine.client().call(methods::MUTATE, params).await {
-                this.update(cx, |shell, cx| {
+                // A gone shell has nowhere to say so.
+                let _gone = this.update(cx, |shell, cx| {
                     shell.show_notice(crate::toast::ToastKind::Error, format!("{err}"), cx);
                     cx.notify();
-                })
-                .ok();
+                });
             }
         }));
     }
@@ -3055,9 +3086,8 @@ impl Shell {
             chat_id,
             input,
             focus_pending: true,
-            reveal_until: Some(
-                crate::clock::now(cx) + motion::COLLAPSE.total() + CHAT_RENAME_REVEAL_GRACE,
-            ),
+            reveal_until: crate::clock::now(cx)
+                .checked_add(motion::COLLAPSE.total().saturating_add(CHAT_RENAME_REVEAL_GRACE)),
             _events: events,
             _blur: None,
         });
@@ -3065,6 +3095,7 @@ impl Shell {
     }
 
     /// Focus a just-opened inline rename and arm its commit-on-blur.
+    #[expect(clippy::used_underscore_binding, reason = "the subscription is kept, not read")]
     fn focus_rename_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let revealing = self.chat_rename_revealing();
         let Some(rename) = self.chat_rename.as_mut() else {
@@ -3081,7 +3112,7 @@ impl Shell {
         if revealing && rename.input.read(cx).drawn_bounds().is_none() {
             let shell = cx.entity().downgrade();
             window.on_next_frame(move |window, cx| {
-                shell.update(cx, |shell, cx| shell.focus_rename_chat(window, cx)).ok();
+                let _gone = shell.update(cx, |shell, cx| shell.focus_rename_chat(window, cx));
             });
             return;
         }
@@ -3190,10 +3221,10 @@ impl Shell {
     /// Track held modifiers for sidebar jump hints and the queue's submit hint.
     /// Only a visibility change repaints; modifier traffic is otherwise constant.
     fn on_modifiers_changed(&mut self, event: &ModifiersChangedEvent, cx: &mut Context<Self>) {
-        self.update_jump_hints(&event.modifiers, cx);
+        self.update_jump_hints(event.modifiers, cx);
     }
 
-    fn update_jump_hints(&mut self, mods: &gpui::Modifiers, cx: &mut Context<Self>) {
+    fn update_jump_hints(&mut self, mods: gpui::Modifiers, cx: &mut Context<Self>) {
         let primary = if crate::keys::MOD_IS_COMMAND {
             // an iPad's ⌘ too
             mods.platform
@@ -3228,11 +3259,6 @@ impl Shell {
     /// dispatcher's clock between frames.
     pub(super) fn now(&self) -> std::time::Instant {
         self.render_time.unwrap_or_else(|| self.motion_time())
-    }
-
-    /// [`Self::motion_time`] while a frame is drawn: the frame's moment.
-    fn frame_motion_time(&self, cx: &App) -> std::time::Instant {
-        cx.frame_time()
     }
 
     fn panel_tween(&self, from: f32, to: f32) -> WidthTween {
@@ -3357,10 +3383,9 @@ impl Shell {
     /// (macOS app-owned titlebar), hand the drag to the compositor once the
     /// pointer moves with the button down, and double-click zooms.
     fn titlebar_drag_region(
-        &self,
         id: &'static str,
         el: gpui::Div,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         el.id(id)
             .window_control_area(WindowControlArea::Drag)
@@ -3409,7 +3434,7 @@ impl Shell {
     /// listeners: everything around the toggle falls through to the titlebar drag strip below.
     /// Over the sidebar it wears the window's ink; with the sidebar put away it stands on the
     /// session's ground and is inked for it, as the row is.
-    fn render_titlebar_cluster(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_titlebar_cluster(&self, cx: &Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let over_ground = self.sidebar_now() < self.title_bar_content_start()
             && self.state.read(cx).selected_chat_row().is_some();
@@ -3585,11 +3610,11 @@ impl Shell {
     /// Roving section tabs, grouped by spacing alone: preferences, agents and
     /// devices, then workspace data.
     fn render_settings_nav(
-        &mut self,
+        &self,
         section: SettingsSection,
         theme: &Theme,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Devices => icons::LAPTOP, // as the server menu's Devices
@@ -3620,68 +3645,82 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .children(SettingsSection::ALL.into_iter().map(|item| {
-                            let index =
-                                SettingsSection::ALL.iter().position(|s| *s == item).unwrap();
-                            let selected = item == section;
-                            let key = format!("settings-nav-{}", item.label());
-                            let hover_key = format!("{key}-hover");
-                            let selection_t = settings::widgets::tab_selection_t(
-                                window,
-                                format!("{key}-selection"),
-                                selected,
-                                motion::reduced_motion(cx),
-                            );
-                            let tab_text = motion::hover_blend(
-                                &hover_key,
-                                motion::mix(theme.text_muted, theme.text, selection_t),
-                                theme.text,
-                            );
-                            settings::widgets::section_tab(
-                                theme,
-                                selected,
-                                selection_t,
-                                key,
-                                hover_key,
-                            )
-                            .when(item.starts_nav_group(), |el| el.mt(px(Theme::SPACE_LG)))
-                            .role(gpui::Role::Tab)
-                            .aria_label(item.label())
-                            .aria_selected(selected)
-                            .track_focus(&self.settings_nav_focus[index].clone().tab_stop(selected))
-                            .tab_index(0)
-                            .tab_stop(selected)
-                            .on_key_down(cx.listener(
-                                move |this, event: &gpui::KeyDownEvent, window, cx| {
-                                    let items: Vec<_> = SettingsSection::ALL.into_iter().collect();
-                                    let current =
-                                        items.iter().position(|s| *s == item).unwrap_or(0);
-                                    let next = match event.keystroke.key.as_str() {
-                                        "up" | "left" => (current + items.len() - 1) % items.len(),
-                                        "down" | "right" => (current + 1) % items.len(),
-                                        "home" => 0,
-                                        "end" => items.len() - 1,
-                                        _ => return,
-                                    };
-                                    let target = items[next];
-                                    this.open_settings(target, cx);
-                                    let index = SettingsSection::ALL
-                                        .iter()
-                                        .position(|s| *s == target)
-                                        .unwrap();
-                                    window.focus(&this.settings_nav_focus[index], cx);
-                                    cx.stop_propagation();
+                        .children(
+                            SettingsSection::ALL.into_iter().zip(&self.settings_nav_focus).map(
+                                |(item, focus)| {
+                                    let selected = item == section;
+                                    let key = format!("settings-nav-{}", item.label());
+                                    let hover_key = format!("{key}-hover");
+                                    let selection_t = settings::widgets::tab_selection_t(
+                                        window,
+                                        format!("{key}-selection"),
+                                        selected,
+                                        motion::reduced_motion(cx),
+                                    );
+                                    let tab_text = motion::hover_blend(
+                                        &hover_key,
+                                        motion::mix(theme.text_muted, theme.text, selection_t),
+                                        theme.text,
+                                    );
+                                    settings::widgets::section_tab(
+                                        theme,
+                                        selected,
+                                        selection_t,
+                                        key,
+                                        hover_key,
+                                    )
+                                    .when(item.starts_nav_group(), |el| el.mt(px(Theme::SPACE_LG)))
+                                    .role(gpui::Role::Tab)
+                                    .aria_label(item.label())
+                                    .aria_selected(selected)
+                                    .track_focus(&focus.clone().tab_stop(selected))
+                                    .tab_index(0)
+                                    .tab_stop(selected)
+                                    .on_key_down(cx.listener(
+                                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                            let items = SettingsSection::ALL;
+                                            let last = items.len().saturating_sub(1);
+                                            let current =
+                                                items.iter().position(|s| *s == item).unwrap_or(0);
+                                            // The arrows wrap at either end.
+                                            let next = match event.keystroke.key.as_str() {
+                                                "up" | "left" => {
+                                                    current.checked_sub(1).unwrap_or(last)
+                                                }
+                                                "down" | "right" => Some(current.saturating_add(1))
+                                                    .filter(|next| *next <= last)
+                                                    .unwrap_or(0),
+                                                "home" => 0,
+                                                "end" => last,
+                                                _ => return,
+                                            };
+                                            let Some(&target) = items.get(next) else {
+                                                return;
+                                            };
+                                            this.open_settings(target, cx);
+                                            // The tabs' focus handles are built from `ALL`, in its
+                                            // order.
+                                            if let Some(focus) = this.settings_nav_focus.get(next) {
+                                                window.focus(focus, cx);
+                                            }
+                                            cx.stop_propagation();
+                                        },
+                                    ))
+                                    // The shell's ring inside the row, paint only (M8).
+                                    .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.open_settings(item, cx);
+                                    }))
+                                    .child(
+                                        icon(section_icon(item))
+                                            .size(px(16.0))
+                                            .text_color(tab_text),
+                                    )
+                                    .child(SharedString::from(item.label()))
                                 },
-                            ))
-                            // The shell's ring inside the row, paint only (M8).
-                            .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
-                            .cursor_pointer()
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.open_settings(item, cx)),
-                            )
-                            .child(icon(section_icon(item)).size(px(16.0)).text_color(tab_text))
-                            .child(SharedString::from(item.label()))
-                        })),
+                            ),
+                        ),
                 ),
         )
         .into_any_element()
@@ -3868,7 +3907,7 @@ impl Shell {
                         }))
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Rename"));
-                let menu = menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_RENAME, rename, cx));
+                let menu = menu.child(Self::chat_menu_hover_row(CHAT_MENU_ROW_RENAME, rename, cx));
                 if is_side_chat {
                     menu
                 } else {
@@ -3906,10 +3945,10 @@ impl Shell {
                         }))
                         .child(icon(icons::FILE_CODE).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Open in\u{2026}"));
-                        self.chat_menu_hover_row(CHAT_MENU_ROW_OPEN_IN, row, cx)
+                        Self::chat_menu_hover_row(CHAT_MENU_ROW_OPEN_IN, row, cx)
                     });
-                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
-                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
+                    menu.child(Self::chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
+                        .child(Self::chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
                         .children(open_in)
                 }
             };
@@ -3937,7 +3976,7 @@ impl Shell {
         kind: PaneResizeKind,
         marker: fn() -> T,
         reset: fn(&mut Self, &mut Context<Self>),
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div>
     where
         T: 'static,
@@ -4044,7 +4083,6 @@ impl Shell {
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
-        let faint = theme.text_faint;
         let selected = self.state.read(cx).selected_chat.clone();
         let has_terminal = selected
             .as_deref()
@@ -4074,7 +4112,6 @@ impl Shell {
         } else if let Some(step) = self.first_step(cx) {
             // Onboarding (first boot / after the destructive wipe): no folders
             // to work in yet — one clear affordance.
-            let _ = faint;
             // With no device yet there is nowhere for a project: add one first.
             let no_devices = step == spaces::FirstStep::AddDevice;
             let action = step.action();
@@ -4138,7 +4175,7 @@ impl Shell {
                 ))
                 .into_any_element()
         } else {
-            self.render_no_session(theme, cx)
+            Self::render_no_session(theme, cx)
         };
         div()
             .id("main-column")
@@ -4181,7 +4218,7 @@ impl Shell {
 
     /// The landing fade's border opacity for the terminal of `shown` this frame, asking for the
     /// next while it fades; `None` once it has, or while another session is shown.
-    fn landing_fade(&mut self, shown: Option<&str>, window: &mut Window, cx: &App) -> Option<f32> {
+    fn landing_fade(&mut self, shown: Option<&str>, window: &Window, cx: &App) -> Option<f32> {
         let (chat, at) = self.landed.as_ref()?;
         let opacity = landing_opacity(crate::clock::now(cx).saturating_duration_since(*at))
             .filter(|_| shown == Some(chat.as_str()));
@@ -4196,12 +4233,7 @@ impl Shell {
     /// The main column for a session with no terminal: one starting shows that it
     /// starts; one that ended says so and offers to resume it in a new terminal (its record
     /// stays in the inspector).
-    fn render_session_ended(
-        &mut self,
-        chat: &str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_session_ended(&self, chat: &str, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let (row, resumable) = {
             let state = self.state.read(cx);
             let owner = state.panel_owner(chat);
@@ -4288,7 +4320,8 @@ impl Shell {
 
     /// Session `chat` was just started or resumed: its main column says "Starting…"
     /// until its terminal shows, for [`STARTS_WITHIN`] at most.
-    pub(super) fn mark_starting(&mut self, chat: String, cx: &mut Context<Self>) {
+    #[expect(clippy::used_underscore_binding, reason = "the redraw is kept, not read")]
+    pub(super) fn mark_starting(&mut self, chat: String, cx: &Context<Self>) {
         self.starting = Some((chat, crate::clock::now(cx)));
         self._starting_redraw = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(STARTS_WITHIN).await;
@@ -4298,7 +4331,7 @@ impl Shell {
 
     /// The main column with no session selected: one quiet offer to start one, with
     /// its key, and the history to resume from.
-    fn render_no_session(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_no_session(theme: &Theme, cx: &Context<Self>) -> AnyElement {
         div()
             .size_full()
             .flex()
@@ -4349,7 +4382,7 @@ impl Shell {
             .into_any_element()
     }
 
-    fn render_gate_card(&mut self, error: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn render_gate_card(error: &str, cx: &Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         // Backend unreachable: quiet centered copy,
         // plus a Retry affordance (the native engine doesn't self-redial).
@@ -4404,14 +4437,20 @@ impl Shell {
 /// 44px hairlines at white 3.5%, with the radial mask approximated by edge
 /// gradients back into the page background (gpui has no mask-image).
 fn grid_backdrop(theme: &Theme) -> AnyElement {
+    /// The hairlines' pitch, in px.
+    const STEP: f32 = 44.0;
+    /// The steps across: the grid spans 2640 px wide.
+    const ACROSS: u16 = 60;
+    /// The steps down: three quarters of the span.
+    const DOWN: u16 = 45;
     let line = crate::theme::hairline(0.035);
     let bg = theme.bg;
-    const STEP: f32 = 44.0;
-    const SPAN: f32 = 2640.0;
-    let verticals = (1..(SPAN / STEP) as usize)
-        .map(|i| div().absolute().left(px(i as f32 * STEP)).top_0().bottom_0().w(px(1.0)).bg(line));
-    let horizontals = (1..((SPAN * 0.75) / STEP) as usize)
-        .map(|i| div().absolute().top(px(i as f32 * STEP)).left_0().right_0().h(px(1.0)).bg(line));
+    let verticals = (1..ACROSS).map(|i| {
+        div().absolute().left(px(f32::from(i) * STEP)).top_0().bottom_0().w(px(1.0)).bg(line)
+    });
+    let horizontals = (1..DOWN).map(|i| {
+        div().absolute().top(px(f32::from(i) * STEP)).left_0().right_0().h(px(1.0)).bg(line)
+    });
     div()
         .absolute()
         .inset_0()
@@ -4465,9 +4504,9 @@ fn window_control_button(
 /// The titlebar row's top padding: [`Theme::TITLEBAR_TOP_PAD`], and on a touch screen
 /// enough more that its 24 pt controls' 44 pt presses start inside the window.
 pub(crate) fn titlebar_top_pad() -> f32 {
-    let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
+    let center = Theme::TITLEBAR_HEIGHT.midpoint(Theme::TITLEBAR_TOP_PAD);
     let over = (crate::surface_chrome::touch_reach(24.0) - (center - 12.0)).max(0.0);
-    Theme::TITLEBAR_TOP_PAD + 2.0 * over
+    over.mul_add(2.0, Theme::TITLEBAR_TOP_PAD)
 }
 
 fn window_control_button_with(
@@ -4497,7 +4536,7 @@ fn window_control_button_with(
         .id(id.clone())
         .debug_selector(move || id.to_string())
         .group(group)
-        .size(px(24.0 + 2.0 * reach))
+        .size(px(reach.mul_add(2.0, 24.0)))
         .m(px(-reach))
         .flex_none()
         .flex()
@@ -4567,25 +4606,20 @@ impl Render for Shell {
         self.focus_rename_chat(window, cx);
 
         // The frame's moment, so a frame drawn again stands where this one did.
-        self.render_time = Some(self.frame_motion_time(cx));
+        self.render_time = Some(cx.frame_time());
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
         {
             let shell = cx.weak_entity();
-            window.defer(cx, move |window, cx| {
-                if matches!(action, PendingExit::Quit) {
-                    crate::app_menus::request_quit(cx);
-                } else {
-                    shell
-                        .update(cx, |shell, cx| match action {
-                            PendingExit::CloseWindow => {
-                                if shell.prepare_window_close(cx) {
-                                    window.remove_window();
-                                }
-                            }
-                            PendingExit::Quit => unreachable!(),
-                        })
-                        .ok();
+            window.defer(cx, move |window, cx| match action {
+                PendingExit::Quit => crate::app_menus::request_quit(cx),
+                PendingExit::CloseWindow => {
+                    // A gone shell has no window to close.
+                    let _gone = shell.update(cx, |shell, cx| {
+                        if shell.prepare_window_close(cx) {
+                            window.remove_window();
+                        }
+                    });
                 }
             });
         }
@@ -4633,6 +4667,7 @@ impl Render for Shell {
                 // The page starts clear of the grab of the divider at its left (`pane_area`).
                 #[cfg(target_os = "macos")]
                 browser.set_resize_inset(px((panes::DIVIDER_GRAB - panes::DIVIDER) / 2.0), cx);
+                #[cfg(target_os = "macos")]
                 browser.set_shortcuts(&self.settings.keymap);
                 browser.set_presentation(presentation, cx);
             });
@@ -4705,7 +4740,7 @@ impl Render for Shell {
         } else if self.jump_hints {
             // Only a fresh modifier event may turn hints on: activation can
             // retain the snapshot from before Cmd+Tab.
-            self.update_jump_hints(&window.modifiers(), cx);
+            self.update_jump_hints(window.modifiers(), cx);
         }
 
         let root = div()
@@ -4857,7 +4892,7 @@ impl Render for Shell {
                     let border_color = Theme::of(cx).border;
                     let sidebar_tone =
                         Self::sidebar_tone(self.settings.sidebar_width, border_color);
-                    let drag = self.titlebar_drag_region(
+                    let drag = Self::titlebar_drag_region(
                         "settings-titlebar",
                         div().absolute().top_0().left_0().right_0().h(px(Theme::TITLEBAR_HEIGHT)),
                         cx,
@@ -4975,7 +5010,7 @@ impl Render for Shell {
             }
             GatePhase::Loading => root, // splash overlay covers boot
             GatePhase::Failed(error) => {
-                let card = self.render_gate_card(error, cx);
+                let card = Self::render_gate_card(error, cx);
                 root.child(card)
             }
         };
@@ -5023,7 +5058,7 @@ impl Render for Shell {
         let root = if matches!(gate, GatePhase::Ready) || cfg!(target_os = "macos") {
             root
         } else {
-            root.child(self.titlebar_drag_region(
+            root.child(Self::titlebar_drag_region(
                 "gate-titlebar-drag",
                 div().absolute().top_0().left_0().right_0().h(px(Theme::TITLEBAR_HEIGHT)),
                 cx,
@@ -5120,6 +5155,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the clamp hands back the bound itself")]
     fn sidebar_drag_nudges_each_edge_once_until_rearmed() {
         let min = sidebar_drag_sample(SIDEBAR_MIN, None, false);
         assert_eq!(min.width, SIDEBAR_MIN);
@@ -5163,6 +5199,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the bounce peaks at the nudge exactly")]
     fn sidebar_bounce_has_rounded_out_and_return_phases() {
         assert_eq!(motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.0), 0.0);
         assert_eq!(
@@ -5202,6 +5239,11 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z").unwrap().to_utc()
     }
 
+    /// `at` moved on by `delta`.
+    fn plus(at: DateTime<Utc>, delta: chrono::TimeDelta) -> DateTime<Utc> {
+        at.checked_add_signed(delta).unwrap()
+    }
+
     fn clock_session(
         chat_id: &str,
         status: slopty_view_proto::SessionStatus,
@@ -5229,10 +5271,11 @@ mod tests {
     ) -> (Entity<ClockProbe>, std::rc::Rc<std::cell::Cell<usize>>, Subscription) {
         use gpui::AppContext as _;
         let probe = cx.new(|_| ClockProbe { clock: ClockRedraw::default() });
-        let redraws = std::rc::Rc::new(std::cell::Cell::new(0));
-        let counter = redraws.clone();
-        let subscription =
-            cx.update(|cx| cx.observe(&probe, move |_, _| counter.set(counter.get() + 1)));
+        let redraws = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+        let counter = std::rc::Rc::clone(&redraws);
+        let subscription = cx.update(|cx| {
+            cx.observe(&probe, move |_, _| counter.set(counter.get().saturating_add(1)))
+        });
         (probe, redraws, subscription)
     }
 
@@ -5260,7 +5303,7 @@ mod tests {
         assert_eq!(wake, expected);
         let (probe, redraws, _subscription) = clock_probe(cx);
         arm_probe(cx, &probe, wake, now);
-        let delay = (expected - now).to_std().unwrap();
+        let delay = expected.signed_duration_since(now).to_std().unwrap();
         cx.executor().advance_clock(delay.checked_sub(Duration::from_millis(1)).unwrap());
         assert_eq!(redraws.get(), 0, "no redraw before the deadline");
         cx.executor().advance_clock(Duration::from_millis(1));
@@ -5269,7 +5312,7 @@ mod tests {
 
     #[gpui::test]
     fn idle_shell_sleeps_until_the_minute(cx: &mut gpui::TestAppContext) {
-        let now = clock_epoch() + chrono::TimeDelta::seconds(20);
+        let now = plus(clock_epoch(), chrono::TimeDelta::seconds(20));
         let mut state = AppState::new();
         // A failed run, a pending question and a reconnecting pill show no
         // clock: only the relative-time minute remains.
@@ -5279,7 +5322,7 @@ mod tests {
         ];
         state.selected_chat = Some("failed".into());
         state.connectivity.state = slopty_view_proto::ConnectivityState::Reconnecting;
-        assert_redraw_at(cx, &state, now, clock_epoch() + chrono::TimeDelta::minutes(1));
+        assert_redraw_at(cx, &state, now, plus(clock_epoch(), chrono::TimeDelta::minutes(1)));
     }
 
     #[gpui::test]
@@ -5289,21 +5332,21 @@ mod tests {
         state.sessions =
             vec![clock_session("chat", slopty_view_proto::SessionStatus::Working, now)];
         state.selected_chat = Some("chat".into());
-        assert_redraw_at(cx, &state, now, now + chrono::TimeDelta::seconds(1));
+        assert_redraw_at(cx, &state, now, plus(now, chrono::TimeDelta::seconds(1)));
         // Awaiting input shows no elapsed timer; its staleness cutoff is an
         // AppState notification, not a shell tick.
         state.sessions[0].status = slopty_view_proto::SessionStatus::AwaitingInput;
-        assert_redraw_at(cx, &state, now, now + chrono::TimeDelta::minutes(1));
+        assert_redraw_at(cx, &state, now, plus(now, chrono::TimeDelta::minutes(1)));
     }
 
     #[gpui::test]
     fn clock_redraw_keeps_the_earliest_deadline(cx: &mut gpui::TestAppContext) {
         let now = clock_epoch();
         let (probe, redraws, _subscription) = clock_probe(cx);
-        arm_probe(cx, &probe, now + chrono::TimeDelta::seconds(10), now);
+        arm_probe(cx, &probe, plus(now, chrono::TimeDelta::seconds(10)), now);
         // An earlier deadline replaces the pending wake; a later one does not.
-        arm_probe(cx, &probe, now + chrono::TimeDelta::seconds(5), now);
-        arm_probe(cx, &probe, now + chrono::TimeDelta::seconds(30), now);
+        arm_probe(cx, &probe, plus(now, chrono::TimeDelta::seconds(5)), now);
+        arm_probe(cx, &probe, plus(now, chrono::TimeDelta::seconds(30)), now);
         cx.executor().advance_clock(Duration::from_secs(5));
         assert_eq!(redraws.get(), 1);
         // Fired timers are one-shot: nothing else is pending.
@@ -5313,6 +5356,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the constants are exact literals")]
     fn pane_resize_hitboxes_yield_the_titlebar_chrome() {
         assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
         assert_eq!(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0, 20.0);
@@ -5327,6 +5371,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the constants are exact literals")]
     fn titlebar_cluster_matches_slopty_window_controls() {
         // 88, or 12 in fullscreen: the
         // cluster clears the {14,15} traffic lights, and reclaims the inset
@@ -5386,10 +5431,10 @@ mod tests {
         let mut nav = NavHistory::new(chat("a"));
         nav.push(chat("a"));
         nav.push(chat("a"));
-        assert_eq!(nav.len(), 1, "re-selecting the current route never stacks");
+        assert_eq!(nav.entry_count(), 1, "re-selecting the current route never stacks");
         nav.push(NavEntry::Settings(SettingsSection::Harnesses));
         nav.push(NavEntry::Settings(SettingsSection::Harnesses));
-        assert_eq!(nav.len(), 2);
+        assert_eq!(nav.entry_count(), 2);
     }
 
     #[test]
@@ -5405,7 +5450,7 @@ mod tests {
         assert!(nav.can_forward());
         nav.push(chat("d"));
         assert!(!nav.can_forward(), "the old branch is unreachable");
-        assert_eq!(nav.len(), 2);
+        assert_eq!(nav.entry_count(), 2);
         assert_eq!(nav.back(), Some(chat("a")));
         assert_eq!(nav.forward(), Some(chat("d")));
     }
@@ -5416,7 +5461,7 @@ mod tests {
         // stays disabled after landing in the last-used chat.
         let mut nav = NavHistory::new(chat(""));
         nav.replace(chat("boot"));
-        assert_eq!(nav.len(), 1);
+        assert_eq!(nav.entry_count(), 1);
         assert_eq!(*nav.current(), chat("boot"));
         assert!(!nav.can_back());
     }
@@ -5426,7 +5471,7 @@ mod tests {
         let mut nav = NavHistory::new(chat("a"));
         nav.push(NavEntry::Settings(SettingsSection::Devices));
         nav.push(NavEntry::Settings(SettingsSection::Shortcuts));
-        assert_eq!(nav.len(), 3, "section changes are navigations");
+        assert_eq!(nav.entry_count(), 3, "section changes are navigations");
         assert_eq!(nav.back(), Some(NavEntry::Settings(SettingsSection::Devices)));
         assert_eq!(nav.back(), Some(chat("a")));
     }
@@ -5508,7 +5553,7 @@ mod exit_regressions {
                 shell.reduced_motion = motion::ReducedMotion::of(cx);
                 // The frame started halfway through the transition but rendering
                 // crossed its deadline. Every region must still use that frame.
-                shell.render_time = Some(started + duration.mul_f32(0.5));
+                shell.render_time = started.checked_add(duration.mul_f32(0.5));
                 assert!(shell.tween_active(tween));
                 assert_eq!(shell.active_tween_endpoints(tween), Some((520., 0.)));
                 let width = shell.eval_tween(tween, 0.);
@@ -5553,7 +5598,7 @@ mod exit_regressions {
                 cx,
             )
         });
-        for index in 0..5 {
+        for index in 0..5_u8 {
             let pause_in_background = index % 2 == 1;
             let open_links_in_slopty = index % 2 == 0;
             let terminal_family = if open_links_in_slopty {
@@ -5566,12 +5611,12 @@ mod exit_regressions {
             } else {
                 crate::typography::UiFontFamily::System
             };
-            let terminal_size = 15.0 + index as f32;
-            let code_size = 11.0 + index as f32;
-            let conversation_width = settings::ConversationWidth::ALL[index % 3];
+            let terminal_size = 15.0 + f32::from(index);
+            let code_size = 11.0 + f32::from(index);
+            let conversation_width = settings::ConversationWidth::ALL[usize::from(index % 3)];
             let geometry = Some(settings::WindowGeometry {
                 display_uuid: Some(uuid::Uuid::from_u128(7)),
-                x: 80.0 + index as f32,
+                x: 80.0 + f32::from(index),
                 y: 60.0,
                 width: 1100.0,
                 height: 750.0,
@@ -5592,10 +5637,10 @@ mod exit_regressions {
                         settings.code_font_size = code_size;
                         settings.conversation_width = conversation_width;
                     });
-                    for step in 0..3 {
-                        shell.settings.sidebar_width = 290.0 + step as f32;
-                        shell.settings.right_pane_width = 540.0 + step as f32;
-                        shell.settings.terminal_height = 300.0 + step as f32;
+                    for step in 0..3_u8 {
+                        shell.settings.sidebar_width = 290.0 + f32::from(step);
+                        shell.settings.right_pane_width = 540.0 + f32::from(step);
+                        shell.settings.terminal_height = 300.0 + f32::from(step);
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
                         assert_eq!(current.pause_animations_in_background, pause_in_background);
@@ -6001,10 +6046,7 @@ mod exit_regressions {
                     LinkOutcome::Internal
                 );
                 let first = shell.browser_seq;
-                assert_eq!(
-                    shell.browsers[&first].read(cx).page.url.as_deref(),
-                    Some("https://example.com/docs")
-                );
+                assert_eq!(shell.browsers[&first].read(cx).url(), Some("https://example.com/docs"));
                 assert_eq!(
                     shell.front_view(cx),
                     Some(RightSurface::Browser(first)),
@@ -6231,13 +6273,13 @@ mod exit_regressions {
             assert_eq!(cx.opened_url(), last_external_url);
             window
                 .update(cx, |shell, _, cx| {
-                    assert_eq!(shell.browsers.len(), index + 1);
+                    assert_eq!(shell.browsers.len(), index.saturating_add(1));
                     assert_eq!(
                         shell.front_view(cx),
                         Some(RightSurface::Browser(shell.browser_seq))
                     );
                     assert_eq!(
-                        shell.browsers[&shell.browser_seq].read(cx).page.url.as_deref(),
+                        shell.browsers[&shell.browser_seq].read(cx).url(),
                         Some(activation.target.original.as_str())
                     );
                 })
@@ -6255,7 +6297,9 @@ mod exit_regressions {
                 cx.run_until_parked();
                 assert_eq!(cx.opened_url(), last_external_url);
             }
-            window.update(cx, |shell, _, _| assert_eq!(shell.browsers.len(), index + 1)).unwrap();
+            window
+                .update(cx, |shell, _, _| assert_eq!(shell.browsers.len(), index.saturating_add(1)))
+                .unwrap();
         }
     }
 
@@ -6357,7 +6401,7 @@ mod exit_regressions {
                 assert_eq!(shell.front_view(cx), Some(second), "the keyboard stays");
                 shell.close_view(second, cx);
                 assert_eq!(shell.panes_now(cx).focused(), Pane::Session, "the keyboard goes home");
-                assert!(shell.panes_now(cx).views().is_empty());
+                assert_eq!(shell.panes_now(cx).views(), []);
                 shell.active_chat = "second-session".into();
                 assert_eq!(shell.front_view(cx), Some(other));
                 shell.close_view(other, cx);
@@ -6548,7 +6592,9 @@ mod shortcut_focus_regressions {
                         cx.notify();
                     }),
                 )
-                .on_action(cx.listener(|this, _: &JumpSession, _, _| this.jumps += 1))
+                .on_action(cx.listener(|this, _: &JumpSession, _, _| {
+                    this.jumps = this.jumps.saturating_add(1);
+                }))
                 .when(self.show_editor, |el| el.child(div().track_focus(&self.editor)))
         }
     }
@@ -6655,7 +6701,11 @@ mod shortcut_focus_regressions {
             // Dispatch immediately after the mouse event; no manual recovery.
             cx.simulate_keystrokes(host.into(), &platform_combo("mod-2"));
             host.update(cx, |host, window, cx| {
-                assert_eq!(host.jumps, index + 1, "shortcut failed after mouse click at {x}");
+                assert_eq!(
+                    host.jumps,
+                    index.saturating_add(1),
+                    "shortcut failed after mouse click at {x}"
+                );
                 assert!(host.root.contains_focused(window, cx));
                 assert_eq!(host.editor.is_focused(window), x < 100.0);
             })
@@ -6763,7 +6813,7 @@ mod settings_modal_regressions {
             .unwrap();
     }
 
-    fn init_settings_test(saved: UiSettings, dir: &std::path::Path, cx: &mut TestAppContext) {
+    fn init_settings_test(saved: UiSettings, dir: &std::path::Path, cx: &TestAppContext) {
         cx.update(|cx| {
             settings::init(saved, dir, cx);
             gpui_base::init(cx);
@@ -6826,11 +6876,13 @@ mod settings_modal_regressions {
                 state.local_device_id = Some("local".into());
                 state.chats = ["older", "newer"]
                     .into_iter()
-                    .enumerate()
-                    .map(|(ix, id)| {
+                    .zip([10, 9])
+                    .map(|(id, minutes_ago)| {
+                        let created =
+                            Utc::now().checked_sub_signed(chrono::Duration::minutes(minutes_ago));
                         serde_json::from_value(serde_json::json!({
                             "id": id, "title": id, "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                            "createdAt": created.unwrap(),
                         }))
                         .unwrap()
                     })
@@ -6878,11 +6930,13 @@ mod settings_modal_regressions {
                 state.local_device_id = Some("local".into());
                 state.chats = ["older", "newer"]
                     .into_iter()
-                    .enumerate()
-                    .map(|(ix, id)| {
+                    .zip([10, 9])
+                    .map(|(id, minutes_ago)| {
+                        let created =
+                            Utc::now().checked_sub_signed(chrono::Duration::minutes(minutes_ago));
                         serde_json::from_value(serde_json::json!({
                             "id": id, "title": id, "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                            "createdAt": created.unwrap(),
                         }))
                         .unwrap()
                     })
@@ -7029,7 +7083,7 @@ mod settings_modal_regressions {
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
-            assert!(shell.state.read(cx).devices.is_empty());
+            assert_eq!(shell.state.read(cx).devices, []);
             shell.open_add_device(cx);
         });
         cx.run_until_parked();

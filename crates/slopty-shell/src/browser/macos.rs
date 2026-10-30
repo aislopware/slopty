@@ -3,21 +3,6 @@
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
 // One page-to-shell message only, the page's own favicon (`FAVICON_SCRIPT`).
-#![allow(
-    let_underscore_drop,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::clone_on_ref_ptr,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::multiple_unsafe_ops_per_block,
-    clippy::needless_pass_by_ref_mut,
-    clippy::string_slice,
-    clippy::suboptimal_flops,
-    clippy::undocumented_unsafe_blocks,
-    clippy::unwrap_used,
-    reason = "shell lint migration: slice A"
-)]
 use std::{
     cell::{Cell, RefCell},
     mem::ManuallyDrop,
@@ -71,14 +56,14 @@ impl BrowserData {
         PROFILES.with(|profiles| {
             let mut profiles = profiles.borrow_mut();
             if let Some(store) = profiles.get(&profile.root) {
-                return Self(store.clone());
+                return Self(Rc::clone(store));
             }
             let root = profile.root.clone();
             let store = Rc::new(RefCell::new(BrowserStore {
                 profile: Some(profile),
                 ..Default::default()
             }));
-            profiles.insert(root, store.clone());
+            profiles.insert(root, Rc::clone(&store));
             Self(store)
         })
     }
@@ -88,27 +73,41 @@ impl BrowserData {
         mtm: MainThreadMarker,
     ) -> Retained<objc2_web_kit::WKWebViewConfiguration> {
         let mut data = self.0.borrow_mut();
-        if data.store.is_none() {
-            data.store = Some(unsafe {
-                match &data.profile {
-                    Some(profile) if persistent_profiles_supported() => {
-                        let identifier =
-                            objc2_foundation::NSUUID::from_bytes(profile.data_store_identifier());
-                        objc2_web_kit::WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm)
-                    }
-                    _ => objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm),
-                }
-            });
-        }
+        let BrowserStore { profile, store } = &mut *data;
+        let store = store.get_or_insert_with(|| website_store(profile.as_ref(), mtm));
+        // SAFETY: WebKit's configuration is main-thread only, which `mtm` proves.
         let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
+        // SAFETY: the store is a live WKWebsiteDataStore, set on a configuration no web view
+        // has taken yet, on the main thread.
         unsafe {
-            configuration.setWebsiteDataStore(data.store.as_ref().unwrap());
-            // WebKit's bare user agent names no browser, and sites (Google's among them)
-            // serve it their pages for old browsers; it says what Safari says.
-            configuration
-                .setApplicationNameForUserAgent(Some(&NSString::from_str(&safari_user_agent())));
+            configuration.setWebsiteDataStore(store);
+        }
+        // WebKit's bare user agent names no browser, and sites (Google's among them)
+        // serve it their pages for old browsers; it says what Safari says.
+        let name = NSString::from_str(&safari_user_agent());
+        // SAFETY: an NSString the configuration copies, set on the main thread.
+        unsafe {
+            configuration.setApplicationNameForUserAgent(Some(&name));
         }
         configuration
+    }
+}
+
+/// The website data store a page of `profile` keeps its data in: the profile's own where
+/// macOS keeps stores by identifier, else a temporary one.
+fn website_store(
+    profile: Option<&super::profile::BrowserProfile>,
+    mtm: MainThreadMarker,
+) -> Retained<objc2_web_kit::WKWebsiteDataStore> {
+    match profile {
+        Some(profile) if persistent_profiles_supported() => {
+            let identifier = objc2_foundation::NSUUID::from_bytes(profile.data_store_identifier());
+            // SAFETY: WebKit's data stores are main-thread only, which `mtm` proves; the
+            // class answers `dataStoreForIdentifier:` (`persistent_profiles_supported`).
+            unsafe { objc2_web_kit::WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) }
+        }
+        // SAFETY: WebKit's data stores are main-thread only, which `mtm` proves.
+        _ => unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) },
     }
 }
 
@@ -118,7 +117,7 @@ fn safari_user_agent() -> String {
     const PLIST: &str = "/Applications/Safari.app/Contents/Info.plist";
     const KEY: &str = "<key>CFBundleShortVersionString</key>";
     let version = std::fs::read_to_string(PLIST).ok().and_then(|plist| {
-        let after = &plist[plist.find(KEY)? + KEY.len()..];
+        let (_, after) = plist.split_once(KEY)?;
         let value = after.split_once("<string>")?.1.split_once("</string>")?.0.trim();
         let mut parts = value.split('.');
         let major = parts.next().filter(|p| p.parse::<u32>().is_ok())?;
@@ -132,6 +131,8 @@ fn safari_user_agent() -> String {
 /// macOS 12/13 have only a single default persistent store. Do not silently
 /// share it across accounts; retain isolated temporary stores on those systems.
 pub(super) fn persistent_profiles_supported() -> bool {
+    // SAFETY: `respondsToSelector:` is NSObject's, taking a selector and answering a BOOL, the
+    // types `msg_send!` gives it here.
     unsafe {
         msg_send![class!(WKWebsiteDataStore), respondsToSelector: sel!(dataStoreForIdentifier:)]
     }
@@ -181,14 +182,24 @@ define_class!(
     unsafe impl WKNavigationDelegate for Observer {
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn policy(&self, _view: &WKWebView, action: &WKNavigationAction, decision: &block2::Block<dyn Fn(WKNavigationActionPolicy)>) {
+            // SAFETY: the action WebKit hands its navigation delegate, read on the main thread
+            // during the call.
             let url = unsafe { action.request().URL() }.and_then(|u| u.absoluteString()).map(|u| u.to_string()).unwrap_or_default();
-            if allowed_navigation(&url) && unsafe { action.targetFrame() }.is_some_and(|frame| unsafe { frame.isMainFrame() }) {
+            // SAFETY: as above.
+            let frame = unsafe { action.targetFrame() };
+            let main_frame = frame.is_some_and(|frame| {
+                // SAFETY: the action's frame, read on the main thread during the call.
+                unsafe { frame.isMainFrame() }
+            });
+            if allowed_navigation(&url) && main_frame {
                 *self.ivars().requested_url.borrow_mut() = Some(url.clone());
             }
             decision.call((if allowed_navigation(&url) { WKNavigationActionPolicy::Allow } else { WKNavigationActionPolicy::Cancel },));
         }
         #[unsafe(method(webView:decidePolicyForNavigationResponse:decisionHandler:))]
         fn response(&self, _view: &WKWebView, response: &WKNavigationResponse, decision: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>) {
+            // SAFETY: the response WebKit hands its navigation delegate, read on the main thread
+            // during the call.
             let displayable = unsafe { response.canShowMIMEType() };
             if !displayable { self.fail("This file can’t be previewed here. Open it in your default browser."); }
             decision.call((if displayable { WKNavigationResponsePolicy::Allow } else { WKNavigationResponsePolicy::Cancel },));
@@ -203,7 +214,9 @@ define_class!(
         }
         #[unsafe(method(webView:didFinishNavigation:))]
         fn finish(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>) {
-            self.changed(); let _ = self.ivars().tx.try_send(NativeEvent::Finished);
+            self.changed();
+            // A full or closed queue: the surface is behind or gone, and its next read catches up.
+            let _full_or_gone = self.ivars().tx.try_send(NativeEvent::Finished);
         }
         #[unsafe(method(webView:didFailProvisionalNavigation:withError:))]
         fn provisional_error(&self, _view: &WKWebView, _navigation: Option<&WKNavigation>, error: &NSError) {
@@ -234,6 +247,7 @@ impl Observer {
             error: RefCell::new(None),
             requested_url: RefCell::new(None),
         });
+        // SAFETY: NSObject's `init` on the allocation `set_ivars` just filled, returning it.
         unsafe { msg_send![super(object), init] }
     }
 
@@ -289,14 +303,16 @@ impl NativePage {
             .with_focused(false)
             .with_new_window_req_handler(move |url, _| {
                 if allowed_navigation(&url) {
-                    let _ = new_tab.try_send(NativeEvent::NewTab(url));
+                    // A full or closed queue drops the request, as a closed tab would.
+                    let _full_or_gone = new_tab.try_send(NativeEvent::NewTab(url));
                 }
                 wry::NewWindowResponse::Deny
             })
             .with_download_started_handler(|_, _| false)
             .with_ipc_handler(move |request| {
                 if let Some((page, data)) = super::favicon_message(request.body()) {
-                    let _ = favicon.try_send(NativeEvent::Favicon { page, data });
+                    // A full or closed queue drops the icon; the page posts it again.
+                    let _full_or_gone = favicon.try_send(NativeEvent::Favicon { page, data });
                 }
             })
             .build_as_child(window)
@@ -318,9 +334,15 @@ impl NativePage {
             .map_err(|error| error.to_string())?;
 
         let observer = Observer::new(tx.clone(), mtm);
+        // SAFETY: the delegate is weak; `Host` keeps the observer and `Host::drop` clears the
+        // delegate before letting the observer go. Main thread.
         unsafe {
             view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*observer)));
-            for key in OBSERVED {
+        }
+        for key in OBSERVED {
+            // SAFETY: KVO on the web view's own key paths with no context pointer, removed in
+            // `Host::drop` while the observer still lives. Main thread.
+            unsafe {
                 view.addObserver_forKeyPath_options_context(
                     &observer,
                     &NSString::from_str(key),
@@ -332,8 +354,9 @@ impl NativePage {
         let shortcuts = Rc::new(RefCell::new(Vec::<String>::new()));
         let monitor_view = view.clone();
         let monitor_tx = tx;
-        let monitor_shortcuts = shortcuts.clone();
+        let monitor_shortcuts = Rc::clone(&shortcuts);
         let callback = block2::RcBlock::new(move |event: NonNull<NSEvent>| {
+            // SAFETY: AppKit hands a local monitor a live event for the length of the call.
             let e = unsafe { event.as_ref() };
             if monitor_view.isHidden()
                 || !has_focus(&monitor_view)
@@ -406,6 +429,8 @@ impl NativePage {
                 event.as_ptr()
             }
         });
+        // SAFETY: AppKit copies the block and keeps it until `Host::drop` removes the monitor;
+        // the block answers each event with it, or with null to swallow it. Main thread.
         let monitor = unsafe {
             NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &callback)
         };
@@ -413,8 +438,9 @@ impl NativePage {
         // window (`PageGlide`); a press anywhere takes over, as in GPUI.
         let wheel = Rc::new(PageGlide::default());
         let wheel_view = view.clone();
-        let page_glide = wheel.clone();
+        let page_glide = Rc::clone(&wheel);
         let wheel_callback = block2::RcBlock::new(move |event: NonNull<NSEvent>| {
+            // SAFETY: AppKit hands a local monitor a live event for the length of the call.
             let e = unsafe { event.as_ref() };
             if e.r#type() != NSEventType::ScrollWheel {
                 page_glide.stop();
@@ -426,6 +452,7 @@ impl NativePage {
                 event.as_ptr()
             }
         });
+        // SAFETY: as the key monitor above: AppKit keeps the block until `Host::drop` removes it.
         let wheel_monitor = unsafe {
             NSEvent::addLocalMonitorForEventsMatchingMask_handler(
                 NSEventMask::ScrollWheel
@@ -450,7 +477,7 @@ impl NativePage {
     }
 
     pub fn handle(&self) -> Rc<RefCell<Host>> {
-        self.0.clone()
+        Rc::clone(&self.0)
     }
 
     pub fn focus_chrome(&self) {
@@ -461,7 +488,7 @@ impl NativePage {
         *self.0.borrow().shortcuts.borrow_mut() = shortcuts;
     }
 
-    pub fn present(&mut self, presentation: Presentation) {
+    pub fn present(&self, presentation: Presentation) {
         self.0.borrow_mut().present(presentation);
     }
 
@@ -476,6 +503,7 @@ impl NativePage {
         let host = self.0.borrow();
         host.observer.ivars().error.borrow_mut().take();
         // Retrying the requested URL also works after a failed provisional load.
+        // SAFETY: the page's own web view, told on the main thread it lives on.
         unsafe {
             host.view.reload();
         }
@@ -484,10 +512,14 @@ impl NativePage {
 
     pub fn history(&self, forward: bool) {
         let host = self.0.borrow();
-        unsafe {
-            if forward {
+        if forward {
+            // SAFETY: the page's own web view, told on the main thread it lives on.
+            unsafe {
                 host.view.goForward();
-            } else {
+            }
+        } else {
+            // SAFETY: as above.
+            unsafe {
                 host.view.goBack();
             }
         }
@@ -496,17 +528,27 @@ impl NativePage {
     pub fn state(&self) -> PageState {
         let host = self.0.borrow();
         host.observer.ivars().pending.set(false);
-        unsafe {
-            PageState {
-                url: host.observer.ivars().requested_url.borrow().clone().or_else(|| {
-                    host.view.URL().and_then(|u| u.absoluteString()).map(|u| u.to_string())
-                }),
-                title: host.view.title().map(|s| s.to_string()).unwrap_or_default(),
-                loading: host.view.isLoading(),
-                can_back: host.view.canGoBack(),
-                can_forward: host.view.canGoForward(),
-                error: host.observer.ivars().error.borrow().clone(),
-            }
+        let view = &host.view;
+        // Each read is one of WKWebView's getters, on the main thread the page lives on.
+        let url = host.observer.ivars().requested_url.borrow().clone().or_else(|| {
+            // SAFETY: as said above.
+            unsafe { view.URL() }.and_then(|u| u.absoluteString()).map(|u| u.to_string())
+        });
+        // SAFETY: as said above.
+        let title = unsafe { view.title() }.map(|s| s.to_string()).unwrap_or_default();
+        // SAFETY: as said above.
+        let loading = unsafe { view.isLoading() };
+        // SAFETY: as said above.
+        let can_back = unsafe { view.canGoBack() };
+        // SAFETY: as said above.
+        let can_forward = unsafe { view.canGoForward() };
+        PageState {
+            url,
+            title,
+            loading,
+            can_back,
+            can_forward,
+            error: host.observer.ivars().error.borrow().clone(),
         }
     }
 
@@ -516,6 +558,8 @@ impl NativePage {
         let host = self.0.borrow();
         // Our navigation delegate owns readiness, so Wry's private pending-
         // script queue is intentionally bypassed. This runs only after finish.
+        // SAFETY: a script string and no completion handler, given to the page's own web view on
+        // the main thread.
         unsafe {
             host.view
                 .evaluateJavaScript_completionHandler(&NSString::from_str(FAVICON_SCRIPT), None);
@@ -622,7 +666,8 @@ impl PageGlide {
             self.stop();
             return false;
         }
-        let lines = gpui::point(event.scrollingDeltaX() as f32, event.scrollingDeltaY() as f32);
+        let lines =
+            gpui::point(wheel_lines(event.scrollingDeltaX()), wheel_lines(event.scrollingDeltaY()));
         if lines == gpui::Point::default() {
             return false;
         }
@@ -649,6 +694,8 @@ impl PageGlide {
             }
         });
         // A frame at 120Hz; the curve runs on the clock, not on ticks.
+        // SAFETY: the run loop keeps the timer and its copied block until `stop` invalidates it;
+        // the block holds the glide weakly. Main thread.
         let timer = unsafe {
             objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(
                 1.0 / 120.0,
@@ -691,11 +738,18 @@ impl PageGlide {
     }
 }
 
+/// A wheel event's delta in lines, as the glide takes it.
+#[expect(clippy::cast_possible_truncation, reason = "a wheel moves a handful of lines")]
+const fn wheel_lines(delta: f64) -> f32 {
+    delta as f32
+}
+
 /// A slice of lines as whole page pixels, carrying the fractions to the next
 /// slice, so a tick still scrolls exactly its 40px a line.
+#[expect(clippy::cast_possible_truncation, reason = "a glide's slice is a few pixels, rounded")]
 fn whole_pixels(carry: (f64, f64), lines: gpui::Point<f32>) -> (i32, i32, (f64, f64)) {
-    let x = carry.0 + f64::from(lines.x) * PAGE_PX_PER_LINE;
-    let y = carry.1 + f64::from(lines.y) * PAGE_PX_PER_LINE;
+    let x = f64::from(lines.x).mul_add(PAGE_PX_PER_LINE, carry.0);
+    let y = f64::from(lines.y).mul_add(PAGE_PX_PER_LINE, carry.1);
     let (dx, dy) = (x.round(), y.round());
     (dx as i32, dy as i32, (x - dx, y - dy))
 }
@@ -741,19 +795,20 @@ impl Host {
         // WebKit may fill newly exposed tiles a frame after a viewport change.
         // Match its page background beneath those tiles instead of exposing
         // the application's dark window background at the resize edge.
-        unsafe {
-            let color = self.view.underPageBackgroundColor();
-            let unchanged = self
-                .background_color
-                .as_ref()
-                .is_some_and(|previous| msg_send![&**previous, isEqual: &*color]);
-            if !unchanged {
-                // WebKit's native backing otherwise uses controlBackgroundColor,
-                // independently of the CSS page background. Exposed resize tiles
-                // must use the page color while the remote content catches up.
-                let _: () = msg_send![&*self.view, _setBackgroundColor: &*color];
-                self.background_color = Some(color);
-            }
+        // SAFETY: WKWebView's getter, on the main thread the page lives on.
+        let color = unsafe { self.view.underPageBackgroundColor() };
+        let unchanged = self.background_color.as_ref().is_some_and(|previous| {
+            // SAFETY: NSObject's `isEqual:` between two live colors, answering a BOOL.
+            unsafe { msg_send![&**previous, isEqual: &*color] }
+        });
+        if !unchanged {
+            // WebKit's native backing otherwise uses controlBackgroundColor,
+            // independently of the CSS page background. Exposed resize tiles
+            // must use the page color while the remote content catches up.
+            // SAFETY: WKWebView's private `_setBackgroundColor:` takes an NSColor and returns
+            // nothing, as Safari's own views call it; main thread.
+            let _: () = unsafe { msg_send![&*self.view, _setBackgroundColor: &*color] };
+            self.background_color = Some(color);
         }
         self.update_visibility();
     }
@@ -766,7 +821,8 @@ impl Host {
     /// Return the keyboard to GPUI if the page holds it.
     pub fn focus_chrome(&self) {
         if has_focus(&self.view) {
-            let _ = self.web.focus_parent();
+            // A refusal leaves the keyboard where it is.
+            let _refused = self.web.focus_parent();
         }
     }
 
@@ -778,7 +834,8 @@ impl Host {
             self.focus_chrome();
         }
         if self.view.isHidden() == visible {
-            let _ = self.web.set_visible(visible);
+            // A refusal leaves the page as it was; the next sync asks again.
+            let _refused = self.web.set_visible(visible);
         }
     }
 
@@ -792,17 +849,25 @@ impl Host {
 impl Drop for Host {
     fn drop(&mut self) {
         self.focus_chrome();
-        unsafe {
-            if let Some(monitor) = self.monitor.take() {
+        for monitor in [self.monitor.take(), self.wheel_monitor.take()].into_iter().flatten() {
+            // SAFETY: a monitor `NativePage::new` added, removed once, on the main thread.
+            unsafe {
                 NSEvent::removeMonitor(&monitor);
             }
-            if let Some(monitor) = self.wheel_monitor.take() {
-                NSEvent::removeMonitor(&monitor);
-            }
-            for key in OBSERVED {
+        }
+        for key in OBSERVED {
+            // SAFETY: the observations `NativePage::new` added, removed while the observer
+            // still lives. Main thread.
+            unsafe {
                 self.view.removeObserver_forKeyPath(&self.observer, &NSString::from_str(key));
             }
+        }
+        // SAFETY: clearing the delegate before the observer goes. Main thread.
+        unsafe {
             self.view.setNavigationDelegate(None);
+        }
+        // SAFETY: the page's own web view, told on the main thread it lives on.
+        unsafe {
             self.view.stopLoading();
         }
         self.wheel.stop();

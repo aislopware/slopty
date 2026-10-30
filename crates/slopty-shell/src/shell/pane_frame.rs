@@ -493,7 +493,7 @@ impl Shell {
     /// The icon a browser pane's page gives itself, which its header wears for the globe.
     fn pane_favicon(&self, pane: Pane, cx: &App) -> Option<std::sync::Arc<gpui::Image>> {
         let Pane::View(RightSurface::Browser(id)) = pane else { return None };
-        self.browsers.get(&id)?.read(cx).favicon.clone()
+        self.browsers.get(&id)?.read(cx).favicon().cloned()
     }
 
     /// What a pane's header names: its icon and the icon's tint, its title, and where it runs.

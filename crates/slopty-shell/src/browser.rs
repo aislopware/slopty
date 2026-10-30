@@ -1,23 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Device-local browser tabs. GPUI owns chrome; the native host owns pages.
-#![allow(
-    let_underscore_drop,
-    missing_copy_implementations,
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assigning_clones,
-    clippy::derive_partial_eq_without_eq,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::missing_const_for_fn,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::partial_pub_fields,
-    clippy::unused_self,
-    clippy::unwrap_used,
-    reason = "shell lint migration: slice A"
-)]
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -33,7 +15,30 @@ use gpui::{
 use model::{PageState, Presentation};
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
-gpui::actions!(browser, [Reload, FocusAddress, NewTab, CloseTab, Back, Forward]);
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    gpui::actions!(
+        browser,
+        [
+            /// Load the page again (or, after a failed load, try its address again).
+            Reload,
+            /// Put the keyboard in the address field, its text selected.
+            FocusAddress,
+            /// Open a new browser tab beside this one.
+            NewTab,
+            /// Close this browser tab.
+            CloseTab,
+            /// Go back in the page's history.
+            Back,
+            /// Go forward in the page's history.
+            Forward,
+        ]
+    );
+}
+pub use actions::{Back, CloseTab, FocusAddress, Forward, NewTab, Reload};
 
 pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     use crate::settings::{ShortcutId, parse_combo, platform_combo};
@@ -67,42 +72,55 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     }
 }
 
+/// What a browser tab tells the shell.
 #[derive(Clone, Debug)]
 pub enum BrowserEvent {
+    /// Its page, title, icon or loading state changed.
     Changed,
+    /// It asks for a new tab, at the address given or blank.
     NewTab(Option<String>),
+    /// It asks to be closed.
     Close,
 }
 
 /// A profile's website data, allocated on first navigation. Default contexts are
 /// ephemeral, for unresolved identities and isolated fixtures.
 #[derive(Clone, Default)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        missing_copy_implementations,
+        reason = "the macOS context holds the page store; iOS opens pages outside and keeps none"
+    )
+)]
 pub struct BrowserContext {
     #[cfg(target_os = "macos")]
     data: native::BrowserData,
 }
 
-impl BrowserContext {
-    pub(crate) fn for_profile(profile: profile::BrowserProfile) -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            Self { data: native::BrowserData::for_profile(profile) }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = profile;
-            Self::default()
-        }
+impl std::fmt::Debug for BrowserContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserContext").finish_non_exhaustive()
     }
 }
 
+#[cfg(target_os = "macos")]
+impl BrowserContext {
+    /// The context holding `profile`'s website data.
+    pub(crate) fn for_profile(profile: profile::BrowserProfile) -> Self {
+        Self { data: native::BrowserData::for_profile(profile) }
+    }
+}
+
+/// A browser tab: its address bar and toolbar drawn by GPUI, its page by the native host (on
+/// iOS a page opens in the system browser).
 pub struct BrowserSurface {
     #[cfg(target_os = "macos")]
     context: BrowserContext,
     address: Entity<ComposerInput>,
     focus: FocusHandle,
-    pub page: PageState,
-    pub favicon: Option<std::sync::Arc<gpui::Image>>,
+    page: PageState,
+    favicon: Option<std::sync::Arc<gpui::Image>>,
     address_edited: bool,
     validation: Option<String>,
     remote: bool,
@@ -125,6 +143,15 @@ pub struct BrowserSurface {
     favicon_generation: u64,
 }
 
+impl std::fmt::Debug for BrowserSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserSurface")
+            .field("page", &self.page)
+            .field("presentation", &self.presentation)
+            .finish_non_exhaustive()
+    }
+}
+
 impl EventEmitter<BrowserEvent> for BrowserSurface {}
 impl Focusable for BrowserSurface {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -133,10 +160,12 @@ impl Focusable for BrowserSurface {
 }
 
 impl BrowserSurface {
+    /// A blank tab over `context`'s website data; `remote` when its session runs on another
+    /// device, whose localhost this one cannot reach.
     pub fn new(
         context: BrowserContext,
         remote: bool,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let address = cx.new(|cx| {
@@ -167,7 +196,7 @@ impl BrowserSurface {
             }
         });
         #[cfg(not(target_os = "macos"))]
-        let _ = (window, context);
+        let _: (&Window, BrowserContext) = (window, context);
         Self {
             #[cfg(target_os = "macos")]
             context,
@@ -198,6 +227,7 @@ impl BrowserSurface {
         }
     }
 
+    /// The tab's title: the page's, or its address while it has none.
     pub fn title(&self) -> gpui::SharedString {
         self.page.label().into()
     }
@@ -207,12 +237,20 @@ impl BrowserSurface {
         self.page.url.as_deref()
     }
 
+    /// The page's icon, once it drew one.
+    pub const fn favicon(&self) -> Option<&std::sync::Arc<gpui::Image>> {
+        self.favicon.as_ref()
+    }
+
+    /// Whether the tab's session runs on another device.
     pub const fn set_remote(&mut self, remote: bool) {
         self.remote = remote;
     }
 
-    pub fn set_shortcuts(&mut self, keymap: &crate::settings::KeymapConfig) {
-        #[cfg(target_os = "macos")]
+    /// Tell the page which chords are the app's, so it hands them back rather than keeping
+    /// them.
+    #[cfg(target_os = "macos")]
+    pub fn set_shortcuts(&self, keymap: &crate::settings::KeymapConfig) {
         if let Some(native) = &self.native {
             native.set_shortcuts(
                 crate::settings::ShortcutId::ALL
@@ -222,11 +260,10 @@ impl BrowserSurface {
                     .collect(),
             );
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = keymap;
     }
 
-    pub fn focus_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Put the keyboard in the address field, its text selected.
+    pub fn focus_address(&self, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(native) = &self.native {
             native.focus_chrome();
@@ -244,6 +281,7 @@ impl BrowserSurface {
         }
     }
 
+    /// How the page shows: live, as a still while the panes move, or hidden.
     pub fn set_presentation(&mut self, presentation: Presentation, cx: &mut Context<Self>) {
         if self.presentation == presentation {
             return;
@@ -262,7 +300,7 @@ impl BrowserSurface {
         &mut self,
         handle: crate::state::EngineHandle,
         chat_id: String,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) {
         self.previews_task = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -305,6 +343,15 @@ impl BrowserSurface {
         }));
     }
 
+    /// Go to what the person typed: an address, or a host such as `localhost:3000`. An address
+    /// the browser refuses leaves the page and says why under the address field.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            clippy::needless_pass_by_ref_mut,
+            reason = "the macOS page takes the window; iOS opens the page outside"
+        )
+    )]
     pub fn navigate(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
         let url = match model::normalize_address(input) {
             Ok(url) => url,
@@ -323,18 +370,19 @@ impl BrowserSurface {
         self.clear_favicon(cx);
         #[cfg(target_os = "macos")]
         {
-            self.favicon_generation += 1;
+            self.favicon_generation = self.favicon_generation.wrapping_add(1);
             self.favicon_task = None;
             let result = if let Some(native) = &self.native {
                 native.load(&url)
             } else {
                 // gpui-fast's native host takes the app too.
                 native::NativePage::new(window, &self.context.data, self.native_tx.clone(), cx)
-                    .map(|mut native| {
+                    .and_then(|native| {
                         native.present(self.presentation);
+                        let loaded = native.load(&url);
                         self.native = Some(native);
+                        loaded
                     })
-                    .and_then(|()| self.native.as_ref().unwrap().load(&url))
             };
             self.page.loading = result.is_ok();
             if let Err(error) = result {
@@ -344,7 +392,7 @@ impl BrowserSurface {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = window;
+            let _: &Window = window;
             cx.open_url(&url);
         }
         cx.emit(BrowserEvent::Changed);
@@ -356,12 +404,24 @@ impl BrowserSurface {
         self.navigate(&url, window, cx);
     }
 
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            clippy::needless_pass_by_ref_mut,
+            reason = "the macOS page clears its error; iOS opens the page outside"
+        )
+    )]
     fn reload(&mut self, cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if let Some(native) = &self.native {
             if self.page.error.is_some() {
-                if let Some(url) = &self.page.url {
-                    let _ = native.load(url);
+                if let Some(url) = &self.page.url
+                    && let Err(error) = native.load(url)
+                {
+                    // The retry failed as the load did: the page keeps saying why.
+                    self.page.error = Some(error);
+                    cx.notify();
+                    return;
                 }
             } else {
                 native.reload();
@@ -373,19 +433,27 @@ impl BrowserSurface {
         cx.notify();
     }
 
-    fn open_external(&self, cx: &mut Context<Self>) {
+    fn open_external(&self, cx: &Context<Self>) {
         if let Some(url) = self.page.url.as_deref().filter(|url| model::allowed_navigation(url)) {
             cx.open_url(url);
         }
     }
 
-    fn history(&mut self, forward: bool) {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            clippy::unused_self,
+            clippy::missing_const_for_fn,
+            reason = "the macOS page walks its history; iOS opens pages outside, with none"
+        )
+    )]
+    fn history(&self, forward: bool) {
         #[cfg(target_os = "macos")]
         if let Some(native) = &self.native {
             native.history(forward);
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = forward;
+        let _: bool = forward;
     }
 
     /// Explicitly close even if an async callback temporarily retains an entity.
@@ -395,6 +463,7 @@ impl BrowserSurface {
         }
     }
 
+    /// Put the page away and let go of it, its icon too.
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.set_presentation(Presentation::Hidden, cx);
         self.clear_favicon(cx);
@@ -405,7 +474,7 @@ impl BrowserSurface {
             }
             self.native = None;
             self.favicon_task = None;
-            self.favicon_generation += 1;
+            self.favicon_generation = self.favicon_generation.wrapping_add(1);
         }
     }
 }
@@ -427,7 +496,7 @@ impl BrowserSurface {
                 let mut page = native.state();
                 // A failed provisional request has no committed WebKit URL.
                 if page.url.is_none() {
-                    page.url = self.page.url.clone();
+                    page.url.clone_from(&self.page.url);
                 }
                 if page.error.is_some() {
                     page.loading = false;
@@ -445,7 +514,7 @@ impl BrowserSurface {
                     if let Some(image) = self.favicon.take() {
                         cx.defer(move |cx| gpui::ImageSource::Image(image).evict(None, cx));
                     }
-                    self.favicon_generation += 1;
+                    self.favicon_generation = self.favicon_generation.wrapping_add(1);
                     self.favicon_task = None;
                 }
                 if !self.address.focus_handle(cx).is_focused(window) {
@@ -491,7 +560,8 @@ impl BrowserSurface {
                     let Some(bytes) = decode.await else {
                         return;
                     };
-                    let _ = this.update(cx, |this, cx| {
+                    // A gone tab has no icon to show.
+                    let _gone = this.update(cx, |this, cx| {
                         if this.favicon_generation == generation
                             && this.page.url.as_deref() == Some(&page)
                         {
@@ -559,7 +629,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn customized_app_shortcuts_win_over_browser_defaults(cx: &mut gpui::TestAppContext) {
+    fn customized_app_shortcuts_win_over_browser_defaults(cx: &gpui::TestAppContext) {
         cx.update(|cx| {
             let mut config = crate::settings::KeymapConfig::default();
             bind_keys(cx, &config);

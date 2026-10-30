@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Loaders: the slopty pulse loader, the gradient matrix spinner, and the boot
-//! splash content. All motion routes through `crate::motion` pure helpers, so
-//! the math is unit-tested and these elements are testable-by-compile.
+//! Loaders: the slopty pulse loader, the gradient matrix spinner, and the boot splash content.
+//!
+//! All motion routes through `crate::motion` pure helpers, so the math is unit-tested and these
+//! elements are testable-by-compile.
 //!
 //! Rendering pattern: cells share a self-parking pulse clock; per-cell offsets
 //! come from [`motion::staggered_phase`], so all cells stay phase-locked.
@@ -10,24 +11,6 @@
 //! cell to its rest state automatically (gpui `reduce_motion`). Activity grids
 //! retain a gentle brightness pulse with system reduced motion; explicit On
 //! and background pause keep them still.
-#![allow(
-    let_underscore_drop,
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::float_cmp,
-    clippy::indexing_slicing,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::missing_assert_message,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EntityId, InteractiveElement as _,
@@ -47,8 +30,9 @@ pub use slopty_view_proto::motion::{
 use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SLOPTY_PULSE, SPLASH_OUT};
 use crate::theme::{GlyphPalette, Theme};
 
-/// The animated Slopty mark: the full logo pixel grid with a light wave sweeping tail→head. Each
-/// cell rests dim (opacity 0.08, scale 0.9) and flares to full as the crest passes; per-cell
+/// The animated Slopty mark: the full logo pixel grid with a light wave sweeping tail→head.
+///
+/// Each cell rests dim (opacity 0.08, scale 0.9) and flares to full as the crest passes; per-cell
 /// stagger follows the flight axis. `height_px` sets the mark's height (width follows the 820:940
 /// canvas).
 pub fn slopty_mark_loader(
@@ -121,10 +105,11 @@ pub fn slopty_loader(
 
 pub use slopty_view_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
 
-/// The gradient matrix spinner (WorkingIndicator): a 3×3 grid of round cells tinted per row from
-/// the sunrise gradient. Each cell pulses opacity once per 750ms period; the per-cell phase
-/// follows the "arrow-up" pattern (the pulse enters at the bottom edge and converges toward the
-/// top-center cell), so the wave reads as travelling upward.
+/// The gradient matrix spinner (`WorkingIndicator`): a 3×3 grid of round cells.
+///
+/// The cells are tinted per row from the sunrise gradient. Each cell pulses opacity once per 750ms
+/// period; the per-cell phase follows the "arrow-up" pattern (the pulse enters at the bottom edge
+/// and converges toward the top-center cell), so the wave reads as travelling upward.
 pub fn gradient_spinner(
     _id: &'static str,
     theme: &Theme,
@@ -132,27 +117,36 @@ pub fn gradient_spinner(
     view: EntityId,
     cx: &mut App,
 ) -> impl IntoElement {
-    let center = (MATRIX_SIDE as f32 - 1.0) / 2.0;
-    let max = MATRIX_SIDE as f32 - 1.0 + center;
+    let center = (cell(MATRIX_SIDE) - 1.0) / 2.0;
+    let max = cell(MATRIX_SIDE) - 1.0 + center;
     let pulse = motion::activity_pulse_slow(view, cx);
     // On light, each sunrise row takes the deeper tone of its hue that reads on white,
     // and the cells rest higher (`Theme::spinner_ink`, `Theme::spinner_floor`).
     let tints = gradient_tints(theme);
     let floor = theme.spinner_floor(GSPIN_DIM);
-    div().flex().flex_col().gap(px(cell_px / 2.0)).children((0..MATRIX_SIDE).map(move |row| {
-        let tint = tints[row];
-        div().flex().flex_row().gap(px(cell_px / 2.0)).children((0..MATRIX_SIDE).map(move |col| {
-            // Distance of this cell from the wave origin, normalized
-            // into a phase offset (gradient-spin's `--gspin-phase`).
-            let d = MATRIX_SIDE as f32 - 1.0 - row as f32 + (col as f32 - center).abs();
-            let phase = if max == 0.0 { 0.0 } else { d / (max + 1.0) };
-            div()
-                .size(px(cell_px))
-                .rounded(px(cell_px / 2.0))
-                .bg(tint)
-                .opacity(pulse.opacity(phase, floor))
-        }))
-    }))
+    div().flex().flex_col().gap(px(cell_px / 2.0)).children(tints.into_iter().enumerate().map(
+        move |(row, tint)| {
+            div().flex().flex_row().gap(px(cell_px / 2.0)).children((0..MATRIX_SIDE).map(
+                move |col| {
+                    // Distance of this cell from the wave origin, normalized
+                    // into a phase offset (gradient-spin's `--gspin-phase`).
+                    let d = cell(MATRIX_SIDE) - 1.0 - cell(row) + (cell(col) - center).abs();
+                    let phase = if max == 0.0 { 0.0 } else { d / (max + 1.0) };
+                    div()
+                        .size(px(cell_px))
+                        .rounded(px(cell_px / 2.0))
+                        .bg(tint)
+                        .opacity(pulse.opacity(phase, floor))
+                },
+            ))
+        },
+    ))
+}
+
+/// A grid cell's index (or a grid's side) as the loaders' geometry counts it.
+#[expect(clippy::cast_precision_loss, reason = "a loader's grid is a few cells a side")]
+const fn cell(index: usize) -> f32 {
+    index as f32
 }
 
 /// The resting opacity of the slopty wave and mark loaders (`motion::pulse_opacity`'s low end).
@@ -160,7 +154,7 @@ const PULSE_FLOOR: f32 = 0.08;
 
 /// `opacity` from [`motion::pulse_opacity`] (0.08..1) rescaled to rest at `floor` instead.
 fn lift_floor(opacity: f32, floor: f32) -> f32 {
-    floor + (opacity - PULSE_FLOOR) / (1.0 - PULSE_FLOOR) * (1.0 - floor)
+    ((opacity - PULSE_FLOOR) / (1.0 - PULSE_FLOOR)).mul_add(1.0 - floor, floor)
 }
 
 /// The gradient spinner's three row tints as `theme` draws them.
@@ -176,7 +170,7 @@ pub fn mini_glyph_spinner(
     cell_px: f32,
     palette: GlyphPalette,
     view: EntityId,
-    cx: &mut App,
+    cx: &App,
 ) -> impl IntoElement {
     mini_spinner_tinted(key, cell_px, palette.rows(), view, cx)
 }
@@ -189,7 +183,7 @@ pub fn mini_mono_spinner(
     cell_px: f32,
     tint: gpui::Hsla,
     view: EntityId,
-    cx: &mut App,
+    cx: &App,
 ) -> impl IntoElement {
     mini_spinner_tinted(key, cell_px, [tint; 3], view, cx)
 }
@@ -199,7 +193,7 @@ fn mini_spinner_tinted(
     cell_px: f32,
     row_tints: [gpui::Hsla; 3],
     _view: EntityId,
-    cx: &mut App,
+    cx: &App,
 ) -> impl IntoElement {
     // Legible on light (`Theme::spinner_ink`), its cells resting higher there; as given
     // where no theme is installed.
@@ -221,6 +215,7 @@ struct MiniSpinner {
 }
 
 impl RenderOnce for MiniSpinner {
+    #[expect(clippy::float_cmp, reason = "any change of size or floor is news")]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         // Keep pulse invalidation separate from container state changes so
         // cached sibling rows can be reused while these six cells animate.
@@ -277,24 +272,28 @@ fn mini_spinner_cells(
     /// Clockwise ring position of each `(row, col)` cell, top-left first:
     /// (0,0) → (0,1) → (1,1) → (2,1) → (2,0) → (1,0).
     const RING: [[usize; COLS]; ROWS] = [[0, 1], [5, 2], [4, 3]];
-    const RING_LEN: f32 = (COLS * ROWS) as f32;
+    const RING_LEN: f32 = cell(COLS * ROWS);
     let pulse = motion::activity_pulse(view, cx);
-    div().flex().flex_col().gap(px(cell_px / 2.0)).children((0..ROWS).map(move |row| {
-        let tint = row_tints[row];
-        div().flex().flex_row().gap(px(cell_px / 2.0)).children((0..COLS).map(move |col| {
-            let phase = RING[row][col] as f32 / RING_LEN;
-            div()
-                .size(px(cell_px))
-                .rounded(px(cell_px / 2.0))
-                .bg(tint)
-                .opacity(pulse.opacity(phase, floor))
-        }))
-    }))
+    div().flex().flex_col().gap(px(cell_px / 2.0)).children(RING.into_iter().zip(row_tints).map(
+        move |(ring, tint)| {
+            div().flex().flex_row().gap(px(cell_px / 2.0)).children(ring.into_iter().map(
+                move |at| {
+                    let phase = cell(at) / RING_LEN;
+                    div()
+                        .size(px(cell_px))
+                        .rounded(px(cell_px / 2.0))
+                        .bg(tint)
+                        .opacity(pulse.opacity(phase, floor))
+                },
+            ))
+        },
+    ))
 }
 
-/// A rounded fill that breathes on the slopty pulse clock between `floor` and
-/// `peak` opacity, filling whatever positioned box it is placed in. Like [`pulse_dot`] it repaints
-/// from its own cached view, so the surrounding chrome stays still.
+/// A rounded fill that breathes on the slopty pulse clock between `floor` and `peak` opacity.
+///
+/// It fills whatever positioned box it is placed in, and repaints from its own cached view, so
+/// the surrounding chrome stays still.
 pub fn pulse_glow(
     key: impl Into<SharedString>,
     radius: f32,
@@ -360,7 +359,7 @@ impl Render for PulseGlowView {
     }
 }
 
-/// Stroke width of [`upload_progress_ring`].
+/// Stroke width of [`upload_progress_arc`].
 const RING_STROKE: f32 = 2.5;
 /// Polyline segments for a full circle — plenty for a ≤40px ring.
 const RING_SEGMENTS: f32 = 64.0;
@@ -398,11 +397,16 @@ fn progress_arc(
                 if sweep <= 0.0 {
                     return;
                 }
-                let steps = ((RING_SEGMENTS * sweep).ceil() as usize).max(2);
-                let at = |i: usize| {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a sweep of at most one turn is at most 64 segments"
+                )]
+                let steps = ((RING_SEGMENTS * sweep.min(1.0)).ceil() as u16).max(2);
+                let at = |i: u16| {
                     // Clockwise from 12 o'clock.
-                    let theta = -std::f32::consts::FRAC_PI_2
-                        + std::f32::consts::TAU * sweep * (i as f32 / steps as f32);
+                    let theta = (std::f32::consts::TAU * sweep)
+                        .mul_add(f32::from(i) / f32::from(steps), -std::f32::consts::FRAC_PI_2);
                     point(center.x + px(radius * theta.cos()), center.y + px(radius * theta.sin()))
                 };
                 let mut builder = PathBuilder::stroke(px(RING_STROKE));
@@ -422,9 +426,10 @@ fn progress_arc(
     .inset_0()
 }
 
-/// Full-window boot splash: the app's dot loader (the same [`gradient_spinner`]
-/// the session list and the reconnecting line pulse — user request, replacing
-/// the hero ascii) over the app background with a quiet status line. While
+/// Full-window boot splash: the app's dot loader over the app background.
+///
+/// The same [`gradient_spinner`] the session list and the reconnecting line pulse — user request,
+/// replacing the hero ascii) over the app background with a quiet status line. While
 /// `fading` it plays `splash-out` (150ms hold, then 0.5s fade + 6px lift); the
 /// shell removes it once [`SPLASH_OUT`] has run its course.
 pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App) -> AnyElement {
@@ -459,9 +464,9 @@ pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App)
 
 // Compile-time proof the specs referenced here stay wired to the catalog.
 const _: () = {
-    assert!(SPLASH_OUT.delay_ms == 150);
-    assert!(SLOPTY_PULSE.duration_ms == 2400);
-    assert!(GRADIENT_SPIN.duration_ms == 750);
+    assert!(SPLASH_OUT.delay_ms == 150, "the splash holds 150 ms before it fades");
+    assert!(SLOPTY_PULSE.duration_ms == 2400, "the slopty pulse runs 2.4 s");
+    assert!(GRADIENT_SPIN.duration_ms == 750, "the gradient spinner turns in 750 ms");
 };
 
 // One loading voice for every surface (`.research/micro-details-2026-10-16.md` M30).
@@ -478,7 +483,8 @@ pub fn pending(key: impl Into<SharedString>, text: impl Into<SharedString>) -> P
     Pending { key: key.into(), text: text.into(), wait: true }
 }
 
-#[derive(IntoElement)]
+/// A load's loader: the mono spinner and muted words ([`pending`]).
+#[derive(Debug, IntoElement)]
 pub struct Pending {
     key: SharedString,
     text: SharedString,
@@ -508,9 +514,10 @@ pub enum Delayed {
     Done,
 }
 
-/// Whether the place `key` names shows its loader while `loading`: blank for the first
-/// [`PENDING_GRACE`], then the loader, held at least [`PENDING_HOLD`] once shown. Ask it every
-/// time the place draws, loading or not, so it knows when its load ends.
+/// Whether the place `key` names shows its loader while `loading`.
+///
+/// Blank for the first [`PENDING_GRACE`], then the loader, held at least [`PENDING_HOLD`] once
+/// shown. Ask it every time the place draws, loading or not, so it knows when its load ends.
 pub fn delayed(
     key: impl Into<SharedString>,
     loading: bool,
@@ -534,12 +541,18 @@ pub fn delayed(
         if load.timer.is_none() {
             load.timer = Some(cx.spawn(async move |load, cx| {
                 cx.background_executor().timer(PENDING_GRACE).await;
-                let _ = load.update(cx, |load, cx| {
-                    load.shown = true;
-                    cx.notify();
-                });
+                if load
+                    .update(cx, |load, cx| {
+                        load.shown = true;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
                 cx.background_executor().timer(PENDING_HOLD).await;
-                let _ = load.update(cx, |load, cx| {
+                // A gone place has no loader to hold.
+                let _gone = load.update(cx, |load, cx| {
                     load.held = true;
                     cx.notify();
                 });
@@ -574,7 +587,8 @@ impl RenderOnce for Pending {
                 }
                 cx.spawn(async move |grace, cx| {
                     cx.background_executor().timer(PENDING_GRACE).await;
-                    let _ = grace.update(cx, |grace, cx| {
+                    // A gone place has no loader to show.
+                    let _gone = grace.update(cx, |grace, cx| {
                         grace.over = true;
                         cx.notify();
                     });

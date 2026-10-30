@@ -1,7 +1,7 @@
-//! What the shell reads about agents that its source kept beside its engine: the harness
-//! descriptors (`registry`) and how each agent installs (`harness`). Slopty's workers run the
-//! agents; these are the shell's view of them.
-#![allow(clippy::too_long_first_doc_paragraph, reason = "shell lint migration: slice A")]
+//! What the shell reads about agents that its source kept beside its engine.
+//!
+//! The harness descriptors (`registry`) and how each agent installs (`harness`). Slopty's
+//! workers run the agents; these are the shell's view of them.
 
 pub mod harness;
 pub mod registry;

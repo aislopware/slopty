@@ -1,14 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 189115f), see THIRD_PARTY_NOTICES.md
 //! Browser state shared by the chrome and platform host. No native handles.
-#![allow(
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::map_err_ignore,
-    reason = "shell lint migration: slice A"
-)]
 use std::net::IpAddr;
 
 /// `NSEvent` supplies characters, while GPUI bindings name non-printing keys.
@@ -43,17 +34,25 @@ mod native_shortcut_tests {
     }
 }
 
+/// What a tab's page is at: its address, title, loading state, history and failure.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 pub struct PageState {
+    /// The address shown: the one asked for until the page commits, then the page's.
     pub url: Option<String>,
+    /// The page's title; empty until it names one.
     pub title: String,
+    /// Whether the page is loading.
     pub loading: bool,
+    /// Whether Back has a page to go to.
     pub can_back: bool,
+    /// Whether Forward has a page to go to.
     pub can_forward: bool,
+    /// Why the page failed, in words for the person.
     pub error: Option<String>,
 }
 
 impl PageState {
+    /// The tab's name: the page's title, else its host, else "Browser".
     pub fn label(&self) -> String {
         if self.title.trim().is_empty() {
             self.url
@@ -67,6 +66,7 @@ impl PageState {
     }
 }
 
+/// Whether `url` names this device: `localhost`, a `.localhost` name or a loopback address.
 pub fn loopback(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
@@ -83,11 +83,10 @@ const LOCAL_FILE_ADDRESS: &str = "Local files can't be opened in the Browser. Op
 /// `\\server\share\page.html` `https://server/share/page.html` and `~`
 /// `https://~/` (#962).
 fn local_file_address(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let drive = bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'/' | b'\\');
+    let drive = matches!(
+        text.as_bytes(),
+        [letter, b':', b'/' | b'\\', ..] if letter.is_ascii_alphabetic()
+    );
     (text.starts_with('/') && !text.starts_with("//"))
         || text.starts_with('\\')
         || text == "~"
@@ -98,6 +97,8 @@ fn local_file_address(text: &str) -> bool {
         || text.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
 }
 
+/// What the person typed as the address a tab loads: `https://` added to a bare host, `http://`
+/// to a bare loopback one. `Err` says, in words for the person, why it is refused.
 pub fn normalize_address(input: &str) -> Result<String, &'static str> {
     let text = input.trim();
     if text.is_empty() {
@@ -119,7 +120,8 @@ pub fn normalize_address(input: &str) -> Result<String, &'static str> {
         text.contains("://") || (text.contains(':') && !host_port && !text.starts_with('['));
     let mut parsed =
         url::Url::parse(&if explicit { text.to_owned() } else { format!("https://{text}") })
-            .map_err(|_| "Enter a valid website or localhost address.")?;
+            .ok()
+            .ok_or("Enter a valid website or localhost address.")?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("Only http and https addresses are supported.");
     }
@@ -127,7 +129,8 @@ pub fn normalize_address(input: &str) -> Result<String, &'static str> {
         return Err("Use an address without an embedded username or password.");
     }
     if !explicit && loopback(&parsed) {
-        let _ = parsed.set_scheme("http");
+        // From https to http, two special schemes: the change cannot be refused.
+        let _refused = parsed.set_scheme("http");
     }
     Ok(parsed.into())
 }
@@ -151,7 +154,7 @@ pub fn transcript_address(input: &str) -> Result<String, &'static str> {
         if byte == b'%'
             && !input
                 .as_bytes()
-                .get(i + 1..i + 3)
+                .get(i.saturating_add(1)..i.saturating_add(3))
                 .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
         {
             return Err("This link contains an invalid escape.");
@@ -160,6 +163,8 @@ pub fn transcript_address(input: &str) -> Result<String, &'static str> {
     normalize_address(input)
 }
 
+/// Whether a page may go to `address`: an http or https address with a host and no
+/// credentials.
 pub fn allowed_navigation(address: &str) -> bool {
     url::Url::parse(address).is_ok_and(|u| {
         matches!(u.scheme(), "http" | "https")
@@ -177,15 +182,19 @@ pub fn allowed_frame_navigation(address: &str) -> bool {
         || url::Url::parse(address).is_ok_and(|u| matches!(u.scheme(), "about" | "data" | "blob"))
 }
 
+/// How a tab's native page shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Presentation {
+    /// Not shown: its pane is not laid out.
     #[default]
     Hidden,
+    /// Shown and taking input.
     Live,
     /// Keep rendering while GPUI owns drag input.
     Passthrough,
 }
 
+/// How a page shows when its pane is laid out (`active`) and while the panes are dragged.
 pub const fn presentation(active: bool, dragging: bool) -> Presentation {
     if !active {
         Presentation::Hidden

@@ -1,6 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Stable device-local browser storage, independent of chats and repositories.
-#![allow(clippy::indexing_slicing, clippy::unwrap_used, reason = "shell lint migration: slice A")]
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
@@ -46,9 +45,14 @@ impl BrowserProfile {
         let mut hash = Sha256::new();
         hash.update(b"slopty-wkwebsite-data-store-v1");
         hash.update(self.root.as_os_str().as_encoded_bytes());
-        let mut id: [u8; 16] = hash.finalize()[..16].try_into().unwrap();
-        id[6] = (id[6] & 0x0f) | 0x80; // UUID v8, application-defined hash.
-        id[8] = (id[8] & 0x3f) | 0x80;
+        // The digest's first 16 bytes, as a UUID v8 (an application-defined hash).
+        let mut id = [0_u8; 16];
+        for (byte, digest) in id.iter_mut().zip(hash.finalize()) {
+            *byte = digest;
+        }
+        let [_, _, _, _, _, _, version, _, variant, ..] = &mut id;
+        *version = (*version & 0x0f) | 0x80;
+        *variant = (*variant & 0x3f) | 0x80;
         id
     }
 }

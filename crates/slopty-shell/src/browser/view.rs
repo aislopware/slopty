@@ -1,10 +1,4 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3d2f1e6), see THIRD_PARTY_NOTICES.md
-#![allow(
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::too_many_arguments,
-    reason = "shell lint migration: slice A"
-)]
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, Focusable as _, IntoElement, KeyDownEvent, MouseButton, Render, Window,
@@ -17,15 +11,21 @@ use crate::settings::widgets::ActionHint as _;
 use crate::theme::Theme;
 use crate::{icons, surface_chrome};
 
-fn button(
+/// A toolbar control: its id, its name, what it draws, whether it can act, and the action whose
+/// key its tooltip names.
+struct Control {
     id: &'static str,
     label: &'static str,
     glyph: &'static str,
     enabled: bool,
     action: Option<Box<dyn gpui::Action>>,
+}
+
+fn button(
+    Control { id, label, glyph, enabled, action }: Control,
     focus: &gpui::FocusHandle,
     theme: &Theme,
-    cx: &mut Context<BrowserSurface>,
+    cx: &Context<BrowserSurface>,
 ) -> gpui::Stateful<gpui::Div> {
     // Match Files/History chrome, including focus-preserving mouse-down and
     // tooltips. Disabled controls have neither a pointer cursor nor a handler.
@@ -72,7 +72,7 @@ impl BrowserSurface {
         cx.stop_propagation();
     }
 
-    fn preview_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn preview_body(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let snapshot = &self.previews;
         let subtitle = if snapshot.remote { "Running on your device" } else { "Running locally" };
         let mut content = div()
@@ -233,7 +233,7 @@ impl BrowserSurface {
             .into_any_element()
     }
 
-    fn empty_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn empty_body(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         if self.page.url.is_none() && self.previews_task.is_some() {
             return self.preview_body(theme, cx);
         }
@@ -373,11 +373,13 @@ impl Render for BrowserSurface {
         let external = !cfg!(target_os = "macos");
         let has_page = self.page.url.is_some();
         let back = button(
-            "browser-back",
-            "Back",
-            icons::ARROW_LEFT,
-            self.page.can_back,
-            Some(Box::new(super::Back)),
+            Control {
+                id: "browser-back",
+                label: "Back",
+                glyph: icons::ARROW_LEFT,
+                enabled: self.page.can_back,
+                action: Some(Box::new(super::Back)),
+            },
             &self.focus,
             &theme,
             cx,
@@ -386,11 +388,13 @@ impl Render for BrowserSurface {
             el.on_click(cx.listener(|this, _, _, _| this.history(false)))
         });
         let forward = button(
-            "browser-forward",
-            "Forward",
-            icons::ARROW_RIGHT,
-            self.page.can_forward,
-            Some(Box::new(super::Forward)),
+            Control {
+                id: "browser-forward",
+                label: "Forward",
+                glyph: icons::ARROW_RIGHT,
+                enabled: self.page.can_forward,
+                action: Some(Box::new(super::Forward)),
+            },
             &self.focus,
             &theme,
             cx,
@@ -399,11 +403,13 @@ impl Render for BrowserSurface {
             el.on_click(cx.listener(|this, _, _, _| this.history(true)))
         });
         let reload = button(
-            "browser-reload",
-            "Reload page",
-            icons::REFRESH,
-            has_page,
-            Some(Box::new(super::Reload)),
+            Control {
+                id: "browser-reload",
+                label: "Reload page",
+                glyph: icons::REFRESH,
+                enabled: has_page,
+                action: Some(Box::new(super::Reload)),
+            },
             &self.focus,
             &theme,
             cx,
@@ -420,7 +426,7 @@ impl Render for BrowserSurface {
                         native.focus_chrome();
                     }
                     #[cfg(not(target_os = "macos"))]
-                    let _ = this;
+                    let _: &mut BrowserSurface = this;
                 }),
             )
             .child(
@@ -475,11 +481,13 @@ impl Render for BrowserSurface {
                 )
             });
         let open = button(
-            "browser-external",
-            "Open in default browser",
-            icons::ARROW_UP_RIGHT,
-            has_page,
-            None,
+            Control {
+                id: "browser-external",
+                label: "Open in default browser",
+                glyph: icons::ARROW_UP_RIGHT,
+                enabled: has_page,
+                action: None,
+            },
             &self.focus,
             &theme,
             cx,
@@ -527,9 +535,7 @@ impl Render for BrowserSurface {
                 .is_some_and(|u| super::model::loopback(&u));
         div().id("browser-surface").size_full().flex().flex_col().track_focus(&self.focus)
             .key_context("Browser").on_key_down(cx.listener(Self::key_down))
-            .on_key_up(cx.listener(|this,event: &gpui::KeyUpEvent,w,cx| {
-                let _=(this,event,w,cx);
-            }))
+            .on_key_up(cx.listener(|_, _: &gpui::KeyUpEvent, _, _| {}))
             .on_action(cx.listener(|this, _: &super::Reload, _, cx| this.reload(cx)))
             .on_action(cx.listener(|this, _: &super::FocusAddress, w, cx| this.focus_address(w, cx)))
             .on_action(cx.listener(|_, _: &super::NewTab, _, cx| cx.emit(BrowserEvent::NewTab(None))))

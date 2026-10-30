@@ -224,7 +224,7 @@ impl Shell {
             .child(div().flex_1())
             .child(actions);
         let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
-        self.titlebar_drag_region("chat-titlebar", bar, cx).into_any_element()
+        Self::titlebar_drag_region("chat-titlebar", bar, cx).into_any_element()
     }
 
     /// The session's identity in the titlebar row: its program's icon, its title (whole in a

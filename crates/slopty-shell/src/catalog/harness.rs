@@ -3,8 +3,8 @@
 //!
 //! The shell reads only the documented manual install command per agent.
 //! The drivers themselves are Slopty's workers'.
-#![allow(missing_docs, reason = "shell lint migration: slice A")]
 
+/// How each agent installs by hand.
 pub mod install {
     use slopty_view_proto::HarnessId;
 

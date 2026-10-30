@@ -162,9 +162,8 @@ impl Shell {
                 Some(Pane::Shell(self.add_shell_beside(key, shell, cx)))
             }
             SavedSurface::File { chat, path } => {
-                let owner = self
-                    .link_owner(&chat, cx)
-                    .unwrap_or_else(|| (chat.clone(), self.state.clone()));
+                let owner =
+                    self.link_owner(&chat).unwrap_or_else(|| (chat.clone(), self.state.clone()));
                 self.add_file_surface_at(owner, path, None, window, cx);
                 self.front_view(cx).map(Pane::View)
             }

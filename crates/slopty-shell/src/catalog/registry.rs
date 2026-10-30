@@ -1,7 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! `HarnessRegistry` — the engine's harness catalog: eager instances (mock) plus lazy
-//! slots resolved on first use (claude-code spawns subprocess discovery; codex/cursor
-//! later). Lazy slots carry a static descriptor so `ListHarnesses` never forces a spawn.
+//! `HarnessRegistry`: the engine's harness catalog.
+//!
+//! Eager instances (mock) plus lazy slots resolved on first use (claude-code spawns subprocess
+//! discovery; codex/cursor later). Lazy slots carry a static descriptor so `ListHarnesses` never
+//! forces a spawn.
 //!
 //! Also owns the device's harness ENABLEMENT (Settings → Providers): which harnesses
 //! this device's composer offers, persisted in `{data_dir}/harness-prefs.json`.
@@ -10,12 +12,6 @@
 
 // An excerpt — the descriptor the interface reads. The registry
 // itself, its harness slots and prefs file are the engine's, which is Slopty's.
-#![allow(
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice A"
-)]
 
 use serde::{Deserialize, Serialize};
 use slopty_view_proto::{HarnessId, ReasoningLevel, SteeringMode};
@@ -24,10 +20,15 @@ use slopty_view_proto::{HarnessId, ReasoningLevel, SteeringMode};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessDescriptor {
+    /// Which harness.
     pub id: HarnessId,
+    /// Its name as the person reads it.
     pub name: String,
+    /// Whether a running turn takes more input.
     pub supports_steering: bool,
+    /// How a running turn takes more input.
     pub steering_mode: SteeringMode,
+    /// The reasoning levels it offers.
     pub reasoning_levels: Vec<ReasoningLevel>,
     /// Whether the agent's CLI is present on the listing device (the settings
     /// enable-gate). Defaults true so catalogs from engines predating the
@@ -56,9 +57,11 @@ fn auto_enabled(id: HarnessId) -> bool {
     id != HarnessId::MOCK
 }
 
-/// A descriptor's effective enabled flag. `None` — a catalog from an engine
-/// predating the setting — falls back to detection, the same rule new devices
-/// start from (see [`HarnessRegistry::enabled_set`]).
+/// A descriptor's effective enabled flag.
+///
+/// `None` — a catalog from an engine predating the setting — falls back to
+/// detection, the same rule new devices start from (the engine's
+/// `HarnessRegistry::enabled_set`).
 pub fn descriptor_enabled(descriptor: &HarnessDescriptor) -> bool {
     descriptor.enabled.unwrap_or_else(|| descriptor.installed && auto_enabled(descriptor.id))
 }

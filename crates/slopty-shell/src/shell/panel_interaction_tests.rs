@@ -133,7 +133,7 @@ fn the_panes_fill_the_room_the_sidebar_leaves_through_its_glide(cx: &mut TestApp
     near(f32::from(initial.session.size.width), 1300.0);
 
     // A view docks at the session's right, in the room the sidebar leaves.
-    change(&shell, cx, Shell::add_diff_surface);
+    change(&shell, cx, |shell, window, cx| shell.add_diff_surface(window, cx));
     let docked = settled(&shell, cx);
     expect(docked, [300.0, 1300.0]);
     let session = cx.debug_bounds("pane-session").expect("the session's pane");

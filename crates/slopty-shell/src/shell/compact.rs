@@ -12,21 +12,6 @@
 //!
 //! A session row takes the platform's gestures: a trailing swipe archives it (or brings it back
 //! from Archived), and a long press opens its menu.
-#![allow(
-    let_underscore_drop,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::expect_used,
-    clippy::float_cmp_const,
-    clippy::items_after_statements,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::mem_forget,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    clippy::unused_self,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::time::{Duration, Instant};
 
@@ -159,7 +144,7 @@ fn swipe_step(
     }
     match phase {
         TouchPhase::Ended | TouchPhase::Cancelled => {
-            let swipe = active.take().expect("a swipe in flight");
+            let Some(swipe) = active.take() else { return SwipeStep::Pass };
             if swipe.sideways != Some(true) {
                 return SwipeStep::Pass;
             }
@@ -177,7 +162,8 @@ fn swipe_step(
 /// Where a row sits for a finger's travel: with it up to the reach, then a quarter as far.
 fn swipe_offset(travel: f32) -> f32 {
     let reach = travel.abs();
-    let at = if reach <= SWIPE_REACH { reach } else { SWIPE_REACH + (reach - SWIPE_REACH) * 0.25 };
+    let at =
+        if reach <= SWIPE_REACH { reach } else { (reach - SWIPE_REACH).mul_add(0.25, SWIPE_REACH) };
     at.copysign(travel)
 }
 
@@ -240,7 +226,7 @@ fn detent_top(detent: Detent, height: f32, safe_top: f32) -> f32 {
 fn dragged_top(detent: Detent, travel: f32, height: f32, safe_top: f32) -> f32 {
     let large = detent_top(Detent::Large, height, safe_top);
     let top = detent_top(detent, height, safe_top) + travel;
-    if top < large { large - (large - top) * 0.25 } else { top }
+    if top < large { (top - large).mul_add(0.25, large) } else { top }
 }
 
 /// Where a sheet let go at `top` rests, its last step `last` down: a flick moves it one detent
@@ -264,9 +250,8 @@ fn sheet_rest(top: f32, last: f32, height: f32, safe_top: f32) -> Option<Detent>
     }
 }
 
-#[cfg(test)]
 thread_local! {
-    /// Tests lay the phone out on a Mac.
+    /// Tests lay the phone out on a Mac (`force_touch`); nothing else sets it.
     static FORCE_COMPACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -285,19 +270,8 @@ fn phone_platform() -> bool {
 /// There focusing a field raises the software keyboard over the page, so opening or landing on a
 /// session leaves it down and the keyboard comes when the person taps the terminal
 /// (`docs/decisions/ui.md`, "On a touch screen the keyboard waits for a tap").
-#[cfg_attr(
-    not(test),
-    expect(
-        clippy::missing_const_for_fn,
-        reason = "a test forces the touch layout through a thread-local"
-    )
-)]
 pub fn touch_screen() -> bool {
-    #[cfg(test)]
-    if FORCE_COMPACT.with(std::cell::Cell::get) {
-        return true;
-    }
-    cfg!(target_os = "ios")
+    cfg!(target_os = "ios") || FORCE_COMPACT.with(std::cell::Cell::get)
 }
 
 /// The phone's key row: made with the first session page, drawn on each while the soft keyboard is
@@ -396,7 +370,7 @@ impl Shell {
         let insets = window.insets();
         let safe = insets.safe_area;
         if self.compact() {
-            let lift = if !self.compact_sessions_up(cx) && self.keyboard_band_held(window) {
+            let lift = if !self.compact_sessions_up(cx) && Self::keyboard_band_held(window) {
                 let row = cx.try_global::<Row>().map_or(0.0, |row| row.0.read(cx).height());
                 f32::from(insets.effective().bottom) + row
             } else {
@@ -404,12 +378,12 @@ impl Shell {
             };
             return ToastPlace::Floor { lift };
         }
-        let width = self.sidebar_now() - 2.0 * Theme::SPACE_SM;
+        let width = Theme::SPACE_SM.mul_add(-2.0, self.sidebar_now());
         if width >= TOAST_COLUMN_MIN {
             let left = f32::from(safe.left) + Theme::SPACE_SM;
             // The sidebar's foot: its bottom row inside a small step all round.
             let row = crate::surface_chrome::touch_row_height(super::SIDEBAR_FOOTER_BUTTON_SIZE);
-            let foot = f32::from(safe.bottom) + row + 2.0 * Theme::SPACE_SM;
+            let foot = Theme::SPACE_SM.mul_add(2.0, f32::from(safe.bottom) + row);
             return ToastPlace::Column { left, width, foot };
         }
         ToastPlace::Top { top: f32::from(safe.top) + Theme::TITLEBAR_HEIGHT }
@@ -421,7 +395,7 @@ impl Shell {
     }
 
     /// On a phone the sidebar button goes back to Sessions; `false` elsewhere.
-    pub(super) fn compact_back(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn compact_back(&self, cx: &mut Context<Self>) -> bool {
         if !self.compact() {
             return false;
         }
@@ -438,7 +412,7 @@ impl Shell {
     /// Whether a field holds the keyboard: the focus is on a text field (a terminal is one), the
     /// only thing the soft keyboard comes for. A pressed button or one of the shell's own handles
     /// holds the focus with no keyboard up.
-    pub(super) fn keyboard_band_held(&self, window: &Window) -> bool {
+    pub(super) fn keyboard_band_held(window: &Window) -> bool {
         window.text_input_focused()
     }
 
@@ -466,7 +440,7 @@ impl Shell {
         // The keyboard's band stays only while a field takes what is typed: once the keyboard
         // drops the page reaches the safe area again, whatever keyboard frame UIKit last reported.
         let bottom =
-            if self.keyboard_band_held(window) { insets.effective().bottom } else { safe.bottom };
+            if Self::keyboard_band_held(window) { insets.effective().bottom } else { safe.bottom };
         // Under a session the bands it keeps clear continue its terminal's ground rather than
         // standing as empty strips of the window's: the home indicator's, the keyboard's while it
         // rises or stands, and on a tablet the status bar's over its title row, right of the
@@ -545,11 +519,11 @@ impl Shell {
     /// the last offers the step it needs, as the Mac's canvas does, never a session with nowhere
     /// to go.
     fn render_sessions_band(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        type OnClick = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
         let step = self.first_step(cx);
         let new_words = step.map_or("New session", super::spaces::FirstStep::action);
         let new_glyph = step.map_or(icons::PLUS, super::spaces::FirstStep::glyph);
         let eye = self.render_inbox_button(theme, cx);
-        type OnClick = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
         let button =
             |id: &'static str, glyph: &'static str, label: &'static str, on_click: OnClick| {
                 super::window_control_button(id, glyph, theme, on_click)
@@ -616,7 +590,7 @@ impl Shell {
     /// new-session canvas, a close); the session's mark and its title over its machine and branch,
     /// whose press puts the inspector up or away; and while other sessions wait on the person, "N
     /// need you", whose press opens the next. It also tells the key row what it stands for.
-    pub(super) fn render_compact_nav_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_compact_nav_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.compact() {
             return None;
         }
@@ -798,7 +772,7 @@ impl Shell {
     /// chat's harness, or a shell), the ground under it, and its terminal. The row is made with
     /// the first session page a phone draws.
     fn set_key_row(
-        &mut self,
+        &self,
         harness: Option<slopty_view_proto::HarnessId>,
         ground: gpui::Hsla,
         cx: &mut Context<Self>,
@@ -930,7 +904,7 @@ impl Shell {
         let insets = window.insets();
         let safe = insets.safe_area;
         let bottom =
-            if self.keyboard_band_held(window) { insets.effective().bottom } else { safe.bottom };
+            if Self::keyboard_band_held(window) { insets.effective().bottom } else { safe.bottom };
         let overlays = self.render_overlays(window.viewport_size(), window, cx);
         Some(
             div()
@@ -956,11 +930,10 @@ impl Shell {
     /// gesture is the sheet's, wherever the header has moved from the place the pan started,
     /// which a touch pan's every step is hit-tested at, through the momentum after it is let go.
     fn sheet_pan(
-        &self,
         on: bool,
         height: f32,
         safe_top: f32,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let shell = cx.weak_entity();
         gpui::canvas(
@@ -986,7 +959,7 @@ impl Shell {
                         }
                         return;
                     }
-                    let _ = shell.update(cx, |this, cx| {
+                    let _gone = shell.update(cx, |this, cx| {
                         this.pan_compact_inspector(event, height, safe_top, cx);
                     });
                     cx.stop_propagation();
@@ -1062,8 +1035,8 @@ impl Shell {
     /// page's own box, which on iOS starts at the safe area, so it reaches the screen's edges
     /// past it. `None` off a phone, or with the inspector neither up nor sinking.
     pub(super) fn render_compact_inspector(
-        &mut self,
-        window: &mut Window,
+        &self,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !self.compact() || self.compact_sessions_up(cx) || self.active_chat.is_empty() {
@@ -1082,7 +1055,7 @@ impl Shell {
         // The page's own box on iOS: inside the safe area, and above the keyboard while a
         // field holds it (`compact_frame`).
         let (page_top, page_bottom, page_left, page_right) = if ios {
-            let bottom = if self.keyboard_band_held(window) {
+            let bottom = if Self::keyboard_band_held(window) {
                 insets.effective().bottom
             } else {
                 safe.bottom
@@ -1128,7 +1101,7 @@ impl Shell {
             sheet.top = None;
             // A flick that put it away keeps its momentum from what was under it.
             let fling = sheet.fling;
-            return fling.then(|| self.sheet_pan(false, height, safe_top, cx).into_any_element());
+            return fling.then(|| Self::sheet_pan(false, height, safe_top, cx).into_any_element());
         }
         sheet.top = Some(top);
         let detent = sheet.detent;
@@ -1208,7 +1181,7 @@ impl Shell {
             .items_center()
             .justify_center()
             // The header follows a finger: up to the whole screen, down to half or away.
-            .child(self.sheet_pan(true, height, safe_top, cx))
+            .child(Self::sheet_pan(true, height, safe_top, cx))
             .child(grabber)
             .child(
                 div()
@@ -1420,6 +1393,12 @@ impl Shell {
 mod tests {
     use super::*;
 
+    /// An accessibility rect's device pixels as the window's points.
+    #[expect(clippy::cast_possible_truncation, reason = "a window's pixels fit an f32")]
+    fn points(pixels: f64, scale: f64) -> f32 {
+        (pixels / scale) as f32
+    }
+
     fn pan(active: &mut Option<Swipe>, steps: &[(f32, f32)]) -> Vec<SwipeStep> {
         let last = steps.len().saturating_sub(1);
         steps
@@ -1468,6 +1447,7 @@ mod tests {
 
     // The row follows the finger to its reach, then resists.
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "a quarter of whole points is exact")]
     fn a_row_resists_past_its_reach() {
         assert_eq!(swipe_offset(50.0), 50.0);
         assert_eq!(swipe_offset(-SWIPE_REACH), -SWIPE_REACH);
@@ -1500,8 +1480,7 @@ mod tests {
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
         });
-        let path = dir.path().to_path_buf();
-        std::mem::forget(dir);
+        let path = dir.keep(); // the shell keeps it past this setup
         let (host, cx) = cx.add_window_view(move |_, cx| {
             PhoneHost(cx.new(|cx| {
                 let state = cx.new(|_| crate::state::AppState::new());
@@ -1847,8 +1826,8 @@ mod tests {
                         let label = node.label()?.to_owned();
                         let rect = node.bounds()?;
                         let (w, h) = (
-                            (rect.x1 - rect.x0) as f32 / scale,
-                            (rect.y1 - rect.y0) as f32 / scale,
+                            points(rect.x1 - rect.x0, f64::from(scale)),
+                            points(rect.y1 - rect.y0, f64::from(scale)),
                         );
                         Some((label, w, h))
                     })
@@ -1921,7 +1900,7 @@ mod tests {
                             && node.label().is_some_and(|label| label.starts_with("Link copied"))
                     })
                     .and_then(|(_, node)| node.bounds())
-                    .map(|rect| ((rect.y0 / scale) as f32, (rect.y1 / scale) as f32));
+                    .map(|rect| (points(rect.y0, scale), points(rect.y1, scale)));
                 (toast, f32::from(window.viewport_size().height))
             })
         };
@@ -1932,7 +1911,7 @@ mod tests {
         cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
         let (toast, height) = bounds(cx);
         let toast = toast.expect("the toast on a Mac");
-        let foot = super::super::SIDEBAR_FOOTER_BUTTON_SIZE + 3.0 * Theme::SPACE_SM;
+        let foot = Theme::SPACE_SM.mul_add(3.0, super::super::SIDEBAR_FOOTER_BUTTON_SIZE);
         assert!(
             (height - toast.1 - foot).abs() < 0.5,
             "over the sidebar's foot: {toast:?} in {height}"
@@ -2053,7 +2032,7 @@ mod tests {
         let pan = |cx: &mut gpui::VisualTestContext, steps: &[f32]| {
             let at =
                 cx.debug_bounds("compact-inspector-header").expect("the sheet's header").center();
-            let last = steps.len() - 1;
+            let last = steps.len().saturating_sub(1);
             for (ix, y) in steps.iter().enumerate() {
                 cx.simulate_event(ScrollEvent {
                     position: at,
