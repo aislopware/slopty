@@ -1,9 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! Session navigation — the horizontal tab strip is gone (wing 2026-08-10):
-//! the activity sidebar IS the session list, and the titlebar names the
-//! selected session (harness brand icon + title). A `+` new-session button
-//! lives in the titlebar's left control cluster while an existing session is
-//! selected. `UiSettings.open_tabs` is legacy — no longer read or written.
+//! Session navigation: the sidebar is the session list, and the titlebar row names the session
+//! shown (its program's icon, its title, its machine and branch, its mark), with the palette and a
+//! new session at its trailing end.
 
 use super::*;
 
@@ -274,9 +272,15 @@ impl Shell {
             ground,
         );
         let menu_chat = chat_id.clone();
+        let spoken = title.clone();
         div()
             .id("titlebar-identity")
             .debug_selector(|| "titlebar-identity".into())
+            // A screen reader hears the session's title, its machine and branch after, as a
+            // button: a press opens the session picker.
+            .role(gpui::Role::Button)
+            .aria_label(spoken)
+            .when_some(machine_branch.clone(), |el, words| el.aria_description(words))
             .min_w_0()
             .overflow_hidden()
             .flex()

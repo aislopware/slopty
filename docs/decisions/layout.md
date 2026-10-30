@@ -319,11 +319,11 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
   - The identity: the program's icon (the agent's own, else a terminal glyph, as on the list's
     row), the title at 13 pt, then the machine and branch in secondary text ("Studio ·
     fix-lexer"), then the state's mark, the row's own glyph. The title dims to secondary while
-    the window is not the key one.
-  - At the trailing end: the palette and a new session. Over the new-session canvas only the
-    palette shows, since a new session there would open the canvas it is on. The inbox joins
-    them once it is built. Until the summoned views replace them, the inspector's toggle, Open
-    in and the side pane's controls stand beside them.
+    the window is not the key one. A screen reader hears it as a button named by the title, the
+    machine and branch as its description; a press opens the session picker under it, and ⌥⌘O
+    hangs Open in there too, since the row has no Open in button.
+  - At the trailing end: the inbox's eye, the palette and a new session. Over the new-session
+    canvas the new session leaves, since it would open the canvas it is on.
   - The ground: the session's column paints the shown terminal's own background (its program's
     OSC 11, else the theme's), so the row over it wears it and follows a program that changes
     it. Its words are inked for it as Ghostty picks a window's appearance, by the ground's luma
@@ -331,7 +331,8 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     other appearance's ink. The traffic lights follow later. gpui-fast sets an appearance only
     app-wide, and the theme follows the window's, so setting it would turn the whole app dark
     under a dark TUI; a per-window setter and a theme that follows the system come first.
-  - Tests: `shell::chrome_tests::the_titlebar_row_names_the_session_then_its_actions`,
+  - Tests: `shell::chrome_tests::{the_titlebar_row_names_the_session_then_its_actions,
+    open_in_hangs_under_the_titlebar_identity}`,
     `shell::tabs::panel_titlebar_tests::{the_identity_says_its_machine_and_branch,
     the_row_is_inked_for_the_ground_it_stands_on}` and
     `terminal::panel::tests::a_running_programs_progress_and_ground_reach_its_tab`.

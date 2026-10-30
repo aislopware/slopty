@@ -141,7 +141,7 @@ const ROWS_SHOWN: f32 = 11.0;
 
 thread_local! {
     /// Where each window's titlebar identity was last drawn: the card hangs under it, whether a
-    /// press or a key asked for it.
+    /// press or a key asked for it, and so does ⌥⌘O's Open in (`open_in`).
     static IDENTITY: RefCell<HashMap<WindowId, Bounds<Pixels>>> = RefCell::new(HashMap::new());
 }
 
@@ -168,14 +168,19 @@ pub(super) fn identity_anchor(identity: Option<AnyElement>, window: &Window) -> 
     )
 }
 
+/// Where the titlebar's identity stands in `window`, while its row names a session.
+pub(super) fn identity_bounds(window: &Window) -> Option<Bounds<Pixels>> {
+    let id = window.window_handle().window_id();
+    IDENTITY.with(|at| at.borrow().get(&id).copied())
+}
+
 /// Where the card's top left goes in `window`: under the identity, else centred under the
 /// titlebar.
 fn anchor(viewport: gpui::Size<Pixels>, window: &Window) -> Point<Pixels> {
     let centred = gpui::point((viewport.width - px(PICKER_WIDTH)) / 2.0, px(Theme::TITLEBAR_HEIGHT));
-    let id = window.window_handle().window_id();
     // Held inside the window by an 8 pt margin, however far right the identity stands.
     let widest = (viewport.width - px(PICKER_WIDTH + 8.0)).max(px(8.0));
-    IDENTITY.with(|at| at.borrow().get(&id).copied()).map_or(centred, |bounds| {
+    identity_bounds(window).map_or(centred, |bounds| {
         gpui::point((bounds.left() - px(8.0)).clamp(px(8.0), widest), bounds.bottom() + px(6.0))
     })
 }

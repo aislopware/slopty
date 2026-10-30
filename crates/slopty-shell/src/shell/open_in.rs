@@ -5,28 +5,21 @@
 //! here are offered, Finder for a folder on this Mac. Every open goes through [`launch`], which an
 //! end-to-end run points at a file (`SLOPTY_E2E_OPEN_LOG`) so nothing is launched.
 
-use std::cell::Cell;
-
 use gpui::{
-    AnyElement, App, Bounds, Context, IntoElement, ParentElement, Pixels, Point, SharedString,
+    AnyElement, App, Context, IntoElement, ParentElement, Pixels, Point, SharedString, Window,
     Styled, div, prelude::*, px,
 };
 
 use super::Shell;
 use crate::icons::{self, icon};
 use crate::popover;
-use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::theme::Theme;
 
-thread_local! {
-    /// Where the titlebar's Open in button was last drawn: the menu hangs under it, whether a
-    /// click or ⌥⌘O asked for it.
-    static BUTTON: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
-}
-
-/// Under the button, its menu's top-left: below it by the menus' gap, its left edge aligned.
-fn under_button() -> Option<Point<Pixels>> {
-    BUTTON.with(Cell::get).map(|bounds| gpui::point(bounds.left(), bounds.bottom() + px(4.0)))
+/// The menu's top-left under the titlebar's identity in `window`, where the session picker hangs;
+/// `None` while the row names no session.
+fn under_identity(window: &Window) -> Option<Point<Pixels>> {
+    super::picker::identity_bounds(window)
+        .map(|bounds| gpui::point((bounds.left() - px(8.0)).max(px(8.0)), bounds.bottom() + px(6.0)))
 }
 
 /// Whether `host` names this machine: a worker reached over loopback runs here, where Finder and
@@ -221,9 +214,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// ⌥⌘O: the selected chat's Open in menu under its button, or shut when it is up. Whether
-    /// there was a chat to do it for.
-    pub(super) fn toggle_open_in(&mut self, cx: &mut Context<Self>) -> bool {
+    /// ⌥⌘O: the selected chat's Open in menu under the titlebar's identity, or shut when it is
+    /// up. Whether there was a chat to do it for.
+    pub(super) fn toggle_open_in(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
         if !Self::offers_open_in() {
             return false;
         }
@@ -232,7 +225,7 @@ impl Shell {
             return true;
         }
         let Some(chat_id) = self.state.read(cx).selected_chat.clone() else { return false };
-        let Some(at) = under_button() else { return false };
+        let Some(at) = under_identity(window) else { return false };
         self.open_open_in(chat_id, at, cx);
         true
     }
@@ -292,53 +285,6 @@ impl Shell {
             .child(list)
             .into_any_element();
         Some(popover::menu_at("open-in-menu", position, card, closing))
-    }
-
-    /// The chat titlebar's Open in button; `None` off a Mac or with no chat shown.
-    pub(super) fn render_open_in_button(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !Self::offers_open_in() {
-            return None;
-        }
-        let chat_id = self.state.read(cx).selected_chat.clone()?;
-        let theme = Theme::of(cx).clone();
-        let open = self.open_in.get().is_some();
-        let button = super::header_icon_button(
-            "open-in",
-            icons::FILE_CODE,
-            open,
-            &theme,
-            cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                if this.open_in.take_press_was_open() {
-                    this.close_open_in(cx);
-                    return;
-                }
-                // Under the button, whether pressed or clicked, never at the pointer.
-                let at = under_button().unwrap_or_else(|| event.position());
-                this.open_open_in(chat_id.clone(), at, cx);
-            }),
-        )
-        .role(gpui::Role::Button);
-        // Its tooltip names the key, and goes while the menu is up rather than cover it.
-        let button = if open {
-            button.aria_label("Open in…")
-        } else {
-            button.action_hint("Open in…", Keys::Action(Box::new(super::chrome_keys::OpenIn)), cx)
-        };
-        Some(
-            div()
-                .flex_none()
-                .on_children_prepainted(|bounds, _, _| {
-                    BUTTON.with(|button| button.set(bounds.first().copied()));
-                })
-                .child(button
-            .flex_none()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, _| this.open_in.note_trigger_press()),
-            )
-            )
-            .into_any_element(),
-        )
     }
 }
 

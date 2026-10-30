@@ -195,6 +195,15 @@ fn the_titlebar_row_names_the_session_then_its_actions(cx: &mut TestAppContext) 
             .map(|node| node.bounds)
             .unwrap_or_else(|| panic!("no {label} in the row"))
     };
+    // A screen reader hears the identity as a button named by the session's title, its machine
+    // and branch after.
+    let identity = nodes
+        .values()
+        .find(|node| {
+            node.role == Role::Button && node.label == "Chat a" && node.bounds.top() < px(Theme::TITLEBAR_HEIGHT)
+        })
+        .expect("the identity, named by the session's title");
+    assert_eq!(identity.description.as_deref(), Some("Studio \u{b7} fix-lexer"));
     let (palette, new) = (in_row("Command palette"), in_row("New session"));
     assert!(
         mark.right() < palette.left() && palette.right() <= new.left(),
@@ -202,6 +211,28 @@ fn the_titlebar_row_names_the_session_then_its_actions(cx: &mut TestAppContext) 
     );
     let toggle = in_row("Hide sidebar");
     assert!(toggle.right() < title.left(), "the sidebar's toggle leads: {toggle:?}");
+}
+
+/// ⌥⌘O hangs Open in under the titlebar's identity, where the session picker hangs, and a
+/// second press shuts it.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn open_in_hangs_under_the_titlebar_identity(cx: &mut TestAppContext) {
+    let (shell, cx) = launch(cx, DESKTOP);
+    shell.update(cx, |shell, cx| shell.open_chat("a".into(), cx));
+    draw(cx);
+    let identity = cx.debug_bounds("titlebar-identity").expect("the identity");
+    cx.simulate_keystrokes("alt-cmd-o");
+    draw(cx);
+    let at = shell.update(cx, |shell, _| shell.open_in.as_open().map(|menu| menu.position));
+    assert_eq!(
+        at,
+        Some(gpui::point((identity.left() - px(8.0)).max(px(8.0)), identity.bottom() + px(6.0))),
+        "under the identity"
+    );
+    cx.simulate_keystrokes("alt-cmd-o");
+    draw(cx);
+    assert!(!shell.update(cx, |shell, _| shell.open_in.is_open()), "a second press shuts it");
 }
 
 /// The titlebar's title opens its chat's menu on a right-click, as the chat's sidebar row does,

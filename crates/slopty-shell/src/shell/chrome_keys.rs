@@ -17,7 +17,7 @@
 //!   Directory (`picker`).
 //! - ⌘. opens the next chat that needs the person, across projects and machines, then the
 //!   finished ones nobody has seen (`sidebar_status::needing_you`).
-//! - ⌥⌘O opens Open in under its button.
+//! - ⌥⌘O opens Open in under the titlebar's identity.
 //!
 //! A terminal keeps every key it takes for itself (its own find, and anything its program
 //! reads), and the browser keeps its own ⌘[ and ⌘]: those bind in their contexts, and this
@@ -209,7 +209,7 @@ impl Shell {
             }
         }))
         .on_action(cx.listener(|this, _: &OpenIn, window, cx| {
-            if in_own_keys(window) || this.overlay_owns_keyboard() || !this.toggle_open_in(cx) {
+            if in_own_keys(window) || this.overlay_owns_keyboard() || !this.toggle_open_in(window, cx) {
                 cx.propagate();
             }
         }))
