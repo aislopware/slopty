@@ -232,9 +232,9 @@ pub(crate) const VIEW_COMMANDS: [WindowCommand; 6] = [
 pub(crate) const GO_COMMANDS: [WindowCommand; 5] = [
     command!("Back", crate::icons::ARROW_LEFT, shell::NavigateBack),
     command!("Forward", crate::icons::ARROW_RIGHT, shell::NavigateForward),
-    command!("Next chat", crate::icons::ALT_ARROW_DOWN, shell::NextSession),
-    command!("Previous chat", crate::icons::ALT_ARROW_UP, shell::PrevSession),
-    command!("Next chat that needs you", crate::icons::BELL, shell::NextNeedsYou),
+    command!("Next session", crate::icons::ALT_ARROW_DOWN, shell::NextSession),
+    command!("Previous session", crate::icons::ALT_ARROW_UP, shell::PrevSession),
+    command!("Next session that needs you", crate::icons::BELL, shell::NextNeedsYou),
 ];
 
 /// slopty: every command the palette offers from the menu bar's table.
@@ -265,7 +265,8 @@ pub(crate) fn title_case(label: &str) -> String {
 
 /// The Go menu's rows for the sidebar's first nine chats (⌘1…⌘9).
 const JUMP_TITLES: [&str; crate::settings::JUMP_SLOTS] = [
-    "Chat 1", "Chat 2", "Chat 3", "Chat 4", "Chat 5", "Chat 6", "Chat 7", "Chat 8", "Chat 9",
+    "Session 1", "Session 2", "Session 3", "Session 4", "Session 5", "Session 6", "Session 7",
+    "Session 8", "Session 9",
 ];
 
 /// The slopty menu bar. macOS renders this natively; mac-only entries are gated
@@ -302,7 +303,7 @@ pub fn app_menus() -> Vec<Menu> {
         Menu::new("Slopty").items(app_items),
         Menu::new("File").items(
             [
-                MenuItem::action("New Chat", shell::NewSession),
+                MenuItem::action("New Session", shell::NewSession),
                 MenuItem::action("New Project…", shell::AddSpacePalette),
             ]
             .into_iter()
@@ -480,7 +481,7 @@ mod tests {
     #[test]
     fn the_menu_bar_names_the_palette_commands_in_title_case() {
         assert_eq!(title_case("Reopen closed tab"), "Reopen Closed Tab");
-        assert_eq!(title_case("Next chat or side pane tab"), "Next Chat or Side Pane Tab");
+        assert_eq!(title_case("Next session or side pane tab"), "Next Session or Side Pane Tab");
         let menus = app_menus();
         let view = menus.iter().find(|m| m.name.as_ref() == "View").expect("View menu");
         let names: Vec<&str> = view

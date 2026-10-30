@@ -1,8 +1,8 @@
 Window (focused)
-Group │ Chats
+Group │ Sessions
 Label │ No projects yet
 Button │ Add a project
 TabList │ Tabs
-Tab │ Chats
+Tab │ Sessions
 Tab │ Settings
 Tab │ Search

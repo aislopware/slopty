@@ -1,6 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Sonner-style toasts: transient feedback stacked in the window's
-//! bottom-right corner.
+//! bottom-right corner. slopty: never over a session's terminal, whose TUI
+//! draws its prompt and status there: the stack stands in the sidebar's foot,
+//! or at the top right with no sidebar ([`ToastPlace`]).
 //!
 //! The behaviour follows sonner's defaults:
 //! - Toasts last four seconds. The countdown pauses while the pointer is over
@@ -621,14 +623,29 @@ fn kind_icon(kind: ToastKind, theme: &Theme) -> AnyElement {
 /// slopty: how far over the chrome a toast stands that `lift` holds above the window's floor.
 const LIFT_GAP: f32 = 8.0;
 
-/// The toaster for this window, or `None` when nothing is showing. slopty: `lift` is how much
-/// of the window's floor the layout holds (a phone's tab bar and capsule, or its composer and
-/// the home indicator): the stack stands above it; 0 keeps the window's corner.
-pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+/// slopty: where the toaster stands. A session's TUI draws its prompt box and status line in
+/// the window's bottom-right corner, so the stack keeps off the terminal (`docs/decisions/ui.md`,
+/// "Toasts keep off the terminal").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ToastPlace {
+    /// At the window's right, the stack's foot `lift` over its floor (a phone's tab bar and
+    /// capsule, or the home indicator or the keyboard); 0 keeps the window's corner.
+    Floor { lift: f32 },
+    /// In a column from `left`, `width` wide, the stack's foot `foot` over the window's floor:
+    /// the sidebar's foot, above its bottom row.
+    Column { left: f32, width: f32, foot: f32 },
+    /// At the window's right, the stack's head `top` under the window's top, newest on top and
+    /// the older peeking under it.
+    Top { top: f32 },
+}
+
+/// The toaster for this window, or `None` when nothing is showing, stood where `place` says.
+pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
     let now = crate::clock::now(cx);
     let reduced = cx.reduce_motion();
     let active = window.is_window_active();
     let theme = Theme::of(cx).for_popup();
+    let from_top = matches!(place, ToastPlace::Top { .. });
     // slopty: which errors are in their "Copied" span, read before the store is borrowed.
     let copied_ids: Vec<u64> = cx
         .try_global::<ToastStore>()
@@ -923,7 +940,8 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
             .absolute()
             .left(px(inset + swipe.max(0.0)))
             .right(px(inset - swipe.max(0.0)))
-            .bottom(px(y))
+            // slopty: hung from the top, the stack mirrors: the same rise is a drop from above.
+            .map(|el| if from_top { el.top(px(y)) } else { el.bottom(px(y)) })
             .h(px(clip_height.max(0.0)))
             .opacity(opacity)
             // Swipe right to dismiss, as sonner does for the bottom-right
@@ -981,8 +999,7 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
     }
     schedule_wake(window, cx);
 
-    let viewport = window.viewport_size();
-    let width = WIDTH.min(f32::from(viewport.width) - 2.0 * OFFSET).max(0.0);
+    let (width, origin) = stand(place, window.viewport_size(), stack_height);
     let stack = div()
         .id("toaster")
         .debug_selector(|| "toaster".into())
@@ -996,19 +1013,31 @@ pub fn render_toaster(lift: f32, window: &mut Window, cx: &mut App) -> Option<An
         .on_hover(|hovered, _, cx| set_hovered(*hovered, cx))
         .children(children);
     Some(
-        gpui::deferred(
-            gpui::anchored()
-                .position(point(
-                    viewport.width - px(OFFSET) - px(width),
-                    viewport.height
-                        - px(if lift > 0.0 { lift + LIFT_GAP } else { OFFSET })
-                        - px(stack_height),
-                ))
-                .child(stack),
-        )
+        gpui::deferred(gpui::anchored().position(origin).child(stack))
         .with_priority(4)
         .into_any_element(),
     )
+}
+
+/// slopty: the stack's width and where its top-left corner stands for `place`, in a window
+/// `viewport` big, the stack `height` tall.
+fn stand(place: ToastPlace, viewport: gpui::Size<gpui::Pixels>, height: f32) -> (f32, gpui::Point<gpui::Pixels>) {
+    let (window_width, window_height) = (f32::from(viewport.width), f32::from(viewport.height));
+    let right = |width: f32, gap: f32| window_width - gap - width;
+    match place {
+        ToastPlace::Floor { lift } => {
+            let width = WIDTH.min(window_width - 2.0 * OFFSET).max(0.0);
+            let foot = if lift > 0.0 { lift + LIFT_GAP } else { OFFSET };
+            (width, point(px(right(width, OFFSET)), px(window_height - foot - height)))
+        }
+        ToastPlace::Column { left, width, foot } => {
+            (width, point(px(left), px(window_height - foot - LIFT_GAP - height)))
+        }
+        ToastPlace::Top { top } => {
+            let width = WIDTH.min(window_width - 2.0 * LIFT_GAP).max(0.0);
+            (width, point(px(right(width, LIFT_GAP)), px(top + LIFT_GAP)))
+        }
+    }
 }
 
 // slopty: sonner's close button (20 round, at the corner, half over the edge), in the house's
@@ -1200,7 +1229,7 @@ mod tests {
 
     impl gpui::Render for Host {
         fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
-            div().size_full().children(render_toaster(0.0, window, cx))
+            div().size_full().children(render_toaster(ToastPlace::Floor { lift: 0.0 }, window, cx))
         }
     }
 

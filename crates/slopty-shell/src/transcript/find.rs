@@ -170,7 +170,7 @@ impl Transcript {
     pub(crate) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.find.input.is_none() {
             let input = cx.new(|cx| {
-                ComposerInput::new("Find in chat", cx)
+                ComposerInput::new("Find in session", cx)
                     .with_single_line()
                     .with_accessibility_role(gpui::Role::SearchInput)
                     .with_text_metrics(12.5, 18.0)
@@ -326,17 +326,15 @@ impl Transcript {
         let theme = Theme::of(cx).clone();
         let tally = self.find.tally();
         let has = self.find.total > 0;
-        let top = if self.doc_override.is_some() {
-            Theme::SPACE_SM
-        } else {
-            Theme::TITLEBAR_HEIGHT + Theme::SPACE_SM
-        };
+        // slopty: at the top of the pane the transcript lays out in, which clears the window's
+        // chrome itself.
+        let top = Theme::SPACE_SM;
         // slopty: the house's find card (the diff's and the terminal's anatomy): its steps name
         // their keys, a step with nowhere to go dims, and it enters as a menu does.
         let card = popover::find_card(&theme)
             .id("find-in-thread")
             .role(gpui::Role::Search)
-            .aria_label("Find in chat")
+            .aria_label("Find in session")
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {

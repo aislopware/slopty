@@ -18250,6 +18250,28 @@ cargo xtask deep canary thread     # prints "SIGCHLD heard in …", then the pla
 cargo xtask deep canary miri; cargo xtask deep canary address; cargo xtask deep canary mutants
 ```
 
+## 2026-10-30 — a pane's glide beside a session's terminal: resizes asked of its TUI
+
+mac-studio, the headless GPUI test below. A terminal 1000 pt wide in a column beside a 320 pt
+pane that glides open and then shut, 29 frames each way (240 ms of `PANEL_RESIZE` at 120 Hz),
+the default mono face at 8 pt a cell with 8 pt of padding: the `TermRequest::Resize` messages the
+terminal sends its session, each one a reflow of the whole TUI screen.
+
+| glide | free (each frame's width) | held (`live::hold_fit`) |
+| --- | --- | --- |
+| pane opens, 123 → 83 columns | 14 | 1 |
+| pane shuts, 83 → 123 columns | 15 | 1 |
+
+Free, every frame whose width crosses a cell's edge is a resize, so most of the glide's frames
+are one; held, the grid goes to the narrower end once and stays (`docs/decisions/ui.md`, "A
+glide reflows the TUI once"). Before the held size was snapped to the device pixel, its float
+noise flipped the grid between 82 and 83 columns on most frames (16 and 15 resizes), since 680 pt
+less the padding is exactly 83 cells.
+
+```sh
+SLOPTY_LANE=main cargo xtask remote -p slopty-terminal   # view::tests::a_held_glide_reflows_once
+```
+
 ## 2026-10-30 — Two e2e guests: two runs at once, and what the second costs on disk
 
 This Mac (M1 Max, ten cores, 32 GB, macOS 27.0.1 26A434), the guests on the external disk

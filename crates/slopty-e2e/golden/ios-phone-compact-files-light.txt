@@ -2,7 +2,7 @@ Window
 Group │ Files
 Group │ Navigation
 Heading │ Files
-Button │ Back to Chat
+Button │ Back to Session
 Group │ Workspace files
 SearchInput │ Search files
 Button │ Show hidden files

@@ -11,9 +11,9 @@ use gpui::{Context, ListOffset, px};
 use crate::motion;
 use crate::transcript::Transcript;
 
-/// How far below the list's top a row a jump lands on stands (slopty): past the titlebar
-/// the transcript scrolls and fades under, at the inset a sent prompt is held at. The first row
-/// carries the titlebar's gap itself.
+/// How far below the list's top a row a jump lands on stands (slopty): past the scroll edge
+/// the transcript fades under at the top of its pane, at the inset a sent prompt is held at. The
+/// first row carries its own gap.
 pub fn landing_inset(row: usize) -> f32 {
     if row == 0 { 0.0 } else { crate::transcript::OWN_SEND_TOP_INSET_PX }
 }

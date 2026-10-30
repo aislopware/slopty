@@ -338,7 +338,7 @@ fn before_any_project_the_sidebar_says_so_and_offers_only_what_works(cx: &mut Te
     // A project, and the list says what fills it now, with its key.
     shell.update(cx, |shell, cx| shell.state.update(cx, |state, _| state.spaces = vec![space("app")]));
     let nodes = tree(cx);
-    assert!(find(&nodes, Role::Label, "No chats yet").is_some());
+    assert!(find(&nodes, Role::Label, "No sessions yet").is_some());
     assert!(cx.debug_bounds("sidebar-empty-key").is_some(), "⌘N makes one now");
 }
 
@@ -593,6 +593,47 @@ mod session_card {
             });
         });
         assert_eq!(show(&terminal, cx), (Vec::new(), false), "a plain terminal has nothing to inspect");
+    }
+
+    /// slopty: a toast never stands over the session's terminal, whose TUI keeps its prompt in
+    /// the window's bottom-right corner: it rises in the sidebar's foot, above its bottom row,
+    /// and with the sidebar put away it hangs at the top right under the title strip.
+    #[gpui::test]
+    fn a_toast_keeps_off_the_terminal(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let window = test_shell(cx, dir.path());
+        window
+            .update(cx, |shell, _, cx| {
+                prepare(shell, cx);
+                shell.debug_gate = Some(GatePhase::Ready);
+                cx.notify();
+            })
+            .unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.simulate_resize(gpui::size(px(1280.0), px(800.0)));
+        cx.update(|_, cx| crate::toast::info(cx, "Link copied"));
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        };
+        settle(&mut cx);
+        let toaster = cx.debug_bounds("toaster").expect("the toast shows");
+        let sidebar = cx.debug_bounds("sidebar-column").expect("the sidebar");
+        let foot = cx.debug_bounds("sidebar-footer-row").expect("its bottom row");
+        assert!(toaster.right() <= sidebar.right(), "inside the sidebar: {toaster:?} in {sidebar:?}");
+        assert!(toaster.left() >= sidebar.left(), "{toaster:?} in {sidebar:?}");
+        assert!(toaster.bottom() <= foot.top(), "above its bottom row: {toaster:?} over {foot:?}");
+
+        window.update(&mut cx, |shell, _, cx| shell.toggle_sidebar(cx)).unwrap();
+        settle(&mut cx);
+        let toaster = cx.debug_bounds("toaster").expect("the toast still shows");
+        let top = px(Theme::TITLEBAR_HEIGHT);
+        assert!(toaster.top() >= top && toaster.top() <= top + px(Theme::SPACE_MD), "{toaster:?}");
+        assert!(px(1280.0) - toaster.right() <= px(Theme::SPACE_MD), "at the right: {toaster:?}");
     }
 
     #[gpui::test]

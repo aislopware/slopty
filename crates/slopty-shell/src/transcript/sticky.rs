@@ -1,11 +1,12 @@
 // slopty: Slopty's own file (not in zeron).
 //! slopty: an open tool group's header held at the top while its rows scroll (opencode's sticky
 //! group trigger, `.research/opencode-study-2026-10-19.md` item 3): once the header has scrolled
-//! under the titlebar while its rows still reach past it, a band of it spans the transcript's top
-//! edge, flush under the titlebar, in the window's own material with a hairline under it. A press
-//! folds the group and goes back to it. A turn's divider holds in its own short words ("Worked
-//! for 4m 13s"), never the sentence of all its work. The band paints deferred, above the
-//! transcript's top fade, which would otherwise fade it with the words it stays above.
+//! past the transcript's top while its rows still reach past it, a band of it spans that edge, on
+//! the pane's own ground, ending in a soft scroll edge rather than a hairline. A press folds the
+//! group and goes back to it. A turn's divider holds as the same centred divider it is in the
+//! list, in its own short words ("Worked for 4m 13s"), never the sentence of all its work. The
+//! band paints deferred, above the transcript's top fade, which would otherwise fade it with the
+//! words it stays above.
 //!
 //! The person's prompt is held nowhere (2026-10-20): Amp, T3 Code and opencode hold none, and
 //! Claude desktop keeps its peek behind a flag; find goes back to a prompt.
@@ -17,8 +18,17 @@ use crate::motion;
 use crate::theme::Theme;
 use crate::motion::HoverFade as _;
 
-/// The group band's height, its hairline under it.
+/// The group band's height, at least: opencode's 28 pt trigger, or a finger's row where the
+/// divider it holds stands that tall.
 const GROUP_BAND_H: f32 = 28.0;
+
+fn band_height() -> f32 {
+    super::tool_group_header_height().max(GROUP_BAND_H)
+}
+
+/// The soft scroll edge under the band: its ground fading out over the rows passing beneath
+/// (`.research/design-premium-2026-10-29.md` §7.4).
+const GROUP_BAND_EDGE: f32 = 24.0;
 
 /// The first of `len` rows whose bottom (the next row's top, by `top`) is under `line`, by
 /// halves: the rows' bottoms only grow down the list. `len` when none is.
@@ -32,21 +42,6 @@ fn first_under(len: usize, top: &impl Fn(usize) -> f32, line: f32) -> usize {
 }
 
 impl Transcript {
-    /// Where the band's top sits below the transcript's: under the titlebar the primary
-    /// transcript slides beneath, or on a phone under its navigation bar, which stands taller
-    /// (its title over the chat's place); at the top of a pane, which pads for the titlebar
-    /// itself.
-    pub(super) fn sticky_top(&self) -> f32 {
-        if self.doc_override.is_some() {
-            0.0
-        } else if self.on_phone() {
-            // slopty: the phone's bar (`shell/compact.rs`), whose words both end above it (#11).
-            Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD
-        } else {
-            Theme::TITLEBAR_HEIGHT
-        }
-    }
-
     /// How many rows are laid out, and where each one's top stands on screen (and so the row
     /// before's bottom): the viewport's top, less what has scrolled above it, plus the list's
     /// sum of the rows' heights before it. None before the list has laid out, and while every
@@ -62,16 +57,16 @@ impl Transcript {
         Some((len, move |ix: usize| origin + f32::from(self.list.offset_for_item(ix))))
     }
 
-    /// The open tool group to hold under the titlebar, by its header's row, and where its band's
-    /// top sits below the transcript's: a group whose header has scrolled under that place while
-    /// its rows still reach a band's height past it. One at most; none while find is open.
-    pub(super) fn sticky_group(&self) -> Option<(usize, f32)> {
+    /// The open tool group to hold at the transcript's top, by its header's row: a group whose
+    /// header has scrolled past that edge while its rows still reach a band's height past it.
+    /// The transcript lays out inside its pane, so the edge is the list's own. One at most; none
+    /// while find is open.
+    pub(super) fn sticky_group(&self) -> Option<usize> {
         if self.finding() {
             return None;
         }
-        let band_top = self.sticky_top();
         let (len, top) = self.row_tops()?;
-        let line = f32::from(self.list.viewport_bounds().top()) + band_top;
+        let line = f32::from(self.list.viewport_bounds().top());
         let read = first_under(len, &top, line);
         if read == len {
             return None;
@@ -85,12 +80,7 @@ impl Transcript {
         }
         let id = &self.rows[header].id;
         let end = header + 1 + self.rows[header + 1..].iter().take_while(|row| row.compact_fold.as_ref() == Some(id)).count();
-        (top(end.min(len)) > line + Self::group_band_height()).then_some((header, band_top))
-    }
-
-    /// The group band's height with its hairline: opencode's 28 pt trigger.
-    pub(super) const fn group_band_height() -> f32 {
-        GROUP_BAND_H + 1.0
+        (top(end.min(len)) > line + band_height()).then_some(header)
     }
 
     /// Whether row `ix` is a tool group shown open behind a header that folds it: its own rows,
@@ -136,25 +126,96 @@ impl Transcript {
         .size_0()
         .into_any_element();
         let mut drawn = vec![watch];
-        drawn.extend(group.and_then(|(ix, top)| self.render_held_group(ix, top, cx)));
+        drawn.extend(group.and_then(|ix| self.render_held_group(ix, cx)));
         drawn
     }
 
-    fn render_held_group(&self, ix: usize, top: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let RowKind::ToolGroup { summary, worked_secs, compact_shell, .. } = &self.rows[ix].kind else {
+    fn render_held_group(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let row = &self.rows[ix];
+        let RowKind::ToolGroup { summary, worked_secs, compact_shell, .. } = &row.kind else {
             return None;
         };
-        // slopty: a turn's divider holds in its own short words ("Worked for 4m 13s"), never the
-        // sentence of all its work; its words in full stay what a screen reader hears.
-        let words: SharedString = match (compact_shell, worked_secs) {
-            (true, Some(secs)) => super::worked_for_label(*secs).into(),
-            (true, None) => super::divider_words(true).into(),
-            (false, _) => summary.text.clone(),
-        };
         let theme = Theme::of(cx).clone();
+        // The pane's own ground, so the band reads as the divider staying put, not a bar.
+        let fill = if theme.is_frost() { theme.glass() } else { theme.session_ground() };
         let key: SharedString = format!("sticky-group-{}", cx.entity_id()).into();
-        let hover = motion::hover_t(&key);
-        let fill = if theme.is_frost() { theme.glass() } else { theme.surface };
+        let content = if *compact_shell {
+            // slopty: a turn's divider holds as the divider it is, centred between its rules, in
+            // its own short words ("Worked for 4m 13s"); its words in full stay what a screen
+            // reader hears.
+            let words: SharedString = match worked_secs {
+                Some(secs) => super::worked_for_label(*secs).into(),
+                None => super::divider_words(true).into(),
+            };
+            let label = SharedString::from(super::spoken_divider(&words, &summary.text));
+            let held: SharedString = format!("{}-held", row.id).into();
+            super::turn_divider(
+                &held,
+                label,
+                super::tool_group_title(words, &[], None, &theme),
+                true,
+                1.0,
+                None,
+                &theme,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.fold_held_group(ix, cx);
+                }),
+            )
+            .w_full()
+            .into_any_element()
+        } else {
+            self.held_group_header(ix, &summary.text, &key, &theme, cx)
+        };
+        let band = div()
+            .id(key)
+            .w_full()
+            .flex()
+            .flex_col()
+            // Frost blurs the band alone: blurred under its soft edge, the rows would end in a
+            // hard line.
+            .child(crate::frost::frosted(
+                0.0,
+                crate::frost::MENU_BLUR,
+                div()
+                    .id("sticky-group-band")
+                    .debug_selector(|| "sticky-group".into()) // slopty: for the tests
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .w_full()
+                    .h(px(band_height()))
+                    .bg(fill)
+                    .px(px(self.row_inset()))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().w_full().max_w(px(self.content_width)).min_w_0().child(content)),
+            ))
+            .child(div().w_full().h(px(GROUP_BAND_EDGE)).bg(gpui::linear_gradient(
+                180.0,
+                gpui::linear_color_stop(fill, 0.0),
+                gpui::linear_color_stop(fill.opacity(0.0), 1.0),
+            )));
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right(px(self.right_reserve))
+                .child(gpui::deferred(band))
+                .into_any_element(),
+        )
+    }
+
+    /// A tool group's own header, held: its chevron and its work's sentence, a press folding it.
+    fn held_group_header(
+        &self,
+        ix: usize,
+        words: &SharedString,
+        key: &SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let hover = motion::hover_t(key);
         let column = div()
             .w_full()
             .max_w(px(self.content_width))
@@ -184,15 +245,10 @@ impl Transcript {
                     .text_color(motion::mix(theme.text_muted, theme.text, hover))
                     .child(words.clone()),
             );
-        let band = div()
-            .id(key.clone())
-            .debug_selector(|| "sticky-group".into()) // slopty: for the tests
+        div()
+            .id(SharedString::from(format!("{key}-header")))
             .role(gpui::Role::Button)
-            .aria_label(if *compact_shell {
-                SharedString::from(super::spoken_divider(&words, &summary.text))
-            } else {
-                summary.text.clone()
-            })
+            .aria_label(words.clone())
             .aria_expanded(true)
             .tab_index(0)
             .focus_visible({
@@ -201,27 +257,13 @@ impl Transcript {
             })
             .hover_fade(key.clone())
             .cursor_pointer()
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| this.fold_held_group(ix, cx)))
+            .h_full()
             .w_full()
-            .h(px(Self::group_band_height()))
-            .bg(fill)
-            .border_b_1()
-            .border_color(theme.border)
-            .pl(px(48.0))
-            .pr(px(48.0))
             .flex()
-            .justify_center()
-            .child(column);
-        Some(
-            div()
-                .absolute()
-                .top(px(top))
-                .left_0()
-                .right(px(self.right_reserve))
-                .child(gpui::deferred(crate::frost::frosted(0.0, crate::frost::MENU_BLUR, band)))
-                .into_any_element(),
-        )
+            .items_center()
+            .child(column)
+            .into_any_element()
     }
 }
 
@@ -313,10 +355,9 @@ mod tests {
             transcript.read_with(cx, |this, _| this.sticky_group())
         };
         assert_eq!(at(3, cx), None, "its header is still read");
-        let under_bar = Theme::TITLEBAR_HEIGHT;
-        assert_eq!(at(25, cx), Some((10, under_bar)), "held under the titlebar");
+        assert_eq!(at(25, cx), Some(10), "held at the transcript's own top");
         assert_eq!(at(50, cx), None, "its rows have gone by");
-        assert_eq!(at(25, cx), Some((10, under_bar)));
+        assert_eq!(at(25, cx), Some(10));
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.refresh();

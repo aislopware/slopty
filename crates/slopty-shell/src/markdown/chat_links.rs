@@ -14,11 +14,11 @@ pub fn is_chat_link(url: &str) -> bool {
     crate::links::parse_slopty_conversation_link(url).is_ok()
 }
 
-/// What a chip says for a chat titled `title` (none: "Untitled chat") standing at `status`:
+/// What a chip says for a chat titled `title` (none: "Untitled session") standing at `status`:
 /// its title, then how it stands when it works or waits on the person.
 pub fn chip_label(title: Option<&str>, status: Option<slopty_view_proto::SessionStatus>) -> String {
     use slopty_view_proto::SessionStatus;
-    let title = title.map(str::trim).filter(|title| !title.is_empty()).unwrap_or("Untitled chat");
+    let title = title.map(str::trim).filter(|title| !title.is_empty()).unwrap_or("Untitled session");
     let title = crate::transcript::single_line(title);
     match status {
         Some(SessionStatus::Working) => format!("{title} · Working"),
@@ -183,8 +183,8 @@ mod tests {
     #[test]
     fn a_chip_says_the_title_and_how_the_chat_stands() {
         use slopty_view_proto::SessionStatus;
-        assert_eq!(chip_label(None, None), "Untitled chat");
-        assert_eq!(chip_label(Some("  "), Some(SessionStatus::Done)), "Untitled chat");
+        assert_eq!(chip_label(None, None), "Untitled session");
+        assert_eq!(chip_label(Some("  "), Some(SessionStatus::Done)), "Untitled session");
         assert_eq!(
             chip_label(Some("Ship it"), Some(SessionStatus::AwaitingInput)),
             "Ship it · Needs you"

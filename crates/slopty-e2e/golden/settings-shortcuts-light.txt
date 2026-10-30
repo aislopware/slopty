@@ -14,24 +14,24 @@ Button │ Close settings
 Button │ Restore defaults
 Button │ Change New session shortcut: ⌘N
 Button │ Change New project shortcut: ⇧⌘N
-Button │ Change Next chat or side pane tab shortcut: ⌃⇥
-Button │ Change Previous chat or side pane tab shortcut: ⌃⇧⇥
-Button │ Change Archive chat shortcut: ⇧⌘A
+Button │ Change Next session or side pane tab shortcut: ⌃⇥
+Button │ Change Previous session or side pane tab shortcut: ⌃⇧⇥
+Button │ Change Archive session shortcut: ⇧⌘A
 Button │ Change Resume a Claude Code session shortcut: ⇧⌘O
-Button │ Change Next chat that needs you shortcut: ⌘.
+Button │ Change Next session that needs you shortcut: ⌘.
 Button │ Change Toggle sidebar shortcut: ⌘B
 Button │ Change Toggle side pane shortcut: ⌘R
 Button │ Change Toggle files panel shortcut: ⌘E
 Button │ Change Toggle terminal shortcut: ⌘J
 Button │ Change Reopen closed tab shortcut: ⇧⌘T
-Button │ Change Jump to chat 1 shortcut: ⌘1
-Button │ Change Jump to chat 2 shortcut: ⌘2
-Button │ Change Jump to chat 3 shortcut: ⌘3
-Button │ Change Jump to chat 4 shortcut: ⌘4
-Button │ Change Jump to chat 5 shortcut: ⌘5
-Button │ Change Jump to chat 6 shortcut: ⌘6
-Button │ Change Jump to chat 7 shortcut: ⌘7
-Button │ Change Jump to chat 8 shortcut: ⌘8
-Button │ Change Jump to chat 9 shortcut: ⌘9
+Button │ Change Jump to session 1 shortcut: ⌘1
+Button │ Change Jump to session 2 shortcut: ⌘2
+Button │ Change Jump to session 3 shortcut: ⌘3
+Button │ Change Jump to session 4 shortcut: ⌘4
+Button │ Change Jump to session 5 shortcut: ⌘5
+Button │ Change Jump to session 6 shortcut: ⌘6
+Button │ Change Jump to session 7 shortcut: ⌘7
+Button │ Change Jump to session 8 shortcut: ⌘8
+Button │ Change Jump to session 9 shortcut: ⌘9
 Button │ Change Save file shortcut: ⌘S
 Button │ Change Reload page shortcut: ⇧⌘R

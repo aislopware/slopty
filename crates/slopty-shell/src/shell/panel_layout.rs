@@ -322,6 +322,55 @@ impl Shell {
         }
     }
 
+    /// slopty: how much narrower and shorter than the main column the session's terminal fits
+    /// its grid while the columns beside it and the dock under it glide: the main column's width
+    /// now, less the narrower of where the glides started and where they land. So a glide
+    /// reflows the TUI once, to that narrower grid, never once a frame: an opening pane glides
+    /// over ground the terminal already gave up, and a closing one uncovers ground the terminal
+    /// fills when it lands (`docs/decisions/ui.md`, "A glide reflows the TUI once"). A drag
+    /// tracks the pointer and holds nothing.
+    pub(super) fn glide_hold(&self, dock: crate::terminal::dock::Geometry, cx: &App) -> (f32, f32) {
+        // What a column gliding from `from` to `lands` takes beyond what it takes `now`, at
+        // either end; nothing for one at rest.
+        let ends = |tween: Option<WidthTween>, lands: f32, now: f32| {
+            self.active_tween_endpoints(tween)
+                .map_or((0.0, 0.0), |(from, _)| (from - now, lands - now))
+        };
+        let fit = self.horizontal_fit();
+        let column = |slot: usize, shown: bool, tween: Option<WidthTween>, lands: f32, now: f32| {
+            if shown {
+                ends(tween, lands, now)
+            } else {
+                ends(self.fit_exits[slot].map(|(exit, _)| exit), 0.0, now)
+            }
+        };
+        // A takeover lays the column out at its own retained width already.
+        let width = if self.main_takeover_active() {
+            0.0
+        } else {
+            let right = if matches!(self.route, Route::Chat) {
+                let (lands, now) = (self.right_settled_target(cx), self.right_visible_width(cx));
+                column(1, fit.right, self.right_tween, lands, now)
+            } else {
+                (0.0, 0.0)
+            };
+            let sidebar = (self.sidebar_target(), self.sidebar_now());
+            let files = (self.files_settled_width(cx), self.files_visible_width(cx));
+            let columns = [
+                column(0, fit.sidebar, self.sidebar_tween, sidebar.0, sidebar.1),
+                right,
+                column(2, fit.files, self.files_tween, files.0, files.1),
+            ];
+            let (started, lands) = columns
+                .iter()
+                .fold((0.0_f32, 0.0_f32), |(started, lands), end| (started + end.0, lands + end.1));
+            started.max(lands).max(0.0)
+        };
+        let lands = self.terminal_target(cx).min(dock.limit);
+        let (started, lands) = ends(self.terminal_tween, lands, dock.height);
+        (width, started.max(lands).max(0.0))
+    }
+
     /// Width of a column the fit hid mid-flight, while its exit runs.
     pub(super) fn fit_exit_width(&self, column: usize) -> Option<f32> {
         self.fit_exits[column]

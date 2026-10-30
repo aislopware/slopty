@@ -810,7 +810,7 @@ mod pinned_session_tests {
                     assert_eq!(shell.active_sidebar_pins(cx), saved);
                     assert_eq!(
                         shell.sidebar_notice.as_deref(),
-                        Some("You can pin up to 200 chats")
+                        Some("You can pin up to 200 sessions")
                     );
                     assert!(shell.sidebar_session_return.is_some());
                 }
@@ -4304,7 +4304,7 @@ impl Shell {
             (active, archived)
         };
         if active.is_none() && archived.is_none() {
-            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t rename this chat here. Clear the project filter, then rename it.", cx);
+            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t rename this session here. Clear the project filter, then rename it.", cx);
             return false;
         }
         if let Some(chat) = &active {
@@ -4899,7 +4899,7 @@ impl Shell {
                 // slopty: Needs you names the key that walks it, across every project and machine.
                 .when(key == super::sidebar_status::StatusGroup::NeedsYou.key(), |el| {
                     el.tooltip(crate::settings::widgets::action_tooltip(
-                        "Next chat that needs you",
+                        "Next session that needs you",
                         Keys::Action(Box::new(super::NextNeedsYou)),
                     ))
                     .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
@@ -7460,7 +7460,12 @@ impl Shell {
                 Some((input, opening, _)) => !opening && !input.read(cx).text().trim().is_empty(),
                 None => listing.is_some(),
             };
-        let footer = if editing {
+        // slopty: its keys where there are keys; a touch screen keeps only the button that adds.
+        let keys = !crate::shell::touch_screen();
+        let adds = (step == ProjectStep::Folders && !cloning) || editing;
+        let footer = if !keys {
+            command_palette::palette_footer()
+        } else if editing {
             command_palette::palette_footer()
                 .child(command_palette::command_key_hint(&theme, "Tab", "Complete", window, cx))
                 .child(command_palette::command_key_hint(&theme, "⏎", "Open", window, cx))
@@ -7496,7 +7501,7 @@ impl Shell {
                 })
         }
         // slopty: a typed address clones from ⏎, so the add button stands down while it shows.
-        .when((step == ProjectStep::Folders && !cloning) || editing, |el| {
+        .when(adds, |el| {
             el.child(div().flex_1()).child(
                 div()
                     .id("project-add")
@@ -7527,10 +7532,9 @@ impl Shell {
                             }))
                     })
                     .when(!can_add, |el| el.opacity(0.5))
-                    .child(popover::kbd_hint(
-                        &theme,
-                        &crate::keys::combo_text("mod-enter"),
-                    ))
+                    .when(keys, |el| {
+                        el.child(popover::kbd_hint(&theme, &crate::keys::combo_text("mod-enter")))
+                    })
                     .child(
                         div()
                             .text_size(crate::typography::ui_rems(10.0))
@@ -7584,8 +7588,8 @@ impl Shell {
                             .child(error),
                     )
                 })
-                .child(footer);
-        Some(command_palette::palette_overlay("add-space-palette", viewport, card))
+                .when(keys || adds, |el| el.child(footer));
+        Some(command_palette::palette_overlay(viewport, card))
     }
 
     // ---- space context menu / rename / delete overlays ----

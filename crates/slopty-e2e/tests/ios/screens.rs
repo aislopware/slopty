@@ -39,15 +39,15 @@ async fn shown(drv: &mut Driver, what: &str, ready: impl Fn(&Dump) -> bool) -> D
     }
 }
 
-/// Open the chat whose title holds `title`: from the Chats page on a phone (back to it first,
+/// Open the chat whose title holds `title`: from the Sessions page on a phone (back to it first,
 /// from a chat open), from the sidebar's list on an iPad.
 async fn open_chat(drv: &mut Driver, phone: bool, title: &str) {
     if phone {
         let dump = drv.dump().await.unwrap();
         if !chats_page(&dump) {
-            tap(drv, "Button", "Back to Chats").await;
+            tap(drv, "Button", "Back to Sessions").await;
         }
-        let what = format!("{title:?} on the Chats page");
+        let what = format!("{title:?} on the Sessions page");
         let listed = shown(drv, &what, |d| chats_page(d) && row(d, title).is_some()).await;
         tap_node(drv, row(&listed, title).unwrap()).await;
     } else {
@@ -239,9 +239,11 @@ async fn a_chats_shell_and_its_files_open_on_the_device() {
     goldens(drv, &dir, device, "files").await;
     if phone {
         // The files are a page over the session, whose back leads to it.
-        tap(drv, "Button", "Back to Chat").await;
-        shown(drv, "the session again", |d| d.a11y_node("Button", Some("Back to Chats")).is_some())
-            .await;
+        tap(drv, "Button", "Back to Session").await;
+        shown(drv, "the session again", |d| {
+            d.a11y_node("Button", Some("Back to Sessions")).is_some()
+        })
+        .await;
     } else {
         tap(drv, "Button", "Hide files panel").await;
     }

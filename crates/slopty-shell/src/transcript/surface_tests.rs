@@ -1194,7 +1194,7 @@ fn a_done_lines_copy_rides_on_its_line(cx: &mut gpui::TestAppContext) {
 }
 
 /// #5: a subagent's run drilled into as a chat reads from the top, not risen from the bottom,
-/// starting under the breadcrumb.
+/// starting at its pane's top.
 #[gpui::test]
 fn a_drilled_run_reads_from_the_top(cx: &mut gpui::TestAppContext) {
     let (transcript, cx) = open(cx, answer("a1", "Main answer."));
@@ -1217,11 +1217,12 @@ fn a_drilled_run_reads_from_the_top(cx: &mut gpui::TestAppContext) {
     let nodes = draw(cx);
     let said = find(&nodes, Role::Paragraph, "It has 4.").expect("the run's answer").clone();
     assert!(f32::from(said.center.y) < 300.0, "near the top of an 800 pt pane: {said:?}");
-    // Its task starts under the breadcrumb that hangs below the titlebar, clear of it.
+    // Its task starts one gap under its pane's top: the pane clears the window's chrome, so no
+    // titlebar's height stands above it.
     let task = find(&nodes, Role::Paragraph, "Task: Count the lines").expect("its task").clone();
     let top = f32::from(task.center.y) - task.height / 2.0;
-    let crumb = Theme::TITLEBAR_HEIGHT + super::DRILL_CRUMB_HEIGHT;
-    assert!(top >= crumb + Theme::SPACE_SM, "under the breadcrumb's {crumb}: {task:?}");
+    let under = Theme::SPACE_LG..Theme::SPACE_LG + Theme::TITLEBAR_HEIGHT;
+    assert!(under.contains(&top), "one gap under the pane's top, {under:?}: {task:?}");
 }
 
 /// #17: a subagent's run drilled into before the chat list lists it (a note tapped at launch)

@@ -49,8 +49,7 @@ const TRANSCRIPT_CACHE_BYTES: usize = 64 * 1024 * 1024;
 struct CachedTranscript {
     prepared: Option<Arc<crate::transcript::PreparedTranscript>>,
     chat_id: String,
-    entries: Vec<SessionMessageEntry>,
-    context_usage: Option<slopty_view_proto::ContextUsage>,
+    entries: Vec<SessionMessageEntry>, // slopty: no context usage
     bytes: usize,
 }
 
@@ -459,12 +458,7 @@ pub struct AppState {
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
     deep_link_notice: Option<String>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
-    pub transcript: Vec<SessionMessageEntry>,
-    pub context_usage: Option<slopty_view_proto::ContextUsage>,
-    // slopty: the plan's rate windows and the limit's reset, read-only, as the selected chat's
-    // agent reports them (the usage ring, its card and the composer's limit notice).
-    pub usage_limits: Vec<slopty_view_proto::AgentUsageWindow>,
-    pub limit_resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub transcript: Vec<SessionMessageEntry>, // slopty: no context usage or plan windows
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -574,9 +568,6 @@ impl AppState {
             canvas_target: None,
             selected_chat: None,
             transcript: Vec::new(),
-            context_usage: None,
-            usage_limits: Vec::new(),
-            limit_resets_at: None,
             transcript_replayed: false,
             window_active: false,
             transcript_baselines: HashMap::new(),
@@ -718,7 +709,6 @@ impl AppState {
             self.selected_chat = None;
             self.restore_canvas_target();
             self.transcript.clear();
-            self.context_usage = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
             self.transcript_replayed = false;
             self.transcript_task = None;
@@ -1064,16 +1054,6 @@ impl AppState {
         if let (Some(doc_id), Some(baseline)) = (&self.selected_chat, update.replay_baseline) {
             self.transcript_baselines
                 .insert(doc_id.clone(), Arc::new(baseline));
-        }
-        if self.context_usage != update.context_usage {
-            self.context_usage = update.context_usage;
-            cx.notify();
-        }
-        // slopty: the rate windows ride the same update.
-        if self.usage_limits != update.limits || self.limit_resets_at != update.limit_resets_at {
-            self.usage_limits = update.limits;
-            self.limit_resets_at = update.limit_resets_at;
-            cx.notify();
         }
         Ok(())
     }
@@ -1671,7 +1651,6 @@ impl AppState {
         self.transcript_baselines.clear();
         self.transcript_cache.clear();
         self.prepared_transcripts.clear();
-        self.context_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         self.local_device_id = None;
@@ -1948,7 +1927,6 @@ impl AppState {
                     prepared,
                     chat_id: previous.clone(),
                     entries,
-                    context_usage: self.context_usage,
                     bytes,
                 });
                 while self.transcript_cache.len() > TRANSCRIPT_CACHE_CAP
@@ -1971,8 +1949,6 @@ impl AppState {
         self.selected_chat = chat_id.clone();
         self.auto_selected = true;
         self.transcript.clear();
-        self.context_usage = None;
-        self.limit_resets_at = None; // slopty: another chat's limit is not this one's.
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
         if let Some(cached) = cached {
@@ -1990,7 +1966,6 @@ impl AppState {
                 self.prepared_transcripts.insert(cached.chat_id, prepared);
             }
             self.transcript = cached.entries;
-            self.context_usage = cached.context_usage;
             self.transcript_replayed = true;
         }
         self.transcript_task = None;
@@ -2691,10 +2666,7 @@ mod tests {
         state.update(cx, |state, cx| {
             let update = |id: &str| slopty_view_doc::TranscriptUpdate {
                 frame: TranscriptFrame::reset(&[user_entry(id)]),
-                context_usage: None,
                 replay_baseline: None,
-                limits: Vec::new(), // slopty: new field.
-                limit_resets_at: None, // slopty: new field.
             };
             state.select_chat(Some("whale".into()), cx);
             state

@@ -32,6 +32,7 @@ Paragraph │ main.rs is the only source file: three lines, and it prints hello.
 Paragraph │ The notes I wrote are in notes.md:
 Paragraph │ # Notes⏎main.rs prints hello
 Button │ Copy code
+Paragraph │ Next I'd add a test for the greeting, then run cargo test in CI.
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Hide inspector

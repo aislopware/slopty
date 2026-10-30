@@ -398,6 +398,14 @@ impl Shell {
                     .child(agent.name),
             );
         }
+        // slopty: the keys, where there are keys: a phone or a pad has none to hint.
+        let keys = (!crate::shell::touch_screen()).then(|| {
+            palette_footer()
+                .child(command_key_hint(&theme, "\u{2191} \u{2193}", "Navigate", window, cx))
+                .child(command_key_hint(&theme, "\u{23CE}", "Start", window, cx))
+                .child(command_key_hint(&theme, "Tab", "Agent", window, cx))
+                .child(command_key_hint(&theme, "Esc", "Close", window, cx))
+        });
         let card = palette_card("new-session-picker", &focus, viewport, &theme)
             .key_context("NewSessionPicker")
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
@@ -418,14 +426,8 @@ impl Shell {
             ))
             .child(tabs)
             .child(body)
-            .child(
-                palette_footer()
-                    .child(command_key_hint(&theme, "\u{2191} \u{2193}", "Navigate", window, cx))
-                    .child(command_key_hint(&theme, "\u{23CE}", "Start", window, cx))
-                    .child(command_key_hint(&theme, "Tab", "Agent", window, cx))
-                    .child(command_key_hint(&theme, "Esc", "Close", window, cx)),
-            );
-        Some(palette_overlay("new-session-picker", viewport, card))
+            .children(keys);
+        Some(palette_overlay(viewport, card))
     }
 }
 

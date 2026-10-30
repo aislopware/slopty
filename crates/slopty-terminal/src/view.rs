@@ -7625,6 +7625,75 @@ mod tests {
         assert!(rows <= tall, "{rows:?} > {tall:?}");
     }
 
+    /// A 320 pt pane gliding open beside the terminal and closing again, frame by frame at
+    /// 120 Hz on the shell's `PANEL_RESIZE`: the resizes the terminal asks of its session.
+    /// Held by the shell (`live::hold_fit`), the TUI reflows once per glide; free, it reflows
+    /// on almost every frame (`docs/MEASUREMENTS.md`, 2026-10-30).
+    #[gpui::test]
+    fn a_held_glide_reflows_once(cx: &mut TestAppContext) {
+        /// The shell, as far as a glide goes: it holds the grid as it lays the terminal out,
+        /// in the same frame.
+        struct Column {
+            term: Entity<TerminalView>,
+            width: f32,
+            by: f32,
+        }
+        impl Render for Column {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let by = size(px(self.by), px(0.0));
+                slopty_shell::live::hold_fit(self.term.entity_id(), by, cx);
+                div().w(px(self.width)).h(px(300.0)).child(self.term.clone())
+            }
+        }
+        let (tx, mut rx) = mpsc::channel(64);
+        cx.update(|cx| cx.set_global(slopty_shell::theme::Theme::default()));
+        let (column, cx) = cx.add_window_view(|_, cx| {
+            let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+            let term =
+                cx.new(|cx| TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx));
+            Column { term, width: 1000.0, by: 0.0 }
+        });
+        cx.simulate_resize(size(px(1200.0), px(300.0)));
+        let term = column.read_with(cx, |column, _| column.term.clone());
+        term.update(cx, |view, cx| view.apply(TermEvent::Driver { you: true }, cx));
+        let resizes = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|msg| matches!(msg, ClientMsg::Term { req: TermRequest::Resize(_), .. }))
+                .count()
+        };
+        let spec = slopty_shell::motion::PANEL_RESIZE;
+        // 240 ms at 120 Hz.
+        let frames: u16 = 29;
+        let (wide, pane) = (1000.0_f32, 320.0_f32);
+        let frame = |width: f32, by: f32, cx: &mut VisualTestContext| {
+            column.update(cx, |column, cx| {
+                (column.width, column.by) = (width, by);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        };
+        let mut glide = |open: bool, held: bool, cx: &mut VisualTestContext| {
+            frame(wide - if open { 0.0 } else { pane }, 0.0, cx);
+            let _settled = resizes(&mut rx);
+            for step in 1..=frames {
+                let eased = spec.progress(f32::from(step) / f32::from(frames));
+                let shown = if open { pane * eased } else { pane * (1.0 - eased) };
+                let by = if held && step < frames { pane - shown } else { 0.0 };
+                frame(wide - shown, by, cx);
+            }
+            resizes(&mut rx)
+        };
+        let free = (glide(true, false, cx), glide(false, false, cx));
+        let held = (glide(true, true, cx), glide(false, true, cx));
+        assert_eq!(held, (1, 1), "a held glide reflows once each way; free: {free:?}");
+        // 14 opening and 15 closing at this font (`docs/MEASUREMENTS.md`, 2026-10-30).
+        assert!(free.0 >= 10 && free.1 >= 10, "a free glide reflows most frames: {free:?}");
+    }
+
     /// The screen of [`with_command_blocks`] again, the cursor showing after the prompt.
     fn cursor_at_the_prompt(view: &Entity<TerminalView>, cx: &mut VisualTestContext) {
         let prompt = SemanticMark::Prompt { exit: Some(0), input: Some(2) };

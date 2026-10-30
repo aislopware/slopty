@@ -4290,8 +4290,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     only the server's tree hears it today, so showing it at once needs a field on the wire.
   - Not taken: shortcuts inside controls, because keybindings live in the palette (CLAUDE.md),
     and plan usage in the bar, which needs an undocumented endpoint and the Keychain
-    credential. Both are parked for the user (plan usage superseded 2026-10-04 by "Plan usage
-    in the status bar, from what the agents publish").
+    credential. Both are parked for the user.
   - Tests: `the_mode_chip_takes_the_freshest_word`, `a_fold_names_what_its_work_touched`,
     `the_status_bar_counts_every_workers_agents`,
     `the_status_bar_reads_the_focused_tile_and_its_link`, `the_readouts_say_what_they_count`,
@@ -5213,7 +5212,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     ending the oldest's session); `a_closed_shell_can_be_taken_back` (an idle shell runs on
     past its notice, then is closed); `tiles::an_exited_shell_stays_until_it_is_closed`.
 
-- ❌ **A thread says each fact once, and the tray is the composer's head** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-03, design
+- ❌ **A thread says each fact once, and the tray is the composer's head** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-03, design
   review `.research/design-review-2026-10-03.md` #2, #3, #5, #6).
   - **The composer holds the thread's changes and context.** An agent tile whose body is the
     thread view drew the old conversation face's chips in its header: its changed lines
@@ -5444,24 +5443,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `an_open_palette_takes_the_agents_as_they_arrive`;
     `palette::the_empty_workspace_asks_what_an_agent_should_do`,
     `palette::the_questions_chips_choose_where_the_agent_starts`.
-
-- ✅ **Plan usage in the status bar, from what the agents publish** (where it shows superseded
-  2026-10-12 by **The frame is one top line**; 2026-10-04, rulings §6).
-  MonoCode reads an undocumented endpoint with Claude Code's Keychain token; Slopty never reads
-  a credential. The plan's windows already arrive on every thread row (`ThreadRow::meters`,
-  `Limit`): Claude Code's status line `rate_limits` and Codex's `account/rateLimits`, mapped by
-  the agent adapters. `slopty_client::meters::PlanMeters` keeps the freshest reading per machine
-  and agent from the thread tables. The bar shows the focused tile's machine's windows for its
-  agent, else the freshest reading there, as `5h 23% · 7d 41%`, in `warn` from 80 %, a spent
-  window with when it comes back ("5h 100% until 14:00"), and the reading's age once it is past
-  a quarter of an hour. A window past its reset is dropped; no reading, no meter. A click lists
-  every reading by machine and agent with its age. Nothing is polled outside the agents' own
-  doors, so a Claude reading after a long idle is stale until the next turn, and says its age.
-  This supersedes "plan usage in the bar … parked for the user". Tests: `slopty-client`
-  `meters::tests::a_reading_past_its_reset_is_dropped`, `no_reading_shows_no_meter`,
-  `the_focused_agents_reading_leads_else_the_freshest`, `a_windows_name_is_said_short`; ui
-  `bars::the_status_bar_shows_the_focused_machines_plan_windows`,
-  `statusbar::tests::a_plan_window_far_used_warns_and_a_spent_one_says_when_it_comes_back`.
 
 - ✅ **The thread says what it could not do, and how to go on** (2026-10-04).
   - **A refusal line** in the activity bar, above the queue: an alert icon in `error`, the words
@@ -5838,7 +5819,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::nav_rows::the_filter_keeps_the_rows_that_match`.
 
 - ❌ **The send button says what ↵ will do, ⌘↵ and ⌥↑ are keymap actions, and the meter opens a
-  panel** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-04, `.research/t3code-ui-2026-10-03.md` #6; stage 4 item 6).
+  panel** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-04, `.research/t3code-ui-2026-10-03.md` #6; stage 4 item 6).
   - **The one solid names its press.** Stop while a turn runs and nothing is typed, as before.
     Otherwise it is Update while a waiting message is being changed (a check), Send with no
     turn under way (the up arrow), Steer into a turn where the agent takes a steer (the arrow
@@ -6245,7 +6226,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (three: commit and push in order, the merge's gate and its head, a refusal verbatim and
     closing), `review::tests::the_tile_shows_the_branch_s_pull_request_and_opens_the_commit_sheet`.
 
-- ❌ **Carrying a thread on: continue in another agent, interrupt and send, edit from here** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).*
+- ❌ **Carrying a thread on: continue in another agent, interrupt and send, edit from here** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).*
   (2026-10-04; rulings R8 and R13 and "Edit from a turn" in `docs/decisions/agents.md`).
   - **Continue in….** Where the thread can (`Cap::CONTINUE`), the model chip is a button
     even with no model to switch to, and its menu ends with "Continue in a new thread": the
@@ -6512,7 +6493,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `conversation::thread::tests::face::a_goal_is_one_quiet_line_with_its_budget`,
     `view::goal::tests`.
 
-- ❌ **A stop pauses the queue, said once** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-04, A1). Messages the person's stop holds
+- ❌ **A stop pauses the queue, said once** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-04, A1). Messages the person's stop holds
   (`Pending::stopped`) sit under one quiet line, "Queue paused · sends after your next
   message", rather than each saying it. Each held message can be sent now, which lets the
   rest go after it. Test: `conversation::thread::tests::composing::a_stop_pauses_the_queue_until_the_next_message`.
@@ -7675,7 +7656,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `tab_strip::the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge`, and
     `keymap::tests::the_files_chord_wins_over_a_deeper_default`, which counts the navigator's ⌘F.
 
-- ❌ **The request is one card with one row of answers; the composer's foot keeps four things** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).*
+- ❌ **The request is one card with one row of answers; the composer's foot keeps four things** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).*
   (2026-10-06, `.research/elegance-icons-2026-10-06.md` §3.6 and §5 items 3, 4 and 6). Supersedes the
   "From now on" section of "A request is one decision" and "The way to the terminal stands on
   the request's title line".
@@ -8030,7 +8011,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the same way once the questionnaire takes a field of several lines (the gpui-kit fork).
   - Tests: `review::tests::a_comment_keeps_its_lines`,
     `conversation::thread::tests::doors::a_reason_keeps_its_lines`.
-- ❌ **The first message is written in the thread's composer** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-06,
+- ❌ **The first message is written in the thread's composer** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-06,
   `.research/readiness-2026-10-07.md` R1 and R5; amends "A start opens its tile at once" in
   `agents.md` and supersedes "A Claude Code start can plan first" in `claude-code.md`). The
   prompt that defines a task was written in the weakest field in the app: one line, which
@@ -8182,7 +8163,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   notice now keeps the tile and what happened, and reads the tile's title each time it is
   drawn.
   - Test: `workspace::tests::toasts::a_tiles_notice_reads_the_name_the_tile_comes_to_have`.
-- ❌ **An empty thread is its composer** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-06, `.research/premium-foundations-2026-10-06.md`
+- ❌ **An empty thread is its composer** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-06, `.research/premium-foundations-2026-10-06.md`
   change 8). An empty thread drew a speech-bubble glyph over "New Claude Code thread" and a line
   of where it worked, centred where its rows would be, with the composer far below at the foot.
   The line carried a path (a run's temporary home read "in slopty-e2e-94f6a37e/home") and broke
@@ -8379,7 +8360,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a_start_in_the_folder_runs_on_one_agent}` and
     `workspace::tests::review_tile::a_messages_runs_are_reviewed_side_by_side`.
 
-- ❌ **Photos beside Files in the composer's "+" menu on iOS** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-06, readiness rank 13).
+- ❌ **Photos beside Files in the composer's "+" menu on iOS** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-06, readiness rank 13).
   On a phone or a tablet the pictures are in Photos, which the Files picker cannot reach, so
   "Photos…" follows "Attach files…" there. What it picks lands as a drop on the tile would, the
   same path the Files picker takes. A picker that cannot be shown says "The Photos picker could
@@ -8799,7 +8780,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `thread::tests::steps::{a_turns_work_is_open_under_its_line_while_it_runs_and_folds_when_done,
     a_call_names_its_file_which_opens_and_a_failure_is_marked_at_its_end}`.
 
-- ❌ **The composer's ledge says where the work is** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-07,
+- ❌ **The composer's ledge says where the work is** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-07,
   `.research/ui-audit-monocode-2026-10-06.md` item 7, M10). The place, a new worktree's base and
   the meter stood in the composer's foot among the model and the mode. The place was the first
   thing to leave for want of room, and the meter wandered to wherever the foot's end fell.
@@ -8903,7 +8884,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `review::view::gaps::tests::the_stretches_lie_between_the_hunks`, and on the worker
     `review::a_review_s_sides_read_back_whole_from_their_blobs` (`crates/slopty-worker/tests/review.rs`).
 
-- ❌ **A question is answered from the keyboard, or skipped** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-07,
+- ❌ **A question is answered from the keyboard, or skipped** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-07,
   `.research/ui-audit-monocode-2026-10-06.md` item 18, M20). An agent's questions already
   stood in the tray directly over the composer (item 8), one at a time, with ↑↓, a digit, ↵,
   ⌘↵ and "Other". MonoCode's question form adds Home and End, says "Select all that apply"
@@ -9300,7 +9281,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     thread says why, and the card returns with the way to the terminal.
   - Test: `conversation::thread::tests::doors::a_start_held_at_its_trust_dialog_offers_to_trust_the_folder`.
 
-- ❌ **A request's card shows what is being approved: an edit's change, a plan whole** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).*
+- ❌ **A request's card shows what is being approved: an edit's change, a plan whole** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).*
   (2026-10-11, readiness audit items 1 and 3, the client half).
   - **The defect.** Claude Code's hooks name no call, so an edit put to the person read
     "Allow Edit?" with nothing to judge it by. The patch was on the wire (`Request.proposed`)
@@ -10275,7 +10256,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   "No machine is named …". Test:
   `settings_form::map_tests::the_clipboards_machines_read_by_name_and_are_added_by_name`.
 
-- ❌ **The empty workspace is the composer page** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-11, the MonoCode anatomy study §1g,
+- ❌ **The empty workspace is the composer page** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-11, the MonoCode anatomy study §1g,
   the orchestrator-first direction). The empty workspace was a 2010s start page: the brand
   mark, three launcher rows, "Recent" and "Machines". With work handed to orchestrators, the
   first thing an empty workspace asks is what should get done. Ruled:
@@ -11195,7 +11176,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `…::questions::{a_question_is_a_card_in_the_thread, a_short_room_scrolls_the_question_with_the_thread}`;
     `conversation::thread::questions::tests::a_question_answers_are_rows_not_boxes`;
     slopty-theme `elevation_and_density`.
-- ❌ **The composer's foot says where the agent works** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-12,
+- ❌ **The composer's foot says where the agent works** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-12,
   `.research/design-polish-2026-10-12.md` §4.7, batch 4). Delta's foot row tells the person
   where the agent works; ours said it only in the tile's header.
   - **Left**: the checkout by its folder and its branch, "slopty / main", after the repository's
@@ -11887,35 +11868,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     so the picker says Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1 by their ids. With no menu
     read yet, it offers the manifest's current models the installed Claude Code runs. The model
     a chat was last started on comes first, so a new chat starts where the person left off.
-  - A model or effort picked for a chat is kept for it and, where the chat runs, switched in
-    its agent through its own door (`Intent::SetModel`, `Intent::SetEffort`).
-  - `@` finds files under the chat's or the project's folder with the worker's find.
   - The branch picker lists the clone's branches, the one checked out first, and switches with
     the worker's new `GitOp::Switch` (`git switch`, refused in git's words when changes are in
     the way).
-  - A file attached to a message arrives in base64 parts, goes to the worker as a transfer
-    into a fresh drop folder (`Dest::Attachment`, `Remote::upload_landed`), and its path goes
-    with the message.
-  - A message held for the turn's end waits in the worker's queue for the thread
-    (`Delivery::Queue`, where the agent has `Cap::QUEUE`). The shell's queue shows it, and its
-    edit, send-now, steer-now, reorder and remove are the worker's `Edit`, `Promote`, `Move`
-    and `Withdraw`.
-  - A side chat is the agent's own aside of the chat (`Intent::Aside`): the whole thread
-    branched into one that shares its context and stays out of the lists, answered once it
-    started, under the chat it was asked of.
   - A project's actions are its repository's run scripts (`GitOp::Scripts`), each by its name
     with an icon from what it does, then the person's own; running one opens it in a terminal
     of its own. The person adds, changes and removes them as zeron keeps them, on this app and
     never in the repository (see "A project's actions are the person's to change").
-  - A retry of a message that did not go sends again, under the same ids, what this client
-    asked of the chat's thread and the worker has not answered, so each is acted on once. A new
-    chat's start and a side chat's aside are kept until answered too: they are sent again when
-    the link comes back, where before one sent while the link was down was lost without a word.
   - A checkout's pull request is the one the thread's row shows (`ThreadRow::pull`), for its
     folder and branch, said again whenever it changes, so the composer's chip follows the
     agent's pull request.
-  - An attached file is read back from its machine whole once and handed over in chunks: a
-    picture in a message shows, and a queued message restored for editing keeps its files.
   - Renaming a chat is the person's own mark on its thread (`Intent::Name`, beside `Seen` and
     `Draft`): the worker keeps it apart from the agent's meta (`ThreadState::named`), so an
     agent naming the thread later does not undo it, and every device's lists show it. Empty
@@ -11931,7 +11893,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     15 s, for the machine to say what it has: an app just opened asked before its links were
     up, was told no agent was there, and kept saying "No agents available".
 
-  Tests: `slopty-ui` `surfaces::projects::tests` and `surfaces::composer::tests`.
+  Tests: `slopty-ui` `workspace::view_model::surfaces::projects`.
 - ✅ **A Claude Code chat's TUI is one key away, on the same session (2026-10-14).** The person
   wants to work in Claude Code's TUI and Slopty's GUI side by side. Claude Code already runs
   as its real TUI in a worker terminal, and the GUI follows and drives that same session
@@ -12076,7 +12038,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the person's use. Fixed in gpui-fast (`ccf27de`, as zeronsh/zui does): `scroll_by` compares the
   target with the cursor's position. Test: gpui-fast
   `fast::tests::list_scroll_by::a_nudge_from_a_negative_offset_lands_in_the_item_above`.
-- ❌ **A queued message is edited with its files (2026-10-15).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* Editing a queued message in the
+- ❌ **A queued message is edited with its files (2026-10-15).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* Editing a queued message in the
   composer always failed ("invalid edit lease"): the lease said neither what the message says
   nor its hash, which the shell needs. The lease is the message itself while it waits, with its
   words, files and a hash of both; a commit over a message changed meanwhile conflicts and
@@ -12085,7 +12047,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   again. Tests: `slopty-ui`
   `workspace::view_model::tests::a_queued_edit_is_leased_and_committed_with_its_files`,
   `slopty-agent` `queue::tests::a_queue_holds_in_order_and_a_stop_holds_it_until_the_person_speaks`.
-- ❌ **A queued message can be moved (2026-10-15).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* The shell's queue reorders by drag, which
+- ❌ **A queued message can be moved (2026-10-15).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* The shell's queue reorders by drag, which
   the view model answered with nothing. A move is `Intent::Move { pending, before }`: the
   message goes just before the one named, or last, in the worker's queue (`Queue::move_to`),
   in the Claude Code composer's list, and in Codex's, pi's and ACP's queues; a message kept for
@@ -12107,7 +12069,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   gives them under the agent's own identity (`harness-skill:`), so a pick goes as the command
   that runs it: `/name` to Claude Code, `$name` to Codex, whose adapter sends each skill the
   words name beside them, as Codex's TUI does. Test: `slopty-agent` `codex::codexs_skills_are_its_commands`.
-- ❌ **A switch an agent turned down leaves its picker (2026-10-15).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* A model or effort picked for
+- ❌ **A switch an agent turned down leaves its picker (2026-10-15).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* A model or effort picked for
   a chat stayed in its picker even when the agent refused it. A pick whose switch was refused is
   dropped, and the picker shows what the thread runs again, beside the refusal in the chat.
 - ✅ **An archived chat stays archived once it starts (2026-10-15).** A chat archived before its
@@ -12553,7 +12515,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty-ui` `view_model::tests::{a_notice_reads_by_its_kind,
     a_users_command_keeps_its_mark}`.
 
-- ❌ **The dock around the composer says what the TUI says, quietly (2026-10-16).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* Everything
+- ❌ **The dock around the composer says what the TUI says, quietly (2026-10-16).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* Everything
   around the composer reads the chat's dock and work (`slopty.WatchDock`, `slopty.WatchWork`,
   `slopty_view_doc::{dock, work}`). What needs the person stands out in amber; the rest is
   faint.
@@ -13019,7 +12981,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and a new file written whole counts its lines as added. Tests: `slopty-ui`
   `view_model::tests::a_dialog_is_headed_by_its_kind_not_its_title`; `slopty-shell`
   `transcript::tests::an_ask_chip_names_its_kind_and_shows_the_ask`.
-- ❌ **A stalled turn says where and after what, with Keep waiting and Stop (2026-10-17).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* When
+- ❌ **A stalled turn says where and after what, with Keep waiting and Stop (2026-10-17).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* When
   the worker says a turn made no progress for a while, the composer's status line says so
   naming the machine and the call it last made ("No progress on studio for a while · last:
   Bash(cargo test)"), with Keep waiting (quiet until that stall ends; a new one is said again)
@@ -13306,7 +13268,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `interface::{a_rows_hover_card_names_where_it_runs,
     a_section_dragged_by_its_header_keeps_its_place}`.
 
-- ❌ **The composer's closed sections take no room** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* (2026-10-18). The composer's stack sections
+- ❌ **The composer's closed sections take no room** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* (2026-10-18). The composer's stack sections
   (a failure, the dock's lines, a side answer, a folded question, mod bands, the checklist, the
   Background tray, the queue) cancelled the column's gap with a negative top margin while closed.
   The layout counts an item's margin box as at least nothing, so each closed section kept its
@@ -13324,7 +13286,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   sidebar's empty line ("No chats yet") is a Label node. Proof: `shell::compact::tests::
   {a_phones_chat_page_reads_no_hidden_rows, an_empty_sessions_page_offers_no_key}`,
   `composer::attachment_chip_tests::the_field_reads_its_chips_by_their_words`.
-- ❌ **The transcript is gone by the composer pill's bottom (2026-10-18).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).* zeron ramps the
+- ❌ **The transcript is gone by the composer pill's bottom (2026-10-18).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).* zeron ramps the
   transcript's fade from the pill's top to the window's floor, so a card scrolling under the footer
   read beside "Auto ◯ 1%". The ramp now ends at the pill's bottom, measured at paint
   (`Shell::pill_floor`), and nothing is drawn under the footer; under the glass pill it still fades
@@ -13381,7 +13343,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   draw; a panel not drawn within half a second opens at 80 × 24. Proof:
   `terminal::panel::progress_tests::a_session_opens_at_the_grid_its_body_draws`.
 - ✅ **A bare `/mcp`, `/context`, `/usage`, `/model`, `/effort` and `/clear` open Slopty's own surfaces; a toast
-  closes by its button; a restored terminal speaks only once drawn (2026-10-19).** *Commands superseded 2026-10-29 by "TUI-first" (`agents.md`): a command typed in the prompt box goes to the TUI, which opens its own ("The prompt box types into the TUI", below); the toast and the restored terminal stand.*
+  closes by its button; a restored terminal speaks only once drawn (2026-10-19).** *Commands superseded 2026-10-29 by "TUI-first" (`agents.md`): a command is typed in the agent's own TUI, which opens its own ("The GUI is read-only toward the agent", below); the toast and the restored terminal stand.*
   - **Commands.** zeron lets an agent's command win a name it shares with a workspace command,
     so `/mcp`, which Claude Code lists, went to the agent as a message; in the TUI it opened a
     dialog that `-p` has not. The bare command now opens Slopty's surface (the servers and
@@ -13453,7 +13415,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   of it; one hangs off the chat that started the subagent now
   (`a_side_chat_over_a_subagent_is_its_parents`).
 
-- ❌ **The composer's stack reads as one object, and its cards as Claude desktop's (2026-10-19).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the prompt box types into the agent's TUI ("The prompt box types into the TUI", below).*
+- ❌ **The composer's stack reads as one object, and its cards as Claude desktop's (2026-10-19).** *Superseded 2026-10-29 by "TUI-first" (`agents.md`): the GUI composer is gone, and the person writes in the agent's own TUI ("The GUI is read-only toward the agent", below).*
   An audit of the composer and what stacks on it against Claude Code desktop and T3 Code
   (`.research/polish-composer-2026-10-19.md`) found its polish gaps in Slopty's own additions,
   not in zeron's pill, so those were brought up to the references, zeron's look and colours kept.
@@ -14390,12 +14352,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   retry is gone, so every caller gets the wait
   (`live::terminals::tests::a_shell_asked_for_ahead_of_its_machine_is_the_one_kept_for_its_chat`,
   `a_shell_whose_machine_never_links_is_refused_after_the_grace`).
-- ❌ **The prompt box types into the TUI (2026-10-29).** *Superseded the same day by "The GUI
-  is read-only toward the agent" (below): a box beside the TUI was not worth keeping.* It was a
-  field docked under an agent session's terminal (⌘L) with the composer's `/`, `$` and `@` menus,
-  pictures and files uploaded to the session's machine, and one paste-then-Enter submit
-  (`TermRequest::Submit`) of the person's words into the TUI.
-
 - ✅ **The GUI is read-only toward the agent (2026-10-29).** The person writes to an agent in its
   own TUI, in the session's terminal, and nowhere else: the prompt box and every way the GUI put
   words before an agent are gone. The inspector will later reflect the TUI's own prompt (its
@@ -14589,3 +14545,81 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     access and plan modes (#1088), fx (#1099), browser annotations (#814), agent CLI updates
     (#978); settings search (#1018); and the mobile apps (#1062). Each path is in
     `xtask/zeron.toml`'s `[skip]`.
+- ✅ **A glide reflows the TUI once (2026-10-30).** A pane gliding open or shut beside a
+  session's terminal (the sidebar, the side pane, Files; 240 ms on `PANEL_RESIZE`), or the dock
+  gliding under it, resized the terminal on every frame, and each new size was a resize the TUI
+  answered by redrawing its whole screen: 14 resizes as a 320 pt pane opened and 15 as it shut,
+  a storm of rewrapping beside the motion. The shell now holds the grid while a glide runs. It
+  works out how much the main column is wider or taller now than the narrower of where the
+  glides started and where they land, summed over every column moving (`Shell::glide_hold`), so
+  two moving opposite ways net out, and hands that to the terminal (`live::hold_fit`), which fits
+  its grid to its bounds less the hold. The TUI reflows once, to the narrower grid, as the glide
+  starts, and once more as it lands, when it lands wider: an opening pane glides over ground the
+  terminal already gave up, and a closing one uncovers ground on the terminal's own colour. The
+  held size is snapped to the device pixel the settled layout stands on, since a difference of
+  two moving widths otherwise flips a column at a cell's edge. A drag of a sash still follows
+  the pointer: it has no end to hold to. Tests: `slopty-terminal`
+  `view::tests::a_held_glide_reflows_once` (`docs/MEASUREMENTS.md`, 2026-10-30), and in
+  `slopty-shell` each glide of `panel_interaction_tests` holds the session's terminal at the
+  narrower end and lets it go as it lands.
+- ✅ **One ground per session (2026-10-30).** A session's column stood on three near-blacks: the
+  title strip's (`#0d0d0d` dark), the terminal's (`#090909`) and the side pane's (`#060606`),
+  and on iOS the bands kept clear of the notch, the home indicator and the keyboard showed the
+  frame's glass. Each step read as a seam where the person should see one surface, which is how
+  Claude Code desktop and T3 Code stand a session. The column now stands on the terminal's own
+  background (`Theme::session_ground`, thinned to 40 % on glass as the panels are), and so do
+  its title strip, the side pane with the inspector, the editor and the Files column docked
+  beside it (zeron keeps those two on one ground, `panel_bg`, which now is this one), the
+  inspector's held group band, a phone's side page, and on a phone or a tablet the safe-area
+  and keyboard bands under a session's terminal; each column keeps its hairline. No hue changed: the ground is the theme's terminal colour in light and
+  dark.
+- ✅ **The inspector's timeline lays out for its pane (2026-10-30).** The transcript renders only
+  in the inspector now, in the side pane under its tab strip, yet it still laid out as zeron's
+  chat column does under a window's title bar: the held group header hung a title bar's height
+  (38 pt) down with rows scrolling over the strip above it, the first row opened 64 pt down
+  (90 under a drilled subagent's crumb), the find card 46, an own send landed 48 down and a live
+  page kept 62 clear, and the top had no fade, which the chat column's outlet had drawn. Each
+  now measures from the pane's top. A group's header holds at the list's top edge, centred on a
+  band of the pane's ground (frosted where the frame is) that fades into the rows over 24 pt
+  rather than ending on a hairline, and a press on it folds the group. The first row opens one
+  large step down (16 pt; 8 in a card), the find card one small step, and the top's scroll fade
+  (24 pt, as tall as what lies above) is always on, an own send and a live page resting where
+  it ends. On a phone the timeline's gutter is the platform's 16 pt margin, not the desktop's
+  48. Tests: `transcript::sticky::tests::an_open_groups_header_holds_while_its_rows_scroll`,
+  `transcript::surface_tests::a_drilled_run_reads_from_the_top` (one step under its crumb).
+- ✅ **A touch screen's palettes show no keys (2026-10-30).** New session, History, the command
+  palette and Add project closed on a footer of key caps (↑ ↓ Navigate, ⏎ Start, Tab, Esc) and
+  headed with ⌘N, and the command palette held a desktop's height, on a phone and a tablet with
+  no keyboard to press them. On a touch screen (`shell::touch_screen`) the caps, the header's
+  shortcut and the footer go, Add project keeps only the button that adds, and a palette is as
+  tall as its rows; a hardware keyboard on a tablet still reaches every key. Test:
+  `compact::tests::a_touch_screens_new_session_picker_offers_no_keys`.
+- ✅ **What a key opens is there at once (2026-10-30).** The command palette and the pickers
+  that share its frame (New session, History, Add project) faded their scrim in over 120 ms and
+  their card over 150 ms with a 4 pt settle, Claude desktop's overlay entrance. The person opens
+  them by key many times a day, and an entrance on something that frequent is a wait each time,
+  so they now stand whole on the frame the key opens them, scrim and all, as Raycast's does. The
+  entrance's curve and its two specs are deleted. Pointer-opened floats keep their entrances.
+- ✅ **Session, everywhere the person reads it (2026-10-30).** TUI-first named a session "session"
+  in New session, the title bar's hint, the palette's rows and the phone's page, but the rest
+  still said chat: Settings → Shortcuts ("Chats", "Jump to chat 1", "Archive chat", "Next chat
+  that needs you"), the Go menu, File's "New Chat", the palette's sections ("Recent chats", "In
+  chats"), its field and its empty line, the phone's tab and its back button, the sidebar's "No
+  chats yet" and "No inactive chats", Find's field, the notification setting "Chat sounds", and
+  the words for a session's machine, its folder and an untitled one. Each now says session. The
+  code's own names (`chat_id`, `selected_chat`) and the view model's methods stay, as the
+  person never reads them.
+- ✅ **Toasts keep off the terminal (2026-10-30).** The shell's toasts (sonner's stack, from
+  zeron) rose in the window's bottom-right corner, over the session's terminal exactly where a
+  TUI draws its prompt box and status line, which TUI-first keeps clear of anything the GUI
+  draws. On a Mac and an iPad the stack now rises in the sidebar's foot, the sidebar's width
+  less a small step each side, above its bottom row, near where T3 Code puts its undo notice,
+  in its sidebar's footer. A sidebar narrower than 216 pt, or put away, hands the stack to the top
+  right, hung a small step under the title strip with the newest on top and the older peeking
+  under it, over the side pane or the terminal's first rows, never its prompt. A phone keeps
+  its stack over its tab bar and capsule, or its floor. Sonner's timings, swipe and fan-out are
+  unchanged. Test: `chrome_tests::a_toast_keeps_off_the_terminal`.
+- ✅ **The Changes pane names its scope once (2026-10-30).** The pane's tab took its scope's
+  label, so "Working tree" stood on the tab and again on the scope picker straight under it. The
+  tab now names the pane, "Changes", as every other tab names its surface, and the picker under
+  it is the one place the scope ("Working tree", "Branch changes") is said and changed.

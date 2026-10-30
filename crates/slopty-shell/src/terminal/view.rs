@@ -26,9 +26,5 @@ pub const TERM_PADDING: f32 = 12.0;
 /// true tone. Explicit cell backgrounds (vim colorschemes etc.) still paint
 /// their own opaque quads on top.
 pub fn terminal_panel_bg(theme: &Theme) -> Hsla {
-    if theme.is_glass() {
-        theme.terminal.background.opacity(0.4)
-    } else {
-        theme.terminal.background
-    }
+    theme.session_ground() // slopty: one ground per session
 }

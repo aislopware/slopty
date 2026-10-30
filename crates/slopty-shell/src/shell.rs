@@ -2949,8 +2949,7 @@ impl Shell {
                 RightSurface::Diff(id) => self
                     .diffs
                     .get(id)
-                    // Contextual title (user request): the pane's scope
-                    // label, or the pinned commit's subject.
+                    // slopty: the pane's name; its scope is the picker's.
                     .map(|changes| (*surface, changes.read(cx).tab_title(), false, None)),
                 RightSurface::Terminal(tab) => terminals
                     .iter()
@@ -7675,7 +7674,7 @@ impl Shell {
             // that cannot make a chat yet (the canvas offers Add a project).
             let no_projects = self.awaits_first_project(cx);
             let combo = if compact || no_projects { "" } else { self.settings.keymap.get(ShortcutId::NewSession) };
-            let empty: &'static str = if no_projects { "No projects yet" } else { "No chats yet" };
+            let empty: &'static str = if no_projects { "No projects yet" } else { "No sessions yet" };
             div()
                 .px(px(Theme::SPACE_SM))
                 .pb(px(Theme::SPACE_SM))
@@ -8617,6 +8616,10 @@ impl Shell {
                 ),
             )));
         let outlet: AnyElement = if has_terminal {
+            // slopty: a glide around the terminal reflows its TUI once (`glide_hold`).
+            let (width, height) = self.glide_hold(terminal_geometry.get(), cx);
+            let by = gpui::size(px(width), px(height));
+            self.session_terminal.update(cx, |panel, cx| panel.hold_fit(by, cx));
             div()
                 .id("session-terminal")
                 .debug_selector(|| "session-terminal".into())
@@ -8705,6 +8708,8 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
+            // slopty: a session's column stands on its terminal's ground, its title strip too.
+            .when(has_terminal, |column| column.bg(theme.session_ground()))
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(div().flex_1().min_h_0().flex().flex_col().child(outlet))
             .child(self.render_terminal_container(terminal_geometry, window, cx))
@@ -10522,7 +10527,7 @@ impl Render for Shell {
                         // slopty: voice removed.
                         .child(drag)
                         .children(overlays);
-                    let frame = self.compact_frame(page, window, cx);
+                    let frame = self.compact_frame(page, false, window, cx);
                     break 'ready root
                         .child(sidebar_tone)
                         // slopty: clear of a phone's or tablet's edges.
@@ -10729,7 +10734,12 @@ impl Render for Shell {
                     })
                     .children(compact_inspector) // slopty
                     .children(overlays);
-                let frame = self.compact_frame(page, window, cx);
+                let session = on_chat && {
+                    let state = self.state.read(cx);
+                    let chat = state.selected_chat.as_deref();
+                    chat.is_some_and(|chat| state.session_terminal(chat).is_some())
+                };
+                let frame = self.compact_frame(page, session, window, cx);
                 root.child(sidebar_tone)
                     // slopty: clear of a phone's or tablet's edges.
                     .child(self.route_outlet(frame))
@@ -10741,9 +10751,9 @@ impl Render for Shell {
             }
         };
         // Toasts float over every phase and route.
-        // slopty: on a phone above its tab bar and capsule, or its composer.
-        let lift = self.compact_toast_lift(window, cx);
-        let root = root.children(crate::toast::render_toaster(lift, window, cx));
+        // slopty: never over a session's terminal (`toast_place`).
+        let place = self.toast_place(window, cx);
+        let root = root.children(crate::toast::render_toaster(place, window, cx));
 
         // A manually-driven tween is mid-flight: keep frames coming (the same
         // scheduling `with_animation` would have requested). Hover color fades

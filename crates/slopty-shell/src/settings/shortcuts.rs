@@ -402,9 +402,9 @@ pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Opt
 /// name must be listed here).
 // slopty: the keys used most lead; the one-key groups fold into one "Other" card at the foot.
 const GROUP_ORDER: [&str; 4] = [ // slopty: dictation and appshots removed.
-    "Chats", // slopty: one word for them, as everywhere (M17)
+    "Sessions", // slopty: one word for them, as everywhere
     "Panels",
-    "Jump to chat",
+    "Jump to session",
     "Other",
 ];
 
@@ -418,15 +418,15 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::ToggleFiles
         | ShortcutId::ToggleTerminal
         | ShortcutId::ReopenClosedTab => "Panels", // slopty: the right pane's last closed tab
-        // slopty: dictation removed; a new project is how a chat starts somewhere new.
+        // slopty: dictation removed; a new project is how a session starts somewhere new.
         ShortcutId::NewProject
         | ShortcutId::NewSession
         | ShortcutId::NextSession
         | ShortcutId::PrevSession
         | ShortcutId::ArchiveSession
         | ShortcutId::ResumeSession // slopty: a past Claude Code session
-        | ShortcutId::NextNeedsYou => "Chats", // slopty: the next chat waiting on the person
-        ShortcutId::JumpSession(_) => "Jump to chat",
+        | ShortcutId::NextNeedsYou => "Sessions", // slopty: the next one waiting on the person
+        ShortcutId::JumpSession(_) => "Jump to session",
     }
 }
 
@@ -701,10 +701,10 @@ mod tests {
     // slopty: the page leads with the keys used most, and no card holds a lone key but the
     // "Other" card at its foot.
     #[test]
-    fn the_page_leads_with_chats_and_gathers_lone_keys_at_the_foot() {
-        assert_eq!(GROUP_ORDER[0], "Chats");
+    fn the_page_leads_with_sessions_and_gathers_lone_keys_at_the_foot() {
+        assert_eq!(GROUP_ORDER[0], "Sessions");
         assert_eq!(GROUP_ORDER.last(), Some(&"Other"));
-        assert_eq!(group(ShortcutId::NewProject), "Chats", "a new project starts a chat");
+        assert_eq!(group(ShortcutId::NewProject), "Sessions", "a new project starts a session");
         for name in &GROUP_ORDER[..GROUP_ORDER.len() - 1] {
             let rows = ShortcutId::ALL.into_iter().filter(|&id| group(id) == *name).count();
             assert!(rows > 1, "{name} holds a lone key: fold it into Other");

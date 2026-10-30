@@ -1,11 +1,11 @@
 Window
-Group │ Chats
+Group │ Sessions
 Button │ Filter projects: All projects
-Label │ No chats yet
+Label │ No sessions yet
 Button │ History: past Claude Code sessions
 Button │ New session
 TabList │ Tabs
-Tab │ Chats
+Tab │ Sessions
 Tab │ Settings
 Tab │ Search
 MultilineTextInput │ Search projects… (focused)

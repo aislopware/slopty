@@ -9,6 +9,6 @@ Group (focused)
 Terminal │ shell │ $SCRATCH/repo %
 Group │ Navigation
 Heading │ Say hello
-Button │ Back to Chats
+Button │ Back to Sessions
 Button │ Show files
 Button │ Show inspector

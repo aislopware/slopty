@@ -294,6 +294,37 @@ pub fn fit(size: Size<Pixels>, window: &mut Window, cx: &mut App) -> Option<(u16
     Some(fit(size, window, cx))
 }
 
+/// How much narrower and shorter than its bounds each held terminal view fits its grid, by the
+/// view's entity ([`hold_fit`]).
+#[derive(Default)]
+struct FitHolds(Vec<(gpui::EntityId, Size<Pixels>)>);
+
+impl Global for FitHolds {}
+
+/// Hold the grid of the terminal drawn as `view` `by` narrower and shorter than its bounds, or
+/// let it go with zero. The shell holds its session's terminal while the panes around it glide,
+/// so the TUI in it reflows once for a glide rather than once a frame (`docs/decisions/ui.md`,
+/// "A glide reflows the TUI once").
+pub fn hold_fit(view: gpui::EntityId, by: Size<Pixels>, cx: &mut App) {
+    let held = by.width > Pixels::ZERO || by.height > Pixels::ZERO;
+    if !held && !cx.has_global::<FitHolds>() {
+        return;
+    }
+    let holds = &mut cx.default_global::<FitHolds>().0;
+    holds.retain(|(id, _)| *id != view);
+    if held {
+        holds.push((view, by));
+    }
+}
+
+/// What [`hold_fit`] holds the terminal drawn as `view` by: zero when nothing does.
+#[must_use]
+pub fn fit_held(view: gpui::EntityId, cx: &App) -> Size<Pixels> {
+    cx.try_global::<FitHolds>()
+        .and_then(|FitHolds(holds)| holds.iter().find(|(id, _)| *id == view))
+        .map_or_else(Size::default, |(_, by)| *by)
+}
+
 type KeysFn = dyn Fn(&mut App);
 
 /// How Slopty binds its views' keys.

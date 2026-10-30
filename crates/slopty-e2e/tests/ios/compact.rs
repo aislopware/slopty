@@ -1,9 +1,9 @@
 //! The phone's anatomy on the simulator (`cargo xtask e2e ios --sim iphone|ipad`): a phone
-//! opens on its Chats page (the large title, the chat list, the capsule and the tab bar, with no
+//! opens on its Sessions page (the large title, the chat list, the capsule and the tab bar, with no
 //! sidebar foot). Before any project the capsule adds one, and the phone lands on the project's
 //! page under a navigation bar (a close, none of the desktop's sidebar and history cluster),
 //! whose close goes back. After it, "New session" puts the picker of projects and agents over
-//! Chats, and a tap outside it puts it away. An iPad keeps the shell's columns, the sidebar
+//! Sessions, and a tap outside it puts it away. An iPad keeps the shell's columns, the sidebar
 //! beside the chat. Each state is a golden in light and in dark, `ios-<device>-compact-*`.
 
 use std::path::Path;
@@ -141,9 +141,10 @@ fn inspector_bands(a11y: &[A11yNode], window: WindowInfo) -> Vec<[f32; 4]> {
         .collect()
 }
 
-/// The Chats page is up.
+/// The Sessions page is up.
 pub fn chats_page(d: &Dump) -> bool {
-    d.a11y_node("Group", Some("Chats")).is_some() && d.a11y_node("TabList", Some("Tabs")).is_some()
+    d.a11y_node("Group", Some("Sessions")).is_some()
+        && d.a11y_node("TabList", Some("Tabs")).is_some()
 }
 
 #[tokio::test]
@@ -157,7 +158,7 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
     let device = if phone { "phone" } else { "pad" };
 
     if !phone {
-        // An iPad keeps the columns: no Chats page, the sidebar's list beside the chat.
+        // An iPad keeps the columns: no Sessions page, the sidebar's list beside the chat.
         let dump = drv.dump().await.unwrap();
         assert!(!chats_page(&dump), "{:#?}", dump.a11y);
         goldens(drv, &dir, device, "columns").await;
@@ -166,11 +167,11 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
         return;
     }
 
-    let dump = drv.wait_for("the Chats page", STEP, chats_page).await.unwrap();
+    let dump = drv.wait_for("the Sessions page", STEP, chats_page).await.unwrap();
     // The page keeps clear of the status bar and the home indicator.
     let tabs = dump.a11y_node("TabList", Some("Tabs")).map(|n| n.bounds).unwrap();
     assert!(tabs[1] + tabs[3] <= dump.window.height + 0.5, "{tabs:?} in {:?}", dump.window);
-    for tab in ["Chats", "Settings", "Search"] {
+    for tab in ["Sessions", "Settings", "Search"] {
         assert!(dump.a11y_node("Tab", Some(tab)).is_some(), "{tab}: {:#?}", dump.a11y);
     }
     // Settings is a tab, so the desktop's sidebar foot (the server pill, the gear) is gone.
@@ -200,14 +201,14 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
         panic!("{e:#}\nthe phone said:\n{}", slopty_e2e::frame_text(&shown.a11y));
     }
     tap(drv, "Button", "Close").await;
-    drv.wait_for("Chats with its project", STEP, chats_page).await.unwrap();
+    drv.wait_for("Sessions with its project", STEP, chats_page).await.unwrap();
 
-    // "New session" puts its picker over Chats: the project, and the agent whose TUI starts
+    // "New session" puts its picker over Sessions: the project, and the agent whose TUI starts
     // there. None of the desktop's sidebar and history cluster, and no page of its own.
     tap(drv, "Button", "New session").await;
     let picker = |d: &Dump| d.a11y_node("TabList", Some("Agent")).is_some();
     let page = drv.wait_for("the new-session picker", STEP, picker).await.unwrap();
-    assert!(chats_page(&page), "over Chats: {:#?}", page.a11y);
+    assert!(chats_page(&page), "over Sessions: {:#?}", page.a11y);
     assert!(page.a11y_node("Group", Some("Navigation")).is_none(), "{:#?}", page.a11y);
     let start =
         |d: &Dump| d.a11y.iter().any(|n| n.label.as_deref() == Some("Start Claude Code in home"));
@@ -217,18 +218,18 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
     }
     goldens(drv, &dir, device, "new-session").await;
 
-    // A tap outside it, between the status bar and its card, puts it away: Chats as it was.
+    // A tap outside it, between the status bar and its card, puts it away: Sessions as it was.
     let field = page.a11y_node("MultilineTextInput", None).map(|n| n.bounds).unwrap();
     drv.ui_tap(page.window.width / 2.0, field[1] / 2.0).await.unwrap();
-    drv.wait_for("the Chats page again", STEP, |d| chats_page(d) && !picker(d)).await.unwrap();
+    drv.wait_for("the Sessions page again", STEP, |d| chats_page(d) && !picker(d)).await.unwrap();
 
-    // Settings from the tab bar, and back from its page to Chats.
+    // Settings from the tab bar, and back from its page to Sessions.
     tap(drv, "Tab", "Settings").await;
     drv.wait_for("the settings", STEP, |d| d.a11y_node("Group", Some("Settings")).is_some())
         .await
         .unwrap();
     tap(drv, "Button", "Back").await;
-    drv.wait_for("Chats after the settings", STEP, chats_page).await.unwrap();
+    drv.wait_for("Sessions after the settings", STEP, chats_page).await.unwrap();
     stack.shutdown().await;
 }
 

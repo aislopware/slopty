@@ -122,7 +122,7 @@ pub(super) fn element(
     let folder = shared.borrow().folder.clone();
     let (value, words): (&str, String) = match resolve(&image.source, folder.as_deref()) {
         Resolved::Remote => ("remote", format!("{label} · {}", image.source)),
-        Resolved::Refused => ("refused", format!("{label} · outside this chat's folder")),
+        Resolved::Refused => ("refused", format!("{label} · outside this session's folder")),
         Resolved::Path(path) => {
             let mut shared = shared.borrow_mut();
             let thumb = shared.thumbs.get(&path).cloned();

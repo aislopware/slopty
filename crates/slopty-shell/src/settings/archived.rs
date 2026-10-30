@@ -172,7 +172,7 @@ impl Render for ArchivedPage {
                 let title: SharedString = chat
                     .title
                     .clone()
-                    .unwrap_or_else(|| "Untitled chat".into())
+                    .unwrap_or_else(|| "Untitled session".into())
                     .into();
                 // Unknown device → no fragment at all (slopty renders the
                 // device span only when the name resolves).

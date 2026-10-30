@@ -89,6 +89,8 @@ struct Frame {
     widths: [f32; 4],
     /// slopty: the session's terminal, the main column's content.
     session: Bounds<Pixels>,
+    /// slopty: how much narrower than its column the session's terminal fits its grid.
+    hold: f32,
     strip: Option<Bounds<Pixels>>,
 }
 
@@ -97,6 +99,8 @@ fn draw(shell: &Entity<Shell>, cx: &mut VisualTestContext, millis: u64) -> Frame
     cx.executor().advance_clock(Duration::from_millis(millis).mul_f32(motion::speed_scale()));
     shell.update(cx, |_, cx| cx.notify());
     cx.update(|window, cx| window.draw(cx).clear(cx));
+    let hold =
+        shell.read_with(cx, |shell, cx| f32::from(shell.session_terminal.read(cx).fit_hold().width));
     let mut width = |id| cx.debug_bounds(id).map_or(0.0, |b| f32::from(b.size.width));
     Frame {
         widths: [
@@ -106,6 +110,7 @@ fn draw(shell: &Entity<Shell>, cx: &mut VisualTestContext, millis: u64) -> Frame
             width("conversation-column"),
         ],
         session: cx.debug_bounds("session-terminal").unwrap_or_default(),
+        hold,
         strip: cx.debug_bounds("right-titlebar-controls"),
     }
 }
@@ -180,8 +185,18 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
             "column {column} lurches: {progress}"
         );
         let mut previous = first.widths[column];
+        // slopty: the terminal fits once for the glide, to the narrower of its start and end
+        // (`Shell::glide_hold`), however its column moves.
+        let fits = |frame: Frame| f32::from(frame.session.size.width) - frame.hold;
+        assert!(first.hold > 0.0, "column {column}: the glide holds the terminal's grid");
+        let held = fits(first);
+        let mut last = first;
         for _ in 0..15 {
             let frame = draw(&shell, cx, 16);
+            if frame.hold > 0.0 {
+                near(fits(frame), held);
+            }
+            last = frame;
             let width = frame.widths[column];
             assert!(width >= source.min(target) - 0.5 && width <= source.max(target) + 0.5);
             assert!((width - previous) * (target - source) >= -0.5);
@@ -197,6 +212,8 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
             previous = width;
         }
         near(previous, target);
+        near(last.hold, 0.0);
+        near(held, f32::from(before.session.size.width).min(f32::from(last.session.size.width)));
     }
     let wide = settled(&shell, cx);
     expect(wide, [0.0, 377.0, 611.5, 611.5]);

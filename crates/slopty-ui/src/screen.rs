@@ -3447,8 +3447,9 @@ impl Render for ScreenView {
             .size_full()
             .overflow_hidden()
             // The picture sits on the pane's own ground in both appearances, as zeron frames
-            // media (`docs/decisions/ui.md`, "A remote picture is letterboxed on the pane").
-            .bg(slopty_shell::live::chrome::theme(cx).bg)
+            // media (`docs/decisions/ui.md`, "A remote picture is letterboxed on the pane"):
+            // the session's, which the side pane stands on ("One ground per session").
+            .bg(slopty_shell::live::chrome::theme(cx).session_ground())
             .cursor(styled)
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
@@ -6163,7 +6164,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         for shell in [slopty_shell::theme::Theme::dark(), slopty_shell::theme::Theme::light()] {
-            let ground = shell.bg;
+            let ground = shell.session_ground();
             cx.update(|_window, cx| cx.set_global(shell));
             view.update(cx, |_, cx| cx.notify());
             cx.run_until_parked();

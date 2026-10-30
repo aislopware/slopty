@@ -2567,7 +2567,7 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
         Some(WorkspaceReadOnlyReason::MixedLineEndings) => {
             "Files with mixed line endings are read-only."
         }
-        Some(WorkspaceReadOnlyReason::OutsideWorkspace) => "Read-only: outside this chat's folder.",
+        Some(WorkspaceReadOnlyReason::OutsideWorkspace) => "Read-only: outside this session's folder.",
         Some(WorkspaceReadOnlyReason::NotRegularFile) | None => "This file cannot be previewed.",
     }
     .into()
@@ -2732,7 +2732,7 @@ mod tests {
         );
         assert_eq!(
             read_only_message(Some(WorkspaceReadOnlyReason::OutsideWorkspace)),
-            SharedString::from("Read-only: outside this chat's folder.")
+            SharedString::from("Read-only: outside this session's folder.")
         );
     }
 

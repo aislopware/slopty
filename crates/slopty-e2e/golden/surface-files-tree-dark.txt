@@ -34,8 +34,8 @@ Button │ Open in…
 Button │ Show inspector
 Button │ Inspector
 Button │ Close Inspector
-Button │ Working tree
-Button │ Close Working tree
+Button │ Changes
+Button │ Close Changes
 Button │ New tab
 Button │ Expand side pane
 Button │ Hide files panel

@@ -1925,9 +1925,11 @@ impl Changes {
 
     // slopty: no History surface (ruled out)
 
-    /// The surface-tab title: the scope's label. // slopty: no History surface (ruled out)
+    /// The surface-tab title. slopty: the pane's name; its scope ("Working tree", "Branch
+    /// changes") is the picker's under the tab, said once (`docs/decisions/ui.md`, "The Changes
+    /// pane names its scope once"). No History surface (ruled out).
     pub fn tab_title(&self) -> gpui::SharedString {
-        gpui::SharedString::from(self.scope.label())
+        gpui::SharedString::new_static("Changes")
     }
 
     /// The selected chat's host device when it differs from the connected
@@ -4755,7 +4757,7 @@ impl Render for Changes {
                 state.device_name(&chat.device_id).unwrap_or(&chat.device_id).to_owned()
             })
         }
-        .unwrap_or_else(|| "This chat's machine".to_owned());
+        .unwrap_or_else(|| "This session's machine".to_owned());
         let scoped_notice: Option<(SharedString, Option<SharedString>, bool)> = (!no_chat
             && scope != DiffScope::WorkingTree)
             .then(|| self.scoped_error.clone())

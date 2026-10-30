@@ -1497,12 +1497,22 @@ impl Element for TerminalElement {
         let (grid, base_derived, face) = (cells.grid, cells.derived, cells.face);
         let (base_size, base_pad, ligatures) = (typed.font_size, cells.pad, typed.ligatures);
         let base_cell_width = grid.cell_width;
-        let (cols, rows) = cells.fit(bounds.size);
+        // While the panes around it glide, the shell holds the grid to where the glide lands
+        // or started, whichever is narrower: the TUI reflows once, not once a frame. The held
+        // size is a difference of two moving widths, so it is snapped to the device pixel the
+        // settled layout stands on: its float noise would flip a column at a cell's edge.
+        let scale = window.scale_factor().max(1.0);
+        let held = slopty_shell::live::fit_held(self.view.entity_id(), cx);
+        let hold = |side: Pixels, by: Pixels| {
+            let snapped = |width: Pixels| px((f32::from(width) * scale).round() / scale);
+            if by > Pixels::ZERO { snapped(side - by) } else { side }
+        };
+        let (cols, rows) = cells
+            .fit(size(hold(bounds.size.width, held.width), hold(bounds.size.height, held.height)));
         let font_size = base_size;
         let (cell_width, line_height) = (grid.cell_width, grid.line_height);
         let pad = base_pad;
         let origin = bounds.origin + point(pad, pad);
-        let scale = window.scale_factor().max(1.0);
         let metrics = CellMetrics {
             origin,
             cell_width,

@@ -221,9 +221,6 @@ pub const USER_COLLAPSED_LINES: usize = 5;
 pub const USER_LINE_HEIGHT: f32 = 22.0;
 /// Lines a folded prompt's Markdown lays out past the fold, under its fade.
 const USER_FOLD_OVERDRAW_LINES: usize = 2;
-/// slopty: the height of the "parent › subagent" breadcrumb a drilled subagent's run starts under
-/// (`shell/subagent_drill.rs`).
-pub(crate) const DRILL_CRUMB_HEIGHT: f32 = 26.0;
 /// Conservative first-frame soft-wrap proxy for the fixed-width long-prompt
 /// bubble. The final decision uses the wrapped `StyledText` layout, but this
 /// fallback lets clearly long prompts render their affordance immediately
@@ -274,10 +271,10 @@ fn should_anchor_live_stream(pinned: bool, distance_from_bottom: f32, streaming:
 pub const SPRING_SETTLE_GRACE_MS: u64 = 500;
 /// Teleport when farther than this many viewports from the end; glide the rest.
 pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
-/// A freshly-sent prompt rests this far below the transcript viewport's top.
-/// The titlebar overlays the full-height list, so its height is part of the
-/// inset; the extra 10px matches the first row's breathing room.
-pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
+/// A freshly-sent prompt rests this far below the transcript viewport's top. slopty: the
+/// transcript lays out inside its pane, which clears the window's chrome, so the inset is only
+/// its own top scroll edge: the prompt rests where that fade ends.
+pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TRANSCRIPT_FADE_BAND;
 /// slopty: what a markdown block says, as plain text: its texts as drawn (a relabelled link by
 /// its label), in paint order, a line each.
 fn block_words(block: &crate::markdown::Block) -> String {
@@ -8129,21 +8126,13 @@ impl Transcript {
                 agent_name(chat.and_then(|chat| chat.config.as_ref()).map(|config| config.harness)),
             )
         };
-        // The viewport spans the full window (under the titlebar): the first
-        // row's gap adds the titlebar's height so a top-scrolled transcript
-        // rests below the chrome it fades under. The right pane already pads
-        // for the titlebar — an override instance's first row keeps only the
-        // ordinary turn gap, or the content sits double-chrome low.
+        // slopty: the transcript lays out inside its pane, which clears the window's chrome
+        // itself: the first row keeps only the ordinary gap under the pane's header.
         let top_gap = if ix == 0 {
             if self.fit.is_some() {
                 Theme::SPACE_SM // slopty: in a card, under its header's hairline
-            } else if self.doc_override.is_some() {
-                Theme::SPACE_LG
             } else {
-                // slopty: a drilled subagent's run, read from its top, starts under the
-                // breadcrumb that hangs below the titlebar (#5).
-                let crumb = if self.list_top { DRILL_CRUMB_HEIGHT } else { 0.0 };
-                Theme::TITLEBAR_HEIGHT + crumb + Theme::SPACE_LG + 10.0
+                Theme::SPACE_LG
             }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
@@ -8723,8 +8712,12 @@ impl Transcript {
             // Keep side gutters as the configurable column shrinks to fit;
             // a docked side card's room comes off the right.
             // slopty: in a card, its rows start under its title.
-            .pl(px(if self.fit.is_some() { subagents::CHILD_INSET } else { 48.0 }))
-            .pr(px(if self.fit.is_some() { Theme::SPACE_MD } else { 48.0 + self.right_reserve }))
+            .pl(px(if self.fit.is_some() { subagents::CHILD_INSET } else { self.row_inset() }))
+            .pr(px(if self.fit.is_some() {
+                Theme::SPACE_MD
+            } else {
+                self.row_inset() + self.right_reserve
+            }))
             .child(
                 div()
                     .w_full()
@@ -11605,24 +11598,19 @@ impl Render for Transcript {
                 .size_full()
                 .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
         );
-        let content: AnyElement = if self.doc_override.is_some() {
-            // The primary transcript's fade lives on the SHELL's outlet
-            // wrapper (it spans the titlebar/composer chrome); an override
-            // instance owns its own — top edge only (nothing overlays the
-            // pane's bottom). slopty: its ramp is as tall as what lies above, read at paint
-            // (HextaUI's scroll area; design-inspiration item 4), so a short top-anchored
-            // transcript shows none and a scroll of 4 px dims 4 px, never a whole band at once.
-            let scroll = self.list.clone();
+        // slopty: every transcript owns its scroll edge, inside its pane: top edge only (nothing
+        // overlays the pane's bottom). Its ramp is as tall as what lies above, read at paint
+        // (HextaUI's scroll area; design-inspiration item 4), so a transcript at its top shows
+        // none and a scroll of 4 px dims 4 px, never a whole band at once.
+        let scroll = self.list.clone();
+        let content: AnyElement =
             crate::edge_fade::edge_faded(Theme::TRANSCRIPT_FADE_BAND, true, false, list_el)
                 .fade_scroll_y_with(move |_| {
                     let max = f32::from(scroll.max_offset_for_scrollbar().y);
                     let above = (-f32::from(scroll.scroll_px_offset_for_scrollbar().y)).clamp(0.0, max.max(0.0));
                     (above, (max - above).max(0.0))
                 })
-                .into_any_element()
-        } else {
-            list_el.into_any_element()
-        };
+                .into_any_element();
         let root = div()
             .relative()
             .size_full()
@@ -12009,9 +11997,6 @@ mod tests {
                             slopty_view_doc::TranscriptUpdate {
                                 frame,
                                 replay_baseline,
-                                context_usage: None,
-                                limits: Vec::new(), // slopty: new field.
-                                limit_resets_at: None, // slopty: new field.
                             },
                             cx,
                         )
@@ -12123,10 +12108,7 @@ mod tests {
         let first = worker
             .prepare(&slopty_view_doc::TranscriptUpdate {
                 frame: slopty_view_doc::TranscriptFrame::reset(&original),
-                context_usage: None,
                 replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(&original)),
-                limits: Vec::new(), // slopty: new field.
-                limit_resets_at: None, // slopty: new field.
             })
             .unwrap();
         let mut changed = original.clone();
@@ -12137,10 +12119,7 @@ mod tests {
         let next = worker
             .prepare(&slopty_view_doc::TranscriptUpdate {
                 frame: slopty_view_doc::diff_transcript(&original, &changed),
-                context_usage: None,
                 replay_baseline: None,
-                limits: Vec::new(), // slopty: new field.
-                limit_resets_at: None, // slopty: new field.
             })
             .unwrap();
         assert!(Arc::ptr_eq(&first.rows["b"], &next.rows["b"]));
@@ -12160,9 +12139,6 @@ mod tests {
             let update = slopty_view_doc::TranscriptUpdate {
                 replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(&entries)),
                 frame: slopty_view_doc::TranscriptFrame::Reset { reset: entries },
-                context_usage: None,
-                limits: Vec::new(), // slopty: new field.
-                limit_resets_at: None, // slopty: new field.
             };
             let start = Instant::now();
             let prepared = TranscriptPreparation::default().prepare(&update).unwrap();
@@ -12248,9 +12224,6 @@ mod tests {
                                 replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(
                                     entries,
                                 )),
-                                context_usage: None,
-                                limits: Vec::new(), // slopty: new field.
-                                limit_resets_at: None, // slopty: new field.
                             },
                             pending,
                             cx,
@@ -12305,9 +12278,6 @@ mod tests {
                         slopty_view_doc::TranscriptUpdate {
                             frame: slopty_view_doc::diff_transcript(&full, &live),
                             replay_baseline: None,
-                            context_usage: None,
-                            limits: Vec::new(), // slopty: new field.
-                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -12346,10 +12316,7 @@ mod tests {
                     .receive_transcript_update(
                         slopty_view_doc::TranscriptUpdate {
                             frame,
-                            context_usage: None,
                             replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(&history)),
-                            limits: Vec::new(), // slopty: new field.
-                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -12359,10 +12326,7 @@ mod tests {
                     .receive_transcript_update(
                         slopty_view_doc::TranscriptUpdate {
                             frame: slopty_view_doc::diff_transcript(&history, &live),
-                            context_usage: None,
                             replay_baseline: None,
-                            limits: Vec::new(), // slopty: new field.
-                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -12397,9 +12361,6 @@ mod tests {
                             slopty_view_doc::TranscriptUpdate {
                                 frame,
                                 replay_baseline: baseline,
-                                context_usage: None,
-                                limits: Vec::new(), // slopty: new field.
-                                limit_resets_at: None, // slopty: new field.
                             },
                             cx,
                         )
@@ -12455,10 +12416,7 @@ mod tests {
                     .receive_transcript_update(
                         slopty_view_doc::TranscriptUpdate {
                             frame: slopty_view_doc::TranscriptFrame::reset(&[]),
-                            context_usage: None,
                             replay_baseline: Some(Default::default()),
-                            limits: Vec::new(), // slopty: new field.
-                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -12475,10 +12433,7 @@ mod tests {
                     .receive_transcript_update(
                         slopty_view_doc::TranscriptUpdate {
                             frame: slopty_view_doc::diff_transcript(&[], &live),
-                            context_usage: None,
                             replay_baseline: None,
-                            limits: Vec::new(), // slopty: new field.
-                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -12511,10 +12466,7 @@ mod tests {
                     .receive_transcript_update(
                         slopty_view_doc::TranscriptUpdate {
                             frame,
-                            context_usage: None,
                             replay_baseline: None,
-                            limits: Vec::new(), // slopty: new field.
-                            limit_resets_at: None, // slopty: new field.
                         },
                         cx,
                     )
@@ -15037,12 +14989,9 @@ mod tests {
                             .receive_transcript_update(
                                 slopty_view_doc::TranscriptUpdate {
                                     frame: slopty_view_doc::TranscriptFrame::reset(&history),
-                                    context_usage: None,
                                     replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(
                                         &history,
                                     )),
-                                    limits: Vec::new(), // slopty: new field.
-                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -15067,14 +15016,11 @@ mod tests {
                             .receive_transcript_update(
                                 slopty_view_doc::TranscriptUpdate {
                                     frame: slopty_view_doc::diff_transcript(&history, &next),
-                                    context_usage: None,
                                     // The RPC must retain its opening cutoff when
                                     // publishing subsequent changed-part history.
                                     replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(
                                         &cutoff,
                                     )),
-                                    limits: Vec::new(), // slopty: new field.
-                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -15124,12 +15070,9 @@ mod tests {
                             .receive_transcript_update(
                                 slopty_view_doc::TranscriptUpdate {
                                     frame: slopty_view_doc::TranscriptFrame::reset(&history),
-                                    context_usage: None,
                                     replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(
                                         &history,
                                     )),
-                                    limits: Vec::new(), // slopty: new field.
-                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -15138,10 +15081,7 @@ mod tests {
                             .receive_transcript_update(
                                 slopty_view_doc::TranscriptUpdate {
                                     frame: slopty_view_doc::diff_transcript(&history, &live),
-                                    context_usage: None,
                                     replay_baseline: None,
-                                    limits: Vec::new(), // slopty: new field.
-                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -15190,12 +15130,9 @@ mod tests {
                             .receive_transcript_update(
                                 slopty_view_doc::TranscriptUpdate {
                                     frame: slopty_view_doc::diff_transcript(&live, &next),
-                                    context_usage: None,
                                     replay_baseline: Some(slopty_view_doc::TranscriptBaseline::capture(
                                         &next_history,
                                     )),
-                                    limits: Vec::new(), // slopty: new field.
-                                    limit_resets_at: None, // slopty: new field.
                                 },
                                 cx,
                             )
@@ -15299,12 +15236,9 @@ mod tests {
                                 .receive_transcript_update(
                                     slopty_view_doc::TranscriptUpdate {
                                         frame,
-                                        context_usage: None,
                                         replay_baseline: Some(
                                             slopty_view_doc::TranscriptBaseline::capture(&updated),
                                         ),
-                                        limits: Vec::new(), // slopty: new field.
-                                        limit_resets_at: None, // slopty: new field.
                                     },
                                     cx,
                                 )

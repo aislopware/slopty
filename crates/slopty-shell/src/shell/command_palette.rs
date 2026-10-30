@@ -275,10 +275,10 @@ fn search_error_message(error: &FilesClientError, what: &str) -> SharedString {
             } else {
                 "files"
             };
-            format!("Couldn\u{2019}t search its {subject}: the chat\u{2019}s machine runs an older Slopty. Update it there.")
+            format!("Couldn\u{2019}t search its {subject}: the session\u{2019}s machine runs an older Slopty. Update it there.")
                 .into()
         }
-        FilesClientError::Transport(_) => "Couldn\u{2019}t reach the chat\u{2019}s machine. Check that it is on and online.".into(),
+        FilesClientError::Transport(_) => "Couldn\u{2019}t reach the session\u{2019}s machine. Check that it is on and online.".into(),
         FilesClientError::Encode(_)
         | FilesClientError::Decode(_)
         | FilesClientError::Request(_) => "Couldn\u{2019}t search. Try again.".into(),
@@ -318,7 +318,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Self::All => "All",
-            Self::Threads => "Chats", // slopty
+            Self::Threads => "Sessions", // slopty
             Self::Commands => "Commands",
             Self::Files => "Files",
         }
@@ -359,13 +359,13 @@ impl Section {
             // slopty: sentence case, as every label in the app.
             Self::RecentFiles => "Recent files",
             Self::QuickActions => "Quick actions",
-            // slopty: one name for a conversation, "chat" (M17).
-            Self::RecentThreads => "Recent chats",
-            Self::Threads => "Chats",
+            // slopty: one name for what an agent works in, "session" (TUI-first).
+            Self::RecentThreads => "Recent sessions",
+            Self::Threads => "Sessions",
             Self::Commands => "Commands",
             Self::Files => "Files",
             Self::InFiles => "In files",
-            Self::InThreads => "In chats",
+            Self::InThreads => "In sessions",
         }
     }
 }
@@ -393,7 +393,7 @@ impl Command {
             Self::Theme(AppearanceMode::System) => "Switch to system theme",
             Self::Theme(AppearanceMode::Light) => "Switch to light theme",
             Self::Theme(AppearanceMode::Dark) => "Switch to dark theme",
-            Self::ArchiveThread => "Archive chat", // slopty
+            Self::ArchiveThread => "Archive session", // slopty
             Self::Window(command) => command.label,
         }
     }
@@ -492,7 +492,7 @@ fn matches_query(query: &str, text: &str) -> bool {
     query.split_whitespace().all(|word| text.contains(word))
 }
 
-/// `can_archive`: a focused, unarchived chat exists for Archive chat. slopty: `window` adds the
+/// `can_archive`: a focused, unarchived chat exists for Archive session. slopty: `window` adds the
 /// menu bar's commands (the Commands tab, or any search).
 fn commands_for(query: &str, is_dark: bool, can_archive: bool, window: bool) -> Vec<Command> {
     [
@@ -597,7 +597,7 @@ impl Shell {
         self.close_add_space(cx);
         crate::live::chrome::release_held_keys(cx);
         let search = cx.new(|cx| {
-            ComposerInput::with_context("Search chats, commands and files…", "PaletteSearch", cx)
+            ComposerInput::with_context("Search sessions, commands and files…", "PaletteSearch", cx)
         });
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
@@ -1462,7 +1462,7 @@ impl Shell {
                 el.child(palette_empty(
                     &theme,
                     "No results",
-                    "Try a command, chat title, project, or device.",
+                    "Try a command, session title, project, or device.",
                 ))
             });
         let body = palette_results_fade(body, &scroll);
@@ -1546,13 +1546,16 @@ impl Shell {
             ))
             .child(tabs)
             .child(body)
-            .child(
-                palette_footer()
-                    .child(command_key_hint(&theme, "↑ ↓", "Navigate", window, cx))
-                    .child(command_key_hint(&theme, "⏎", "Open", window, cx))
-                    .child(command_key_hint(&theme, "Esc", "Close", window, cx)),
-            );
-        Some(palette_overlay("command-palette", viewport, card))
+            // slopty: the keys, where there are keys.
+            .when(!crate::shell::touch_screen(), |card| {
+                card.child(
+                    palette_footer()
+                        .child(command_key_hint(&theme, "↑ ↓", "Navigate", window, cx))
+                        .child(command_key_hint(&theme, "⏎", "Open", window, cx))
+                        .child(command_key_hint(&theme, "Esc", "Close", window, cx)),
+                )
+            });
+        Some(palette_overlay(viewport, card))
     }
 }
 
@@ -1651,10 +1654,13 @@ pub(super) fn palette_card(
         .track_focus(focus)
         .w(px(560.0_f32.min(f32::from(viewport.width) - 32.0)))
         // slopty: between 280 and 480 tall (`PALETTE_MIN_HEIGHT`), within the window under its
-        // top, its footer at its foot.
-        .min_h(px(PALETTE_MIN_HEIGHT.min(
-            f32::from(viewport.height - palette_top(viewport.height)) - 16.0,
-        )))
+        // top, its footer at its foot. A touch screen has no footer of keys to hold there: the
+        // card hugs its rows.
+        .when(!crate::shell::touch_screen(), |card| {
+            card.min_h(px(PALETTE_MIN_HEIGHT.min(
+                f32::from(viewport.height - palette_top(viewport.height)) - 16.0,
+            )))
+        })
         .max_h(px(PALETTE_MAX_HEIGHT))
         .flex()
         .flex_col()
@@ -1684,7 +1690,8 @@ pub(super) fn palette_header(theme: &Theme, search: AnyElement, hint: gpui::Div)
                 .text_size(crate::typography::ui_rems(14.0))
                 .child(search),
         )
-        .child(hint)
+        // slopty: a key to press, where there are keys.
+        .when(!crate::shell::touch_screen(), |header| header.child(hint))
 }
 
 pub(super) fn palette_footer() -> gpui::Div {
@@ -1700,14 +1707,6 @@ pub(super) fn palette_footer() -> gpui::Div {
         .items_center()
         .gap(px(12.0))
 }
-
-// slopty: Claude desktop's overlay entrance (`dur-snap` 120 ms on `cubic(0.32,0.72,0,1)`), its
-// card's .98 scale approximated by a 4 px settle as `motion::menu_in` approximates its own.
-const OVERLAY_EASE: crate::motion::CubicBezier = crate::motion::CubicBezier::new(0.32, 0.72, 0.0, 1.0);
-/// The scrim's fade in under a palette.
-const SCRIM_IN: crate::motion::MotionSpec = crate::motion::MotionSpec::new(120, OVERLAY_EASE);
-/// The palette card's fade and settle in.
-const CARD_IN: crate::motion::MotionSpec = crate::motion::MotionSpec::new(150, OVERLAY_EASE);
 
 /// slopty: a palette row's height, a list row's as Claude desktop draws them, and as the pickers'
 /// rows stand (`popover::PICKER_ROW_HEIGHT`).
@@ -1727,19 +1726,12 @@ pub(super) fn palette_top(height: Pixels) -> Pixels {
 
 /// Mount a palette card over the scrimmed window, frosted like the composer.
 // slopty: pinned from the top (`palette_top`), not centred, so the field does not move as the
-// results change, and it comes in over Claude desktop's overlay entrance; `id` keys it.
-pub(super) fn palette_overlay(
-    id: &'static str,
-    viewport: gpui::Size<Pixels>,
-    card: gpui::Stateful<gpui::Div>,
-) -> AnyElement {
+// results change. It stands whole on the frame its key opens it, scrim and all, as Raycast's
+// does: what a key opens many times a day never makes the person wait on its entrance
+// (`docs/decisions/ui.md`, "What a key opens is there at once").
+pub(super) fn palette_overlay(viewport: gpui::Size<Pixels>, card: gpui::Stateful<gpui::Div>) -> AnyElement {
     // Match the composer's 16px backdrop blur, including its opaque fallback.
     let card = crate::frost::frosted(16.0, crate::frost::MENU_BLUR, card);
-    let card = div().relative().child(card).with_animation(
-        SharedString::from(format!("{id}-in")),
-        CARD_IN.animation(),
-        |el, t| el.opacity(t).top(px(-4.0 * (1.0 - t))),
-    );
     gpui::deferred(
         gpui::anchored()
             .position(gpui::point(px(0.0), px(0.0)))
@@ -1755,11 +1747,7 @@ pub(super) fn palette_overlay(
                     .child(card)
                     // Match glass modals: quiet the background while
                     // preserving its color through the frosted palette.
-                    .with_animation(
-                        SharedString::from(format!("{id}-scrim")),
-                        SCRIM_IN.animation(),
-                        |el, t| el.bg(popover::scrim_alpha(0.35 * t)),
-                    ),
+                    .bg(popover::scrim_alpha(0.35)),
             ),
     )
     .priority(2)

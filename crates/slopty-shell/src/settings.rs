@@ -597,18 +597,18 @@ pub const JUMP_SLOTS: usize = 9;
 const JUMP_DEFAULTS: [&str; JUMP_SLOTS] = [
     "mod-1", "mod-2", "mod-3", "mod-4", "mod-5", "mod-6", "mod-7", "mod-8", "mod-9",
 ];
-// slopty: one noun for a conversation everywhere: chat (`.research/micro-details-2026-10-16.md`
-// §1.4).
+// slopty: one noun for what an agent works in everywhere: session (TUI-first, `docs/decisions/ui.md`,
+// "A session is its terminal, its inspector beside it").
 const JUMP_LABELS: [&str; JUMP_SLOTS] = [
-    "Jump to chat 1",
-    "Jump to chat 2",
-    "Jump to chat 3",
-    "Jump to chat 4",
-    "Jump to chat 5",
-    "Jump to chat 6",
-    "Jump to chat 7",
-    "Jump to chat 8",
-    "Jump to chat 9",
+    "Jump to session 1",
+    "Jump to session 2",
+    "Jump to session 3",
+    "Jump to session 4",
+    "Jump to session 5",
+    "Jump to session 6",
+    "Jump to session 7",
+    "Jump to session 8",
+    "Jump to session 9",
 ];
 
 /// The rebindable app shortcuts. `JumpSession(slot)` is zero-based; a slot at
@@ -678,12 +678,12 @@ impl ShortcutId {
             ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New project",
-            ShortcutId::NextSession => "Next chat or side pane tab",
-            ShortcutId::PrevSession => "Previous chat or side pane tab",
-            ShortcutId::ArchiveSession => "Archive chat",
+            ShortcutId::NextSession => "Next session or side pane tab",
+            ShortcutId::PrevSession => "Previous session or side pane tab",
+            ShortcutId::ArchiveSession => "Archive session",
             ShortcutId::ReopenClosedTab => "Reopen closed tab", // slopty
             ShortcutId::ResumeSession => "Resume a Claude Code session", // slopty
-            ShortcutId::NextNeedsYou => "Next chat that needs you", // slopty
+            ShortcutId::NextNeedsYou => "Next session that needs you", // slopty
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }

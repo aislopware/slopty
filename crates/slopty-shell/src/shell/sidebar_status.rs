@@ -114,7 +114,7 @@ fn inactive(chat: &Chat, now: DateTime<Utc>) -> bool {
 }
 
 /// What the Inactive group says while no chat rests in it.
-pub(super) const NO_INACTIVE: &str = "No inactive chats";
+pub(super) const NO_INACTIVE: &str = "No inactive sessions";
 
 /// Whether a row with display status `status` and session `session` is at rest (Done): the rows
 /// a group pages behind "Show more".
@@ -264,7 +264,7 @@ pub(super) fn order_by_status(rows: &mut [(ChatIndicator, Chat)], state: &AppSta
     });
 }
 
-/// The chats the "Next chat that needs you" key walks: every chat that waits on the person,
+/// The chats the "Next session that needs you" key walks: every chat that waits on the person,
 /// across projects and machines, in the order "By status" draws them, then each finished one
 /// nobody has seen.
 pub(super) fn needing_you(state: &AppState, now: DateTime<Utc>) -> Vec<String> {

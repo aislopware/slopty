@@ -79,7 +79,7 @@ impl FilesSurface {
             .iter()
             .find(|chat| chat.id == self.chat_id)
             .map(|chat| state.device_name(&chat.device_id).unwrap_or(&chat.device_id).to_owned())
-            .unwrap_or_else(|| "This chat's machine".to_owned())
+            .unwrap_or_else(|| "This session's machine".to_owned())
     }
 
     /// What shows while the chat's machine is not up yet.

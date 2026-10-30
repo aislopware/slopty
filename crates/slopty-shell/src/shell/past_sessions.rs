@@ -1099,6 +1099,14 @@ impl Shell {
                         .child(SharedString::from(cut)),
                 )
             });
+        // slopty: the keys, where there are keys.
+        let keys = (!crate::shell::touch_screen()).then(|| {
+            palette_footer()
+                .child(command_key_hint(&theme, "\u{2191} \u{2193}", "Navigate", window, cx))
+                .child(command_key_hint(&theme, "\u{23CE}", "Open", window, cx))
+                .when(has_project, |footer| footer.child(command_key_hint(&theme, "Tab", "Scope", window, cx)))
+                .child(command_key_hint(&theme, "Esc", "Close", window, cx))
+        });
         let card = palette_card("resume-picker", &focus, viewport, &theme)
             .key_context("ResumePicker")
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
@@ -1115,14 +1123,8 @@ impl Shell {
             .child(palette_header(&theme, search.into_any_element(), popover::kbd_hint(&theme, &shortcut)))
             .child(tabs)
             .child(body)
-            .child(
-                palette_footer()
-                    .child(command_key_hint(&theme, "\u{2191} \u{2193}", "Navigate", window, cx))
-                    .child(command_key_hint(&theme, "\u{23CE}", "Open", window, cx))
-                    .when(has_project, |footer| footer.child(command_key_hint(&theme, "Tab", "Scope", window, cx)))
-                    .child(command_key_hint(&theme, "Esc", "Close", window, cx)),
-            );
-        Some(palette_overlay("resume-picker", viewport, card))
+            .children(keys);
+        Some(palette_overlay(viewport, card))
     }
 }
 

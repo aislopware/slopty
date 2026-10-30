@@ -910,13 +910,24 @@ impl Theme {
         self.glass().a < 1.0
     }
 
-    /// Shared background for the editor host and the adjacent Files column.
-    pub fn panel_bg(&self) -> Hsla {
+    /// slopty: the ground a session's column stands on: its terminal's own background, under
+    /// the title strip above it, the side pane and its Files column beside it, a phone's side
+    /// page and the bands a phone or a tablet keeps clear at the screen's edges, parted by
+    /// hairlines rather than by near-blacks (`docs/decisions/ui.md`, "One ground per session").
+    /// On glass it thins as the panels do.
+    pub fn session_ground(&self) -> Hsla {
         if self.is_glass() {
-            self.bg.opacity(0.4)
+            self.terminal.background.opacity(0.4)
         } else {
-            self.bg
+            self.terminal.background
         }
+    }
+
+    /// Shared background for the editor host and the adjacent Files column.
+    /// slopty: the session's one ground, so the side pane and its Files column stand on the
+    /// terminal's background beside it.
+    pub fn panel_bg(&self) -> Hsla {
+        self.session_ground()
     }
 
     /// Whether FLOATING surfaces (popovers, the composer pill) paint their

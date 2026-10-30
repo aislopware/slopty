@@ -1,13 +1,13 @@
 //! slopty: the phone's anatomy, after zeron's iOS app (`apps/ios`), built from the shell's own
-//! parts. A phone shows one page at a time: Chats (the large title, the sidebar's list at the
-//! page's width, the "New session" capsule with what is running, and the tab bar of Chats,
+//! parts. A phone shows one page at a time: Sessions (the large title, the sidebar's list at the
+//! page's width, the "New session" capsule with what is running, and the tab bar of Sessions,
 //! Settings and Search) or the chat that was opened from it, whose sidebar button goes back.
 //! Every page keeps clear of the system's edges (the status bar, the home indicator) and of the
 //! keyboard. Wider windows (an iPad's, a Mac's) keep the shell's columns.
 //!
 //! The chat or the new-session page wears no desktop chrome there: the titlebar's sidebar and
 //! history cluster give way to a navigation bar (zeron iOS's `SessionViewController`: a back
-//! chevron to Chats and the chat's title over "project @ device"; `NewSessionViewController`:
+//! chevron to Sessions and the chat's title over "project @ device"; `NewSessionViewController`:
 //! "New session" with a close button). A chat row takes zeron iOS's gestures
 //! (`SessionListController`): a leading swipe pins it, a trailing swipe archives it (or brings it
 //! back from Archived), and a long press opens its menu.
@@ -39,6 +39,9 @@ const PLATE: f32 = 34.0;
 const PLATE_INSET: f32 = 7.0;
 /// The tab bar's row above the home indicator.
 const TAB_BAR: f32 = 49.0;
+/// slopty: the narrowest a sidebar's foot holds the toasts; a narrower one hands them to the top
+/// right, so a toast never spills over the session beside it.
+const TOAST_COLUMN_MIN: f32 = 200.0;
 /// The selected tab's glass pill, inset in its third of the bar.
 const TAB_PILL_INSET: f32 = 6.0;
 /// The capsule's status glyph, before the summary (zeron's 12 pt `StatusGlyph`).
@@ -303,7 +306,7 @@ impl Tab {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Sessions => "Chats",
+            Self::Sessions => "Sessions",
             Self::Settings => "Settings",
             Self::Search => "Search",
         }
@@ -373,23 +376,37 @@ impl Shell {
         *pages.sessions.get_or_insert(true)
     }
 
-    /// slopty: how much of the window's floor a phone's chrome holds, for the toasts to stand
-    /// above: the Chats page's tab bar and capsule, or the home indicator or the keyboard under
-    /// a session; 0 off a phone.
-    pub(super) fn compact_toast_lift(&self, window: &Window, cx: &mut App) -> f32 {
-        if !self.compact() {
-            return 0.0;
-        }
+    /// slopty: where the toasts stand, never over a session's terminal, whose TUI draws its
+    /// prompt and status at the bottom: on a phone above its Sessions page's tab bar and capsule,
+    /// or the home indicator or the keyboard; else in the sidebar's foot, above its bottom row,
+    /// or with no sidebar to take them at the top right, under the title strip
+    /// (`docs/decisions/ui.md`, "Toasts keep off the terminal").
+    pub(super) fn toast_place(&self, window: &Window, cx: &mut App) -> crate::toast::ToastPlace {
+        use crate::toast::ToastPlace;
         let insets = window.insets();
-        if self.compact_sessions_up(cx) {
-            return f32::from(insets.safe_area.bottom) + TAB_BAR + CAPSULE + CAPSULE_BELOW;
+        let safe = insets.safe_area;
+        if self.compact() {
+            let lift = if self.compact_sessions_up(cx) {
+                f32::from(safe.bottom) + TAB_BAR + CAPSULE + CAPSULE_BELOW
+            } else if self.keyboard_band_held(window) {
+                f32::from(insets.effective().bottom)
+            } else {
+                f32::from(safe.bottom)
+            };
+            return ToastPlace::Floor { lift };
         }
-        let floor =
-            if self.keyboard_band_held(window) { insets.effective().bottom } else { insets.safe_area.bottom };
-        f32::from(floor)
+        let width = self.sidebar_now() - 2.0 * Theme::SPACE_SM;
+        if width >= TOAST_COLUMN_MIN {
+            let left = f32::from(safe.left) + Theme::SPACE_SM;
+            // The sidebar's foot: its bottom row inside a small step all round.
+            let row = crate::surface_chrome::touch_row_height(super::SIDEBAR_FOOTER_BUTTON_SIZE);
+            let foot = f32::from(safe.bottom) + row + 2.0 * Theme::SPACE_SM;
+            return ToastPlace::Column { left, width, foot };
+        }
+        ToastPlace::Top { top: f32::from(safe.top) + Theme::TITLEBAR_HEIGHT }
     }
 
-    /// Bring the phone's Chats page up, or take it down for the chat page.
+    /// Bring the phone's Sessions page up, or take it down for the chat page.
     pub(super) fn set_compact_sessions(up: bool, cx: &mut App) {
         cx.default_global::<Pages>().sessions = Some(up);
     }
@@ -416,16 +433,17 @@ impl Shell {
         window.text_input_focused()
     }
 
-    /// `page` kept clear of the system's edges and the keyboard, on iOS.
+    /// `page` kept clear of the system's edges and the keyboard, on iOS. `session`: the page is
+    /// a session's column, whose ground the bands it keeps clear take.
     pub(super) fn compact_frame(
         &self,
         page: impl IntoElement,
+        session: bool,
         window: &Window,
         cx: &App,
     ) -> gpui::Div {
-        let frame = div().size_full().child(page);
         if !cfg!(target_os = "ios") {
-            return frame;
+            return div().size_full().child(page);
         }
         let insets = window.insets();
         let safe = insets.safe_area;
@@ -437,10 +455,28 @@ impl Shell {
         } else {
             safe.bottom
         };
-        frame
+        // slopty: under a session the band over the home indicator, and the keyboard's while
+        // it rises or stands over it, continues the terminal's ground rather than standing as an
+        // empty strip of the window's; on a tablet so does the status bar's band over its title
+        // strip, right of the sidebar. A phone's status bar band continues its navigation bar.
+        let theme = Theme::of(cx);
+        let left = safe.left + px(self.sidebar_now());
+        let band = |top: bool, height: Pixels| {
+            (session && height > Pixels::ZERO).then(|| {
+                let band = div().absolute().left(left).right_0().h(height);
+                let band = band.bg(theme.session_ground());
+                if top { band.top_0() } else { band.bottom_0() }
+            })
+        };
+        div()
+            .size_full()
+            .relative()
             // A phone's chat has no sidebar: the window's own fill over the hidden column's
             // edge, which would otherwise stand as a hairline down the screen's left.
-            .when(self.compact(), |frame| frame.bg(Theme::of(cx).glass()))
+            .when(self.compact(), |frame| frame.bg(theme.glass()))
+            .children(band(true, safe.top).filter(|_| !self.compact()))
+            .children(band(false, bottom))
+            .child(page)
             .pt(safe.top)
             .pb(bottom)
             .pl(safe.left)
@@ -471,7 +507,7 @@ impl Shell {
             .text_size(ui_rems(TITLE_SIZE))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.text)
-            .child("Chats");
+            .child("Sessions");
         let list = div()
             .id("compact-sessions")
             .flex_1()
@@ -483,7 +519,7 @@ impl Shell {
             div()
                 .id("compact-sessions-page")
                 .role(gpui::Role::Group)
-                .aria_label("Chats")
+                .aria_label("Sessions")
                 .size_full()
                 .relative()
                 .flex()
@@ -589,9 +625,9 @@ impl Shell {
                     step.take(this, cx);
                     return;
                 }
-                // TUI-first: the picker is the whole new session, so it stands over Chats, as the
-                // project picker does; the session it starts takes the screen (a chat chosen
-                // leaves Chats), and put away it leaves Chats as it was, never an empty page.
+                // TUI-first: the picker is the whole new session, so it stands over Sessions, as
+                // the project picker does; the session it starts takes the screen (a chat chosen
+                // leaves Sessions), and put away it leaves Sessions as it was, never an empty page.
                 this.open_new_session(None, cx);
             }))
             .child(plate)
@@ -719,7 +755,7 @@ impl Shell {
 
     /// The phone's navigation bar over a chat or the new-session page, in place of the
     /// titlebar and its sidebar and history cluster; `None` off a phone. A chat: a back
-    /// chevron to Chats, its title over "project @ device". The new-chat page: "New session"
+    /// chevron to Sessions, its title over "project @ device". The new-chat page: "New session"
     /// and a close button.
     pub(super) fn render_compact_nav_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.compact() {
@@ -758,7 +794,7 @@ impl Shell {
                 .id("compact-back")
                 .debug_selector(|| "compact-back".into())
                 .role(gpui::Role::Button)
-                .aria_label("Back to Chats")
+                .aria_label("Back to Sessions")
                 .h(px(NAV_TARGET))
                 .flex_none()
                 .pr(px(8.0))
@@ -773,7 +809,7 @@ impl Shell {
                     div()
                         .text_size(ui_rems(16.0))
                         .text_color(theme.text)
-                        .child("Chats"),
+                        .child("Sessions"),
                 )
         };
         // The title centres on the bar, whatever the lead's width; the lead's side reserves
@@ -925,7 +961,7 @@ impl Shell {
             } else if files {
                 "Files"
             } else {
-                "Chat"
+                "Session"
             };
             (title, self.right_surface_content(cx), back_to)
         } else {
@@ -939,7 +975,7 @@ impl Shell {
                 files.ensure_loaded(cx);
                 files.ensure_git_status(cx);
             });
-            ("Files".into(), explorer.into_any_element(), "Chat")
+            ("Files".into(), explorer.into_any_element(), "Session")
         };
         let page_label = title.clone();
         let back = div()
@@ -1591,7 +1627,7 @@ mod tests {
         let back = cx.debug_bounds("compact-back").expect("the chat's back chevron").center();
         cx.simulate_click(back, gpui::Modifiers::default());
         cx.update(|_, cx| {
-            assert_eq!(cx.default_global::<Pages>().sessions, Some(true), "Chats is up");
+            assert_eq!(cx.default_global::<Pages>().sessions, Some(true), "Sessions is up");
         });
         // A long press opens the row's menu.
         let row = cx.debug_bounds("compact-row-fix").unwrap().center();
@@ -1619,24 +1655,42 @@ mod tests {
         shell.update(cx, |shell, cx| shell.state.update(cx, |state, _| state.chats.clear()));
         redraw(cx);
         let page = (
-            cx.debug_bounds("sidebar-empty: No chats yet").is_some(),
+            cx.debug_bounds("sidebar-empty: No sessions yet").is_some(),
             cx.debug_bounds("sidebar-empty-key").is_some(),
         );
-        assert_eq!(page, (true, false), "the phone's empty Chats page");
+        assert_eq!(page, (true, false), "the phone's empty Sessions page");
         let read = a11y(cx);
         assert!(
-            read.contains(&(gpui::Role::Label, "No chats yet".to_owned())),
+            read.contains(&(gpui::Role::Label, "No sessions yet".to_owned())),
             "a screen reader reads the empty line: {read:?}"
         );
         FORCE_COMPACT.with(|force| force.set(false));
         cx.simulate_resize(gpui::size(gpui::px(1320.0), gpui::px(880.0)));
         redraw(cx);
         let sidebar = (
-            cx.debug_bounds("sidebar-empty: No chats yet").is_some(),
+            cx.debug_bounds("sidebar-empty: No sessions yet").is_some(),
             cx.debug_bounds("sidebar-empty-key").is_some(),
         );
         assert_eq!(sidebar, (true, true), "the desktop sidebar names its key");
         assert_eq!(crate::keys::combo_text_on(true, "mod-n"), "⌘N", "a Mac's key");
+    }
+
+    // slopty: a touch screen's new-session picker offers no keys to press, none at its foot;
+    // with a keyboard they stand there.
+    #[gpui::test]
+    fn a_touch_screens_new_session_picker_offers_no_keys(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        shell.update(cx, |shell, cx| shell.open_new_session_picker(None, cx));
+        redraw(cx);
+        let keys = |cx: &mut gpui::VisualTestContext| {
+            let mut shown = |id| cx.debug_bounds(id).is_some();
+            (shown("new-session-picker"), shown("key-cap-Esc"))
+        };
+        assert_eq!(keys(cx), (true, false), "the phone's picker, with no key caps");
+        FORCE_COMPACT.with(|force| force.set(false));
+        redraw(cx);
+        assert_eq!(keys(cx), (true, true), "a keyboard's picker names its keys");
     }
 
     // slopty: before the first chat can start, the capsule offers the step it needs, as the
@@ -1674,7 +1728,7 @@ mod tests {
         cx.simulate_click(capsule, gpui::Modifiers::default());
         shell.update(cx, |shell, cx| {
             assert!(shell.add_space.is_some(), "the press opens the project picker");
-            assert!(shell.compact_sessions_up(cx), "over the Chats page, which stays");
+            assert!(shell.compact_sessions_up(cx), "over the Sessions page, which stays");
         });
         // A screen reader reads the picker's devices as buttons, the dot's state in words.
         let read = a11y(cx);
@@ -1698,19 +1752,19 @@ mod tests {
             assert!(!shell.compact_sessions_up(cx), "on the new chat's page");
             Shell::set_compact_sessions(true, cx);
         });
-        assert_eq!(offers(cx), ["New session"], "back on Chats, a chat can start");
-        // Its press puts the new-session picker over Chats, and put away it leaves Chats up.
+        assert_eq!(offers(cx), ["New session"], "back on Sessions, a chat can start");
+        // Its press puts the new-session picker over Sessions, and put away it leaves Sessions up.
         let capsule = cx.debug_bounds("compact-new-session").expect("the capsule").center();
         cx.simulate_click(capsule, gpui::Modifiers::default());
         let picked = a11y(cx);
         shell.update(cx, |shell, cx| {
             assert!(shell.new_session.is_some(), "the press opens the new-session picker");
-            assert!(shell.compact_sessions_up(cx), "over the Chats page, which stays");
+            assert!(shell.compact_sessions_up(cx), "over the Sessions page, which stays");
             shell.close_new_session_picker(cx);
-            assert!(shell.compact_sessions_up(cx), "put away, Chats is as it was");
+            assert!(shell.compact_sessions_up(cx), "put away, Sessions is as it was");
         });
         assert!(picked.contains(&(gpui::Role::TabList, "Agent".to_owned())), "{picked:?}");
-        assert!(picked.contains(&(gpui::Role::Group, "Chats".to_owned())), "{picked:?}");
+        assert!(picked.contains(&(gpui::Role::Group, "Sessions".to_owned())), "{picked:?}");
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
                 state.spaces.clear();
@@ -1854,7 +1908,8 @@ mod tests {
     }
 
     // slopty: on a phone a toast stands above the tab bar and the New session capsule, hiding
-    // neither; off a phone it keeps the window's corner.
+    // neither; off a phone it rises in the sidebar's foot, above its bottom row, off the
+    // terminal (`chrome_tests::a_toast_keeps_off_the_terminal`).
     #[gpui::test]
     fn a_phones_toast_stands_over_its_tabs_and_capsule(cx: &mut gpui::TestAppContext) {
         let (_shell, cx) = ipad(cx);
@@ -1902,7 +1957,8 @@ mod tests {
         cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
         let (toast, _, _, height) = bounds(cx);
         let toast = toast.expect("the toast on a Mac");
-        assert!((height - toast.1 - 24.0).abs() < 0.5, "the window's corner: {toast:?} in {height}");
+        let foot = super::super::SIDEBAR_FOOTER_BUTTON_SIZE + 3.0 * Theme::SPACE_SM;
+        assert!((height - toast.1 - foot).abs() < 0.5, "over the sidebar's foot: {toast:?} in {height}");
     }
 
     /// The last frame's accessibility tree as (role, label), drawn with the tree on.
@@ -1924,9 +1980,9 @@ mod tests {
         })
     }
 
-    // slopty: a page that is not shown gives no nodes: on a phone's chat page the Chats list is
+    // slopty: a page that is not shown gives no nodes: on a phone's chat page the Sessions list is
     // off screen, so a screen reader reads none of its rows nor its History button; back on
-    // Chats it reads them again.
+    // Sessions it reads them again.
     #[gpui::test]
     fn a_phones_chat_page_reads_no_hidden_rows(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = ipad(cx);
@@ -1939,17 +1995,17 @@ mod tests {
                 .count()
         };
         let chats = a11y(cx);
-        assert!(rows(&chats) >= 2, "the Chats page reads its rows: {chats:?}");
+        assert!(rows(&chats) >= 2, "the Sessions page reads its rows: {chats:?}");
         shell.update(cx, |shell, cx| shell.open_chat("fix".into(), cx));
         let chat = a11y(cx);
-        let back = chat.iter().any(|(_, label)| label == "Back to Chats");
+        let back = chat.iter().any(|(_, label)| label == "Back to Sessions");
         let hidden = rows(&chat);
         shell.update(cx, |shell, cx| assert!(shell.compact_back(cx)));
         let again = a11y(cx);
         FORCE_COMPACT.with(|force| force.set(false));
         assert!(back, "the chat page: {chat:?}");
         assert_eq!(hidden, 0, "no hidden row on the chat page: {chat:?}");
-        assert!(rows(&again) >= 2, "back on Chats: {again:?}");
+        assert!(rows(&again) >= 2, "back on Sessions: {again:?}");
     }
 
     // slopty: a row's status says what it asks of the person: "Needs you" for a chat waiting on
@@ -2058,13 +2114,13 @@ mod tests {
         assert!(has(&chat, gpui::Role::Button, "Show inspector"), "{chat:?}");
         assert!(!has(&chat, gpui::Role::Button, "Show terminal"), "the session is its terminal: {chat:?}");
         assert!(has(&files, gpui::Role::Heading, "Files"), "the files page: {files:?}");
-        assert!(has(&files, gpui::Role::Button, "Back to Chat"), "{files:?}");
-        assert!(!has(&files, gpui::Role::Button, "Back to Chats"), "the chat's page gives way: {files:?}");
-        assert!(has(&back, gpui::Role::Button, "Back to Chats"), "back on the chat: {back:?}");
+        assert!(has(&files, gpui::Role::Button, "Back to Session"), "{files:?}");
+        assert!(!has(&files, gpui::Role::Button, "Back to Sessions"), "the chat's page gives way: {files:?}");
+        assert!(has(&back, gpui::Role::Button, "Back to Sessions"), "back on the chat: {back:?}");
         assert!(!has(&back, gpui::Role::Heading, "Files"), "{back:?}");
         assert!(has(&sheet, gpui::Role::Dialog, "Inspector"), "the sheet: {sheet:?}");
         assert!(has(&sheet, gpui::Role::Button, "Hide inspector"), "{sheet:?}");
-        assert!(has(&sheet, gpui::Role::Button, "Back to Chats"), "over the session's page: {sheet:?}");
+        assert!(has(&sheet, gpui::Role::Button, "Back to Sessions"), "over the session's page: {sheet:?}");
         assert!(has(&sheet, gpui::Role::Button, "Expand inspector"), "{sheet:?}");
         assert_eq!(medium, Some(422.0), "up at half the screen");
         assert_eq!(large, Some(SHEET_LARGE_GAP), "the whole screen");

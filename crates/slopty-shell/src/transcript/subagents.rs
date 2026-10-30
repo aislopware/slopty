@@ -48,6 +48,8 @@ const CHILD_MAX_HEIGHT: f32 = 480.0;
 const CHILD_VIEWPORT_SHARE: f32 = 0.4;
 /// A window narrower than this is a phone's (`shell/compact.rs`): a card there drills in.
 const PHONE_BELOW: f32 = 700.0;
+/// slopty: a phone's side margin at a compact width (UIKit's `systemMinimumLayoutMargins`).
+const PHONE_MARGIN: f32 = 16.0;
 
 /// slopty: a card's status word swaps as Amp's does (`AJ/46b413b6.js:10505-10535`): the new word
 /// enters from 4 pt below over 350 ms as the old one leaves 4 pt up over 150 ms.
@@ -337,6 +339,13 @@ impl Transcript {
     pub(super) fn on_phone(&self) -> bool {
         let width = f32::from(self.subagents.window.width);
         crate::shell::touch_screen() && width > 0.0 && width < PHONE_BELOW
+    }
+
+    /// slopty: the side gutter the rows keep in their pane: on a phone the platform's own
+    /// margin (UIKit's 16 pt at a compact width), so the timeline lines up with the sheet's
+    /// words; elsewhere the reading column's 48.
+    pub(super) fn row_inset(&self) -> f32 {
+        if self.on_phone() { PHONE_MARGIN } else { 48.0 }
     }
 }
 

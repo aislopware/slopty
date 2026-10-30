@@ -217,18 +217,18 @@ impl Render for NotificationsPage {
                             .min_w(px(160.0))
                             .flex()
                             .flex_col()
-                            .child(widgets::row_title(&theme, "Chat sounds")),
+                            .child(widgets::row_title(&theme, "Session sounds")),
                     )
                     .children(self.reset_button(
                         "notifications-sound-reset",
-                        "Chat sounds",
+                        "Session sounds",
                         NotificationPreference::Sound,
                         sound,
                         &theme,
                         cx,
                     ))
                     .child(interactive_switch(
-                        toggle("notifications-sound-toggle", "Chat sounds", sound, true),
+                        toggle("notifications-sound-toggle", "Session sounds", sound, true),
                         ring,
                         NotificationPreference::Sound,
                         cx,

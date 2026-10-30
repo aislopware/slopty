@@ -238,6 +238,10 @@ pub struct TerminalPanel {
     /// through the changing clip, but do not feed transient widths into the
     /// emulator: alternate-screen rows truncate rather than reflow.
     resize_suspended: bool,
+    /// slopty: how much narrower and shorter than the body the shown terminal fits its grid
+    /// while the panes around the panel glide, and the view it holds ([`live::hold_fit`]).
+    fit_hold: Size<Pixels>,
+    held_view: Option<gpui::EntityId>,
     /// Whether this docked panel's bottom-left/right corners sit at the
     /// WINDOW's corners — the shell sets these per frame so the panel's fill
     /// can carry the CSD window's rounded corners (gpui cannot clip children
@@ -294,6 +298,8 @@ impl TerminalPanel {
             session: false,
             session_asked: HashMap::new(),
             resize_suspended: false,
+            fit_hold: Size::default(),
+            held_view: None,
             window_corner_bl: false,
             window_corner_br: false,
             tab_seq: 0,
@@ -338,6 +344,10 @@ impl TerminalPanel {
         if self.resize_suspended {
             return;
         }
+        let size = Size {
+            width: (size.width - self.fit_hold.width).max(Pixels::ZERO),
+            height: (size.height - self.fit_hold.height).max(Pixels::ZERO),
+        };
         let look = TerminalLook::of(cx);
         let known = self.fitted.as_ref().is_some_and(|(at, was, _)| *at == size && *was == look);
         if known && self.awaiting_fit.is_empty() {
@@ -389,6 +399,24 @@ impl TerminalPanel {
 
     pub fn set_resize_suspended(&mut self, suspended: bool) {
         self.resize_suspended = suspended;
+    }
+
+    /// slopty: what [`Self::hold_fit`] holds the grid by (tests).
+    #[cfg(test)]
+    pub(crate) const fn fit_hold(&self) -> Size<Pixels> {
+        self.fit_hold
+    }
+
+    /// slopty: the shell's hold on the shown terminal's grid while the panes around the panel
+    /// glide: `by` narrower and shorter than the body, zero once they rest ([`live::hold_fit`]).
+    pub fn hold_fit(&mut self, by: Size<Pixels>, cx: &mut Context<Self>) {
+        if self.fit_hold == by {
+            return;
+        }
+        self.fit_hold = by;
+        if let Some(view) = self.held_view {
+            live::hold_fit(view, by, cx);
+        }
     }
 
     /// Shell hook: whether the panel's bottom corners sit at the window's
@@ -1391,6 +1419,15 @@ impl Render for TerminalPanel {
         let look = TerminalLook::of(cx);
         let hosted = id.and_then(|id| live::terminal(&id, &look, cx));
         self.drawn = hosted.as_ref().map(|hosted| hosted.view.clone()); // slopty
+        // slopty: the hold follows the view shown, and lets go of one no longer shown.
+        let shown = hosted.as_ref().map(|hosted| hosted.view.entity_id());
+        if let Some(was) = self.held_view.filter(|was| Some(*was) != shown) {
+            live::hold_fit(was, Size::default(), cx);
+        }
+        if let Some(view) = shown {
+            live::hold_fit(view, self.fit_hold, cx);
+        }
+        self.held_view = shown;
         // Focus lands on the panel's body once, and passes on to the terminal when it is there.
         if self.open && std::mem::take(&mut self.focus_pending) {
             window.focus(hosted.as_ref().map_or(&self.focus_handle, |h| &h.focus), cx);
