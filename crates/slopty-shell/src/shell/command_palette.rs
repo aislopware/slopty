@@ -1372,8 +1372,6 @@ impl Shell {
                     state.display_status_for(chat, crate::clock::utc(cx)),
                     active,
                     chat.archived,
-                    false,
-                    None,
                     None,
                     Some(query),
                     theme,

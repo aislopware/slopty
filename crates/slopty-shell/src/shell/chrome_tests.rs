@@ -378,10 +378,11 @@ fn the_chat_menu_names_its_rows(cx: &mut TestAppContext) {
         cx.notify();
     });
     let nodes = tree(cx);
-    for label in ["Rename", "Pin", "Archive"] {
+    for label in ["Rename", "Archive"] {
         assert!(find(&nodes, Role::MenuItem, label).is_some(), "{label} is a named menu item");
     }
     assert!(find(&nodes, Role::MenuItem, "Delete\u{2026}").is_none(), "no Delete");
+    assert!(find(&nodes, Role::MenuItem, "Pin").is_none(), "no Pin: the list keeps its order");
     let copy = find(&nodes, Role::MenuItem, "Copy").expect("Copy");
     assert_eq!(copy.expanded, Some(false), "its submenu shut: {copy:?}");
     assert!(nodes.values().all(|node| node.role != Role::MenuItem || !node.label.is_empty()), "no row unnamed");
@@ -510,10 +511,9 @@ mod session_card {
             state.workspace_scope = Some(WorkspaceScope::Local);
             state.local_device_id = Some("local".into());
             state.chats_synced = true;
-            state.chats = vec![chat("pin"), chat("regular"), chat("other")];
+            state.chats = vec![chat("first"), chat("regular"), chat("other")];
         });
         shell.settings.space_filter = None;
-        shell.settings.sidebar_pins_mut("local".into()).push("pin".into());
     }
 
     /// A session opens on its terminal alone, the side pane shut; ⌘I opens its inspector

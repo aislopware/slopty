@@ -35,7 +35,7 @@ use slopty_view_doc::{
 };
 use slopty_view_proto::{
     Chat, ChatConnectivity, Connectivity, ConnectivityState, Device, EngineInfo, ServerPresence,
-    Session, SidebarPreferencesState, Space, WorkspaceScope,
+    Session, Space, WorkspaceScope,
 };
 use slopty_view_rpc::{RpcError, RpcReply, RpcService, methods};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -82,7 +82,7 @@ pub struct Feed {
     devices: watch::Sender<Arc<[Device]>>,
     /// `None` until the workspace has heard every machine's threads, or given up waiting: an
     /// empty or partial first list would read as chats and projects gone, and the shell would
-    /// let go of their pins and filter.
+    /// let go of its filter.
     spaces: watch::Sender<Option<Arc<[Space]>>>,
     chats: watch::Sender<Option<Arc<[Chat]>>>,
     sessions: watch::Sender<Arc<[Session]>>,
@@ -97,8 +97,6 @@ pub struct Feed {
     local: watch::Sender<Local>,
     /// Each followed chat's transcript, `None` until its thread has come.
     transcripts: Mutex<HashMap<String, Followed>>,
-    /// The sidebar's pins, `None` until the workspace says them.
-    sidebar: watch::Sender<Option<SidebarPreferencesState>>,
 }
 
 /// This machine's own worker, as the app last said.
@@ -182,7 +180,6 @@ impl Feed {
             workers_up: Mutex::new(None),
             local: watch::Sender::new(Local::Unknown),
             transcripts: Mutex::new(HashMap::new()),
-            sidebar: watch::Sender::new(None),
         }
     }
 
@@ -237,15 +234,6 @@ impl Feed {
     #[cfg(test)]
     pub(crate) fn said_sessions(&self) -> Arc<[Session]> {
         self.sessions.borrow().clone()
-    }
-
-    /// The sidebar's pins.
-    pub fn sidebar(&self, state: SidebarPreferencesState) {
-        self.sidebar.send_if_modified(|now| {
-            let changed = now.as_ref() != Some(&state);
-            *now = Some(state);
-            changed
-        });
     }
 
     /// The threads' live status, as sessions.
@@ -637,19 +625,6 @@ impl RpcService for ViewModel {
                 Ok(RpcReply::Stream(list_frames(self.feed.sessions.subscribe())))
             }
             methods::WATCH_DOC_MESSAGES => self.transcript(&params),
-            // Pins are this client's own, kept by the workspace.
-            methods::WATCH_SIDEBAR_PREFERENCES => {
-                let sidebar = self.feed.sidebar.subscribe();
-                let _sent = self.asks.send(Ask::Republish);
-                let frames = futures::stream::unfold((sidebar, true), async |(mut rx, first)| {
-                    if !first {
-                        rx.changed().await.ok()?;
-                    }
-                    let state = rx.wait_for(Option::is_some).await.ok()?.clone()?;
-                    Some((serde_json::to_value(&state).ok()?, (rx, false)))
-                });
-                Ok(RpcReply::Stream(frames.boxed()))
-            }
             methods::WATCH_CONNECTIVITY => {
                 Ok(RpcReply::Stream(value_frames(self.feed.connectivity.subscribe())))
             }

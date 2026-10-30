@@ -441,9 +441,6 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
-    /// Device-local pins for local profiles; synced profiles use registry pins.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub sidebar_pinned_session_ids_by_profile: HashMap<String, Vec<String>>,
     /// Master switch for session notification chimes. `SLOPTY_DISABLE_SOUND`
     /// overrides every per-event preference below.
     pub sound_enabled: bool,
@@ -541,7 +538,6 @@ impl Default for UiSettings {
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
-            sidebar_pinned_session_ids_by_profile: HashMap::new(),
             sound_enabled: true,
             sound_completion_enabled: true,
             sound_input_enabled: true,
@@ -774,7 +770,7 @@ pub struct KeymapConfig {
 /// Stable key for device-local preferences that belong to one workspace
 /// profile. Authentication may arrive after `EngineInfo`, so callers must
 /// treat `None` as "identity not ready" and avoid destructive cleanup.
-pub fn sidebar_pin_profile_key(
+pub fn workspace_profile_key(
     scope: Option<WorkspaceScope>,
     auth: Option<&AuthState>,
     development_org_id: Option<&str>,
@@ -1160,19 +1156,6 @@ pub fn bound_canonical_combo(combo: &str) -> Option<String> {
     BOUND_KEY_EQUIVALENTS.with_borrow(|equivalents| canonical_combo(combo, equivalents))
 }
 impl UiSettings {
-    pub fn sidebar_pins(&self, profile_key: &str) -> &[String] {
-        self.sidebar_pinned_session_ids_by_profile
-            .get(profile_key)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-
-    pub fn sidebar_pins_mut(&mut self, profile_key: String) -> &mut Vec<String> {
-        self.sidebar_pinned_session_ids_by_profile
-            .entry(profile_key)
-            .or_default()
-    }
-
     // slopty: appshots removed.
     /// Whether this session event may produce audio.
     pub fn session_sound_enabled(&self, sound: crate::sound::Sound) -> bool {
@@ -1208,7 +1191,6 @@ impl UiSettings {
             last_project_action_by_space_id,
             open_tabs,
             space_filter,
-            sidebar_pinned_session_ids_by_profile,
             sound_enabled,
             sound_completion_enabled,
             sound_input_enabled,
@@ -1833,16 +1815,6 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
-            sidebar_pinned_session_ids_by_profile: HashMap::from([
-                (
-                    "local".to_string(),
-                    vec!["local-2".to_string(), "local-1".to_string()],
-                ),
-                (
-                    "synced:org-1:user-1".to_string(),
-                    vec!["synced-1".to_string()],
-                ),
-            ]),
             sound_enabled: false,
             sound_completion_enabled: false,
             sound_input_enabled: true,
@@ -1972,7 +1944,6 @@ mod tests {
         assert_eq!(loaded.accent, slopty_shell_theme::AccentSelection::ThemeDefault);
         assert_eq!(loaded.surface, slopty_shell_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(loaded.sidebar_pinned_session_ids_by_profile.is_empty());
         assert!(!loaded.sound_enabled, "other keys still parse");
         assert!(loaded.sound_completion_enabled);
         assert!(loaded.sound_input_enabled);
@@ -2121,13 +2092,13 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_pin_profile_keys_include_the_full_workspace_identity() {
+    fn workspace_profile_keys_include_the_full_workspace_identity() {
         assert_eq!(
-            sidebar_pin_profile_key(Some(WorkspaceScope::Local), None, None).as_deref(),
+            workspace_profile_key(Some(WorkspaceScope::Local), None, None).as_deref(),
             Some("local")
         );
         assert_eq!(
-            sidebar_pin_profile_key(
+            workspace_profile_key(
                 Some(WorkspaceScope::Synced),
                 Some(&signed_in("user-1", Some("org-1"))),
                 None,
@@ -2136,7 +2107,7 @@ mod tests {
             Some("synced:org-1:user-1")
         );
         assert_eq!(
-            sidebar_pin_profile_key(
+            workspace_profile_key(
                 Some(WorkspaceScope::Development),
                 Some(&signed_in("dev-user@dev-org-2", None)),
                 Some("ignored-org"),
@@ -2145,7 +2116,7 @@ mod tests {
             Some("development:dev-org-2:dev-user")
         );
         assert_eq!(
-            sidebar_pin_profile_key(
+            workspace_profile_key(
                 Some(WorkspaceScope::Development),
                 Some(&signed_in("dev-user", None)),
                 Some("configured-org"),
@@ -2156,13 +2127,13 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_pin_profile_key_waits_for_a_complete_remote_identity() {
+    fn workspace_profile_key_waits_for_a_complete_remote_identity() {
         assert_eq!(
-            sidebar_pin_profile_key(Some(WorkspaceScope::Synced), None, None),
+            workspace_profile_key(Some(WorkspaceScope::Synced), None, None),
             None
         );
         assert_eq!(
-            sidebar_pin_profile_key(
+            workspace_profile_key(
                 Some(WorkspaceScope::Synced),
                 Some(&signed_in("user-1", None)),
                 None,
@@ -2170,39 +2141,9 @@ mod tests {
             None
         );
         assert_eq!(
-            sidebar_pin_profile_key(Some(WorkspaceScope::Development), None, None),
+            workspace_profile_key(Some(WorkspaceScope::Development), None, None),
             None
         );
-    }
-
-    #[test]
-    fn local_synced_local_switch_restores_each_profiles_pins() {
-        let mut settings = UiSettings::default();
-        settings
-            .sidebar_pins_mut("local".to_string())
-            .extend(["local-1".to_string(), "local-2".to_string()]);
-        settings
-            .sidebar_pins_mut("synced:org-1:user-1".to_string())
-            .push("synced-1".to_string());
-
-        assert_eq!(settings.sidebar_pins("local"), ["local-1", "local-2"]);
-        assert_eq!(settings.sidebar_pins("synced:org-1:user-1"), ["synced-1"]);
-        assert_eq!(settings.sidebar_pins("local"), ["local-1", "local-2"]);
-    }
-
-    #[test]
-    fn account_switch_restores_each_accounts_pins() {
-        let mut settings = UiSettings::default();
-        settings
-            .sidebar_pins_mut("synced:org-a:user-a".to_string())
-            .push("a-1".to_string());
-        settings
-            .sidebar_pins_mut("synced:org-b:user-b".to_string())
-            .push("b-1".to_string());
-
-        assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
-        assert_eq!(settings.sidebar_pins("synced:org-b:user-b"), ["b-1"]);
-        assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
     }
 
     #[test]
@@ -2363,6 +2304,7 @@ mod tests {
                 "sidebarShowProjectFilter": false,
                 "sidebarShowArchived": false,
                 "sidebarSectionsByProfile": {"local": [{"id": "a", "name": "Focus", "sessionIds": ["c"], "collapsed": false}]},
+                "sidebarPinnedSessionIdsByProfile": {"local": ["c"]},
                 "compactModelPicker": false,
                 "skillCompletionByHarness": {"claudeCode": {"dollar": false, "separateFromSlash": false}},
                 "reduceMotion": "on",

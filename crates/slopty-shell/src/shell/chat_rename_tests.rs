@@ -207,29 +207,6 @@ fn add_chats(shell: &Entity<Shell>, cx: &mut VisualTestContext, ids: &[&str], ar
 }
 
 #[gpui::test]
-fn rename_opens_a_collapsed_pinned_section_with_its_motion(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    shell.update(cx, |shell, cx| {
-        shell.set_chat_pinned("older".into(), true, cx);
-        shell.pinned_open = false;
-        cx.notify();
-    });
-    redraw(cx);
-
-    rename(&shell, cx, "older");
-    assert_eq!(editing(&shell, cx).as_deref(), Some("older"));
-    shell.read_with(cx, |shell, _| {
-        assert!(shell.pinned_open);
-        // The queued reveal became the disclosure's opening motion.
-        assert!(shell.sidebar_reveal_motions.is_empty());
-        let motion = shell.sidebar_disclosure_motion["pinned"];
-        assert_eq!(motion.from, 0.0);
-        assert!(motion.to > 0.0);
-    });
-    assert!(cx.debug_bounds("chat-title-editor-older").is_some());
-}
-
-#[gpui::test]
 fn rename_opens_collapsed_sessions_groups_and_the_sidebar(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     // slopty: by status, the default: the chat's collapsed status group opens.

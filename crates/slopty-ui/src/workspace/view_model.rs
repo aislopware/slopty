@@ -383,7 +383,6 @@ impl WorkspaceView {
         let workers_up = (!self.workers.is_empty())
             .then(|| self.workers.values().any(|worker| worker.status.is_up()));
         feed.links(workers_up, links);
-        feed.sidebar(self.sidebar_state());
         // A thread whose state has not come says nothing yet: an empty transcript would stand as
         // its whole history, and the real one, once it comes, as live arrivals. A chat with no
         // thread had its empty transcript when followed.
@@ -637,7 +636,6 @@ impl WorkspaceView {
             _ => self
                 .surface_mutate(op, params, cx)
                 .or_else(|| self.project_mutate(op, params, cx))
-                .or_else(|| self.sidebar_mutate(op, params, cx))
                 .unwrap_or_else(|| {
                     Err(RpcError::Failed(format!("{op} is not something Slopty does to a thread")))
                 }),

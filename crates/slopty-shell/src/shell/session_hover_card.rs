@@ -507,8 +507,6 @@ mod tests {
                     slopty_view_proto::ChatIndicator::Idle,
                     false,
                     false,
-                    false,
-                    None,
                     None,
                     palette.then_some(""),
                     &Theme::default(),

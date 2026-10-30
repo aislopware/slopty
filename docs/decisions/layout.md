@@ -143,3 +143,14 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
   - zeron is no longer adopted: `cargo xtask upstream adopt` and `xtask/zeron.toml` go, and the
     `// slopty:` marker on shell edits is no longer asked for. The interface still credits the
     zeron code it was copied from, as its licence asks.
+- ✅ **No pinned sessions (2026-10-30).** A pin was a second, hand-made order laid over the list:
+  a Pinned group at its top, kept per profile on the server, reordered by dragging, set from a
+  row's menu or a swipe on the phone. It existed to keep a session from moving away. In the
+  stable list rows never move, and the picker's ⌘1-9 and the ⌘J jump reach any session sooner,
+  so the pin has no reason left (redundant, by the bar of "What the layout leaves out").
+  - Deleted: the Pinned group, its drag and the row's drag lift, the menu's Pin row, the phone's
+    swipe to pin (the swipe archives, or brings an archived row back), the settings field
+    `sidebarPinnedSessionIdsByProfile`, the view model's sidebar preferences with their watch
+    and mutation, and the pin glyph. A settings file that still holds the field loads.
+  - Tests: `settings::tests::a_file_holding_deleted_settings_still_loads` and
+    `shell::compact::tests::a_rows_swipe_archives_past_its_travel`.

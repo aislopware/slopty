@@ -322,7 +322,7 @@ impl Shell {
         self.project_icons.render(
             &self.state,
             space.as_ref(),
-            self.active_sidebar_pin_profile_key(cx),
+            self.active_profile_key(cx),
             selected,
             cx,
         )

@@ -9,8 +9,8 @@
 //! history cluster give way to a navigation bar (zeron iOS's `SessionViewController`: a back
 //! chevron to Sessions and the chat's title over "project @ device"; `NewSessionViewController`:
 //! "New session" with a close button). A chat row takes zeron iOS's gestures
-//! (`SessionListController`): a leading swipe pins it, a trailing swipe archives it (or brings it
-//! back from Archived), and a long press opens its menu.
+//! (`SessionListController`): a trailing swipe archives it (or brings it back from Archived), and
+//! a long press opens its menu.
 
 use std::time::{Duration, Instant};
 
@@ -91,8 +91,6 @@ impl Global for Pages {}
 /// What a finished swipe does to its row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SwipeAct {
-    /// The leading swipe: pin, or unpin a pinned row.
-    Pin,
     /// The trailing swipe: archive, or bring back an archived row.
     Archive,
 }
@@ -160,13 +158,7 @@ fn swipe_step(
             if phase == TouchPhase::Cancelled {
                 return SwipeStep::Done(None, swipe.x);
             }
-            let act = if swipe.x >= SWIPE_COMMIT {
-                Some(SwipeAct::Pin)
-            } else if swipe.x <= -SWIPE_COMMIT {
-                Some(SwipeAct::Archive)
-            } else {
-                None
-            };
+            let act = (swipe.x <= -SWIPE_COMMIT).then_some(SwipeAct::Archive);
             SwipeStep::Done(act, swipe.x)
         }
         _ if swipe.sideways == Some(true) => SwipeStep::Held,
@@ -1329,9 +1321,9 @@ impl Shell {
         Some(div().absolute().inset_0().children(scrim).child(sheet).into_any_element())
     }
 
-    /// `row`, as a phone's session row: it follows a sideways finger with the action it would
-    /// take showing behind it (pin on the leading side, archive on the trailing), takes that
-    /// action when let go past [`SWIPE_COMMIT`], and opens the row's menu on a long press.
+    /// `row`, as a phone's session row: it follows a finger uncovering its trailing side, with
+    /// archive showing there, archives it when let go past [`SWIPE_COMMIT`], and opens the row's
+    /// menu on a long press.
     /// Off a phone the row is as it was.
     pub(super) fn compact_session_row(
         &self,
@@ -1344,14 +1336,13 @@ impl Shell {
             return row;
         }
         let theme = Theme::of(cx).clone();
-        let pinned = self.active_sidebar_pins(cx).iter().any(|pin| pin == chat_id);
         let offset = {
             let now = crate::clock::now(cx);
             let reduced = cx.reduce_motion();
             let swipes = cx.default_global::<Swipes>();
             match (&swipes.active, &swipes.settling) {
                 (Some(swipe), _) if swipe.chat == chat_id && swipe.sideways == Some(true) => {
-                    swipe_offset(swipe.x)
+                    swipe_offset(swipe.x.min(0.0))
                 }
                 (_, Some((chat, from, at))) if chat == chat_id => {
                     let t = now.saturating_duration_since(*at).as_secs_f32()
@@ -1368,9 +1359,7 @@ impl Shell {
                 _ => 0.0,
             }
         };
-        let (glyph, words, fill) = if offset >= 0.0 {
-            (icons::PIN, if pinned { "Unpin" } else { "Pin" }, theme.accent_strong)
-        } else if archived {
+        let (glyph, words, fill) = if archived {
             (icons::ARCHIVE_UP_MINIMALISTIC, "Unarchive", theme.accent_strong)
         } else {
             (icons::ARCHIVE_MINIMALISTIC, "Archive", theme.danger_strong)
@@ -1386,8 +1375,8 @@ impl Shell {
                 .bg(fill.opacity(if ready { 1.0 } else { 0.72 }))
                 .flex()
                 .items_center()
-                .when(offset > 0.0, |el| el.justify_start().pl(px(16.0)))
-                .when(offset < 0.0, |el| el.justify_end().pr(px(16.0)))
+                .justify_end()
+                .pr(px(16.0))
                 .child(
                     div()
                         .flex()
@@ -1427,7 +1416,7 @@ impl Shell {
                     SwipeStep::Pass => return,
                     SwipeStep::Held => {}
                     SwipeStep::Done(act, travel) => {
-                        this.finish_compact_swipe(chat.clone(), act, travel, archived, pinned, cx);
+                        this.finish_compact_swipe(chat.clone(), act, travel, archived, cx);
                     }
                 }
                 cx.stop_propagation();
@@ -1478,14 +1467,12 @@ impl Shell {
         act: Option<SwipeAct>,
         travel: f32,
         archived: bool,
-        pinned: bool,
         cx: &mut Context<Self>,
     ) {
-        cx.default_global::<Swipes>().settling = Some((chat.clone(), swipe_offset(travel), crate::clock::now(cx)));
-        match act {
-            Some(SwipeAct::Pin) => self.set_chat_pinned(chat, !pinned, cx),
-            Some(SwipeAct::Archive) => self.set_chat_archived(chat, !archived, cx),
-            None => {}
+        cx.default_global::<Swipes>().settling =
+            Some((chat.clone(), swipe_offset(travel.min(0.0)), crate::clock::now(cx)));
+        if act == Some(SwipeAct::Archive) {
+            self.set_chat_archived(chat, !archived, cx);
         }
         cx.notify();
     }
@@ -1511,14 +1498,14 @@ mod tests {
             .collect()
     }
 
-    // A sideways pan past the commit travel pins (leading) or archives (trailing); a short one
-    // springs back with nothing done; a vertical one is the list's scroll, never the row's.
+    // A pan to the leading side past the commit travel archives; a short one, or one the other
+    // way, springs back with nothing done; a vertical one is the list's scroll, never the row's.
     #[test]
-    fn a_rows_swipe_pins_or_archives_past_its_travel() {
+    fn a_rows_swipe_archives_past_its_travel() {
         let mut active = None;
         let steps = pan(&mut active, &[(0.0, 0.0), (30.0, 2.0), (30.0, 1.0), (30.0, 0.0)]);
         assert_eq!(steps[1], SwipeStep::Held);
-        assert_eq!(steps[3], SwipeStep::Done(Some(SwipeAct::Pin), 90.0));
+        assert_eq!(steps[3], SwipeStep::Done(None, 90.0), "the trailing side holds nothing");
         assert!(active.is_none(), "the swipe ends with its touch");
         let steps = pan(&mut active, &[(0.0, 0.0), (-40.0, 0.0), (-45.0, 0.0)]);
         assert_eq!(steps[2], SwipeStep::Done(Some(SwipeAct::Archive), -85.0));

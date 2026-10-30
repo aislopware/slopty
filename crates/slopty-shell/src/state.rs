@@ -33,7 +33,7 @@ use slopty_view_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 // slopty: the embedded engine is cut; its service comes in through the boot config.
 use slopty_view_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
-    EngineInfo, HarnessId, Session, SidebarPreferencesState, Space, WorkspaceScope,
+    EngineInfo, HarnessId, Session, Space, WorkspaceScope,
 };
 use slopty_view_rpc::{RpcClient, RpcError, RpcService, memory_client, methods}; // slopty: no `connect_ws`, `RpcReply`
 
@@ -426,9 +426,6 @@ pub struct AppState {
     /// agent's session by the one its TUI runs in now, a plain terminal by its own. A chat with
     /// none has ended.
     pub session_terminals: std::collections::BTreeMap<String, String>,
-    /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
-    /// this and continue reading their device-local settings entry.
-    pub sidebar_preferences: SidebarPreferencesState,
     session_presentation: Option<Vec<Session>>,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
@@ -560,7 +557,6 @@ impl AppState {
             chats: Vec::new(),
             sessions: Vec::new(),
             session_terminals: std::collections::BTreeMap::new(),
-            sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
             selected_space: None,
             no_project: false,
@@ -676,14 +672,6 @@ impl AppState {
     }
 
     // ---- reducers (pure) ----
-
-    pub(crate) fn apply_sidebar_preferences(&mut self, value: SidebarPreferencesState) -> bool {
-        if value.revision < self.sidebar_preferences.revision || value == self.sidebar_preferences {
-            return false;
-        }
-        self.sidebar_preferences = value;
-        true
-    }
 
     /// Returns whether anything observable changed. The engine re-publishes
     /// identical lists (presence and sync churn elsewhere in the doc), and
@@ -1637,7 +1625,6 @@ impl AppState {
         self.spaces.clear();
         self.chats.clear();
         self.sessions.clear();
-        self.sidebar_preferences = SidebarPreferencesState::default();
         self.session_presentation = None;
         self.selected_space = None;
         self.no_project = false;
@@ -1746,12 +1733,6 @@ impl AppState {
                 handle.clone(),
                 slopty_view_doc::calls::WATCH_SESSION_TERMINALS,
                 AppState::apply_session_terminals,
-            ),
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::WATCH_SIDEBAR_PREFERENCES,
-                AppState::apply_sidebar_preferences,
             ),
             spawn_watch(
                 cx,

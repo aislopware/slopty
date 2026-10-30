@@ -23,9 +23,10 @@ use gpui::{
     Window, WindowControlArea, actions, div, prelude::*, px,
 };
 use crate::motion::HoverFade as _;
+#[cfg(test)] // the shell's tests set a workspace scope through `use super::*`
+use slopty_view_proto::WorkspaceScope;
 
 // slopty: no accounts, sync or sign-in.
-use slopty_view_proto::WorkspaceScope; // slopty: no pull-request pages.
 use slopty_view_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent}; // slopty: no Discard changes (ruled out).
@@ -53,7 +54,7 @@ use crate::settings::{
     RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
     TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
     TERMINAL_MIN_HEIGHT, UiSettings, jump_hints_visible,
-    platform_combo, sidebar_pin_profile_key,
+    platform_combo, workspace_profile_key,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, GatePhase, Indicator,
@@ -84,7 +85,6 @@ mod fuzz_tests; // slopty: seeded action sequences over the whole shell, shrunk 
 pub(crate) mod project_icon;
 mod session_hover_card;
 mod sidebar; // the sidebar column, its list, rows and the server foot
-mod sidebar_pins;
 mod sidebar_status; // slopty: status groups, reasons and the hover card
 mod search_warm;
 pub(crate) mod spaces;
@@ -229,7 +229,6 @@ enum ChatMenuPage {
 
 /// Hover-intent keys for the chat menu's rows; only Copy owns a submenu.
 const CHAT_MENU_ROW_RENAME: u8 = 0;
-const CHAT_MENU_ROW_PIN: u8 = 1;
 const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
 const CHAT_MENU_ROW_COPY: u8 = 3;
 const CHAT_MENU_ROW_TAB: u8 = 5;
@@ -1143,105 +1142,10 @@ struct RightTabDragState {
     prev_over: usize,
 }
 
-/// Sidebar-only drag payload. Regular sessions never acquire a manual order.
-#[derive(Clone)]
-struct SidebarSessionDrag {
-    chat_id: String,
-    visible_ids: std::sync::Arc<Vec<String>>,
-    filter: Option<String>,
-    profile_key: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum SidebarSessionDrop {
-    Pinned(usize),
-    Regular,
-}
-
-struct SidebarSessionTransfer {
-    payload: SidebarSessionDrag,
-    origin: std::rc::Rc<std::cell::Cell<Point<Pixels>>>,
-    cursor_offset: Point<Pixels>,
-    pointer: Point<Pixels>,
-    viewport: Option<gpui::Bounds<Pixels>>,
-    /// The lifted row's window position: `slide` its top, `slide_x` its left.
-    slide: SidebarSessionSlide,
-    slide_x: SidebarSessionSlide,
-    preview: Option<SidebarSessionGap>,
-    source_group: String,
-    source_index: usize,
-    row_height: f32,
-    source_collapse: SidebarSessionSlide,
-    collapsed_height: f32,
-    section_gaps: std::collections::HashMap<String, SidebarSessionSlide>,
-    siblings: std::collections::HashMap<String, SidebarSessionSlide>,
-}
-
-#[derive(Clone)]
-struct SidebarSessionGap {
-    group: String,
-    index: usize,
-    pinned: bool,
-    top: f32,
-}
-
-/// The same slot-to-slot easing as pinned reordering, applied to the actual row.
-struct SidebarSessionSlide {
-    from: f32,
-    to: f32,
-    epoch: u64,
-    started: std::time::Instant,
-}
-
-impl SidebarSessionSlide {
-    fn current(&self, now: std::time::Instant) -> f32 {
-        let progress = TAB_SLIDE.progress(
-            now.saturating_duration_since(self.started).as_secs_f32() / TAB_SLIDE.total().as_secs_f32(),
-        );
-        motion::lerp(self.from, self.to, progress)
-    }
-
-    fn retarget(&mut self, target: f32, now: std::time::Instant) {
-        if (target - self.to).abs() < 0.5 {
-            return;
-        }
-        self.from = self.current(now);
-        self.to = target;
-        self.epoch = self.epoch.wrapping_add(1);
-        self.started = now;
-    }
-}
-
-struct SidebarSessionReturn {
-    transfer: SidebarSessionTransfer,
-    epoch: u64,
-    started: std::time::Instant,
-}
-
-/// Live destination for a pinned-session drag. The real row remains clipped
-/// to the sidebar and slides between slots with its pinned siblings.
-struct PinnedSessionDragState {
-    chat_id: String,
-    visible_ids: std::sync::Arc<Vec<String>>,
-    from: usize,
-    over: usize,
-    prev_over: usize,
-    epoch: usize,
-    filter: Option<String>,
-    profile_key: String,
-    pointer_y: Option<f32>,
-    viewport_top: f32,
-    viewport_bottom: f32,
-    generation: u64,
-    autoscroll_active: bool,
-}
-
 type SidebarKeyedRow = (String, f32, AnyElement);
 
 struct SidebarSessionRows {
     rows: Vec<SidebarKeyedRow>,
-    pinned_count: usize,
-    moving_row: Option<(AnyElement, f32)>,
 }
 
 /// Ghost chip following the pointer while a surface tab drags.
@@ -1260,22 +1164,12 @@ impl Render for SurfaceTabGhost {
 /// Drag marker for the terminal-panel height handle.
 struct TerminalResize;
 
-/// Invisible drag ghost — resize drags and contained pinned-session reorders
-/// render nothing at the cursor.
+/// Invisible drag ghost — resize drags render nothing at the cursor.
 struct DragGhost;
 
 impl Render for DragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Empty
-    }
-}
-
-/// slopty: a [`DragGhost`] that holds the closed hand for the whole drag of a chat row.
-struct GrabGhost;
-
-impl Render for GrabGhost {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        drag_cursor(gpui::CursorStyle::ClosedHand)
     }
 }
 
@@ -1470,8 +1364,6 @@ pub struct Shell {
     starting: Option<(String, std::time::Instant)>,
     /// slopty: the redraw that ends "Starting…" once its time is up.
     _starting_redraw: Option<Task<()>>,
-    /// Session-transient disclosure state, matching the Archived shelf.
-    pub(super) pinned_open: bool,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
@@ -1621,8 +1513,6 @@ pub struct Shell {
     spaces_menu: popover::Popup<spaces::SpacesMenu>,
     /// Hover/drag + scroll-linger state of the dropdown's floating rail.
     spaces_menu_bar: popover::MenuScrollbarState,
-    /// Current pinned-row metrics shared by hit testing and displacement animations.
-    sidebar_pinned_heights: Vec<f32>,
     project_icons: project_icon::ProjectIcons,
     /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
@@ -1643,15 +1533,6 @@ pub struct Shell {
     session_hover_card: session_hover_card::SessionHoverCard,
     /// Scroll position of the sidebar lists region (drives its edge fades).
     sidebar_scroll: gpui::ScrollHandle,
-    /// In-flight reorder for the pinned section only.
-    pinned_session_drag: Option<PinnedSessionDragState>,
-    pinned_session_drag_generation: u64,
-    sidebar_session_transfer: Option<SidebarSessionTransfer>,
-    sidebar_session_return: Option<SidebarSessionReturn>,
-    /// Pending pin intents are scoped to the active profile and engine attachment.
-    sidebar_pin_write: Option<sidebar_pins::PendingSidebarPins>,
-    sidebar_pin_write_generation: u64,
-    sidebar_pin_write_notice: Option<SharedString>,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
     /// Last seen session status per chat — the chime trigger compares against
@@ -1927,7 +1808,6 @@ impl Shell {
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             archived_open: true,
-            pinned_open: true,
             archived_shown: 0,
             sidebar_group_shown: std::collections::HashMap::new(), // slopty
             // slopty: Inactive starts shut (Amp's).
@@ -2014,7 +1894,6 @@ impl Shell {
             pending_change: None,
             spaces_menu: popover::Popup::default(),
             spaces_menu_bar: popover::MenuScrollbarState::default(),
-            sidebar_pinned_heights: Vec::new(),
             project_icons: Default::default(),
             chat_status_hover: None,
             sidebar_clock: crate::clock::utc(cx),
@@ -2023,13 +1902,6 @@ impl Shell {
             chat_hover_resync: false,
             session_hover_card: Default::default(),
             sidebar_scroll: gpui::ScrollHandle::new(),
-            pinned_session_drag: None,
-            pinned_session_drag_generation: 0,
-            sidebar_session_transfer: None,
-            sidebar_session_return: None,
-            sidebar_pin_write: None,
-            sidebar_pin_write_generation: 0,
-            sidebar_pin_write_notice: None,
             space_boot_applied: false,
             sound_prev: std::collections::HashMap::new(),
             connectivity_notifications: Default::default(),
@@ -2306,10 +2178,6 @@ impl Shell {
         {
             self.settings.space_filter = None;
             self.schedule_save(cx);
-        }
-        self.reconcile_sidebar_pins(cx);
-        if !self.pinned_session_drag_is_valid(cx) {
-            self.cancel_pinned_session_drag(cx);
         }
         // Chat switch: restore THAT chat's panel state (per-session open flags;
         // snap, no tween — the panels belong to the destination chat). The
@@ -3795,29 +3663,6 @@ impl Shell {
         cx.notify();
     }
 
-    fn contain_pinned_session_drag(
-        &mut self,
-        event: &gpui::DragMoveEvent<SidebarSessionDrag>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(transfer) = self.sidebar_session_transfer.as_mut() {
-            transfer.pointer = event.event.position;
-            cx.notify();
-        }
-        let inside_window = event.bounds.contains(&event.event.position);
-        let pointer_x = f32::from(event.event.position.x);
-        let sidebar_left = f32::from(event.bounds.left());
-        let inside_sidebar =
-            pointer_x >= sidebar_left && pointer_x <= sidebar_left + self.sidebar_now();
-        if !inside_window || !inside_sidebar {
-            if let Some(transfer) = self.sidebar_session_transfer.as_mut() {
-                transfer.preview = None;
-            }
-            self.cancel_pinned_session_drag(cx);
-        }
-    }
-
     fn finish_pane_resize(&mut self, kind: PaneResizeKind) {
         if self.pane_resize_active == Some(kind) {
             self.pane_resize_active = None;
@@ -4770,158 +4615,13 @@ impl Shell {
         self.set_chat_archived(chat_id, true, cx);
     }
 
-    fn reconcile_sidebar_pins(&mut self, cx: &mut Context<Self>) {
-        self.discard_stale_sidebar_pin_writes(cx);
-        let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
-            return;
-        };
+    fn active_profile_key(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        if state.workspace_scope == Some(WorkspaceScope::Local) {
-            // slopty: not while a machine is out of reach: its chats are missing, not gone.
-            if !state.chats_synced || !spaces::every_device_reached(state, crate::clock::utc(cx)) {
-                return;
-            }
-            let known = state.chats.iter().map(|chat| chat.id.clone()).collect();
-            let changed = self
-                .settings
-                .sidebar_pinned_session_ids_by_profile
-                .get_mut(&profile_key)
-                .is_some_and(|pins| spaces::retain_known_pins(pins, &known));
-            if changed {
-                self.schedule_save(cx);
-            }
-            return;
-        }
-        // Remote pins come exclusively from per-pin registry records.
-    }
-
-    fn active_sidebar_pin_profile_key(&self, cx: &App) -> Option<String> {
-        let state = self.state.read(cx);
-        sidebar_pin_profile_key(
+        workspace_profile_key(
             state.workspace_scope,
             state.auth.as_ref(),
             None, // slopty: Slopty's server is the only backend.
         )
-    }
-
-    fn active_sidebar_pins(&self, cx: &App) -> Vec<String> {
-        if let Some(pins) = self.optimistic_sidebar_pins(cx) {
-            return pins;
-        }
-        let state = self.state.read(cx);
-        match state.workspace_scope {
-            Some(WorkspaceScope::Local) => self
-                .active_sidebar_pin_profile_key(cx)
-                .map(|key| self.settings.sidebar_pins(&key).to_vec())
-                .unwrap_or_default(),
-            Some(WorkspaceScope::Synced | WorkspaceScope::Development) => {
-                state.sidebar_preferences.pinned_session_ids.clone()
-            }
-            None => Vec::new(),
-        }
-    }
-
-    fn sidebar_pins_for_profile(&self, profile_key: &str, cx: &App) -> Vec<String> {
-        if self.active_sidebar_pin_profile_key(cx).as_deref() != Some(profile_key) {
-            return Vec::new();
-        }
-        self.active_sidebar_pins(cx)
-    }
-
-    fn validate_sidebar_pin_change(
-        &mut self,
-        profile_key: &str,
-        pins: &[String],
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.active_sidebar_pin_profile_key(cx).as_deref() != Some(profile_key) {
-            return false;
-        }
-        let state = self.state.read(cx);
-        let remote = matches!(
-            state.workspace_scope,
-            Some(WorkspaceScope::Synced | WorkspaceScope::Development)
-        );
-        let result = if remote && !state.sidebar_preferences.can_edit() {
-            Err("Couldn\u{2019}t pin while the sidebar syncs. Try again shortly.")
-        } else {
-            let current = self.active_sidebar_pins(cx);
-            slopty_view_proto::validate_sidebar_pin_update(&current, pins)
-        };
-        if let Err(message) = result {
-            self.show_notice(crate::toast::ToastKind::Error, message, cx);
-            cx.notify();
-            return false;
-        }
-        true
-    }
-
-    fn apply_sidebar_pin_change(
-        &mut self,
-        profile_key: String,
-        change: slopty_view_proto::SidebarPinChange,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let mut pinned_session_ids = self.active_sidebar_pins(cx);
-        change.project(&mut pinned_session_ids);
-        if !self.validate_sidebar_pin_change(&profile_key, &pinned_session_ids, cx)
-            || self.active_sidebar_pins(cx) == pinned_session_ids
-        {
-            return false;
-        }
-        match self.state.read(cx).workspace_scope {
-            Some(WorkspaceScope::Local) => {
-                if pinned_session_ids.is_empty() {
-                    self.settings
-                        .sidebar_pinned_session_ids_by_profile
-                        .remove(&profile_key);
-                } else {
-                    self.settings
-                        .sidebar_pinned_session_ids_by_profile
-                        .insert(profile_key, pinned_session_ids);
-                }
-                self.schedule_save(cx);
-            }
-            Some(WorkspaceScope::Synced | WorkspaceScope::Development) => {
-                return self.queue_sidebar_pin_write(profile_key, change, cx);
-            }
-            None => return false,
-        }
-        true
-    }
-
-    fn set_chat_pinned(&mut self, chat_id: String, pinned: bool, cx: &mut Context<Self>) {
-        self.close_chat_menu(cx);
-        self.cancel_pinned_session_drag(cx);
-        let Some(profile_key) = self.active_sidebar_pin_profile_key(cx) else {
-            return;
-        };
-        if !self
-            .state
-            .read(cx)
-            .chats
-            .iter()
-            .any(|chat| chat.id == chat_id)
-        {
-            return;
-        }
-        let pins = self.active_sidebar_pins(cx);
-        if pins.contains(&chat_id) == pinned {
-            return;
-        }
-        let change = if pinned {
-            slopty_view_proto::SidebarPinChange::Pin {
-                session_id: chat_id.clone(),
-                after: pins.last().cloned(),
-                before: None,
-            }
-        } else {
-            slopty_view_proto::SidebarPinChange::Unpin {
-                session_id: chat_id.clone(),
-            }
-        };
-        self.apply_sidebar_pin_change(profile_key, change, cx);
-        cx.notify();
     }
 
     /// The Archive session shortcut. With no chat open, or with an already
@@ -6139,12 +5839,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         // slopty: voice removed.
-        if event.keystroke.key == "escape" && self.sidebar_session_transfer.is_some() {
-            cx.stop_active_drag(window);
-            self.cancel_sidebar_session_transfer(cx);
-            cx.stop_propagation();
-            return;
-        }
         if event.keystroke.key == "escape" && self.command_palette.is_some() {
             self.close_command_palette(window, cx);
             cx.stop_propagation();
@@ -6201,7 +5895,6 @@ impl Shell {
                     .chats
                     .iter()
                     .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
-            let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
             // slopty: a row names its key where the key would do the same, on the open chat
             // and the tab in front (M16).
             let is_open = matches!(self.route, Route::Chat)
@@ -6210,7 +5903,6 @@ impl Shell {
                 .then(|| crate::keys::for_action(&ArchiveSession, None, window, cx))
                 .flatten();
             let rename_id = chat_id.clone();
-            let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
             let menu = popover::popover_card(&theme)
                 .w(px(216.0))
@@ -6247,15 +5939,6 @@ impl Shell {
                 if is_side_chat {
                     menu
                 } else {
-                    let pin = popover::menu_row(&theme, false, format!("chat-menu-pin-{chat_id}"))
-                        .id("chat-menu-pin")
-                        .role(gpui::Role::MenuItem) // slopty
-                        .aria_label(if is_pinned { "Unpin" } else { "Pin" })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_chat_pinned(pin_id.clone(), !is_pinned, cx)
-                        }))
-                        .child(icon(icons::PIN).size(px(16.0)).text_color(theme.text_muted))
-                        .child(SharedString::from(if is_pinned { "Unpin" } else { "Pin" }));
                     let archive =
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
                             .id("chat-menu-archive")
@@ -6288,8 +5971,7 @@ impl Shell {
                             .child(SharedString::from("Open in\u{2026}"));
                         self.chat_menu_hover_row(CHAT_MENU_ROW_OPEN_IN, row, cx)
                     });
-                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
-                        .child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
+                    menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
                         .child(self.chat_menu_hover_row(CHAT_MENU_ROW_COPY, copy, cx))
                         .children(open_in)
                 }
@@ -8257,26 +7939,6 @@ impl Render for Shell {
                 el
             })
             .text_size(crate::typography::ui_rems(14.0))
-            .on_drag_move::<SidebarSessionDrag>(cx.listener(Self::contain_pinned_session_drag))
-            .on_drop::<SidebarSessionDrag>(cx.listener(|this, _, _, cx| {
-                this.cancel_sidebar_session_transfer(cx);
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.sidebar_session_transfer.is_some() {
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.sidebar_session_transfer.is_some() {
-                        cx.notify();
-                    }
-                }),
-            )
             // Mouse side buttons walk the same history as the titlebar
             // back/forward arrows (the browser surface keeps them to itself).
             .on_mouse_down(
@@ -12174,73 +11836,6 @@ mod settings_modal_regressions {
             stale.push("no Show more drawn".to_owned());
         }
         assert!(stale.is_empty(), "{}", stale.join("\n\n"));
-    }
-
-    /// The full shell draws its sidebar as a cached view after its own
-    /// render, so the lifted row must be built and drawn within one frame.
-    /// Carried out of the sidebar it follows the pointer, and dropped on a
-    /// conversation it becomes a chat chip in that composer.
-    #[gpui::test]
-    fn a_dragged_session_leaves_the_sidebar_and_follows_the_pointer(
-        cx: &mut TestAppContext,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
-        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
-        shell.update(cx, |shell, cx| {
-            shell.debug_gate = Some(GatePhase::Ready);
-            shell.splash = SplashPhase::Gone;
-            crate::motion::set_reduced_motion(cx, true);
-            shell.state.update(cx, |state, _| {
-                state.workspace_scope = Some(WorkspaceScope::Local);
-                state.local_device_id = Some("local".into());
-                state.chats = ["older", "newer"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(ix, id)| {
-                        serde_json::from_value(serde_json::json!({
-                            "id": id, "title": format!("Chat {id}"), "deviceId": "local",
-                            "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
-                        }))
-                        .unwrap()
-                    })
-                    .collect();
-                state.selected_chat = Some("newer".into());
-            });
-            shell.active_chat = "newer".into();
-        });
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let row = cx.debug_bounds("chat-older").expect("sidebar row");
-        let from = row.center();
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        // Several frames of dragging, inside the sidebar and then out of it.
-        for step in 1..=6 {
-            let x = from.x + px(4.0 + 120.0 * step as f32);
-            cx.simulate_mouse_move(
-                gpui::point(x, from.y + px(40.0)),
-                Some(MouseButton::Left),
-                gpui::Modifiers::default(),
-            );
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-        }
-        // The sidebar is a cached view, whose contents tests can't query by
-        // selector; the lifted row's own window position is the check.
-        let sidebar_width = shell.read_with(cx, |shell, _| shell.settings.sidebar_width);
-        shell.read_with(cx, |shell, _| {
-            let transfer = shell.sidebar_session_transfer.as_ref().expect("still dragging");
-            let left = transfer.slide_x.to;
-            let expected = f32::from(transfer.pointer.x - transfer.cursor_offset.x);
-            assert!(left > sidebar_width, "outside the sidebar the row follows the pointer");
-            assert!((left - expected).abs() < 0.5);
-        });
-        let drop = gpui::point(from.x + px(724.0), from.y + px(40.0));
-        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::default());
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        shell.read_with(cx, |shell, _| assert!(shell.sidebar_session_transfer.is_none()));
     }
 
     // slopty: voice removed.

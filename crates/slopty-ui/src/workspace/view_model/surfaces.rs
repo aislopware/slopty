@@ -34,7 +34,6 @@ mod files;
 mod live;
 mod projects;
 mod settings;
-mod sidebar;
 
 use std::collections::{BTreeMap, HashMap};
 use std::pin::Pin;
@@ -108,8 +107,6 @@ pub(super) struct Surfaces {
     actions: actions::Actions,
     /// The attached files read back, while they are read.
     read_back: composer::ReadBack,
-    /// The sidebar's pins and sections.
-    sidebar: sidebar::Sidebar,
     /// The last number given a watch.
     last_watch: u64,
     /// The repositories the status and diff watches follow, by worker and folder as named,

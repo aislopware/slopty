@@ -187,9 +187,10 @@ async fn every_state_reads_at_a_glance() {
     let menu =
         seen(drv, "the row's menu", STEP, |d| d.a11y_node("MenuItem", Some("Rename")).is_some())
             .await;
-    for item in ["Rename", "Pin", "Archive"] {
+    for item in ["Rename", "Archive"] {
         assert!(menu.a11y_node("MenuItem", Some(item)).is_some(), "the menu offers {item}");
     }
+    assert!(menu.a11y_node("MenuItem", Some("Pin")).is_none(), "no Pin: the list keeps its order");
     drv.keys("escape").await.unwrap();
     seen(drv, "the menu put away", STEP, |d| d.a11y_node("MenuItem", Some("Rename")).is_none())
         .await;

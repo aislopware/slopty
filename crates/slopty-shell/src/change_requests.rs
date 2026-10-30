@@ -129,17 +129,7 @@ pub(crate) fn pull_request_badge_with_query(
     device: Option<String>,
     theme: &Theme,
 ) -> AnyElement {
-    render_pull_request_badge(id, summary, surface, query, true, device, theme)
-}
-
-/// The same badge geometry without hover, tooltip, or click behavior in drag previews.
-pub(crate) fn pull_request_badge_preview(
-    id: SharedString,
-    summary: ChangeRequestSummary,
-    surface: ChangeRequestBadgeSurface,
-    theme: &Theme,
-) -> AnyElement {
-    render_pull_request_badge(id, summary, surface, None, false, None, theme)
+    render_pull_request_badge(id, summary, surface, query, device, theme)
 }
 
 fn render_pull_request_badge(
@@ -147,21 +137,11 @@ fn render_pull_request_badge(
     summary: ChangeRequestSummary,
     surface: ChangeRequestBadgeSurface,
     query: Option<&str>,
-    interactive: bool,
     device: Option<String>,
     theme: &Theme,
 ) -> AnyElement {
     let model = ChangeRequestBadgeModel::from_summary(&summary);
-    render_badge_model(
-        id,
-        model,
-        summary.url,
-        surface,
-        query,
-        interactive,
-        device,
-        theme,
-    )
+    render_badge_model(id, model, summary.url, surface, query, device, theme)
 }
 
 // slopty: no pull-request pages.
@@ -172,7 +152,6 @@ fn render_badge_model(
     url: String,
     surface: ChangeRequestBadgeSurface,
     query: Option<&str>,
-    interactive: bool,
     _device: Option<String>, // slopty: a pull request opens in the web browser.
     theme: &Theme,
 ) -> AnyElement {
@@ -199,22 +178,20 @@ fn render_badge_model(
         .text_size(px(if composer { 11.0 } else { 10.0 }))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(color.opacity(0.85))
-        .when(interactive, |el| {
-            el.role(gpui::Role::Link)
-                .aria_label(accessible_label)
-                .tab_index(0)
-                // slopty: the shared ring, outside the chip: focus moves nothing.
-                .map(|el| crate::surface_chrome::focus_ring(el, theme))
-                .cursor_pointer()
-                .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    cx.open_url(&url); // slopty: a pull request opens in the web browser.
-                })
+        .role(gpui::Role::Link)
+        .aria_label(accessible_label)
+        .tab_index(0)
+        // slopty: the shared ring, outside the chip: focus moves nothing.
+        .map(|el| crate::surface_chrome::focus_ring(el, theme))
+        .cursor_pointer()
+        .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            cx.open_url(&url); // slopty: a pull request opens in the web browser.
         })
         // Sidebar rows spell the pull request out in their hover card.
         .when(
-            interactive && surface != ChangeRequestBadgeSurface::SessionRow,
+            surface != ChangeRequestBadgeSurface::SessionRow,
             |el| {
                 el.tooltip(move |_, cx| {
                     cx.new(|_| ChangeRequestTooltip {
