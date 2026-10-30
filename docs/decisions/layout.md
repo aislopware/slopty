@@ -336,6 +336,35 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     the_row_is_inked_for_the_ground_it_stands_on}` and
     `terminal::panel::tests::a_running_programs_progress_and_ground_reach_its_tab`.
 
+- ✅ **The window wears its ground's appearance (2026-10-30)** (terminal-craft §1; Ghostty's
+  `TerminalWindow.syncAppearance`). The titlebar row's ground left the traffic lights for later;
+  `shell::window_appearance` gives them, and the rest of what the platform draws, the ground.
+  - Each window takes the appearance Ghostty picks for the ground of the session it shows (its
+    program's OSC 11, else the theme's): light past half luma, dark below. The traffic lights,
+    menus, popovers and scrollers AppKit draws, and on iOS the status bar and keyboard, then read
+    on the ground: a dark TUI in a light app gets a dark window. The window carries it as its own
+    (gpui-fast's `Window::set_appearance`: `NSWindow.appearance`,
+    `UIWindow.overrideUserInterfaceStyle`) only while it differs from the app's, so the theme's
+    own ground, the new-session canvas and Settings leave the window the app's. iOS cannot pin
+    the app's appearance, so there a pinned theme against the system's style is the window's own
+    over no session too.
+  - The theme follows the app, never a window. The person's light or dark pins the app's
+    appearance (`App::set_window_appearance`), System clears it, and the theme takes the app's
+    appearance as `App::on_window_appearance_change` tells it (key-value observing of
+    `NSApp.effectiveAppearance`, as Ghostty's `AppDelegate` does; the window scene's style on
+    iOS). The theme read the window's appearance before, which would have turned the whole app
+    dark under a dark TUI, and a window with its own appearance no longer hears the system turn.
+    A page an agent shows takes the theme's appearance with the theme's tokens.
+  - The titlebar's words keep their inking by the ground's luma: Slopty draws them, so the
+    window's appearance inks none of them. Both read one rule, `window_appearance::of_ground`.
+  - The behind-window blur under the frosted surfaces wears neither appearance's tint
+    (gpui_macos strips its tint and saturation), so a dark window under a light theme keeps the
+    sidebar's frost light.
+  - Tests: `shell::window_appearance::tests::{a_dark_ground_darkens_the_window_and_not_the_theme,
+    a_light_ground_lightens_the_window_and_not_the_theme,
+    the_theme_follows_the_app_whatever_the_window_wears, the_ground_is_read_by_its_luma}` and
+    gpui-fast's `fast::tests::window_appearance`.
+
 - ✅ **The inbox as built (2026-10-30).** `shell::inbox` builds it, behind the eye at the
   titlebar's trailing end.
   - It lists every session that calls or works, across projects and machines, the loudest kind

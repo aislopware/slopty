@@ -442,7 +442,7 @@ impl WorkspaceView {
         } else if fence::is_fence(key) {
             self.page_fence_moved(key, cx);
         }
-        self.page_theme(window_id, window, cx);
+        self.page_theme(window_id, cx);
         let waiting = self.page_waiting(key, cx).map(Into::into);
         let host = self.view_model.pages.hosts.get(&window_id).cloned()?;
         let page = self.view_model.pages.shown.get_mut(key)?;
@@ -585,9 +585,9 @@ impl WorkspaceView {
     }
 
     /// Give `window`'s host the shell's theme when it changed.
-    fn page_theme(&mut self, window_id: WindowId, window: &Window, cx: &App) {
+    fn page_theme(&mut self, window_id: WindowId, cx: &App) {
         let Some(host) = self.view_model.pages.hosts.get(&window_id) else { return };
-        let theme = page_theme_of(window, cx);
+        let theme = page_theme_of(cx);
         if self.view_model.pages.themes.get(&window_id) != Some(&theme) {
             host.set_theme(theme.clone());
             self.view_model.pages.themes.insert(window_id, theme);
@@ -746,7 +746,7 @@ impl WorkspaceView {
             return Some(Rc::clone(host));
         }
         let events = self.page_pump(cx);
-        let theme = page_theme_of(window, cx);
+        let theme = page_theme_of(cx);
         self.view_model.pages.themes.insert(window_id, theme.clone());
         let config = HostConfig {
             device: if cfg!(target_os = "ios") { Device::Pad } else { Device::Mac },
@@ -1797,15 +1797,16 @@ impl WorkspaceView {
     }
 }
 
-/// The theme pages draw in: the window's appearance and the shell's tokens as MCP Apps' CSS
-/// variables, the six chart colours with them.
-fn page_theme_of(window: &Window, cx: &App) -> Theme {
-    let dark = matches!(
-        window.appearance(),
-        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
-    );
-    let variables = slopty_shell::page::theme_variables(slopty_shell::theme::Theme::of(cx));
-    Theme { dark, variables }
+/// The theme pages draw in: the shell theme's appearance and its tokens as MCP Apps' CSS
+/// variables, the six chart colours with them. The theme's, not the window's: a window takes
+/// its terminal's ground's appearance (`slopty_shell::window_appearance`), and a page stands on
+/// the theme's surfaces.
+fn page_theme_of(cx: &App) -> Theme {
+    let shell = slopty_shell::theme::Theme::of(cx);
+    Theme {
+        dark: shell.appearance.is_dark(),
+        variables: slopty_shell::page::theme_variables(shell),
+    }
 }
 
 /// A height in whole points, as a page's watch says it.

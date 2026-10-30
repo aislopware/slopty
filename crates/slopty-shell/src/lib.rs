@@ -69,6 +69,7 @@ pub mod toast;
 pub mod transcript;
 pub mod typography;
 pub mod visuals;
+pub mod window_appearance; // slopty: a window wears its terminal's ground's appearance
 mod workspace_links;
 
 use std::path::PathBuf;
@@ -470,10 +471,10 @@ fn open_main_window(
                 // slopty: a tooltip sits centred under the control it names, never under the
                 // pointer (`docs/decisions/ui.md`, "Tooltips name the action and its key").
                 window.set_tooltip_placement(gpui::TooltipPlacement::Below);
-                // React to the user flipping macOS between light and dark. Detached:
-                // the subscription lives as long as the window does, and the window
-                // owns nothing that would drop it early.
-                appearance::observe_window(window, cx).detach();
+                // The theme takes the app's appearance from the window as it opens, which
+                // has it even early in launch; from `appearance::init` on it follows the app,
+                // never a window, which wears its ground's (`window_appearance`).
+                appearance::reconcile(window, cx);
                 let shell = cx.new(|cx| {
                     observe_main_window_geometry(window, cx);
                     shell::Shell::new(state, boot, cx)
