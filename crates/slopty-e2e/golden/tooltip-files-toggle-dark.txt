@@ -10,10 +10,9 @@ Group (focused)
 Terminal │ shell │ >
 Button │ Open in…
 Button │ Show inspector
+Button │ Command palette
+Button │ New session
 Button │ Show files panel
 Button │ Show side pane
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward
-Button │ New session
 Tooltip │ Show files panel │ ⌘E

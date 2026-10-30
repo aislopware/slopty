@@ -12,6 +12,5 @@ Button │ New terminal
 Button │ Hide terminal
 Group (focused)
 Terminal │ shell │ ~ %
+Button │ Command palette
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward

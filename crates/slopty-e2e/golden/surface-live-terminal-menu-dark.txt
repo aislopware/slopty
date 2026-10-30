@@ -11,10 +11,9 @@ Button │ Close Terminal 1
 Button │ New terminal
 Button │ Hide terminal
 Group
-Terminal │ shell │ ~ %
+Terminal │ shell │ 304
+Button │ Command palette
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward
 Menu │ Command block (focused)
 MenuItem │ Copy command
 MenuItem │ Copy output

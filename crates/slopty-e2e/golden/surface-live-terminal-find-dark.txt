@@ -11,16 +11,12 @@ Button │ Close Terminal 1
 Button │ New terminal
 Button │ Hide terminal
 Group
-Terminal │ shell │ ~ %
+Terminal │ shell │ 304
 Search │ Find
 SearchInput │ Find │ 29 (focused)
-Button │ Match case
-Button │ Match whole word
-Button │ Use regular expression
-Status │ Matches │ 13 of 13
-Button │ Previous match
-Button │ Next match
+Status │ Matches │ 1/13
+Button │ Next match up
+Button │ Next match down
 Button │ Close find
+Button │ Command palette
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward

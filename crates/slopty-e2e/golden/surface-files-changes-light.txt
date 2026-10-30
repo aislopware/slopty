@@ -23,6 +23,8 @@ Button │ Show these lines
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Show inspector
+Button │ Command palette
+Button │ New session
 Button │ Changes
 Button │ Close Changes
 Button │ New tab
@@ -30,6 +32,3 @@ Button │ Expand side pane
 Button │ Show files panel
 Button │ Hide side pane
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward
-Button │ New session

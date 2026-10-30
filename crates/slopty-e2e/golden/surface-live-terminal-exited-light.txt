@@ -12,7 +12,6 @@ Button │ New terminal
 Button │ Hide terminal
 Group (focused)
 Terminal │ shell
-Status │ [process exited 3]
+Status │ The shell exited, code 3
+Button │ Command palette
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward

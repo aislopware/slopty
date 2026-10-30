@@ -12,7 +12,6 @@ Button │ New terminal
 Button │ Hide terminal
 Group (focused)
 Terminal │ shell │ 261
-Button │ 40 lines below · Back to live
+Button │ 12 new lines
+Button │ Command palette
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward

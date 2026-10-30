@@ -42,6 +42,8 @@ Cell │ 210
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Hide inspector
+Button │ Command palette
+Button │ New session
 Button │ Inspector
 Button │ Close Inspector
 Button │ New tab
@@ -49,6 +51,3 @@ Button │ Expand side pane
 Button │ Show files panel
 Button │ Hide side pane
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward
-Button │ New session

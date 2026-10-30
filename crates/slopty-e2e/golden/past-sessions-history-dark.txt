@@ -13,6 +13,5 @@ Splitter │ Resize sidebar
 Heading │ No session open
 Label
 Button │ New session
+Button │ Command palette
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward

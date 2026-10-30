@@ -9,6 +9,8 @@ Splitter │ Resize sidebar
 Group
 Terminal │ shell │ >
 Button │ Window controls
+Button │ Command palette
+Button │ New session
 Button │ Synthetic editor
 Button │ Close Synthetic editor
 Button │ New tab
@@ -16,6 +18,3 @@ Button │ Restore side pane
 Button │ Show files panel
 Button │ Hide side pane
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward
-Button │ New session

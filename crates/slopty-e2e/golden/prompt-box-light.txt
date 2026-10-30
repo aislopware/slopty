@@ -2,26 +2,25 @@ Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ hold the release
-Status │ Working
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Status │ Working
 Article │ You
 Paragraph │ hold the release
 Button │ Copy message
 Article │ Claude Code
 Status │ Interrupted │ interrupted
-Status │ Conjuring
 Group │ Prompt box
 Paragraph │ Look at [Image #1]
 Button │ Image #1
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Hide inspector
+Button │ Command palette
+Button │ New session
 Button │ Inspector
 Button │ Close Inspector
 Button │ New tab
@@ -29,6 +28,3 @@ Button │ Expand side pane
 Button │ Show files panel
 Button │ Hide side pane
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward
-Button │ New session
