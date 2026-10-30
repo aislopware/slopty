@@ -136,7 +136,10 @@ impl Shell {
             }
         }
         self.panes_mut(cx).focus(front.unwrap_or(Pane::Session));
-        self.pane_keyboard_pending = true;
+        // The boot's landing: where the soft keyboard would rise, it waits for a tap.
+        if super::navigation_focus::keyboard_moves_unasked(cx) {
+            self.pane_keyboard_pending = true;
+        }
         cx.notify();
     }
 

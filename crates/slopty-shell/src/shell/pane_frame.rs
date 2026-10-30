@@ -201,7 +201,9 @@ impl Shell {
     }
 
     /// Close `pane`: a shell's terminal closes with it, a view as [`Self::close_view`] closes
-    /// it; its sibling takes its room and the keyboard. The session's own pane does not close.
+    /// it; its sibling takes its room and the keyboard, but not where that would raise the soft
+    /// keyboard ([`super::navigation_focus::keyboard_moves_unasked`]): there it waits for a tap.
+    /// The session's own pane does not close.
     pub(super) fn close_pane(&mut self, pane: Pane, cx: &mut Context<Self>) -> bool {
         if !self.panes_now(cx).contains(pane) {
             return false;
@@ -212,7 +214,9 @@ impl Shell {
                 if let Some(shell) = self.pane_shells.remove(&n) {
                     shell.update(cx, TerminalPanel::close_shown);
                 }
-                self.pane_keyboard_pending = true;
+                if navigation_focus::keyboard_moves_unasked(cx) {
+                    self.pane_keyboard_pending = true;
+                }
                 cx.notify();
             }
             Pane::View(view) => self.close_view(view, cx),

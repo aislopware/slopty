@@ -14685,3 +14685,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `ProjectAction*` types, and the wire's `GitOp::Scripts` with `GitDone::Scripts` and
   `RunScripts`, whose only asker the actions were. The worker still reads a repository's archive
   script before a worktree goes; `RunScript` stays as what opens an agent's installer.
+- ✅ **On a touch screen the shell never raises the soft keyboard (2026-10-31).** Refines "On a
+  touch screen the keyboard waits for a tap" in "An iPad behaves as an iPad". The panes
+  (2026-10-30) brought paths past that rule: a session switch and a boot's restore handed the
+  keyboard back to the pane that had it, and a pane or a view closed (⌘W on a split, a phone's
+  page or inspector sheet put away) handed it to its sibling. On a phone or an iPad that focused
+  the session's terminal and raised the soft keyboard over a session the person had only opened,
+  or beside a split they had only closed; the iPhone e2e found the keyboard up before its first
+  tap. Ruled: the shell gives a pane the keyboard on its own (a landing, a switch, a boot's
+  restore, a close, a lost focus recovered) only where no soft keyboard rises, off a touch screen
+  or on one with a hardware keyboard attached as the key row hears it, where a focused terminal
+  shows at most the shortcut bar (`navigation_focus::keyboard_moves_unasked`). Otherwise the
+  soft keyboard stays down until the person taps, and the shell's shortcuts still answer
+  through its own focus. An act aimed at typing (⌘D's new shell, a new session's page) still
+  takes the keyboard. With a hardware keyboard an iPad now lands like a Mac, the one change to
+  the earlier rule, whose reason was the soft keyboard. Tests: `slopty-shell`
+  `shell::navigation_focus::tests::a_session_opened_on_a_touch_screen_leaves_the_keyboard_down`,
+  `a_split_closed_on_a_touch_screen_leaves_the_keyboard_down`.

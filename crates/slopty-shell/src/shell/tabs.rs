@@ -57,11 +57,11 @@ impl Shell {
     }
 
     /// Landing on a session (opening it, the boot's landing, back and forward) gives
-    /// its terminal the keyboard, but not on a touch screen, where it would raise the software
-    /// keyboard over the session: there it comes when the person taps it
-    /// ([`super::touch_screen`]).
+    /// its terminal the keyboard, but not where it would raise the software keyboard over the
+    /// session, a touch screen without a hardware keyboard: there it comes when the person taps
+    /// it ([`super::navigation_focus::keyboard_moves_unasked`]).
     pub(super) fn focus_composer_on_landing(&self, cx: &mut Context<Self>) {
-        if !touch_screen() {
+        if navigation_focus::keyboard_moves_unasked(cx) {
             self.focus_composer(cx);
         }
     }

@@ -192,13 +192,14 @@ impl Shell {
     }
 
     /// Take `view` out of the panes of `key`, letting go of what it showed; its sibling takes its
-    /// room and, on screen, the keyboard.
+    /// room and, on screen, the keyboard, but not where that would raise the soft keyboard
+    /// ([`super::navigation_focus::keyboard_moves_unasked`]): there it waits for a tap.
     pub(super) fn drop_view(&mut self, view: RightSurface, key: &str, cx: &mut Context<Self>) {
         if let Some(panes) = self.panes.get_mut(key) {
             panes.close(Pane::View(view));
         }
         self.forget_view(view, key, cx);
-        if key == self.panel_key(cx) {
+        if key == self.panel_key(cx) && navigation_focus::keyboard_moves_unasked(cx) {
             self.pane_keyboard_pending = true;
         }
         cx.notify();

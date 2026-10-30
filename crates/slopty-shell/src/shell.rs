@@ -1631,8 +1631,12 @@ impl Shell {
                 }
             }
             self.fit_exit = None;
-            // Its keyboard goes back to the pane that had it, once that pane draws.
-            self.pane_keyboard_pending = true;
+            // Its keyboard goes back to the pane that had it, once that pane draws; not where it
+            // would raise the soft keyboard over the session the person only opened: there it
+            // comes when they tap (`navigation_focus::keyboard_moves_unasked`).
+            if navigation_focus::keyboard_moves_unasked(cx) {
+                self.pane_keyboard_pending = true;
+            }
             for view in self.panes_now(cx).views() {
                 if let RightSurface::Diff(id) = view
                     && let Some(changes) = self.diffs.get(&id).cloned()

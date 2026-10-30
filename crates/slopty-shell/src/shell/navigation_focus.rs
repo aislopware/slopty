@@ -20,6 +20,15 @@ fn focus_navigation_scope(scope: &FocusHandle, window: &mut Window, cx: &mut App
     });
 }
 
+/// Whether the shell may give a pane the keyboard on its own, as a session landed on or switched
+/// to, the panes a boot restores, a pane or a view closed and a lost focus recovered do: off a
+/// touch screen, and on one only with a hardware keyboard, where a focused terminal raises no
+/// soft keyboard. Without one the soft keyboard stays down and the keyboard waits for a tap
+/// (`docs/decisions/ui.md`, "On a touch screen the shell never raises the soft keyboard").
+pub(super) fn keyboard_moves_unasked(cx: &App) -> bool {
+    !touch_screen() || crate::live::key_row::hardware_keyboard(cx)
+}
+
 /// Cmd/Ctrl+C for a transcript selection once the pane itself holds focus
 /// (clicking the transcript blurs the composer, whose `Copy` handles this
 /// otherwise). Bubble phase: focused inputs, editors and terminals see the
@@ -47,13 +56,20 @@ impl Shell {
 
     /// Where a lost focus comes back to, and where it goes with nothing focused: Settings' own
     /// focus there; on a session's page the pane with the keyboard, its view or its terminal;
-    /// on a touch screen with the session in front, nowhere a software keyboard would rise.
+    /// where the shell may not move the keyboard on its own ([`keyboard_moves_unasked`]),
+    /// nowhere a software keyboard would rise, whichever pane is in front.
     pub(super) fn navigation_focus_fallback(
         &mut self,
         cx: &Context<Self>,
     ) -> (FocusHandle, FocusHandle) {
         if matches!(self.route, Route::Settings(_)) {
             return (self.settings_focus.clone(), self.unfocused.clone());
+        }
+        if !keyboard_moves_unasked(cx) {
+            // On a touch screen the keyboard waits for a tap (`docs/decisions/ui.md`): a focus
+            // lost to a tap elsewhere (a sidebar row's) or to a pane or a view closing goes
+            // where no software keyboard rises.
+            return (self.unfocused.clone(), self.unfocused.clone());
         }
         let shell = match self.panes_now(cx).focused() {
             panes::Pane::View(view) => {
@@ -65,16 +81,8 @@ impl Shell {
             }
             panes::Pane::Session => None,
         };
-        if let Some(shell) = shell {
-            (shell, self.unfocused.clone())
-        } else if touch_screen() {
-            // On a touch screen the keyboard waits for a tap in the terminal
-            // (`docs/decisions/ui.md`): focus recovered after a tap elsewhere, a sidebar row's,
-            // goes where no software keyboard rises.
-            (self.unfocused.clone(), self.unfocused.clone())
-        } else {
-            (self.session_terminal.read(cx).focus_handle(), self.unfocused.clone())
-        }
+        let shell = shell.unwrap_or_else(|| self.session_terminal.read(cx).focus_handle());
+        (shell, self.unfocused.clone())
     }
 }
 
@@ -147,5 +155,93 @@ mod tests {
         cx.update(|window, cx| {
             assert!(host.read(cx).main.is_focused(window));
         });
+    }
+
+    /// Lays the shell out and lets what that set off run, twice: a focus handed on lands once
+    /// the pane it goes to draws.
+    fn settle(cx: &mut gpui::VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        cx.run_until_parked();
+    }
+
+    /// Whether `pane` of `shell`'s view holds the keyboard, which on a device would raise the
+    /// soft keyboard over it.
+    fn holds(shell: &Entity<Shell>, pane: panes::Pane, cx: &mut gpui::VisualTestContext) -> bool {
+        cx.update(|window, cx| shell.read(cx).pane_holds_keyboard(pane, window, cx))
+    }
+
+    /// On a touch screen a session opened leaves the soft keyboard down: neither the landing nor
+    /// the panes it shows as it left them hand its terminal the keyboard, which comes when the
+    /// person taps it (`docs/decisions/ui.md`, "On a touch screen the shell never raises the
+    /// soft keyboard"). With a hardware keyboard, which raises none, its terminal takes it.
+    #[gpui::test]
+    fn a_session_opened_on_a_touch_screen_leaves_the_keyboard_down(cx: &mut TestAppContext) {
+        use super::super::retention_tests::{PHONE, launch};
+        let (shell, cx) = launch(cx, PHONE);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                let terminals = [("a", "t-a"), ("b", "t-b")];
+                state.apply_session_terminals(
+                    terminals.map(|(chat, at)| (chat.to_owned(), at.to_owned())).into(),
+                );
+                cx.notify();
+            });
+            shell.open_chat("a".into(), cx);
+        });
+        settle(cx);
+        assert!(
+            shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.is_some()),
+            "the session is open"
+        );
+        assert!(!holds(&shell, panes::Pane::Session, cx), "the session waits for a tap");
+
+        cx.update(|_, cx| crate::live::key_row::set_hardware_keyboard(true, cx));
+        shell.update(cx, |shell, cx| shell.open_chat("b".into(), cx));
+        settle(cx);
+        assert!(holds(&shell, panes::Pane::Session, cx), "a hardware keyboard's: it lands");
+    }
+
+    /// On an iPad's touch screen a split closed leaves the soft keyboard down: the session's
+    /// terminal beside it is not handed the keyboard the split's shell had. With a hardware
+    /// keyboard, which raises none, it is, as on the Mac.
+    #[gpui::test]
+    fn a_split_closed_on_a_touch_screen_leaves_the_keyboard_down(cx: &mut TestAppContext) {
+        use super::super::panes::{Direction, Pane};
+        use super::super::retention_tests::{Screen, launch};
+        let ipad = Screen { size: (1366.0, 1024.0), scale: 2.0, touch: true, reduced: true };
+        let (shell, cx) = launch(cx, ipad);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_session_terminals([("a".to_owned(), "t-a".to_owned())].into());
+                cx.notify();
+            });
+            shell.open_chat("a".into(), cx);
+        });
+        settle(cx);
+        for hardware in [false, true] {
+            cx.update(|_, cx| crate::live::key_row::set_hardware_keyboard(hardware, cx));
+            cx.update(|_, cx| {
+                shell.update(cx, |shell, cx| shell.split_pane(Some(Direction::Right), cx));
+            });
+            settle(cx);
+            let split = shell.read_with(cx, |shell, cx| shell.panes_now(cx).focused());
+            assert!(matches!(split, Pane::Shell(_)), "an iPad splits: {split:?}");
+            assert!(holds(&shell, split, cx), "the split takes the keyboard");
+            assert!(shell.update(cx, Shell::close_focused_pane), "⌘W closes it");
+            settle(cx);
+            let left = shell.read_with(cx, |shell, cx| shell.panes_now(cx).focused());
+            assert_eq!(left, Pane::Session, "the session alone");
+            assert_eq!(
+                holds(&shell, Pane::Session, cx),
+                hardware,
+                "the session's terminal holds the keyboard only with a hardware keyboard"
+            );
+        }
     }
 }
