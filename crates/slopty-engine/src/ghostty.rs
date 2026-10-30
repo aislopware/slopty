@@ -5748,6 +5748,34 @@ mod checkpoint_tests {
         );
     }
 
+    /// A cursor saved under origin mode where the margins set after it leave it out, and one
+    /// `DECRC` put back there, come back from a checkpoint where they were, and what is written
+    /// at them after lands alike. The formatter wrote both with a `CUP` counted from the
+    /// margins, which never leaves them, so the saved cursor's pending wrap was printed again a
+    /// row down, over a cell of the screen's own (fuzz
+    /// `regressions/terminal/checkpoint-saved-cursor-outside-the-margins`, fixed in
+    /// aislopware/ghostty).
+    #[test]
+    fn a_checkpoint_keeps_a_cursor_saved_outside_the_margins_under_origin_mode() {
+        for input in [
+            // Saved waiting to wrap at the end of the top row, above the margins.
+            &b"\x1b[?6h0123456789abcdef\x1b7\x1b[2;5rME.md"[..],
+            // Put back there by DECRC and moved along the row.
+            b"\x1b[?6h\x1b[1;3H\x1b7\x1b[2;5r\x1b8\x1b[2Cxy",
+        ] {
+            let mut a = engine(16, 6, 100);
+            a.write(input);
+            let mut b = replayed(&mut a);
+            for written in [&b""[..], b"yz\x1b8w"] {
+                a.write(written);
+                b.write(written);
+                assert_eq!(all_text(&b), all_text(&a), "{input:?} then {written:?}");
+                let (fa, fb) = (a.full_frame(0).unwrap(), b.full_frame(0).unwrap());
+                assert_eq!((fb.cursor.row, fb.cursor.col), (fa.cursor.row, fa.cursor.col));
+            }
+        }
+    }
+
     /// What a checkpoint of `a` replays into a fresh engine of its size.
     fn replayed(a: &mut GhosttyEngine) -> GhosttyEngine {
         let mut state = Vec::new();

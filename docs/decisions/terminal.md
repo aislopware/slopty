@@ -3156,6 +3156,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     every frame. This was a live-frame bug, not only a checkpoint one. Deleting or inserting
     lines, and a reverse index at the top, did the same through `Row.reset`, which now keeps
     the flag the fill set (#9).
+  - **A cursor outside the margins under origin mode** (aislopware/ghostty #15, `b4344e7a4`,
+    pinned by libghostty-rs `8b996bdb`; 2026-10-30). Under DECOM a `CUP` counts from the
+    margins and never leaves them, so a cursor saved above, below or beside margins set after
+    it, and one that DECRC put back there, came back inside them, and the saved cursor's
+    pending wrap was printed again a row down over a cell of the screen's own. The saved
+    cursor's save now lifts the margins its position is outside of and sets them again after
+    the DECSC. Only DECRC takes a cursor outside the margins, and from there it moves only as
+    far as they let it, so the formatter puts the cursor back where DECRC puts it and moves it
+    to its place with `CUU`, `CUD`, `CUF` and `CUB`. Tests: the fork's formatter tests,
+    `a_checkpoint_keeps_a_cursor_saved_outside_the_margins_under_origin_mode` in slopty-engine
+    (red on the old pin), and `regressions/terminal/checkpoint-saved-cursor-outside-the-margins`.
   - **Kitty graphics are left open.** The formatter writes no image. Upstream's PR #12182
     (open since April) adds a `kitty_graphics` extra. Taking it means re-sending each image's
     pixels in every checkpoint, so it comes with a decision on checkpoint size and cadence
