@@ -5,7 +5,13 @@
 //! Timed from the event to the first live row: the worker's shell drawn again from a link that
 //! came up after the cut. Without a resume, only the dead link's silence says it is dead: no
 //! pong for 4 s shows it silent and 6 s relinks it (`slopty_net::liveness`);
-//! `docs/MEASUREMENTS.md` has both.
+//! `docs/MEASUREMENTS.md` has both. Each step waits on the event it means and prints how long it
+//! took; none is held to a time, since an app, a worker and a guest on one loaded machine move
+//! every number (`docs/decisions/testing.md`, "A test waits on the event it means"). "At once"
+//! is proved where only its own code runs, in `slopty_app::workers`: a probe waits at most a
+//! second (`a_probe_is_sized_from_the_round_trip`), gives a dead link up at the first look at
+//! its deadline (`a_probe_gives_a_dead_link_up_at_its_deadline`), and a worker whose link is
+//! gone is dialled now (`a_resume_probes_a_live_link_and_dials_a_dead_one`).
 
 use std::time::{Duration, Instant};
 
@@ -59,16 +65,14 @@ fn percentile(sorted: &[Duration], p: usize) -> f64 {
     sorted.get(at).map_or(0.0, |d| d.as_secs_f64() * 1e3)
 }
 
-fn report(what: &str, mut took: Vec<Duration>) -> (f64, f64) {
+fn report(what: &str, mut took: Vec<Duration>) {
     took.sort_unstable();
     let (p50, p95) = (percentile(&took, 50), percentile(&took, 95));
     println!("MEASURE {what}, {} deaths: p50 {p50:.0} ms p95 {p95:.0} ms", took.len());
-    (p50, p95)
 }
 
-/// A live link answers a resume's probe and stays; a dead one is given up and dialled again the
-/// moment the probe goes unanswered, its tiles set back meanwhile, and its shell is live again
-/// in a fraction of the time its silence took to say it was dead.
+/// A live link answers a resume's probe and stays; a dead one is given up and dialled again
+/// once the probe goes unanswered, its tiles set back meanwhile, and its shell is live again.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_resume_brings_a_dead_link_back_at_once() {
@@ -79,12 +83,15 @@ async fn a_resume_brings_a_dead_link_back_at_once() {
     let d =
         drv.wait_for("the dock's shell with a prompt", STEP, |d| live_after(d, 0)).await.unwrap();
 
-    // A live link: probed, it answers, and nothing is dialled again.
-    let seen = links(&d);
+    // A live link: probed (its tiles set back at once after a wake), it answers, and nothing is
+    // dialled again.
+    let (seen, before) = (links(&d), doubts(&d));
     drv.ok(&Command::Resume { what: "woke".into() }).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    let d = drv.dump().await.unwrap();
-    assert_eq!((links(&d), status(&d)), (seen, "connected"), "a live link is kept");
+    let d = drv
+        .wait_for("the probe answered", STEP, |d| doubts(d) > before && status(d) == "connected")
+        .await
+        .unwrap();
+    assert_eq!(links(&d), seen, "a live link is kept");
 
     // The link dies with nothing said: only its silence tells.
     let mut silent = Vec::with_capacity(SILENT);
@@ -108,13 +115,8 @@ async fn a_resume_brings_a_dead_link_back_at_once() {
         resumed.push(took);
     }
 
-    let (silent_p50, _) = report("a dead link found by its silence", silent);
-    let (_, resumed_p95) = report("a dead link found by a resume's probe", resumed);
-    assert!(
-        resumed_p95 * 4.0 < silent_p50,
-        "a resume brings the link back in a fraction of the silence: p95 {resumed_p95:.0} ms \
-         against p50 {silent_p50:.0} ms"
-    );
+    report("a dead link found by its silence", silent);
+    report("a dead link found by a resume's probe", resumed);
     assert!(cut.dropped() > 0, "the cuts dropped what the dead links sent");
     stack.shutdown().await;
 }
