@@ -16,6 +16,7 @@ use slopty_view_rpc::{RpcError, RpcReply};
 
 use super::param;
 use crate::view_model::transcript::{self, VisualRead};
+use crate::view_model::work;
 use crate::workspace::WorkspaceView;
 
 /// How long a whole may take to come from its worker.
@@ -177,8 +178,9 @@ impl WorkspaceView {
         })
     }
 
-    /// `ReadAttachmentChunk` for a picture of a thread ([`transcript::image_path`]): its bytes
-    /// from `offset`, in base64, once its worker sent them.
+    /// `ReadAttachmentChunk` for a picture of a thread ([`transcript::image_path`]): a message's,
+    /// a call's, or one pasted into its prompt box ([`work::DRAFT_ITEM`]); its bytes from
+    /// `offset`, in base64, once its worker sent them.
     pub(super) fn view_image_chunk(
         &self,
         path: &str,
@@ -194,6 +196,9 @@ impl WorkspaceView {
         };
         let image = self.held_hub(key).and_then(|hub| {
             let state = hub.read(cx).threads().mirror(thread)?.state()?;
+            if item == work::DRAFT_ITEM {
+                return Some(state.draft.as_ref()?.images.get(index)?.image.clone());
+            }
             let found = state.items.iter().find(|i| i.id.0 == item)?;
             let images = match &found.body {
                 ItemBody::User(message) => &message.images,

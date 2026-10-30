@@ -10,11 +10,9 @@
 //! - **A mirror per open thread** ([`Mirror`]) applies the worker's frames with the same reducer
 //!   the worker runs ([`slopty_proto::thread::ThreadState::apply`]). It is drawn from the cache in
 //!   the first frame and caught up from its cursor: after a blink, only the actions missed come.
-//! - **The outbox** ([`Outbox`]) holds every intent under the id it was first sent with. It is
-//!   drawn at once (a sent message as a pending bubble, an answer flipping its card), sent again
-//!   under the same id after a reconnect or a relaunch, and the worker acts on an id once. An
-//!   intent stays until the thread's own state shows what it did, so nothing flickers back between
-//!   the worker's answer and the agent's record.
+//! - **The outbox** ([`Outbox`]) holds every intent (a seen mark, a name) under the id it was first
+//!   sent with, sent again under the same id after a reconnect or a relaunch until the worker
+//!   answers, and the worker acts on an id once.
 //! - **Blobs** ([`Blobs`]): the whole of clipped content, by recency under a byte budget.
 
 pub mod blobs;
@@ -34,7 +32,7 @@ use slopty_net::ClientMsg;
 use slopty_proto::thread::wire::{
     Expanded, Intent, IntentDone, Review, ReviewScope, TableFrame, ThreadFrame, ThreadRequest,
 };
-use slopty_proto::thread::{AskId, ContentRef, IntentId, TableState, ThreadId};
+use slopty_proto::thread::{ContentRef, IntentId, TableState, ThreadId};
 
 /// The turns a snapshot carries when a thread is first followed: enough to fill a tall window;
 /// older ones come by page.
@@ -49,7 +47,7 @@ pub const MAX_LATENCY_MS: u32 = 16;
 pub enum Changed {
     /// Nothing anyone draws.
     Nothing,
-    /// The thread's state moved on (and the outbox may have settled).
+    /// The thread's state moved on.
     Thread,
     /// The whole of some clipped content came.
     Expanded(ContentRef),
@@ -121,21 +119,6 @@ impl Threads {
         &self.outbox
     }
 
-    /// The intents for `thread` its state does not show yet: what to draw over it. A sent
-    /// message is a pending bubble, an answer flips its card, an interrupt reads "Stopping".
-    pub fn unshown(&self, thread: ThreadId) -> impl Iterator<Item = &Sent> {
-        let state = self.mirrors.get(&thread).and_then(Mirror::state);
-        self.outbox.of(thread).filter(move |s| state.is_none_or(|state| !s.shown_in(state)))
-    }
-
-    /// The answer this client gave `ask` that the thread does not show yet: its card is drawn
-    /// as answered.
-    #[must_use]
-    pub fn answering(&self, thread: ThreadId, ask: &AskId) -> Option<&Sent> {
-        self.unshown(thread)
-            .find(|s| !s.failed() && matches!(&s.intent, Intent::Answer { ask: a, .. } if a == ask))
-    }
-
     /// Whether the link is up.
     #[must_use]
     pub const fn linked(&self) -> bool {
@@ -150,7 +133,7 @@ impl Threads {
         let have = self.heard_table.then_some(self.table.cursor);
         let mut out = vec![ClientMsg::Thread(ThreadRequest::Table { have })];
         out.extend(self.mirrors.iter().map(|(thread, mirror)| follow(*thread, mirror)));
-        out.extend(self.outbox.unanswered().map(intent_msg));
+        out.extend(self.outbox.all().iter().map(intent_msg));
         out.extend(self.reviews_asked.iter().map(|(thread, scope)| review_msg(*thread, scope)));
         out
     }
@@ -198,25 +181,6 @@ impl Threads {
     pub fn table(&mut self, frame: &TableFrame) {
         self.table.apply(frame);
         self.heard_table = true;
-        let unopened: Vec<ThreadId> = self
-            .outbox
-            .all()
-            .iter()
-            .map(|s| s.thread)
-            .filter(|t| !self.mirrors.contains_key(t))
-            .collect();
-        for thread in unopened {
-            self.settle(thread);
-        }
-    }
-
-    /// Drop the answered intents for `thread` that what is known of it shows.
-    fn settle(&mut self, thread: ThreadId) {
-        let settled = match self.mirrors.get(&thread).and_then(Mirror::state) {
-            Some(state) => self.outbox.settle(thread, state),
-            None => self.outbox.settle_by_row(thread, self.table.rows.get(&thread)),
-        };
-        self.outbox_changed |= settled;
     }
 
     /// Whether the outbox changed since this was last asked: then the cache keeps it again.
@@ -249,10 +213,7 @@ impl Threads {
             return (Changed::Nothing, Vec::new());
         };
         match mirror.take(frame) {
-            Took::Moved => {
-                self.settle(thread);
-                (Changed::Thread, Vec::new())
-            }
+            Took::Moved => (Changed::Thread, Vec::new()),
             Took::Gap => {
                 // The worker ignores a follow of a thread it streams, so the stream ends first.
                 let restart = vec![
@@ -265,16 +226,12 @@ impl Threads {
         }
     }
 
-    /// The worker's answer to an intent. Returns whether it was one of this client's.
-    pub fn done(&mut self, done: &IntentDone) -> bool {
-        let Some(thread) = self.outbox.all().iter().find(|s| s.id == done.id).map(|s| s.thread)
-        else {
-            return false;
-        };
-        self.outbox.answered(done);
+    /// The worker's answer to an intent: the intent, when it was one of this client's, which is
+    /// on its way no longer.
+    pub fn done(&mut self, done: &IntentDone) -> Option<Sent> {
+        let sent = self.outbox.answered(done.id)?;
         self.outbox_changed = true;
-        self.settle(thread);
-        true
+        Some(sent)
     }
 
     /// Ask `thread` to do `intent`: its id, and what to send now (nothing while the link is
@@ -292,7 +249,7 @@ impl Threads {
         thread: ThreadId,
         intent: Intent,
     ) -> Option<ClientMsg> {
-        let sent = Sent { id, thread, intent, outcome: None };
+        let sent = Sent { id, thread, intent };
         let msg = self.linked.then(|| intent_msg(&sent));
         self.outbox.push(sent);
         self.outbox_changed = true;
@@ -303,13 +260,6 @@ impl Threads {
     #[must_use]
     pub fn asked(&self, id: IntentId) -> bool {
         self.outbox.all().iter().any(|sent| sent.id == id)
-    }
-
-    /// Let a failed intent go once the person has read why.
-    pub fn dismiss(&mut self, id: IntentId) -> Option<Sent> {
-        let gone = self.outbox.dismiss(id);
-        self.outbox_changed |= gone.is_some();
-        gone
     }
 
     /// What to send to see what `thread` changed over `scope`; the answer comes as

@@ -24,6 +24,11 @@
 //!   transcript says once the record no longer waits. Hooks are exact, so a session that has them
 //!   keeps them over its record, and its record over its transcript. An Esc fires no hook, so the
 //!   transcript's interrupt says it for both.
+//! - **Its prompt box** comes from Slopty's mod in a Claude Code Slopty started
+//!   (`slopty_agent::claude::draft`): each draft it relays, with the pictures pasted into it read
+//!   from Claude Code's own store, is the thread's [`slopty_proto::thread::Draft`], apart from the
+//!   hooks and their order. The prompts queued behind a turn come from the transcript, for any
+//!   session; one queued before its Claude Code began was another run's.
 //! - **Ended** when its Claude Code ends (its process gone, its terminal closed or exited) or its
 //!   `SessionEnd` hook says so: exited and resumable, the terminal no longer named.
 //! - **A worker that starts again** finds the sessions again at its first ticks and reads their
@@ -36,6 +41,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::Mutex;
+use slopty_agent::claude::draft::{self, Pictures};
 use slopty_agent::claude::history::{End, History, Out, asks_for};
 use slopty_agent::claude::sessions::{self, Live};
 use slopty_agent::conversation::{Body, Change, Transcripts};
@@ -87,7 +94,12 @@ pub struct Claude {
     asks: mpsc::UnboundedSender<Ask>,
     host: Host,
     place: Arc<Place>,
+    stores: Stores,
 }
+
+/// Where each thread's prompt box keeps its pasted pictures, while it shows one: the store a
+/// draft picture's bytes are read from ([`Claude::expand`]).
+type Stores = Arc<Mutex<HashMap<ThreadId, PathBuf>>>;
 
 #[derive(Debug)]
 enum Ask {
@@ -103,14 +115,16 @@ impl Claude {
     pub fn spawn(host: Host, place: Place) -> (Self, JoinHandle<()>) {
         let (asks, taken) = mpsc::unbounded_channel();
         let place = Arc::new(place);
+        let stores = Stores::default();
         let watch = Watch {
             host: host.clone(),
             place: Arc::clone(&place),
+            stores: Arc::clone(&stores),
             terms: HashMap::new(),
             ticks: 0,
         };
         let task = tokio::spawn(watch.run(taken));
-        (Self { asks, host, place }, task)
+        (Self { asks, host, place, stores }, task)
     }
 
     /// What every terminal running a program shows in its foreground now; a terminal not named
@@ -137,8 +151,17 @@ impl Claude {
         let _gone = self.asks.send(Ask::Row { terminal, thread });
     }
 
-    /// The whole of `content`, clipped in `thread`, read from its session's records.
+    /// The whole of `content`, clipped in `thread`, read from its session's records; a picture
+    /// pasted into its prompt box, from Claude Code's store of them.
     pub async fn expand(&self, thread: ThreadId, content: ContentRef) -> Expanded {
+        if let Some(name) = draft::image_name(&content).map(str::to_owned) {
+            let Some(store) = self.stores.lock().get(&thread).cloned() else {
+                return Expanded::Gone;
+            };
+            let read =
+                move || draft::read_picture(&store, &name).map_or(Expanded::Gone, Expanded::Bytes);
+            return tokio::task::spawn_blocking(read).await.unwrap_or(Expanded::Gone);
+        }
         let Some(root) = root_of(&self.host, thread) else { return Expanded::Gone };
         let home = self.place.home.clone();
         tokio::task::spawn_blocking(move || {
@@ -167,6 +190,7 @@ const START_TICKS: u32 = 8;
 struct Watch {
     host: Host,
     place: Arc<Place>,
+    stores: Stores,
     terms: HashMap<SessionId, Term>,
     ticks: u32,
 }
@@ -183,6 +207,11 @@ struct Term {
     ended: HashSet<String>,
     /// When the last hook taken started, in microseconds since the epoch.
     hooked_us: u64,
+    /// When the last draft of its prompt box taken started: drafts keep their own order, apart
+    /// from the hooks'.
+    drafted_us: u64,
+    /// When its Claude Code began, once known: a prompt queued before was another run's.
+    since: Option<WallMs>,
     /// Ticks since the session began with no Claude Code seen in the foreground.
     unseen: u32,
     /// Another agent's thread that is a row only, ended with the terminal's program.
@@ -212,6 +241,9 @@ enum Say {
     Named(String),
     /// Its record says it waits on the person for this (`None`: no longer), since this time.
     Waits(Option<Wait>, WallMs),
+    /// Slopty's mod says its prompt box holds `text`, its pasted pictures under the temporary
+    /// root `tmpdir`, at this time.
+    Draft { text: String, tmpdir: Option<String>, at: WallMs },
     /// The session ended here.
     End(WallMs),
 }
@@ -223,6 +255,8 @@ struct Begin {
     cwd: String,
     version: String,
     transcript: PathBuf,
+    /// When the Claude Code that runs it began, when known.
+    since: Option<WallMs>,
 }
 
 impl Watch {
@@ -233,6 +267,8 @@ impl Watch {
                 Ask::Hook { terminal, at_us, payload } => self.hooked(terminal, at_us, &payload),
                 Ask::Begun { terminal, native, cwd, version } => {
                     let term = self.terms.entry(terminal).or_default();
+                    let since = Some(WallMs::now());
+                    term.since = since;
                     // Its first hook can come before word of the start: the session is
                     // followed already, by the path the hook named.
                     if term.session.as_ref().is_some_and(|f| f.native == native) {
@@ -243,7 +279,7 @@ impl Watch {
                     }
                     let transcript =
                         sessions::transcript(&self.place.home, Path::new(&cwd), &native);
-                    self.follow(Begin { terminal, native, cwd, version, transcript });
+                    self.follow(Begin { terminal, native, cwd, version, transcript, since });
                 }
                 Ask::Row { terminal, thread } => {
                     self.terms.entry(terminal).or_default().row = Some(thread);
@@ -292,6 +328,9 @@ impl Watch {
         term.seen = true;
         term.unseen = 0;
         let Some(live) = record_of(&self.place.home, pid) else { return };
+        if live.started_at.is_some() {
+            term.since = live.started_at;
+        }
         if let (Some(name), Some(followed)) = (&live.name, &term.session)
             && followed.native == live.session
         {
@@ -310,8 +349,8 @@ impl Watch {
         let transcript = sessions::transcript(&self.place.home, Path::new(&cwd), &live.session);
         let version = live.version.clone().unwrap_or_default();
         tracing::info!(%terminal, session = live.session, "a Claude Code's session, by its record");
-        let native = live.session.clone();
-        self.follow(Begin { terminal, native, cwd, version, transcript });
+        let (native, since) = (live.session.clone(), live.started_at);
+        self.follow(Begin { terminal, native, cwd, version, transcript, since });
         self.waits(terminal, &live);
     }
 
@@ -375,6 +414,11 @@ impl Watch {
             tracing::debug!(%terminal, "a hook that is no hook's JSON");
             return;
         };
+        let signal = hook.signal();
+        if let Signal::Draft { text, tmpdir } = signal {
+            self.drafted(terminal, at_us, hook.session_id.as_deref(), text, tmpdir);
+            return;
+        }
         let term = self.terms.entry(terminal).or_default();
         if at_us < term.hooked_us {
             tracing::debug!(%terminal, event = hook.event, "a hook older than the last, passed over");
@@ -382,7 +426,6 @@ impl Watch {
         }
         term.hooked_us = at_us;
         let at = wall_of(at_us);
-        let signal = hook.signal();
         let native = hook.session_id.clone().filter(|s| slopty_agent::claude::is_session_id(s));
         let current = term.session.as_ref().map(|f| f.native.clone());
         match (&signal, native) {
@@ -395,8 +438,8 @@ impl Watch {
                     PathBuf::from,
                 );
                 tracing::info!(%terminal, session = native, source = ?hook.source, "a Claude Code's session, by its hook");
-                let version = term.version.clone();
-                self.follow(Begin { terminal, native, cwd, version, transcript });
+                let (version, since) = (term.version.clone(), term.since);
+                self.follow(Begin { terminal, native, cwd, version, transcript, since });
                 self.say(terminal, Say::Signal(Signal::Began, at));
             }
             (Signal::Ended, Some(native)) if current.as_deref() == Some(native.as_str()) => {
@@ -410,8 +453,8 @@ impl Watch {
             (_, Some(native)) if current.is_none() && hook.transcript_path.is_some() => {
                 let cwd = hook.cwd.clone().unwrap_or_default();
                 let transcript = hook.transcript_path.map(PathBuf::from).unwrap_or_default();
-                let version = term.version.clone();
-                self.follow(Begin { terminal, native, cwd, version, transcript });
+                let (version, since) = (term.version.clone(), term.since);
+                self.follow(Begin { terminal, native, cwd, version, transcript, since });
                 self.say(terminal, Say::Signal(signal, at));
             }
             (_, Some(native)) if current.as_deref() != Some(native.as_str()) => {
@@ -421,6 +464,28 @@ impl Watch {
         }
     }
 
+    /// What Slopty's mod relayed from `terminal` of session `session`'s prompt box, as the relay
+    /// started at `at_us`: told the session followed there when it is that one, unless a later
+    /// draft was told already.
+    fn drafted(
+        &mut self,
+        terminal: SessionId,
+        at_us: u64,
+        session: Option<&str>,
+        text: String,
+        tmpdir: Option<String>,
+    ) {
+        let Some(term) = self.terms.get_mut(&terminal) else { return };
+        let ours = term.session.as_ref().is_some_and(|f| Some(f.native.as_str()) == session);
+        if !ours || at_us < term.drafted_us {
+            tracing::debug!(%terminal, ?session, "a draft of a session not followed here, or late");
+            return;
+        }
+        term.drafted_us = at_us;
+        let at = wall_of(at_us);
+        self.say(terminal, Say::Draft { text, tmpdir, at });
+    }
+
     /// Follow `at`'s session in its terminal, in place of the one there before.
     fn follow(&mut self, at: Begin) {
         let terminal = at.terminal;
@@ -428,7 +493,9 @@ impl Watch {
         let (native, version) = (at.native.clone(), at.version.clone());
         let thread = slopty_agent::claude::thread_of(&native);
         let (says, told) = mpsc::unbounded_channel();
-        drop(tokio::spawn(read(self.host.clone(), self.place.home.clone(), at, told)));
+        let reading =
+            read(self.host.clone(), self.place.home.clone(), Arc::clone(&self.stores), at, told);
+        drop(tokio::spawn(reading));
         let followed = Followed { native, thread, says, waits: None };
         let term = self.terms.entry(terminal).or_default();
         if !version.is_empty() {
@@ -481,9 +548,15 @@ const LOOK: Duration = Duration::from_secs(1);
 
 /// Follow one session: its thread begun (again), its files read as they grow, what its hooks
 /// say applied, until it ends.
-async fn read(host: Host, home: PathBuf, at: Begin, mut heard: mpsc::UnboundedReceiver<Say>) {
+async fn read(
+    host: Host,
+    home: PathBuf,
+    stores: Stores,
+    at: Begin,
+    mut heard: mpsc::UnboundedReceiver<Say>,
+) {
     let terminal = at.terminal;
-    let mut reader = Reader::begin(&host, &home, at);
+    let mut reader = Reader::begin(&host, &home, stores, at);
     // The follower takes each list sent after it starts, the first one too.
     let (paths, lists) = watch::channel(Vec::new());
     let mut files = crate::fswatch::follow(lists, crate::fswatch::Limits::default());
@@ -501,6 +574,11 @@ async fn read(host: Host, home: PathBuf, at: Begin, mut heard: mpsc::UnboundedRe
                     reader = back;
                     reader.end(&host, at);
                     return;
+                }
+                Some(Say::Draft { text, tmpdir, at }) => {
+                    let Some(back) = reader.draft_off(&host, text, tmpdir, at).await else { return };
+                    reader = back;
+                    continue;
                 }
                 Some(say) => {
                     // A hook comes once Claude Code wrote what it says of: the transcript is
@@ -543,7 +621,28 @@ struct Reader {
     /// The calls the transcript has written with no result yet, the latest last, while no hook
     /// is heard: what a dialog the record says is open is about.
     open: Vec<Open>,
+    /// Its prompt box's pictures, as Claude Code stores them.
+    pictures: Pictures,
+    /// Where each thread's box keeps its pictures, which this one's tells.
+    stores: Stores,
+    /// A draft one of whose pictures was not there yet, looked for again.
+    relook: Option<Relook>,
 }
+
+/// A draft looked for again, its picture not yet stored when it came.
+struct Relook {
+    text: String,
+    tmpdir: Option<String>,
+    at: WallMs,
+    /// When it is looked for next.
+    next: std::time::Instant,
+    /// How many more looks it gets.
+    left: u8,
+}
+
+/// How many times a draft whose picture is not there is looked for again, a [`LOOK`] apart: a
+/// placeholder recalled from another session names a picture this one never stored.
+const RELOOKS: u8 = 3;
 
 /// A call written with no result yet.
 struct Open {
@@ -569,20 +668,17 @@ const PLAN: &str = "plan";
 impl Reader {
     /// Begin `at`'s thread: the one held of its session taken up again from nothing, else a new
     /// one, naming its terminal.
-    fn begin(host: &Host, home: &Path, at: Begin) -> Self {
-        let Begin { terminal, native, cwd, version, transcript } = at;
+    fn begin(host: &Host, home: &Path, stores: Stores, at: Begin) -> Self {
+        let Begin { terminal, native, cwd, version, transcript, since } = at;
         let thread = slopty_agent::claude::thread_of(&native);
         let now = WallMs::now();
         let mut history = match host.meta(thread) {
             Some((mut meta, _status)) => {
                 // Read, not driven: nothing to switch to from here.
                 meta.drive = Drive::named(Drive::OBSERVED);
-                meta.models.clear();
-                meta.modes.clear();
-                meta.efforts.clear();
-                History::of(meta, &[])
+                History::of(meta)
             }
-            None => History::new(&native, &version, &cwd, &[], now),
+            None => History::new(&native, &version, &cwd, now),
         };
         take(host, history.drain());
         if !version.is_empty() {
@@ -590,6 +686,11 @@ impl Reader {
         }
         take(host, history.fact(ThreadMeta::TERMINAL_FACT, Some(&terminal.to_string())));
         take(host, history.status(Phase::Idle, None, Liveness::Live, now));
+        if let Some(since) = since {
+            take(host, history.run_began(since));
+        }
+        let uid = rustix::process::getuid().as_raw();
+        let pictures = Pictures::new(uid, Path::new(&cwd), &native);
         Self {
             history,
             transcripts: Transcripts::default(),
@@ -599,7 +700,52 @@ impl Reader {
             hooked: false,
             asked: false,
             open: Vec::new(),
+            pictures,
+            stores,
+            relook: None,
         }
+    }
+
+    /// Take what the prompt box holds now ([`Self::draft`]), off the runtime's threads: its
+    /// pictures are files. `None` when that panicked.
+    async fn draft_off(
+        mut self,
+        host: &Host,
+        text: String,
+        tmpdir: Option<String>,
+        at: WallMs,
+    ) -> Option<Self> {
+        let host = host.clone();
+        tokio::task::spawn_blocking(move || {
+            self.relook = None;
+            self.draft(&host, text, tmpdir, at, RELOOKS);
+            self
+        })
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, "a prompt box's draft was not read"))
+        .ok()
+    }
+
+    /// The prompt box holds `text` since `at`, its pictures under the temporary root `tmpdir`:
+    /// the thread's draft, with each picture stored by now, and the draft looked for again
+    /// (`looks` more times) while one is not.
+    fn draft(&mut self, host: &Host, text: String, tmpdir: Option<String>, at: WallMs, looks: u8) {
+        let (draft, missing) = self.pictures.draft(&text, tmpdir.as_deref(), at);
+        let thread = self.history.main();
+        match (draft.as_ref().is_some_and(|d| !d.images.is_empty()), self.pictures.dir()) {
+            (true, Some(store)) => drop(self.stores.lock().insert(thread, store.to_path_buf())),
+            _ => drop(self.stores.lock().remove(&thread)),
+        }
+        take(host, self.history.draft(draft));
+        self.relook = (missing && looks > 0).then(|| Relook {
+            text,
+            tmpdir,
+            at,
+            next: std::time::Instant::now()
+                .checked_add(LOOK)
+                .unwrap_or_else(std::time::Instant::now),
+            left: looks.saturating_sub(1),
+        });
     }
 
     /// The files to follow: the main transcript, and every subagent file found so far.
@@ -632,6 +778,9 @@ impl Reader {
     }
 
     fn read(&mut self, host: &Host) {
+        if let Some(relook) = self.relook.take_if(|r| r.next <= std::time::Instant::now()) {
+            self.draft(host, relook.text, relook.tmpdir, relook.at, relook.left);
+        }
         let changes = self.transcripts.read(&self.main, &[]);
         let outputs = self.transcripts.outputs();
         if changes.is_empty() && outputs.is_empty() {
@@ -661,7 +810,7 @@ impl Reader {
                 Change::Remove { id, .. } => self.open.retain(|o| o.id != *id),
                 Change::Reset { thread: Some(thread) } => self.open.retain(|o| o.thread != *thread),
                 Change::Reset { thread: None } => self.open.clear(),
-                Change::Tasks { .. } | Change::Turn { .. } => {}
+                Change::Tasks { .. } | Change::Turn { .. } | Change::Queued(_) => {}
             }
         }
         let over = self.open.len().saturating_sub(OPEN_CALLS);
@@ -701,6 +850,10 @@ impl Reader {
             }
             Say::Waits(wait, at) => self.waits(wait, at),
             Say::Named(name) => self.history.named(&name),
+            Say::Draft { text, tmpdir, at } => {
+                self.draft(host, text, tmpdir, at, RELOOKS);
+                Vec::new()
+            }
             Say::End(at) => {
                 self.end(host, at);
                 Vec::new()
@@ -767,12 +920,15 @@ impl Reader {
                 outs
             }
             Signal::Compacting(on) => self.history.compacting(on),
-            Signal::Ended | Signal::Nothing => Vec::new(),
+            // A draft goes its own way ([`Say::Draft`]).
+            Signal::Ended | Signal::Nothing | Signal::Draft { .. } => Vec::new(),
         }
     }
 
     /// The session ended here at `at`: exited and resumable, its terminal no longer named.
     fn end(&mut self, host: &Host, at: WallMs) {
+        self.relook = None;
+        drop(self.stores.lock().remove(&self.history.main()));
         let mut outs = self.history.gone(at);
         outs.extend(self.history.fact(ThreadMeta::TERMINAL_FACT, None));
         take(host, outs);
@@ -797,6 +953,13 @@ fn ended(host: &Host, thread: ThreadId, at: WallMs) {
         let mut actions = Vec::new();
         if meta.facts.remove(ThreadMeta::TERMINAL_FACT).is_some() {
             actions.push(Action::Meta(Box::new(meta)));
+        }
+        // The prompt box and the queue were its TUI's, gone with it.
+        if state.draft.is_some() {
+            actions.push(Action::DraftSet(None));
+        }
+        if !state.queued.is_empty() {
+            actions.push(Action::QueuedSet(Vec::new()));
         }
         if state.status.liveness == Liveness::Live {
             let phase = match state.status.phase {

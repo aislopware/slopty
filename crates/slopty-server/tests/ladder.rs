@@ -18,9 +18,9 @@ mod tests {
     use slopty_proto::thread::attention::{
         Ladder, Notice, NoticeKind, Presence, Present, Rung, Seat, Subject, ThreadAt,
     };
-    use slopty_proto::thread::wire::{RequestCard, TableFrame, ThreadRow};
+    use slopty_proto::thread::wire::{TableFrame, ThreadRow};
     use slopty_proto::thread::{
-        AgentId, AskId, Changed, Cursor, Drive, Liveness, Meters, Phase, Status, ThreadId,
+        AgentId, Changed, Cursor, Drive, Liveness, Phase, Status, ThreadId, Wait,
     };
     use slopty_server::{Config, Server};
 
@@ -76,21 +76,15 @@ mod tests {
                 liveness: Liveness::Live,
                 since_ms: WallMs::from_millis(since),
             },
-            requests: Vec::new(),
             last_line: None,
             doing: None,
             changed: Changed::default(),
             parent: None,
             drive: Drive::named(Drive::DRIVEN),
-            caps: Vec::new(),
             facts: BTreeMap::from([(slopty_proto::agent::SEAT_FACT.to_owned(), seat.to_string())]),
-            to_review: false,
-            pull: None,
-            meters: Meters::default(),
             ended: None,
             began_ms: None,
             seen: slopty_proto::thread::TurnId::BEFORE,
-            draft: None,
             lease_ms: None,
             created_ms: WallMs::from_millis(since),
             updated_ms: WallMs::from_millis(since),
@@ -206,16 +200,8 @@ mod tests {
         assert_eq!(working.fleet.counts.working, 1);
 
         let mut asking = row(thread, Phase::NeedsYou, 2_000, shell);
-        asking.requests.push(RequestCard {
-            id: AskId("1".to_owned()),
-            item: None,
-            kind: "permission".to_owned(),
-            title: "Run cargo test?".to_owned(),
-            options: Vec::new(),
-            buttons: Vec::new(),
-            opened_ms: WallMs::from_millis(2_000),
-            needs_presence: false,
-        });
+        asking.status.wait =
+            Some(Wait { kind: "permission".to_owned(), text: "Run cargo test?".to_owned() });
         let delta = |rows| TableFrame::Delta { cursor: Cursor::default(), rows, removed: vec![] };
         link.tx.send(&ToServer::Threads(delta(vec![asking.clone()]))).await.unwrap();
         desk.ladder(|l| l.rung(at) == Some(Rung::NeedsYou)).await;

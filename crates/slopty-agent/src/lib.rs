@@ -27,7 +27,6 @@ pub mod history;
 pub mod hooks;
 pub mod managed;
 pub mod mcp;
-pub mod media;
 pub mod pi;
 pub mod shown;
 pub mod status;

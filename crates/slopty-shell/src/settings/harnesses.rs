@@ -763,20 +763,6 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
-                // slopty: the plan windows its agent last published, zeron's meters.
-                if let Some(usage) = descriptor.usage.as_ref().filter(|u| installed && !u.windows.is_empty()) {
-                    let now = crate::clock::utc(cx);
-                    meta.push(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .ml(px(-8.0))
-                            .children(usage.windows.iter().map(|window| {
-                                crate::account_usage::render_usage_meter(window, now, &theme)
-                            }))
-                            .into_any_element(),
-                    );
-                }
                 // slopty: an installed agent says so, where nothing else speaks for it.
                 if meta.is_empty() && installed {
                     meta.push(
@@ -1058,7 +1044,6 @@ mod row_tests {
             reasoning_levels: Vec::new(),
             installed,
             can_install: true,
-            usage: None,
             enabled: Some(installed),
         };
         page.update(cx, |page, _| {
@@ -1316,30 +1301,3 @@ fn install_phase_copy_and_cancel_target_match_install() {
     );
 }
 
-// slopty: an agent's plan windows reach its row as the view model lists them.
-#[cfg(test)]
-#[test]
-fn an_agents_listing_carries_its_plan_windows() {
-    let listed: Vec<crate::catalog::registry::HarnessDescriptor> =
-        serde_json::from_value(serde_json::json!([
-            {
-                "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
-                "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true,
-                "usage": {
-                    "windows": [{ "label": "5h", "usedFraction": 0.4, "resetsAt": null }],
-                    "fetchedAt": "2026-10-16T09:00:00Z"
-                }
-            },
-            {
-                "id": "codex", "name": "Codex", "supportsSteering": true,
-                "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true,
-                "usage": null
-            }
-        ]))
-        .unwrap();
-    let usage = listed[0].usage.as_ref().expect("its windows");
-    assert_eq!(usage.windows[0].label, "5h");
-    assert!((usage.windows[0].used_fraction - 0.4).abs() < 1e-6);
-    assert!(usage.fetched_at.is_some());
-    assert!(listed[1].usage.is_none(), "an agent that said nothing has no meters");
-}

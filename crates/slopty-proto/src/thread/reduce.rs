@@ -6,17 +6,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use slopty_core::WallMs;
 
-use super::wire::{Draft, Page, PullSeen, RequestCard, TableFrame, ThreadRow, TurnEnded};
+use super::wire::{Page, TableFrame, ThreadRow, TurnEnded};
 use super::{
-    Action, Activity, AgentNote, AgentScreen, BackgroundTask, CallNote, Changed, Clipped, Command,
-    ContextUsage, Cursor, Edge, Goal, IntentId, Item, ItemBody, ItemId, McpServer, Meters, PartKey,
-    Pending, Plan, Request, Rules, Status, SubagentKind, Surface, ThreadId, ThreadMeta, ToolState,
-    Turn, TurnId, TurnState,
+    Action, AgentScreen, BackgroundTask, CallNote, Changed, Clipped, Cursor, Draft, Item, ItemBody,
+    ItemId, PartKey, Plan, Status, ThreadId, ThreadMeta, ToolState, Turn, TurnId, TurnState,
 };
-
-/// Settled requests a thread keeps, newest last, so a client that comes back still sees who
-/// answered what.
-pub const RESOLVED_KEPT: usize = 32;
 
 /// The longest last line a [`ThreadRow`] carries, in characters.
 const LAST_LINE_CHARS: usize = 160;
@@ -34,64 +28,26 @@ pub struct ThreadState {
     pub items: Vec<Item>,
     /// There are turns before the first one here ([`super::wire::ThreadRequest::Page`]).
     pub older: bool,
-    /// Its open requests, then up to [`RESOLVED_KEPT`] settled ones, in the order they opened.
-    pub requests: Vec<Request>,
-    /// The messages waiting to go.
-    pub pending: Vec<Pending>,
     /// The plan.
     pub plan: Option<Plan>,
     /// The background work.
     pub tasks: Vec<BackgroundTask>,
-    /// The meters.
-    pub meters: Meters,
-    /// The commands the composer offers.
-    pub commands: Vec<Command>,
-    /// Whether its tree holds changes the person has not kept ([`Action::ToReview`]).
-    pub to_review: bool,
     /// The windows and displays its agent drives ([`Action::ScreensSet`]).
     pub screens: Vec<AgentScreen>,
-    /// Its branch's pull request ([`Action::PullSeen`]).
-    pub pull: Option<PullSeen>,
     /// The last turn the person has seen, on any device ([`Action::Seen`]).
     pub seen: TurnId,
-    /// What the person was writing to it and has not sent ([`Action::DraftSet`]).
+    /// What its agent's own prompt box holds as the person types ([`Action::DraftSet`]).
     pub draft: Option<Draft>,
+    /// The prompts queued in its agent's own TUI behind the turn, in the order they go
+    /// ([`Action::QueuedSet`]).
+    pub queued: Vec<String>,
     /// The person's own name for it, over the agent's ([`Action::NameSet`]); empty for none.
     pub named: String,
-    /// The person's own words for the messages given the agent in its words, by the intent
-    /// that sent each ([`Action::Said`]): shown in their place.
-    pub said: BTreeMap<IntentId, String>,
     /// When the worker last heard its agent alive during a turn ([`Action::Lease`]).
     pub lease_ms: Option<WallMs>,
     /// What the agent says of its calls beside them, by call ([`Action::CallNoted`]): only for
     /// calls this state holds.
     pub calls: BTreeMap<ItemId, CallNote>,
-    /// The turn under way, as the spinner line shows it ([`Action::ActivitySet`]).
-    pub activity: Option<Activity>,
-    /// The goal it works towards ([`Action::GoalSet`]).
-    pub goal: Option<Goal>,
-    /// Its passing notifications, one per key, newest last, at most [`AgentNote::KEPT`]
-    /// ([`Action::Notified`]); a client hides one past its `until_ms`.
-    pub notes: Vec<AgentNote>,
-    /// The prompt the agent guesses the person sends next ([`Action::Suggested`]).
-    pub suggestion: Option<String>,
-    /// The side questions asked and their answers, newest last, at most
-    /// [`SideExchange::KEPT`](super::SideExchange::KEPT) ([`Action::Side`]).
-    pub side: Vec<super::SideExchange>,
-    /// Its agent's permission rules, once read ([`Action::RulesSet`]).
-    pub rules: Option<Rules>,
-    /// The person's own status line, as run for it ([`Action::StatusLine`]).
-    pub status_line: Option<String>,
-    /// The folder before its last rewind, while it can be put back ([`Action::Rewound`]).
-    pub rewound: Option<super::Rewound>,
-    /// The kinds of subagent its agent offers ([`Action::AgentsSet`]).
-    pub agents: Vec<SubagentKind>,
-    /// Its context by category, once read ([`Action::ContextSet`]).
-    pub context: Option<ContextUsage>,
-    /// Its agent's MCP servers, as it last said them ([`Action::McpServersSet`]).
-    pub servers: Vec<McpServer>,
-    /// What its agent's mods draw, in the order they came ([`Action::SurfaceSet`]).
-    pub surfaces: Vec<Surface>,
 }
 
 impl ThreadState {
@@ -104,33 +60,15 @@ impl ThreadState {
             turns: Vec::new(),
             items: Vec::new(),
             older: false,
-            requests: Vec::new(),
-            pending: Vec::new(),
             plan: None,
             tasks: Vec::new(),
-            meters: Meters::default(),
-            commands: Vec::new(),
-            to_review: false,
             screens: Vec::new(),
-            pull: None,
             seen: TurnId::BEFORE,
             draft: None,
+            queued: Vec::new(),
             named: String::new(),
-            said: BTreeMap::new(),
             lease_ms: None,
             calls: BTreeMap::new(),
-            activity: None,
-            goal: None,
-            notes: Vec::new(),
-            suggestion: None,
-            side: Vec::new(),
-            rules: None,
-            status_line: None,
-            rewound: None,
-            agents: Vec::new(),
-            context: None,
-            servers: Vec::new(),
-            surfaces: Vec::new(),
         }
     }
 
@@ -170,50 +108,19 @@ impl ThreadState {
                 }
                 self.calls.remove(item);
             }
-            Action::RequestOpened(request) => {
-                match self.requests.iter_mut().find(|r| r.id == request.id) {
-                    Some(have) => *have = (**request).clone(),
-                    None => self.requests.push((**request).clone()),
-                }
-                self.trim_requests();
-            }
-            Action::RequestResolved { id, state } => {
-                if let Some(have) = self.requests.iter_mut().find(|r| r.id == *id) {
-                    have.state = state.clone();
-                }
-                self.trim_requests();
-            }
-            Action::PendingSet(pending) => self.pending.clone_from(pending),
+            Action::QueuedSet(queued) => self.queued.clone_from(queued),
             Action::PlanSet(plan) => self.plan.clone_from(plan),
             Action::TasksSet(tasks) => self.tasks.clone_from(tasks),
-            Action::MetersSet(meters) => self.meters = meters.clone(),
-            Action::CommandsSet(commands) => self.commands.clone_from(commands),
             Action::Truncated { after } => {
                 let kept = |turn: TurnId| after.is_some_and(|last| turn <= last);
                 self.turns.retain(|t| kept(t.id));
                 self.items.retain(|i| kept(i.turn));
                 self.keep_calls();
             }
-            Action::Snapshot { turn, edge, tree } => {
-                if let Some(t) = self.turn_mut(*turn) {
-                    match edge {
-                        Edge::Before => t.before = Some(tree.clone()),
-                        Edge::After => t.after = Some(tree.clone()),
-                    }
-                }
-            }
-            Action::ToReview(to_review) => self.to_review = *to_review,
             Action::ScreensSet(screens) => self.screens.clone_from(screens),
-            Action::PullSeen(pull) => self.pull.clone_from(pull),
             Action::Seen(turn) => self.seen = self.seen.max(*turn),
-            Action::DraftSet(draft) => self.draft = Some(draft.clone()),
+            Action::DraftSet(draft) => self.draft.clone_from(draft),
             Action::NameSet(name) => self.named.clone_from(name),
-            Action::Said { message, words } if words.is_empty() => {
-                self.said.remove(message);
-            }
-            Action::Said { message, words } => {
-                self.said.insert(*message, words.clone());
-            }
             Action::Lease(at) => {
                 self.lease_ms = Some(self.lease_ms.map_or(*at, |had| had.max(*at)));
             }
@@ -226,41 +133,6 @@ impl ThreadState {
                     self.calls.insert(item.clone(), note);
                 }
             }
-            Action::TaskOutput { task, output } => {
-                if let Some(have) = self.tasks.iter_mut().find(|t| t.id == *task) {
-                    have.output = Some(output.clone());
-                }
-            }
-            Action::ActivitySet(activity) => self.activity.clone_from(activity),
-            Action::GoalSet(goal) => self.goal.clone_from(goal),
-            Action::Notified(note) => {
-                self.notes.retain(|n| n.key != note.key);
-                self.notes.push(note.clone());
-                let over = self.notes.len().saturating_sub(AgentNote::KEPT);
-                self.notes.drain(..over);
-            }
-            Action::Suggested(suggestion) => self.suggestion.clone_from(suggestion),
-            Action::Side(exchange) => {
-                match self.side.iter_mut().find(|had| had.intent == exchange.intent) {
-                    Some(had) => *had = exchange.clone(),
-                    None => self.side.push(exchange.clone()),
-                }
-                let over = self.side.len().saturating_sub(super::SideExchange::KEPT);
-                self.side.drain(..over);
-            }
-            Action::RulesSet(rules) => self.rules = Some(rules.clone()),
-            Action::StatusLine(line) => self.status_line.clone_from(line),
-            Action::Rewound(rewound) => self.rewound.clone_from(rewound),
-            Action::AgentsSet(agents) => self.agents.clone_from(agents),
-            Action::ContextSet(context) => self.context = Some(context.clone()),
-            Action::McpServersSet(servers) => self.servers.clone_from(servers),
-            Action::SurfaceSet(surface) => {
-                match self.surfaces.iter_mut().find(|s| s.id == surface.id) {
-                    Some(have) => *have = surface.clone(),
-                    None => self.surfaces.push(surface.clone()),
-                }
-            }
-            Action::SurfaceGone { id } => self.surfaces.retain(|s| s.id != *id),
         }
     }
 
@@ -349,11 +221,6 @@ impl ThreadState {
         self.turns.last()
     }
 
-    /// The requests still open.
-    pub fn open_requests(&self) -> impl Iterator<Item = &Request> {
-        self.requests.iter().filter(|r| r.is_open())
-    }
-
     /// Its latest turn, once it ended ([`ThreadRow::ended`]); `None` while a turn is under way
     /// or before the first.
     #[must_use]
@@ -381,19 +248,6 @@ impl ThreadState {
             native: self.meta.native.clone(),
             title: if self.named.is_empty() { self.meta.title.clone() } else { self.named.clone() },
             status: self.status.clone(),
-            requests: self
-                .open_requests()
-                .map(|r| RequestCard {
-                    id: r.id.clone(),
-                    item: r.item.clone(),
-                    kind: r.kind.clone(),
-                    title: r.title.clone(),
-                    options: r.options.clone(),
-                    buttons: super::wire::NoteChoice::of(r),
-                    opened_ms: r.opened_ms,
-                    needs_presence: r.needs_presence,
-                })
-                .collect(),
             last_line: self.last_line(),
             doing: self.doing(),
             changed,
@@ -402,11 +256,7 @@ impl ThreadState {
             repo_id: None,
             parent: self.meta.parent.clone(),
             drive: self.meta.drive.clone(),
-            caps: self.meta.caps.clone(),
             facts: self.meta.facts.clone(),
-            to_review: self.to_review,
-            pull: self.pull.clone(),
-            meters: self.meters.clone(),
             ended: self.ended(),
             began_ms: self
                 .turns
@@ -414,7 +264,6 @@ impl ThreadState {
                 .filter(|turn| turn.state == TurnState::Active)
                 .map(|turn| turn.started_ms),
             seen: self.seen,
-            draft: self.draft.clone(),
             lease_ms: self.lease_ms,
             created_ms: self.meta.created_ms,
             updated_ms,
@@ -449,14 +298,11 @@ impl ThreadState {
         self.turns.binary_search_by_key(&id, |t| t.id).ok().and_then(|at| self.turns.get_mut(at))
     }
 
-    /// A turn the agent tells again keeps the snapshots the worker took of it, since an
-    /// adapter's turn never carries them ([`Action::Snapshot`] does).
-    fn put_turn(&mut self, mut turn: Turn) {
+    /// A turn told again replaces the one held.
+    fn put_turn(&mut self, turn: Turn) {
         match self.turns.binary_search_by_key(&turn.id, |t| t.id) {
             Ok(at) => {
                 if let Some(have) = self.turns.get_mut(at) {
-                    turn.before = turn.before.or_else(|| have.before.take());
-                    turn.after = turn.after.or_else(|| have.after.take());
                     *have = turn;
                 }
             }
@@ -474,18 +320,6 @@ impl ThreadState {
             Some(have) => *have = item,
             None => self.items.push(item),
         }
-    }
-
-    fn trim_requests(&mut self) {
-        let settled = self.requests.iter().filter(|r| !r.is_open()).count();
-        let mut over = settled.saturating_sub(RESOLVED_KEPT);
-        self.requests.retain(|r| {
-            if over > 0 && !r.is_open() {
-                over = over.saturating_sub(1);
-                return false;
-            }
-            true
-        });
     }
 }
 

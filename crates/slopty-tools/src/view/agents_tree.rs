@@ -29,8 +29,6 @@ pub struct AgentEntryView<'a> {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     ended: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    asks: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     last: Option<&'a str>,
     /// It needs someone or has come to rest.
     rests: bool,
@@ -66,7 +64,6 @@ pub fn agents<'a, S: std::hash::BuildHasher>(
             phase: phase_key(a.phase),
             wait: a.wait.as_ref().map(|w| w.text.as_str()),
             ended: a.ended,
-            asks: a.asks.as_deref(),
             last: a.last.as_deref(),
             rests: a.rests,
             since_ms: a.since_ms,

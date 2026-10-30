@@ -223,13 +223,6 @@ pub(crate) struct Daemon {
 }
 
 impl Daemon {
-    /// Why the person's words may not be typed into `session` now: the agent there waits on
-    /// them at a dialog ([`slopty_worker::thread::submit_refused`]).
-    pub fn submit_refused(&self, session: SessionId) -> Option<String> {
-        let (_thread, status) = self.threads.as_ref()?.host().at_terminal(session)?;
-        slopty_worker::thread::submit_refused(&status)
-    }
-
     /// End `session` (kill its program if it still runs) and tell every client and the server
     /// why, on behalf of `by` (whose item delta is not echoed back to it).
     ///

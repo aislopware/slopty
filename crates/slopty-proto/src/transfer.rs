@@ -389,9 +389,6 @@ pub enum Dest {
     Staging,
     /// This directory.
     Path(String),
-    /// A fresh `~/.slopty/drop/<xfer>/`, with nothing put on the pasteboard: a file attached
-    /// to an agent's prompt, whose path the conversation's composer types.
-    Attachment,
     /// `~/.slopty/drop/<drag>/`, with nothing put on the pasteboard: the files of a drag over a
     /// streamed window or display, sent from the moment it enters, so they are whole by the
     /// drop it lands them in.

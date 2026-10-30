@@ -2611,7 +2611,116 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `Cap::REVIEW` that came with Claude Code listing `code-review`. No `claude -p` runs beside
     a session any more, so a managed launcher is run only by the start. The stand-in no longer
     answers `-p`, and `STUB_PROBES` went with the tests of it.
-  - **Kept:** the worker's writer that types into the terminal for `agent_tell`, `SendMessage`
-    and `agent_stop`, with its refusal while the agent waits on the person
-    (`thread::submit_refused`). `TermRequest::Submit` keeps the worker's side until the wire
-    drops it; the client's prompt box was its last sender.
+  - **Kept:** the worker's writer that types into the terminal for `agent_tell` and
+    `agent_stop`, with its refusal while the agent waits on the person
+    (`thread::submit_refused`). The client link's `TermRequest::Submit` went on 2026-10-30:
+    the client's prompt box was its last sender.
+
+- ✅ **The inspector mirrors the TUI's prompt box through a mod of Slopty's** (2026-10-30,
+  checked with Claude Code 2.1.312; the study is `.research/tui-first-live-prompt-2026-10-29.md`,
+  its prototype and logs `.research/live-prompt-mod/`). The person types in the TUI, and the
+  inspector shows what its box holds meanwhile: the words, the pictures pasted into them, and
+  the prompts queued behind the turn under way. Nothing is typed back and no screen is read.
+  - **The mod** (`crates/slopty-agent/assets/claude-mod`, `slopty_agent::claude::draft`) is a
+    plugin with one hooks module on Claude Code's mod API. `prompt.edit` gives each edit with
+    the box as it is after it (a caret move changes no words and counts for nothing), and
+    `prompt.change` every other change: a paste, a recalled entry, a clear, an undo. A change
+    goes after 150 ms of quiet, held back at most 6 times under steady typing; one relay runs
+    at a time, and words already relayed are not sent again. A relay runs `<slopty> hook` with
+    a `PromptDraft` payload: the session's id, the words, and `$.env.get('CLAUDE_CODE_TMPDIR')`.
+    It is a process, not a request to the worker: `slopty hook` is the door every other hook
+    already takes, vouched for by the session's token its children inherit, and the worker's
+    control socket speaks JSON lines, not HTTP, so the mod knows no port and holds no secret.
+    It writes, draws and answers nothing.
+  - **Loaded only where it may be.** The worker writes the mod, its own CLI as the relay,
+    under `<data>/claude-mod/<the first 16 hex of its blake3>/` (`draft::install`): a running
+    Claude Code keeps the files it loaded, and each file is written only when it differs,
+    through a sibling renamed into place. A Claude Code it starts gets
+    `--plugin-dir=<that folder>` first, once, and only where the managed settings allow
+    sideloads (`draft::with_mod_under`); a failed write is a warning and a start without it. A
+    Claude Code typed by hand has no mod and shows no draft: its picture files alone cannot say
+    what its box holds.
+  - **TypeScript kept to the least.** The module is TypeScript because the engine runs only
+    that, as it is, with no runtime library and no build. Its tools are pinned by its
+    `bun.lock` and run by `cargo xtask claude-mod check` (`xtask/src/claude_mod.rs`, in a copy
+    under `target/claude-mod`): oxfmt, `tsc` 7 at its strictest against the pinned build's own
+    declarations, oxlint with its type-aware rules, `claude plugin validate --strict`,
+    `claude plugin test` on the engine's mocked clock (`tests/draft.test.ts`), and Stryker,
+    which must kill every mutant not disabled inline with its reason (39 killed, 4 disabled,
+    and the 3 known endless relay loops timed out). `--deep` adds the seeded model-based
+    property (`deep/model.ts`). A check whose inputs match its last pass is skipped.
+  - **The pictures are Claude Code's own.** A picture pasted into the box stands in its words
+    as `[Image #N]`, and Claude Code writes its bytes at the paste to
+    `realpath(<CLAUDE_CODE_TMPDIR or /tmp>)/claude-<uid>/<project key>/<session>/images/<N>.<ext>`
+    (`draft::images_dir`). `draft::Pictures` describes each file once while it stays as it was
+    (its type and size from its header, none past `PICTURE_MAX`); a number whose file is not
+    there yet is looked for again once a second, three times. The worker serves the bytes on
+    `Expand` of a `draft-image:<N>.<ext>` ref, from the folder of the thread that names it, so
+    no path travels. A long paste shows as its own placeholder (`[Pasted text #1 +5 lines]`),
+    since its words are not known before submit.
+  - **The project key, fixed with it.** Claude Code names a project folder by turning each
+    UTF-16 unit that is not an ASCII letter or digit into `-` (a character outside the BMP is
+    two), and cuts a key past 200 units there, ending it in `-` and the base-36 magnitude of the
+    path's Java-style string hash (`sessions::escape`, held to keys `bun` computed). The decoder
+    had cut nothing and counted characters, so a deep folder's transcripts went unfound.
+  - **The queue is the transcript's, for every session.** The TUI writes its queue as
+    `queue-operation` records: `enqueue` with the words, `popAll` when the person pulls them
+    back into the box, `dequeue`, which names nothing, when the agent takes one, and `remove`
+    with the words when one is taken in mid-turn or delivered. Background work's notices ride
+    the same queue at a lower priority (`later`, the person's `next`), so a `dequeue` takes the
+    person's first, and the decoder keeps only the person's (`conversation`, `queue_op`). Over
+    this Mac's 924 transcripts, 739 with queue records, that model leaves 17 sessions with a
+    prompt queued at their end, none delivered later and 15 within their last ten records:
+    queued as the TUI exited. So a prompt queued before the TUI now running began was another
+    run's, and the queue is bounded by that start (`History::run_began`): the worker's own
+    clock at a start, or the registry's `startedAt` for a session it finds running.
+  - **On the wire.** The hook's `Signal::Draft` becomes `Action::DraftSet(Option<Draft>)`, and
+    the queue `Action::QueuedSet(Vec<String>)`, kept as `ThreadState::draft` and `queued` and
+    on no `ThreadRow`, so a table frame carries neither. They are the TUI's, not the person's
+    marks: a log read again leaves them to be told again, and a session that ends clears both.
+    A draft holds at most 16 KiB of words. Drafts are ordered by their own hearing, apart from
+    the turn's hooks, and one for a session the thread no longer follows is dropped.
+  - **The mirror filters nothing.** An `agent_tell` paste shows for the moment the TUI shows it,
+    as the TUI shows it.
+  - **In the inspector** (`crates/slopty-shell/src/inspector.rs`, fed by the view model's
+    `slopty.WatchDock` as a `PromptBox`: `slopty_ui::view_model::work::dock`). The box sits
+    under the timeline, as the TUI keeps it under the conversation, and only while it holds
+    something: the queued prompts first, each a line after `❯`, then the draft in muted words
+    up to six lines and an ellipsis, its placeholders on the inline-code wash the composer gave
+    its own, then a 40 pt thumbnail of each pasted picture. A thumbnail is the one action: a
+    press opens the picture in the lightbox the timeline's pictures open in, and its tooltip
+    says so. Its bytes come as the timeline's do, through the attachment cache and
+    `ReadAttachmentChunk` of `slopty-image:<thread>/draft/<index>/<digest>`, which the view
+    model answers from the thread's draft by `Expand` of its `draft-image:` ref. There is no
+    caret and no motion of its own: the words change as each relay lands, the box goes the
+    moment the TUI sends it, and the turn it became arrives in the timeline as any turn does.
+    The stand-in TUI records its queue as Claude Code does (`enqueue` as a line is typed behind
+    a turn under way, `dequeue` as it goes), so a test sees the same records.
+  - **Pinned per version.** The mod API is early access, `prompt.change` is recent and the
+    picture store is Claude Code's internal layout, so a recording is the check:
+    `cargo xtask fixtures claude-mod` drives the official build's TUI in a pseudo-terminal
+    against the canned API (no account, no model), types, pastes, recalls, queues and asks,
+    and keeps what the mod relayed, the transcript's queue and where the picture was stored
+    (`crates/slopty-agent/tests/fixtures/claude-mod`). `crates/slopty-agent/tests/claude_mod.rs`
+    holds the embedded module and `draft::CHECKED_WITH` to the recording and reads each relay
+    and the queue as the worker does, so a new Claude Code or an edited mod fails there until
+    it is recorded again.
+  - **Proof.** The kit and the mutation score above;
+    `the_prompt_box_shows_on_its_thread_with_the_pictures_pasted_into_it`
+    (`apps/slopty-worker/tests/threads.rs`: the stand-in TUI loads the mod from `--plugin-dir`
+    and runs its relay as Claude Code does; the typed words, a pasted PNG path stored where
+    Claude Code stores it and its bytes by `Expand`, a submit that clears the box into the
+    turn's prompt, and a close that clears a half-typed draft); `draft`'s tests of the key,
+    the placeholders and the pictures. The cost is in `docs/MEASUREMENTS.md` (2026-10-30, the
+    prompt box's mod): a key's echo moves from 5.3 to 5.5 ms median.
+    `the_inspector_mirrors_the_tuis_prompt_box` (`crates/slopty-e2e/tests/app/prompt_box.rs`,
+    the app on a real stack, golden `prompt-box`): a prompt typed behind a held turn shows
+    queued under the timeline and goes when Esc ends the turn; words and a pasted picture
+    show as the box holds them, the thumbnail opens the picture large, and the mirror goes once
+    the TUI sends the box. `a_followed_chat_mirrors_its_prompt_box` holds the dock to the
+    thread's draft and queue.
+  - **Pruned with it** (`slopty_proto::thread`, 2026-10-30): the intents no client sends,
+    `Outcome::Accepted` and `Unsupported`, `Cap` and the thread's lists of caps, models, modes
+    and efforts, the pending messages, the GUI composer's shared draft (`ThreadRow::draft`,
+    `Intent::Draft`) and the words it said, the start's attachments, the kept review, and the
+    GUI-first actions no worker sends any more (`agents.md`, "TUI-first", *What went*).

@@ -633,20 +633,6 @@ impl Hub {
                 Ok(of) => self.forward(key, Verb::ReadThread { of, view, after }).await,
                 Err(refused) => refused,
             },
-            // Each agent asks in its own TUI, which takes the person's answer there alone.
-            Verb::AnswerRequest { .. } => error(
-                ErrorCode::Unsupported,
-                "an agent asks in its own terminal, and the person answers it there",
-            ),
-            Verb::SendMessage { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "only the person sends a thread a message this way; an agent tells another \
-                 with agent_tell",
-            ),
-            Verb::SendMessage { of, text } => match self.thread_on(of) {
-                Ok(of) => self.forward(key, Verb::SendMessage { of, text }).await,
-                Err(refused) => refused,
-            },
             Verb::RestartWorker { .. } if caller == Caller::Agent => {
                 person_only("restarting a machine's worker")
             }
@@ -1250,7 +1236,6 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::AgentWait { .. }
         | Verb::AgentStop { .. }
         | Verb::Agents
-        | Verb::AnswerRequest { .. }
         | Verb::BranchBring { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::ReadFile { worker, .. }
@@ -1278,13 +1263,11 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::AgentStatus { term }
         | Verb::ResizeTerminal { term, .. }
         | Verb::Close { term } => Some(term.worker),
-        Verb::ReadThread { of, .. } | Verb::SendMessage { of, .. } => {
-            match of {
-                ThreadOf::On { worker, .. } => Some(*worker),
-                // The server finds the worker first ([`Hub::thread_on`]).
-                ThreadOf::Term(_) | ThreadOf::Thread(_) => None,
-            }
-        }
+        Verb::ReadThread { of, .. } => match of {
+            ThreadOf::On { worker, .. } => Some(*worker),
+            // The server finds the worker first ([`Hub::thread_on`]).
+            ThreadOf::Term(_) | ThreadOf::Thread(_) => None,
+        },
     }
 }
 
@@ -1744,7 +1727,8 @@ pub(crate) mod tests {
                 panic!("terminals")
             };
             assert_eq!(terminals.len(), 1, "the one terminal");
-            agents.into_iter().map(|(term, a)| (term.session, a.phase, a.asks)).collect::<Vec<_>>()
+            let asks = |a: slopty_proto::orchestration::TermAgent| a.wait.map(|w| w.text);
+            agents.into_iter().map(|(term, a)| (term.session, a.phase, asks(a))).collect::<Vec<_>>()
         };
         assert_eq!(listed().await, [], "no agent yet");
         let thread = ThreadId::new();

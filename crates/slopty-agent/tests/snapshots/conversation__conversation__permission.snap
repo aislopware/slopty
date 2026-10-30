@@ -166,13 +166,9 @@ expression: "decode(\"permission\").snapshot()"
       ended_ms: 1793277004732
       models:
         - claude-haiku-5-5
-      requests: 6
       usage:
         input: 12
         cache_read: 106070
         cache_write: 8061
         output: 627
         thinking: 167
-      context_tokens: 19447
-      mode: default
-      stop: end_turn

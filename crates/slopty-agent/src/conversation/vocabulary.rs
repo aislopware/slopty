@@ -767,16 +767,8 @@ pub struct Turn {
     pub ended_ms: Option<WallMs>,
     /// The models that answered in it, in the order they first did (`claude-opus-5-5`).
     pub models: Vec<String>,
-    /// Requests the model answered.
-    pub requests: u32,
     /// Tokens, summed over its requests.
     pub usage: Usage,
-    /// The context the last request carried: its input, cached or not.
-    pub context_tokens: Option<u64>,
-    /// The permission mode the prompt was sent in (`default`, `plan`, `acceptEdits`, …).
-    pub mode: Option<String>,
-    /// Why the model last stopped (`end_turn`, `tool_use`, `max_tokens`, `refusal`).
-    pub stop: Option<String>,
 }
 
 /// Tokens a request (or a turn's) used.
@@ -795,12 +787,6 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// Everything the request read: the context it carried.
-    #[must_use]
-    pub const fn context(&self) -> u64 {
-        self.input.saturating_add(self.cache_read).saturating_add(self.cache_write)
-    }
-
     /// `self` with `other` added.
     #[must_use]
     pub const fn plus(self, other: Self) -> Self {
@@ -863,32 +849,18 @@ pub enum Change {
         /// The turn.
         turn: Turn,
     },
+    /// The prompts the person queued in the TUI behind the main thread's turn are now these, in
+    /// the order they go.
+    Queued(Vec<Queued>),
 }
 
-/// What the face shows from Claude Code's status line.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Meters {
-    /// The model's display name (`Opus`).
-    pub model: Option<String>,
-    /// Its id (`claude-opus-5-5`).
-    pub model_id: Option<String>,
-    /// Share of the context window in use, 0 to 100.
-    pub context_used_pct: Option<f64>,
-    /// The context window, in tokens.
-    pub context_window: Option<u64>,
-    /// The five-hour rate limit (subscribers only).
-    pub five_hour: Option<RateWindow>,
-    /// The seven-day rate limit.
-    pub seven_day: Option<RateWindow>,
-}
-
-/// One rate-limit window.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RateWindow {
-    /// Share used, 0 to 100.
-    pub used_pct: f64,
-    /// When the window resets, in seconds since the Unix epoch.
-    pub resets_at: Option<u64>,
+/// A prompt the person queued in the TUI, as its `queue-operation` record says it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Queued {
+    /// What it says.
+    pub text: String,
+    /// When it was queued.
+    pub at_ms: WallMs,
 }
 
 /// The end of what a background command has printed.

@@ -214,7 +214,7 @@ pub fn signs(state: &ThreadState, now: WallMs) -> Option<Signs> {
 /// never the text, so a tick reads nothing large.
 fn progress(state: &ThreadState) -> u64 {
     let mut hash = std::hash::DefaultHasher::new();
-    (state.turns.len(), state.items.len(), state.requests.len()).hash(&mut hash);
+    (state.turns.len(), state.items.len()).hash(&mut hash);
     if let Some(last) = state.items.last() {
         last.id.hash(&mut hash);
         match &last.body {
@@ -225,9 +225,6 @@ fn progress(state: &ThreadState) -> u64 {
             }
             _ => {}
         }
-    }
-    if let Some(activity) = &state.activity {
-        activity.tokens.hash(&mut hash);
     }
     for task in &state.tasks {
         (&task.state, task.output.as_ref().map(|out| out.chars)).hash(&mut hash);
@@ -388,8 +385,6 @@ mod tests {
     fn thread() -> ThreadState {
         use slopty_proto::thread::{AgentId, Drive, ThreadMeta};
         ThreadState::new(ThreadMeta {
-            modes: Vec::new(),
-            efforts: Vec::new(),
             id: ThreadId::new(),
             agent: AgentId::named(AgentId::CLAUDE_CODE),
             agent_version: "2.1.300".to_owned(),
@@ -398,10 +393,7 @@ mod tests {
             title: "t".to_owned(),
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
-            forked_from: None,
             drive: Drive::named(Drive::DRIVEN),
-            caps: Vec::new(),
-            models: Vec::new(),
             facts: std::collections::BTreeMap::new(),
             created_ms: WallMs::ZERO,
         })

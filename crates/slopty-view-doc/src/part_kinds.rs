@@ -40,10 +40,6 @@ pub struct ToolFacts {
     /// links to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_row: Option<String>,
-    /// It blocks the turn and can be moved to the background (`slopty.Background` with this
-    /// part's id): "Run in background".
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub backgroundable: bool,
     /// A subagent's request tried again inside the call, while it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryLine>,
@@ -125,13 +121,13 @@ pub struct SubagentProgress {
     /// "Failed: out of turns", "Stopped", "Waiting on its own background work".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
-    /// What it asks of the person, while it waits on them: answered in this chat's dock.
+    /// What it asks of the person, while it waits on them: answered in its own TUI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs_you: Option<String>,
     /// Its run's chat, where Slopty keeps one: what expands in place and drills in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
-    /// Its tray row (`task:{id}` or `chat:{chatId}`), which `slopty.StopWork` stops.
+    /// Its tray row (`task:{id}` or `chat:{chatId}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<String>,
 }
@@ -141,7 +137,7 @@ impl SubagentProgress {
     pub const DONE: &'static str = "done";
     /// It failed.
     pub const FAILED: &'static str = "failed";
-    /// It waits on the person: its request is answered in this chat's dock.
+    /// It waits on the person, who answers it in its own TUI.
     pub const NEEDS_YOU: &'static str = "needs-you";
     /// It is at work.
     pub const RUNNING: &'static str = "running";

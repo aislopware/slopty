@@ -6,10 +6,9 @@
 //! interface reads back through the thread's link to it. So does the script of a visual a call
 //! showed ([`visual_path`]), drawn natively after the call.
 //!
-//! Beside the turns go a few entries no one wrote: a plan's own card (`plan-card:<ask>`, its text
-//! the part `plan:<ask>`), a compaction's row, its summary under it ([`MessagePart::Note`]), a
-//! divider for a subagent's news ([`MessagePart::Marker`]), the seam of a forked chat
-//! ([`MessagePart::Fork`]), and the words one agent told another, as from that agent. A failure
+//! Beside the turns go a few entries no one wrote: a compaction's row, its summary under it
+//! ([`MessagePart::Note`]), a divider for a subagent's news ([`MessagePart::Marker`]), and the
+//! words one agent told another, as from that agent. A failure
 //! reads in one grammar: what happened and the one thing to do, the agent's own words kept behind
 //! it ([`error_words`]).
 
@@ -17,12 +16,10 @@ use std::collections::HashMap;
 
 use slopty_proto::thread::detail::{Clipped, Patch};
 use slopty_proto::thread::{
-    AskId, BackgroundTask, Compaction, ContentRef, Image, Item, ItemBody, Notice, Request,
-    TaskNote, ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState,
-    UserMessage, kind,
+    BackgroundTask, Compaction, ContentRef, Image, Item, ItemBody, Notice, TaskNote, ThreadId,
+    ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, kind,
 };
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, ToolDiffStat};
-use slopty_view_proto::UserInputQuestion;
 
 pub use super::facts::ChildRun;
 use super::facts::{note_row, page_card, task_part, tool_facts};
@@ -36,11 +33,7 @@ pub struct Look<'a> {
     child_run: Box<dyn Fn(ThreadId) -> Option<ChildRun> + 'a>,
     chat_of: Box<dyn Fn(ThreadId) -> String + 'a>,
     whole: Whole<'a>,
-    source: Source<'a>,
 }
-
-/// A thread's chat id and title, for the seam of a chat forked off it.
-type Source<'a> = Box<dyn Fn(ThreadId) -> Option<(String, String)> + 'a>;
 
 /// The whole of a cut text, once it came.
 type Whole<'a> = Box<dyn Fn(&ContentRef) -> Option<String> + 'a>;
@@ -61,7 +54,6 @@ impl<'a> Look<'a> {
             child_run: Box::new(|_| None),
             chat_of: Box::new(|thread| thread.to_string()),
             whole: Box::new(|_| None),
-            source: Box::new(|_| None),
         }
     }
 
@@ -69,13 +61,6 @@ impl<'a> Look<'a> {
     #[must_use]
     pub const fn host(mut self, name: &'a str) -> Self {
         self.host = Some(name);
-        self
-    }
-
-    /// The chat id and title of a thread, which a chat forked off it names at its seam.
-    #[must_use]
-    pub fn source(mut self, source: impl Fn(ThreadId) -> Option<(String, String)> + 'a) -> Self {
-        self.source = Box::new(source);
         self
     }
 
@@ -264,19 +249,11 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
     // A task's text by its id, as a task call before named it: a change to a task names it by id
     // alone.
     let mut named: Named<'_> = HashMap::new();
-    // The plans to approve, by the call that asked: each gets its card after that call.
-    let plans: Vec<&Request> = state
-        .requests
-        .iter()
-        .filter(|request| request.kind == Request::PLAN && plan_text(request).is_some())
-        .collect();
-    let seam = seam(state);
     for (ix, item) in state.items.iter().enumerate() {
         let id = item.id.0.clone();
         let at = at(item.at_ms);
         match &item.body {
             ItemBody::User(message) => {
-                let shown = shown_as(message, &id);
                 // The person's words as the agent was given them, and its pictures.
                 let words = marked(message.command.as_deref(), look.words(&message.text));
                 let text = with_images(words, thread, &id, &message.images);
@@ -292,8 +269,8 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                 } else {
                     text
                 };
-                let parts = vec![MessagePart::Text { id: format!("{shown}:text"), text }];
-                made.own(own_entry(shown, MessageRole::User, parts, at, device));
+                let parts = vec![MessagePart::Text { id: format!("{id}:text"), text }];
+                made.own(own_entry(id.clone(), MessageRole::User, parts, at, device));
                 if let Some(plan) = plan {
                     let part = MessagePart::Text { id: format!("plan:implement:{id}"), text: plan };
                     let mut entry = own_entry(
@@ -424,26 +401,8 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                 }
             }
         }
-        for request in plans.iter().filter(|request| request.item.as_ref() == Some(&item.id)) {
-            made.own(plan_card(request, look, at, device));
-        }
-        if seam == Some(ix)
-            && let Some(entry) = fork_seam(state, look, at, device)
-        {
-            made.own(entry);
-        }
     }
     made.flush();
-    // A plan asked of no call shown here has its card at the end.
-    for request in &plans {
-        let shown = request
-            .item
-            .as_ref()
-            .is_some_and(|item| state.items.iter().any(|shown| shown.id == *item));
-        if !shown {
-            made.own(plan_card(request, look, at(request.opened_ms), device));
-        }
-    }
     let Made { mut out, turns, .. } = made;
     // slopty: what the TUI folds of task notices, and each finished turn's done line.
     for entry in &mut out {
@@ -499,53 +458,6 @@ fn compacted(compaction: &Compaction) -> String {
         }
         None => "Compacted · context → summary".to_owned(),
     }
-}
-
-/// The text of a plan to approve: its markdown, which its card shows whole.
-fn plan_text(request: &Request) -> Option<&str> {
-    request.text.as_ref().map(|text| text.text.as_str()).filter(|text| !text.trim().is_empty())
-}
-
-/// A plan's own card: an entry `plan-card:<ask>` whose one part, `plan:<ask>`, is the plan's
-/// markdown. The question panel then asks only for its choices.
-fn plan_card(request: &Request, look: &Look<'_>, at: i64, device: &str) -> SessionMessageEntry {
-    let text = request.text.as_ref().map(|text| look.words(text)).unwrap_or_default();
-    let ask = &request.id.0;
-    let part = MessagePart::Text { id: format!("plan:{ask}"), text };
-    let mut entry =
-        own_entry(format!("plan-card:{ask}"), MessageRole::Assistant, vec![part], at, device);
-    entry.status = Some(MessageStatus::Complete);
-    entry
-}
-
-/// The index of the last item a forked chat copied from its source, after which its seam goes:
-/// the last of the turns it shares, where its fork says which; else the last made before the
-/// fork itself began.
-fn seam(state: &ThreadState) -> Option<usize> {
-    let fork = state.meta.forked_from?;
-    match fork.turn {
-        Some(shared) => state.items.iter().rposition(|item| item.turn <= shared),
-        None => state
-            .items
-            .iter()
-            .rposition(|item| !item.at_ms.is_zero() && item.at_ms < state.meta.created_ms),
-    }
-}
-
-/// The seam of a chat forked off another: "Forked from `<title>`", between what it copied and its
-/// own.
-fn fork_seam(
-    state: &ThreadState,
-    look: &Look<'_>,
-    at: i64,
-    device: &str,
-) -> Option<SessionMessageEntry> {
-    let fork = state.meta.forked_from?;
-    let (source_chat_id, source_title) =
-        (look.source)(fork.thread).unwrap_or_else(|| (fork.thread.to_string(), String::new()));
-    let id = format!("fork:{}", state.meta.id);
-    let part = MessagePart::Fork { id: id.clone(), source_chat_id, source_title };
-    Some(own_entry(id, MessageRole::System, vec![part], at, device))
 }
 
 /// How a report's block names an agent's words: `Agent <name> (<thread>) says (an agent, not the
@@ -807,12 +719,6 @@ fn plan_part(state: &ThreadState, written: bool, device: &str, out: &mut Vec<Ses
 /// A task's text by its id.
 type Named<'a> = HashMap<&'a str, &'a str>;
 
-/// The id the person's message `message`, the item `item`, goes by in the shell: its intent's,
-/// else its item's where no intent is known to have sent it.
-pub fn shown_as(message: &UserMessage, item: &str) -> String {
-    message.intent.map_or_else(|| item.to_owned(), |intent| intent.to_string())
-}
-
 /// A task list's steps as the shell's checklist, a step of no text of its own named by its id
 /// (`named`).
 fn todo_items(
@@ -858,82 +764,6 @@ pub fn settle(entries: &mut [SessionMessageEntry], live: bool) {
     for entry in entries {
         if entry.status == Some(MessageStatus::Streaming) {
             entry.status = Some(MessageStatus::Complete);
-        }
-    }
-}
-
-/// `state`'s open requests as the shell's question panel takes them.
-///
-/// They go on the answer the agent is giving: the last entry when it is the agent's, else an
-/// entry of their own after the person's message. A request is asked where the person looks,
-/// whatever it is: an approval, a question, a plan, Claude Code's own dialog at start.
-pub fn asks(state: &ThreadState, device: &str, entries: &mut Vec<SessionMessageEntry>) {
-    let parts: Vec<MessagePart> = state
-        .requests
-        .iter()
-        .filter(|request| request.is_open())
-        .map(|request| input(request, state))
-        .collect();
-    let Some(first) = state.requests.iter().find(|request| request.is_open()) else { return };
-    let at = at(first.opened_ms);
-    let id = format!("ask:{}", request_key(state.meta.id, &first.id));
-    if let Some(entry) = tail(entries, &id, at, device) {
-        entry.parts.extend(parts);
-    }
-}
-
-/// How the shell names request `ask` of `thread`, which its answer comes back by.
-///
-/// An agent numbers its own asks, so a chat's first ask and another chat's, or one of a
-/// subagent's asked in its parent, share an id ([`request_of`] reads both back). The composer
-/// keeps the requests it answered by this name, and a second chat's approval showed no card
-/// once the first chat's question was answered.
-#[must_use]
-pub fn request_key(thread: ThreadId, ask: &AskId) -> String {
-    format!("{thread}/{}", ask.0)
-}
-
-/// The thread and the ask a request's name in the shell is ([`request_key`]).
-#[must_use]
-pub fn request_of(key: &str) -> Option<(ThreadId, AskId)> {
-    let (thread, ask) = key.split_once('/')?;
-    Some((thread.parse().ok()?, AskId(ask.to_owned())))
-}
-
-/// The open requests of the chats an agent started under this one, asked in this chat.
-///
-/// `children` each come with their name. A subagent's approval is answered where the person
-/// looks, after this chat's own requests, each question naming who asks (`sent_by`). The answer
-/// goes back to the child's thread by the request's id.
-pub fn child_asks(
-    children: &[(&str, &ThreadState)],
-    device: &str,
-    entries: &mut Vec<SessionMessageEntry>,
-) {
-    for (name, state) in children {
-        let Some(first) = state.requests.iter().find(|request| request.is_open()) else {
-            continue;
-        };
-        let parts: Vec<MessagePart> = state
-            .requests
-            .iter()
-            .filter(|request| request.is_open())
-            .map(|request| {
-                let mut part = input(request, state);
-                if let MessagePart::Input { questions, .. } = &mut part
-                    && !name.trim().is_empty()
-                {
-                    for question in questions {
-                        question.sent_by = Some(super::text::escaped(name.trim()));
-                    }
-                }
-                part
-            })
-            .collect();
-        let at = at(first.opened_ms);
-        let id = format!("ask:{}", request_key(state.meta.id, &first.id));
-        if let Some(entry) = tail(entries, &id, at, device) {
-            entry.parts.extend(parts);
         }
     }
 }
@@ -1017,441 +847,6 @@ fn brief_words(call: &ToolCall) -> Option<String> {
 pub(crate) fn shown_call(body: &ItemBody) -> bool {
     matches!(body, ItemBody::Tool(call)
         if !HIDDEN_TOOLS.contains(&call.name.as_str()) && call.kind != kind::TASKS)
-}
-
-/// What each of a question's options would look like, for the pane beside them; nothing when
-/// none has a preview.
-fn previews(options: &[slopty_proto::thread::detail::Offered]) -> Vec<String> {
-    let shown: Vec<String> =
-        options.iter().map(|o| o.preview.clone().unwrap_or_default()).collect();
-    if shown.iter().all(String::is_empty) { Vec::new() } else { shown }
-}
-
-/// What each of a question's options says under it; nothing when none says anything.
-fn descriptions(options: &[slopty_proto::thread::detail::Offered]) -> Vec<String> {
-    let said: Vec<String> =
-        options.iter().map(|o| o.description.clone().unwrap_or_default()).collect();
-    if said.iter().all(String::is_empty) { Vec::new() } else { said }
-}
-
-/// What each choice says while the pointer rests on it: the folders its scope names, each in
-/// full on a line of its own; no entries at all when no choice names any.
-fn choice_tooltips(options: &[slopty_proto::thread::Choice]) -> Vec<String> {
-    if options.iter().all(|c| c.folders.is_empty()) {
-        return Vec::new();
-    }
-    options
-        .iter()
-        .map(|c| c.folders.iter().map(|f| super::text::escaped(f)).collect::<Vec<_>>().join("\n"))
-        .collect()
-}
-
-/// The rule an approval offers to allow its like always: its allowing choice whose reach is a
-/// rule in the agent's words (`Bash(cargo test:*)`), to go to the folder's own settings unless
-/// the person picks another scope.
-fn rule_offer(request: &Request) -> Option<slopty_view_proto::RuleOffer> {
-    if request.kind != Request::APPROVAL {
-        return None;
-    }
-    request.options.iter().enumerate().find_map(|(option, choice)| {
-        let rule = choice.scope.as_deref()?.trim();
-        let looks_like_rule = rule.ends_with(')') && rule.contains('(');
-        (choice.effect == slopty_proto::thread::Effect::Allow && looks_like_rule).then(|| {
-            slopty_view_proto::RuleOffer {
-                option,
-                rule: rule.to_owned(),
-                scope: Some("local".to_owned()),
-            }
-        })
-    })
-}
-
-/// A dialog's payload with each string and name in it escaped (`text::escaped`): a
-/// dialog's payload is only shown, never sent back, so its every word may be.
-fn escaped_payload(payload: &str) -> String {
-    fn walk(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::String(words) => *words = super::text::escaped(words),
-            serde_json::Value::Array(items) => items.iter_mut().for_each(walk),
-            serde_json::Value::Object(fields) => {
-                *fields = std::mem::take(fields)
-                    .into_iter()
-                    .map(|(key, mut field)| {
-                        walk(&mut field);
-                        (super::text::escaped(&key), field)
-                    })
-                    .collect();
-            }
-            _ => {}
-        }
-    }
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {
-        return super::text::escaped(payload);
-    };
-    walk(&mut value);
-    value.to_string()
-}
-
-/// The id of the one question of a request that offers its choices.
-const CHOICE: &str = "choice";
-
-/// What a request asks, as the panel heads it.
-fn header(request: &Request) -> String {
-    match request.kind.as_str() {
-        Request::APPROVAL | Request::RETRY => "Approval",
-        Request::PLAN => "Plan",
-        Request::QUESTION => "Question",
-        Request::ELICITATION => "Form",
-        kind if kind.starts_with(Request::DIALOG) => "Confirm",
-        _ => "Input",
-    }
-    .to_owned()
-}
-
-/// A choice as the panel offers it: its label, and how far it reaches when it reaches beyond
-/// this once. A plan's choices say what they do in their own words ("Yes, auto-accept edits").
-fn choice_label(request: &Request, choice: &slopty_proto::thread::Choice) -> String {
-    match &choice.scope {
-        Some(scope) if !scope.trim().is_empty() && request.kind != Request::PLAN => {
-            format!("{} ({scope})", choice.label)
-        }
-        _ => choice.label.clone(),
-    }
-}
-
-/// The agents that take the person's words with an allow, as their next message
-/// ("Allow, and say what's next…"): Claude Code and Codex.
-fn takes_words_with_allow(state: &ThreadState) -> bool {
-    state.meta.agent.is(slopty_proto::thread::AgentId::CLAUDE_CODE)
-        || state.meta.agent.is(slopty_proto::thread::AgentId::CODEX)
-}
-
-/// The most characters an approval's payload has and is still allowed at a key: past it, or
-/// past [`KEY_LINES`], the deny is where focus starts (Claude desktop's rule).
-const KEY_CHARS: usize = 600;
-
-/// The most lines an approval's payload has and is still allowed at a key.
-const KEY_LINES: usize = 6;
-
-/// How an approval may be answered at a key ([`UserInputQuestion::deny_first`],
-/// [`UserInputQuestion::click_only`], [`UserInputQuestion::read_gate`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Gate {
-    deny_first: bool,
-    click_only: bool,
-    long: bool,
-    /// Destructive, by its command alone ([`destructive`]): the card's warning.
-    risky: bool,
-}
-
-/// The commands that only read, which a key may allow when nothing else rides with them.
-const READ_ONLY_COMMANDS: [&str; 14] = [
-    "ls", "cat", "head", "tail", "pwd", "echo", "wc", "which", "file", "stat", "tree", "rg",
-    "grep", "du",
-];
-
-/// The git commands that only read.
-const READ_ONLY_GIT: [&str; 5] = ["status", "diff", "log", "show", "blame"];
-
-/// What in a command can destroy work or reach past it: deleting, forcing, rewriting history,
-/// raising privileges, wiping disks.
-const DESTRUCTIVE: [&str; 22] = [
-    "rm -rf",
-    "rm -fr",
-    "rm -r ",
-    "rm -f ",
-    "--force",
-    "push -f",
-    "reset --hard",
-    "clean -f",
-    "branch -d",
-    "checkout -- ",
-    "restore ",
-    "mkfs",
-    "dd if=",
-    "> /dev/",
-    "chmod -r",
-    "chown -r",
-    "sudo ",
-    "drop table",
-    "drop database",
-    "truncate ",
-    "kill -9",
-    ":(){",
-];
-
-/// The command an exec call runs.
-const fn command(call: &ToolCall) -> Option<&str> {
-    match &call.detail {
-        Some(ToolDetail::Exec(exec)) => Some(exec.command.text.as_str()),
-        _ => None,
-    }
-}
-
-/// Whether `command` reads and nothing more: one read-only program, nothing chained, piped or
-/// redirected.
-fn reads_only(command: &str) -> bool {
-    if command.contains([';', '|', '&', '>', '<', '`', '$', '\n']) {
-        return false;
-    }
-    let mut words = command.split_whitespace();
-    match words.next() {
-        Some("git") => words.next().is_some_and(|sub| READ_ONLY_GIT.contains(&sub)),
-        Some(program) => READ_ONLY_COMMANDS.contains(&program),
-        None => false,
-    }
-}
-
-/// Whether `command` can destroy work or reach past it ([`DESTRUCTIVE`]).
-fn destructive(command: &str) -> bool {
-    let command = format!("{} ", command.to_lowercase());
-    DESTRUCTIVE.iter().any(|mark| command.contains(mark))
-}
-
-/// How an approval of `call` (when its call is known), in a thread whose mode is `mode`, may be
-/// answered: a long, unknown or destructive one starts on its deny; nothing but a known read
-/// is allowed at a key, and nothing at all in plan mode; a long one is read through before it
-/// can be allowed. Any other request is answered as it asks.
-fn gate(request: &Request, call: Option<&ToolCall>, mode: Option<&str>) -> Gate {
-    if !matches!(request.kind.as_str(), Request::APPROVAL | Request::RETRY) {
-        return Gate::default();
-    }
-    let payload = call
-        .and_then(command)
-        .map(str::to_owned)
-        .or_else(|| request.text.as_ref().map(|text| text.text.clone()))
-        .unwrap_or_else(|| request.title.clone());
-    let long = payload.chars().count() > KEY_CHARS || payload.lines().count() > KEY_LINES;
-    let unknown = call.is_none_or(|call| call.detail.is_none());
-    let risky = call.and_then(command).is_some_and(destructive);
-    let safe = call.is_some_and(|call| match &call.detail {
-        Some(ToolDetail::Read(_) | ToolDetail::Search(_) | ToolDetail::WebSearch(_)) => true,
-        Some(ToolDetail::Exec(exec)) => reads_only(exec.command.text.trim()),
-        _ => false,
-    });
-    let planning = mode.is_some_and(|mode| mode.eq_ignore_ascii_case("plan"));
-    // An agent that lists its deny first means "No" by default (Claude Code's `default_to_no`).
-    let said_no =
-        request.options.first().is_some_and(|c| c.effect == slopty_proto::thread::Effect::Deny);
-    let deny_first = long || unknown || risky || said_no;
-    Gate { deny_first, click_only: deny_first || !safe || planning, long, risky }
-}
-
-/// The change an approval of `call` would make, for its card: an edit's or a write's diff.
-fn proposed(request: &Request, call: Option<&ToolCall>) -> Option<slopty_view_proto::ToolDiff> {
-    let call = call?;
-    if !matches!(request.kind.as_str(), Request::APPROVAL | Request::RETRY) {
-        return None;
-    }
-    tool_diff(call, None).or_else(|| {
-        let patch = request.proposed.as_ref()?;
-        let path = match &call.detail {
-            Some(ToolDetail::Edit(edit)) => edit.path.clone(),
-            Some(ToolDetail::Write(write)) => write.path.clone(),
-            _ => return None,
-        };
-        let lines = patch_lines(patch);
-        let side = |keep: char| -> String {
-            lines
-                .iter()
-                .filter_map(|line| {
-                    let mut chars = line.chars();
-                    let mark = chars.next()?;
-                    (mark == ' ' || mark == keep).then(|| format!("{}\n", chars.as_str()))
-                })
-                .collect()
-        };
-        let old_text = side('-');
-        Some(slopty_view_proto::ToolDiff {
-            path,
-            old_text: (!old_text.is_empty()).then_some(old_text),
-            new_text: side('+'),
-        })
-    })
-}
-
-/// What an approval's `text` says about `command` once the command itself is drawn apart: the
-/// words after it when the text leads with it whole (Claude Code's "command, blank line,
-/// description"), else the text as it is (Codex's reason).
-fn about_command(text: &str, command: &str) -> String {
-    let text = text.trim();
-    let command = command.trim();
-    match text.strip_prefix(command) {
-        Some(rest) if !command.is_empty() && (rest.is_empty() || rest.starts_with('\n')) => {
-            rest.trim().to_owned()
-        }
-        _ => text.to_owned(),
-    }
-}
-
-/// An open request of `state`'s as the shell's input part.
-///
-/// A request that offers choices and asks no questions (an approval, a plan, Claude Code's trust
-/// dialog) takes one of them on a click, headed by its own title; one that offers none takes
-/// words; an agent's questions keep their own headers and the words one may add. A plan whose
-/// text its card shows asks only "Plan ready" and its choices. An approval says how it may be
-/// answered at a key ([`gate`]) and the change it would make, and every word it shows has what
-/// would hide or reorder text shown as its code ([`super::text::escaped`]).
-fn input(request: &Request, state: &ThreadState) -> MessagePart {
-    use super::text::escaped;
-    let call = request.item.as_ref().and_then(|item| {
-        state.items.iter().find(|shown| shown.id == *item).and_then(|shown| match &shown.body {
-            ItemBody::Tool(call) => Some(&**call),
-            _ => None,
-        })
-    });
-    let mut questions = if request.questions.is_empty() && !request.options.is_empty() {
-        let title = request.title.trim();
-        let text = request.text.as_ref().map(|text| text.text.trim()).unwrap_or_default();
-        let carded = request.kind == Request::PLAN && plan_text(request).is_some();
-        let (header, question) = if carded {
-            ("Plan ready".to_owned(), String::new())
-        } else if request.kind.starts_with(Request::DIALOG) && !title.is_empty() {
-            // A dialog's title is its ask, not its kind: the card is headed by the kind, and the
-            // title leads the words, so the head never repeats the question.
-            let question =
-                if text.is_empty() { title.to_owned() } else { format!("{title}\n\n{text}") };
-            (header(request), question)
-        } else {
-            (if title.is_empty() { header(request) } else { title.to_owned() }, text.to_owned())
-        };
-        let gate = gate(request, call, state.meters.mode.as_deref());
-        // slopty: a shell command's approval carries its command whole, apart from its words.
-        let command = matches!(request.kind.as_str(), Request::APPROVAL | Request::RETRY)
-            .then(|| call.and_then(command))
-            .flatten()
-            .filter(|command| !command.trim().is_empty());
-        let question = match command {
-            Some(command) => about_command(&question, command),
-            None => question,
-        };
-        // slopty: a Claude Code plan shown whole may be approved as the person edits it.
-        let edit_from = (request.kind == Request::PLAN
-            && state.meta.agent.is(slopty_proto::thread::AgentId::CLAUDE_CODE))
-        .then(|| request.text.as_ref().filter(|text| text.full.is_none()))
-        .flatten()
-        .map(|text| text.text.clone())
-        .filter(|text| !text.trim().is_empty());
-        vec![UserInputQuestion {
-            id: CHOICE.to_owned(),
-            header: escaped(&header),
-            question: escaped(&question),
-            options: request.options.iter().map(|c| escaped(&choice_label(request, c))).collect(),
-            option_tooltips: choice_tooltips(&request.options),
-            multi_select: false,
-            prefill: None,
-            multiline: false,
-            choices_only: true,
-            deny_first: gate.deny_first,
-            click_only: gate.click_only,
-            read_gate: gate.long,
-            deny_option: slopty_proto::thread::plain_deny(&request.options)
-                .and_then(|deny| request.options.iter().position(|c| c.id == deny.id)),
-            // slopty: "Allow, and say what's next…" on an approval, where the agent takes it.
-            allow_option: ((request.kind == Request::APPROVAL && takes_words_with_allow(state))
-                || edit_from.is_some())
-            .then(|| {
-                // A plan's edit goes with its manual approval, the TUI's after Ctrl+G.
-                let manual =
-                    request.options.iter().find(|c| c.id == "allow" && edit_from.is_some());
-                manual.or_else(|| slopty_proto::thread::once(&request.options, true))
-            })
-            .flatten()
-            .and_then(|allow| request.options.iter().position(|c| c.id == allow.id)),
-            edit_from,
-            proposed: proposed(request, call),
-            // slopty: a shell command's approval sets its command as code.
-            command: command.map(|command| escaped(command.trim())),
-            risky: gate.risky,
-            // slopty: the once-allow leads, unless the card starts on its deny; a choice that
-            // stops the turn reads as the danger it is.
-            primary_option: (!gate.deny_first)
-                .then(|| slopty_proto::thread::once(&request.options, true))
-                .flatten()
-                .and_then(|allow| request.options.iter().position(|c| c.id == allow.id)),
-            stop_options: request
-                .options
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.stops)
-                .map(|(ix, _)| ix)
-                .collect(),
-            ..UserInputQuestion::default()
-        }]
-    } else if request.questions.is_empty() {
-        let mut question = request.title.clone();
-        if let Some(text) = request.text.as_ref().filter(|text| !text.text.trim().is_empty()) {
-            question = format!("{question}\n\n{}", text.text);
-        }
-        vec![UserInputQuestion {
-            id: CHOICE.to_owned(),
-            header: header(request),
-            question: escaped(&question),
-            multiline: true,
-            ..UserInputQuestion::default()
-        }]
-    } else {
-        request
-            .questions
-            .iter()
-            .enumerate()
-            .map(|(ix, question)| UserInputQuestion {
-                id: ix.to_string(),
-                header: escaped(&question.header.clone().unwrap_or_else(|| header(request))),
-                question: escaped(&question.text),
-                options: question.options.iter().map(|o| escaped(&o.label)).collect(),
-                option_descriptions: descriptions(&question.options),
-                option_previews: previews(&question.options),
-                multi_select: question.multi_select,
-                ..UserInputQuestion::default()
-            })
-            .collect()
-    };
-    // slopty: a choice beside the questions that answers none of them ("Chat about this"), on
-    // each: any deny but the plain one.
-    if !request.questions.is_empty() {
-        let plain = slopty_proto::thread::plain_deny(&request.options).map(|c| c.id.clone());
-        let aside = request.options.iter().find(|c| {
-            c.effect == slopty_proto::thread::Effect::Deny && Some(&c.id) != plain.as_ref()
-        });
-        for question in &mut questions {
-            question.aside = aside.map(|aside| escaped(&aside.label));
-        }
-    }
-    // slopty: what the dock draws the card by, on each of its questions, every shown word
-    // escaped here: the shell draws them as they come.
-    let rule = rule_offer(request).map(|mut rule| {
-        rule.rule = escaped(&rule.rule);
-        rule
-    });
-    let schema = request.schema_json.as_deref().map(|schema| {
-        if request.kind.starts_with(Request::DIALOG) {
-            escaped_payload(schema)
-        } else {
-            schema.to_owned()
-        }
-    });
-    for question in &mut questions {
-        question.kind.clone_from(&request.kind);
-        question.schema_json.clone_from(&schema);
-        question.url = request.url.as_deref().map(escaped);
-        question.until_ms = request.until_ms.map(at).filter(|ms| *ms > 0);
-        question.reason = request.reason.as_deref().map(escaped);
-        question.needs_presence = request.needs_presence;
-        for words in question.option_descriptions.iter_mut().chain(&mut question.option_previews) {
-            *words = escaped(words);
-        }
-        if let Some(diff) = question.proposed.as_mut() {
-            diff.path = escaped(&diff.path);
-            diff.old_text = diff.old_text.as_deref().map(escaped);
-            diff.new_text = escaped(&diff.new_text);
-        }
-        if question.id == CHOICE {
-            question.rule.clone_from(&rule);
-        }
-    }
-    let request_id = request_key(state.meta.id, &request.id);
-    MessagePart::Input { id: format!("ask:{request_id}"), request_id, questions, resolved: false }
 }
 
 /// A turn's answer, begun with its first part; a failed turn's error goes at its end

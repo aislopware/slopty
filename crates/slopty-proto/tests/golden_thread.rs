@@ -6,7 +6,7 @@
 mod golden_thread {
     use std::collections::BTreeMap;
 
-    use slopty_core::{ClientId, DisplayId, SessionId, WallMs, WindowId};
+    use slopty_core::{DisplayId, SessionId, WallMs, WindowId};
     use slopty_proto::codec;
     use slopty_proto::screen::CaptureTarget;
     use slopty_proto::search::Span;
@@ -16,19 +16,16 @@ mod golden_thread {
         WriteDetail,
     };
     use slopty_proto::thread::wire::{
-        Expanded, FileDiff, FileKind, Intent, IntentDone, Modes, NewWorktree, Outcome, Page,
-        PastSession, PastSessions, Pick, PromptHit, PullSeen, PullStands, Review, ReviewScope,
-        Setup, Start, TableFrame, ThreadFrame, ThreadRequest,
+        Against, Expanded, FileDiff, FileKind, Intent, IntentDone, Modes, NewWorktree, Outcome,
+        Page, PastSession, PastSessions, PromptHit, Review, ReviewScope, Setup, Start, TableFrame,
+        ThreadFrame, ThreadRequest,
     };
     use slopty_proto::thread::{
-        Action, Activity, AgentId, AgentNote, AgentScreen, Answerer, AskId, BackgroundTask,
-        CallNote, Cap, Changed, Choice, Clipped, Command, Compaction, ContentRef, ContextCategory,
-        ContextUsage, Cursor, Delivery, Drive, Edge, Effect, Effort, Fork, Goal, Image, IntentId,
-        Item, ItemBody, ItemId, Limit, Link, Liveness, McpServer, Meters, Mode, Model, Notice,
-        PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Rule,
-        RuleChange, Rules, SideExchange, Status, Step, SubagentKind, Surface, SurfaceEvent,
-        TaskNote, TaskUsage, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState,
-        TreeRef, Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
+        Action, AgentId, AgentScreen, BackgroundTask, CallNote, Changed, Clipped, Compaction,
+        ContentRef, Cursor, Draft, DraftImage, Drive, Image, IntentId, Item, ItemBody, ItemId,
+        Link, Liveness, Notice, PartKey, Patch, Phase, Plan, Retry, Status, Step, TaskNote,
+        TaskUsage, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef,
+        Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
     };
     use uuid::Uuid;
 
@@ -75,27 +72,7 @@ mod golden_thread {
                 item: ItemId("toolu_1".to_owned()),
             }),
             origin: ThreadMeta::SUBAGENT.to_owned(),
-            forked_from: Some(Fork {
-                thread: ThreadId::from_uuid(Uuid::from_u128(0xf0)),
-                turn: Some(TurnId(2)),
-            }),
             drive: Drive::named(Drive::DRIVEN),
-            caps: vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)],
-            models: vec![Model {
-                id: "opus".to_owned(),
-                label: "Opus".to_owned(),
-                options: Vec::new(),
-            }],
-            modes: vec![Mode {
-                id: "plan".to_owned(),
-                label: "Plan".to_owned(),
-                description: Some("Reads and plans, changes nothing".to_owned()),
-            }],
-            efforts: vec![Effort {
-                id: "high".to_owned(),
-                label: "High".to_owned(),
-                description: Some("Thinks longer".to_owned()),
-            }],
             facts: BTreeMap::from([("branch".to_owned(), "main".to_owned())]),
             created_ms: ms(1_000),
         }
@@ -127,8 +104,6 @@ mod golden_thread {
             usage: usage(),
             models: vec!["claude-opus-5-5".to_owned()],
             changed: Changed { added: 3, removed: 1 },
-            before: Some(TreeRef("4b825dc6".to_owned())),
-            after: None,
         }
     }
 
@@ -183,77 +158,6 @@ mod golden_thread {
         Item { id: ItemId(id.to_owned()), turn: TurnId(1), at_ms: ms(1_600), body }
     }
 
-    fn request() -> Request {
-        Request {
-            id: AskId("ask-1".to_owned()),
-            item: Some(ItemId("toolu_2".to_owned())),
-            kind: Request::APPROVAL.to_owned(),
-            title: "Run cargo test?".to_owned(),
-            text: Some(clip("cargo test --workspace")),
-            options: vec![
-                Choice {
-                    id: "allow".to_owned(),
-                    label: "Allow".to_owned(),
-                    effect: Effect::Allow,
-                    scope: None,
-                    folders: Vec::new(),
-                    stops: false,
-                },
-                Choice {
-                    id: "always".to_owned(),
-                    label: "Always allow".to_owned(),
-                    effect: Effect::Allow,
-                    scope: Some("Bash(cargo test:*)".to_owned()),
-                    folders: Vec::new(),
-                    stops: false,
-                },
-                Choice {
-                    id: "deny".to_owned(),
-                    label: "No".to_owned(),
-                    effect: Effect::Deny,
-                    scope: None,
-                    folders: Vec::new(),
-                    stops: true,
-                },
-            ],
-            questions: vec![],
-            proposed: Some(patch()),
-            schema_json: None,
-            url: None,
-            reason: None,
-            state: RequestState::Open,
-            opened_ms: ms(1_700),
-            until_ms: Some(ms(61_700)),
-            needs_presence: false,
-        }
-    }
-
-    fn pending() -> Pending {
-        Pending {
-            intent: intent(),
-            text: "and the docs".to_owned(),
-            attachments: vec!["/Users/me/.slopty/drop/x/shot.png".to_owned()],
-            delivery: Delivery::Queue,
-            state: PendingState::Waiting,
-        }
-    }
-
-    fn meters() -> Meters {
-        Meters {
-            model: Some("Opus 5.5".to_owned()),
-            model_id: Some("claude-opus-5-5".to_owned()),
-            mode: Some("default".to_owned()),
-            effort: Some("high".to_owned()),
-            context_tokens: Some(42_000),
-            context_window: Some(200_000),
-            limits: vec![Limit {
-                name: "five-hour".to_owned(),
-                used_bp: 1_250,
-                resets_ms: Some(ms(99)),
-            }],
-        }
-    }
-
     fn screen() -> AgentScreen {
         AgentScreen {
             target: CaptureTarget::Window(WindowId(4_242)),
@@ -274,17 +178,12 @@ mod golden_thread {
                     text: clip("fix it"),
                     images: vec![image()],
                     command: None,
-                    intent: Some(intent()),
                 }),
             )),
             Action::ItemStarted(item("a1", ItemBody::Text(clip("On it.")))),
             Action::ItemStarted(item("toolu_2", ItemBody::Tool(Box::new(call(kind::EXEC, None))))),
-            Action::RequestOpened(Box::new(request())),
-            Action::PendingSet(vec![pending()]),
-            Action::MetersSet(meters()),
-            Action::ToReview(true),
+            Action::QueuedSet(vec!["and the docs".to_owned()]),
             Action::ScreensSet(vec![screen()]),
-            Action::PullSeen(Some(pull_seen())),
         ] {
             state.apply(&action);
         }
@@ -346,9 +245,7 @@ mod golden_thread {
                     model: Some("gpt-5.5".to_owned()),
                     mode: Some("on-request".to_owned()),
                     effort: Some("high".to_owned()),
-                    attachments: vec!["/work/shot.png".to_owned()],
                     args: vec!["--yolo".to_owned()],
-                    options: BTreeMap::new(),
                     worktree: None,
                 }),
             },
@@ -366,9 +263,7 @@ mod golden_thread {
                     model: None,
                     mode: None,
                     effort: None,
-                    attachments: Vec::new(),
                     args: Vec::new(),
-                    options: BTreeMap::new(),
                     worktree: Some(NewWorktree::named("claude-3f9a2c")),
                 }),
             },
@@ -382,71 +277,7 @@ mod golden_thread {
             thread: thread(),
             intent: intent_,
         };
-        snap(
-            "intent_send_steer",
-            &send(Intent::Send {
-                text: "use the other test".to_owned(),
-                delivery: Delivery::Steer,
-                attachments: vec![],
-            }),
-        );
-        snap(
-            "intent_send_queue",
-            &send(Intent::Send {
-                text: "then the docs".to_owned(),
-                delivery: Delivery::Queue,
-                attachments: vec![],
-            }),
-        );
-        snap(
-            "intent_send_attachments",
-            &send(Intent::Send {
-                text: "what is wrong here?".to_owned(),
-                delivery: Delivery::Steer,
-                attachments: vec![
-                    "/Users/me/.slopty/drop/x/shot.png".to_owned(),
-                    "/work/notes.md".to_owned(),
-                ],
-            }),
-        );
-        snap(
-            "intent_send_at",
-            &send(Intent::Send {
-                text: "Run the nightly checks".to_owned(),
-                delivery: Delivery::At { at_ms: ms(1_800_000) },
-                attachments: Vec::new(),
-            }),
-        );
-        snap("intent_withdraw", &send(Intent::Withdraw { pending: intent() }));
-        snap(
-            "intent_edit",
-            &send(Intent::Edit {
-                pending: intent(),
-                text: "then the README".to_owned(),
-                attachments: vec!["/tmp/slopty-attachments/notes.md".to_owned()],
-            }),
-        );
-        snap("intent_promote", &send(Intent::Promote { pending: intent() }));
-        snap("intent_move", &send(Intent::Move { pending: intent(), before: None }));
-        snap("intent_interrupt", &send(Intent::Interrupt));
-        snap(
-            "intent_answer",
-            &send(Intent::Answer {
-                ask: AskId("ask-1".to_owned()),
-                choice: "always".to_owned(),
-                message: Some("fine".to_owned()),
-            }),
-        );
-        snap("intent_set_model", &send(Intent::SetModel { model: "claude-opus-5-5".to_owned() }));
-        snap("intent_set_mode", &send(Intent::SetMode { mode: "plan".to_owned() }));
-        snap("intent_set_effort", &send(Intent::SetEffort { effort: "high".to_owned() }));
-        snap("intent_aside", &send(Intent::Aside));
-        snap("intent_discard", &send(Intent::Discard));
-        snap("intent_keep_aside", &send(Intent::KeepAside));
-        snap("intent_fork", &send(Intent::Fork { after: Some(TurnId(3)) }));
-        snap("intent_fork_whole", &send(Intent::Fork { after: None }));
         snap("intent_seen", &send(Intent::Seen { turn: TurnId(3) }));
-        snap("intent_draft", &send(Intent::Draft { text: "and the README".to_owned() }));
         snap("intent_name", &send(Intent::Name { title: "Release 0.9".to_owned() }));
     }
 
@@ -454,7 +285,6 @@ mod golden_thread {
     fn outcomes() {
         let done = |outcome| IntentDone { id: intent(), outcome };
         snap("outcome_done", &done(Outcome::Done));
-        snap("outcome_accepted", &done(Outcome::Accepted));
         snap("outcome_started", &done(Outcome::Started { thread: thread() }));
         snap(
             "outcome_refused",
@@ -462,7 +292,6 @@ mod golden_thread {
                 reason: "Your draft in the terminal is in the way".to_owned(),
             }),
         );
-        snap("outcome_unsupported", &done(Outcome::Unsupported { cap: Cap::named(Cap::SET_MODE) }));
         snap(
             "outcome_setup_failed",
             &done(Outcome::SetupFailed {
@@ -519,13 +348,6 @@ mod golden_thread {
     /// Every action, one frame.
     #[test]
     fn actions() {
-        let answered = RequestState::Answered {
-            by: Answerer {
-                client: Some(ClientId::from_uuid(Uuid::from_u128(0x42))),
-                name: "iPad".to_owned(),
-            },
-            choice: "allow".to_owned(),
-        };
         let actions = vec![
             Action::Meta(Box::new(meta())),
             Action::Status(status()),
@@ -586,28 +408,8 @@ mod golden_thread {
                 ItemBody::Extra { kind: "queue-operation".to_owned(), json: clip("{}") },
             )),
             Action::ItemRemoved { item: ItemId("x1".to_owned()) },
-            Action::RequestOpened(Box::new(request())),
-            Action::RequestResolved { id: AskId("ask-1".to_owned()), state: answered },
-            Action::RequestResolved {
-                id: AskId("ask-2".to_owned()),
-                state: RequestState::Released,
-            },
-            Action::RequestResolved {
-                id: AskId("ask-3".to_owned()),
-                state: RequestState::Withdrawn,
-            },
-            Action::PendingSet(vec![
-                pending(),
-                Pending {
-                    intent: IntentId::from_uuid(Uuid::from_u128(0x1e8)),
-                    text: "look".to_owned(),
-                    attachments: vec![],
-                    delivery: Delivery::Steer,
-                    state: PendingState::Held {
-                        reason: "Your draft in the terminal is in the way".to_owned(),
-                    },
-                },
-            ]),
+            Action::QueuedSet(vec!["and the docs".to_owned(), "then the README".to_owned()]),
+            Action::QueuedSet(Vec::new()),
             Action::PlanSet(Some(Plan {
                 text: Some(clip("Three steps")),
                 steps: vec![Step {
@@ -627,22 +429,8 @@ mod golden_thread {
                     WallMs::from_millis(1_727_000_000_000),
                 )
             }]),
-            Action::MetersSet(meters()),
-            Action::CommandsSet(vec![Command {
-                name: "compact".to_owned(),
-                description: "Compact the context".to_owned(),
-                argument_hint: Some("[instructions]".to_owned()),
-                source: "built-in".to_owned(),
-                skill: false,
-            }]),
             Action::Truncated { after: Some(TurnId(1)) },
             Action::Truncated { after: None },
-            Action::Snapshot {
-                turn: TurnId(1),
-                edge: Edge::After,
-                tree: TreeRef("9f2e".to_owned()),
-            },
-            Action::ToReview(true),
             Action::ScreensSet(vec![
                 screen(),
                 AgentScreen {
@@ -653,34 +441,15 @@ mod golden_thread {
                 },
             ]),
             Action::ScreensSet(Vec::new()),
-            Action::PullSeen(Some(pull_seen())),
-            Action::PullSeen(None),
             Action::Seen(TurnId(3)),
-            Action::DraftSet(slopty_proto::thread::wire::Draft {
-                text: "and the README".to_owned(),
+            Action::DraftSet(Some(Draft {
+                text: "and the README [Image #2]".to_owned(),
+                images: vec![DraftImage { n: 2, image: image() }],
                 at_ms: ms(1_727_000_000_900),
-            }),
-            Action::DraftSet(slopty_proto::thread::wire::Draft {
-                text: String::new(),
-                at_ms: ms(1_727_000_001_000),
-            }),
+            })),
+            Action::DraftSet(None),
         ];
         snap("frame_actions", &ThreadFrame::Actions { epoch: 1, first: 8, next: 40, actions });
-    }
-
-    /// A branch's pull request with a failed check, as the worker sums it up.
-    fn pull_seen() -> PullSeen {
-        PullSeen {
-            forge: slopty_proto::git::Forge::GitHub,
-            number: 42,
-            url: "https://github.com/o/r/pull/42".to_owned(),
-            title: "Fix the login".to_owned(),
-            base: "main".to_owned(),
-            stands: PullStands::ChecksFailed,
-            failed: 1,
-            failed_first: Some("lint".to_owned()),
-            running: 1,
-        }
     }
 
     /// Every typed tool detail, and the user message's parts.
@@ -796,46 +565,10 @@ mod golden_thread {
         );
     }
 
-    /// The work an agent does beside its turn: task rows, call timers, the goal, notices,
-    /// rules, its agents, context categories and the surfaces a mod draws, plus the verbs.
+    /// The work an agent does beside its turn: task rows, call timers, the turn's live line and
+    /// context categories.
     #[test]
     fn work() {
-        let send = |intent_: Intent| ThreadRequest::Intent {
-            id: intent(),
-            thread: thread(),
-            intent: intent_,
-        };
-        snap("intent_stop_task", &send(Intent::StopTask { task: "b1".to_owned() }));
-        snap(
-            "intent_background",
-            &send(Intent::Background { item: Some(ItemId("toolu_3".to_owned())) }),
-        );
-        snap("intent_shell", &send(Intent::Shell { command: "pwd".to_owned() }));
-        snap("intent_rewind", &send(Intent::Rewind { turn: TurnId(2) }));
-        snap("intent_rewind_conversation", &send(Intent::RewindConversation { turn: TurnId(2) }));
-        snap("intent_side", &send(Intent::Side { question: "Which test covers this?".to_owned() }));
-        snap("intent_mcp_reconnect", &send(Intent::McpReconnect { server: "github".to_owned() }));
-        snap(
-            "intent_mcp_enable",
-            &send(Intent::McpEnable { server: "github".to_owned(), enabled: false }),
-        );
-        snap(
-            "intent_rule",
-            &send(Intent::Rule(RuleChange {
-                add: true,
-                behavior: Rule::ALLOW.to_owned(),
-                rule: "Bash(cargo test:*)".to_owned(),
-                scope: Rule::LOCAL.to_owned(),
-            })),
-        );
-        snap(
-            "intent_surface",
-            &send(Intent::Surface {
-                surface: "deploy".to_owned(),
-                element: "go".to_owned(),
-                event: SurfaceEvent::Input("prod".to_owned()),
-            }),
-        );
         let actions = vec![
             Action::ItemCompleted(item(
                 "task:b1:1",
@@ -863,106 +596,24 @@ mod golden_thread {
                     title: Some("Read report.pdf · pages 1-3".to_owned()),
                 },
             },
-            Action::TaskOutput { task: "b1".to_owned(), output: clip("ok\n") },
-            Action::ActivitySet(Some(Activity {
-                tokens: 2_100,
-                thinking_since: Some(ms(40)),
-                thought_ms: Some(3_000),
-                phrase: Some("Pondering".to_owned()),
-                quiet_since: Some(ms(41)),
-            })),
-            Action::ActivitySet(None),
-            Action::GoalSet(Some(Goal {
-                condition: "all tests pass".to_owned(),
-                iterations: 2,
-                set_ms: ms(1),
-                tokens_at_start: 100,
-                last_reason: Some("2 failing".to_owned()),
-            })),
-            Action::GoalSet(None),
-            Action::Notified(AgentNote {
-                key: "update".to_owned(),
-                text: "Update ready".to_owned(),
-                priority: "low".to_owned(),
-                color: Some("warning".to_owned()),
-                at_ms: ms(50),
-                until_ms: Some(ms(8_050)),
-            }),
-            Action::Suggested(Some("run the tests".to_owned())),
-            Action::Suggested(None),
-            Action::Side(SideExchange {
-                intent: intent(),
-                question: "Which test covers this?".to_owned(),
-                answer: Some("the codec's round trip".to_owned()),
-                failed: None,
-                at_ms: ms(52),
-            }),
-            Action::RulesSet(Rules {
-                rules: vec![Rule {
-                    behavior: Rule::DENY.to_owned(),
-                    text: "Bash(rm:*)".to_owned(),
-                    source: Rule::PROJECT.to_owned(),
-                    description: None,
-                    editable: true,
-                    in_effect: true,
-                }],
-                directories: vec!["/srv/shared".to_owned()],
-            }),
-            Action::StatusLine(Some("main ✓ 42%".to_owned())),
-            Action::StatusLine(None),
-            Action::AgentsSet(vec![SubagentKind {
-                name: "Explore".to_owned(),
-                description: "Searches the code".to_owned(),
-                model: Some("haiku".to_owned()),
-            }]),
-            Action::McpServersSet(vec![McpServer {
-                name: "github".to_owned(),
-                status: McpServer::FAILED.to_owned(),
-                error: Some("Connection closed".to_owned()),
-                source: Some("user".to_owned()),
-            }]),
-            Action::ContextSet(ContextUsage {
-                categories: vec![
-                    ContextCategory {
-                        name: "Messages".to_owned(),
-                        tokens: 40_000,
-                        free: false,
-                        color: Some("purple".to_owned()),
-                    },
-                    ContextCategory {
-                        name: "Free space".to_owned(),
-                        tokens: 160_000,
-                        free: true,
-                        color: None,
-                    },
-                ],
-                tokens: 40_000,
-                window: 200_000,
-                auto_compact_bp: Some(9_200),
-            }),
-            Action::SurfaceSet(Surface {
-                id: "deploy".to_owned(),
-                kind: Surface::PANE.to_owned(),
-                plugin: "ship".to_owned(),
-                title: Some("Deploy".to_owned()),
-                text: None,
-                tree: "{\"type\":\"button\",\"id\":\"go\"}".to_owned(),
-                until_ms: None,
-            }),
-            Action::SurfaceGone { id: "deploy".to_owned() },
         ];
         snap("frame_work", &ThreadFrame::Actions { epoch: 1, first: 40, next: 60, actions });
     }
 
-    /// A review asked for, sent, and a change kept and put back.
+    /// A review asked for, and sent.
     #[test]
     fn review() {
         snap(
             "review_request",
-            &ThreadRequest::Review { thread: thread(), scope: ReviewScope::Turn(TurnId(2)) },
+            &ThreadRequest::Review {
+                thread: thread(),
+                scope: ReviewScope::WorkingTree(Against::Base),
+            },
         );
-        snap("review_since", &ReviewScope::Since(TurnId(1)));
-        snap("review_kept", &ReviewScope::Kept);
+        snap(
+            "review_range",
+            &ReviewScope::Range { base: "main".to_owned(), head: "fix-login".to_owned() },
+        );
         let hunk = Hunk {
             old_start: 3,
             old_lines: 1,
@@ -973,7 +624,7 @@ mod golden_thread {
         };
         let patch = Patch { hunks: vec![hunk], added: 2, removed: 1, clipped_lines: 0, full: None };
         let review = Review {
-            scope: ReviewScope::Kept,
+            scope: ReviewScope::WorkingTree(Against::Head),
             from: Some(TreeRef("4b825dc6".to_owned())),
             to: Some(TreeRef("9d1e0f3a".to_owned())),
             files: vec![
@@ -1023,20 +674,6 @@ mod golden_thread {
             absent: None,
         };
         snap("review_frame", &ThreadFrame::Review(Box::new(review)));
-        let pick = Pick {
-            path: "src/lib.rs".to_owned(),
-            from: Some("aa11".to_owned()),
-            stamp: Some("bb22".to_owned()),
-            hunks: vec![0],
-            old_path: None,
-        };
-        snap("review_keep", &Intent::Keep(pick.clone()));
-        snap("review_revert", &Intent::Revert(Pick { hunks: vec![], ..pick }));
-        let asked = Intent::Review {
-            from: TreeRef("4b825dc".to_owned()),
-            to: TreeRef("9d1e7aa".to_owned()),
-        };
-        snap("review_by_agent", &asked);
     }
 
     /// The thread messages as they ride the control stream and open a stream of their own.
@@ -1060,7 +697,7 @@ mod golden_thread {
         snap("link_worker_threads", &WorkerMsg::Threads(delta));
         snap(
             "link_worker_intent_done",
-            &WorkerMsg::IntentDone(IntentDone { id: intent(), outcome: Outcome::Accepted }),
+            &WorkerMsg::IntentDone(IntentDone { id: intent(), outcome: Outcome::Done }),
         );
         snap(
             "link_worker_setting_up",
@@ -1150,10 +787,6 @@ mod golden_thread {
                 answered: true,
             }),
             seen: TurnId(1),
-            draft: Some(slopty_proto::thread::wire::Draft {
-                text: "then the README".to_owned(),
-                at_ms: ms(2_400),
-            }),
             ..state().row(ms(2_500))
         };
         snap(
@@ -1187,14 +820,7 @@ mod golden_thread {
         let ranked = Ranked { at, rung: Rung::NeedsYou, since_ms: ms(1_500) };
         let standing = Standing {
             rung: Rung::NeedsYou,
-            counts: Counts {
-                needs_you: 1,
-                failed: 2,
-                to_review: 3,
-                working: 4,
-                waiting: 5,
-                idle: 6,
-            },
+            counts: Counts { needs_you: 1, failed: 2, working: 4, waiting: 5, idle: 6 },
             top: Some(at),
             since_ms: ms(1_500),
         };
@@ -1266,7 +892,6 @@ mod golden_thread {
         use slopty_proto::orchestration::TermRef;
         use slopty_proto::push::{PushBody, PushDevice};
         use slopty_proto::server::ToServer;
-        use slopty_proto::thread::AskId;
         use slopty_proto::thread::attention::{Notice, NoticeKind, Subject, ThreadAt};
         let client = ClientId::from_uuid(Uuid::from_u128(0xc11e));
         let device = PushDevice {
@@ -1288,12 +913,7 @@ mod golden_thread {
             worked_ms: None,
             via: None,
         };
-        let ask = Some(AskId("toolu_01".to_owned()));
-        let body = |ask, picks, quiet| PushBody { notice: notice.clone(), ask, picks, quiet };
-        snap("push_body", &body(ask.clone(), Vec::new(), false));
-        snap("push_body_quiet", &body(ask.clone(), Vec::new(), true));
-        let picks = ["Postgres", "SQLite"].map(str::to_owned).to_vec();
-        snap("push_body_picks", &body(ask, picks, false));
+        snap("push_body", &PushBody { notice });
         let program = Notice {
             kind: NoticeKind::NeedsYou,
             about: Subject::Terminal(TermRef { worker, session }),
@@ -1302,10 +922,7 @@ mod golden_thread {
             worked_ms: None,
             via: None,
         };
-        snap(
-            "push_body_program",
-            &PushBody { notice: program, ask: None, picks: Vec::new(), quiet: false },
-        );
+        snap("push_body_program", &PushBody { notice: program });
         snap("push_pushable", &slopty_proto::server::FromServer::Pushable(false));
     }
 }

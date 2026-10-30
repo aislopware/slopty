@@ -154,8 +154,8 @@ tools and its own judgement. Slopty adds reach and hearing, not a workflow.
 - A read is bounded so a model can take it in at once: a message cut to 4000 characters, an
   output to its last 1000, the read stopping at the first whole turn past 48 000 characters.
   `truncated`, `next` and `skipped` say what was left out.
-- The open requests come with the read. The person answers one with `AnswerRequest`
-  (`slopty agent answer`); there is no tool for it, and the server refuses it from an agent.
+- A read carries no requests: the agent asks in its TUI and takes the answer there, so no
+  verb, tool or command answers one (2026-10-30, `agents.md`, "TUI-first", *What went*).
 
 
 **An agent's worktree is made by its worker.** ✅ 2026-10-01, narrowed 2026-10-13

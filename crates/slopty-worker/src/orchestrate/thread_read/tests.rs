@@ -3,17 +3,15 @@ use std::collections::BTreeMap;
 use slopty_core::WallMs;
 use slopty_proto::orchestration::{ReadEntry, ThreadRead, ThreadView};
 use slopty_proto::thread::{
-    AgentId, AskId, Cap, Changed, Choice, Clipped, ContentRef, Drive, Effect, Item, ItemBody,
-    ItemId, Notice, Phase, Request, RequestState, ThreadId, ThreadMeta, ThreadState, ToolCall,
-    ToolState, Turn, TurnId, TurnState, Usage, UserMessage, kind,
+    AgentId, Changed, Clipped, ContentRef, Drive, Item, ItemBody, ItemId, Notice, Phase, ThreadId,
+    ThreadMeta, ThreadState, ToolCall, ToolState, Turn, TurnId, TurnState, Usage, UserMessage,
+    kind,
 };
 
 use super::*;
 
 fn state() -> ThreadState {
     ThreadState::new(ThreadMeta {
-        modes: Vec::new(),
-        efforts: Vec::new(),
         id: ThreadId::derived(&["read"]),
         agent: AgentId::named(AgentId::PI),
         agent_version: "0.9".to_owned(),
@@ -22,10 +20,7 @@ fn state() -> ThreadState {
         title: "Fix the build".to_owned(),
         parent: None,
         origin: ThreadMeta::ORCHESTRATED.to_owned(),
-        forked_from: None,
         drive: Drive::named(Drive::DRIVEN),
-        caps: vec![Cap::named(Cap::QUEUE)],
-        models: Vec::new(),
         facts: BTreeMap::new(),
         created_ms: WallMs::from_millis(1),
     })
@@ -41,8 +36,6 @@ fn turn(n: u32, state: TurnState) -> Turn {
         usage: Usage::default(),
         models: Vec::new(),
         changed: Changed::default(),
-        before: None,
-        after: None,
     }
 }
 
@@ -51,12 +44,7 @@ fn item(id: &str, turn: u32, body: ItemBody) -> Item {
 }
 
 fn said(words: &str) -> ItemBody {
-    ItemBody::User(UserMessage {
-        text: Clipped::whole(words),
-        images: Vec::new(),
-        command: None,
-        intent: None,
-    })
+    ItemBody::User(UserMessage { text: Clipped::whole(words), images: Vec::new(), command: None })
 }
 
 fn answer(words: &str) -> ItemBody {
@@ -203,10 +191,8 @@ fn a_read_is_bounded_and_says_what_it_left_out() {
 }
 
 /// A read from a turn the worker no longer holds starts at the first it holds, and says so.
-/// Only open requests come with it, each with the choices it offers, and a small question with
-/// the picks its note's buttons answer by their place.
 #[test]
-fn a_read_says_what_it_skipped_and_offers_the_open_requests() {
+fn a_read_says_what_it_skipped() {
     let mut s = worked();
     s.older = true;
     s.turns.remove(0);
@@ -214,55 +200,4 @@ fn a_read_says_what_it_skipped_and_offers_the_open_requests() {
     assert!(from_start.skipped);
     let held = read(&s, WorkerId::new(), ThreadView::Messages, Some(TurnId(1)));
     assert!(!held.skipped, "nothing after turn 1 was let go");
-
-    let ask = |id: &str, state: RequestState| Request {
-        id: AskId(id.to_owned()),
-        item: None,
-        kind: Request::APPROVAL.to_owned(),
-        title: "Run cargo test?".to_owned(),
-        text: None,
-        options: vec![Choice {
-            id: "allow".to_owned(),
-            label: "Allow".to_owned(),
-            effect: Effect::Allow,
-            scope: None,
-            folders: Vec::new(),
-            stops: false,
-        }],
-        questions: Vec::new(),
-        proposed: None,
-        schema_json: None,
-        url: None,
-        reason: None,
-        state,
-        opened_ms: WallMs::ZERO,
-        until_ms: None,
-        needs_presence: false,
-    };
-    s.requests = vec![ask("1", RequestState::Withdrawn), ask("2", RequestState::Open)];
-    let asking = read(&s, WorkerId::new(), ThreadView::Messages, None);
-    assert_eq!(asking.requests.len(), 1);
-    assert_eq!(asking.requests[0].ask, AskId("2".to_owned()));
-    assert_eq!(asking.requests[0].choices[0].id, "allow");
-    assert!(asking.requests[0].picks.is_empty(), "a yes or no takes Allow and Deny");
-
-    let mut question = ask("3", RequestState::Open);
-    question.kind = Request::QUESTION.to_owned();
-    question.questions = vec![slopty_proto::thread::detail::Question {
-        text: "Layout?".to_owned(),
-        header: None,
-        options: ["Split", "Unified"]
-            .map(|label| slopty_proto::thread::detail::Offered {
-                label: label.to_owned(),
-                description: None,
-                preview: None,
-            })
-            .to_vec(),
-        multi_select: false,
-    }];
-    s.requests = vec![question.clone()];
-    let asked = read(&s, WorkerId::new(), ThreadView::Messages, None);
-    let picks = &asked.requests[0].picks;
-    assert_eq!(picks.iter().map(|p| p.label.as_str()).collect::<Vec<_>>(), ["Split", "Unified"]);
-    assert_eq!(picks, &slopty_proto::thread::wire::NoteChoice::of(&question));
 }

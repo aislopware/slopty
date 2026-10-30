@@ -17,12 +17,12 @@ use gpui::{Context, Subscription, Task};
 use slopty_client::WorkerKey;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::wire::{Intent, IntentDone, ThreadRow};
-use slopty_proto::thread::{IntentId, Liveness, Phase, ThreadId, ThreadState, TurnState, Wait};
+use slopty_proto::thread::{IntentId, Liveness, Phase, ThreadId, ThreadState, TurnState};
 use slopty_view_rpc::{RpcError, RpcReply, methods};
 use tokio::sync::mpsc;
 
 use super::WorkspaceView;
-use crate::view_model::{Ask, Feed, Pull, Transcript, rows, transcript};
+use crate::view_model::{Ask, Feed, Transcript, rows, transcript};
 
 mod blobs;
 #[cfg(test)]
@@ -128,27 +128,13 @@ fn refused_at(id: IntentId) -> Option<u64> {
 }
 
 /// When the usage limit holding `state`'s agent lifts, while one holds it: its failed last turn's
-/// own word, else the reset of its most used rate window.
+/// own word.
 fn limit_resets(state: &ThreadState) -> Option<DateTime<Utc>> {
-    let limited = state.status.wait.as_ref().is_some_and(|wait| wait.kind == Wait::LIMIT);
-    let failed_until = state.turns.last().and_then(|turn| match turn.state {
+    let until = state.turns.last().and_then(|turn| match turn.state {
         TurnState::Failed { until_ms, .. } => until_ms,
         _ => None,
-    });
-    if let Some(until) = failed_until.filter(|_| limited || state.status.phase == Phase::Failed) {
-        return Some(rows::time(until));
-    }
-    if !limited {
-        return None;
-    }
-    state
-        .meters
-        .limits
-        .iter()
-        .filter(|limit| limit.used_bp >= 10_000)
-        .filter_map(|limit| limit.resets_ms)
-        .max()
-        .map(rows::time)
+    })?;
+    (state.status.phase == Phase::Failed).then(|| rows::time(until))
 }
 
 /// How many bytes of words an excerpt of a search keeps on each side of its match.
@@ -283,7 +269,6 @@ impl WorkspaceView {
             self.workers.keys().filter_map(|key| self.surface_device_row(*key, now)).collect();
         let mut chats = Vec::new();
         let mut sessions = Vec::new();
-        let mut pulls = Vec::new();
         let mut folders: BTreeMap<(String, String), Folder> = BTreeMap::new();
         let mut links = Vec::new();
         let mut leases = std::mem::take(&mut self.view_model.leases);
@@ -320,12 +305,7 @@ impl WorkspaceView {
             }
             let place = self.view_place(device, row.cwd.as_deref(), row.repo.as_deref());
             chat.space_id = place.as_deref().map(|path| self.view_space_id(device, path));
-            chat.config = Some(self.chat_config(device, row));
-            if let Some(summary) = rows::pull(row, chat.branch.as_deref()) {
-                let folders = [row.cwd.clone(), row.repo.clone()].into_iter().flatten().collect();
-                let branch = chat.branch.clone();
-                pulls.push(Pull { device: device.clone(), folders, branch, summary });
-            }
+            chat.config = Some(Self::chat_config(row));
             chat.archived = self.surface_archived(&id);
             chat.id.clone_from(&id);
             if let Some(parent) = rows::parent(row) {
@@ -357,9 +337,9 @@ impl WorkspaceView {
                 now.checked_sub_signed(ago.unwrap_or_default()).unwrap_or(now)
             });
             let mut session = rows::session(row, device, running, heard, leased);
-            let unsent = self.held_hub(*key).map_or(0, |hub| {
-                hub.read(cx).threads().outbox().of(row.id).filter(|s| s.outcome.is_none()).count()
-            });
+            let unsent = self
+                .held_hub(*key)
+                .map_or(0, |hub| hub.read(cx).threads().outbox().of(row.id).count());
             links.push(self.view_chat_link(&id, *key, unsent));
             session.chat_id = id;
             chats.push(chat);
@@ -413,7 +393,6 @@ impl WorkspaceView {
         let workers_up = (!self.workers.is_empty())
             .then(|| self.workers.values().any(|worker| worker.status.is_up()));
         feed.links(workers_up, links);
-        feed.pulls(pulls);
         feed.sidebar(self.sidebar_state());
         // A thread whose state has not come says nothing yet: an empty transcript would stand as
         // its whole history, and the real one, once it comes, as live arrivals. A chat with no
@@ -470,8 +449,8 @@ impl WorkspaceView {
         }
     }
 
-    /// The transcript of the chat `chat` as its thread stands here, with how full its agent's
-    /// context is and whether older turns are still on their way.
+    /// The transcript of the chat `chat` as its thread stands here, and whether older turns
+    /// are still on their way.
     fn view_transcript(&self, chat: &str, cx: &gpui::App) -> Option<Transcript> {
         let (key, thread) = self.view_model.followed.get(chat).copied()?;
         let hub = self.held_hub(key)?.read(cx);
@@ -485,22 +464,14 @@ impl WorkspaceView {
                 .map(|row| transcript::ChildRun::of(row, child.to_string()))
         };
         let host = self.workers.get(&key).map(|worker| worker.name.clone()).unwrap_or_default();
-        // The chat a forked thread came from, for its seam: its id and its title.
-        let source = |thread: ThreadId| {
-            let title = self
-                .hubs()
-                .find_map(|(_, hub)| hub.read(cx).threads().rows().rows.get(&thread).cloned())
-                .map(|row| row.title)
-                .unwrap_or_default();
-            Some((thread.to_string(), title))
-        };
         let look =
-            transcript::Look::new(&device).host(&host).source(source).children(running).whole(
-                |content| match hub.whole(content)?.as_ref() {
-                    slopty_proto::thread::wire::Expanded::Text(text) => Some(text.clone()),
-                    _ => None,
-                },
-            );
+            transcript::Look::new(&device).host(&host).children(running).whole(|content| match hub
+                .whole(content)?
+                .as_ref()
+            {
+                slopty_proto::thread::wire::Expanded::Text(text) => Some(text.clone()),
+                _ => None,
+            });
         let mut entries = transcript::entries(state, &look);
         // The table is the worker's word on whether the agent works now; a mirror drawn from the
         // cache may still hold a turn that ended since.
@@ -508,7 +479,6 @@ impl WorkspaceView {
             .get(&thread)
             .is_some_and(|row| rows::running(row) || row.status.phase == Phase::NeedsYou);
         transcript::settle(&mut entries, live);
-        transcript::asks(state, &device, &mut entries);
         // What the worker last turned down, until the thread moves past it.
         let last = state.items.last().map_or(0, |item| item.at_ms.as_millis());
         // The mark the app keeps by itself (seen) is no act of the person's.
@@ -521,20 +491,8 @@ impl WorkspaceView {
             let at = i64::try_from(at).unwrap_or(i64::MAX);
             transcript::refused(&refusal.words, at, &device, &mut entries);
         }
-        let meters = &state.meters;
-        let context_usage = (meters.context_tokens.is_some() || meters.context_window.is_some())
-            .then_some(slopty_view_proto::ContextUsage {
-                tokens: meters.context_tokens,
-                window: meters.context_window,
-            });
         let history_pending = state.older && hub.linked();
-        Some(Transcript {
-            entries,
-            context_usage,
-            history_pending,
-            limits: rows::limits(&meters.limits),
-            limit_resets_at: limit_resets(state),
-        })
+        Some(Transcript { entries, history_pending, limit_resets_at: limit_resets(state) })
     }
 
     /// Ask for what the followed threads' transcripts still lack: their older turns, and the
@@ -1083,19 +1041,6 @@ mod tests {
             .into_iter()
             .any(|request| matches!(request, ThreadRequest::Page { thread: t, .. } if t == thread));
         assert!(paged, "its older turns are asked for");
-    }
-
-    /// A transcript says how full its agent's context is.
-    #[gpui::test]
-    fn a_transcript_says_how_full_its_context_is(cx: &mut gpui::TestAppContext) {
-        let mut state = fixtures::thread("tools");
-        state.meters.context_tokens = Some(50_000);
-        state.meters.context_window = Some(200_000);
-        let (workspace, cx, _rx) = holding(&state, cx);
-        let chat = follow(&workspace, cx, &state);
-        let said = workspace.read_with(cx, |v, cx| v.view_transcript(&chat, cx)).expect("said");
-        let usage = said.context_usage.expect("its context");
-        assert_eq!((usage.tokens, usage.window), (Some(50_000), Some(200_000)));
     }
 
     /// "Show full output" fetches what the worker cut, whole.

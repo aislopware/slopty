@@ -167,6 +167,7 @@ enum Cmd {
     Detach { client: ClientId, sink: Option<ClientSink> },
     Reserve { client: ClientId },
     Request { client: ClientId, req: TermRequest, at: tokio::time::Instant },
+    Submit { client: ClientId, text: String, at: tokio::time::Instant },
     DragEnter { client: ClientId, drag: DragId, items: Vec<DragItem>, fetch: DragFetch },
     DragData { drag: DragId, data: DragData },
     Snapshot { reply: oneshot::Sender<Snapshot> },
@@ -335,6 +336,7 @@ impl std::fmt::Debug for Cmd {
             Self::Detach { .. } => "Detach",
             Self::Reserve { .. } => "Reserve",
             Self::Request { .. } => "Request",
+            Self::Submit { .. } => "Submit",
             Self::DragEnter { .. } => "DragEnter",
             Self::DragData { .. } => "DragData",
             Self::Snapshot { .. } => "Snapshot",
@@ -392,6 +394,18 @@ impl SessionHandle {
     /// Forward a terminal request from a client.
     pub fn request(&self, client: ClientId, req: TermRequest) -> Result<(), WorkerError> {
         self.send(Cmd::Request { client, req, at: tokio::time::Instant::now() })
+    }
+
+    /// Type `text` into the session's program as one message, for `client`: a paste (bracketed
+    /// when the program asked for it), then Enter as a write of its own [`SUBMIT_ENTER`] later,
+    /// since an Ink TUI (Claude Code) reads an Enter that arrives with the paste as part of it.
+    /// The session's other input waits until the Enter is written.
+    ///
+    /// No client sends this: only an orchestrating agent's `agent_tell` does, through the
+    /// worker, which first checks the agent waits at no dialog (`docs/decisions/agents.md`,
+    /// "TUI-first").
+    pub fn submit(&self, client: ClientId, text: String) -> Result<(), WorkerError> {
+        self.send(Cmd::Submit { client, text, at: tokio::time::Instant::now() })
     }
 
     /// `client`'s drag `drag` of `items` entered the terminal
@@ -935,10 +949,11 @@ struct Actor {
     arrivals: Option<watch::Receiver<u64>>,
     /// A paste event waiting for the paster's copy, and the viewers' input behind it.
     pasting: Option<paste::Pasting>,
-    /// A [`TermRequest::Submit`] whose words are written and whose Enter waits; the viewers'
+    /// A [`SessionHandle::submit`] whose words are written and whose Enter waits; the viewers'
     /// input waits behind it too.
     submitting: Option<Submitting>,
-    held: VecDeque<(ClientId, TermRequest, tokio::time::Instant)>,
+    /// The input waiting behind either, in order.
+    held: VecDeque<(ClientId, Held, tokio::time::Instant)>,
     /// The program asks for drops (Kitty drag and drop), and the drag or drop under way.
     drops: dnd::Drops,
 }
@@ -2205,9 +2220,16 @@ impl Actor {
             // Input waits, in order, behind a paste waiting for the paster's copy, and behind a
             // submit's Enter.
             Cmd::Request { client, req, at } if self.holds_input() && req.is_input() => {
-                self.held.push_back((client, req, at));
+                self.held.push_back((client, Held::Request(req), at));
             }
             Cmd::Request { client, req, at } => self.request(client, req, at),
+            Cmd::Submit { client, text, at } if self.holds_input() => {
+                self.held.push_back((client, Held::Submit(text), at));
+            }
+            Cmd::Submit { client, text, .. } => {
+                self.quiet_again();
+                self.submit(client, &text);
+            }
             Cmd::DragEnter { client, drag, items, fetch } => {
                 self.dnd(client, dnd::Act::Enter { drag, items, fetch: Some(fetch) });
             }
@@ -2311,8 +2333,14 @@ impl Actor {
     /// Send on the input held behind a paste or a submit, in order, while nothing holds it.
     fn release_held(&mut self) {
         while !self.holds_input() {
-            let Some((client, req, at)) = self.held.pop_front() else { break };
-            self.request(client, req, at);
+            let Some((client, held, at)) = self.held.pop_front() else { break };
+            match held {
+                Held::Request(req) => self.request(client, req, at),
+                Held::Submit(text) => {
+                    self.quiet_again();
+                    self.submit(client, &text);
+                }
+            }
         }
     }
 
@@ -2409,7 +2437,6 @@ impl Actor {
                 bytes = raw;
                 Ok(())
             }
-            TermRequest::Submit { text } => return self.submit(client, &text),
             TermRequest::Clear => {
                 // The scrollback goes as if the program had printed the erase: through the
                 // engine and the tap, so a checkpoint replay ends up in the same place. The
@@ -2490,7 +2517,16 @@ impl Actor {
     }
 }
 
-/// A [`TermRequest::Submit`]'s Enter, waiting ([`Actor::submitting`]).
+/// Input waiting behind a paste or a submit's Enter ([`Actor::held`]), in the order it came.
+#[derive(Debug)]
+enum Held {
+    /// A viewer's.
+    Request(TermRequest),
+    /// An agent's words ([`SessionHandle::submit`]).
+    Submit(String),
+}
+
+/// A [`SessionHandle::submit`]'s Enter, waiting ([`Actor::submitting`]).
 #[derive(Debug)]
 struct Submitting {
     /// Whose words they are.
@@ -2501,7 +2537,7 @@ struct Submitting {
 
 /// How long a submit's Enter waits after its words: an Ink TUI (Claude Code) reads an Enter
 /// that comes in the same read as a paste as part of the paste, and drops it.
-const SUBMIT_ENTER: Duration = Duration::from_millis(slopty_proto::terminal::SUBMIT_ENTER_MS);
+pub const SUBMIT_ENTER: Duration = Duration::from_millis(200);
 
 impl Actor {
     /// `client` sends `text`: its words go now as a paste, bracketed when the program asked for

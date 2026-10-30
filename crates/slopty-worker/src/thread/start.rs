@@ -93,12 +93,6 @@ impl Starter {
         if !known.iter().any(|a| start.agent.is(a)) {
             return Err(format!("{} is no agent this machine starts", start.agent.0));
         }
-        if !start.attachments.is_empty() {
-            return Err("a start takes no files: name them in its prompt".to_owned());
-        }
-        if !start.options.is_empty() {
-            return Err("a start takes no options here".to_owned());
-        }
         if !start.args.is_empty() && Self::resumed(start).is_none() {
             return Err(ONLY_RESUME.to_owned());
         }
@@ -160,6 +154,12 @@ impl Starter {
         if let Some(cli) = self.host.tools_cli() {
             args = slopty_agent::mcp::with_mcp(args, &cli);
             args = slopty_agent::hooks::with_relay(args, &cli, Path::new(&start.cwd));
+            // The mod that shows the TUI's prompt box in the inspector, relaying through the
+            // same CLI.
+            match agent::draft::install(&self.place.data, &cli) {
+                Ok(dir) => args = agent::draft::with_mod(args, &dir),
+                Err(e) => tracing::warn!(error = %e, "Claude Code's prompt-box mod unwritten"),
+            }
         }
         let version = installed.version.clone().unwrap_or_default();
         let thread = agent::thread_of(&native);
@@ -167,7 +167,6 @@ impl Starter {
             &native,
             &version,
             &start.cwd,
-            &[],
             WallMs::now(),
         );
         let meta = history.meta().clone();
@@ -236,12 +235,7 @@ impl Starter {
             title: start.prompt.as_deref().map(slopty_agent::title::title_of).unwrap_or_default(),
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
-            forked_from: None,
             drive: Drive::named(Drive::OBSERVED),
-            caps: Vec::new(),
-            models: Vec::new(),
-            modes: Vec::new(),
-            efforts: Vec::new(),
             facts: std::collections::BTreeMap::new(),
             created_ms: WallMs::now(),
         };

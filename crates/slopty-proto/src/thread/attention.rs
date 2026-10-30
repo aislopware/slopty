@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use slopty_core::{WallMs, WorkerId};
 
-use super::wire::{PullStands, ThreadRow};
+use super::wire::ThreadRow;
 use super::{Phase, ThreadId};
 use crate::orchestration::TermRef;
 
@@ -32,8 +32,6 @@ pub enum Rung {
     Waiting,
     /// Working on a turn.
     Working,
-    /// At rest, with changes in its tree the person has not kept.
-    ToReview,
     /// It stopped on an error.
     Failed,
     /// It waits on the person.
@@ -42,28 +40,18 @@ pub enum Rung {
 
 impl Rung {
     /// Every rung, highest first.
-    pub const DOWN: [Self; 6] =
-        [Self::NeedsYou, Self::Failed, Self::ToReview, Self::Working, Self::Waiting, Self::Idle];
+    pub const DOWN: [Self; 5] =
+        [Self::NeedsYou, Self::Failed, Self::Working, Self::Waiting, Self::Idle];
 
     /// Where the thread `row` stands.
     #[must_use]
     pub const fn of(row: &ThreadRow) -> Self {
-        if !row.requests.is_empty() {
-            return Self::NeedsYou;
-        }
         match row.status.phase {
             Phase::NeedsYou => Self::NeedsYou,
             Phase::Failed => Self::Failed,
             Phase::Working => Self::Working,
             Phase::Waiting => Self::Waiting,
-            // At rest, its pull request may wait on the person (a check failed, changes asked
-            // for, a conflict) or be ready to merge.
-            Phase::Idle | Phase::Done | Phase::Stopped => match &row.pull {
-                Some(pull) if pull.stands.needs_you() => Self::NeedsYou,
-                Some(pull) if matches!(pull.stands, PullStands::Ready) => Self::ToReview,
-                _ if row.to_review => Self::ToReview,
-                _ => Self::Idle,
-            },
+            Phase::Idle | Phase::Done | Phase::Stopped => Self::Idle,
         }
     }
 
@@ -73,7 +61,6 @@ impl Rung {
         match self {
             Self::NeedsYou => Some("Needs you"),
             Self::Failed => Some("Failed"),
-            Self::ToReview => Some("To review"),
             Self::Working => Some("Working"),
             Self::Waiting => Some("Background work"),
             Self::Idle => None,
@@ -88,8 +75,6 @@ pub struct Counts {
     pub needs_you: u32,
     /// Stopped on an error.
     pub failed: u32,
-    /// At rest with changes not kept.
-    pub to_review: u32,
     /// Working.
     pub working: u32,
     /// Waiting on their own work.
@@ -105,7 +90,6 @@ impl Counts {
         match rung {
             Rung::NeedsYou => self.needs_you,
             Rung::Failed => self.failed,
-            Rung::ToReview => self.to_review,
             Rung::Working => self.working,
             Rung::Waiting => self.waiting,
             Rung::Idle => self.idle,
@@ -122,7 +106,6 @@ impl Counts {
         let at = match rung {
             Rung::NeedsYou => &mut self.needs_you,
             Rung::Failed => &mut self.failed,
-            Rung::ToReview => &mut self.to_review,
             Rung::Working => &mut self.working,
             Rung::Waiting => &mut self.waiting,
             Rung::Idle => &mut self.idle,
@@ -135,7 +118,6 @@ impl Counts {
     pub const fn total(&self) -> u32 {
         self.needs_you
             .saturating_add(self.failed)
-            .saturating_add(self.to_review)
             .saturating_add(self.working)
             .saturating_add(self.waiting)
             .saturating_add(self.idle)

@@ -206,7 +206,6 @@ impl WorkspaceView {
     pub fn remove_worker(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         self.disconnect_worker(key, WorkerStatus::Connecting, cx);
         let Some(w) = self.workers.remove(&key) else { return };
-        self.faces.threads.forget_meters(key);
         for item in w.doc.items() {
             self.screens.remove(&item.id);
             self.titles.remove(&item.id);

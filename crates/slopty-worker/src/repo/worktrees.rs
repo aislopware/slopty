@@ -1278,9 +1278,7 @@ mod tests {
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: std::collections::BTreeMap::new(),
             worktree: worktree.map(NewWorktree::named),
         };
 

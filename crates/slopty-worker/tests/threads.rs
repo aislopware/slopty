@@ -10,7 +10,7 @@ mod threads {
     use slopty_core::WallMs;
     use slopty_proto::thread::wire::{Outcome, TableFrame, ThreadFrame};
     use slopty_proto::thread::{
-        Action, AgentId, Cap, Changed, Clipped, Cursor, Drive, IntentId, Item, ItemBody, ItemId,
+        Action, AgentId, Changed, Clipped, Cursor, Drive, IntentId, Item, ItemBody, ItemId,
         PartKey, TableState, ThreadId, ThreadMeta, ThreadState, Turn, TurnId, TurnState, Usage,
     };
     use slopty_worker::thread::log::Limits;
@@ -18,8 +18,6 @@ mod threads {
 
     fn meta() -> ThreadMeta {
         ThreadMeta {
-            modes: Vec::new(),
-            efforts: Vec::new(),
             id: ThreadId::new(),
             agent: AgentId::named(AgentId::CLAUDE_CODE),
             agent_version: "2.1.286".to_owned(),
@@ -28,10 +26,7 @@ mod threads {
             title: "Fix the build".to_owned(),
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
-            forked_from: None,
             drive: Drive::named(Drive::DRIVEN),
-            caps: vec![Cap::named(Cap::QUEUE)],
-            models: Vec::new(),
             facts: BTreeMap::new(),
             created_ms: WallMs::from_millis(1),
         }
@@ -47,8 +42,6 @@ mod threads {
             usage: Usage::default(),
             models: vec![],
             changed: Changed::default(),
-            before: None,
-            after: None,
         })
     }
 
@@ -523,21 +516,22 @@ mod threads {
         for _ in 0..3 {
             let outcome = host.intent(thread, send, |_| {
                 acted += 1;
-                (Outcome::Accepted, vec![turn(1)])
+                (Outcome::Done, vec![turn(1)])
             });
-            assert_eq!(outcome, Some(Outcome::Accepted));
+            assert_eq!(outcome, Some(Outcome::Done));
         }
         assert_eq!((acted, state(&host, thread).0.turns.len()), (1, 1));
         drop(host);
         let host = open(dir.path());
         let again = host.intent(thread, send, |_| panic!("acted on twice"));
-        assert_eq!(again, Some(Outcome::Accepted));
+        assert_eq!(again, Some(Outcome::Done));
         assert_eq!(host.start(id, || panic!("started twice")), Outcome::Started { thread });
     }
 
-    /// The person's own marks on a thread (their name for it, their words for a message)
+    /// The person's own marks on a thread (how far they have seen it, their name for it)
     /// outlive the thread being read again from the agent's session, after a worker restart
-    /// too.
+    /// too; what the agent's TUI held (its prompt box, its queue) does not, as its reader tells
+    /// it again.
     #[tokio::test]
     async fn the_persons_marks_outlive_a_read_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -545,13 +539,19 @@ mod threads {
         let meta = meta();
         let thread = meta.id;
         host.create(meta.clone()).unwrap();
-        let message = IntentId::new();
+        let draft = slopty_proto::thread::Draft {
+            text: "and then".to_owned(),
+            images: Vec::new(),
+            at_ms: WallMs::ZERO,
+        };
         host.apply(
             thread,
             vec![
                 turn(1),
+                Action::Seen(TurnId(1)),
                 Action::NameSet("Greetings".to_owned()),
-                Action::Said { message, words: "hello @there".to_owned() },
+                Action::DraftSet(Some(draft)),
+                Action::QueuedSet(vec!["next".to_owned()]),
             ],
         );
         drop(host);
@@ -561,7 +561,12 @@ mod threads {
         host.apply(thread, vec![turn(1)]);
         let (again, _) = state(&host, thread);
         assert_eq!(again.named, "Greetings", "the person's name for it stays");
-        assert_eq!(again.said.get(&message).map(String::as_str), Some("hello @there"));
+        assert_eq!(again.seen, TurnId(1), "and how far they saw it");
+        assert_eq!(
+            (again.draft, again.queued),
+            (None, Vec::<String>::new()),
+            "the TUI's are its own"
+        );
     }
 
     /// The seat an agent's thread was started at outlives the agent's own account of the
@@ -667,9 +672,7 @@ mod threads {
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: BTreeMap::new(),
             worktree: Some(NewWorktree::named("fix")),
         };
         let (id, other) = (IntentId::new(), IntentId::new());

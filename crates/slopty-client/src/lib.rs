@@ -9,8 +9,6 @@
 //! * [`server`] — [`server::spawn`]: the one link to the server, redialled after every drop.
 //! * [`items`] — [`items::ItemDoc`]: one worker's item registry, worker-authoritative, applied
 //!   optimistically; [`WorkerKey`] and [`ItemRef`] name a worker and an item on one.
-//! * [`meters`] — [`meters::PlanMeters`]: each machine's plan windows as its agents publish them,
-//!   the freshest per agent, for the status bar.
 //! * [`folders`] — [`folders::FolderPages`]: a folder's listing joined across its pages, asked for
 //!   as the person wants more; [`folders::FsOps`], the folder ops on their way to the worker.
 //! * [`xfer`] — files both ways: uploads of dropped files (resumed after a cut stream), downloads
@@ -54,7 +52,6 @@ pub mod handoff;
 mod ids;
 pub mod items;
 pub mod link;
-pub mod meters;
 pub mod pacing;
 pub mod relay;
 pub mod remote;

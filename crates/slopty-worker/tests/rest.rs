@@ -29,8 +29,6 @@ mod rest {
 
     fn meta() -> ThreadMeta {
         ThreadMeta {
-            modes: Vec::new(),
-            efforts: Vec::new(),
             id: ThreadId::new(),
             agent: AgentId::named(AgentId::CLAUDE_CODE),
             agent_version: "2.1.286".to_owned(),
@@ -39,10 +37,7 @@ mod rest {
             title: "Fix the build".to_owned(),
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
-            forked_from: None,
             drive: Drive::named(Drive::DRIVEN),
-            caps: Vec::new(),
-            models: Vec::new(),
             facts: BTreeMap::new(),
             created_ms: WallMs::from_millis(1),
         }
@@ -58,8 +53,6 @@ mod rest {
             usage: Usage::default(),
             models: vec![],
             changed: Changed::default(),
-            before: None,
-            after: None,
         })
     }
 

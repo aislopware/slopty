@@ -87,13 +87,9 @@ expression: "decode(\"auto\").snapshot()"
       ended_ms: 1793273785332
       models:
         - claude-haiku-5-5
-      requests: 3
       usage:
         input: 6
         cache_read: 49311
         cache_write: 8581
         output: 1051
         thinking: 703
-      context_tokens: 19967
-      mode: auto
-      stop: end_turn

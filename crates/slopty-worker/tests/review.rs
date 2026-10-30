@@ -10,11 +10,11 @@ mod review {
 
     use slopty_core::WallMs;
     use slopty_proto::thread::wire::{Against, Expanded, Review, ReviewScope};
-    use slopty_proto::thread::{AgentId, Drive, ThreadId, ThreadMeta, TurnId};
+    use slopty_proto::thread::{AgentId, Drive, ThreadId, ThreadMeta};
     use slopty_worker::repo::snapshot::Repo;
     use slopty_worker::thread::Host;
     use slopty_worker::thread::log::Limits;
-    use slopty_worker::thread::review::{NO_TURN_SNAPSHOTS, NOT_IN_GIT, Reviews};
+    use slopty_worker::thread::review::{NOT_IN_GIT, Reviews};
 
     fn git() -> PathBuf {
         slopty_worker::changes::git().expect("git on this machine").to_owned()
@@ -54,12 +54,7 @@ mod review {
             title: String::new(),
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
-            forked_from: None,
             drive: Drive::named(Drive::OBSERVED),
-            caps: Vec::new(),
-            models: Vec::new(),
-            modes: Vec::new(),
-            efforts: Vec::new(),
             facts: std::collections::BTreeMap::new(),
             created_ms: WallMs::ZERO,
         };
@@ -93,8 +88,6 @@ mod review {
             Expanded::Text(text) => assert!(text.starts_with("one"), "{text:?}"),
             other => panic!("{other:?}"),
         }
-        let turn = reviews.review(thread, ReviewScope::Turn(TurnId(1))).await;
-        assert_eq!(turn.absent.as_deref(), Some(NO_TURN_SNAPSHOTS));
         let outside = tempfile::tempdir().unwrap();
         let elsewhere = thread_in(&host, outside.path());
         let none = reviews.review(elsewhere, ReviewScope::WorkingTree(Against::Head)).await;

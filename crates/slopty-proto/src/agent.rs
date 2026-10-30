@@ -66,8 +66,6 @@ pub struct AgentEntry {
     pub wait: Option<Wait>,
     /// Its program has ended.
     pub ended: bool,
-    /// What it asks the person: its first open request's title.
-    pub asks: Option<String>,
     /// The last line it wrote.
     pub last: Option<String>,
     /// When it entered its phase, by its worker's clock.

@@ -410,9 +410,8 @@ task, plan or outcome of its own. The hub answers the agents' verbs itself
   runs there, when an agent opened or typed into it, or when the server does not know it. A
   terminal's token (`SLOPTY_SESSION_TOKEN`) proves which terminal a program speaks from, and so
   which agent is the parent of what it starts. Only the person sends a composer's message,
-  restarts a worker or changes settings; a request is answered in its agent's terminal alone, so
-  the hub refuses `AnswerRequest` from anyone. An agent tells and stops only agents of its own
-  tree.
+  restarts a worker or changes settings; a request is answered in its agent's terminal alone,
+  and no verb answers one. An agent tells and stops only agents of its own tree.
 - `AgentStart` picks the folder, or has the worker clone the repository named
   (`Verb::CloneRepo`), then forwards a `StartThread` at a seat derived from the caller and its
   idempotency key, so a repeat takes the same seat. The start's mode is the person's
@@ -900,8 +899,8 @@ comes back is found again by the chat that asks (`surfaces::live::terminals`).
 
 **The right pane and the dock** (`workspace::view_model::surfaces`) answer the shell's calls
 through each worker's own verbs. Beside a session's terminal the inspector reads its tray
-(`slopty.WatchWork`) and its dock (`slopty.WatchDock`: the turn's live line, the mode, the
-context and the subagent kinds `@` lists), and neither asks the agent anything:
+(`slopty.WatchWork`: the background work at it now) and its dock (`slopty.WatchDock`: the
+agent's prompt box as its TUI holds it), and neither asks the agent anything:
 
 - *Changes*: a thread's diff, the working tree's live and the branch's against its base on
   asking, cut by the worker's review (`GitOp::Changes`) and written as the unified patch the
@@ -957,36 +956,42 @@ joins late is sent whole, so it names every running agent and its status at once
 ## 5. Agents
 
 **The thread model (being built; decisions, `agents.md`).** Every agent is to speak one
-agent-neutral model, `slopty_proto::thread`. A thread's turns and items, its open requests,
-pending messages, plan, background tasks and meters are changed only by `Action`s.
+agent-neutral model, `slopty_proto::thread`. A thread's turns and items, its plan, background
+tasks and its TUI's prompt box and queue are changed only by `Action`s.
 `ThreadState::apply`, the one pure reducer, runs on the worker, which keeps the thread's log,
 and on each client, which mirrors it. A followed thread streams a snapshot of its last turns
 and then actions numbered by a `Cursor { epoch, seq }`, so a client that comes back gets only
 what it missed. Every worker also keeps one small thread table (`ThreadRow`s, `TableFrame`) for
 the lists that follow nothing. A start and the intents left (`Seen`, `Name`) carry a
 client-made `IntentId` that the worker acts on once. Each agent's adapter maps its native session onto the
-model on the worker. What an agent is, what it can do (`Cap`), how it is reached (`Drive`) and
-what its tools are stay open strings. On the worker, `slopty_worker::thread::Host` holds every
+model on the worker. What an agent is, how it is reached (`Drive`) and what its tools are stay
+open strings. On the worker, `slopty_worker::thread::Host` holds every
 thread. Each thread has a log under `threads/<id>/` (a snapshot plus a tail of framed actions,
 compacted at turn ends), the last few thousand actions are kept in memory for followers coming
 back, and per-thread intent outcomes are deduplicated by id. A `Follower` turns a cursor into
 frames, gathering batches within the client's latency budget and merging runs of appends.
 Every agent runs as its own TUI in a Slopty terminal (`docs/decisions/agents.md`, "TUI-first"):
 a start opens a terminal with the person's own `claude`, `codex` or `pi`
-(`slopty_worker::thread::start`), Claude Code on a session Slopty names, with Slopty's tools and
-its hooks relayed by `slopty hook`. Any Claude Code in any terminal is read
-(`slopty_worker::thread::claude`): the terminal's process names its session in Claude Code's
-registry (`slopty_agent::claude::sessions`), and its transcript, followed on the kernel's word,
-maps onto the thread model through the transcript decoder (`slopty_agent::claude::history`),
-with a linked thread per subagent. One thread per session, named by the session's id; a
+(`slopty_worker::thread::start`), Claude Code on a session Slopty names, with Slopty's tools,
+its hooks relayed by `slopty hook`, and Slopty's mod (`--plugin-dir`,
+`slopty_agent::claude::draft`), whose two read-only hooks hand the TUI's prompt box to the same
+relay after a pause in typing. The worker reads the pictures pasted into the box from Claude
+Code's own store, and the thread holds the box (`Action::DraftSet`) and the prompts queued behind
+a turn, read from the transcript's queue records (`Action::QueuedSet`), which the inspector
+draws under its timeline from the view model's dock (`work::dock`, a `PromptBox`). Any
+Claude Code in any terminal is read (`slopty_worker::thread::claude`): the terminal's process
+names its session in Claude Code's registry (`slopty_agent::claude::sessions`), and its
+transcript, followed on the kernel's word, maps onto the thread model through the transcript
+decoder (`slopty_agent::claude::history`), with a linked thread per subagent. One thread per session, named by the session's id; a
 `/clear` or `/resume` moves the terminal to the next session's thread. The hooks give the status,
 and a session without them takes its phase from its transcript. Codex and pi rows name their terminals and have no inspector. On the link, `ClientMsg::Thread`
 carries the requests and the control stream carries the table (`WorkerMsg::Threads`) and each
 intent's outcome (`WorkerMsg::IntentDone`). A followed thread streams on a unidirectional
 stream of its own (`UniHead::Thread`), one task per thread on the worker
-(`apps/slopty-worker/src/threads.rs`), which also carries its pages and expansions. What the
-person or an agent sends an agent is typed into its terminal (`TermRequest::Submit`: a paste,
-then Enter 200 ms later, refused while it needs the person), and a stop is an Esc. While an
+(`apps/slopty-worker/src/threads.rs`), which also carries its pages and expansions. What an
+agent sends an agent (`agent_tell`) is typed into its terminal (`SessionHandle::submit`, which
+no client link reaches: a paste, then Enter 200 ms later, refused while it needs the person), and
+a stop is an Esc. While an
 agent's process lives, the worker stamps its thread alive (`Action::Lease`, every
 `LEASE_EVERY`), and stops the moment it is gone. A review
 is a diff of the repository's states (the unstaged changes, a branch), cut into hunks on the
@@ -1004,8 +1009,10 @@ its tile is on screen and no handheld while they are at a desk.
 
 Tests drive `slopty-stub-claude` (`slopty_testkit::claude_tui`), a stand-in for Claude Code's
 TUI in a real terminal: it keeps the registry record and the transcript Claude Code keeps, runs
-the hooks it is given and records every read of its terminal,
-never a signed-in `claude`.
+the hooks it is given, relays its line as the mod would when it loads one, keeps a pasted
+picture where Claude Code does, and records every read of its terminal, never a signed-in
+`claude`. The mod itself is checked against the real Claude Code it was recorded with
+(`cargo xtask claude-mod check`, `cargo xtask fixtures claude-mod`).
 
 Finding what needs the person: ⌘⇧A (the "Next Thing Needing You" menu item) reveals and
 focuses the next rung of the attention ladder on any worker, cycling from the active item: a

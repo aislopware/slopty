@@ -6,7 +6,10 @@
 //!   session's transcript, and the sessions of a folder.
 //! - [`history`]: a session's transcript mapped onto the thread model; [`history::replay`] rebuilds
 //!   a thread from the transcript alone.
+//! - [`draft`]: the TUI's prompt box, read live through Slopty's mod, with the pictures pasted into
+//!   it.
 
+pub mod draft;
 pub mod history;
 pub mod sessions;
 

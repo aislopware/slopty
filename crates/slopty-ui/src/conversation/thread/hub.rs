@@ -9,11 +9,10 @@
 //! rest, and what a person does shows in the frame they did it: the hub notifies before it asks
 //! for anything to be sent.
 //!
-//! An intent the worker turns down is said in words where its thread shows. A message and a
-//! change to one hold the person's words and stand on their own lines; every other refusal
-//! (an answer, a stop, a model, a keep) is kept here as a [`Refusal`] until the person lets it
-//! go, since the thread's own state would otherwise show nothing happened. An agent that
-//! exited is taken up again in a terminal of its own (`docs/decisions/agents.md`), never here.
+//! An intent the worker turns down is kept here as a [`Refusal`], said in words where its
+//! thread shows, since the thread's own state would otherwise show nothing happened. An agent
+//! that exited is taken up again in a terminal of its own (`docs/decisions/agents.md`), never
+//! here.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -180,26 +179,18 @@ impl ThreadHub {
         }
     }
 
-    /// The worker's answer to an intent. One it turned down that the thread would not show is
-    /// kept, in words, as a [`Refusal`].
+    /// The worker's answer to an intent. One it turned down is kept, in words, as a
+    /// [`Refusal`].
     pub fn done(&mut self, done: &IntentDone, cx: &mut Context<Self>) {
-        let sent = self.threads.outbox().all().iter().find(|s| s.id == done.id).cloned();
-        if self.threads.done(done) {
-            self.keep_outbox(cx);
-            if let Some(sent) = sent
-                && let Some(why) =
-                    turned_down(&done.outcome).filter(|_| !speaks_for_itself(&sent.intent))
-            {
-                let words = refused_words(&sent.intent, &why);
-                self.refuse(Refusal {
-                    id: sent.id,
-                    thread: sent.thread,
-                    intent: sent.intent,
-                    words,
-                });
-            }
-            cx.notify();
+        let Some(sent) = self.threads.done(done) else {
+            return;
+        };
+        self.keep_outbox(cx);
+        if let Some(why) = turned_down(&done.outcome) {
+            let words = refused_words(&sent.intent, &why);
+            self.refuse(Refusal { id: sent.id, thread: sent.thread, intent: sent.intent, words });
         }
+        cx.notify();
     }
 
     fn refuse(&mut self, refusal: Refusal) {
@@ -418,72 +409,20 @@ impl ThreadHub {
 fn turned_down(outcome: &Outcome) -> Option<String> {
     match outcome {
         Outcome::Refused { reason } => Some(reason.trim().trim_end_matches('.').to_owned()),
-        Outcome::Unsupported { .. } => Some("the agent can't do that through Slopty".to_owned()),
         Outcome::SetupFailed { .. } => Some("the worktree's setup failed".to_owned()),
-        Outcome::Done | Outcome::Accepted | Outcome::Started { .. } => None,
+        Outcome::Done | Outcome::Started { .. } => None,
     }
 }
 
-/// Whether the thread view draws `intent`'s refusal on its own line: a message and a change to
-/// one hold the person's words and stay until dismissed.
-const fn speaks_for_itself(intent: &Intent) -> bool {
-    matches!(intent, Intent::Send { .. } | Intent::Edit { .. })
-}
-
-/// What was turned down and why, as the person reads it: "Couldn't stop: the agent is not
-/// working".
+/// What was turned down and why, as the person reads it: "Couldn't rename the chat: the
+/// thread is gone".
 #[must_use]
 pub fn refused_words(intent: &Intent, why: &str) -> String {
     let what = match intent {
-        Intent::Send { .. } => "Not sent".to_owned(),
-        Intent::Edit { .. } => "Not changed".to_owned(),
-        Intent::Withdraw { .. } => "Couldn't take the message back".to_owned(),
-        Intent::Promote { .. } => "Couldn't send the message now".to_owned(),
-        Intent::Move { .. } => "Couldn't reorder the queue".to_owned(),
-        Intent::Interrupt => "Couldn't stop".to_owned(),
-        Intent::Answer { .. } => "The answer didn't go".to_owned(),
-        Intent::SetModel { model } => format!("Couldn't switch to {model}"),
-        Intent::SetMode { mode } => format!("Couldn't switch to {mode}"),
-        Intent::Keep(pick) => format!("Couldn't keep {}", file_name(&pick.path)),
-        Intent::Revert(pick) => format!("Couldn't revert {}", file_name(&pick.path)),
-        Intent::Fork { .. } => "Couldn't fork the thread".to_owned(),
-        Intent::SetEffort { effort } => format!("Couldn't set the effort to {effort}"),
-        Intent::Aside => "Couldn't ask aside".to_owned(),
-        Intent::Discard => "Couldn't close the thread".to_owned(),
-        Intent::KeepAside => "Couldn't keep the aside".to_owned(),
-        Intent::Review { .. } => "The review didn't start".to_owned(),
-        Intent::Seen { .. } => "Couldn't mark it seen".to_owned(),
-        Intent::Draft { .. } => "Couldn't keep the draft".to_owned(),
-        Intent::Name { .. } => "Couldn't rename the chat".to_owned(),
-        Intent::Said { .. } => "Couldn't keep the message's own words".to_owned(),
-        Intent::End => "Couldn't end the agent".to_owned(),
-        Intent::SetOption { option, choice } => format!("Couldn't set {option} to {choice}"),
-        Intent::StopTask { .. } => "Couldn't stop it".to_owned(),
-        Intent::Background { .. } => "Couldn't move it to the background".to_owned(),
-        Intent::Shell { .. } => "The command didn't run".to_owned(),
-        Intent::Rewind { .. } => "Couldn't put the files back".to_owned(),
-        Intent::RewindConversation { .. } => "Couldn't take the conversation back".to_owned(),
-        Intent::Unrewind { .. } => "Couldn't undo the rewind".to_owned(),
-        Intent::Rule(_) => "Couldn't change the rule".to_owned(),
-        Intent::Surface { .. } => "The mod didn't take it".to_owned(),
-        Intent::Side { .. } => "Couldn't ask the side question".to_owned(),
-        Intent::McpReconnect { server } => format!("Couldn't reconnect {server}"),
-        Intent::McpEnable { server, enabled: true } => format!("Couldn't enable {server}"),
-        Intent::McpEnable { server, enabled: false } => format!("Couldn't disable {server}"),
+        Intent::Seen { .. } => "Couldn't mark it seen",
+        Intent::Name { .. } => "Couldn't rename the chat",
     };
     format!("{what}: {why}")
-}
-
-/// Whether `row` is an aside of another thread (`ThreadMeta::aside_of`): it shows only in its
-/// thread's sheet, so the lists that show threads, what needs the person and the notes pass
-/// over it.
-#[must_use]
-pub fn is_aside(row: &slopty_proto::thread::wire::ThreadRow) -> bool {
-    row.facts.contains_key(slopty_proto::thread::ThreadMeta::ASIDE_FACT)
-}
-
-fn file_name(path: &str) -> &str {
-    path.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(path)
 }
 
 fn write(cache: &Cache, batch: Writes) {

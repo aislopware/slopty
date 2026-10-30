@@ -25,14 +25,14 @@ mod threads {
     use slopty_net::client::{bind_client, connect_addr};
     use slopty_net::{ClientMsg, WorkerMsg};
     use slopty_proto::handshake::Hello;
-    use slopty_proto::terminal::{OpenSession, TermError, TermEvent, TermRequest, TermSize};
+    use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_proto::thread::wire::{
-        IntentDone, NewWorktree, Outcome, PastSessions, Start, ThreadFrame, ThreadRequest,
-        ThreadRow,
+        Expanded, IntentDone, NewWorktree, Outcome, PastSessions, Start, ThreadFrame,
+        ThreadRequest, ThreadRow,
     };
     use slopty_proto::thread::{
-        AgentId, Cursor, Drive, IntentId, ItemBody, Liveness, Phase, TableState, ThreadId,
-        ThreadMeta, ThreadState, TurnState,
+        AgentId, ContentRef, Cursor, Drive, IntentId, ItemBody, Liveness, Phase, TableState,
+        ThreadId, ThreadMeta, ThreadState, TurnState,
     };
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -169,6 +169,8 @@ mod threads {
         table: TableState,
         thread: Option<ThreadState>,
         cursor: Option<Cursor>,
+        /// What each expand brought, in order.
+        expanded: Vec<(ContentRef, Expanded)>,
     }
 
     impl Client {
@@ -194,6 +196,7 @@ mod threads {
                 table: TableState::default(),
                 thread: None,
                 cursor: None,
+                expanded: Vec::new(),
             };
             client.send(ThreadRequest::Table { have: None }).await;
             client
@@ -208,9 +211,9 @@ mod threads {
             self.link.send(ClientMsg::Term { session, req }).await.unwrap();
         }
 
-        /// Type `text` into terminal `session` as the prompt box sends it.
-        async fn submit(&self, session: SessionId, text: &str) {
-            self.term(session, TermRequest::Submit { text: text.to_owned() }).await;
+        /// Type `words` and Enter into terminal `session`, as the person does in the TUI.
+        async fn typed(&self, session: SessionId, words: &str) {
+            self.term(session, TermRequest::Raw(format!("{words}\r").into_bytes())).await;
         }
 
         /// End this client's connection, as a client that quits does.
@@ -258,6 +261,7 @@ mod threads {
                     }
                     self.cursor = Some(Cursor { epoch, seq: next });
                 }
+                ThreadFrame::Expanded { content, body } => self.expanded.push((content, body)),
                 _ => {}
             }
         }
@@ -341,9 +345,7 @@ mod threads {
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: std::collections::BTreeMap::new(),
             worktree: None,
         }
     }
@@ -433,9 +435,8 @@ mod threads {
     /// and its thread names that terminal. It runs on the session Slopty named, with Slopty's
     /// tools and hooks, the first prompt as its own argument, and nothing of the Claude Code a
     /// worker may itself run under. Its first turn reaches the thread from its transcript, and
-    /// its hooks give the phase. Words typed into it go as a paste and an Enter of its own the
-    /// 200 ms wait after it, two lines one message, and each record the TUI writes reaches the
-    /// thread in well under the second a look takes.
+    /// its hooks give the phase. Each record the TUI writes reaches the thread in well under the
+    /// second a look takes.
     #[tokio::test]
     async fn a_claude_code_start_is_its_tui_in_a_terminal_its_thread_follows() {
         let dir = tempfile::tempdir().unwrap();
@@ -483,33 +484,15 @@ mod threads {
             assert_eq!(hooks_ran(&seen, event, native), [ran], "{event} relayed");
         }
 
-        // Typed in: a paste, then its Enter on its own.
-        a.submit(terminal, "Second\nline").await;
+        // Typed in, as the person types.
+        a.typed(terminal, "Second").await;
         a.until(turns_done(2)).await;
-        assert_eq!(prompts(a.state()), ["Fix the login", "Second\nline"], "one message");
-        let seen = record_of(&root, terminal, |r| listed(r, "prompts").len() == 2).await;
-        let reads = listed(&seen, "reads");
-        let text = |r: &serde_json::Value| r["bytes"].as_str().unwrap_or_default().to_owned();
-        let start = reads.iter().position(|r| text(r).contains("\u{1b}[200~")).expect("a paste");
-        let end = reads.iter().position(|r| text(r).contains("\u{1b}[201~")).expect("its end");
-        let pasted: String = reads[start..=end].iter().map(|r| text(r)).collect();
-        assert_eq!(
-            pasted.replace('\r', "\n"),
-            "\u{1b}[200~Second\nline\u{1b}[201~",
-            "the words as one paste, bracketed as the TUI asked"
-        );
-        let enter = reads[end + 1];
-        assert_eq!(text(enter), "\r", "the Enter is a write of its own");
-        // Timed where the TUI reads, so with the way's jitter (ptyd, the pty, the reader's
-        // turn to run): the wait is proved, its length is the worker's own clock.
-        let gap = enter["at_us"].as_u64().unwrap() - reads[end]["at_us"].as_u64().unwrap();
-        let wait = slopty_proto::terminal::SUBMIT_ENTER_MS * 1000;
-        assert!(gap >= wait * 3 / 4, "the Enter came {gap} µs after the paste");
+        assert_eq!(prompts(a.state()), ["Fix the login", "Second"]);
 
         // Each record written reaches the thread at once.
         let mut late = Vec::new();
         for (n, words) in ["Third", "Fourth", "Fifth"].into_iter().enumerate() {
-            a.submit(terminal, words).await;
+            a.typed(terminal, words).await;
             a.until(|c| prompts(c.state()).last().map(String::as_str) == Some(words)).await;
             let arrived = now_us();
             // The stand-in saves its record at its hooks, so the write is waited for.
@@ -525,6 +508,83 @@ mod threads {
         assert!(late.iter().all(|l| *l < Duration::from_millis(500)), "{late:?}");
     }
 
+    /// The TUI's prompt box shows on its thread as Slopty's mod relays it from a Claude Code
+    /// Slopty started (the stand-in runs the relay the worker wrote into the mod it loads): the
+    /// words as typed; a picture pasted into it, read from Claude Code's own store under the
+    /// temporary root the session has, with its bytes a press away; nothing once the box is sent,
+    /// and nothing once the session ends with words left in it.
+    #[tokio::test]
+    async fn the_prompt_box_shows_on_its_thread_with_the_pictures_pasted_into_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let tmp = root.join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let picture = root.join("red.png");
+        std::fs::write(&picture, png()).unwrap();
+        let daemons = with_claude(&root, &[("CLAUDE_CODE_TMPDIR", tmp.to_str().unwrap())]).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let (thread, terminal) = started(&mut a, claude_in(&root, None)).await;
+        a.follow(thread).await;
+        let seen = record_of(&root, terminal, |r| !listed(r, "hooks").is_empty()).await;
+        let args: Vec<&str> = listed(&seen, "args").iter().filter_map(|a| a.as_str()).collect();
+        let module = args.iter().find_map(|a| a.strip_prefix("--plugin-dir=")).expect("the mod");
+        assert!(
+            Path::new(module).starts_with(root.join("data")),
+            "under the worker's data: {module}"
+        );
+
+        a.term(terminal, TermRequest::Raw(b"Fix the header".to_vec())).await;
+        a.until(|c| c.state().draft.as_ref().is_some_and(|d| d.text == "Fix the header")).await;
+        let text = picture.to_string_lossy().into_owned();
+        a.term(terminal, TermRequest::Paste { text, confirmed: true }).await;
+        let shown = "Fix the header[Image #1]";
+        a.until(|c| c.state().draft.as_ref().is_some_and(|d| d.text == shown)).await;
+        let draft = a.state().draft.clone().unwrap();
+        let [pasted] = draft.images.as_slice() else { panic!("{draft:?}") };
+        assert_eq!(pasted.n, 1);
+        assert_eq!(pasted.image.media_type, "image/png");
+        assert_eq!((pasted.image.width, pasted.image.height), (1, 1));
+        let session = &a.state().meta.native;
+        let tmpdir = Some(tmp.to_str().unwrap());
+        let store = slopty_agent::claude::draft::images_dir(tmpdir, uid(&picture), &root, session);
+        assert!(store.join("1.png").is_file(), "kept where Claude Code keeps it");
+        let content = pasted.image.at.clone();
+        a.send(ThreadRequest::Expand { thread, content: content.clone() }).await;
+        a.until(|c| !c.expanded.is_empty()).await;
+        assert_eq!(a.expanded, [(content, Expanded::Bytes(png()))], "its bytes, a press away");
+
+        a.term(terminal, TermRequest::Raw(b"\r".to_vec())).await;
+        a.until(|c| c.state().draft.is_none()).await;
+        a.until(turns_done(1)).await;
+        assert_eq!(prompts(a.state()), [shown], "the box was sent");
+
+        a.term(terminal, TermRequest::Raw(b"half a thought".to_vec())).await;
+        a.until(|c| c.state().draft.as_ref().is_some_and(|d| d.text == "half a thought")).await;
+        let relayed = record_of(&root, terminal, |r| listed(r, "drafts").len() == 4).await;
+        let texts: Vec<&str> =
+            listed(&relayed, "drafts").iter().filter_map(|d| d["text"].as_str()).collect();
+        assert_eq!(texts, ["Fix the header", shown, "", "half a thought"], "each change, once");
+        a.term(terminal, TermRequest::Close).await;
+        a.row_until(thread, |row| row.status.liveness != Liveness::Live).await;
+        a.until(|c| c.state().draft.is_none()).await;
+    }
+
+    /// The process's user id, as Claude Code names its temporary folder: the owner of a file it
+    /// made.
+    fn uid(made: &Path) -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(made).unwrap().uid()
+    }
+
+    /// The smallest PNG: one pixel.
+    fn png() -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        bytes.extend_from_slice(b"\x08\x06\0\0\0\x1f\x15\xc4\x89");
+        bytes
+    }
+
     /// A `/clear` in the TUI moves its terminal to the next session: that session's thread
     /// begins naming the terminal, and the one before ends, resumable, naming none.
     #[tokio::test]
@@ -537,7 +597,7 @@ mod threads {
         a.follow(first).await;
         a.until(turns_done(1)).await;
 
-        a.submit(terminal, "/clear").await;
+        a.typed(terminal, "/clear").await;
         let seen = record_of(&root, terminal, |r| listed(r, "sessions").len() == 2).await;
         let next = slopty_agent::claude::thread_of(seen["sessions"][1].as_str().unwrap());
         a.row_until(next, |row| row.terminal() == Some(terminal)).await;
@@ -555,55 +615,15 @@ mod threads {
         assert_eq!(naming, [next], "one thread names a terminal");
 
         a.follow(next).await;
-        a.submit(terminal, "Now the logout").await;
+        a.typed(terminal, "Now the logout").await;
         a.until(turns_done(1)).await;
         assert_eq!(said(a.state()), ["Now the logout", "Done: Now the logout"]);
     }
 
-    /// While its agent asks the person at a dialog, words typed from the prompt box are refused,
-    /// with why, and nothing reaches its terminal: the dialog would take them as the answer. The
-    /// person answers in the terminal, the turn ends, and the next words go.
-    #[tokio::test]
-    async fn words_wait_while_the_agent_asks_the_person() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let daemons = with_claude(&root, &[]).await;
-        let mut a = Client::connect(&daemons, ClientId::new()).await;
-        let (thread, terminal) = started(&mut a, claude_in(&root, Some("ask Which colour?"))).await;
-        a.row_until(thread, |row| row.status.phase == Phase::NeedsYou).await;
-        let wait = a.table.rows[&thread].status.wait.clone().expect("what it waits on");
-        assert_eq!(wait.kind, slopty_proto::thread::kind::QUESTION, "{wait:?}");
-
-        a.submit(terminal, "Blue, and more").await;
-        let why = a
-            .heard(|msg| match msg {
-                WorkerMsg::Term { session, event: TermEvent::Error(TermError::Refused(why)) }
-                    if session == terminal =>
-                {
-                    Some(why)
-                }
-                _ => None,
-            })
-            .await;
-        assert!(!why.is_empty(), "why, in words");
-        let seen = record_of(&root, terminal, |r| !listed(r, "prompts").is_empty()).await;
-        let typed: String =
-            listed(&seen, "reads").iter().filter_map(|r| r["bytes"].as_str()).collect();
-        assert!(!typed.contains("Blue"), "nothing typed: {typed:?}");
-
-        a.term(terminal, TermRequest::Raw(b"Red\r".to_vec())).await;
-        a.row_until(thread, |row| row.status.phase == Phase::Done).await;
-        a.submit(terminal, "Now blue").await;
-        a.follow(thread).await;
-        a.until(turns_done(2)).await;
-        assert_eq!(prompts(a.state()).last().map(String::as_str), Some("Now blue"));
-    }
-
     /// A Claude Code typed by hand into a terminal runs with none of Slopty's hooks, and its
     /// record of itself says when a dialog holds it: its thread waits on the person for the
-    /// question its transcript has open, words from the prompt box are refused meanwhile and
-    /// nothing reaches the terminal, and once the person answers there the record waits no more
-    /// and the turn ends.
+    /// question its transcript has open, and once the person answers there the record waits no
+    /// more and the turn ends.
     #[tokio::test]
     async fn a_claude_code_typed_by_hand_waits_on_the_person_as_its_record_says() {
         let dir = tempfile::tempdir().unwrap();
@@ -642,25 +662,9 @@ mod threads {
         let wait = a.table.rows[&thread].status.wait.clone().expect("what it waits on");
         assert_eq!((wait.kind.as_str(), wait.text.as_str()), ("question", "Which colour?"));
 
-        a.submit(terminal, "Blue, and more").await;
-        let why = a
-            .heard(|msg| match msg {
-                WorkerMsg::Term { session, event: TermEvent::Error(TermError::Refused(why)) }
-                    if session == terminal =>
-                {
-                    Some(why)
-                }
-                _ => None,
-            })
-            .await;
-        assert!(!why.is_empty(), "why, in words");
-
         a.term(terminal, TermRequest::Raw(b"Red\r".to_vec())).await;
         a.row_until(thread, |row| row.status.phase == Phase::Done).await;
         let seen = record_of(&root, terminal, |r| listed(r, "prompts").len() == 2).await;
-        let typed: String =
-            listed(&seen, "reads").iter().filter_map(|r| r["bytes"].as_str()).collect();
-        assert!(!typed.contains("Blue"), "nothing typed: {typed:?}");
         let ran: Vec<&serde_json::Value> = listed(&seen, "hooks");
         assert!(!ran.is_empty() && ran.iter().all(|h| h["ran"] == 0), "no hooks: {ran:?}");
     }
@@ -689,7 +693,7 @@ mod threads {
         b.until(turns_done(1)).await;
         assert_eq!(said(b.state()), ["Fix the login", "Done: Fix the login"]);
 
-        b.submit(terminal, "ask Red or blue?").await;
+        b.typed(terminal, "ask Red or blue?").await;
         b.row_until(thread, |row| row.status.phase == Phase::NeedsYou).await;
     }
 
@@ -855,9 +859,7 @@ mod threads {
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: std::collections::BTreeMap::new(),
             worktree: Some(NewWorktree::named("claude-c0ffee")),
         };
         let notes = root.join("notes");
@@ -919,9 +921,7 @@ mod threads {
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: std::collections::BTreeMap::new(),
             worktree: Some(NewWorktree::named("claude-5ea7ed")),
         };
         let client = ClientId::new();
@@ -1001,9 +1001,7 @@ mod threads {
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: std::collections::BTreeMap::new(),
             worktree: Some(NewWorktree::named("claude-4e57a7")),
         };
         let client = ClientId::new();

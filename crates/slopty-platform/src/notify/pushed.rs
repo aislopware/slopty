@@ -84,7 +84,6 @@ pub fn note_of(body: &PushBody) -> Note {
         title,
         body: notice_body(notice),
         info: keys,
-        silent: body.quiet,
         urgent: notice.kind == NoticeKind::NeedsYou,
     }
 }
@@ -369,8 +368,8 @@ pub mod keychain {
 mod tests {
     use slopty_core::{SessionId, WorkerId};
     use slopty_proto::orchestration::TermRef;
+    use slopty_proto::thread::ThreadId;
     use slopty_proto::thread::attention::{ThreadAt, Via};
-    use slopty_proto::thread::{AskId, ThreadId};
 
     use super::*;
 
@@ -392,13 +391,7 @@ mod tests {
         let (worker, session, thread) = (WorkerId::new(), SessionId::new(), ThreadId::new());
         let at = Subject::Thread(ThreadAt { worker, thread });
         let tile = TermRef { worker, session };
-        let ask = AskId("toolu_01".to_owned());
-        let body = PushBody {
-            notice: notice(NoticeKind::NeedsYou, at),
-            ask: Some(ask),
-            picks: Vec::new(),
-            quiet: false,
-        };
+        let body = PushBody { notice: notice(NoticeKind::NeedsYou, at) };
         let note = note_of(&body);
         assert_eq!(note.id, format!("thread-{thread}"));
         assert_eq!(
@@ -413,15 +406,12 @@ mod tests {
             note.info,
             keys(&[(info::WORKER, worker_key.clone()), (info::THREAD, thread.to_string()),])
         );
-        assert!(note.urgent && !note.silent, "the first push sounds, through a Focus");
-        let moved = note_of(&PushBody { ask: None, picks: Vec::new(), quiet: true, ..body });
-        assert_eq!(moved.id, note.id, "in place of the note up");
-        assert!(moved.silent, "a quiet push only says more");
+        assert!(note.urgent, "it breaks through a Focus");
 
         let mut done = notice(NoticeKind::Finished, at);
         done.via = Some(Via { thread: ThreadId::new(), title: "Explore".to_owned() });
         done.title = " ".to_owned();
-        let note = note_of(&PushBody { notice: done, ask: None, picks: Vec::new(), quiet: false });
+        let note = note_of(&PushBody { notice: done });
         assert_eq!(note.id, format!("thread-{thread}"));
         assert_eq!(
             note.info,
@@ -435,8 +425,7 @@ mod tests {
 
         // A program's own wait leads to its terminal, under the id the app's own note has.
         let program = notice(NoticeKind::NeedsYou, Subject::Terminal(tile));
-        let note =
-            note_of(&PushBody { notice: program, ask: None, picks: Vec::new(), quiet: false });
+        let note = note_of(&PushBody { notice: program });
         assert_eq!(note.id, session.to_string());
         assert_eq!(
             note.info,
@@ -454,12 +443,7 @@ mod tests {
         let key = DeviceKey::generate().unwrap();
         let token = "0f".repeat(32);
         let at = Subject::Thread(ThreadAt { worker: WorkerId::new(), thread: ThreadId::new() });
-        let body = PushBody {
-            notice: notice(NoticeKind::NeedsYou, at),
-            ask: None,
-            picks: Vec::new(),
-            quiet: false,
-        };
+        let body = PushBody { notice: notice(NoticeKind::NeedsYou, at) };
         let bytes = slopty_proto::codec::encode_body(&body).unwrap();
         let sealed = slopty_push::seal::seal(&key.public(), &token, &bytes).unwrap();
         let (enc, ct) = (sealed.enc_text(), sealed.ct_text());

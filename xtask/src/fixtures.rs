@@ -41,6 +41,10 @@ pub enum FixturesCmd {
         #[arg(long, default_value = crate::claude::VERSION)]
         version: String,
     },
+    /// Record what Slopty's Claude Code mod relays while a person types in the TUI, and the
+    /// queue and image store Claude Code keeps meanwhile, with the official build, no account
+    /// and no model, into `crates/slopty-agent/tests/fixtures/claude-mod` (`claude_mod`).
+    ClaudeMod,
     /// The hook a capture registers: saves the payload on stdin and, standing in for the
     /// person, answers permission requests. Not for people.
     #[command(hide = true)]
@@ -53,6 +57,7 @@ pub enum FixturesCmd {
 pub fn run(cmd: &FixturesCmd) -> Result<()> {
     match cmd {
         FixturesCmd::Claude { only, version } => capture_all(only.as_deref(), version),
+        FixturesCmd::ClaudeMod => record_mod(),
         FixturesCmd::HookSink { dir } => hook_sink(dir),
     }
 }
@@ -820,4 +825,201 @@ fn emails(s: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The acts `fixtures claude-mod` types, each with the keys it sends and the pause after it.
+/// Keys go one at a time, 120 ms apart, as a person types; a bracketed paste goes whole.
+const MOD_ACTS: &[(&str, &[&str], u64)] = &[
+    ("typed", &["h", "e", "l", "l", "o"], 700),
+    ("backspace", &["\x7f"], 700),
+    ("short paste", &["\x1b[200~ one\ntwo\x1b[201~"], 700),
+    ("long paste", &["\x1b[200~a\nb\nc\nd\ne\nf\x1b[201~"], 700),
+    ("image", &["\x1b[200~IMAGE\x1b[201~"], 900),
+    ("caret", &["\x1b[D", "\x1b[D"], 700),
+    ("clear", &["\x1b", "\x1b"], 900),
+    ("recall", &["\x1b[A"], 700),
+    ("back", &["\x1b[B"], 700),
+    ("submit", &["s", "c", "e", "n", "a", "r", "i", "o", ":", "h", "o", "l", "d", "\r"], 1200),
+    ("queue", &["q", "u", "e", "u", "e", "d", "\r"], 1000),
+    ("pull back", &["\x1b[A"], 700),
+    ("queue again", &["\r"], 12_000),
+    ("ask", &["s", "c", "e", "n", "a", "r", "i", "o", ":", "a", "s", "k", "\r"], 3000),
+    ("dialog keys", &["z", "q"], 900),
+    ("decline", &["\x1b"], 3000),
+];
+
+/// A 1 × 1 PNG, the picture the recording pastes.
+const PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+/// `cargo xtask fixtures claude-mod`: the official TUI in a pseudo-terminal, in a scratch home
+/// with a placeholder key, against the canned API; the embedded mod relays to this binary
+/// (`claude-mod sink`). Written: what each act relayed (`drafts.jsonl`), the transcript's
+/// queue and prompt records (`queue.jsonl`), where the pasted picture was stored
+/// (`store.json`), and the version and module recorded with.
+fn record_mod() -> Result<()> {
+    use crate::claude_mod::{MOD, Scratch, Tui, pause, until};
+    let version = crate::claude::VERSION;
+    let claude = crate::claude::official(version)?;
+    let root = repo_root()?.into_std_path_buf();
+    let out = root.join("crates/slopty-agent/tests/fixtures/claude-mod");
+    let scratch = Scratch::new("record")?;
+    let api = crate::canned::FakeApi::start()?;
+    let sink = scratch.root.join("relayed.jsonl");
+    let module = std::fs::read_to_string(root.join(MOD).join("hooks/register.ts"))?;
+    let exe = std::env::current_exe()?;
+    let relay = json!([exe.to_string_lossy(), "claude-mod", "sink", sink.to_string_lossy()]);
+    let relayed_module = module.replace("['/slopty', 'hook']", &relay.to_string());
+    ensure!(relayed_module != module, "the mod's module names no relay to replace");
+    let plugin = scratch.root.join("mod");
+    for part in [".claude-plugin/plugin.json", "hooks/hooks.json"] {
+        let to = plugin.join(part);
+        std::fs::create_dir_all(to.parent().context("a file in a folder")?)?;
+        std::fs::copy(root.join(MOD).join(part), &to)?;
+    }
+    std::fs::write(plugin.join("hooks/register.ts"), relayed_module)?;
+    let picture = scratch.work.join("pixel.png");
+    std::fs::write(&picture, data_encoding::BASE64.decode(PIXEL_PNG.as_bytes())?)?;
+    let debug = scratch.root.join("debug.log");
+    let mut command = scratch.claude(&claude);
+    command
+        .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{}", api.port))
+        // The dialog the recording types at: auto mode would let the call run unasked.
+        .args(["--permission-mode", "default"])
+        .arg("--plugin-dir")
+        .arg(&plugin)
+        .arg("--debug-file")
+        .arg(&debug);
+    let tui = Tui::start(command)?;
+    let loaded = until(Duration::from_secs(60), || {
+        std::fs::read_to_string(&debug)
+            .is_ok_and(|log| log.contains("hooks module slopty@inline loaded"))
+    });
+    ensure!(loaded, "the mod did not load in 60 s:\n{}", tui.screen_text());
+    // The box draws a moment after the modules load.
+    pause(Duration::from_secs(3));
+    let mut marks = Vec::new();
+    for &(act, keys, rest_ms) in MOD_ACTS {
+        marks.push((act, now_ms()));
+        for key in keys {
+            let key = key.replace("IMAGE", &picture.to_string_lossy());
+            tui.send(key.as_bytes())?;
+            pause(Duration::from_millis(120));
+        }
+        pause(Duration::from_millis(rest_ms));
+    }
+    let screen = tui.screen_text();
+    tui.send(b"\x03")?;
+    pause(Duration::from_millis(300));
+    tui.send(b"\x03")?;
+    pause(Duration::from_secs(1));
+    tui.stop();
+    let relays: Vec<Value> = std::fs::read_to_string(&sink)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    ensure!(!relays.is_empty(), "the mod relayed nothing; the screen:\n{screen}");
+    let mut sessions: Vec<String> = Vec::new();
+    let mut session_name = |id: &str| {
+        let at = sessions.iter().position(|s| s == id).unwrap_or_else(|| {
+            sessions.push(id.to_owned());
+            sessions.len().saturating_sub(1)
+        });
+        format!("session-{}", at.saturating_add(1))
+    };
+    let mut drafts = String::new();
+    for relay in &relays {
+        let at = relay.get("at_ms").and_then(Value::as_u64).unwrap_or(0);
+        let act = marks.iter().rev().find(|(_, m)| *m <= at).map_or("start", |(a, _)| a);
+        let mut payload = relay.get("payload").cloned().unwrap_or(Value::Null);
+        if let Some(fields) = payload.as_object_mut()
+            && let Some(id) = fields.get("session_id").and_then(Value::as_str).map(str::to_owned)
+        {
+            fields.insert("session_id".to_owned(), Value::from(session_name(&id)));
+        }
+        drafts.push_str(&json!({ "act": act, "payload": payload }).to_string());
+        drafts.push('\n');
+    }
+    // The transcript's queue and the prompts it delivered, in order.
+    let mut queue = String::new();
+    let first = sessions.first().cloned().context("no session relayed")?;
+    let escaped: String = scratch
+        .work
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let transcript =
+        scratch.home.join(".claude/projects").join(&escaped).join(format!("{first}.jsonl"));
+    let records = std::fs::read_to_string(&transcript)
+        .with_context(|| format!("read {}", transcript.display()))?;
+    for record in records.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
+        let kind = record.get("type").and_then(Value::as_str).unwrap_or_default();
+        let kept = match kind {
+            "queue-operation" => json!({
+                "type": kind,
+                "operation": record.get("operation"),
+                "content": record.get("content"),
+            }),
+            "user" if record.get("isMeta").is_none() => {
+                let content = record.pointer("/message/content");
+                let text = match content {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Array(parts)) => {
+                        parts.iter().filter_map(|p| p.get("text").and_then(Value::as_str)).collect()
+                    }
+                    _ => continue,
+                };
+                if text.is_empty() {
+                    continue;
+                }
+                json!({ "type": kind, "text": text })
+            }
+            _ => continue,
+        };
+        queue.push_str(&kept.to_string());
+        queue.push('\n');
+    }
+    // Where Claude Code stored the pasted picture, below its temporary root.
+    let tmp = std::fs::canonicalize(scratch.root.join("tmp"))?;
+    let mut images = Vec::new();
+    let mut stack = vec![tmp.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.parent().is_some_and(|p| p.ends_with("images")) {
+                let relative =
+                    path.strip_prefix(&tmp)?.to_string_lossy().replace(&first, "session-1");
+                images.push(relative);
+            }
+        }
+    }
+    ensure!(!images.is_empty(), "Claude Code stored no pasted picture under {}", tmp.display());
+    let store = json!({
+        "cwd": scratch.work.to_string_lossy(),
+        "uid": rustix::process::getuid().as_raw(),
+        "images": images,
+    });
+    std::fs::create_dir_all(&out)?;
+    std::fs::write(out.join("version"), format!("{version}\n"))?;
+    std::fs::write(out.join("register.ts"), &module)?;
+    std::fs::write(out.join("drafts.jsonl"), drafts)?;
+    std::fs::write(out.join("queue.jsonl"), queue)?;
+    std::fs::write(out.join("store.json"), format!("{store:#}\n"))?;
+    println!(
+        "recorded {} relays, {} sessions, into {}",
+        relays.len(),
+        sessions.len(),
+        out.display()
+    );
+    Ok(())
+}
+
+/// Milliseconds since the epoch, as the sink stamps them.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }

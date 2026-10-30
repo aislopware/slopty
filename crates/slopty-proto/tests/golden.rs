@@ -1350,15 +1350,6 @@ mod golden {
             }),
         );
         snap(
-            "client_xfer_begin_attachment",
-            &ClientMsg::Xfer(XferMsg::Begin {
-                xfer,
-                dest: Some(Dest::Attachment),
-                files: 1,
-                bytes: 2048,
-            }),
-        );
-        snap(
             "worker_xfer_done",
             &WorkerMsg::Xfer(XferMsg::Done {
                 xfer,
@@ -1574,25 +1565,6 @@ mod golden {
         snap(
             "client_term_reached",
             &ClientMsg::Term { session: session(), req: TermRequest::Reached { marker: 41 } },
-        );
-    }
-
-    /// The prompt box's words for an agent's terminal, and the worker's refusal while the agent
-    /// waits on the person at a dialog.
-    #[test]
-    fn submit() {
-        snap(
-            "client_term_submit",
-            &ClientMsg::Term {
-                session: session(),
-                req: TermRequest::Submit { text: "fix the build\nthen test".to_owned() },
-            },
-        );
-        snap(
-            "worker_term_refused",
-            &TermEvent::Error(TermError::Refused(
-                "Claude Code is asking you something in its terminal".to_owned(),
-            )),
         );
     }
 
@@ -1940,7 +1912,6 @@ mod orchestration {
             rung: Rung::NeedsYou,
             phase: Phase::NeedsYou,
             wait: Some(Wait { kind: "question".to_owned(), text: "Which branch?".to_owned() }),
-            asks: Some("Which branch?".to_owned()),
             since_ms: WallMs::from_millis(1_789_999_990_000),
         }
     }

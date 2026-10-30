@@ -1185,7 +1185,6 @@ mod tests {
     #[test]
     fn slopty_surfaces_size_their_words_by_the_setting() {
         let allowed: &[(&str, &str, usize)] = &[
-            ("account_usage.rs", include_str!("account_usage.rs"), 0),
             ("running_pill.rs", include_str!("running_pill.rs"), 0),
             ("notice.rs", include_str!("notice.rs"), 0),
             ("toast.rs", include_str!("toast.rs"), 0),

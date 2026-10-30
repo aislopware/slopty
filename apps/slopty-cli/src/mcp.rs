@@ -289,7 +289,7 @@ fn needs_human(
 #[cfg(test)]
 mod tests {
     use slopty_core::WallMs;
-    use slopty_proto::thread::{AgentId, Phase, ThreadId};
+    use slopty_proto::thread::{AgentId, Phase, ThreadId, Wait, kind};
 
     use super::*;
 
@@ -339,8 +339,7 @@ mod tests {
             title: "Fix the build".to_owned(),
             rung,
             phase,
-            wait: None,
-            asks: asks.map(str::to_owned),
+            wait: asks.map(|text| Wait { kind: kind::QUESTION.to_owned(), text: text.to_owned() }),
             since_ms: WallMs::ZERO,
         }
     }
@@ -353,7 +352,7 @@ mod tests {
         let asking = agent(Rung::NeedsYou, Phase::NeedsYou, Some("Run cargo test?"));
         let data = needs_human(at, Some("mac-studio"), &asking, Some(Rung::Working)).unwrap();
         assert_eq!(data["agent"]["needs_human"], true);
-        assert_eq!(data["agent"]["asks"], "Run cargo test?");
+        assert_eq!(data["agent"]["waits"], "Run cargo test?");
         assert_eq!(data["worker_name"], "mac-studio");
         let message = data["message"].as_str().unwrap();
         assert!(message.contains("Run cargo test?") && message.contains("mac-studio"), "{message}");

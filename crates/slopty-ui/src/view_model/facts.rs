@@ -9,8 +9,8 @@
 
 use slopty_proto::thread::detail::{Clipped, ExecStatus};
 use slopty_proto::thread::{
-    BackgroundTask, Cap, ItemBody, Notice, Phase, TaskNote, ThreadId, ThreadState, ToolCall,
-    ToolDetail, ToolState, TurnId, TurnState, kind,
+    BackgroundTask, ItemBody, Notice, Phase, TaskNote, ThreadId, ThreadState, ToolCall, ToolDetail,
+    ToolState, TurnId, TurnState, kind,
 };
 use slopty_proto::visual::{PageDetail, PageSource};
 use slopty_view_doc::{
@@ -376,13 +376,12 @@ fn rejected(call: &ToolCall) -> String {
     }
 }
 
-/// What a call held on a request of `kind` waits for, in the words of the request's chip.
+/// What a call held while its thread waits on the person for `kind` waits for, in the words
+/// of the wait's chip.
 fn waiting_on(kind: &str) -> &'static str {
     match kind {
-        slopty_proto::thread::Request::APPROVAL | slopty_proto::thread::Request::RETRY => {
-            "Waiting for approval"
-        }
-        slopty_proto::thread::Request::PLAN => "Plan ready for review",
+        "permission" => "Waiting for approval",
+        "plan" => "Plan ready for review",
         _ => "Waiting for your answer",
     }
 }
@@ -581,12 +580,13 @@ pub fn tool_facts(
             || task.item.as_ref().is_some_and(|i| i.0 == item)
     });
     let (mut result_line, mut failed) = result(call, task).unzip();
-    // slopty: a call held for the person says what it waits for in its request's words, as
-    // the request's own chip does: a question is never called a permission (#9).
-    if let ToolState::Pending { ask } = &call.state
-        && let Some(request) = state.requests.iter().find(|request| request.id == *ask)
+    // slopty: a call held for the person says what it waits for in its thread's wait's words,
+    // as the wait's own chip does: a question is never called a permission (#9).
+    if let ToolState::Pending { .. } = &call.state
+        && let Some(wait) =
+            state.status.wait.as_ref().filter(|_| state.status.phase == Phase::NeedsYou)
     {
-        result_line = Some(waiting_on(&request.kind).to_owned());
+        result_line = Some(waiting_on(&wait.kind).to_owned());
     }
     // How it ended in the agent's own words, where its state alone does not say.
     if let Some(said) = note.and_then(|n| n.said.clone()).filter(|s| !s.trim().is_empty()) {
@@ -603,14 +603,6 @@ pub fn tool_facts(
                 .or_else(|| task.and_then(|t| t.timeout_ms)),
         })
     });
-    let background = match &call.detail {
-        Some(ToolDetail::Exec(exec)) => Some(exec.background),
-        Some(ToolDetail::Agent(agent)) => Some(agent.background),
-        _ => None,
-    };
-    let backgroundable = call.state == ToolState::Running
-        && background == Some(false)
-        && state.meta.can(Cap::BACKGROUND);
     let retry = note.and_then(|note| {
         let notice = Notice {
             kind: Notice::API_ERROR.to_owned(),
@@ -628,7 +620,6 @@ pub fn tool_facts(
         rejected: call.state == ToolState::Rejected,
         timer,
         task_row: task_id.as_deref().map(task_row),
-        backgroundable,
         retry,
         subagent_progress,
         detail: file_path(call)

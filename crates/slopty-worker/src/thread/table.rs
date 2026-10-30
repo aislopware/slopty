@@ -178,8 +178,6 @@ mod tests {
 
     fn row(id: ThreadId) -> ThreadRow {
         let meta = ThreadMeta {
-            modes: Vec::new(),
-            efforts: Vec::new(),
             id,
             agent: AgentId::named(AgentId::PI),
             agent_version: "1.1.0".to_owned(),
@@ -188,10 +186,7 @@ mod tests {
             title: "t".to_owned(),
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
-            forked_from: None,
             drive: Drive::named(Drive::DRIVEN),
-            caps: Vec::new(),
-            models: Vec::new(),
             facts: std::collections::BTreeMap::new(),
             created_ms: WallMs::ZERO,
         };

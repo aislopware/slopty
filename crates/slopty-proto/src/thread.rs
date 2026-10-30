@@ -1,22 +1,22 @@
 //! The agent-neutral thread model: what any coding agent's session looks like to a client, and
 //! the one way it changes.
 //!
-//! Every agent (Claude Code driven over stream-json, Codex over its app-server, pi over its RPC
-//! mode, any ACP agent) is mapped on the worker by its adapter into the same shape: a thread of
+//! Every agent's session is mapped on the worker by its adapter into the same shape, read from the
+//! agent's own records and published doors (`docs/decisions/agents.md`, "TUI-first"): a thread of
 //! turns, each turn a run of items (what the person sent, what the agent wrote, the tools it
-//! called), beside the requests it holds open for the person, the messages waiting to go to it,
-//! and its plan, background work and meters. The shape follows Codex's thread, turn and item
-//! primitives; how it is kept in step on many clients follows Microsoft's Agent Host Protocol
-//! (`docs/decisions/agents.md`).
+//! called), beside its own prompt box and the prompts queued behind its turn ([`prompt`]), and
+//! its plan and background work. The shape
+//! follows Codex's thread, turn and item primitives; how it is kept in step on many clients
+//! follows Microsoft's Agent Host Protocol.
 //!
 //! **One mutation.** A thread changes only by an [`Action`]. [`ThreadState::apply`] is pure and
 //! is the same code on the worker, which keeps the thread's log, and on every client, which
 //! mirrors it, so the two can never disagree about what a run of actions means.
 //!
-//! **Open where agents differ.** What an agent is ([`AgentId`]), what it can do ([`Cap`]), how
-//! Slopty reaches it ([`Drive`]), what kind of tool it called ([`ToolCall::kind`]), what a
-//! request asks ([`Request::kind`]) and which tokens it counts ([`Usage`]) are open strings with
-//! known values named here, never closed enums: a new agent brings its own without a wire
+//! **Open where agents differ.** What an agent is ([`AgentId`]), how Slopty reaches it
+//! ([`Drive`]), what kind of tool it called ([`ToolCall::kind`]) and which tokens it counts
+//! ([`Usage`]) are open strings with known values
+//! named here, never closed enums: a new agent brings its own without a wire
 //! change, and a client shows what it does not know as a quiet, plain row. What is closed is
 //! the structure every agent shares: the phases a thread moves through, a tool call's states,
 //! and where text is appended.
@@ -31,21 +31,20 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use slopty_core::{ClientId, WallMs};
+use slopty_core::WallMs;
 use uuid::Uuid;
 
 pub mod attention;
 pub mod detail;
+pub mod prompt;
 mod reduce;
 pub mod wire;
 pub mod work;
 
 pub use detail::{Clipped, ContentRef, Image, Patch, ToolDetail};
-pub use reduce::{RESOLVED_KEPT, TableState, ThreadState};
-pub use work::{
-    Activity, AgentNote, CallNote, ContextCategory, ContextUsage, Goal, McpServer, Rewound, Rule,
-    RuleChange, Rules, SideExchange, SubagentKind, Surface, SurfaceEvent, TaskNote, TaskUsage,
-};
+pub use prompt::{Draft, DraftImage};
+pub use reduce::{TableState, ThreadState};
+pub use work::{CallNote, TaskNote, TaskUsage};
 
 macro_rules! uuid_id {
     ($(#[$doc:meta])* $name:ident) => {
@@ -236,71 +235,6 @@ impl Drive {
     }
 }
 
-/// Something a thread's agent can do through Slopty. Open: an adapter declares the set its
-/// agent has, and a client shows a control only where its capability is present.
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-pub struct Cap(pub String);
-
-impl Cap {
-    /// Requests are answered through Slopty ([`wire::Intent::Answer`]).
-    pub const APPROVALS: &'static str = "approvals";
-    /// [`wire::Intent::Background`]: a call that blocks its turn goes on in the background.
-    pub const BACKGROUND: &'static str = "background";
-    /// [`wire::Intent::End`]: the agent's process is ended, its background work with it, and
-    /// its conversation kept to be taken up again.
-    pub const END: &'static str = "end";
-    /// [`wire::Intent::Fork`]: a new thread branched off this one.
-    pub const FORK: &'static str = "fork";
-    /// [`wire::Intent::Interrupt`].
-    pub const INTERRUPT: &'static str = "interrupt";
-    /// [`wire::Intent::McpReconnect`] and [`wire::Intent::McpEnable`]: the person reconnects,
-    /// enables or disables one of the agent's MCP servers ([`Action::McpServersSet`]).
-    pub const MCP_SERVERS: &'static str = "mcp-servers";
-    /// [`wire::Intent::Send`] with [`Delivery::Queue`], held until the turn ends, and the
-    /// editing of what is held.
-    pub const QUEUE: &'static str = "queue";
-    /// [`wire::Intent::Review`]: the agent reviews a change through its own door (Claude Code's
-    /// `/code-review`, Codex's `review/start`).
-    pub const REVIEW: &'static str = "review";
-    /// [`wire::Intent::Rewind`]: the files put back as they were before a turn.
-    pub const REWIND: &'static str = "rewind";
-    /// [`wire::Intent::RewindConversation`]: the conversation taken back to before a turn in
-    /// the thread itself, not branched off it.
-    pub const REWIND_CONVERSATION: &'static str = "rewind-conversation";
-    /// [`wire::Intent::Rule`]: the agent's permission rules changed in its own settings.
-    pub const RULES: &'static str = "rules";
-    /// [`wire::Intent::Send`] with a delivery the worker keeps ([`Delivery::is_kept`]): it holds
-    /// the message until its moment, or the person's word for a draft.
-    pub const SCHEDULE: &'static str = "schedule";
-    /// [`wire::Intent::SetEffort`].
-    pub const SET_EFFORT: &'static str = "set-effort";
-    /// [`wire::Intent::SetMode`].
-    pub const SET_MODE: &'static str = "set-mode";
-    /// [`wire::Intent::SetModel`].
-    pub const SET_MODEL: &'static str = "set-model";
-    /// [`wire::Intent::SetOption`].
-    pub const SET_OPTION: &'static str = "set-option";
-    /// [`wire::Intent::Shell`]: a command run on the agent's machine, its output given the agent
-    /// as the TUI's `!` gives it.
-    pub const SHELL: &'static str = "shell";
-    /// [`wire::Intent::Side`]: a side question, answered beside the conversation.
-    pub const SIDE: &'static str = "side";
-    /// The worker snapshots the working tree at each turn edge ([`Action::Snapshot`]).
-    pub const SNAPSHOTS: &'static str = "snapshots";
-    /// [`wire::Intent::Send`] with [`Delivery::Steer`]: a message taken mid-turn.
-    pub const STEER: &'static str = "steer";
-    /// [`wire::Intent::StopTask`]: one piece of background work stopped.
-    pub const STOP_TASK: &'static str = "stop-task";
-    /// [`wire::Intent::Surface`]: the person acts in a mod's surface.
-    pub const SURFACES: &'static str = "surfaces";
-
-    /// The capability named `name`.
-    #[must_use]
-    pub fn named(name: &str) -> Self {
-        Self(name.to_owned())
-    }
-}
-
 /// What a thread is: its agent, where it runs and how it came to be. Changes rarely
 /// ([`Action::Meta`]).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -321,24 +255,10 @@ pub struct ThreadMeta {
     /// For a subagent: the thread and the call that started it.
     pub parent: Option<Link>,
     /// How it came to be. Open: [`ThreadMeta::PERSON`], [`ThreadMeta::SUBAGENT`],
-    /// [`ThreadMeta::FORK`], [`ThreadMeta::ORCHESTRATED`], [`ThreadMeta::AUTOMATION`].
+    /// [`ThreadMeta::ORCHESTRATED`].
     pub origin: String,
-    /// For a fork: where it branched.
-    pub forked_from: Option<Fork>,
     /// How Slopty reaches it.
     pub drive: Drive,
-    /// What it can do through Slopty, sorted.
-    pub caps: Vec<Cap>,
-    /// The models it can be switched to ([`wire::Intent::SetModel`]), from its adapter's
-    /// catalogue; empty where it cannot be.
-    pub models: Vec<Model>,
-    /// The modes it can be switched to ([`wire::Intent::SetMode`]), as its agent publishes
-    /// them (an ACP agent's session modes); empty where it publishes none.
-    pub modes: Vec<Mode>,
-    /// How hard its model can be set to think ([`wire::Intent::SetEffort`]), as its agent names
-    /// the levels for the model it runs now (Codex's reasoning efforts, pi's thinking levels, an
-    /// ACP agent's thought levels); empty where it offers none.
-    pub efforts: Vec<Effort>,
     /// Open facts about it: its seat, its parent, branch, pull request, model.
     pub facts: BTreeMap<String, String>,
     /// When it began.
@@ -346,13 +266,6 @@ pub struct ThreadMeta {
 }
 
 impl ThreadMeta {
-    /// The fact an aside carries ([`wire::Intent::Aside`]): the thread it was asked beside, by
-    /// its id. A list, the inbox, attention and notifications pass over a thread with it.
-    pub const ASIDE_FACT: &'static str = "slopty.aside";
-    /// Started by an automation.
-    pub const AUTOMATION: &'static str = "automation";
-    /// Branched from another thread.
-    pub const FORK: &'static str = "fork";
     /// Started by another agent ([`crate::orchestration::Verb::AgentStart`]).
     pub const ORCHESTRATED: &'static str = "orchestrated";
     /// Started by the person.
@@ -364,127 +277,11 @@ impl ThreadMeta {
     /// only while its session runs there; at most one thread names a terminal at a time.
     pub const TERMINAL_FACT: &'static str = "slopty.terminal";
 
-    /// Whether the thread's agent can do `cap`.
-    #[must_use]
-    pub fn can(&self, cap: &str) -> bool {
-        self.caps.iter().any(|c| c.0 == cap)
-    }
-
-    /// How a message the person sends now goes: into the turn under way, where the agent takes a
-    /// message mid-turn ([`Cap::STEER`]); else queued for the turn's end ([`Cap::QUEUE`]), which
-    /// at rest goes at once. An agent that says neither is sent a steer, and its worker says what
-    /// it can do. Every sender of a message meant for now asks this rather than choosing.
-    #[must_use]
-    pub fn delivery_now(&self) -> Delivery {
-        if !self.can(Cap::STEER) && self.can(Cap::QUEUE) {
-            Delivery::Queue
-        } else {
-            Delivery::Steer
-        }
-    }
-
-    /// How a message meant for when the agent rests goes: queued where the agent queues
-    /// ([`Cap::QUEUE`]), so it never cuts into a turn under way; else as a steer. A scheduled
-    /// message, the agent's own review and words for a seated agent go this way.
-    #[must_use]
-    pub fn delivery_after_turn(&self) -> Delivery {
-        if self.can(Cap::QUEUE) { Delivery::Queue } else { Delivery::Steer }
-    }
-
-    /// The thread this one is an aside of ([`Self::ASIDE_FACT`]), while it is one.
-    #[must_use]
-    pub fn aside_of(&self) -> Option<ThreadId> {
-        self.facts.get(Self::ASIDE_FACT).and_then(|id| id.parse().ok())
-    }
-
     /// The terminal the thread's agent runs in now ([`Self::TERMINAL_FACT`]).
     #[must_use]
     pub fn terminal(&self) -> Option<slopty_core::SessionId> {
         self.facts.get(Self::TERMINAL_FACT).and_then(|id| id.parse().ok())
     }
-}
-
-/// A model a thread's agent can be switched to.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Model {
-    /// The agent's own name for it, as its switch takes it (`opus`, a full model id).
-    pub id: String,
-    /// Its name for people.
-    pub label: String,
-    /// The settings of its own it offers beside it (Codex's service tiers, Claude Code's fast
-    /// mode), each a choice of a few ([`wire::Intent::SetOption`], [`wire::Start::options`]).
-    #[serde(default)]
-    pub options: Vec<OptionOffer>,
-}
-
-/// A setting a model offers, as its agent names it ([`Model::options`]).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct OptionOffer {
-    /// The agent's own name for it.
-    pub id: String,
-    /// Its name for people.
-    pub label: String,
-    /// What it can be set to, in the agent's order.
-    pub choices: Vec<OptionChoice>,
-    /// The choice it has unless one is made, by its id.
-    pub default: String,
-}
-
-/// One choice of an [`OptionOffer`].
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct OptionChoice {
-    /// The agent's own name for it.
-    pub id: String,
-    /// Its name for people.
-    pub label: String,
-}
-
-/// A mode a thread's agent can be switched to: how it asks before acting (`plan`, `ask`,
-/// `code`), by its own name.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Mode {
-    /// The agent's own name for it, as its switch takes it.
-    pub id: String,
-    /// Its name for people.
-    pub label: String,
-    /// What it does, in the agent's words, when it says.
-    pub description: Option<String>,
-}
-
-/// How hard a thread's model can be set to think, by its agent's own name (`low`, `high`).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Effort {
-    /// The agent's own name for it, as its switch takes it.
-    pub id: String,
-    /// Its name for people.
-    pub label: String,
-    /// What it does, in the agent's words, when it says.
-    pub description: Option<String>,
-}
-
-/// What a new thread of an agent can be started with on a worker, known before any thread of
-/// it runs there ([`InstalledAgent::offers`](crate::server::InstalledAgent::offers)).
-///
-/// Each list is what the agent's adapter knows at start without asking the agent (Claude
-/// Code's permission modes and efforts), else what the worker's newest thread of the agent
-/// published; empty where neither says, and then a start leaves that choice to the agent.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct Offers {
-    /// The models it can start on ([`wire::Start::model`]).
-    pub models: Vec<Model>,
-    /// The model a start that asks for none runs on, by its id in [`Self::models`], where the
-    /// agent says: the one a model picker marks as recommended (Claude Code's `default`, the
-    /// model its account is given unless one is chosen).
-    pub model: Option<String>,
-    /// The modes it can start in ([`wire::Start::mode`]).
-    pub modes: Vec<Mode>,
-    /// The mode a start that asks for none begins in, by its id in [`Self::modes`], where the
-    /// machine can tell (Claude Code's settings, else its built-in default).
-    pub mode: Option<String>,
-    /// How hard it can start thinking ([`wire::Start::effort`]).
-    pub efforts: Vec<Effort>,
-    /// The commands its composer takes.
-    pub commands: Vec<Command>,
 }
 
 /// Where a subagent's thread hangs: the thread and the call that started it.
@@ -494,16 +291,6 @@ pub struct Link {
     pub thread: ThreadId,
     /// The call in it.
     pub item: ItemId,
-}
-
-/// Where a fork branched.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Fork {
-    /// The thread it came from.
-    pub thread: ThreadId,
-    /// The last turn it shares with it, when that is known: a fork the agent made on its own
-    /// names only the thread it came from.
-    pub turn: Option<TurnId>,
 }
 
 /// Where a thread is, as every adapter maps its agent: the contract the attention ladder ranks.
@@ -516,7 +303,7 @@ pub enum Phase {
     Working,
     /// Waiting on its own background work or a wakeup, not on the person.
     Waiting,
-    /// Waiting on the person: a request is open, or it asked something.
+    /// Waiting on the person: it asked something, or its own dialog is open.
     NeedsYou,
     /// It finished what it was asked.
     Done,
@@ -545,31 +332,18 @@ impl Phase {
 /// What a thread waits on, in words.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Wait {
-    /// Open: `permission`, `question`, `plan`, `input`, `task`, `command`, `wakeup`, `limit`,
-    /// `stopping`, `compacting`, `stalled`.
+    /// Open: what the agent's records and hooks say it waits on the person for (`permission`,
+    /// `question`, `plan`, `input`), [`Wait::TASK`], [`Wait::COMPACTING`], else the adapter's
+    /// own word.
     pub kind: String,
     /// What it waits for, worded by the adapter ("Wants to run cargo test").
     pub text: String,
 }
 
 impl Wait {
-    /// At rest with only commands left running in the background (a dev server, say), named
-    /// in its text: nothing of the agent's own work holds it.
-    pub const COMMAND: &'static str = "command";
     /// At work compacting its context: the turn waits on the summary, not on the model's next
     /// word.
     pub const COMPACTING: &'static str = "compacting";
-    /// Stopped on the plan's usage limit, failed until it lifts: its windows in the row's
-    /// meters say when.
-    pub const LIMIT: &'static str = "limit";
-    /// A turn under way that has shown no progress for long (no event of its agent, no hook,
-    /// no transcript write, no terminal output): its text names the last thing it was doing,
-    /// when that is known. Nothing is done about it but saying so.
-    pub const STALLED: &'static str = "stalled";
-    /// A stop under way ([`wire::Intent::Interrupt`] answered
-    /// [`Accepted`](wire::Outcome::Accepted)): the worker is ending the turn, rung by rung,
-    /// and the phase leaves working once it ended. Its text says how far it went.
-    pub const STOPPING: &'static str = "stopping";
     /// At rest with work of its own left running in the background: a subagent, a monitor, a
     /// scheduled prompt, or work the adapter cannot tell apart.
     pub const TASK: &'static str = "task";
@@ -620,10 +394,6 @@ pub struct Turn {
     pub models: Vec<String>,
     /// Lines added and removed in the working tree over the turn.
     pub changed: Changed,
-    /// The working tree when it began, when the worker snapshots it.
-    pub before: Option<TreeRef>,
-    /// And when it ended.
-    pub after: Option<TreeRef>,
 }
 
 /// How a turn stands.
@@ -694,18 +464,10 @@ impl Usage {
     }
 }
 
-/// A snapshot of the working tree: a git tree id in the worker's private refs.
+/// A snapshot of the working tree, taken for a review: a git tree id in the worker's private
+/// refs.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct TreeRef(pub String);
-
-/// Which edge of a turn a snapshot was taken at.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum Edge {
-    /// As the turn began.
-    Before,
-    /// As it ended.
-    After,
-}
 
 /// One thing in a thread.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -763,8 +525,6 @@ pub struct UserMessage {
     pub images: Vec<Image>,
     /// A command it is (`/compact`), or `!` for a shell command.
     pub command: Option<String>,
-    /// The intent that sent it, when Slopty did: a client's pending message turns into this.
-    pub intent: Option<IntentId>,
 }
 
 /// A compaction.
@@ -967,291 +727,6 @@ impl ToolState {
     }
 }
 
-/// Something the agent holds open for the person: an approval, a question, a plan, a form.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Request {
-    /// Its id.
-    pub id: AskId,
-    /// The call it is about, when it is about one.
-    pub item: Option<ItemId>,
-    /// What it asks. Open: [`Request::APPROVAL`], [`Request::QUESTION`], [`Request::PLAN`],
-    /// [`Request::ELICITATION`], [`Request::RETRY`], and a dialog of the agent's own,
-    /// [`Request::DIALOG`] followed by its kind ([`Request::dialog_kind`]).
-    pub kind: String,
-    /// What it asks, in a line ("Run cargo test?").
-    pub title: String,
-    /// More of it, when there is more.
-    pub text: Option<Clipped>,
-    /// The answers the agent offers, in its order. Slopty never invents one.
-    pub options: Vec<Choice>,
-    /// The questions, for a question.
-    pub questions: Vec<detail::Question>,
-    /// The change it would make, for an approval of an edit.
-    pub proposed: Option<Patch>,
-    /// For a form: its JSON schema, its properties in the order the server listed them. For a
-    /// dialog ([`Request::DIALOG`]): its payload, as JSON, as the agent sent it.
-    pub schema_json: Option<String>,
-    /// For a form the person fills in elsewhere: where.
-    pub url: Option<String>,
-    /// Why the agent asks, in its own words, when it says: the classifier, the rule, the hook or
-    /// the safety check that wanted the person's word ("Permission rule `Bash(rm:*)` requires
-    /// confirmation for this command.").
-    pub reason: Option<String>,
-    /// How it stands.
-    pub state: RequestState,
-    /// When it opened.
-    pub opened_ms: WallMs,
-    /// When the worker stops holding it and gives it back to the agent's own prompt.
-    pub until_ms: Option<WallMs>,
-    /// Only the person at its card answers it: the agent says one-tap answers must not be
-    /// offered (Claude Code's `requires_user_interaction`). A notification's buttons, an API
-    /// call (the CLI, a note's verdict through the server), another agent and any rule Slopty
-    /// would add with it are refused; the card says so ([`Request::NEEDS_PRESENCE`]).
-    #[serde(default)]
-    pub needs_presence: bool,
-}
-
-impl Request {
-    /// May the agent do something.
-    pub const APPROVAL: &'static str = "approval";
-    /// The choice that dismisses a dialog or a form without an answer.
-    pub const CANCEL: &'static str = "cancel";
-    /// The choice that turns a form down.
-    pub const DECLINE: &'static str = "decline";
-    /// How a dialog of the agent's own begins its kind: `dialog:goal_proposal`,
-    /// `dialog:sandbox_network_access`, `dialog:refusal_fallback_prompt`. Its payload is
-    /// [`Request::schema_json`], its offered answers [`Request::options`] for a kind the adapter
-    /// knows. Any dialog is answered by a [`Choice::id`], or by a JSON object as the dialog's
-    /// result, or dismissed by [`Request::CANCEL`]: a kind no client knows is shown from its
-    /// payload and still answered, never refused unseen.
-    pub const DIALOG: &'static str = "dialog:";
-    /// A form to fill in (an MCP server's elicitation): its message is [`Request::text`], its
-    /// server [`Request::title`], its schema [`Request::schema_json`], or the page to fill it in
-    /// at [`Request::url`]. Answered with the filled-in object as JSON, [`Request::DECLINE`] or
-    /// [`Request::CANCEL`].
-    pub const ELICITATION: &'static str = "elicitation";
-    /// What a card that only the person at it answers says ([`Request::needs_presence`]).
-    pub const NEEDS_PRESENCE: &'static str = "Answer in Slopty";
-    /// Why an answer from anywhere but the card is refused ([`Request::needs_presence`]).
-    pub const NEEDS_PRESENCE_REFUSED: &'static str =
-        "Answer in Slopty: the agent takes this answer only from its card";
-    /// A plan to approve.
-    pub const PLAN: &'static str = "plan";
-    /// Questions for the person.
-    pub const QUESTION: &'static str = "question";
-    /// May the agent try again a call its own judge of risk turned down: the allow lets it,
-    /// the deny keeps the decline.
-    pub const RETRY: &'static str = "retry";
-
-    /// Whether it still waits on an answer.
-    #[must_use]
-    pub const fn is_open(&self) -> bool {
-        matches!(self.state, RequestState::Open)
-    }
-
-    /// The kind of the agent's own dialog this is ([`Request::DIALOG`]), when it is one.
-    #[must_use]
-    pub fn dialog_kind(&self) -> Option<&str> {
-        self.kind.strip_prefix(Self::DIALOG).filter(|kind| !kind.is_empty())
-    }
-}
-
-/// The choice of `options` that allows (`allow`) or denies the call once and no more.
-///
-/// The plain allow neither reaches beyond this once nor stops the turn (a plan's "clear context"
-/// does); the plain deny is [`plain_deny`].
-#[must_use]
-pub fn once(options: &[Choice], allow: bool) -> Option<&Choice> {
-    if allow {
-        options.iter().find(|c| c.effect == Effect::Allow && c.scope.is_none() && !c.stops)
-    } else {
-        plain_deny(options)
-    }
-}
-
-/// The deny of `options` that turns the call down once and no more: the plain one, else the
-/// first.
-#[must_use]
-pub fn plain_deny(options: &[Choice]) -> Option<&Choice> {
-    let denies = || options.iter().filter(|c| c.effect == Effect::Deny);
-    denies().find(|c| c.scope.is_none() && !c.stops).or_else(|| denies().next())
-}
-
-/// An answer an agent offers.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Choice {
-    /// Its id, as the agent knows it.
-    pub id: String,
-    /// What it says.
-    pub label: String,
-    /// What it means.
-    pub effect: Effect,
-    /// How far it reaches beyond this once, in the agent's words ("this session",
-    /// "Bash(cargo test:*)"), a folder said short: relative to the thread's folder, or to `~`.
-    pub scope: Option<String>,
-    /// The folders `scope` names, each in full, for its tooltip; empty when it names none.
-    pub folders: Vec<String>,
-    /// It also stops the turn.
-    pub stops: bool,
-}
-
-/// What an answer means, so a client can tell yes from no without knowing the agent.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum Effect {
-    /// Go ahead.
-    Allow,
-    /// Do not.
-    Deny,
-    /// Neither: an answer to a question, a choice in a form.
-    Answer,
-}
-
-/// How a request stands.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum RequestState {
-    /// It waits.
-    Open,
-    /// Someone answered it.
-    Answered {
-        /// Who.
-        by: Answerer,
-        /// The choice taken ([`Choice::id`]), or what was written.
-        choice: String,
-    },
-    /// Slopty gave it back to the agent's own prompt (the TUI's dialog).
-    Released,
-    /// The agent stopped asking.
-    Withdrawn,
-}
-
-/// Who answered a request.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Answerer {
-    /// The client, when one did.
-    pub client: Option<ClientId>,
-    /// Its name, or where the answer came from ("terminal").
-    pub name: String,
-}
-
-/// A message on its way to the agent, held by the worker.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Pending {
-    /// The intent that sent it.
-    pub intent: IntentId,
-    /// What it says.
-    pub text: String,
-    /// The files sent with it, by their paths on the worker ([`wire::Intent::Send`]).
-    pub attachments: Vec<String>,
-    /// When it goes.
-    pub delivery: Delivery,
-    /// Where it is.
-    pub state: PendingState,
-}
-
-impl Pending {
-    /// What a refused message's reason begins with: the agent, or its own door, said no, and
-    /// the rest is its words. It never goes on its own: the person sends it again, as a new
-    /// [`wire::Intent::Send`].
-    pub const REFUSED: &'static str = "Not taken: ";
-    /// Why a queued message waits once the person stopped the turn: a stop is their word to
-    /// halt, so nothing queued goes on its own until they send again ([`wire::Intent::Send`]
-    /// or [`wire::Intent::Promote`]), which lets the rest go after it in their order.
-    pub const STOPPED: &'static str = "Held since you stopped the turn";
-    /// Why a message is held when it may or may not have reached its agent: the agent's door
-    /// went away (its process ended, its mod stopped answering, the worker restarted) after it
-    /// was handed over and before the agent said it began. It never goes on its own;
-    /// the person sends it again, as a new [`wire::Intent::Send`].
-    pub const UNKNOWN: &'static str = "It may not have reached the agent";
-
-    /// The reason of a message its agent refused, saying `why`.
-    #[must_use]
-    pub fn refused(why: &str) -> String {
-        format!("{}{why}", Self::REFUSED)
-    }
-
-    /// Whether its agent refused it ([`Self::REFUSED`]).
-    #[must_use]
-    pub fn is_refused(&self) -> bool {
-        matches!(&self.state, PendingState::Held { reason } if reason.starts_with(Self::REFUSED))
-    }
-
-    /// Whether it may or may not have reached its agent ([`Self::UNKNOWN`]).
-    #[must_use]
-    pub fn is_unknown(&self) -> bool {
-        matches!(&self.state, PendingState::Held { reason } if reason == Self::UNKNOWN)
-    }
-
-    /// Whether it waits for its moment and nothing holds it: what a queue picks from.
-    #[must_use]
-    pub fn is_waiting(&self) -> bool {
-        self.state == PendingState::Waiting
-    }
-
-    /// Whether it waits on the person's stop ([`Self::STOPPED`]).
-    #[must_use]
-    pub fn stopped(&self) -> bool {
-        matches!(&self.state, PendingState::Held { reason } if reason == Self::STOPPED)
-    }
-
-    /// Hold it for the person's stop when it is a queued message not yet on its way; whether
-    /// it was.
-    pub fn hold_for_stop(&mut self) -> bool {
-        let queued = self.delivery == Delivery::Queue && self.state != PendingState::Sending;
-        if queued {
-            self.state = PendingState::Held { reason: Self::STOPPED.to_owned() };
-        }
-        queued
-    }
-
-    /// Let it wait for its turn again once the person speaks after their stop; whether it was
-    /// held for it.
-    pub fn release_stop(&mut self) -> bool {
-        let held = self.stopped();
-        if held {
-            self.state = PendingState::Waiting;
-        }
-        held
-    }
-}
-
-/// When a message goes to the agent.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
-pub enum Delivery {
-    /// Now, into the turn under way, which the agent takes at its next step.
-    Steer,
-    /// When the turn under way ends.
-    Queue,
-    /// At a time: held on the worker until then, through a restart, and then queued
-    /// ([`Cap::SCHEDULE`]).
-    At {
-        /// When.
-        at_ms: WallMs,
-    },
-}
-
-impl Delivery {
-    /// Whether the worker keeps the message until a moment it watches for ([`Self::At`]),
-    /// rather than the agent's queue.
-    #[must_use]
-    pub const fn is_kept(self) -> bool {
-        matches!(self, Self::At { .. })
-    }
-}
-
-/// Where a pending message is.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum PendingState {
-    /// It waits for its moment.
-    Waiting,
-    /// Something is in its way, in words ("Your draft in the terminal is in the way").
-    Held {
-        /// What.
-        reason: String,
-    },
-    /// The worker is giving it to the agent.
-    Sending,
-}
-
 /// The agent's plan or task list.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Plan {
@@ -1392,53 +867,6 @@ impl BackgroundTask {
     }
 }
 
-/// A thread's meters: its model, context and plan windows.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct Meters {
-    /// The model's name for people.
-    pub model: Option<String>,
-    /// The model's id.
-    pub model_id: Option<String>,
-    /// The permission mode, as the agent names it, shown and never set by typing keys.
-    pub mode: Option<String>,
-    /// How hard the model thinks, as the agent names it (Codex's reasoning effort, pi's thinking
-    /// level, an ACP agent's thought level).
-    pub effort: Option<String>,
-    /// Tokens in the context.
-    pub context_tokens: Option<u64>,
-    /// The context window.
-    pub context_window: Option<u64>,
-    /// The plan's rate windows.
-    pub limits: Vec<Limit>,
-}
-
-/// One of a plan's rate windows.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Limit {
-    /// Open, as the agent names it: `five-hour`, `seven-day`.
-    pub name: String,
-    /// How much is used, in hundredths of a percent.
-    pub used_bp: u32,
-    /// When it resets.
-    pub resets_ms: Option<WallMs>,
-}
-
-/// A command the agent takes in its composer (`/compact`).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Command {
-    /// Its name, without the slash.
-    pub name: String,
-    /// What it does.
-    pub description: String,
-    /// What its arguments look like.
-    pub argument_hint: Option<String>,
-    /// Open, where it comes from: `built-in`, `personal`, `project`, `plugin`.
-    pub source: String,
-    /// Whether it runs one of the agent's skills, which the composer offers by `$` too.
-    #[serde(default)]
-    pub skill: bool,
-}
-
 /// Where in an item an [`Action::Append`] goes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum PartKey {
@@ -1490,65 +918,30 @@ pub enum Action {
         /// The item.
         item: ItemId,
     },
-    /// A request opened, or changed.
-    RequestOpened(Box<Request>),
-    /// A request was settled.
-    RequestResolved {
-        /// The request.
-        id: AskId,
-        /// How.
-        state: RequestState,
-    },
-    /// The messages waiting to go, in their order.
-    PendingSet(Vec<Pending>),
+    /// The prompts the person queued in the agent's own TUI behind the turn under way, in the
+    /// order they go, as its transcript says them (its `queue-operation` records); empty once
+    /// none waits.
+    QueuedSet(Vec<String>),
     /// The plan.
     PlanSet(Option<Plan>),
     /// The background work.
     TasksSet(Vec<BackgroundTask>),
-    /// The meters.
-    MetersSet(Meters),
-    /// The commands the composer offers.
-    CommandsSet(Vec<Command>),
     /// The turns after `after` are gone (a rewind, a fork); `None` empties the thread.
     Truncated {
         /// The last turn kept.
         after: Option<TurnId>,
     },
-    /// The working tree was snapshotted at a turn's edge.
-    Snapshot {
-        /// The turn.
-        turn: TurnId,
-        /// Which edge.
-        edge: Edge,
-        /// The tree.
-        tree: TreeRef,
-    },
-    /// Whether the working tree, as last snapshotted, holds changes the person has not kept:
-    /// the worker compares it with what they kept, or the thread's first snapshot when they
-    /// have kept nothing.
-    ToReview(bool),
     /// The windows and displays on the worker its agent drives, the latest first; empty once
     /// it drives none.
     ScreensSet(Vec<AgentScreen>),
-    /// The pull request of the branch its folder has checked out, as the worker last read it
-    /// from the forge; `None` once that branch has none.
-    PullSeen(Option<wire::PullSeen>),
     /// The person saw the thread's turns through this one ([`wire::Intent::Seen`]); a mark
     /// below the one held changes nothing.
     Seen(TurnId),
-    /// What the person was writing to it and has not sent ([`wire::Intent::Draft`]); empty
-    /// words once it went or was cleared, kept with when, as a tombstone.
-    DraftSet(wire::Draft),
+    /// What the agent's own prompt box holds as the person types in its TUI ([`Draft`]);
+    /// `None` once it holds nothing, or its TUI ended.
+    DraftSet(Option<Draft>),
     /// The person's own name for it ([`wire::Intent::Name`]); empty once taken back.
     NameSet(String),
-    /// The person's own words for a message given the agent in its words
-    /// ([`wire::Intent::Said`]); empty words take them back.
-    Said {
-        /// The intent that sent the message.
-        message: IntentId,
-        /// The words as the person wrote them.
-        words: String,
-    },
     /// What the agent says of one call beside the call ([`CallNote`]): its running time, the
     /// task it became, the words it ended with. Replaces the note held for the item.
     CallNoted {
@@ -1557,56 +950,11 @@ pub enum Action {
         /// The note.
         note: CallNote,
     },
-    /// The end of what a background task printed, as the agent last read it.
-    TaskOutput {
-        /// The task ([`BackgroundTask::id`]).
-        task: String,
-        /// Its output's tail.
-        output: Clipped,
-    },
-    /// The turn under way, as the spinner line shows it; `None` once no turn runs.
-    ActivitySet(Option<Activity>),
-    /// The goal the agent works towards; `None` once it is cleared or met.
-    GoalSet(Option<Goal>),
-    /// A passing notification, in place of any of its key.
-    Notified(AgentNote),
-    /// The prompt the agent guesses the person sends next; `None` once it no longer holds.
-    Suggested(Option<String>),
-    /// A side question asked or answered, in place of any of its intent's.
-    Side(SideExchange),
-    /// The agent's permission rules, as it lists them.
-    RulesSet(Rules),
-    /// The person's own status line, run on the worker as the agent's TUI runs it: its text,
-    /// ANSI colours kept; `None` when there is none.
-    StatusLine(Option<String>),
-    /// The folder as it was before the last rewind, which [`wire::Intent::Unrewind`] puts back;
-    /// `None` once it was put back, or nothing can be.
-    Rewound(Option<Rewound>),
-    /// The kinds of subagent the agent offers.
-    AgentsSet(Vec<SubagentKind>),
-    /// The context window by category.
-    ContextSet(ContextUsage),
-    /// A mod's surface shows, in place of any of its id.
-    SurfaceSet(Surface),
-    /// A mod's surface went.
-    SurfaceGone {
-        /// Its id.
-        id: String,
-    },
     /// The worker last heard the thread's agent alive at this moment, by its own clock, while a
     /// turn was under way ([`wire::ThreadRow::lease_ms`]): the agent's own word (Claude Code's
     /// mod beats every few seconds), else the worker's check that its process lives. A client
     /// that sees it go stale shows the turn as no longer known to run.
     Lease(WallMs),
-    /// The agent's MCP servers, in its order, as it last said them.
-    McpServersSet(Vec<McpServer>),
-}
-
-/// The first of `pending` a queue sends next: the oldest that waits for its moment, not held
-/// for any reason (a stop, a refusal, a doubt whether it went) and not on its way.
-#[must_use]
-pub fn next_queued(pending: &[Pending]) -> Option<&Pending> {
-    pending.iter().find(|p| p.delivery == Delivery::Queue && p.is_waiting())
 }
 
 /// A window or display on the thread's worker that its agent drives.

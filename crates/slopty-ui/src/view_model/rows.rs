@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::ThreadRow;
-use slopty_proto::thread::{Phase, ThreadId, ThreadMeta};
+use slopty_proto::thread::{Phase, ThreadId};
 use slopty_view_proto::{Chat, Session, SessionStatus, SessionWait, Space};
 
 /// A wall time as the shell's.
@@ -118,19 +118,16 @@ pub fn folder(row: &ThreadRow) -> Option<&str> {
 }
 
 /// The thread that started this one: the row's link to it, else the parent its agent was
-/// started under ([`slopty_proto::agent::PARENT_FACT`]), else the thread it was asked aside of
-/// ([`ThreadMeta::ASIDE_FACT`]).
+/// started under ([`slopty_proto::agent::PARENT_FACT`]).
 #[must_use]
 pub fn parent(row: &ThreadRow) -> Option<ThreadId> {
     row.parent.as_ref().map(|link| link.thread).or_else(|| {
-        [slopty_proto::agent::PARENT_FACT, ThreadMeta::ASIDE_FACT]
-            .iter()
-            .find_map(|fact| row.facts.get(*fact).and_then(|thread| thread.parse().ok()))
+        row.facts.get(slopty_proto::agent::PARENT_FACT).and_then(|thread| thread.parse().ok())
     })
 }
 
 /// Whether another agent started the thread: a subagent of a call, or an agent started by
-/// another; not a side chat the person asked aside.
+/// another.
 #[must_use]
 pub fn subagent(row: &ThreadRow) -> bool {
     row.parent.is_some() || row.facts.contains_key(slopty_proto::agent::PARENT_FACT)
@@ -169,78 +166,8 @@ pub fn chat(row: &ThreadRow, device: &str) -> Chat {
         parent_chat_id: parent(row).map(|thread| thread.to_string()),
         subagent: subagent(row),
         in_parent: row.parent.is_some(),
-        // What the person last kept writing to it, on any device.
-        draft: row.draft.as_ref().map(|draft| draft.text.clone()).filter(|text| !text.is_empty()),
+        draft: None,
     }
-}
-
-/// The pull request a thread's row shows, as the shell's summary of it, on branch `branch`.
-#[must_use]
-pub fn pull(
-    row: &ThreadRow,
-    branch: Option<&str>,
-) -> Option<slopty_view_proto::ChangeRequestSummary> {
-    use slopty_proto::thread::wire::PullStands;
-    use slopty_view_proto::ChangeRequestState;
-    let pull = row.pull.as_ref()?;
-    let state = match pull.stands {
-        PullStands::Merged => ChangeRequestState::Merged,
-        PullStands::Closed => ChangeRequestState::Closed,
-        _ => ChangeRequestState::Open,
-    };
-    Some(slopty_view_proto::ChangeRequestSummary {
-        provider: match pull.forge {
-            slopty_proto::git::Forge::GitHub => "github",
-            slopty_proto::git::Forge::GitLab => "gitlab",
-        }
-        .to_owned(),
-        number: u64::from(pull.number),
-        title: pull.title.clone(),
-        url: pull.url.clone(),
-        state,
-        base_ref: pull.base.clone(),
-        head_ref: branch.unwrap_or_default().to_owned(),
-    })
-}
-
-/// A plan's rate window as the usage ring names it: Claude Code's five-hour window is the
-/// session's, its seven-day ones the week's (the model it is for after), as zeron names them.
-fn window_label(name: &str) -> String {
-    let name = name.trim();
-    let (base, rest) = if let Some(rest) = name.strip_prefix("five-hour") {
-        ("Session", rest)
-    } else if let Some(rest) = name.strip_prefix("seven-day") {
-        ("Week", rest)
-    } else if let Some(rest) = name.strip_prefix("month") {
-        ("Month", rest)
-    } else {
-        let mut chars = name.chars();
-        let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
-        return format!("{first}{}", chars.as_str()).replace(['-', '_'], " ");
-    };
-    let rest = rest.trim_start_matches(['-', '_', ' ']);
-    if rest.is_empty() {
-        return base.to_owned();
-    }
-    let mut chars = rest.chars();
-    let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
-    format!("{base} · {first}{}", chars.as_str())
-}
-
-/// A plan's rate windows as the shell's usage ring takes them, the most used first.
-#[must_use]
-pub fn limits(limits: &[slopty_proto::thread::Limit]) -> Vec<slopty_view_proto::AgentUsageWindow> {
-    let mut windows: Vec<_> = limits
-        .iter()
-        .map(|limit| slopty_view_proto::AgentUsageWindow {
-            label: window_label(&limit.name),
-            used_fraction: f32::from(u16::try_from(limit.used_bp.min(10_000)).unwrap_or(10_000))
-                / 10_000.0,
-            resets_at: limit.resets_ms.map(time),
-        })
-        .collect();
-    windows.sort_by(|a, b| b.used_fraction.total_cmp(&a.used_fraction));
-    windows
 }
 
 /// The longest a session's reason line is, in characters as seen.

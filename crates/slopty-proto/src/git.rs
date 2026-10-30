@@ -186,21 +186,6 @@ pub enum GitOp {
         /// The branch, with no remote's prefix.
         branch: String,
     },
-    /// What one turn of a thread changed in the working tree, from its snapshot at the turn's
-    /// start to its snapshot at the end, or to the working tree now while it runs
-    /// ([`GitDone::Changes`], scoped [`crate::thread::wire::ReviewScope::Turn`]). The snapshots are
-    /// the ones the worker takes of every turn ([`crate::thread::Turn::before`],
-    /// [`crate::thread::Turn::after`]). Nothing in the repository moves; its index is not touched.
-    Turn {
-        /// The turn.
-        turn: crate::thread::TurnId,
-        /// The tree when it began.
-        before: crate::thread::TreeRef,
-        /// The tree when it ended; none while it runs.
-        after: Option<crate::thread::TreeRef>,
-        /// Whitespace does not count, as `git diff -w` reads it.
-        ignore_whitespace: bool,
-    },
 }
 
 /// What a person's review of a pull request says of the whole ([`GitOp::PullReview`]).

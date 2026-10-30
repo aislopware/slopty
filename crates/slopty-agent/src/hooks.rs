@@ -8,8 +8,9 @@
 //! never answered: the TUI shows its own.
 //!
 //! The relay hands each payload to the worker, which reads the session's status from it
-//! ([`Hook::signal`]). Unknown events and fields are passed over, so a newer Claude Code's
-//! additions cost nothing.
+//! ([`Hook::signal`]). Slopty's own mod relays the TUI's prompt box the same way, under an event of
+//! its own ([`DRAFT_EVENT`], `crate::claude::draft`). Unknown events and fields are passed over,
+//! so a newer Claude Code's additions cost nothing.
 
 use std::path::Path;
 
@@ -43,6 +44,9 @@ pub const RELAY_ARG: &str = "hook";
 
 /// The flag Claude Code takes settings for one run with.
 pub const SETTINGS_FLAG: &str = "--settings";
+
+/// The event Slopty's mod relays the TUI's prompt box under: none of Claude Code's own.
+pub const DRAFT_EVENT: &str = "PromptDraft";
 
 /// `claude` arguments that also relay [`EVENTS`] to `<relay> hook`, for that run alone.
 ///
@@ -167,6 +171,14 @@ pub struct Hook {
     /// What a `StopFailure` failed on.
     #[serde(default)]
     pub error: Option<String>,
+    /// The prompt: the one sent, on `UserPromptSubmit`; what the box holds, on a
+    /// [`DRAFT_EVENT`].
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// The temporary root Claude Code keeps its files under (its `CLAUDE_CODE_TMPDIR`), on a
+    /// [`DRAFT_EVENT`] whose TUI has one set.
+    #[serde(default)]
+    pub tmpdir: Option<String>,
 }
 
 /// What a hook says of its session.
@@ -192,6 +204,15 @@ pub enum Signal {
     Compacting(bool),
     /// The session ended (`/clear`, `/resume`, `/exit`, a logout).
     Ended,
+    /// The TUI's prompt box holds `text` now ([`DRAFT_EVENT`]): nothing for the status. Its pasted
+    /// pictures are kept under the temporary root `tmpdir`, Claude Code's own default when
+    /// `None`.
+    Draft {
+        /// What the box holds.
+        text: String,
+        /// The temporary root, when the TUI moved it.
+        tmpdir: Option<String>,
+    },
     /// Nothing for the status (a subagent's start or stop: the transcript tells those).
     Nothing,
 }
@@ -223,6 +244,10 @@ impl Hook {
             "Notification" => self.notified(),
             "Stop" => Signal::Done,
             "StopFailure" => Signal::Failed(self.error.clone().filter(|e| !e.trim().is_empty())),
+            DRAFT_EVENT => Signal::Draft {
+                text: self.prompt.clone().unwrap_or_default(),
+                tmpdir: self.tmpdir.clone().filter(|t| !t.trim().is_empty()),
+            },
             "PreCompact" => Signal::Compacting(true),
             "PostCompact" => Signal::Compacting(false),
             _ => Signal::Nothing,
@@ -377,6 +402,20 @@ mod tests {
             Signal::Ended
         );
         assert_eq!(hook(json!({"hook_event_name": "SubagentStop"})), Signal::Nothing);
+        assert_eq!(
+            hook(
+                json!({"hook_event_name": "PromptDraft", "session_id": "s", "prompt": "see [Image #2]", "tmpdir": "/Volumes/Fast/tmp"})
+            ),
+            Signal::Draft {
+                text: "see [Image #2]".to_owned(),
+                tmpdir: Some("/Volumes/Fast/tmp".to_owned())
+            }
+        );
+        assert_eq!(
+            hook(json!({"hook_event_name": "PromptDraft", "session_id": "s", "tmpdir": ""})),
+            Signal::Draft { text: String::new(), tmpdir: None },
+            "a box with nothing in it, under Claude Code's own temporary root"
+        );
         assert_eq!(hook(json!({"hook_event_name": "SomethingNew", "x": 1})), Signal::Nothing);
         assert_eq!(Hook::parse("not json"), None);
     }

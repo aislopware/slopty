@@ -53,35 +53,6 @@ fn harness_of(agent: &AgentId) -> HarnessId {
     }
 }
 
-/// The option the picker shows an agent's modes as (Claude Code's permission modes, an ACP
-/// agent's session modes): switched through the agent's own `SetMode`, started in by
-/// `Start::mode`, never sent as an option.
-pub(in crate::workspace) const MODE_OPTION: &str = "mode";
-
-/// The row of `offered` a thread running `model` (an agent's full id, `claude-opus-5-5`) is
-/// on: its own id, else the alias it is of (`opus`), a `[1m]` row only for a 1M model.
-pub(in crate::workspace) fn alias_in(
-    offered: &[slopty_proto::thread::Model],
-    model: &str,
-) -> Option<String> {
-    let model = model.to_ascii_lowercase();
-    if let Some(row) = offered.iter().find(|row| row.id.eq_ignore_ascii_case(&model)) {
-        return Some(row.id.clone());
-    }
-    let wide = model.contains("[1m]") || model.ends_with("-1m");
-    offered
-        .iter()
-        .filter(|row| !row.id.eq_ignore_ascii_case("default"))
-        .find(|row| {
-            let (base, row_wide) = match row.id.strip_suffix("[1m]") {
-                Some(base) => (base, true),
-                None => (row.id.as_str(), false),
-            };
-            row_wide == wide && !base.is_empty() && model.contains(&base.to_ascii_lowercase())
-        })
-        .map(|row| row.id.clone())
-}
-
 impl WorkspaceView {
     /// One of these calls; `None` for one it does not make.
     pub(super) fn composer_call(
@@ -148,43 +119,14 @@ impl WorkspaceView {
         self.surface_device(params).or_else(|| self.context_worker())
     }
 
-    /// What the thread `row` on `device` runs, as the shell's chat config: its agent, its model
-    /// by its own id (Claude's by the id its alias answers for), its effort and its mode.
-    pub(in crate::workspace) fn chat_config(&self, device: &str, row: &ThreadRow) -> ChatConfig {
-        let model = row.meters.model_id.as_deref().map(|id| {
-            let listed = if row.agent.is(AgentId::CLAUDE_CODE) {
-                super::catalog::claude_id(id).map(str::to_owned)
-            } else {
-                self.view_worker(device)
-                    .and_then(|key| self.workers.get(&key))
-                    .and_then(|worker| {
-                        let caps = worker.caps.as_ref()?;
-                        caps.agents.iter().find(|a| a.agent == row.agent)
-                    })
-                    .and_then(|installed| alias_in(&installed.offers.models, id))
-            };
-            listed.unwrap_or_else(|| id.to_owned())
-        });
+    /// What the thread `row` runs, as the shell's chat config: its agent. Its model, effort and
+    /// mode are its TUI's to show.
+    pub(in crate::workspace) fn chat_config(row: &ThreadRow) -> ChatConfig {
         ChatConfig {
             harness: harness_of(&row.agent),
-            model,
-            reasoning: row
-                .meters
-                .effort
-                .as_deref()
-                .and_then(|effort| serde_json::from_value(serde_json::json!(effort)).ok()),
-            model_options: row
-                .meters
-                .mode
-                .clone()
-                .filter(|mode| !mode.trim().is_empty())
-                .map(|mode| {
-                    serde_json::Map::from_iter([(
-                        MODE_OPTION.to_owned(),
-                        serde_json::Value::String(mode),
-                    )])
-                })
-                .unwrap_or_default(),
+            model: None,
+            reasoning: None,
+            model_options: serde_json::Map::new(),
             sandbox: SandboxLevel::WorkspaceWrite,
         }
     }

@@ -11,6 +11,7 @@ mod canned;
 mod check;
 mod ci_profile;
 mod claude;
+mod claude_mod;
 mod deep;
 mod dist;
 mod doctor;
@@ -250,6 +251,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: fixtures::FixturesCmd,
     },
+    /// Slopty's Claude Code mod: its TypeScript checks (`check`), the pinned build's declarations.
+    #[command(subcommand)]
+    ClaudeMod(claude_mod::ClaudeModCmd),
     /// Run the live end-to-end tests (daemons, screen capture, input) in an isolated data dir.
     E2e(e2e::E2eOpts),
     /// Format everything (rustfmt nightly if present, taplo).
@@ -456,6 +460,7 @@ pub fn main() -> Result<()> {
         }
         Cmd::E2e(opts) => e2e::run(&sh, &opts),
         Cmd::Fixtures { cmd } => fixtures::run(&cmd),
+        Cmd::ClaudeMod(cmd) => claude_mod::run(&cmd),
         Cmd::Fmt => gate::fmt(&sh, true),
         Cmd::Lint => gate::lint(&sh),
         Cmd::Test { args } => gate::test(&sh, &args),

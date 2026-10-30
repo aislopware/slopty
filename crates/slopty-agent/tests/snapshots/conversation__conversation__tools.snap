@@ -364,16 +364,12 @@ expression: "decode(\"tools\").snapshot()"
       ended_ms: 1793273708408
       models:
         - claude-haiku-5-5
-      requests: 14
       usage:
         input: 28
         cache_read: 315770
         cache_write: 15809
         output: 2538
         thinking: 728
-      context_tokens: 25642
-      mode: default
-      stop: end_turn
 - id:
     Agent: a0000000000000001
   origin:
@@ -431,13 +427,9 @@ expression: "decode(\"tools\").snapshot()"
       ended_ms: ~
       models:
         - claude-haiku-5-5
-      requests: 2
       usage:
         input: 4
         cache_read: 13002
         cache_write: 14339
         output: 444
         thinking: 371
-      context_tokens: 14341
-      mode: ~
-      stop: end_turn

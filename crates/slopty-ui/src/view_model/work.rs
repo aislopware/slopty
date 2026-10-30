@@ -1,21 +1,18 @@
-//! What a thread does besides its conversation, as the shell's dock and tray read it.
+//! What a thread does besides its conversation, as the shell's inspector reads it.
 //!
-//! Its background work beside the child chats it started ([`tray`]); and the turn's live line,
-//! its permission mode, its context and the subagent kinds it offers ([`dock`]).
+//! Its background work beside the child chats it started ([`tray`]); and the agent's own prompt
+//! box, mirrored ([`dock`]).
 //!
 //! Pure: the workspace hands in a thread's state and the rows of the threads it started, and
 //! publishes what comes out (`workspace::view_model::work`).
 
 use slopty_proto::thread::wire::ThreadRow;
-use slopty_proto::thread::{
-    BackgroundTask, Cap, ItemBody, Notice, Phase, ThreadId, ThreadState, TurnState, Usage,
-};
+use slopty_proto::thread::{BackgroundTask, Notice, Phase, ThreadId, ThreadState};
 use slopty_view_doc::{
-    ActivityLine, ChatDock, ContextBreakdown, ContextSlice, MainRow, ModeChip, RetryLine,
-    TurnTokens, WorkCounts, WorkRow, WorkTray, tokens_short,
+    ChatDock, PromptBox, PromptImage, RetryLine, WorkRow, WorkTray, tokens_short,
 };
 
-use super::transcript::at;
+use super::transcript::{at, image_path};
 
 /// A chat another agent started under this thread, as its row says it: Claude Code's own
 /// subagent of a call, or an agent started through Slopty's verbs.
@@ -99,23 +96,39 @@ const fn child_state(row: &ThreadRow) -> &'static str {
     }
 }
 
-/// What a child chat asks of the person now, in a line, while it does.
+/// What a child chat asks of the person now, in a line, while it does: its wait's words.
 #[must_use]
 pub fn child_asks(row: &ThreadRow) -> Option<String> {
-    let card = row.requests.first()?;
-    let title = card.title.trim();
-    Some(if title.is_empty() { "Needs your answer".to_owned() } else { title.to_owned() })
+    if row.status.phase != Phase::NeedsYou {
+        return None;
+    }
+    let words = row.status.wait.as_ref().map_or("", |wait| wait.text.trim());
+    Some(if words.is_empty() { "Needs your answer".to_owned() } else { words.to_owned() })
 }
 
-/// `state`'s background work beside the chats it started (`children`), as the tray lists it.
-/// `chat_of` names a thread by the id the shell knows its chat by.
+/// A row on its way into the tray, with what places it there.
+struct Work {
+    row: WorkRow,
+    /// It is still at work in any way.
+    live: bool,
+    /// Housekeeping of the agent's own (a memory pass), which the tray leaves out.
+    ambient: bool,
+    /// It waits on the person.
+    needs_you: bool,
+    /// When it began.
+    started: i64,
+    /// The row that started it, for work a subagent started.
+    parent: Option<String>,
+}
+
+/// `state`'s background work at work now beside the chats it started (`children`), as the tray
+/// lists it. `chat_of` names a thread by the id the shell knows its chat by.
 #[must_use]
 pub fn tray(
     state: &ThreadState,
     children: &[Child<'_>],
     chat_of: &dyn Fn(ThreadId) -> String,
 ) -> WorkTray {
-    let can_stop_task = state.meta.can(Cap::STOP_TASK);
     // A task's chat: the one it names, else the one its call started (a subagent taken up again
     // names none).
     let child_of = |task: &BackgroundTask| {
@@ -126,43 +139,26 @@ pub fn tray(
                 })
         })
     };
-    let mut rows: Vec<WorkRow> = Vec::new();
+    let mut work: Vec<Work> = Vec::new();
     for task in &state.tasks {
         let (kind, noun) = kind_of(&task.kind);
         let child = child_of(task);
-        let needs_you = child.and_then(|c| child_asks(c.row));
-        let usage = task.usage;
-        let live = task.is_live();
-        rows.push(WorkRow {
-            id: task_row(&task.id),
-            kind: kind.to_owned(),
-            noun: noun.to_owned(),
-            title: task.title.clone(),
-            agent_type: task.agent_type.clone(),
-            model: child.and_then(|c| c.row.meters.model.clone()),
-            state: if needs_you.is_some() { NEEDS_YOU.to_owned() } else { task.state.clone() },
-            state_words: state_words(if needs_you.is_some() { NEEDS_YOU } else { &task.state }),
-            live,
-            wakes: live && (task.awaited || task.kind != BackgroundTask::SHELL),
-            awaited: task.awaited,
+        let needs_you = child.is_some_and(|c| c.row.status.phase == Phase::NeedsYou);
+        work.push(Work {
+            row: WorkRow {
+                id: task_row(&task.id),
+                kind: kind.to_owned(),
+                noun: noun.to_owned(),
+                title: task.title.clone(),
+                state_words: state_words(if needs_you { NEEDS_YOU } else { &task.state }),
+                step: task.step.clone().or_else(|| child.and_then(|c| c.row.doing.clone())),
+                chat_id: child.map(|c| chat_of(c.row.id)),
+            },
+            live: task.is_live(),
             ambient: task.ambient,
             needs_you,
-            step: task.step.clone().or_else(|| child.and_then(|c| c.row.doing.clone())),
-            tokens: usage.map(|u| u.tokens).filter(|n| *n > 0),
-            tool_uses: usage.map(|u| u.tool_uses).filter(|n| *n > 0),
-            duration_ms: usage.map(|u| u.duration_ms).filter(|n| *n > 0),
-            figures: figures(usage.map(|u| u.tool_uses), usage.map(|u| u.tokens)),
-            started_at: at(task.started_ms),
-            ended_at: task.ended_ms.map(at),
-            outcome: task.outcome.clone(),
-            output: task.output.as_ref().map(|out| out.text.clone()).filter(|t| !t.is_empty()),
-            timeout_ms: task.timeout_ms,
-            persistent: task.persistent,
-            call_part_id: task.item.as_ref().map(|item| item.0.clone()),
-            chat_id: child.map(|c| chat_of(c.row.id)),
+            started: at(task.started_ms),
             parent: task.parent.as_deref().map(task_row),
-            depth: 0,
-            can_stop: live && can_stop_task,
         });
     }
     // The chats it started that no task stands for.
@@ -171,156 +167,68 @@ pub fn tray(
             continue;
         }
         let row = child.row;
-        let needs_you = child_asks(row);
-        let state_now = if needs_you.is_some() { NEEDS_YOU } else { child_state(row) };
+        let needs_you = row.status.phase == Phase::NeedsYou;
         let live = matches!(row.status.phase, Phase::Working | Phase::Waiting | Phase::NeedsYou);
-        let started = row.began_ms.filter(|_| live).unwrap_or(row.created_ms);
         let chat = chat_of(row.id);
-        rows.push(WorkRow {
-            id: chat_row(&chat),
-            kind: WorkRow::SUBAGENT.to_owned(),
-            noun: "subagent".to_owned(),
-            title: row.title.clone(),
-            agent_type: row.facts.get("agent_type").cloned(),
-            model: row.meters.model.clone(),
-            state: state_now.to_owned(),
-            state_words: state_words(state_now),
+        work.push(Work {
+            row: WorkRow {
+                id: chat_row(&chat),
+                kind: WorkRow::SUBAGENT.to_owned(),
+                noun: "subagent".to_owned(),
+                title: row.title.clone(),
+                state_words: state_words(if needs_you { NEEDS_YOU } else { child_state(row) }),
+                step: row.doing.clone().or_else(|| row.last_line.clone()).filter(|_| live),
+                chat_id: Some(chat),
+            },
             live,
-            wakes: live,
-            awaited: false,
             ambient: false,
             needs_you,
-            step: row.doing.clone().or_else(|| row.last_line.clone()).filter(|_| live),
-            tokens: None,
-            tool_uses: None,
-            duration_ms: None,
-            figures: String::new(),
-            started_at: at(started),
-            ended_at: (!live).then(|| at(row.updated_ms)),
-            outcome: None,
-            output: None,
-            timeout_ms: None,
-            persistent: false,
-            call_part_id: row.parent.as_ref().map(|link| link.item.0.clone()),
-            chat_id: Some(chat),
+            started: at(row.began_ms.filter(|_| live).unwrap_or(row.created_ms)),
             parent: None,
-            depth: 0,
-            can_stop: live && row.caps.iter().any(|cap| cap.0 == Cap::INTERRUPT),
         });
     }
-    // One row per piece of work: a task the thread names twice (its start and its stream) is
-    // counted once, as the tray lists it once.
-    let rows = distinct(rows);
-    let counts = counts(&rows);
-    let ordered = order(&rows);
-    WorkTray {
-        main: main_row(state),
-        summary: counts.summary(),
-        can_stop_all: ordered.iter().any(|row| row.can_stop),
-        counts,
-        rows: ordered,
-    }
+    // One row per piece of work, the last word on it: a task the thread names twice (its start
+    // and its stream) is listed once, and one that ended since is gone.
+    let mut work = distinct(work);
+    work.retain(|one| one.live && !one.ambient);
+    WorkTray { rows: order(&work) }
 }
 
-/// `rows` with one row per id, the last word on each kept where the first stood.
-fn distinct(rows: Vec<WorkRow>) -> Vec<WorkRow> {
-    let mut out: Vec<WorkRow> = Vec::with_capacity(rows.len());
-    for row in rows {
-        match out.iter_mut().find(|kept| kept.id == row.id) {
-            Some(kept) => *kept = row,
-            None => out.push(row),
+/// `work` with one row per id, the last word on each kept where the first stood.
+fn distinct(work: Vec<Work>) -> Vec<Work> {
+    let mut out: Vec<Work> = Vec::with_capacity(work.len());
+    for one in work {
+        match out.iter_mut().find(|kept| kept.row.id == one.row.id) {
+            Some(kept) => *kept = one,
+            None => out.push(one),
         }
     }
     out
 }
 
-/// The live rows by kind, housekeeping left out.
-fn counts(rows: &[WorkRow]) -> WorkCounts {
-    let mut counts = WorkCounts::default();
-    for row in rows.iter().filter(|row| row.live && !row.ambient) {
-        let slot = match row.kind.as_str() {
-            WorkRow::COMMAND => &mut counts.commands,
-            WorkRow::MONITOR => &mut counts.monitors,
-            WorkRow::SUBAGENT => &mut counts.subagents,
-            WorkRow::WORKFLOW => &mut counts.workflows,
-            WorkRow::MCP => &mut counts.mcp,
-            WorkRow::REMOTE => &mut counts.remote,
-            WorkRow::TEAMMATE => &mut counts.teammates,
-            _ => &mut counts.other,
-        };
-        *slot = slot.saturating_add(1);
-        if row.needs_you.is_some() {
-            counts.needs_you = counts.needs_you.saturating_add(1);
-        }
-    }
-    counts
-}
-
-/// The rows in the tray's order: what needs the person, then what is at work by when it began,
-/// then what ended, the latest first and [`WorkTray::ENDED_KEPT`] at most; each row's own work
-/// after it, one deeper.
-fn order(rows: &[WorkRow]) -> Vec<WorkRow> {
-    let rank =
-        |row: &WorkRow| u8::from(row.needs_you.is_none()).saturating_add(u8::from(!row.live));
-    let mut top: Vec<&WorkRow> = rows
+/// The rows in the tray's order: what needs the person, then by when it began; each row's own
+/// work after it.
+fn order(work: &[Work]) -> Vec<WorkRow> {
+    let mut top: Vec<&Work> = work
         .iter()
-        .filter(|row| row.parent.as_ref().is_none_or(|p| !rows.iter().any(|r| r.id == *p)))
+        .filter(|one| one.parent.as_ref().is_none_or(|p| !work.iter().any(|w| w.row.id == *p)))
         .collect();
-    top.sort_by(|a, b| {
-        rank(a).cmp(&rank(b)).then_with(|| {
-            if a.live {
-                a.started_at.cmp(&b.started_at)
-            } else {
-                b.ended_at.unwrap_or(b.started_at).cmp(&a.ended_at.unwrap_or(a.started_at))
-            }
-        })
-    });
-    let mut ended = 0_usize;
-    top.retain(|row| {
-        if row.live {
-            return true;
-        }
-        ended = ended.saturating_add(1);
-        ended <= WorkTray::ENDED_KEPT
-    });
-    let mut out = Vec::with_capacity(rows.len());
-    for row in top {
-        place(row, 0, rows, &mut out);
+    top.sort_by_key(|one| (!one.needs_you, one.started));
+    let mut out = Vec::with_capacity(work.len());
+    for one in top {
+        place(one, 0, work, &mut out);
     }
     out
 }
 
-/// `row` at `depth`, then the rows it started, one deeper.
-fn place(row: &WorkRow, depth: u32, rows: &[WorkRow], out: &mut Vec<WorkRow>) {
-    if out.iter().any(|placed| placed.id == row.id) || depth > 8 {
+/// `one`, then the work it started, at most a few deep.
+fn place(one: &Work, depth: u32, work: &[Work], out: &mut Vec<WorkRow>) {
+    if out.iter().any(|placed| placed.id == one.row.id) || depth > 8 {
         return;
     }
-    let mut placed = row.clone();
-    placed.depth = depth;
-    out.push(placed);
-    for child in rows.iter().filter(|r| r.parent.as_deref() == Some(row.id.as_str())) {
-        place(child, depth.saturating_add(1), rows, out);
-    }
-}
-
-/// The turn under way, if any: when it began.
-fn turn_started(state: &ThreadState) -> Option<i64> {
-    state
-        .turns
-        .last()
-        .filter(|turn| turn.state == TurnState::Active)
-        .map(|turn| at(turn.started_ms))
-        .filter(|ms| *ms > 0)
-}
-
-/// The chat's own agent as the agents list's first row.
-fn main_row(state: &ThreadState) -> MainRow {
-    let working = state.status.phase == Phase::Working;
-    MainRow {
-        working,
-        step: state.activity.as_ref().and_then(|a| a.phrase.clone()).filter(|_| working),
-        tokens: state.activity.as_ref().map(|a| a.tokens).filter(|n| *n > 0 && working),
-        started_at: turn_started(state),
+    out.push(one.row.clone());
+    for child in work.iter().filter(|w| w.parent.as_deref() == Some(one.row.id.as_str())) {
+        place(child, depth.saturating_add(1), work, out);
     }
 }
 
@@ -366,156 +274,28 @@ pub fn retry_line(notice: &Notice, at_ms: i64) -> Option<RetryLine> {
     })
 }
 
-/// The request the turn under way is trying again, while it is: its last notice with a retry,
-/// nothing of the agent's after it.
-fn retrying(state: &ThreadState) -> Option<RetryLine> {
-    let turn = state.turns.last().filter(|turn| turn.state == TurnState::Active)?;
-    let last = state.items.iter().rev().find(|item| item.turn == turn.id)?;
-    match &last.body {
-        ItemBody::Notice(notice) if notice.kind == Notice::API_ERROR => {
-            retry_line(notice, at(last.at_ms))
-        }
-        _ => None,
-    }
-}
+/// The item a draft's pictures are read back under ([`image_path`]). An agent's items go by its
+/// records' ids (a UUID, a tool call's id), never this word.
+pub const DRAFT_ITEM: &str = "draft";
 
-/// The task in progress of the agent's list, and the one after it.
-fn todo_now(state: &ThreadState) -> (Option<String>, Option<String>) {
-    let Some(plan) = &state.plan else { return (None, None) };
-    let now = plan.steps.iter().position(|step| step.status == "in_progress");
-    let doing = now.and_then(|ix| plan.steps.get(ix)).map(|step| step.text.clone());
-    let next = plan
-        .steps
-        .iter()
-        .skip(now.map_or(0, |ix| ix.saturating_add(1)))
-        .find(|step| step.status == "pending")
-        .map(|step| step.text.clone());
-    (doing, next)
-}
-
-/// A permission mode's chip.
-fn mode_chip(state: &ThreadState) -> Option<ModeChip> {
-    let id = state.meters.mode.clone()?;
-    let label = state
-        .meta
-        .modes
-        .iter()
-        .find(|mode| mode.id == id)
-        .map_or_else(|| humane(&id), |mode| mode.label.clone());
-    // The recommended default says its name quietly; only a mode the person chose that asks less,
-    // or plans, stands out.
-    // Don't ask refuses what was not allowed beforehand: the safer side, so it is quiet; only
-    // a mode that asks nothing and lets everything through is loud.
-    let tone = match id.as_str() {
-        "bypassPermissions" => ModeChip::DANGER,
-        "plan" => ModeChip::PLAN,
-        "dontAsk" | "acceptEdits" => ModeChip::ACCEPT,
-        _ => ModeChip::QUIET,
-    };
-    let words = if tone == ModeChip::QUIET { String::new() } else { format!("{label} on") };
-    Some(ModeChip { id, label, words, tone: tone.to_owned() })
-}
-
-/// An agent's camel-cased name for people: `acceptEdits` → "Accept edits".
-fn humane(id: &str) -> String {
-    let mut out = String::new();
-    for (ix, c) in id.chars().enumerate() {
-        if ix == 0 {
-            out.extend(c.to_uppercase());
-        } else if c.is_uppercase() {
-            out.push(' ');
-            out.extend(c.to_lowercase());
-        } else if c == '-' || c == '_' {
-            out.push(' ');
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// A share of a window, 0 to 100.
-fn percent(part: u64, whole: u64) -> u8 {
-    let share = part.saturating_mul(100).checked_div(whole).unwrap_or(0);
-    u8::try_from(share.min(100)).unwrap_or(100)
-}
-
-/// How near the context is to full, when it is worth a word: the TUI warns 20 points before
-/// the agent compacts on its own, or before the window is full when it does not.
-const WARN_WITHIN: u8 = 20;
-
-/// The context window, by category when the agent counted them.
-fn context(state: &ThreadState) -> Option<ContextBreakdown> {
-    let (tokens, window, categories, auto) = match &state.context {
-        Some(ctx) => (ctx.tokens, ctx.window, ctx.categories.as_slice(), ctx.auto_compact_bp),
-        None => (state.meters.context_tokens?, state.meters.context_window?, [].as_slice(), None),
-    };
-    let used = percent(tokens, window);
-    let auto_compact_percent = auto.map(|bp| u8::try_from((bp / 100).min(100)).unwrap_or(100));
-    let (words, urgent) = if let Some(at) = auto_compact_percent {
-        let until = at.saturating_sub(used);
-        ((until <= WARN_WITHIN).then(|| format!("{until}% until auto-compact")), false)
-    } else {
-        let left = 100_u8.saturating_sub(used);
-        let low = left <= WARN_WITHIN && window > 0;
-        (
-            low.then(|| {
-                format!("Context low ({left}% remaining) · Run /compact to compact & continue")
-            }),
-            low,
-        )
-    };
-    let share = |n: u64| {
-        u32::try_from(n.saturating_mul(10_000).checked_div(window).unwrap_or(0)).unwrap_or(u32::MAX)
-    };
-    let last_turn =
-        state.turns.iter().rev().find(|turn| turn.ended_ms.is_some()).map(|turn| TurnTokens {
-            input: turn.usage.get(Usage::INPUT),
-            output: turn.usage.get(Usage::OUTPUT),
-            cache_read: turn.usage.get(Usage::CACHE_READ),
-            cache_write: turn.usage.get(Usage::CACHE_WRITE),
-        });
-    Some(ContextBreakdown {
-        tokens,
-        window,
-        used_percent: used,
-        categories: categories
-            .iter()
-            .map(|c| ContextSlice {
-                name: c.name.clone(),
-                tokens: c.tokens,
-                share_bp: share(c.tokens),
-                free: c.free,
-                color: c.color.clone(),
-            })
-            .collect(),
-        auto_compact_percent,
-        words,
-        urgent,
-        last_turn,
-    })
-}
-
-/// `state`'s dock: what the inspector reads beside the session's terminal.
+/// `state`'s dock: the agent's prompt box as its TUI holds it, while it holds anything.
 #[must_use]
 pub fn dock(state: &ThreadState) -> ChatDock {
-    let working = state.status.phase == Phase::Working;
-    let (doing, next) = todo_now(state);
-    let activity = working.then(|| {
-        let live = state.activity.clone().unwrap_or_default();
-        ActivityLine {
-            started_at: turn_started(state),
-            tokens: live.tokens,
-            thinking_since: live.thinking_since.map(at).filter(|ms| *ms > 0),
-            thought_ms: live.thought_ms,
-            effort: state.meters.effort.clone(),
-            phrase: live.phrase.or(doing),
-            next,
-            retry: retrying(state),
-            quiet_since: live.quiet_since.map(at).filter(|ms| *ms > 0),
-        }
+    let (text, images) = state.draft.as_ref().map_or_else(Default::default, |draft| {
+        let images = draft
+            .images
+            .iter()
+            .enumerate()
+            .map(|(index, pasted)| PromptImage {
+                number: pasted.n,
+                path: image_path(state.meta.id, DRAFT_ITEM, index, &pasted.image),
+                mime_type: pasted.image.media_type.clone(),
+            })
+            .collect();
+        (draft.text.clone(), images)
     });
-    ChatDock { activity, mode: mode_chip(state), context: context(state) }
+    let prompt = PromptBox { queued: state.queued.clone(), text, images };
+    ChatDock { prompt: (!prompt.is_empty()).then_some(prompt) }
 }
 
 #[cfg(test)]

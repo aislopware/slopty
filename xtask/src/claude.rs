@@ -7,7 +7,7 @@
 //! `SLOPTY_CLAUDE` names another binary instead. [`latest`] asks the registry which release is
 //! newest, for `cargo xtask upstream check`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -24,7 +24,16 @@ pub const VERSION: &str = "2.1.312";
 /// Names a `claude` binary to use instead of the downloaded one.
 const OVERRIDE: &str = "SLOPTY_CLAUDE";
 
-const PACKAGE: &str = "@anthropic-ai/claude-code-darwin-arm64";
+/// Claude Code's package for this host.
+const PACKAGE: &str = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    "@anthropic-ai/claude-code-linux-x64"
+} else if cfg!(target_os = "linux") {
+    "@anthropic-ai/claude-code-linux-arm64"
+} else if cfg!(target_arch = "x86_64") {
+    "@anthropic-ai/claude-code-darwin-x64"
+} else {
+    "@anthropic-ai/claude-code-darwin-arm64"
+};
 const REGISTRY: &str = "https://registry.npmjs.org";
 
 /// The `claude` to record with: `SLOPTY_CLAUDE`, else the official build of `version`,
@@ -75,8 +84,20 @@ fn download(version: &str) -> Result<PathBuf> {
     if binary.is_file() {
         return Ok(binary);
     }
+    let package = fetch(PACKAGE, version, dir.as_std_path())?;
+    ensure!(package.join("claude").is_file(), "the package holds no claude binary");
+    Ok(binary)
+}
+
+/// npm's `package` at `version`, unpacked as `<dir>/package` and returned: fetched once, its
+/// tarball checked against the registry's SHA-512 `integrity`, and kept.
+pub fn fetch(package: &str, version: &str, dir: &Path) -> Result<PathBuf> {
+    let unpacked = dir.join("package");
+    if unpacked.join("package.json").is_file() {
+        return Ok(unpacked);
+    }
     let sh = Shell::new()?;
-    let url = format!("{REGISTRY}/{PACKAGE}/{version}");
+    let url = format!("{REGISTRY}/{package}/{version}");
     let meta: Value = serde_json::from_str(&cmd!(sh, "curl -fsSL {url}").read()?)
         .context("the registry's answer")?;
     let tarball = meta.pointer("/dist/tarball").and_then(Value::as_str).context("no tarball")?;
@@ -86,22 +107,25 @@ fn download(version: &str) -> Result<PathBuf> {
         bail!("integrity {integrity} is not SHA-512");
     };
     let want = HEXLOWER.encode(&BASE64.decode(want.as_bytes()).context("integrity base64")?);
-    let partial = dir.join(".partial");
+    // Each fetch unpacks in a place of its own: two checks may fetch at once.
+    let partial = dir.join(format!(".partial-{}", std::process::id()));
     if partial.exists() {
         std::fs::remove_dir_all(&partial)?;
     }
     std::fs::create_dir_all(&partial)?;
     let archive = partial.join("package.tgz");
-    println!("fetching Claude Code {version} from {tarball}");
+    println!("fetching {package} {version} from {tarball}");
     cmd!(sh, "curl -fsSL -o {archive} {tarball}").run()?;
     let sum = cmd!(sh, "shasum -a 512 -b {archive}").read()?;
     let got = sum.split_whitespace().next().unwrap_or_default();
     ensure!(got == want, "{tarball}: SHA-512 {got}, the registry says {want}");
     cmd!(sh, "tar -xzf {archive} -C {partial}").run()?;
     std::fs::remove_file(&archive)?;
-    let unpacked = partial.join("package");
-    ensure!(unpacked.join("claude").is_file(), "the package holds no claude binary");
-    std::fs::rename(&unpacked, dir.join("package"))?;
+    let fetched = partial.join("package");
+    ensure!(fetched.join("package.json").is_file(), "{package} {version} holds no package.json");
+    if std::fs::rename(&fetched, &unpacked).is_err() && !unpacked.join("package.json").is_file() {
+        bail!("{package} {version} could not be kept at {}", unpacked.display());
+    }
     std::fs::remove_dir_all(&partial)?;
-    Ok(binary)
+    Ok(unpacked)
 }

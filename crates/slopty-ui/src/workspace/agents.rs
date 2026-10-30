@@ -6,8 +6,8 @@ use gpui::Context;
 use slopty_client::WorkerKey;
 use slopty_core::SessionId;
 use slopty_kit::icons::Status;
+use slopty_proto::thread::Phase;
 use slopty_proto::thread::attention::Rung;
-use slopty_proto::thread::{Phase, Request, Wait};
 
 use super::attention::About;
 use super::faces::ThreadStand;
@@ -31,11 +31,6 @@ pub fn program_banner(name: Option<&str>, title: &str, body: &str) -> (String, S
     (banner_title(name, title), body.trim().to_owned())
 }
 
-/// Whether it stopped on its plan's usage limit.
-fn limited(agent: &ThreadStand) -> bool {
-    agent.rung == Rung::Failed && wait_kind(agent) == Some(Wait::LIMIT)
-}
-
 /// Whether the agent is waiting on the human.
 pub(super) fn needs_human(agent: &ThreadStand) -> bool {
     agent.rung == Rung::NeedsYou
@@ -50,7 +45,6 @@ pub(super) fn agent_mark_of(agent: &ThreadStand) -> Status {
         Rung::Failed => Status::Failed,
         Rung::Working => Status::Working,
         Rung::Waiting => Status::Running,
-        Rung::ToReview => Status::Done,
         Rung::Idle if agent.status.as_ref().is_some_and(|s| s.phase == Phase::Done) => Status::Done,
         Rung::Idle => Status::Idle,
     }
@@ -67,16 +61,8 @@ fn wait_kind(agent: &ThreadStand) -> Option<&str> {
     Some(agent.status.as_ref()?.wait.as_ref()?.kind.as_str())
 }
 
-/// What kind of thing a waiting agent asks for: its open request's kind, else its wait's
-/// (`permission` is an approval, `input` an elicitation).
-fn asked_kind(agent: &ThreadStand) -> Option<&str> {
-    agent.asks.as_ref().map(|a| a.kind.as_str()).or_else(|| match wait_kind(agent)? {
-        "permission" => Some(Request::APPROVAL),
-        "question" => Some(Request::QUESTION),
-        "input" => Some(Request::ELICITATION),
-        _ => None,
-    })
-}
+/// A wait on the person for an approval of a call.
+const PERMISSION: &str = "permission";
 
 /// The agent's state in a word or two, without the detail: the one word for it wherever a
 /// state is said beside something else: a header's pill, a note with nothing asked.
@@ -85,17 +71,16 @@ fn asked_kind(agent: &ThreadStand) -> Option<&str> {
 #[must_use]
 pub(super) fn agent_status_word(agent: &ThreadStand) -> String {
     match agent_mark_of(agent) {
-        Status::NeedsYou => match asked_kind(agent) {
-            Some(Request::APPROVAL) => "Needs approval",
-            Some(Request::QUESTION) => "Has a question",
-            Some(Request::ELICITATION) => "Needs input",
-            Some(Request::PLAN) => "Plan to approve",
+        Status::NeedsYou => match wait_kind(agent) {
+            Some(PERMISSION) => "Needs approval",
+            Some("question") => "Has a question",
+            Some("input") => "Needs input",
+            Some("plan") => "Plan to approve",
             _ => "Needs you",
         },
         Status::Working => "Working",
         Status::Running => "Background work",
         Status::Done => "Turn finished",
-        Status::Failed if limited(agent) => "Limit reached",
         Status::Failed => "Failed",
         _ => "Idle",
     }
@@ -107,7 +92,7 @@ pub(super) fn agent_status_word(agent: &ThreadStand) -> String {
 /// nothing more than its state.
 ///
 /// An approval is said as its adapter words what it waits on ("Run cargo test"), else by the
-/// call that waits on it; a question by its own words. A row whose trailing word already says
+/// call that waits on it; anything else by its wait's words. A row whose trailing word already says
 /// "Needs you" and a chip that says "Needs approval" take this as their detail, so the state is
 /// not said twice in one place.
 #[must_use]
@@ -115,11 +100,10 @@ pub(super) fn agent_ask_text(agent: &ThreadStand) -> Option<String> {
     if !needs_human(agent) {
         return None;
     }
-    let card = agent.asks.as_ref().map(|a| a.title.trim()).filter(|t| !t.is_empty());
     let call = agent.doing.as_deref().map(str::trim).filter(|d| !d.is_empty());
-    let said = match asked_kind(agent) {
-        Some(Request::APPROVAL) => wait_text(agent).or(call).or(card),
-        _ => card.or_else(|| wait_text(agent)),
+    let said = match wait_kind(agent) {
+        Some(PERMISSION) => wait_text(agent).or(call),
+        _ => wait_text(agent),
     };
     said.map(slopty_kit::markdown::plain_line)
 }
@@ -185,8 +169,7 @@ impl WorkspaceView {
 mod tests {
     use slopty_client::WorkerKey;
     use slopty_core::WallMs;
-    use slopty_proto::thread::wire::RequestCard;
-    use slopty_proto::thread::{AskId, Liveness, Status as RowStatus};
+    use slopty_proto::thread::{Liveness, Status as RowStatus, Wait};
 
     use super::*;
 
@@ -203,7 +186,6 @@ mod tests {
         ThreadStand {
             worker: WorkerKey::new(1),
             rung,
-            asks: None,
             since: WallMs::ZERO,
             status: Some(RowStatus {
                 phase,
@@ -217,35 +199,21 @@ mod tests {
         }
     }
 
-    /// The same, with request `kind` open, titled `title`.
-    fn asking(kind: &str, title: &str, wait: Option<(&str, &str)>) -> ThreadStand {
-        let card = RequestCard {
-            id: AskId("a".to_owned()),
-            item: None,
-            kind: kind.to_owned(),
-            title: title.to_owned(),
-            options: Vec::new(),
-            buttons: Vec::new(),
-            opened_ms: WallMs::ZERO,
-            needs_presence: false,
-        };
-        ThreadStand { asks: Some(card), ..at(Phase::NeedsYou, wait) }
-    }
-
     /// An approval is said as the adapter words its wait, else by the call that waits on it;
     /// a question by its own words. Nothing asked, nothing said.
     #[test]
     fn the_ask_says_what_is_asked_without_the_state() {
-        let worded = asking(Request::APPROVAL, "Allow Bash?", Some(("permission", "Run ls")));
+        let worded = at(Phase::NeedsYou, Some(("permission", "Run ls")));
         assert_eq!(agent_ask_text(&worded).as_deref(), Some("Run ls"));
         assert_eq!(agent_status_word(&worded), "Needs approval");
         let call = ThreadStand {
             doing: Some("$ touch notes.txt".to_owned()),
-            ..asking(Request::APPROVAL, "Allow Bash?", None)
+            ..at(Phase::NeedsYou, Some(("permission", "")))
         };
         assert_eq!(agent_ask_text(&call).as_deref(), Some("$ touch notes.txt"), "else the call");
-        let question = asking(Request::QUESTION, "Which branch?", Some(("question", "Which?")));
+        let question = at(Phase::NeedsYou, Some(("question", "Which branch?")));
         assert_eq!(agent_ask_text(&question).as_deref(), Some("Which branch?"), "its own words");
+        assert_eq!(agent_status_word(&question), "Has a question");
         let held = at(Phase::NeedsYou, Some(("input", "Pick a port")));
         assert_eq!(agent_status_word(&held), "Needs input", "a wait alone says what it asks");
         assert_eq!(agent_ask_text(&held).as_deref(), Some("Pick a port"));
@@ -256,18 +224,18 @@ mod tests {
 
     /// The word for a state never carries the detail, so a note and a pill read one state the
     /// same whatever the agent is doing; a turn over is done, never idle; a paused turn waits,
-    /// asking nothing; a failure says whether a limit stopped it.
+    /// asking nothing.
     #[test]
     fn a_state_has_one_word_whatever_its_detail() {
         let states = [
             (at(Phase::Idle, None), "Idle"),
             (at(Phase::Working, None), "Working"),
-            (asking(Request::APPROVAL, "Bash", None), "Needs approval"),
-            (asking(Request::QUESTION, "Which?", None), "Has a question"),
-            (asking(Request::ELICITATION, "A port", None), "Needs input"),
+            (at(Phase::NeedsYou, Some(("permission", "Bash"))), "Needs approval"),
+            (at(Phase::NeedsYou, Some(("question", "Which?"))), "Has a question"),
+            (at(Phase::NeedsYou, Some(("input", "A port"))), "Needs input"),
+            (at(Phase::NeedsYou, None), "Needs you"),
             (at(Phase::Done, None), "Turn finished"),
-            (at(Phase::Waiting, Some((Wait::COMMAND, "npm run dev"))), "Background work"),
-            (at(Phase::Failed, Some((Wait::LIMIT, "Hit its usage limit"))), "Limit reached"),
+            (at(Phase::Waiting, Some((Wait::TASK, "npm run dev"))), "Background work"),
             (at(Phase::Failed, None), "Failed"),
         ];
         for (agent, word) in states {

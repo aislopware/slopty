@@ -26,10 +26,9 @@ mod tests {
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer, WorkerCaps};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_proto::thread::attention::{NoticeKind, Presence, Seat};
-    use slopty_proto::thread::wire::{RequestCard, TableFrame, ThreadRow};
+    use slopty_proto::thread::wire::{TableFrame, ThreadRow};
     use slopty_proto::thread::{
-        AgentId, AskId, Changed, Choice, Cursor, Drive, Effect, Liveness, Meters, Phase, Request,
-        Status, ThreadId,
+        AgentId, Changed, Cursor, Drive, Liveness, Phase, Status, ThreadId, Wait,
     };
     use slopty_push::provider::ProviderKey;
     use slopty_push::seal::{DeviceKey, Sealed};
@@ -150,21 +149,15 @@ mod tests {
                 liveness: Liveness::Live,
                 since_ms: WallMs::from_millis(since),
             },
-            requests: Vec::new(),
             last_line: None,
             doing: None,
             changed: Changed::default(),
             parent: None,
             drive: Drive::named(Drive::DRIVEN),
-            caps: Vec::new(),
             facts: BTreeMap::from([(slopty_proto::agent::SEAT_FACT.to_owned(), seat.to_string())]),
-            to_review: false,
-            pull: None,
-            meters: Meters::default(),
             ended: None,
             began_ms: None,
             seen: slopty_proto::thread::TurnId::BEFORE,
-            draft: None,
             lease_ms: None,
             created_ms: WallMs::from_millis(since),
             updated_ms: WallMs::from_millis(since),
@@ -247,25 +240,9 @@ mod tests {
         let rows = vec![row(thread, Phase::Working, 1_000, shell)];
         let snapshot = TableFrame::Snapshot { cursor: Cursor::default(), rows };
         link.tx.send(&ToServer::Threads(snapshot)).await.unwrap();
-        let choice = |id: &str, effect| Choice {
-            id: id.to_owned(),
-            label: id.to_owned(),
-            effect,
-            scope: None,
-            folders: Vec::new(),
-            stops: false,
-        };
         let mut asking = row(thread, Phase::NeedsYou, 2_000, shell);
-        asking.requests.push(RequestCard {
-            id: AskId("toolu_01".to_owned()),
-            item: None,
-            kind: Request::APPROVAL.to_owned(),
-            title: "Run cargo test?".to_owned(),
-            options: vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)],
-            buttons: Vec::new(),
-            opened_ms: WallMs::from_millis(2_000),
-            needs_presence: false,
-        });
+        asking.status.wait =
+            Some(Wait { kind: "permission".to_owned(), text: "Run cargo test?".to_owned() });
         // Once the working row is ranked, so the next is a climb and not a first sight.
         while server.hub().ladder().threads.is_empty() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -326,11 +303,6 @@ mod tests {
         assert_eq!(
             (body.notice.title.as_str(), body.notice.text.as_str()),
             ("Rank the fleet", "Run cargo test?")
-        );
-        assert_eq!(
-            (&body.ask, body.picks.len()),
-            (&None, 0),
-            "a note answers nothing: the person answers in the agent's terminal"
         );
         assert!(key.open(&"1f".repeat(32), &sealed).is_err(), "bound to its own token");
     }

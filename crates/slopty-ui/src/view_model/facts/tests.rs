@@ -5,7 +5,7 @@ use slopty_proto::thread::detail::{
     AgentDetail, Clipped, ExecDetail, ExecStatus, FetchDetail, ReadDetail, SearchDetail,
 };
 use slopty_proto::thread::{
-    BackgroundTask, CallNote, Cap, ItemId, Notice, Retry, TaskNote, TaskUsage, ThreadState,
+    BackgroundTask, CallNote, ItemId, Notice, Phase, Retry, TaskNote, TaskUsage, ThreadState,
     ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, Usage,
 };
 use slopty_proto::visual::{McpApp, PageDetail, PageSource};
@@ -139,39 +139,19 @@ fn a_calls_result_reads_as_the_tuis() {
         result_of(&call("Bash", "exec", None, asking.clone())).as_deref(),
         Some("Waiting for permission…")
     );
-    // slopty: held on a request it knows, it says what the request waits for, in the words of
-    // the request's chip (#9).
+    // slopty: held while its thread waits on the person, it says what the wait is for, in the
+    // words of the wait's chip (#9).
     let held = |kind: &str| {
         let mut state = fixtures::empty();
-        state.requests = vec![slopty_proto::thread::Request {
-            id: slopty_proto::thread::AskId("1".to_owned()),
-            item: Some(ItemId("t1".to_owned())),
-            kind: kind.to_owned(),
-            title: String::new(),
-            text: None,
-            options: Vec::new(),
-            questions: Vec::new(),
-            proposed: None,
-            schema_json: None,
-            url: None,
-            reason: None,
-            state: slopty_proto::thread::RequestState::Open,
-            opened_ms: WallMs::from_millis(1),
-            until_ms: None,
-            needs_presence: false,
-        }];
+        state.status.phase = Phase::NeedsYou;
+        state.status.wait =
+            Some(slopty_proto::thread::Wait { kind: kind.to_owned(), text: String::new() });
         tool_facts("t1", &call("Bash", "exec", None, asking.clone()), &state, None)
             .and_then(|facts| facts.result)
     };
-    assert_eq!(
-        held(slopty_proto::thread::Request::QUESTION).as_deref(),
-        Some("Waiting for your answer")
-    );
-    assert_eq!(
-        held(slopty_proto::thread::Request::APPROVAL).as_deref(),
-        Some("Waiting for approval")
-    );
-    assert_eq!(held(slopty_proto::thread::Request::PLAN).as_deref(), Some("Plan ready for review"));
+    assert_eq!(held("question").as_deref(), Some("Waiting for your answer"));
+    assert_eq!(held("permission").as_deref(), Some("Waiting for approval"));
+    assert_eq!(held("plan").as_deref(), Some("Plan ready for review"));
     let mut ask = call("AskUserQuestion", "other", None, ToolState::Completed);
     ask.input = Clipped::whole(r#"{"questions":[{"header":"Color","question":"Which color?"}]}"#);
     let title = tool_facts("t1", &ask, &fixtures::empty(), None).and_then(|facts| facts.title);
@@ -207,12 +187,11 @@ fn a_calls_result_reads_as_the_tuis() {
     );
 }
 
-/// A running call ticks from what its agent last said; it moves to the background where the
-/// agent can; its own words win; a monitor says what it started.
+/// A running call ticks from what its agent last said; its own words win; a monitor says what
+/// it started.
 #[test]
 fn a_running_call_has_its_timer_and_task() {
     let mut state = fixtures::empty();
-    state.meta.caps = vec![Cap::named(Cap::BACKGROUND)];
     let exec = ExecDetail {
         command: Clipped::whole("sleep 60"),
         description: None,
@@ -235,13 +214,12 @@ fn a_running_call_has_its_timer_and_task() {
     let facts = tool_facts("t1", &running, &state, None).expect("facts");
     let timer = facts.timer.expect("a timer");
     assert_eq!((timer.elapsed_ms, timer.timeout_ms), (12_000, Some(120_000)));
-    assert!(facts.backgroundable);
     state.calls.get_mut(&ItemId("t1".into())).expect("its note").said =
         Some("Denied by auto mode classifier · rm is destructive".into());
     running.state = ToolState::Failed;
     let facts = tool_facts("t1", &running, &state, None).expect("facts");
     assert_eq!(facts.result.as_deref(), Some("Denied by auto mode classifier · rm is destructive"));
-    assert!(facts.failed && facts.timer.is_none() && !facts.backgroundable);
+    assert!(facts.failed && facts.timer.is_none());
 
     let mut monitor = call("Monitor", "other", None, ToolState::Completed);
     monitor.input = Clipped::whole(r#"{"description":"lane stall watch"}"#);
@@ -397,8 +375,6 @@ fn a_retry_reads_trying_again_then_recovered() {
         usage: Usage::default(),
         models: Vec::new(),
         changed: slopty_proto::thread::Changed::default(),
-        before: None,
-        after: None,
     };
     state.turns = vec![turn(TurnState::Active)];
     let mut notice = Notice::new(Notice::API_ERROR, Clipped::whole("API Error: 500"));

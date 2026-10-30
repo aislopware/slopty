@@ -34,8 +34,8 @@ use slopty_view_doc::{
     calls,
 };
 use slopty_view_proto::{
-    AgentUsageWindow, Chat, ChatConnectivity, Connectivity, ConnectivityState, Device, EngineInfo,
-    ServerPresence, Session, SidebarPreferencesState, Space, WorkspaceScope,
+    Chat, ChatConnectivity, Connectivity, ConnectivityState, Device, EngineInfo, ServerPresence,
+    Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
 use slopty_view_rpc::{RpcError, RpcReply, RpcService, methods};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -97,23 +97,8 @@ pub struct Feed {
     local: watch::Sender<Local>,
     /// Each followed chat's transcript, `None` until its thread has come.
     transcripts: Mutex<HashMap<String, Followed>>,
-    /// The pull requests the threads' branches have, as their rows show them.
-    pulls: watch::Sender<Arc<[Pull]>>,
     /// The sidebar's pins, `None` until the workspace says them.
     sidebar: watch::Sender<Option<SidebarPreferencesState>>,
-}
-
-/// A pull request a thread's branch has, where the thread works.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pull {
-    /// The machine, as a device id.
-    pub device: String,
-    /// The folders the thread works in: where it runs and its repository's root.
-    pub folders: Vec<String>,
-    /// The branch, when known.
-    pub branch: Option<String>,
-    /// The pull request.
-    pub summary: slopty_view_proto::ChangeRequestSummary,
 }
 
 /// This machine's own worker, as the app last said.
@@ -148,11 +133,11 @@ impl Followed {
 
 /// slopty: what a followed chat's thread says beside its transcript, as the workspace publishes
 /// it ([`Feed::chat_views`]).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChatViews {
     /// Its background work.
     pub work: WorkTray,
-    /// Its dock: activity, goal, notes, the status line, the mode, the context card.
+    /// Its dock: the agent's prompt box, as its TUI holds it.
     pub dock: ChatDock,
 }
 
@@ -172,14 +157,9 @@ fn publish_value<T: PartialEq>(sender: &watch::Sender<Option<Arc<T>>>, value: T)
 pub struct Transcript {
     /// Its entries.
     pub entries: Vec<SessionMessageEntry>,
-    /// How full the agent's context is, for the shell's ring.
-    pub context_usage: Option<slopty_view_proto::ContextUsage>,
     /// Older turns are still on their way: the entries are the latest ones, which the shell
     /// shows as it waits for the whole history (zeron's opening tail).
     pub history_pending: bool,
-    /// The plan's rate windows as the agent last said them, the most used first, for the
-    /// shell's usage ring.
-    pub limits: Vec<AgentUsageWindow>,
     /// When the usage limit holding the agent lifts, while one does.
     pub limit_resets_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -188,13 +168,7 @@ impl Transcript {
     /// The whole of a transcript of `entries`, with nothing more to say.
     #[must_use]
     pub const fn of(entries: Vec<SessionMessageEntry>) -> Self {
-        Self {
-            entries,
-            context_usage: None,
-            history_pending: false,
-            limits: Vec::new(),
-            limit_resets_at: None,
-        }
+        Self { entries, history_pending: false, limit_resets_at: None }
     }
 }
 
@@ -210,7 +184,6 @@ impl Feed {
             workers_up: Mutex::new(None),
             local: watch::Sender::new(Local::Unknown),
             transcripts: Mutex::new(HashMap::new()),
-            pulls: watch::Sender::new(Arc::default()),
             sidebar: watch::Sender::new(None),
         }
     }
@@ -275,11 +248,6 @@ impl Feed {
             *now = Some(state);
             changed
         });
-    }
-
-    /// The pull requests the threads' branches have.
-    pub fn pulls(&self, pulls: Vec<Pull>) {
-        publish(&self.pulls, pulls);
     }
 
     /// The threads' live status, as sessions.
@@ -536,8 +504,8 @@ impl Drop for Closing {
 ///
 /// While older turns are on their way the latest ones go as zeron's opening tail
 /// (`historyPending`), and the whole history, once here, as one reset the shell takes as
-/// history: older turns put in front never arrive as live ones. How full the context is, the
-/// plan's rate windows and when a usage limit lifts ride every frame.
+/// history: older turns put in front never arrive as live ones. When a usage limit lifts rides
+/// every frame.
 fn transcript_frames(
     said: watch::Receiver<Option<Arc<Transcript>>>,
     closing: Closing,
@@ -557,25 +525,21 @@ fn transcript_frames(
                 TranscriptUpdate {
                     replay_baseline: Some(TranscriptBaseline::capture(&next.entries)),
                     frame: TranscriptFrame::reset(&next.entries),
-                    context_usage: next.context_usage,
-                    limits: next.limits.clone(),
+                    context_usage: None,
+                    limits: Vec::new(),
                     limit_resets_at: next.limit_resets_at,
                 }
             } else {
                 let last = last.as_ref()?;
                 let frame = slopty_view_doc::diff_transcript(&last.entries, &next.entries);
-                if frame.is_empty_delta()
-                    && last.context_usage == next.context_usage
-                    && last.limits == next.limits
-                    && last.limit_resets_at == next.limit_resets_at
-                {
+                if frame.is_empty_delta() && last.limit_resets_at == next.limit_resets_at {
                     continue;
                 }
                 TranscriptUpdate {
                     replay_baseline: None,
                     frame,
-                    context_usage: next.context_usage,
-                    limits: next.limits.clone(),
+                    context_usage: None,
+                    limits: Vec::new(),
                     limit_resets_at: next.limit_resets_at,
                 }
             };
@@ -654,60 +618,6 @@ fn still<T: Serialize>(value: &T) -> Result<RpcReply, RpcError> {
     ))
 }
 
-/// The pull request of the checkout `cwd` on `device` with `branch` checked out, among `pulls`.
-fn checkout_pull<'a>(pulls: &'a [Pull], device: &str, cwd: &str, branch: &str) -> Option<&'a Pull> {
-    let cwd = cwd.trim_end_matches('/');
-    pulls.iter().find(|pull| {
-        pull.device == device
-            && pull.folders.iter().any(|folder| folder.trim_end_matches('/') == cwd)
-            && (branch.is_empty() || pull.branch.as_deref().is_none_or(|b| b == branch))
-    })
-}
-
-impl ViewModel {
-    /// `WatchCheckoutChangeRequest`: the pull request of a checkout's branch, as its threads'
-    /// rows show it, said again each time it changes.
-    fn change_request(&self, params: &serde_json::Value) -> RpcReply {
-        let text = |key: &str| params.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
-        let device = Some(text("targetDeviceId"))
-            .filter(|device| !device.is_empty())
-            .map(str::to_owned)
-            .or_else(|| self.feed.local_worker())
-            .unwrap_or_default();
-        let (cwd, branch) = (text("cwd").to_owned(), text("branch").to_owned());
-        let pulls = self.feed.pulls.subscribe();
-        let frames = futures::stream::unfold(
-            (pulls, None::<Option<slopty_view_proto::ChangeRequestSummary>>),
-            move |(mut pulls, last)| {
-                let (device, cwd, branch) = (device.clone(), cwd.clone(), branch.clone());
-                async move {
-                    loop {
-                        if last.is_some() {
-                            pulls.changed().await.ok()?;
-                        }
-                        let now = checkout_pull(&pulls.borrow_and_update(), &device, &cwd, &branch)
-                            .map(|pull| pull.summary.clone());
-                        if last.as_ref() == Some(&now) {
-                            continue;
-                        }
-                        let status = slopty_view_proto::CheckoutChangeRequestStatus {
-                            checkout_id: cwd.clone(),
-                            device_id: device.clone(),
-                            cwd: cwd.clone(),
-                            branch: branch.clone(),
-                            change_request: now.clone(),
-                            updated_at: chrono::Utc::now(),
-                        };
-                        let value = serde_json::to_value(&status).ok()?;
-                        return Some((value, (pulls, Some(now))));
-                    }
-                }
-            },
-        );
-        RpcReply::Stream(frames.boxed())
-    }
-}
-
 #[async_trait]
 impl RpcService for ViewModel {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
@@ -739,7 +649,6 @@ impl RpcService for ViewModel {
                 Ok(RpcReply::Stream(list_frames(self.feed.sessions.subscribe())))
             }
             methods::WATCH_DOC_MESSAGES => self.transcript(&params),
-            methods::WATCH_CHECKOUT_CHANGE_REQUEST => Ok(self.change_request(&params)),
             // Pins are this client's own, kept by the workspace.
             methods::WATCH_SIDEBAR_PREFERENCES => {
                 let sidebar = self.feed.sidebar.subscribe();

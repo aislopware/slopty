@@ -9,8 +9,6 @@ use slopty_proto::thread::{AgentId, Drive, ThreadId, ThreadMeta, ThreadState};
 /// A thread with nothing in it.
 pub(crate) fn empty() -> ThreadState {
     ThreadState::new(ThreadMeta {
-        modes: Vec::new(),
-        efforts: Vec::new(),
         id: ThreadId::new(),
         agent: AgentId::named(AgentId::CLAUDE_CODE),
         agent_version: String::new(),
@@ -19,10 +17,7 @@ pub(crate) fn empty() -> ThreadState {
         title: "Fix the build".to_owned(),
         parent: None,
         origin: ThreadMeta::PERSON.to_owned(),
-        forked_from: None,
         drive: Drive::named(Drive::DRIVEN),
-        caps: Vec::new(),
-        models: Vec::new(),
         facts: BTreeMap::new(),
         created_ms: WallMs::ZERO,
     })

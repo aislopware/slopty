@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc"],
+  "categories": { "correctness": "error", "suspicious": "error", "perf": "error" },
+  "options": { "typeAware": true },
+  "rules": {
+    "typescript/no-floating-promises": "error",
+    // Hangs on Claude Code's declarations whenever `checksVoidReturn.arguments` is on (over
+    // 20 s; a module that does not import them lints in 0.46 s): `.research/testing-ts-mod`.
+    "typescript/no-misused-promises": "off",
+    "typescript/await-thenable": "error",
+    "typescript/require-await": "error",
+    "typescript/return-await": "error",
+    "typescript/strict-boolean-expressions": "error",
+    "typescript/switch-exhaustiveness-check": "error",
+    "typescript/no-unnecessary-condition": "error",
+    "typescript/no-unsafe-assignment": "error",
+    "typescript/no-unsafe-member-access": "error",
+    "typescript/no-unsafe-call": "error",
+    "typescript/no-unsafe-return": "error",
+    "typescript/no-unsafe-argument": "error",
+    "typescript/prefer-promise-reject-errors": "error",
+    "typescript/only-throw-error": "error"
+  },
+  "overrides": [
+    {
+      // A simulation's steps happen one after another on the kit's clock, by design.
+      "files": ["tests/**", "deep/**"],
+      "rules": { "no-await-in-loop": "off" }
+    }
+  ]
+}

@@ -32,9 +32,8 @@ pub use host::Host;
 
 /// Why the person's words may not be typed into the terminal of a thread at `status` now.
 ///
-/// Its agent waits on the person at a dialog, which would take the Enter of a
-/// `slopty_proto::terminal::TermRequest::Submit` or an `agent_tell` as an answer. `None` when
-/// they may.
+/// Its agent waits on the person at a dialog, which would take the Enter of an `agent_tell` as
+/// an answer. `None` when they may.
 #[must_use]
 pub fn submit_refused(status: &slopty_proto::thread::Status) -> Option<String> {
     if status.phase != slopty_proto::thread::Phase::NeedsYou {

@@ -7,7 +7,7 @@ mod golden_machine {
     use slopty_core::WorkerId;
     use slopty_proto::handshake::HelloAck;
     use slopty_proto::server::{InstalledAgent, Os, WorkerCaps};
-    use slopty_proto::thread::{AgentId, Effort, Mode, Model, Offers};
+    use slopty_proto::thread::AgentId;
     use slopty_proto::{WorkerMsg, codec};
     use uuid::Uuid;
 
@@ -26,13 +26,12 @@ mod golden_machine {
     }
 
     fn agent(name: AgentId, version: &str) -> InstalledAgent {
-        InstalledAgent { agent: name, version: version.to_owned(), offers: Offers::default() }
+        InstalledAgent { agent: name, version: version.to_owned() }
     }
 
     /// A machine's greeting names its settings file, so a client edits that machine's settings
     /// in a file tile, and every agent it can start a thread of by the name the thread carries:
-    /// Claude Code, Codex, pi and an agent reached over ACP alike, each with what a new thread of
-    /// it can be started with.
+    /// Claude Code, Codex, pi and an agent reached over ACP alike.
     #[test]
     fn greeting() {
         let caps = WorkerCaps {
@@ -45,29 +44,7 @@ mod golden_machine {
             encoders: Vec::new(),
             displays: Vec::new(),
             agents: vec![
-                InstalledAgent {
-                    offers: Offers {
-                        models: vec![Model {
-                            id: "opus".to_owned(),
-                            label: "Opus".to_owned(),
-                            options: Vec::new(),
-                        }],
-                        model: Some("opus".to_owned()),
-                        modes: vec![Mode {
-                            id: "plan".to_owned(),
-                            label: "Plan".to_owned(),
-                            description: Some("Plans first and changes nothing".to_owned()),
-                        }],
-                        mode: Some("plan".to_owned()),
-                        efforts: vec![Effort {
-                            id: "high".to_owned(),
-                            label: "High".to_owned(),
-                            description: None,
-                        }],
-                        commands: Vec::new(),
-                    },
-                    ..agent(AgentId::named(AgentId::CLAUDE_CODE), "2.1.286 (Claude Code)")
-                },
+                agent(AgentId::named(AgentId::CLAUDE_CODE), "2.1.286 (Claude Code)"),
                 agent(AgentId::named(AgentId::CODEX), "codex-cli 0.157.0"),
                 agent(AgentId::named(AgentId::PI), "0.42.1"),
                 agent(AgentId::acp("gemini"), "0.9.0"),

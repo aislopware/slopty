@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use serde::Serialize;
-use slopty_proto::orchestration::{ReadEntry, RequestRead, ThreadRead, TurnRead};
+use slopty_proto::orchestration::{ReadEntry, ThreadRead, TurnRead};
 use slopty_proto::thread::{Phase, ToolState, TurnState};
 
 use crate::bulk::Moved;
@@ -23,7 +23,6 @@ pub struct ThreadReadView<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     wait: Option<&'a str>,
     turns: Vec<TurnView<'a>>,
-    requests: Vec<RequestView<'a>>,
     /// Read again from here (`after`) for what came next.
     next: u32,
     truncated: bool,
@@ -79,24 +78,6 @@ pub enum ReadEntryView<'a> {
         /// What it says.
         text: &'a str,
     },
-}
-
-/// An open request, for JSON.
-#[derive(Debug, Serialize)]
-pub struct RequestView<'a> {
-    ask: &'a str,
-    kind: &'a str,
-    title: &'a str,
-    choices: Vec<ChoiceView<'a>>,
-    #[serde(skip_serializing_if = "<[String]>::is_empty")]
-    questions: &'a [String],
-}
-
-/// A choice a request offers, for JSON.
-#[derive(Debug, Serialize)]
-pub struct ChoiceView<'a> {
-    id: &'a str,
-    label: &'a str,
 }
 
 /// A thread's phase, as a word.
@@ -163,20 +144,6 @@ fn turn(turn: &TurnRead) -> TurnView<'_> {
     }
 }
 
-fn request(request: &RequestRead) -> RequestView<'_> {
-    RequestView {
-        ask: &request.ask.0,
-        kind: &request.kind,
-        title: &request.title,
-        choices: request
-            .choices
-            .iter()
-            .map(|c| ChoiceView { id: &c.id, label: &c.label })
-            .collect(),
-        questions: &request.questions,
-    }
-}
-
 /// Turns of a thread, for JSON.
 #[must_use]
 pub fn thread_read(read: &ThreadRead) -> ThreadReadView<'_> {
@@ -189,7 +156,6 @@ pub fn thread_read(read: &ThreadRead) -> ThreadReadView<'_> {
         phase: phase_key(read.phase),
         wait: read.wait.as_deref(),
         turns: read.turns.iter().map(turn).collect(),
-        requests: read.requests.iter().map(request).collect(),
         next: read.next.0,
         truncated: read.truncated,
         skipped: read.skipped,
@@ -206,8 +172,8 @@ fn gist(text: &str) -> String {
     gist
 }
 
-/// Turns of a thread, for a person: a line for each thing in them, then the requests waiting,
-/// each with the command that answers it.
+/// Turns of a thread, for a person: a line for each thing in them. What the agent waits on is
+/// said at the top, and answered in its terminal.
 #[must_use]
 pub fn thread_read_text(read: &ThreadRead) -> String {
     let mut out = String::new();
@@ -237,17 +203,6 @@ pub fn thread_read_text(read: &ThreadRead) -> String {
             };
             let _infallible = writeln!(out, "  {line}");
         }
-    }
-    for r in &read.requests {
-        let choices: Vec<&str> = r.choices.iter().map(|c| c.id.as_str()).collect();
-        let _infallible = writeln!(
-            out,
-            "waiting  {}: slopty thread answer {} {} <{}>",
-            r.title,
-            read.thread,
-            r.ask.0,
-            choices.join(" | ")
-        );
     }
     let more = if read.truncated { ", more to read" } else { "" };
     let _infallible = writeln!(out, "next: --after {}{more}", read.next.0);
@@ -294,12 +249,12 @@ pub fn moved(moved: &Moved) -> MovedView<'_> {
 #[cfg(test)]
 mod tests {
     use slopty_core::{WallMs, WorkerId};
-    use slopty_proto::thread::{AgentId, AskId, Choice, Effect, ThreadId, TurnId};
+    use slopty_proto::thread::{AgentId, AskId, ThreadId, TurnId};
 
     use super::*;
 
-    /// A read says each turn's words and calls in a line apiece, and each request waiting with
-    /// the command that answers it; its JSON keeps every field, the next cursor too.
+    /// A read says what its agent waits on, then each turn's words and calls in a line apiece;
+    /// its JSON keeps every field, the next cursor too.
     #[test]
     fn a_read_names_its_turns_and_what_waits() {
         let thread = ThreadId::derived(&["t"]);
@@ -327,22 +282,6 @@ mod tests {
                     },
                 ],
             }],
-            requests: vec![RequestRead {
-                ask: AskId("7".to_owned()),
-                kind: "approval".to_owned(),
-                title: "Run cargo test?".to_owned(),
-                choices: vec![Choice {
-                    id: "allow".to_owned(),
-                    label: "Allow".to_owned(),
-                    effect: Effect::Allow,
-                    scope: None,
-                    folders: Vec::new(),
-                    stops: false,
-                }],
-                questions: Vec::new(),
-                picks: Vec::new(),
-                needs_presence: false,
-            }],
             next: TurnId(3),
             truncated: true,
             skipped: false,
@@ -350,13 +289,14 @@ mod tests {
         let shown = thread_read_text(&read);
         assert!(shown.contains("  you      fix the build\n"), "{shown}");
         assert!(shown.contains("  tool     Run cargo test (pending)"), "{shown}");
-        assert!(shown.contains(&format!("slopty thread answer {thread} 7 <allow>")), "{shown}");
+        let top = format!("pi {thread} (Fix the build), needs you: Wants to run cargo test\n");
+        assert!(shown.starts_with(&top), "{shown}");
         assert!(shown.contains("next: --after 3, more to read"), "{shown}");
         let json = serde_json::to_value(thread_read(&read)).unwrap();
         assert_eq!(json["phase"], "needs_you");
         assert_eq!(json["turns"][0]["entries"][0]["type"], "user");
         assert_eq!(json["turns"][0]["entries"][1]["state"], "pending");
-        assert_eq!(json["requests"][0]["choices"][0]["id"], "allow");
+        assert_eq!(json["wait"], "Wants to run cargo test");
         assert_eq!((json["next"].as_u64(), json["truncated"].as_bool()), (Some(3), Some(true)));
     }
 }

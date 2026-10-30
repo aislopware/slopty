@@ -1,0 +1,6 @@
+{
+  "name": "slopty",
+  "version": "0.1.0",
+  "description": "Slopty reads the prompt box's draft for its inspector",
+  "author": { "name": "Slopty" }
+}

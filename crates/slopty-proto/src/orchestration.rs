@@ -18,8 +18,8 @@
 //! whose answer was lost sends it again without doing it twice.
 //!
 //! Any agent's thread is read through the agent-neutral thread model ([`Verb::ReadThread`]), a
-//! bounded page of whole turns at a time, and its open requests are answered as a client's
-//! would be ([`Verb::AnswerRequest`]). A file too large for one frame goes up in parts
+//! bounded page of whole turns at a time; what it asks the person is answered in its own
+//! terminal, never through here. A file too large for one frame goes up in parts
 //! ([`Verb::Upload`]) and comes down in [`Verb::ReadFile`] ranges.
 //!
 //! Agents start agents ([`Verb::AgentStart`]) on the machine they name, tell them things, wait
@@ -38,7 +38,7 @@ use crate::server::{Liveness, WorkerFacts, WorkerInfo};
 use crate::terminal::SessionSummary;
 use crate::thread::attention::Rung;
 use crate::thread::wire::ThreadRow;
-use crate::thread::{AgentId, AskId, Choice, Phase, ThreadId, ToolState, TurnId, TurnState, Wait};
+use crate::thread::{AgentId, Phase, ThreadId, ToolState, TurnId, TurnState, Wait};
 use crate::transfer::Hash;
 
 /// How long after its answer a key is still honoured: longer than any caller keeps retrying
@@ -165,8 +165,6 @@ pub struct TermAgent {
     pub phase: Phase,
     /// What it waits on, while it waits.
     pub wait: Option<Wait>,
-    /// What it asks the person: its first open request's title.
-    pub asks: Option<String>,
     /// When it entered its phase, by its worker's clock.
     pub since_ms: WallMs,
 }
@@ -182,7 +180,6 @@ impl TermAgent {
             rung: Rung::of(row),
             phase: row.status.phase,
             wait: row.status.wait.clone(),
-            asks: row.requests.first().map(|r| r.title.clone()),
             since_ms: row.status.since_ms,
         }
     }
@@ -395,8 +392,7 @@ pub enum Verb {
     ///
     /// A read is bounded ([`ThreadRead::truncated`]) and ends on a whole turn, so reading again
     /// from [`ThreadRead::next`] goes on where it stopped; a turn still under way is read again
-    /// until it ends. The thread's open requests come with it, answered with
-    /// [`Verb::AnswerRequest`].
+    /// until it ends.
     ReadThread {
         /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
         of: ThreadOf,
@@ -404,19 +400,6 @@ pub enum Verb {
         view: ThreadView,
         /// The last turn already read; from the first held when absent.
         after: Option<TurnId>,
-    },
-    /// Answer a thread's open request ([`ThreadRead::requests`]) as a client's would be: by
-    /// one of the choices it offers. The person's alone; an agent is
-    /// [`ErrorCode::Forbidden`].
-    AnswerRequest {
-        /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
-        of: ThreadOf,
-        /// The request.
-        ask: AskId,
-        /// The choice taken ([`Choice::id`]), or the answers to its questions.
-        choice: String,
-        /// Words to go with it, where the agent takes them.
-        message: Option<String>,
     },
     /// One still picture of a window or a display; answered with [`Outcome::Still`], or
     /// [`ErrorCode::Unsupported`] by a worker that may not capture its screen.
@@ -560,17 +543,6 @@ pub enum Verb {
         /// What to change first; none only reads.
         edits: Vec<crate::settings::SettingEdit>,
     },
-    /// Type a message into the terminal of a thread's agent and submit it, as the prompt box
-    /// does (what a phone's note replies with, with no window open); refused while the agent
-    /// waits on the person. The person's alone; an agent is [`ErrorCode::Forbidden`] (an
-    /// agent speaks to another with [`Verb::AgentTell`]). Answered with [`Outcome::Done`] once
-    /// it is typed.
-    SendMessage {
-        /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
-        of: ThreadOf,
-        /// What it says.
-        text: String,
-    },
     /// Have a worker's daemon exit for its service manager to start it again (launchd's
     /// `KeepAlive`, systemd's `Restart=always`), so a grant made at its desk (Screen Recording)
     /// is seen. Its terminals stay with ptyd and come back; its agents' turns that run in the
@@ -585,8 +557,9 @@ pub enum Verb {
     /// tools, and records the caller's agent as its parent. Answered with
     /// [`Outcome::ThreadStarted`] once it runs.
     AgentStart(Box<crate::agent::AgentStart>),
-    /// Words for an agent, marked as the caller's, typed into its terminal and submitted as
-    /// [`Verb::SendMessage`] types the person's; refused while it waits on the person.
+    /// Words for an agent, marked as the caller's, typed into its terminal as one message: a
+    /// paste, then its Enter a moment later; refused while it waits on the person at a dialog,
+    /// which would take them as the answer.
     /// Answered with [`Outcome::Done`] once they are typed.
     AgentTell {
         /// Which agent.
@@ -692,8 +665,6 @@ impl Verb {
             | Self::Close { .. }
             | Self::ResizeTerminal { .. }
             | Self::ForgetWorker { .. }
-            | Self::AnswerRequest { .. }
-            | Self::SendMessage { .. }
             | Self::RestartWorker { .. }
             | Self::BundleBranch { .. }
             | Self::FetchBundle { .. }
@@ -802,8 +773,8 @@ pub enum Happening {
         /// Which.
         term: TermRef,
     },
-    /// A thread that hangs from no other moved on the ladder, or what it asks changed: its
-    /// phase, its rung, or its first open request, as its worker's table says.
+    /// A thread that hangs from no other moved on the ladder: its phase or its rung, as its
+    /// worker's table says.
     Rung {
         /// Where.
         worker: WorkerId,
@@ -1011,8 +982,8 @@ pub enum Outcome {
     /// For [`Verb::ListPorts`].
     Ports(Vec<Port>),
     /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`],
-    /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::AnswerRequest`],
-    /// [`Verb::Upload`], [`Verb::AgentTell`], [`Verb::AgentStop`]).
+    /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::Upload`], [`Verb::AgentTell`],
+    /// [`Verb::AgentStop`]).
     Done,
     /// It failed.
     Error {
@@ -1117,8 +1088,7 @@ pub enum Outcome {
     },
 }
 
-/// Which thread a [`Verb::ReadThread`], a [`Verb::AnswerRequest`] or a [`Verb::SendMessage`] is
-/// about.
+/// Which thread a [`Verb::ReadThread`] is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ThreadOf {
     /// The thread of the agent in a terminal, or of a thread seated there.
@@ -1164,8 +1134,6 @@ pub struct ThreadRead {
     pub wait: Option<String>,
     /// The turns after the one asked from, oldest first; the last may be under way.
     pub turns: Vec<TurnRead>,
-    /// The requests open now, oldest first.
-    pub requests: Vec<RequestRead>,
     /// The turn to read after next: the last whole turn given, or the one asked from when
     /// none ended.
     pub next: TurnId,
@@ -1223,28 +1191,4 @@ pub enum ReadEntry {
         /// What it says.
         text: String,
     },
-}
-
-/// An open request of a [`ThreadRead`].
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct RequestRead {
-    /// Its id, for [`Verb::AnswerRequest`].
-    pub ask: AskId,
-    /// What it asks ([`crate::thread::Request::kind`]), open.
-    pub kind: String,
-    /// What it asks, in a line.
-    pub title: String,
-    /// The answers it offers, in its order: each `id` is a choice to answer with.
-    pub choices: Vec<Choice>,
-    /// Its questions, for a question.
-    pub questions: Vec<String>,
-    /// The answers a note offers as buttons of their own
-    /// ([`NoteChoice::of`](crate::thread::wire::NoteChoice::of)): a note's pick, pressed,
-    /// answers with the choice at its place here.
-    pub picks: Vec<crate::thread::wire::NoteChoice>,
-    /// Only the person at its card answers it ([`crate::thread::Request::needs_presence`]): an
-    /// answer from here is refused, so a caller says so without asking
-    /// ([`crate::thread::Request::NEEDS_PRESENCE_REFUSED`]).
-    #[serde(default)]
-    pub needs_presence: bool,
 }

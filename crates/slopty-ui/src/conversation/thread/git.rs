@@ -350,7 +350,6 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
             ReviewScope::Range { base, head } => {
                 repo.ranges.insert((base, head), Arc::from(review));
             }
-            ReviewScope::Turn(_) | ReviewScope::Since(_) | ReviewScope::Kept => {}
         },
         GitDone::Branches(branches) => repo.branches = Some(Arc::from(branches)),
         // Another branch checked out: what the clone holds is read again.
@@ -455,7 +454,6 @@ const fn changes(op: &GitOp) -> bool {
             | GitOp::PullStatus
             | GitOp::PullComments { .. }
             | GitOp::Changes { .. }
-            | GitOp::Turn { .. }
             | GitOp::Range { .. }
             | GitOp::Branches
             | GitOp::Worktrees

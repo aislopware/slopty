@@ -1,8 +1,7 @@
 //! What an agent shows beyond words, read the same way whichever agent showed it.
 //!
-//! An MCP result's blocks (its text, its pictures, the resources it links), its structured
-//! content, and a call of Slopty's own `show_visual` or `show_page` as the visual or page it
-//! shows.
+//! The resources an MCP result links, its structured content, and a call of Slopty's own
+//! `show_visual` or `show_page` as the visual or page it shows.
 //!
 //! Claude Code's decoder ([`crate::conversation`]) reads its MCP results and Slopty's own calls
 //! through these.
@@ -12,7 +11,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use slopty_proto::thread::detail::Clip;
-use slopty_proto::thread::{Clipped, Image, ToolDetail};
+use slopty_proto::thread::{Clipped, ToolDetail};
 use slopty_proto::visual::{
     PageDetail, PageSource, ResourceLink, SHOW_PAGE, SHOW_VISUAL, VisualDetail,
 };
@@ -29,61 +28,18 @@ const STRUCTURED: Clip = Clip { lines: 2_000, chars: 64 * 1024 };
 /// An MCP App's call result, for its page, kept whole up to this (pictures in it included).
 pub const RESULT: Clip = Clip { lines: usize::MAX, chars: 4 * 1024 * 1024 };
 
-/// An MCP result's blocks, read.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct McpOutput {
-    /// Its text blocks, one after another; an embedded text resource's text too.
-    pub text: String,
-    /// Its pictures, kept ([`crate::media`]).
-    pub images: Vec<Image>,
-    /// The resources it links or embeds, in its order.
-    pub links: Vec<ResourceLink>,
-}
-
-/// The blocks of an MCP result (`content`), as MCP spells them: `text`, `image`, `audio`,
-/// `resource_link` and `resource`.
+/// The resources MCP result blocks (`content`, or Claude Code's `resourceLinks`) link or embed,
+/// in their order: a `resource_link` block, and an embedded `resource`'s.
 #[must_use]
-pub fn mcp_content(blocks: &[Value]) -> McpOutput {
-    let mut out = McpOutput::default();
-    let mut text = Vec::new();
-    for block in blocks {
-        let field = |name: &str| block.get(name).and_then(Value::as_str);
-        match field("type") {
-            Some("text") => text.extend(field("text").map(str::to_owned)),
-            Some("image") => {
-                if let Some(image) = field("data")
-                    .and_then(|data| crate::media::keep_base64(data, field("mimeType")))
-                {
-                    out.images.push(image);
-                }
-            }
-            Some("resource_link") => {
-                if let Some(link) = link_of(block) {
-                    out.links.push(link);
-                }
-            }
-            Some("resource") => {
-                let Some(resource) = block.get("resource") else { continue };
-                let mime = resource.get("mimeType").and_then(Value::as_str);
-                let blob = resource.get("blob").and_then(Value::as_str);
-                let picture = blob.filter(|_| mime.is_some_and(|m| m.starts_with("image/")));
-                if let Some(image) = picture.and_then(|b| crate::media::keep_base64(b, mime)) {
-                    out.images.push(image);
-                    continue;
-                }
-                if let Some(said) = resource.get("text").and_then(Value::as_str) {
-                    text.push(said.to_owned());
-                }
-                if let Some(link) = link_of(resource) {
-                    out.links.push(link);
-                }
-            }
-            // Audio and what MCP adds later: kept as the JSON they came as, so nothing is lost.
-            Some(_) | None => text.push(block.to_string()),
-        }
-    }
-    out.text = text.join("\n");
-    out
+pub fn mcp_links(blocks: &[Value]) -> Vec<ResourceLink> {
+    blocks
+        .iter()
+        .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+            Some("resource_link") => link_of(block),
+            Some("resource") => link_of(block.get("resource")?),
+            _ => None,
+        })
+        .collect()
 }
 
 fn link_of(block: &Value) -> Option<ResourceLink> {
@@ -187,28 +143,22 @@ mod tests {
 
     use super::*;
 
-    /// An MCP result's text, pictures and links are each read for what they are; a picture's
-    /// digest is that of its bytes.
+    /// An MCP result's links are read in their order, an embedded resource's too, and nothing
+    /// else is taken for one.
     #[test]
-    fn an_mcp_results_blocks_are_read_for_what_they_are() {
-        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x04\x00\x00\x00\x02\x08\x06\x00\x00\x07";
-        let data = data_encoding::BASE64.encode(png);
-        let out = mcp_content(&[
+    fn an_mcp_results_links_are_read_in_their_order() {
+        let links = mcp_links(&[
             json!({ "type": "text", "text": "two rows" }),
-            json!({ "type": "image", "data": data, "mimeType": "image/png" }),
+            json!({ "type": "image", "data": "AAAA", "mimeType": "image/png" }),
             json!({ "type": "resource_link", "uri": "file:///r/a.csv", "name": "a.csv",
                     "mimeType": "text/csv" }),
             json!({ "type": "resource", "resource": { "uri": "mem://note", "text": "a note" } }),
-            json!({ "type": "resource", "resource": { "uri": "mem://pic", "mimeType": "image/png",
-                    "blob": data } }),
+            json!({ "type": "resource", "resource": { "text": "no uri" } }),
         ]);
-        assert_eq!(out.text, "two rows\na note");
-        assert_eq!(out.images.len(), 2);
-        assert_eq!(out.images[0].digest, blake3::hash(png).to_hex().to_string());
-        assert_eq!((out.images[0].width, out.images[0].height), (4, 2));
-        let uris: Vec<&str> = out.links.iter().map(|l| l.uri.as_str()).collect();
+        let uris: Vec<&str> = links.iter().map(|l| l.uri.as_str()).collect();
         assert_eq!(uris, ["file:///r/a.csv", "mem://note"]);
-        assert_eq!(out.links[0].mime_type.as_deref(), Some("text/csv"));
+        assert_eq!(links[0].mime_type.as_deref(), Some("text/csv"));
+        assert_eq!(links[1].name, "mem://note", "named by its uri when it has no name");
         assert_eq!(structured(Some(&json!({ "rows": 2 }))).unwrap().text, r#"{"rows":2}"#);
         assert_eq!(structured(Some(&Value::Null)), None);
     }

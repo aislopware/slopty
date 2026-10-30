@@ -21,7 +21,6 @@
 
 mod actions;
 mod adding;
-mod catalog;
 mod changes;
 mod clone;
 mod composer;

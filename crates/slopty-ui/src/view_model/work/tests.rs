@@ -1,25 +1,16 @@
 use slopty_core::WallMs;
 use slopty_proto::thread::detail::Clipped;
-use slopty_proto::thread::wire::RequestCard;
 use slopty_proto::thread::{
-    AskId, BackgroundTask, Cap, ContextUsage, Item, ItemBody, ItemId, Link, Meters, Mode, Notice,
-    Phase, Retry, Status, ThreadState, Turn, TurnId, TurnState, Usage,
+    BackgroundTask, ItemId, Link, Notice, Phase, Retry, Status, ThreadState, Wait,
 };
-use slopty_view_doc::{ModeChip, WorkRow};
+use slopty_view_doc::WorkRow;
 
-use super::{Child, chat_row, dock, task_row, tray};
+use super::{Child, chat_row, task_row, tray};
 use crate::conversation::thread::fixtures;
 
 /// A wall time `ms` after a fixed moment well past the year 2000.
 fn ms(ms: u64) -> WallMs {
     WallMs::from_millis(1_800_000_000_000_u64.saturating_add(ms))
-}
-
-/// A thread whose agent can do `caps`.
-fn thread_with(caps: &[&str]) -> ThreadState {
-    let mut state = fixtures::empty();
-    state.meta.caps = caps.iter().map(|cap| Cap::named(cap)).collect();
-    state
 }
 
 /// A background task of `kind`.
@@ -37,7 +28,6 @@ fn child_of(parent: &ThreadState, item: &str, phase: Phase) -> ThreadState {
     let mut child = fixtures::empty();
     child.meta.parent = Some(Link { thread: parent.meta.id, item: ItemId(item.to_owned()) });
     child.meta.title = "reviewer".to_owned();
-    child.meta.caps = vec![Cap::named(Cap::INTERRUPT)];
     child.status = Status {
         phase,
         wait: None,
@@ -47,98 +37,62 @@ fn child_of(parent: &ThreadState, item: &str, phase: Phase) -> ThreadState {
     child
 }
 
-/// Two commands and a subagent make the tray's header "2 commands · 1 subagent"; a command
-/// left running beside the turn keeps a still dot while a monitor's pulses; what ended counts
-/// for nothing.
+/// What is at work reaches the tray by kind and by when it began; what ended and the agent's
+/// own housekeeping are left out.
 #[test]
 fn tasks_reach_the_tray_by_kind() {
-    let mut state = thread_with(&[Cap::STOP_TASK]);
+    let mut state = fixtures::empty();
     let mut dev = task("b1", BackgroundTask::SHELL, 10);
     dev.title = "npm run dev".to_owned();
     let build = task("b2", BackgroundTask::SHELL, 20);
     let mut agent = task("a1", BackgroundTask::AGENT, 30);
-    agent.agent_type = Some("Explore".to_owned());
-    agent.usage = Some(slopty_proto::thread::TaskUsage {
-        tokens: 41_000,
-        tool_uses: 12,
-        duration_ms: 125_000,
-    });
+    agent.step = Some("Reading main.rs".to_owned());
     let mut gone = task("m0", BackgroundTask::MONITOR, 1);
     gone.state = BackgroundTask::COMPLETED.to_owned();
     let watch = task("m1", BackgroundTask::MONITOR, 40);
-    state.tasks = vec![dev, build, agent, gone, watch];
+    let mut memory = task("d1", BackgroundTask::AGENT, 5);
+    memory.ambient = true;
+    state.tasks = vec![dev, build, agent, gone, watch, memory];
     let tray = tray(&state, &[], &chat_of);
-    assert_eq!(tray.summary, "2 commands · 1 monitor · 1 subagent");
-    assert_eq!(tray.counts.total(), 4);
-    let row = |id: &str| tray.rows.iter().find(|row| row.id == task_row(id)).expect("its row");
-    assert!(!row("b1").wakes, "a dev server does not pulse");
-    assert!(row("m1").wakes, "a monitor brings news");
-    assert_eq!(row("a1").figures, "12 tool uses · 41k tokens");
-    assert_eq!(row("a1").noun, "subagent");
-    assert_eq!(row("m0").state_words, "done");
-    assert!(row("b1").can_stop && !row("m0").can_stop);
-    // Live by when they began, then what ended.
     let ids: Vec<&str> = tray.rows.iter().map(|row| row.id.as_str()).collect();
-    assert_eq!(ids, ["task:b1", "task:b2", "task:a1", "task:m1", "task:m0"]);
-    assert!(tray.can_stop_all);
+    assert_eq!(ids, ["task:b1", "task:b2", "task:a1", "task:m1"]);
+    let row = |id: &str| tray.rows.iter().find(|row| row.id == task_row(id)).expect("its row");
+    assert_eq!(row("b1").title, "npm run dev");
+    assert_eq!((row("a1").kind.as_str(), row("a1").noun.as_str()), (WorkRow::SUBAGENT, "subagent"));
+    assert_eq!(row("a1").step.as_deref(), Some("Reading main.rs"));
+    assert_eq!(row("m1").state_words, "running");
 }
 
-/// A command the thread names twice (its start, then its stream) is one row and one in the
-/// header's count: the header never says "2 commands" over one running.
+/// A command the thread names twice (its start, then its stream) is one row, the last word on
+/// it; named again as ended, it is gone.
 #[test]
-fn a_task_named_twice_counts_once() {
-    let mut state = thread_with(&[Cap::STOP_TASK]);
+fn a_task_named_twice_is_one_row() {
+    let mut state = fixtures::empty();
     let first = task("b1", BackgroundTask::SHELL, 10);
     let mut again = task("b1", BackgroundTask::SHELL, 10);
     again.title = "sleep 600".to_owned();
-    state.tasks = vec![first, again];
+    state.tasks = vec![first.clone(), again];
     let tray = tray(&state, &[], &chat_of);
-    assert_eq!(tray.summary, "1 command");
     assert_eq!(tray.rows.len(), 1);
     assert_eq!(tray.rows[0].title, "sleep 600", "the last word on it");
+    let mut ended = first.clone();
+    ended.state = BackgroundTask::COMPLETED.to_owned();
+    state.tasks = vec![first, ended];
+    assert!(super::tray(&state, &[], &chat_of).rows.is_empty(), "ended since");
 }
 
-/// Don't ask refuses what was not allowed beforehand: quiet on the chip, never amber.
-#[test]
-fn dont_ask_is_not_loud() {
-    let mut state = thread_with(&[Cap::SET_MODE]);
-    state.meta.modes = ["auto", "dontAsk"]
-        .iter()
-        .map(|id| Mode { id: (*id).to_owned(), label: super::humane(id), description: None })
-        .collect();
-    state.meters = Meters { mode: Some("dontAsk".to_owned()), ..Meters::default() };
-    let chip = dock(&state).mode.expect("a chip");
-    assert_ne!(chip.tone, ModeChip::DANGER);
-}
-
-/// Without the agent's stop, nothing in the tray offers one.
-#[test]
-fn work_an_agent_cannot_stop_offers_no_stop() {
-    let mut state = thread_with(&[]);
-    state.tasks = vec![task("b1", BackgroundTask::SHELL, 1)];
-    let tray = tray(&state, &[], &chat_of);
-    assert!(!tray.rows.iter().any(|row| row.can_stop));
-    assert!(!tray.can_stop_all);
-}
-
-/// A chat started under this one that waits on the person sits first, with what it asks; one
-/// a task stands for is that task's row, not a second one.
+/// A chat started under this one that waits on the person sits first, saying so; one a task
+/// stands for is that task's row, not a second one.
 #[test]
 fn a_child_that_needs_you_sits_first() {
-    let mut state = thread_with(&[Cap::STOP_TASK]);
+    let mut state = fixtures::empty();
     state.tasks = vec![task("b1", BackgroundTask::SHELL, 1)];
-    let asking = child_of(&state, "call-7", Phase::NeedsYou);
-    let mut asking_row = asking.row(ms(9));
-    asking_row.requests = vec![RequestCard {
-        id: AskId("r1".to_owned()),
-        item: None,
-        kind: "approval".to_owned(),
-        title: "reviewer wants to run cargo test".to_owned(),
-        options: Vec::new(),
-        buttons: Vec::new(),
-        opened_ms: ms(8),
-        needs_presence: false,
-    }];
+    let mut asking = child_of(&state, "call-7", Phase::NeedsYou);
+    asking.status.wait = Some(Wait {
+        kind: "permission".to_owned(),
+        text: "reviewer wants to run cargo test".to_owned(),
+    });
+    let asking_row = asking.row(ms(9));
     let tasked = child_of(&state, "call-8", Phase::Working);
     let tasked_row = tasked.row(ms(9));
     let mut agent = task("a1", BackgroundTask::AGENT, 2);
@@ -148,11 +102,8 @@ fn a_child_that_needs_you_sits_first() {
     let tray = tray(&state, &children, &chat_of);
     let first = tray.rows.first().expect("a row");
     assert_eq!(first.id, chat_row(&asking.meta.id.to_string()));
-    assert_eq!(first.needs_you.as_deref(), Some("reviewer wants to run cargo test"));
     assert_eq!(first.state_words, "needs you");
-    assert_eq!(first.call_part_id.as_deref(), Some("call-7"));
-    assert!(first.can_stop, "a child is stopped by its own interrupt");
-    assert_eq!(tray.counts.needs_you, 1);
+    assert_eq!(first.chat_id, Some(asking.meta.id.to_string()));
     assert_eq!(tray.rows.len(), 3, "the tasked child is its task's row alone");
     let tasked_task = tray.rows.iter().find(|row| row.id == "task:a1").expect("the task");
     assert_eq!(tasked_task.chat_id, Some(tasked.meta.id.to_string()));
@@ -162,7 +113,7 @@ fn a_child_that_needs_you_sits_first() {
 /// the call that started both: the tray lists it once.
 #[test]
 fn a_task_is_its_calls_chat() {
-    let mut state = thread_with(&[Cap::STOP_TASK]);
+    let mut state = fixtures::empty();
     let child = child_of(&state, "call-3", Phase::Working);
     let child_row = child.row(ms(9));
     let mut agent = task("a3", BackgroundTask::AGENT, 2);
@@ -173,161 +124,43 @@ fn a_task_is_its_calls_chat() {
     assert_eq!(tray.rows[0].chat_id, Some(child.meta.id.to_string()));
 }
 
-/// Work a subagent started follows it, one deeper; ended rows are kept to a few.
+/// Work a subagent started follows it; what ended is gone.
 #[test]
 fn a_tasks_own_work_follows_it() {
-    let mut state = thread_with(&[]);
+    let mut state = fixtures::empty();
     let parent = task("a1", BackgroundTask::AGENT, 1);
     let mut inner = task("b9", BackgroundTask::SHELL, 2);
     inner.parent = Some("a1".to_owned());
-    state.tasks = vec![inner, parent];
-    for n in 0..12 {
+    let early = task("b0", BackgroundTask::SHELL, 0);
+    state.tasks = vec![inner, parent, early];
+    for n in 0..3 {
         let mut ended = task(&format!("x{n}"), BackgroundTask::SHELL, n);
         ended.state = BackgroundTask::FAILED.to_owned();
         ended.ended_ms = Some(ms(100_u64.saturating_add(n)));
         state.tasks.push(ended);
     }
     let tray = tray(&state, &[], &chat_of);
-    let (first, second) = (&tray.rows[0], &tray.rows[1]);
-    assert_eq!((first.id.as_str(), first.depth), ("task:a1", 0));
-    assert_eq!((second.id.as_str(), second.depth), ("task:b9", 1));
-    let ended = tray.rows.iter().filter(|row| !row.live).count();
-    assert_eq!(ended, slopty_view_doc::WorkTray::ENDED_KEPT);
-    assert_eq!(tray.rows[2].id, "task:x11", "the latest ended first");
-    assert_eq!(tray.rows[2].kind, WorkRow::COMMAND);
+    let ids: Vec<&str> = tray.rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, ["task:b0", "task:a1", "task:b9"]);
+    assert_eq!(tray.rows[0].kind, WorkRow::COMMAND);
 }
 
-/// The mode chip says the mode as the TUI does, loudest when nothing is asked; the default says
-/// nothing.
+/// A request tried again says what failed and counts down to its next attempt; the third
+/// attempt of an overload points at the status page, and no answer at all says how long it
+/// waited.
 #[test]
-fn the_mode_chip_is_loud_for_bypass() {
-    let mut state = thread_with(&[Cap::SET_MODE]);
-    state.meta.modes = ["default", "acceptEdits", "plan", "bypassPermissions"]
-        .iter()
-        .map(|id| Mode { id: (*id).to_owned(), label: super::humane(id), description: None })
-        .collect();
-    state.meters = Meters { mode: Some("bypassPermissions".to_owned()), ..Meters::default() };
-    let chip = dock(&state).mode.expect("a chip");
-    assert_eq!(chip.words, "Bypass permissions on");
-    assert_eq!(chip.tone, ModeChip::DANGER);
-    state.meters.mode = Some("default".to_owned());
-    let quiet = dock(&state).mode.expect("a chip");
-    assert_eq!((quiet.words.as_str(), quiet.tone.as_str()), ("", ModeChip::QUIET));
-}
-
-/// Auto, the recommended default, is quiet on the chip.
-#[test]
-fn the_recommended_auto_mode_is_quiet() {
-    let mut state = thread_with(&[Cap::SET_MODE]);
-    state.meta.modes = ["auto", "acceptEdits", "plan"]
-        .iter()
-        .map(|id| Mode { id: (*id).to_owned(), label: super::humane(id), description: None })
-        .collect();
-    state.meters = Meters { mode: Some("auto".to_owned()), ..Meters::default() };
-    let chip = dock(&state).mode.expect("a chip");
-    assert_eq!((chip.words.as_str(), chip.tone.as_str()), ("", ModeChip::QUIET));
-}
-
-/// The context card warns as the TUI does: before it compacts on its own, or when it is nearly
-/// full with nothing to compact it; the last turn's tokens ride along.
-#[test]
-fn context_usage_keeps_its_categories_and_warns() {
-    let mut state = thread_with(&[]);
-    state.context = Some(ContextUsage {
-        categories: vec![
-            slopty_proto::thread::ContextCategory {
-                name: "Messages".to_owned(),
-                tokens: 140_000,
-                free: false,
-                color: None,
-            },
-            slopty_proto::thread::ContextCategory {
-                name: "Free space".to_owned(),
-                tokens: 60_000,
-                free: true,
-                color: None,
-            },
-        ],
-        tokens: 140_000,
-        window: 200_000,
-        auto_compact_bp: Some(8_000),
-    });
-    let mut usage = Usage::default();
-    usage.0.insert(Usage::OUTPUT.to_owned(), 900);
-    state.turns = vec![Turn {
-        id: TurnId(1),
-        input: None,
-        state: TurnState::Complete,
-        started_ms: ms(0),
-        ended_ms: Some(ms(10)),
-        usage,
-        models: Vec::new(),
-        changed: slopty_proto::thread::Changed::default(),
-        before: None,
-        after: None,
-    }];
-    let ctx = dock(&state).context.expect("a context");
-    assert_eq!(ctx.used_percent, 70);
-    assert_eq!(ctx.categories.len(), 2);
-    assert_eq!(ctx.categories[0].share_bp, 7_000);
-    assert_eq!(ctx.words.as_deref(), Some("10% until auto-compact"));
-    assert!(!ctx.urgent);
-    assert_eq!(ctx.last_turn.map(|t| t.output), Some(900));
-    let mut full = state;
-    if let Some(ctx) = full.context.as_mut() {
-        ctx.auto_compact_bp = None;
-        ctx.tokens = 170_000;
-    }
-    let low = dock(&full).context.expect("a context");
-    assert_eq!(
-        low.words.as_deref(),
-        Some("Context low (15% remaining) · Run /compact to compact & continue")
-    );
-    assert!(low.urgent);
-}
-
-/// While the turn's last word is a request tried again, the line under way counts down to the
-/// next attempt; once anything follows, it does not.
-#[test]
-fn a_retry_counts_down_in_the_line_under_way() {
-    let mut state = thread_with(&[]);
-    state.status.phase = Phase::Working;
-    state.turns = vec![Turn {
-        id: TurnId(1),
-        input: None,
-        state: TurnState::Active,
-        started_ms: ms(0),
-        ended_ms: None,
-        usage: Usage::default(),
-        models: Vec::new(),
-        changed: slopty_proto::thread::Changed::default(),
-        before: None,
-        after: None,
-    }];
+fn a_retry_counts_down_to_its_next_attempt() {
     let mut notice = Notice::new(Notice::API_ERROR, Clipped::whole("529 Overloaded"));
     notice.retry = Some(Retry { attempt: 3, max: Some(10), in_ms: Some(5_000) });
-    state.items = vec![Item {
-        id: ItemId("n1".to_owned()),
-        turn: TurnId(1),
-        at_ms: ms(1_000),
-        body: ItemBody::Notice(notice),
-    }];
-    let retry = dock(&state).activity.and_then(|a| a.retry).expect("a retry");
+    let at = super::at(ms(1_000));
+    let retry = super::retry_line(&notice, at).expect("a retry");
     assert_eq!(retry.what, "Overloaded");
     assert_eq!(retry.at, Some(super::at(ms(6_000))));
     assert!(retry.hint.is_some(), "the third attempt of an overload points at the status page");
     assert_eq!(retry.words(Some(5_000)), "Overloaded · Retrying in 5s · attempt 3/10");
-    // No answer at all says how long it waited.
     let mut silent =
         Notice::new(Notice::API_ERROR, Clipped::whole("No response from the API after 1m 30s"));
     silent.retry = Some(Retry { attempt: 2, max: Some(10), in_ms: None });
     let line = super::retry_line(&silent, 1).expect("a retry");
     assert_eq!(line.what, "No response from the API after 1m 30s");
-    state.items.push(Item {
-        id: ItemId("t1".to_owned()),
-        turn: TurnId(1),
-        at_ms: ms(7_000),
-        body: ItemBody::Text(Clipped::whole("back")),
-    });
-    assert!(dock(&state).activity.and_then(|a| a.retry).is_none());
 }

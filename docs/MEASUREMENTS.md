@@ -17959,6 +17959,36 @@ cargo test -p slopty-net --test sim                                  # the gate
 cargo test -p slopty-net --test sim -- --ignored --nocapture         # the 200-seed sweep
 ```
 
+## 2026-10-30 — the prompt box's mod
+
+What Slopty's Claude Code mod (`docs/decisions/claude-code.md`, "The inspector mirrors the TUI's
+prompt box through a mod of Slopty's") costs the TUI it runs in, measured on this Mac with
+Claude Code 2.1.312 by the study's harness (`.research/tui-first-live-prompt-2026-10-29.md`):
+keys sent to the real TUI in a pseudo-terminal, the times read from its debug log and the
+relay's own log.
+
+| what | measured |
+| --- | --- |
+| the edit hook's dispatch per key, median / p90 | 1.6 / 4.8 ms; 3.8 / 10.5 ms while lanes built |
+| a key's echo on the screen, 40 keys 120 ms apart, median / p90 | 5.3 / 20.5 ms bare, 5.5 / 15.1 ms with the mod |
+| one relay (`slopty hook` run and done) | 3–13 ms |
+| relays for 40 keys typed 120 ms apart | 5 |
+| a lone change to its relay | about 160 ms |
+
+The echo is the same within noise, so the mod is on for every Claude Code Slopty starts.
+
+The dispatch is the debug log's `settled in` lines, the echo the pseudo-terminal's own record
+of each key and its echo (`logs/<run>.pty`, `.events.jsonl`), the relays the relay's log.
+
+```sh
+cd .research/live-prompt-mod/harness   # the study's prototype mod is ../slopty-draft
+uv run --with pyte python drive.py s6-bare s6-proto.txt --debug-file "$PWD/../logs/s6-bare.debug.log"
+uv run --with pyte python drive.py s6-proto s6-proto.txt --plugin-dir "$PWD/../slopty-draft" \
+  --debug-file "$PWD/../logs/s6-proto.debug.log"
+uv run --with pyte python drive.py s7-demo s7-demo.txt --plugin-dir "$PWD/../slopty-draft" \
+  --debug-file "$PWD/../logs/s7-demo.debug.log"
+```
+
 ## 2026-10-30 — a Mac window's frames from CAMetalDisplayLink
 
 gpui-fast `576e7c96` imports zed #65472, which paces a macOS 14+ window with a

@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use slopty_core::WallMs;
 use slopty_proto::thread::{
-    self, Action, AgentId, BackgroundTask, Cap, Changed, Clipped, Compaction, ContentRef, Drive,
+    self, Action, AgentId, BackgroundTask, Changed, Clipped, Compaction, ContentRef, Draft, Drive,
     Item, ItemBody, ItemId, Link, Liveness, Notice, Phase, Plan, Retry, Status, Step, ThreadId,
     ThreadMeta, ThreadState, ToolCall, ToolState, Turn, TurnId, TurnState, Usage, UserMessage,
     Wait, detail, kind,
@@ -60,14 +60,6 @@ pub enum End {
 
 /// The words a thread waits with while it is compacted.
 pub const COMPACTING_TEXT: &str = "Compacting the conversation";
-
-/// The capabilities named `names`, each once, in order.
-fn caps_of(names: &[&str]) -> Vec<Cap> {
-    let mut caps: Vec<Cap> = names.iter().copied().map(Cap::named).collect();
-    caps.sort();
-    caps.dedup();
-    caps
-}
 
 /// What a permission waits on, as a row leads with it: the action on its subject ("Run cargo
 /// test", [`tool_action`]) from the hook's line `detail`, or what the tool does when the hook
@@ -430,16 +422,23 @@ pub struct History {
     compacting: bool,
     /// When the latest entry was made.
     last_at: WallMs,
+    /// The TUI's prompt box as last told ([`Self::draft`]).
+    draft: Option<Draft>,
+    /// The prompts queued in the TUI, as its transcript says them.
+    queue: Vec<conv::Queued>,
+    /// When the TUI that runs the session now began ([`Self::run_began`]): a prompt queued
+    /// before was another run's, and went with it.
+    queue_since: Option<WallMs>,
+    /// The queue as last told.
+    queued: Vec<String>,
 }
 
 impl History {
-    /// Session `native` of Claude Code `version` in `cwd`, as Slopty reads it, with
-    /// capabilities `caps`. The first outs it gives, from whichever call, begin its thread.
+    /// Session `native` of Claude Code `version` in `cwd`, as Slopty reads it. The first outs it
+    /// gives, from whichever call, begin its thread.
     #[must_use]
-    pub fn new(native: &str, version: &str, cwd: &str, caps: &[&str], now: WallMs) -> Self {
+    pub fn new(native: &str, version: &str, cwd: &str, now: WallMs) -> Self {
         let meta = ThreadMeta {
-            modes: Vec::new(),
-            efforts: Vec::new(),
             id: thread_of(native),
             agent: AgentId::named(AgentId::CLAUDE_CODE),
             agent_version: version.to_owned(),
@@ -448,20 +447,17 @@ impl History {
             title: String::new(),
             parent: None,
             origin: ThreadMeta::PERSON.to_owned(),
-            forked_from: None,
             drive: Drive::named(Drive::OBSERVED),
-            caps: Vec::new(),
-            models: Vec::new(),
             facts: BTreeMap::new(),
             created_ms: now,
         };
-        Self::of(meta, caps)
+        Self::of(meta)
     }
 
     /// The thread `meta` as it stands, read again from nothing: what it is and who holds it are
     /// kept, what it holds is told again by the records that follow.
     #[must_use]
-    pub fn of(meta: ThreadMeta, caps: &[&str]) -> Self {
+    pub fn of(meta: ThreadMeta) -> Self {
         let mut threads = HashMap::new();
         threads.insert(conv::ThreadId::Main, Mapped::new(meta.id));
         let mut history = Self {
@@ -475,8 +471,11 @@ impl History {
             rested: None,
             compacting: false,
             last_at: WallMs::ZERO,
+            draft: None,
+            queue: Vec::new(),
+            queue_since: None,
+            queued: Vec::new(),
         };
-        history.meta.caps = caps_of(caps);
         history.out.push(Out::Begin(Box::new(history.meta.clone())));
         history
     }
@@ -734,8 +733,51 @@ impl History {
         });
         self.reshow();
         self.went = Some(now);
+        // The box and the queue are the TUI's, and went with it.
+        if self.draft.take().is_some() {
+            self.push(self.meta.id, Action::DraftSet(None));
+        }
+        self.queue_since = Some(now);
+        self.tell_queue();
         self.settle_subagents();
         self.drain()
+    }
+
+    /// What the TUI's prompt box holds now ([`slopty_proto::thread::Draft`]), `None` for
+    /// nothing: told when its words or its pictures changed.
+    pub fn draft(&mut self, draft: Option<Draft>) -> Vec<Out> {
+        let same = match (&self.draft, &draft) {
+            (Some(had), Some(now)) => had.text == now.text && had.images == now.images,
+            (had, now) => had.is_none() && now.is_none(),
+        };
+        if !same {
+            self.draft.clone_from(&draft);
+            self.push(self.meta.id, Action::DraftSet(draft));
+        }
+        self.drain()
+    }
+
+    /// The TUI that runs the session now began at `at`: a prompt the transcript says was
+    /// queued before then was another run's, which took it when it ended.
+    pub fn run_began(&mut self, at: WallMs) -> Vec<Out> {
+        self.queue_since = Some(at);
+        self.tell_queue();
+        self.drain()
+    }
+
+    /// Tell the prompts queued in this run, when they are not what was told.
+    fn tell_queue(&mut self) {
+        let since = self.queue_since.unwrap_or(WallMs::ZERO);
+        let queued: Vec<String> = self
+            .queue
+            .iter()
+            .filter(|q| q.at_ms >= since && !q.text.trim().is_empty())
+            .map(|q| q.text.clone())
+            .collect();
+        if queued != self.queued {
+            self.queued.clone_from(&queued);
+            self.push(self.meta.id, Action::QueuedSet(queued));
+        }
     }
 
     /// The session's own thread.
@@ -776,6 +818,10 @@ impl History {
                     self.push(id, Action::PlanSet(plan));
                 }
                 Change::Turn { thread, turn } => self.turn(thread, turn),
+                Change::Queued(queued) => {
+                    self.queue.clone_from(queued);
+                    self.tell_queue();
+                }
             }
         }
         for output in outputs {
@@ -810,6 +856,9 @@ impl History {
         id
     }
 
+    /// Subagent `agent`'s thread `id`: its session's agent, folder and drive, hung off the call
+    /// that started it. None of the session's facts are its own: the terminal, the seat and the
+    /// orchestrating parent are the session's, which a client finds through [`ThreadMeta::parent`].
     fn subagent_meta(&self, id: ThreadId, agent: &str) -> ThreadMeta {
         let spawn = self.spawned.get(agent);
         let parent = spawn.map(|spawn| Link {
@@ -822,15 +871,7 @@ impl History {
             title: spawn.map(|spawn| spawn.title.clone()).unwrap_or_default(),
             parent,
             origin: ThreadMeta::SUBAGENT.to_owned(),
-            // A subagent's run is stopped on its own where its session's is (`stop_task`).
-            caps: self
-                .meta
-                .caps
-                .iter()
-                .filter(|c| **c == Cap::named(Cap::INTERRUPT))
-                .cloned()
-                .collect(),
-            models: Vec::new(),
+            facts: BTreeMap::new(),
             ..self.meta.clone()
         }
     }
@@ -854,6 +895,12 @@ impl History {
             if thread == conv::ThreadId::Main {
                 self.failed = false;
                 self.reshow();
+                if let Some(draft) = &self.draft {
+                    self.push(id, Action::DraftSet(Some(draft.clone())));
+                }
+                // The queue comes again with the records, into a thread that holds none.
+                self.queue.clear();
+                self.queued.clear();
             }
         }
     }
@@ -894,8 +941,6 @@ impl History {
                     usage: Usage::default(),
                     models: Vec::new(),
                     changed: Changed::default(),
-                    before: None,
-                    after: None,
                 };
                 mapped.turns.insert(turn, started.clone());
                 actions.push(Action::TurnStarted(started));
@@ -1119,8 +1164,6 @@ impl History {
             usage: Usage::default(),
             models: Vec::new(),
             changed: Changed::default(),
-            before: None,
-            after: None,
         });
         updated.models.clone_from(&record.models);
         updated.usage = usage.clone();
@@ -1204,7 +1247,6 @@ impl History {
                 text: clip(&prompt.text),
                 images: prompt.images.iter().map(|i| image(thread, i)).collect(),
                 command: prompt.command.clone(),
-                intent: None,
             }),
             Body::Text(text) => ItemBody::Text(clip(text)),
             Body::Thinking(text) => ItemBody::Reasoning(clip(text)),
@@ -1710,7 +1752,7 @@ pub fn replay(records: &[serde_json::Value]) -> ThreadState {
             .to_owned()
     };
     let mut history =
-        History::new(&field("sessionId"), &field("version"), &field("cwd"), &[], WallMs::ZERO);
+        History::new(&field("sessionId"), &field("version"), &field("cwd"), WallMs::ZERO);
     let main = history.main();
     let mut decoder = conv::Conversation::default();
     let mut outs = history.drain();

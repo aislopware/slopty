@@ -318,6 +318,7 @@ mod tests {
                 Change::Remove { thread, id } => format!("{thread:?} -{id}"),
                 Change::Tasks { thread, .. } => format!("{thread:?} tasks"),
                 Change::Reset { thread } => format!("reset {thread:?}"),
+                Change::Queued(queued) => format!("queued {}", queued.len()),
                 Change::Turn { .. } => String::new(),
             })
             .collect()

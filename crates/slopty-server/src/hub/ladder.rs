@@ -47,7 +47,7 @@ use slopty_proto::thread::attention::{
     Ladder, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, SpaceAt, Standing, Subject,
     ThreadAt, Via,
 };
-use slopty_proto::thread::wire::{PullSeen, TableFrame, ThreadRow};
+use slopty_proto::thread::wire::{TableFrame, ThreadRow};
 use slopty_proto::thread::{Liveness, Phase, ThreadId, TurnId};
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 
@@ -257,9 +257,8 @@ impl Phones {
             if listening || short {
                 continue;
             }
-            // A note answers nothing: no request, no buttons.
-            let body =
-                PushBody { notice: notice.clone(), ask: None, picks: Vec::new(), quiet: false };
+            // A note answers nothing: it opens its session.
+            let body = PushBody { notice: notice.clone() };
             // A note waiting for room, or a take-back owed, about the same subject is older
             // than this one, which replaces it on the phone.
             self.owed_notes
@@ -677,8 +676,7 @@ impl Board {
             let now = TermAgent::of(row);
             let said = self.rungs_said.get(&(worker, row.id));
             let moved = said.is_none_or(|was| {
-                (was.rung, was.phase, &was.asks, was.wait.as_ref().map(|w| &w.kind))
-                    != (now.rung, now.phase, &now.asks, now.wait.as_ref().map(|w| &w.kind))
+                (was.rung, was.phase, &was.wait) != (now.rung, now.phase, &now.wait)
             });
             if moved {
                 self.rungs_said.insert((worker, row.id), now.clone());
@@ -1199,12 +1197,12 @@ fn moved(board: &mut Board, ladder: &Ladder) -> Vec<Told> {
             board.busy.entry(now.at).or_insert(now.since_ms);
         }
         // A wait on the person is part of the work; coming to rest or failing ends it.
-        let rest = matches!(now.rung, Rung::ToReview | Rung::Idle | Rung::Failed);
+        let rest = matches!(now.rung, Rung::Idle | Rung::Failed);
         let kind = match (was, now.rung) {
             (None, Rung::NeedsYou) => Some(NoticeKind::NeedsYou),
             (Some(was), Rung::NeedsYou) if was != Rung::NeedsYou => Some(NoticeKind::NeedsYou),
             (Some(was), Rung::Failed) if was != Rung::Failed => Some(NoticeKind::Failed),
-            (Some(was), Rung::ToReview | Rung::Idle) if busy(was) => Some(NoticeKind::Finished),
+            (Some(was), Rung::Idle) if busy(was) => Some(NoticeKind::Finished),
             _ => None,
         };
         let since = if rest { board.busy.remove(&now.at) } else { None };
@@ -1292,13 +1290,7 @@ fn left(board: &mut Board) {
 fn text(kind: NoticeKind, row: &ThreadRow) -> String {
     let wait = row.status.wait.as_ref().map(|w| w.text.clone()).filter(|t| !t.is_empty());
     match kind {
-        NoticeKind::NeedsYou => row
-            .requests
-            .first()
-            .map(|r| r.title.clone())
-            .or(wait)
-            .or_else(|| row.pull.as_ref().filter(|p| p.stands.needs_you()).map(PullSeen::line))
-            .unwrap_or_default(),
+        NoticeKind::NeedsYou => wait.unwrap_or_default(),
         NoticeKind::Failed | NoticeKind::Finished => {
             wait.or_else(|| row.last_line.clone()).unwrap_or_default()
         }

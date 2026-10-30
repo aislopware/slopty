@@ -164,9 +164,6 @@ impl WorkspaceView {
                 Ok(RpcReply::Value(serde_json::json!({ "chatId": thread.to_string() })))
             }
             Outcome::Refused { reason } => Err(RpcError::Failed(reason.clone())),
-            Outcome::Unsupported { cap } => {
-                Err(RpcError::Failed(format!("Claude Code here cannot {}", cap.0)))
-            }
             _ => Err(RpcError::Failed("The session did not open".to_owned())),
         };
         let _gone = reply.send(answer);
@@ -405,9 +402,7 @@ impl WorkspaceView {
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: std::collections::BTreeMap::new(),
             worktree: None,
         };
         let (reply, answer) = oneshot::channel();
@@ -470,9 +465,7 @@ impl WorkspaceView {
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: resume,
-            options: std::collections::BTreeMap::new(),
             worktree: None,
         };
         let (reply, answer) = oneshot::channel();

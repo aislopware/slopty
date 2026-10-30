@@ -893,7 +893,6 @@ mod tests {
             reasoning_levels: vec![],
             installed: true,
             can_install: false,
-            usage: None, // slopty
             enabled: None,
         };
         let mixed = vec![

@@ -24,7 +24,6 @@ expression: "terminals_json(&o.workers, &o.terminals, &o.agents)"
       "thread": "0199a000-0000-7000-8000-000000007101",
       "status": "working",
       "waits": null,
-      "asks": null,
       "needs_human": false
     }
   },
@@ -48,8 +47,7 @@ expression: "terminals_json(&o.workers, &o.terminals, &o.agents)"
       "agent": "claude-code",
       "thread": "0199a000-0000-7000-8000-000000007102",
       "status": "needs_you",
-      "waits": null,
-      "asks": "Run cargo test",
+      "waits": "Run cargo test",
       "needs_human": true
     }
   },
@@ -73,8 +71,7 @@ expression: "terminals_json(&o.workers, &o.terminals, &o.agents)"
       "agent": "claude-code",
       "thread": "0199a000-0000-7000-8000-000000007103",
       "status": "needs_you",
-      "waits": null,
-      "asks": "Which branch?",
+      "waits": "Which branch?",
       "needs_human": true
     }
   }

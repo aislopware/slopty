@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use slopty_core::WallMs;
-use slopty_proto::thread::wire::{Expanded, Outcome, TableFrame};
+use slopty_proto::thread::wire::{Against, Expanded, Outcome, TableFrame};
 use slopty_proto::thread::{
-    Action, AgentId, Clipped, Cursor, Delivery, Drive, Item, ItemBody, ItemId, PartKey, Pending,
-    PendingState, Request, RequestState, ThreadMeta, ThreadState, TurnId, UserMessage,
+    Action, AgentId, Clipped, Cursor, Drive, Item, ItemBody, ItemId, PartKey, ThreadMeta,
+    ThreadState, TurnId, UserMessage,
 };
 
 use super::cache::CACHE_THREADS;
@@ -12,8 +12,6 @@ use super::*;
 
 fn meta(id: ThreadId) -> ThreadMeta {
     ThreadMeta {
-        modes: Vec::new(),
-        efforts: Vec::new(),
         id,
         agent: AgentId::named(AgentId::CLAUDE_CODE),
         agent_version: String::new(),
@@ -22,10 +20,7 @@ fn meta(id: ThreadId) -> ThreadMeta {
         title: "Fix the build".to_owned(),
         parent: None,
         origin: ThreadMeta::PERSON.to_owned(),
-        forked_from: None,
         drive: Drive::named(Drive::DRIVEN),
-        caps: Vec::new(),
-        models: Vec::new(),
         facts: BTreeMap::new(),
         created_ms: WallMs::ZERO,
     }
@@ -43,7 +38,7 @@ fn actions(first: u64, actions: Vec<Action>) -> ThreadFrame {
     ThreadFrame::Actions { epoch: 7, first, next, actions }
 }
 
-fn said(id: &str, intent: Option<IntentId>) -> Action {
+fn said(id: &str) -> Action {
     Action::ItemStarted(Item {
         id: ItemId(id.to_owned()),
         turn: TurnId(1),
@@ -52,29 +47,8 @@ fn said(id: &str, intent: Option<IntentId>) -> Action {
             text: Clipped::whole("hi"),
             images: Vec::new(),
             command: None,
-            intent,
         }),
     })
-}
-
-fn request(id: &str) -> Action {
-    Action::RequestOpened(Box::new(Request {
-        id: AskId(id.to_owned()),
-        item: None,
-        kind: Request::APPROVAL.to_owned(),
-        title: "Run cargo test?".to_owned(),
-        text: None,
-        options: Vec::new(),
-        questions: Vec::new(),
-        proposed: None,
-        schema_json: None,
-        url: None,
-        reason: None,
-        state: RequestState::Open,
-        opened_ms: WallMs::ZERO,
-        until_ms: None,
-        needs_presence: false,
-    }))
 }
 
 fn followed(thread: ThreadId) -> Threads {
@@ -85,21 +59,21 @@ fn followed(thread: ThreadId) -> Threads {
     threads
 }
 
-fn send(text: &str) -> Intent {
-    Intent::Send { text: text.to_owned(), delivery: Delivery::Steer, attachments: vec![] }
+fn name(title: &str) -> Intent {
+    Intent::Name { title: title.to_owned() }
 }
 
 #[test]
 fn frames_carry_a_mirror_on_and_a_gap_starts_the_stream_again_from_its_cursor() {
     let thread = ThreadId::new();
     let mut threads = followed(thread);
-    let (changed, out) = threads.frame(thread, actions(0, vec![said("u1", None)]));
+    let (changed, out) = threads.frame(thread, actions(0, vec![said("u1")]));
     assert_eq!((changed, out.len()), (Changed::Thread, 0));
     let mirror = threads.mirror(thread).unwrap();
     assert_eq!(mirror.cursor(), Some(Cursor { epoch: 7, seq: 1 }));
     assert!(mirror.live());
 
-    let (changed, out) = threads.frame(thread, actions(5, vec![said("u2", None)]));
+    let (changed, out) = threads.frame(thread, actions(5, vec![said("u2")]));
     assert_eq!(changed, Changed::Nothing, "a frame that does not follow on is not applied");
     assert_eq!(
         out,
@@ -117,86 +91,40 @@ fn frames_carry_a_mirror_on_and_a_gap_starts_the_stream_again_from_its_cursor() 
     assert_eq!(threads.mirror(thread).unwrap().state().unwrap().items.len(), 1);
 }
 
+/// An intent is on its way until the worker answers it, whether it did it or turned it down:
+/// the answer hands back what was asked, for the interface to say a refusal in its own words,
+/// and an answer heard twice is one.
 #[test]
-fn a_send_is_drawn_at_once_and_until_the_agent_s_record_shows_it() {
+fn an_intent_is_on_its_way_until_the_worker_answers_it() {
     let thread = ThreadId::new();
     let mut threads = followed(thread);
-    let (id, msg) = threads.intent(thread, send("hi"));
+    let (id, msg) = threads.intent(thread, name("Login fix"));
     assert!(msg.is_some(), "sent at once while linked");
-    assert_eq!(threads.unshown(thread).count(), 1, "a pending bubble in the same frame");
-
-    assert!(threads.done(&IntentDone { id, outcome: Outcome::Done }));
-    assert_eq!(threads.unshown(thread).count(), 1, "the worker's answer alone is not the record");
-    let _took = threads.frame(thread, actions(0, vec![said("u1", Some(id))]));
-    assert_eq!(threads.unshown(thread).count(), 0, "the agent's own record takes over");
+    assert_eq!(threads.outbox().of(thread).count(), 1);
+    assert!(threads.take_outbox_changed(), "the cache keeps it");
+    let done = threads.done(&IntentDone { id, outcome: Outcome::Done }).expect("this client's");
+    assert_eq!(done.intent, name("Login fix"));
     assert_eq!(threads.outbox().all(), []);
-}
+    assert!(threads.take_outbox_changed());
+    assert!(threads.done(&IntentDone { id, outcome: Outcome::Done }).is_none(), "heard once");
 
-#[test]
-fn a_send_the_worker_holds_is_its_pending_row_not_a_bubble() {
-    let thread = ThreadId::new();
-    let mut threads = followed(thread);
-    let (id, _msg) = threads.intent(thread, send("after this"));
-    let held = Pending {
-        intent: id,
-        text: "after this".to_owned(),
-        attachments: vec![],
-        delivery: Delivery::Queue,
-        state: PendingState::Waiting,
-    };
-    let _took = threads.frame(thread, actions(0, vec![Action::PendingSet(vec![held])]));
-    assert_eq!(threads.unshown(thread).count(), 0, "drawn once, as the worker holds it");
-}
-
-#[test]
-fn an_answer_flips_its_card_at_once_and_a_refusal_puts_it_back() {
-    let thread = ThreadId::new();
-    let mut threads = followed(thread);
-    let _took = threads.frame(thread, actions(0, vec![request("p1")]));
-    let ask = AskId("p1".to_owned());
-    let answer = Intent::Answer { ask: ask.clone(), choice: "allow".to_owned(), message: None };
-    let (id, _msg) = threads.intent(thread, answer);
-    assert!(threads.answering(thread, &ask).is_some(), "flipped in the same frame");
-    threads.done(&IntentDone { id, outcome: Outcome::Done });
-    assert!(threads.answering(thread, &ask).is_some(), "until the thread says it is answered");
-    let resolved = Action::RequestResolved { id: ask.clone(), state: RequestState::Released };
-    let _took = threads.frame(thread, actions(1, vec![resolved]));
-    assert!(threads.answering(thread, &ask).is_none());
-
-    let _took = threads.frame(thread, actions(2, vec![request("p2")]));
-    let ask = AskId("p2".to_owned());
-    let again = Intent::Answer { ask: ask.clone(), choice: "allow".to_owned(), message: None };
-    let (id, _msg) = threads.intent(thread, again);
-    let refused = Outcome::Refused { reason: "Already answered".to_owned() };
-    threads.done(&IntentDone { id, outcome: refused });
-    assert!(threads.answering(thread, &ask).is_none(), "a refused answer is not drawn as one");
-    assert_eq!(threads.outbox().all(), []);
-}
-
-#[test]
-fn a_failed_send_keeps_its_words_until_dismissed() {
-    let thread = ThreadId::new();
-    let mut threads = followed(thread);
-    let (id, _msg) = threads.intent(thread, send("hello"));
-    let cap = slopty_proto::thread::Cap::named("steer");
-    threads.done(&IntentDone { id, outcome: Outcome::Unsupported { cap } });
-    let failed: Vec<&Sent> = threads.unshown(thread).collect();
-    assert_eq!(failed.len(), 1);
-    assert_eq!(failed[0].failure().as_deref(), Some("The agent cannot steer"));
-    assert!(threads.dismiss(id).is_some());
-    assert_eq!(threads.unshown(thread).count(), 0);
+    let (id, _msg) = threads.intent(thread, name(&"x".repeat(Intent::NAME_MAX + 1)));
+    let refused = Outcome::Refused { reason: "A name is at most 200 characters".to_owned() };
+    let turned_down = threads.done(&IntentDone { id, outcome: refused }).expect("this client's");
+    assert_eq!(turned_down.id, id);
+    assert_eq!(threads.outbox().all(), [], "a refusal is an answer too");
 }
 
 #[test]
 fn intents_wait_out_a_dropped_link_and_go_again_under_their_ids() {
     let thread = ThreadId::new();
     let mut threads = followed(thread);
-    let (answered, _msg) = threads.intent(thread, send("one"));
-    threads.done(&IntentDone { id: answered, outcome: Outcome::Accepted });
-    let (lost, _msg) = threads.intent(thread, send("two"));
+    let (answered, _msg) = threads.intent(thread, name("one"));
+    assert!(threads.done(&IntentDone { id: answered, outcome: Outcome::Done }).is_some());
+    let (lost, _msg) = threads.intent(thread, name("two"));
     threads.disconnected();
     assert!(!threads.mirror(thread).unwrap().live(), "drawn as last known");
-    let (offline, msg) = threads.intent(thread, send("three"));
+    let (offline, msg) = threads.intent(thread, name("three"));
     assert!(msg.is_none(), "nothing goes while the link is down");
 
     let out = threads.connected();
@@ -238,9 +166,9 @@ fn a_review_not_come_is_asked_again_on_the_next_link() {
             })
             .collect()
     };
-    let came = ReviewScope::Turn(TurnId(1));
-    let lost = ReviewScope::Turn(TurnId(2));
-    let offline = ReviewScope::Kept;
+    let came = ReviewScope::WorkingTree(Against::Head);
+    let lost = ReviewScope::WorkingTree(Against::Base);
+    let offline = ReviewScope::Range { base: "main".to_owned(), head: "fix".to_owned() };
     assert!(threads.ask_review(thread, came.clone()).is_some());
     let review = Review { scope: came.clone(), from: None, to: None, files: vec![], absent: None };
     let (changed, _out) = threads.frame(thread, ThreadFrame::Review(Box::new(review)));
@@ -258,29 +186,18 @@ fn a_review_not_come_is_asked_again_on_the_next_link() {
 }
 
 #[test]
-fn the_table_resumes_from_its_cursor_and_settles_a_list_s_answers() {
+fn the_table_resumes_from_its_cursor() {
     let thread = ThreadId::new();
     let mut threads = Threads::default();
     let _out = threads.connected();
-    let mut state = ThreadState::new(meta(thread));
-    state.apply(&request("p1"));
-    let row = state.row(WallMs::ZERO);
+    let row = ThreadState::new(meta(thread)).row(WallMs::ZERO);
     threads.table(&TableFrame::Snapshot { cursor: Cursor { epoch: 3, seq: 9 }, rows: vec![row] });
-    let ask = AskId("p1".to_owned());
-    let answer = Intent::Answer { ask: ask.clone(), choice: "deny".to_owned(), message: None };
-    let (id, _msg) = threads.intent(thread, answer);
-    threads.done(&IntentDone { id, outcome: Outcome::Done });
-    assert!(threads.answering(thread, &ask).is_some(), "the row still holds it open");
-    let mut answered = ThreadState::new(meta(thread));
-    answered.apply(&request("p1"));
-    answered.apply(&Action::RequestResolved { id: ask, state: RequestState::Withdrawn });
     let delta = TableFrame::Delta {
         cursor: Cursor { epoch: 3, seq: 10 },
-        rows: vec![answered.row(WallMs::ZERO)],
+        rows: vec![ThreadState::new(meta(thread)).row(WallMs::ZERO)],
         removed: Vec::new(),
     };
     threads.table(&delta);
-    assert!(threads.outbox().all().is_empty(), "settled by the row");
 
     threads.disconnected();
     let out = threads.connected();
@@ -296,7 +213,7 @@ fn a_cached_thread_is_drawn_before_any_frame_and_caught_up_from_its_cursor() {
     let cache = Cache::new(dir.path().join("w1"));
     let thread = ThreadId::new();
     let mut threads = followed(thread);
-    let _took = threads.frame(thread, actions(0, vec![said("u1", None)]));
+    let _took = threads.frame(thread, actions(0, vec![said("u1")]));
     let (kept, unfollow) = threads.close_thread(thread);
     assert!(unfollow.is_some());
     cache.keep_thread(thread, &kept.unwrap()).unwrap();
@@ -311,7 +228,7 @@ fn a_cached_thread_is_drawn_before_any_frame_and_caught_up_from_its_cursor() {
         m,
         ClientMsg::Thread(ThreadRequest::Follow { have: Some(Cursor { epoch: 7, seq: 1 }), .. })
     )));
-    let _took = later.frame(thread, actions(1, vec![said("u2", None)]));
+    let _took = later.frame(thread, actions(1, vec![said("u2")]));
     assert_eq!(later.mirror(thread).and_then(Mirror::state).unwrap().items.len(), 2);
 
     std::fs::write(dir.path().join("w1").join(format!("{thread}.thread")), b"torn").unwrap();
@@ -326,7 +243,7 @@ fn the_cache_keeps_the_outbox_and_only_the_most_recent_threads() {
     let cache = Cache::new(dir.path().join("w1"));
     let thread = ThreadId::new();
     let mut threads = followed(thread);
-    let _sent = threads.intent(thread, send("kept"));
+    let _sent = threads.intent(thread, name("kept"));
     assert!(threads.take_outbox_changed());
     cache.keep_outbox(threads.outbox()).unwrap();
     assert_eq!(&cache.outbox(), threads.outbox(), "an intent outlives a relaunch");
@@ -385,7 +302,7 @@ fn an_item_s_revision_moves_with_it_and_with_a_fresh_snapshot() {
     let thread = ThreadId::new();
     let mut threads = followed(thread);
     let (u1, u2) = (ItemId("u1".to_owned()), ItemId("u2".to_owned()));
-    let _took = threads.frame(thread, actions(0, vec![said("u1", None), said("u2", None)]));
+    let _took = threads.frame(thread, actions(0, vec![said("u1"), said("u2")]));
     let rev = |t: &Threads, item: &ItemId| t.mirror(thread).unwrap().rev(item);
     let (first, other) = (rev(&threads, &u1), rev(&threads, &u2));
     let grow = Action::Append { item: u1.clone(), part: PartKey::Body, text: " there".to_owned() };
@@ -435,8 +352,6 @@ fn older_turns_are_paged_once_until_every_turn_is_held() {
         usage: Usage::default(),
         models: Vec::new(),
         changed: Lines::default(),
-        before: None,
-        after: None,
     };
     let thread = ThreadId::new();
     let mut threads = Threads::default();

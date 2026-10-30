@@ -533,9 +533,9 @@ impl Answer {
     /// order given, one's own words last, as Claude Code's own dialog joins them.
     pub const JOIN: &'static str = ", ";
 
-    /// The choice of an [`Intent::Answer`](super::wire::Intent::Answer) that answers
-    /// `questions` with `answers`: the words alone for one question that offers nothing,
-    /// otherwise the answers as a JSON list, each keyed by its question's text.
+    /// The choice that answers `questions` with `answers`, as a request's answer carries it: the
+    /// words alone for one question that offers nothing, otherwise the answers as a JSON list, each
+    /// keyed by its question's text.
     #[must_use]
     pub fn choice(questions: &[Question], answers: &[Self]) -> String {
         match (questions, answers) {

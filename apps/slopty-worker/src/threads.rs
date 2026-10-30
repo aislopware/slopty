@@ -23,8 +23,8 @@ use slopty_proto::thread::wire::{
     TableFrame, ThreadFrame, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{
-    AgentId, Cap, ContentRef, Cursor, IntentId, Liveness, Status, ThreadId, ThreadMeta,
-    ThreadState, TurnId,
+    AgentId, ContentRef, Cursor, IntentId, Liveness, Status, ThreadId, ThreadMeta, ThreadState,
+    TurnId,
 };
 use slopty_proto::visual::AppAnswer;
 use slopty_worker::ItemStore;
@@ -350,22 +350,13 @@ impl Following {
 }
 
 /// Act on the person's own mark `intent` on `thread` once, for intent `id`: how far they have
-/// seen it, or their name for it. Every other intent is a turn's or its agent's, which the
-/// person does in the agent's own terminal (`docs/decisions/agents.md`, "TUI-first").
+/// seen it, or their name for it. Everything else of a thread the person does in its agent's own
+/// terminal (`docs/decisions/agents.md`, "TUI-first").
 fn mark(threads: &Threads, thread: ThreadId, id: IntentId, intent: &Intent) -> Outcome {
-    if !matches!(intent, Intent::Seen { .. } | Intent::Name { .. }) {
-        let cap = intent.needs().unwrap_or(IN_ITS_TERMINAL);
-        return Outcome::Unsupported { cap: Cap::named(cap) };
-    }
-    let now = slopty_core::WallMs::now();
-    let marked = threads
-        .host
-        .intent(thread, id, |state| slopty_worker::thread::marks::act(state, intent, now));
+    let marked =
+        threads.host.intent(thread, id, |state| slopty_worker::thread::marks::act(state, intent));
     marked.unwrap_or_else(|| refused("no such thread".to_owned()))
 }
-
-/// What an intent no thread takes from Slopty is done in instead.
-const IN_ITS_TERMINAL: &str = "take this from Slopty: do it in its terminal";
 
 /// Start a thread for intent `id` as `start` says, in the worktree it names once that is made
 /// and set up, telling `said` what the setup says as it goes. Its outcome is recorded with the
@@ -762,11 +753,6 @@ async fn stream(
 }
 
 impl Threads {
-    /// The threads held.
-    pub(crate) const fn host(&self) -> &Host {
-        &self.host
-    }
-
     /// The Claude Code observer, which the daemon's ticks and hooks feed.
     pub(crate) const fn claude(&self) -> &Claude {
         &self.claude
@@ -809,12 +795,8 @@ impl orchestrate::SeatedThreads for Threads {
 fn started(agent: &AgentId, outcome: Outcome) -> Result<ThreadId, Failure> {
     match outcome {
         Outcome::Started { thread } => Ok(thread),
-        Outcome::Unsupported { cap } => {
-            let why = format!("{} cannot {} through Slopty", agent.0, cap.0);
-            Err(Failure::new(ErrorCode::Unsupported, why))
-        }
         Outcome::Refused { reason } => Err(Failure::new(ErrorCode::Failed, reason)),
-        Outcome::Done | Outcome::Accepted | Outcome::SetupFailed { .. } => {
+        Outcome::Done | Outcome::SetupFailed { .. } => {
             let why = format!("{} started no thread", agent.0);
             Err(Failure::new(ErrorCode::Failed, why))
         }

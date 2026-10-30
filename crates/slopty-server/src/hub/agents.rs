@@ -108,7 +108,6 @@ fn entry_of(worker: WorkerId, row: &ThreadRow) -> AgentEntry {
         phase: row.status.phase,
         wait: row.status.wait.clone(),
         ended: !there(row),
-        asks: row.requests.first().map(|r| r.title.clone()).filter(|t| !t.trim().is_empty()),
         last: row.last_line.clone().filter(|l| !l.trim().is_empty()),
         since_ms: row.status.since_ms,
         rests: rests(row),
@@ -119,7 +118,7 @@ fn entry_of(worker: WorkerId, row: &ThreadRow) -> AgentEntry {
 /// waits on the person, or its turn ended and it waits at its prompt. Idle before its first
 /// turn ended is a start not yet under way.
 fn rests(row: &ThreadRow) -> bool {
-    if !there(row) || row.status.phase == Phase::NeedsYou || !row.requests.is_empty() {
+    if !there(row) || row.status.phase == Phase::NeedsYou {
         return true;
     }
     match row.status.phase {
@@ -167,7 +166,7 @@ fn told(name: &str, from: ThreadId, text: &str) -> String {
 
 /// Whether `row`'s agent is in a turn an Esc stops: at work, asking nobody.
 fn at_work(row: &ThreadRow) -> bool {
-    row.status.phase == Phase::Working && row.status.wait.is_none() && row.requests.is_empty()
+    row.status.phase == Phase::Working && row.status.wait.is_none()
 }
 
 /// The name an agent is read by: its title, else its id.
@@ -522,9 +521,7 @@ impl Hub {
             model,
             mode,
             effort,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: BTreeMap::new(),
             worktree: worktree.map(NewWorktree::named),
         };
         // A repeat under the same key takes the same seat, which the worker answers with the

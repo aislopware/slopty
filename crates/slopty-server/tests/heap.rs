@@ -19,7 +19,7 @@ mod tests {
     use slopty_proto::terminal::{CloseReason, SessionState, SessionSummary};
     use slopty_proto::thread::wire::{TableFrame, ThreadRow};
     use slopty_proto::thread::{
-        AgentId, Changed, Cursor, Drive, Liveness, Meters, Phase, Status, ThreadId,
+        AgentId, Changed, Cursor, Drive, Liveness, Phase, Status, ThreadId,
     };
     use slopty_server::Hub;
     use slopty_server::hub::EVENT_LOG;
@@ -129,24 +129,18 @@ mod tests {
             native: String::new(),
             title: "Soak".to_owned(),
             status: Status { phase, wait: None, liveness: Liveness::Live, since_ms: now },
-            requests: Vec::new(),
             last_line: None,
             doing: None,
             changed: Changed::default(),
             parent: None,
             drive: Drive::named(Drive::DRIVEN),
-            caps: Vec::new(),
             facts: BTreeMap::from([(
                 slopty_proto::agent::SEAT_FACT.to_owned(),
                 session.to_string(),
             )]),
-            to_review: false,
-            pull: None,
-            meters: Meters::default(),
             ended: None,
             began_ms: None,
             seen: slopty_proto::thread::TurnId::BEFORE,
-            draft: None,
             lease_ms: None,
             created_ms: now,
             updated_ms: now,

@@ -514,13 +514,12 @@ impl Transfers {
         let (base, staging) = match dest {
             Dest::SessionCwd(_) => (cwd.map(|c| crate::file::expand_home(Path::new(c))), false),
             Dest::Staging => (None, true),
-            Dest::Attachment => (None, false),
             Dest::Path(p) => (Some(crate::file::expand_home(Path::new(p))), false),
             Dest::Drag(drag) => (Some(self.drag_dir(*drag)), false),
         };
         let drag = match dest {
             Dest::Drag(drag) => Some(*drag),
-            Dest::SessionCwd(_) | Dest::Staging | Dest::Attachment | Dest::Path(_) => None,
+            Dest::SessionCwd(_) | Dest::Staging | Dest::Path(_) => None,
         };
         let entries = self.ledger_entries(xfer);
         let transfer = Transfer {

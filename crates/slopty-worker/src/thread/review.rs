@@ -2,8 +2,7 @@
 //! commits, and the sides of a file either showed (`crate::repo::snapshot` is the git half).
 //!
 //! No snapshot is taken of a turn: an agent works in its own TUI (`docs/decisions/agents.md`,
-//! "TUI-first"), and a review reads the repository as it stands. A scope between a thread's
-//! turns has nothing to compare, and says so.
+//! "TUI-first"), and a review reads the repository as it stands.
 
 use std::path::{Path, PathBuf};
 
@@ -14,10 +13,6 @@ use super::Host;
 
 /// Why a review has nothing to compare.
 pub const NOT_IN_GIT: &str = "This thread's folder is not in a git repository";
-
-/// Why a review of a thread's turns has nothing to compare.
-pub const NO_TURN_SNAPSHOTS: &str =
-    "No snapshot is taken of a turn: review the working tree or a range of commits";
 
 /// The repositories of the threads a host holds. Cheap to clone.
 #[derive(Clone, Debug)]
@@ -49,9 +44,6 @@ impl Reviews {
             }
             ReviewScope::Range { base, head } => {
                 crate::repo::snapshot::range(&git, &root, base, head).await
-            }
-            ReviewScope::Turn(_) | ReviewScope::Since(_) | ReviewScope::Kept => {
-                return absent(NO_TURN_SNAPSHOTS);
             }
         };
         read.unwrap_or_else(|e| absent(&e.to_string()))

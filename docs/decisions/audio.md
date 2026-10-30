@@ -229,8 +229,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_path_dragged_out_of_a_shell_is_kept_by_a_download`.
 
 - ✅ **A shell's paste of a picture puts it on the worker's pasteboard first, held as a
-  window's paste is** (2026-09-28, no protocol version change; `TermRequest::PastePicture`,
-  `Dest::Attachment`).
+  window's paste is** (2026-09-28, no protocol version change; `TermRequest::PastePicture`).
   - Claude Code reads a pasted picture off its own machine's pasteboard. It looks on ⌃V, and on
     an empty paste, which is what a ⌘V with no text sends. Before this, the client's clipboard reached
     the worker's pasteboard only on a window's ⌘V, so a screenshot taken on the Mac or iPad
@@ -249,16 +248,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     reach the worker before the offer it follows and paste whatever the pasteboard held.
   - The client never sends back up a picture that came from a worker's offer. That picture
     sits on a worker's pasteboard already.
-  - The conversation face attaches a picture pasted into its composer, and any file dropped on
-    the face, by its path, as Claude Code takes one dropped on a terminal. It goes up with
-    `Dest::Attachment` to a fresh `~/.slopty/drop/<xfer>/` on the worker (the drop directory,
-    `--drop-dir` in tests), with nothing put on the pasteboard. The session's working tree was
-    the other choice. It was rejected because a screenshot there shows in `git status`, can be
-    committed, and a second one called the same would land elsewhere. A chip in the composer
-    shows the upload, and once it lands the path is typed at the composer's cursor. Nothing
-    reaches the PTY until the message is sent.
-  - Tests: goldens `client_term_paste_picture_command`, `client_term_paste_picture_control`,
-    `client_xfer_begin_attachment`; client `a_picture_paste_follows_its_offer_and_has_no_copy`;
+  - *Gone with the GUI composer* (2026-10-29, `agents.md`, "TUI-first"; `Dest::Attachment` was
+    deleted 2026-10-30): the conversation face attached a picture pasted into its composer, and
+    any file dropped on the face, by its path, as Claude Code takes one dropped on a terminal.
+    It went up with `Dest::Attachment` to a fresh `~/.slopty/drop/<xfer>/` on the worker (the
+    drop directory, `--drop-dir` in tests), with nothing put on the pasteboard. The session's
+    working tree was the other choice. It was rejected because a screenshot there shows in
+    `git status`, can be committed, and a second one called the same would land elsewhere. A
+    chip in the composer showed the upload, and once it landed the path was typed at the
+    composer's cursor. Nothing reached the PTY until the message was sent.
+  - Tests: goldens `client_term_paste_picture_command`, `client_term_paste_picture_control`;
+    client `a_picture_paste_follows_its_offer_and_has_no_copy`;
     worker `a_picture_paste_holds_its_shells_input_behind_it` and
     `a_shells_picture_paste_sets_the_pasteboard_before_the_chord_goes_on` (named pasteboard);
     terminal view `a_picture_goes_to_the_worker_ahead_of_the_paste_chord`; composer

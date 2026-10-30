@@ -16,8 +16,9 @@
 //! it answers the terminal that id already names.
 //!
 //! No key is typed into a terminal a coding agent runs in ([`may_type`]). What one agent tells
-//! another ([`Verb::AgentTell`]) and what the person sends ([`Verb::SendMessage`]) go in as one
-//! message each ([`TermRequest::Submit`]), never while the agent asks the person at a dialog;
+//! another ([`Verb::AgentTell`]) goes in as one message
+//! ([`SessionHandle::submit`](crate::session::SessionHandle::submit)), never while the agent asks
+//! the person at a dialog;
 //! a stop ([`Verb::AgentStop`]) is an Esc while its turn runs (`docs/decisions/agents.md`,
 //! "TUI-first").
 //!
@@ -62,8 +63,8 @@ use crate::{ItemStore, Worker, WorkerError, listing};
 /// outcome reports them) and for the item deltas it causes (nobody's echo).
 const ORCHESTRATOR: ClientId = ClientId::nil();
 
-/// Why an agent's request is not answered from here: the person answers it in the agent's own
-/// terminal (`docs/decisions/agents.md`, "TUI-first").
+/// Why nothing is pressed in an agent that waits on the person: what it asks, the person answers
+/// in its own terminal (`docs/decisions/agents.md`, "TUI-first").
 pub const ANSWER_IN_ITS_TERMINAL: &str =
     "Its agent asks in its own terminal: the person answers it there";
 
@@ -164,8 +165,8 @@ pub trait SeatedThreads: Send + Sync {
 
 /// The worker's threads as orchestration reads them ([`Verb::ReadThread`]).
 ///
-/// It finds the terminal each agent runs in, which [`Verb::AgentTell`] and [`Verb::SendMessage`]
-/// type into and [`Verb::AgentStop`] presses Esc in. The daemon gives it
+/// It finds the terminal each agent runs in, which [`Verb::AgentTell`] types into and
+/// [`Verb::AgentStop`] presses Esc in. The daemon gives it
 /// ([`Orchestrator::set_thread_reads`]).
 pub trait ThreadReads: Send + Sync {
     /// `thread` as it stands; `None` for one this worker does not hold.
@@ -411,8 +412,9 @@ impl Orchestrator {
     }
 
     /// Type `text` into the terminal `thread`'s agent runs in, as one message
-    /// ([`TermRequest::Submit`]): refused while the agent waits on the person at a dialog, which
-    /// would take the words as its answer, and for an agent in no terminal now.
+    /// ([`SessionHandle::submit`](crate::session::SessionHandle::submit)): refused while the
+    /// agent waits on the person at a dialog, which would take the words as its answer, and for
+    /// an agent in no terminal now.
     fn submit(
         &self,
         reads: &dyn ThreadReads,
@@ -424,7 +426,7 @@ impl Orchestrator {
         })?;
         tracing::info!(%thread, session = %handle.id(), chars = text.chars().count(), "typed into an agent's terminal");
         handle
-            .request(ORCHESTRATOR, TermRequest::Submit { text })
+            .submit(ORCHESTRATOR, text)
             .map_err(|e| Failure::new(ErrorCode::Failed, e.to_string()))?;
         Ok(Outcome::Done)
     }
@@ -661,10 +663,6 @@ impl Orchestrator {
                 let read = thread_read::read(&state, inner.id, view, after);
                 Ok(Outcome::Thread(Box::new(read)))
             }
-            Verb::SendMessage { of, text } => {
-                let (thread, reads) = self.thread_of(&of)?;
-                self.submit(&*reads, thread, text)
-            }
             // The server lets an agent tell or stop only the agents of its own tree, then asks
             // the worker that holds the one named.
             Verb::AgentTell { agent, text } => self.submit(&*self.reads()?, agent, text),
@@ -685,11 +683,6 @@ impl Orchestrator {
                     restart.notify_one();
                 });
                 Ok(Outcome::Done)
-            }
-            Verb::AnswerRequest { of, .. } => {
-                let (thread, reads) = self.thread_of(&of)?;
-                reads.standing(thread).ok_or_else(|| no_thread(thread))?;
-                Err(Failure::new(ErrorCode::Unsupported, ANSWER_IN_ITS_TERMINAL))
             }
             Verb::CaptureStill { worker, target } => {
                 self.mine(worker)?;

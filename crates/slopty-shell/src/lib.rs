@@ -18,7 +18,6 @@
 
 // slopty: voice, dictation, the orb, appshots, the updater, sign-in, sync, agent accounts,
 // the pull-request pages and agent visuals are not taken (docs/decisions/ui.md).
-mod account_usage;
 pub mod app_menus;
 pub mod appearance;
 pub mod attachments;

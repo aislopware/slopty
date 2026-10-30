@@ -24,7 +24,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
        that ptyd keeps. Slopty starts it with Slopty's tools and, for Claude Code, Slopty's
        hooks, or the person types it into any Slopty terminal.
     2. The person is the one writer, in the TUI; the GUI types nothing into an agent.
-       Orchestration's `agent_tell` (and a `SendMessage`) types into the agent's terminal: a
+       Orchestration's `agent_tell` types into the agent's terminal: a
        bracketed paste, then Enter as its own write 200 ms later (Ink takes an Enter that
        arrives in the paste's read as part of the paste). Nothing is typed while the session
        waits on the person at a dialog, because the TUI would read the Enter as an answer.
@@ -36,16 +36,24 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
        with the subagents' files, followed on the kernel's word. It never reads the screen.
     4. The GUI is read-only toward the agent. It has no approvals, answers, queue, pickers,
        stop, fork, rewind, ask aside, review-with-agent, keep, revert or schedule; the TUI does
-       all of that. The inspector keeps only what helps inspect the session: status and meters,
-       what it is doing, its tasks, subagents and background work, the files it changed, and
-       each turn rendered properly with tool calls folded and their whole input and output a
-       press away.
+       all of that. The inspector keeps only what helps inspect the session: its status, its
+       tasks, subagents and background work, the files it changed, each turn rendered properly
+       with tool calls folded and their whole input and output a press away, and the TUI's
+       prompt box (rule 5).
     5. No GUI prompt box (2026-10-29, the same day: the person found it not worth its
        weight). It had the composer's completions, from a `-p` `initialize` probe, and staged
        notes written on diff lines; both are deleted with it, and the GUI writes no notes.
-       In its place the inspector is to show the TUI's own prompt box live, its draft and the
-       pictures pasted into it, read through Claude Code's own doors (lane D's study,
-       `.research/tui-first-live-prompt-2026-10-29.md`).
+       In its place the inspector shows the TUI's own prompt box live (2026-10-30; the study
+       is `.research/tui-first-live-prompt-2026-10-29.md`, the ruling "The inspector mirrors
+       the TUI's prompt box through a mod of Slopty's" in `claude-code.md`). For a Claude Code
+       Slopty starts, the box comes through Slopty's mod (`--plugin-dir`, only where the
+       managed settings allow sideloads). Two read-only hooks hand the draft to `slopty hook`
+       after a pause in typing. The worker takes the pictures from Claude Code's own store of
+       pasted images. A pasted block shows as its placeholder, since its words are unknown
+       before submit. The prompts queued behind a turn come from the transcript's own queue
+       records, for every session. A session typed by hand shows its queue and no draft. The
+       inspector draws the box under the timeline, where the TUI keeps it under the
+       conversation, only while it holds something ("In the inspector" in that ruling).
   - **Codex and pi** run as their own TUIs with Slopty's tools through their config doors, and
     have no inspector. **ACP agents** have no TUI; the adapter is deleted, and an agent's own
     CLI runs in a terminal like any other program.
@@ -56,7 +64,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - *A start is a terminal.* Claude Code runs as the person's own `claude` with
       `--session-id` (or `--resume`), the model, mode and effort only when the start names
       them, joined to their flags, and the prompt after `--`. It gets Slopty's tools
-      (`--mcp-config`) and the relay (`slopty hook`) for every hook event (`--settings`); the
+      (`--mcp-config`), the relay (`slopty hook`) for every hook event (`--settings`) and
+      Slopty's mod for its prompt box (`--plugin-dir=<data>/claude-mod/<digest>`); the
       markers of a Claude Code the worker itself runs under (`CLAUDECODE`,
       `CLAUDE_CODE_ENTRYPOINT`) are taken out of every terminal's environment. Codex and pi
       start as their TUIs with their tools. The terminal is the seat's for a seated start, else
@@ -71,14 +80,36 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       the hook, and an Esc's interrupt record ends it in the decoder, since Esc fires no hook
       and Claude Code writes no end of its own for it.
     - *Typing.* The worker's submit pastes (bracketed when the program asked for it), then
-      writes Enter 200 ms later; it is refused while the session needs the person.
-      `SendMessage` and `agent_tell` are a submit; no client sends one. An agent's words go framed as an agent's:
+      writes Enter 200 ms later; it is refused while the session needs the person. Only
+      `agent_tell` submits (`SessionHandle::submit`); the client link carries no submit, and
+      `SendMessage`, which no client sent, is gone (2026-10-30). An agent's words go framed as
+      an agent's:
       "Agent <name> (<id>) says (an agent, not the person):". `agent_stop` presses Esc in each
       session at work under the agent, the deepest first; one at rest answers that there is
       nothing to stop.
-    - *What went.* Every intent but `Seen` and `Name` answers `Unsupported`, and so does
-      `AnswerRequest`, which the hub refuses for every caller without asking the worker: the TUI
-      asks in its terminal and takes the answer there. The CLI's `agent answer` is gone. A note
+    - *What went.* The wire's intents are only `Seen` and `Name` (2026-10-30: the others, with
+      `Outcome::Accepted` and `Unsupported`, `Cap` and the thread's capability lists, the
+      pending messages, the GUI composer's shared draft, the per-message words, the start's
+      attachments, the kept review and the GUI-first actions no worker sent any more, are
+      deleted from `slopty_proto::thread`). A second pass the same day deleted what nothing
+      sent any more: the agent's requests and every way to answer one (`AnswerRequest`, a
+      read's requests, a note's buttons), the meters, activity and context figures, the
+      to-review flag and the turn snapshots a review compared (`ReviewScope::Turn` and
+      `Since`, `GitOp::Turn`), the pull request a row showed, a task's output action, the
+      agents' offers and a start's options, forks and asides, and the agent's picture store.
+      What only those fed went with them in the interface: the inspector's model, mode and
+      context words and its line of what the agent is doing, the composer's model catalog
+      (T3 Code's model manifest, with its notice), Settings' plan-usage meters, and the view
+      model's feed of a checkout's pull request (the shell's chip finds no method and shows
+      none). The client's outbox holds an intent until the worker answers it, done or turned
+      down alike; the interface keeps a refusal's words itself. The wait kinds no adapter set
+      after the prune went too (`Wait::COMMAND`, `LIMIT` and `STALLED`, with the agents list's
+      "Limit reached" read from the second), and so did what only the old tray read of the
+      work tray (its counts and summary, a row's figures, times, outcome, output, nesting depth
+      and the like): the tray now carries only the work at it, in the order the inspector's
+      Now lists it.
+      The TUI asks in its terminal and takes the answer there; the CLI's `agent answer` is
+      gone. A note
       answers nothing: a push carries no request and no buttons, and opens its session; the
       quiet re-push that followed a note's request is gone. An MCP App's call is refused (no
       door to the agent's servers). A review compares the repository's states, never turn
@@ -2123,7 +2154,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_interrupted_turn_goes_idle_from_the_transcript` and
     `the_table_keeps_the_persons_stop_until_their_next_prompt` (`slopty-agent`).
 
-- ✅ **An agent left waiting only on its commands says so** (2026-10-04, A6 of the T3 Code
+- ❌ **An agent left waiting only on its commands says so** *Superseded 2026-10-30 by "TUI-first" above: no adapter sets `Wait::COMMAND` any more, and it went.* (2026-10-04, A6 of the T3 Code
   delta study, the adapter half). A dev server the agent left running held its row at
   `Waiting` with the kind `task`, which the server cannot tell from a subagent or a monitor.
   - The observed adapter names the wait `command` (`Wait::COMMAND`) when every task it counts is
@@ -2238,8 +2269,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     yard, the bell, the notices and ⌘⇧A read that one stand. The two badges, the terminal
     agent's and the thread tile's, are one (`agent_badge`).
   - The worker's codec carries what the old event said and the row did not. A failure on the
-    plan's usage limit is a wait of its own (`Wait::LIMIT`, "Hit its usage limit"), and its
-    reset comes from the row's spent rate windows. A permission waits on the action it asks,
+    plan's usage limit is a wait of its own (`Wait::LIMIT`, "Hit its usage limit"; gone
+    2026-10-30 with the waits no adapter set, see "TUI-first"), and its reset comes from the
+    row's spent rate windows. A permission waits on the action it asks,
     worded by the codec from its tool and call ("Run cargo test", "Edit src/main.rs"), else on
     what the tool does ("Wants to run a command"). An elicitation says "Needs input". A lone background
     task is named by the hook's words ("Waiting on cargo test"). Counts read as nouns ("2
@@ -3051,7 +3083,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     each is a `shell` task named by its command and tied to the call that started it. The
     app-server sends nothing when one exits, so the worker lists them again whenever a command's
     call or a turn ends, or the thread is taken up (`codex::shared::terminals_due`). A thread at
-    rest with some still running waits on them (`Wait::COMMAND`), as a Claude Code thread does.
+    rest with some still running waits on them (`Wait::COMMAND`, gone 2026-10-30 with the waits
+    no adapter set, see "TUI-first"), as a Claude Code thread does.
   - **No compacting through Slopty.** The orchestrator-first study deleted compacting from every
     agent's face, since agents compact themselves, so no `Cap::COMPACT` is declared and
     `thread/compact/start` is not spoken.
@@ -3389,7 +3422,11 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
 - ✅ **Pictures, visuals, pages and MCP Apps through each agent's own doors (2026-10-16).**
   - *Partly superseded 2026-10-29 by "TUI-first" above:* pictures from Claude Code's
     transcript, `show_visual` and `show_page` stay; MCP Apps, Codex's, ACP's and pi's pictures
-    went with their drives.
+    went with their drives. The picture store below went after them (2026-10-30): only those
+    agents' pictures ever needed a copy, and with them gone the worker no longer answered an
+    `Expand` of a `media:` ref at all, so the store only filled. Claude Code's pictures,
+    MCP results' among them, are read from its transcript; an MCP result keeps its links and
+    its `structuredContent` (`slopty_agent::shown::mcp_links`).
   - **Pictures are kept by their digest.** A picture Codex viewed (`imageView`) or made
     (`imageGeneration`), an image block in an MCP result, an ACP agent's image and resource
     blocks, and pi's tool and message images are each kept once on the worker, by the BLAKE3 of

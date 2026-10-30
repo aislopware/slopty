@@ -37,10 +37,6 @@ pub struct HarnessDescriptor {
     /// "unknown": consumers fall back to detection (see [`descriptor_enabled`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    // slopty: the plan windows its agent last published, for its row's meters.
-    /// Its plan windows as its agent last said them; `None` before it has said any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<slopty_view_proto::AgentUsage>,
 }
 
 fn default_installed() -> bool {

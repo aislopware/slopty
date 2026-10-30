@@ -331,21 +331,7 @@ pub enum TermRequest {
         /// Where they landed, in item order.
         landed: Option<Vec<String>>,
     },
-    /// The person's words for the session's program, sent as they would type and send them:
-    /// the prompt box of an agent's terminal (`docs/decisions/agents.md`, "TUI-first"). The
-    /// worker writes `text` as a paste (bracketed when the program asked for it), then Enter as
-    /// a write of its own [`SUBMIT_ENTER_MS`] later, since an Ink TUI (Claude Code) reads an
-    /// Enter that arrives with the paste as part of it; the session's other input waits until
-    /// the Enter is written. Refused with [`TermError::Refused`] while the terminal's agent
-    /// waits on the person at a dialog, which would take the Enter as an answer.
-    Submit {
-        /// What to send.
-        text: String,
-    },
 }
-
-/// How long after a [`TermRequest::Submit`]'s paste its Enter is written, in milliseconds.
-pub const SUBMIT_ENTER_MS: u64 = 200;
 
 /// The MIME type a drop of files is offered as.
 pub const URI_LIST: &str = "text/uri-list";
@@ -469,8 +455,7 @@ impl TermRequest {
             | Self::Raw(_)
             | Self::Clear
             | Self::Focus { .. }
-            | Self::PastePicture(_)
-            | Self::Submit { .. } => true,
+            | Self::PastePicture(_) => true,
             Self::Attach { .. }
             | Self::Detach
             | Self::Close
@@ -724,10 +709,6 @@ pub enum TermError {
     /// The session stream to this client could not be opened.
     #[error("The terminal's stream did not open: {0}")]
     Stream(String),
-    /// The worker would not do it now, for this reason, in words a person reads: a
-    /// [`TermRequest::Submit`] while the terminal's agent waits on the person at a dialog.
-    #[error("{0}")]
-    Refused(String),
 }
 
 /// Worker → client on the session stream.

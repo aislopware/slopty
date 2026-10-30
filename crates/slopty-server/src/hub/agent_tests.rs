@@ -7,7 +7,7 @@ use slopty_proto::thread::wire::ThreadRow;
 use slopty_proto::thread::{Phase, ThreadId};
 use slopty_settings::Autonomy;
 
-use super::ladder::tests::{asking, row, snapshot, started_by};
+use super::ladder::tests::{row, snapshot, started_by};
 use super::tests::{registration, summary};
 use super::*;
 
@@ -169,32 +169,6 @@ async fn a_child_s_rest_ends_a_wait_and_told_words_go_to_its_worker() {
     assert!(text.contains("an agent, not the person") && text.contains("Now the logout"), "{text}");
     fleet.lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
     assert_eq!(telling.await.unwrap(), Outcome::Done);
-}
-
-/// No one answers an agent's request from outside its terminal, an agent or the person: its
-/// TUI asks there and takes the answer there, and the worker is never asked.
-#[tokio::test]
-async fn no_request_is_answered_from_outside_its_terminal() {
-    let mut fleet = Fleet::new();
-    let child = asking(
-        started_by(row(Phase::NeedsYou, 2_000, Some(SessionId::new())), &fleet.parent),
-        "Run rm -rf build?",
-    );
-    fleet.lease.handle(snapshot(vec![fleet.parent.clone(), child.clone()]));
-    let answer = Verb::AnswerRequest {
-        of: ThreadOf::Thread(child.id),
-        ask: child.requests[0].id.clone(),
-        choice: "allow".to_owned(),
-        message: None,
-    };
-    let refused = fleet.parent_says(answer.clone()).await;
-    assert!(matches!(refused, Outcome::Error { code: ErrorCode::Unsupported, .. }), "{refused:?}");
-    let refused = fleet.hub.dispatch(answer).await;
-    assert!(matches!(refused, Outcome::Error { code: ErrorCode::Unsupported, .. }), "{refused:?}");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), fleet.request()).await.is_err(),
-        "the worker is never asked"
-    );
 }
 
 /// An agent tells only its own tree and stops only itself and what it started, each one at

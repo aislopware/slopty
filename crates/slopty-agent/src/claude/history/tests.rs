@@ -61,7 +61,7 @@ impl Host {
 }
 
 fn observed() -> History {
-    History::new("00000000-0000-4000-8000-000000000001", "2.1.286", "/work", &[], WallMs::ZERO)
+    History::new("00000000-0000-4000-8000-000000000001", "2.1.286", "/work", WallMs::ZERO)
 }
 
 /// A scenario's transcripts read whole, through the adapter.
@@ -165,6 +165,37 @@ fn a_subagent_is_a_linked_thread() {
         assert_eq!(sub.meta.origin, ThreadMeta::SUBAGENT);
         assert_ne!(sub.items, Vec::<Item>::new());
     }
+}
+
+/// A subagent's thread carries none of its session's facts: only the session's own thread names
+/// the terminal its TUI runs in, the seat it was started at and the agent that started it, and
+/// the session's end takes the terminal off that thread alone.
+#[test]
+fn a_subagent_never_names_its_session_s_terminal() {
+    let dir = dir("conversation", "tools");
+    let mut transcripts = Transcripts::default();
+    let mut observed = observed();
+    let mut host = Host::default();
+    host.take(observed.drain());
+    host.take(observed.fact(ThreadMeta::TERMINAL_FACT, Some("terminal-1")));
+    host.take(observed.fact(slopty_proto::agent::SEAT_FACT, Some("seat-1")));
+    let changes = transcripts.read(&dir.join("transcript.jsonl"), &subagents(&dir));
+    host.take(observed.transcript(&changes, &[]));
+    let main = host.thread(observed.main());
+    assert_eq!(
+        main.meta.facts.get(ThreadMeta::TERMINAL_FACT).map(String::as_str),
+        Some("terminal-1")
+    );
+    let subagents: Vec<&ThreadState> =
+        host.threads.values().filter(|s| s.meta.origin == ThreadMeta::SUBAGENT).collect();
+    assert!(!subagents.is_empty(), "the scenario runs a subagent");
+    for sub in &subagents {
+        assert_eq!(sub.meta.facts, BTreeMap::new(), "{}", sub.meta.native);
+        assert_eq!(sub.meta.terminal(), None);
+    }
+    host.take(observed.fact(ThreadMeta::TERMINAL_FACT, None));
+    host.take(observed.gone(WallMs::from_millis(1)));
+    assert!(host.threads.values().all(|s| s.meta.terminal().is_none()));
 }
 
 /// A subagent's thread says where its run stands. Its own transcript comes before the call in

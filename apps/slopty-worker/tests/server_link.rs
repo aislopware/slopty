@@ -889,12 +889,14 @@ mod tests {
         (daemons_finding(dir, server, Some(&programs)).await, dir.join("record.json"))
     }
 
-    /// The server starts a Claude Code thread at `seat` in `cwd`: the thread it names.
+    /// The server starts a Claude Code thread at `seat` in `cwd`, told `prompt` first: the thread
+    /// it names.
     async fn seated_claude(
         peer: &mut Peer,
         worker: WorkerId,
         cwd: &Path,
         seat: SessionId,
+        prompt: &str,
     ) -> slopty_proto::thread::ThreadId {
         use slopty_proto::thread::AgentId;
         use slopty_proto::thread::wire::Start;
@@ -903,13 +905,11 @@ mod tests {
             agent: AgentId::named(AgentId::CLAUDE_CODE),
             cwd: cwd.to_string_lossy().into_owned(),
             drive: None,
-            prompt: Some("Say hello.".to_owned()),
+            prompt: Some(prompt.to_owned()),
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: std::collections::BTreeMap::new(),
             worktree: None,
         };
         let verb = Verb::StartThread {
@@ -941,7 +941,7 @@ mod tests {
         peer.heard(|m| matches!(m, ToServer::Threads(TableFrame::Snapshot { .. }))).await;
 
         let seat = SessionId::new();
-        let thread = seated_claude(&mut peer, reg.worker, &root, seat).await;
+        let thread = seated_claude(&mut peer, reg.worker, &root, seat, "Say hello.").await;
         let seated = seat.to_string();
         let has_row = |m: &ToServer| match m {
             ToServer::Threads(
@@ -975,12 +975,112 @@ mod tests {
         let (_daemons, record) = with_claude(&root, server.local_addr().unwrap()).await;
         let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
         let (mut peer, reg) = Peer::welcome(link).await;
-        let _thread = seated_claude(&mut peer, reg.worker, &root, SessionId::new()).await;
+        let _thread =
+            seated_claude(&mut peer, reg.worker, &root, SessionId::new(), "Say hello.").await;
         let started = recorded(&record, |r| r["env"].is_object()).await;
         let inherited: std::collections::BTreeMap<String, u64> =
             serde_json::from_value(started["env"].clone()).unwrap();
         assert!(inherited.contains_key(slopty_proto::ctl::SESSION_ENV), "its terminal's own");
         let leaked = slopty_testkit::env::leaked(&inherited);
         assert!(leaked.is_empty(), "the test's own environment leaked into the agent: {leaked:?}");
+    }
+
+    /// Whether `msg` is a table frame with `thread` at `phase`.
+    fn at_phase(
+        msg: &ToServer,
+        thread: slopty_proto::thread::ThreadId,
+        phase: slopty_proto::thread::Phase,
+    ) -> bool {
+        match msg {
+            ToServer::Threads(
+                TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
+            ) => rows.iter().any(|r: &ThreadRow| r.id == thread && r.status.phase == phase),
+            _ => false,
+        }
+    }
+
+    /// What the stand-in read from its terminal, in order, each read's bytes and when.
+    fn reads(record: &serde_json::Value) -> Vec<(String, u64)> {
+        let reads = record["reads"].as_array().map(Vec::as_slice).unwrap_or_default();
+        reads
+            .iter()
+            .map(|r| {
+                let bytes = r["bytes"].as_str().unwrap_or_default().to_owned();
+                (bytes, r["at_us"].as_u64().unwrap_or_default())
+            })
+            .collect()
+    }
+
+    /// What an orchestrating agent tells another (`agent_tell`) goes into the agent's TUI as one
+    /// message: its words as one paste, bracketed as the TUI asked, two lines and all, then its
+    /// Enter as a write of its own the wait after them, since an Ink TUI reads an Enter that
+    /// comes with a paste as part of the paste.
+    #[tokio::test]
+    async fn an_agents_words_go_in_as_one_paste_and_an_enter_of_their_own() {
+        use slopty_proto::thread::Phase;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let (_daemons, record) = with_claude(&root, server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+        let thread =
+            seated_claude(&mut peer, reg.worker, &root, SessionId::new(), "Say hello.").await;
+        peer.heard(|m| at_phase(m, thread, Phase::Done)).await;
+
+        let tell = Verb::AgentTell { agent: thread, text: "Second\nline".to_owned() };
+        assert_eq!(peer.ask(tell).await, Outcome::Done);
+        let prompts = |r: &serde_json::Value| r["prompts"].as_array().map_or(0, Vec::len);
+        let seen = recorded(&record, |r| prompts(r) == 2).await;
+        assert_eq!(seen["prompts"][1]["text"], "Second\nline", "one message");
+        let reads = reads(&seen);
+        let start = reads.iter().position(|(b, _)| b.contains("\u{1b}[200~")).expect("a paste");
+        let end = reads.iter().position(|(b, _)| b.contains("\u{1b}[201~")).expect("its end");
+        let pasted: String = reads[start..=end].iter().map(|(b, _)| b.as_str()).collect();
+        assert_eq!(
+            pasted.replace('\r', "\n"),
+            "\u{1b}[200~Second\nline\u{1b}[201~",
+            "the words as one paste, bracketed as the TUI asked"
+        );
+        let (enter, entered_us) = &reads[end + 1];
+        assert_eq!(enter, "\r", "the Enter is a write of its own");
+        // Timed where the TUI reads, so with the way's jitter (ptyd, the pty, the reader's turn
+        // to run): the wait is proved, its length is the worker's own clock.
+        let gap = entered_us - reads[end].1;
+        let wait = u64::try_from(slopty_worker::session::SUBMIT_ENTER.as_micros()).unwrap();
+        assert!(gap >= wait * 3 / 4, "the Enter came {gap} µs after the paste");
+    }
+
+    /// While an agent asks the person at a dialog, what another agent tells it is refused, with
+    /// why, and nothing reaches its terminal: the dialog would take the words as its answer.
+    #[tokio::test]
+    async fn an_agents_words_wait_while_the_agent_asks_the_person() {
+        use slopty_proto::thread::Phase;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let (_daemons, record) = with_claude(&root, server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+        let seat = SessionId::new();
+        let thread = seated_claude(&mut peer, reg.worker, &root, seat, "ask Which colour?").await;
+        peer.heard(|m| at_phase(m, thread, Phase::NeedsYou)).await;
+
+        let tell = Verb::AgentTell { agent: thread, text: "Blue, and more".to_owned() };
+        let refused = peer.ask(tell).await;
+        let Outcome::Error { code: ErrorCode::Conflict, message } = refused else {
+            panic!("not refused: {refused:?}")
+        };
+        assert!(message.contains("answer it there"), "why, in words: {message}");
+        let seen =
+            recorded(&record, |r| r["prompts"].as_array().is_some_and(|p| !p.is_empty())).await;
+        let typed: String = reads(&seen).into_iter().map(|(b, _)| b).collect();
+        assert!(!typed.contains("Blue"), "nothing typed: {typed:?}");
     }
 }

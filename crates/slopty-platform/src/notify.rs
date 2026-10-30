@@ -58,9 +58,6 @@ pub struct Note {
     pub body: String,
     /// What a tap hands back ([`Tap::info`]), carried in the notification's `userInfo`.
     pub info: BTreeMap<String, String>,
-    /// No sound: it only says more about a note already up under its identifier, which
-    /// sounded when it came.
-    pub silent: bool,
     /// Time Sensitive: an agent that needs the person, which breaks through a Focus and the
     /// notification summary. Nothing else is: the system shows the person how often an app
     /// uses it, and lets them take it away. The level wants its entitlement, which wants a
@@ -769,9 +766,7 @@ mod apple {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(&note.title));
         content.setBody(&NSString::from_str(&note.body));
-        if !note.silent {
-            content.setSound(Some(&UNNotificationSound::defaultSound()));
-        }
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
         if note.urgent {
             content.setInterruptionLevel(UNNotificationInterruptionLevel::TimeSensitive);
         }

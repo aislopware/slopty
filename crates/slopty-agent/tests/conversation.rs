@@ -62,7 +62,7 @@ mod conversation {
                     copy.remove(&thread);
                 }
                 Change::Reset { thread: None } => copy.clear(),
-                Change::Tasks { .. } => {}
+                Change::Tasks { .. } | Change::Queued(_) => {}
                 Change::Turn { thread, turn } => {
                     let turns = &mut copy.entry(thread).or_default().turns;
                     match turns.iter_mut().find(|t| t.prompt == turn.prompt) {

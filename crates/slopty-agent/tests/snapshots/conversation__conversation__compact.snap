@@ -66,27 +66,19 @@ expression: "decode(\"compact\").snapshot()"
       ended_ms: 1793273714628
       models:
         - claude-haiku-5-5
-      requests: 1
       usage:
         input: 2
         cache_read: 11384
         cache_write: 7055
         output: 4
         thinking: 0
-      context_tokens: 18441
-      mode: default
-      stop: end_turn
     - prompt: 00000000-0000-4000-8000-000000000024
       started_ms: 1793273714644
       ended_ms: ~
       models: []
-      requests: 0
       usage:
         input: 0
         cache_read: 0
         cache_write: 0
         output: 0
         thinking: 0
-      context_tokens: ~
-      mode: ~
-      stop: ~

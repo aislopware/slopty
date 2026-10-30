@@ -28,8 +28,8 @@ mod agents;
 pub mod agents_tree;
 
 pub use agents::{
-    ChoiceView, MovedView, ReadEntryView, RequestView, StillView, ThreadReadView, TurnView, moved,
-    phase_key, still, thread_read, thread_read_text,
+    MovedView, ReadEntryView, StillView, ThreadReadView, TurnView, moved, phase_key, still,
+    thread_read, thread_read_text,
 };
 
 /// The shortest session-id prefix text output uses. `UUIDv7`s start with their creation time,
@@ -117,10 +117,8 @@ pub struct AgentView {
     /// Its phase: `idle`, `working`, `waiting`, `needs_you`, `done`, `failed`, `stopped`, or
     /// `none` with no agent.
     status: &'static str,
-    /// What it waits on, while it waits: its adapter's words.
+    /// What it waits on, while it waits: what it asks the person, or its adapter's words.
     waits: Option<String>,
-    /// What it asks the person, while it asks.
-    asks: Option<String>,
     needs_human: bool,
 }
 
@@ -373,8 +371,7 @@ fn agent_name(agent: &AgentId) -> String {
 /// What an agent is doing, for a person: its phase, and what it waits on or asks.
 fn status_text(agent: &TermAgent) -> String {
     let phase = phase_key(agent.phase).replace('_', " ");
-    let said = agent.asks.as_ref().or_else(|| agent.wait.as_ref().map(|w| &w.text));
-    match said {
+    match agent.wait.as_ref().map(|w| &w.text) {
         Some(said) => format!("{phase}: {said}"),
         None => phase,
     }
@@ -388,7 +385,6 @@ pub fn agent(agent: Option<&TermAgent>) -> AgentView {
             thread: None,
             status: "none",
             waits: None,
-            asks: None,
             needs_human: false,
         };
     };
@@ -397,7 +393,6 @@ pub fn agent(agent: Option<&TermAgent>) -> AgentView {
         thread: Some(a.thread),
         status: phase_key(a.phase),
         waits: a.wait.as_ref().map(|w| w.text.clone()),
-        asks: a.asks.clone(),
         needs_human: a.rung == Rung::NeedsYou,
     }
 }
@@ -463,7 +458,7 @@ impl Overview {
                     .map(|(term, a)| WaitingView {
                         term: term_string(term),
                         agent: a.agent.0.clone(),
-                        asks: a.asks.clone().or_else(|| a.wait.as_ref().map(|w| w.text.clone())),
+                        asks: a.wait.as_ref().map(|w| w.text.clone()),
                     })
                     .collect(),
             })
@@ -497,7 +492,7 @@ impl Overview {
             .iter()
             .flat_map(|w| self.waiting(w.worker))
             .map(|(term, a)| {
-                let asks = a.asks.clone().or_else(|| a.wait.as_ref().map(|w| w.text.clone()));
+                let asks = a.wait.as_ref().map(|w| w.text.clone());
                 vec![
                     short.get(term),
                     agent_name(&a.agent),
@@ -1137,7 +1132,7 @@ fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
 #[cfg(test)]
 mod tests {
     use slopty_proto::server::WorkerCaps;
-    use slopty_proto::thread::{Phase, Wait};
+    use slopty_proto::thread::{Phase, Wait, kind};
 
     use super::*;
 
@@ -1194,7 +1189,7 @@ mod tests {
         }
     }
 
-    /// Claude Code in thread `n`, in `phase`, asking `asks`.
+    /// Claude Code in thread `n`, in `phase`, asking `asks` at a dialog.
     fn at(n: u8, phase: Phase, asks: Option<&str>) -> TermAgent {
         TermAgent {
             thread: format!("0199a000-0000-7000-8000-0000000071{n:02x}").parse().unwrap(),
@@ -1202,8 +1197,7 @@ mod tests {
             title: format!("Thread {n}"),
             rung: if asks.is_some() { Rung::NeedsYou } else { Rung::Working },
             phase,
-            wait: None,
-            asks: asks.map(str::to_owned),
+            wait: asks.map(|text| Wait { kind: kind::QUESTION.to_owned(), text: text.to_owned() }),
             since_ms: WallMs::ZERO,
         }
     }
@@ -1317,7 +1311,7 @@ mod tests {
             json,
             serde_json::json!({
                 "agent": "claude-code", "thread": asking.thread, "status": "needs_you",
-                "waits": null, "asks": "Which branch?", "needs_human": true
+                "waits": "Which branch?", "needs_human": true
             })
         );
         assert_eq!(agent_text(Some(&asking)), "Claude Code  needs you: Which branch?");

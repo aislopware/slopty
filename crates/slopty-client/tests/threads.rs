@@ -141,9 +141,7 @@ mod threads {
             model: None,
             mode: None,
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: std::collections::BTreeMap::new(),
             worktree: None,
         })
     }
@@ -247,7 +245,7 @@ mod threads {
                 }
                 LinkEvent::Control(WorkerMsg::Threads(frame)) => self.threads.table(&frame),
                 LinkEvent::Control(WorkerMsg::IntentDone(done)) => {
-                    let ours = self.threads.done(&done) || self.starts.contains(&done.id);
+                    let ours = self.threads.done(&done).is_some() || self.starts.contains(&done.id);
                     assert!(ours, "every answer is for an intent sent here");
                     self.done.push(done);
                 }
@@ -285,8 +283,9 @@ mod threads {
     /// Whether the name `title` waits in the outbox, drawn over the thread before it shows it.
     fn naming(threads: &Threads, thread: ThreadId, title: &str) -> bool {
         threads
-            .unshown(thread)
-            .any(|s| !s.failed() && matches!(&s.intent, Intent::Name { title: t } if t == title))
+            .outbox()
+            .of(thread)
+            .any(|s| matches!(&s.intent, Intent::Name { title: t } if t == title))
     }
 
     /// How many answers `client` heard for intent `id`.
@@ -350,7 +349,7 @@ mod threads {
 
         // A relaunch: the core starts from the cache, and the thread draws before any frame.
         let mut threads = Threads::new(cache.outbox());
-        assert_eq!(threads.outbox().unanswered().map(|s| s.id).collect::<Vec<_>>(), [later]);
+        assert_eq!(threads.outbox().all().iter().map(|s| s.id).collect::<Vec<_>>(), [later]);
         assert!(threads.open_thread(thread, cache.thread(thread)).is_none(), "not linked yet");
         assert_eq!(state(&threads, thread), Some(&kept.state), "drawn from the cache");
         assert!(naming(&threads, thread, "Greeting, kept"), "the unsent name is drawn too");
@@ -436,10 +435,7 @@ mod threads {
         let reviewed = back.elapsed();
         b.until("the name settled", |t| t.outbox().all().iter().all(|s| s.id != first)).await;
         let answer = b.done.iter().find(|d| d.id == first).map(|d| d.outcome.clone());
-        assert!(
-            matches!(answer, Some(Outcome::Done | Outcome::Accepted)),
-            "answered as done: {answer:?}"
-        );
+        assert!(matches!(answer, Some(Outcome::Done)), "answered as done: {answer:?}");
         assert_eq!(answers(&b, first), 1, "acted on once");
         println!(
             "cut both ways {AWAY:?}: back to linked {linked:?}, to the name acted on \
@@ -465,10 +461,7 @@ mod threads {
             .await;
         let settled = back.elapsed();
         let answer = c.done.iter().find(|d| d.id == second).map(|d| d.outcome.clone());
-        assert!(
-            matches!(answer, Some(Outcome::Done | Outcome::Accepted)),
-            "answered as it was: {answer:?}"
-        );
+        assert!(matches!(answer, Some(Outcome::Done)), "answered as it was: {answer:?}");
         c.until("the name kept", |t| named(t, thread, "Greeting, renamed")).await;
         println!("reply lost: back to the name settled {settled:?}");
 

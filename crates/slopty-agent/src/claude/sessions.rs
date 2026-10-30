@@ -2,8 +2,9 @@
 //!
 //! Claude Code writes one transcript per session under
 //! `<config>/projects/<escaped working directory>/<session id>.jsonl`, each subagent's beside it
-//! (`<session id>/subagents/agent-<id>.jsonl`), where the escaping replaces every character that
-//! is not an ASCII letter or digit with a `-` (so `/Users/x/.config` becomes `-Users-x--config`).
+//! (`<session id>/subagents/agent-<id>.jsonl`), where the escaping replaces every UTF-16 unit that
+//! is not an ASCII letter or digit with a `-` (so `/Users/x/.config` becomes `-Users-x--config`),
+//! and cuts a long one, telling it apart by a hash ([`escape`]).
 //! A Claude Code Slopty starts is given its session id, so its record is found by that id and its
 //! folder, never guessed.
 //!
@@ -38,22 +39,92 @@ pub fn config_dir(home: &Path) -> PathBuf {
     std::env::var_os(CONFIG_DIR_ENV).map_or_else(|| home.join(".claude"), PathBuf::from)
 }
 
+/// The variable that names a session's project directory outright, which Claude Code heeds only
+/// while [`CONFIG_DIR_ENV`] moves its own directory.
+pub const PROJECT_DIR_NAME_ENV: &str = "CLAUDE_CODE_PROJECT_DIR_NAME";
+
 /// The directory Claude Code writes a session's transcript into, for an agent running in `cwd`.
 ///
-/// Claude Code names the directory after the working directory as the process sees it, which
-/// on macOS is the resolved path (`/private/var/…` for a `/var/…` the worker was given), so
-/// `cwd` is canonicalised first when it exists; a directory that does not is used as given.
+/// Claude Code names the directory after the working directory as the process sees it
+/// ([`escape`]), which on macOS is the resolved path (`/private/var/…` for a `/var/…` the worker
+/// was given), so `cwd` is resolved first ([`resolved`]). With its own directory moved, a name
+/// [`PROJECT_DIR_NAME_ENV`] gives stands instead, when it is one Claude Code takes.
 #[must_use]
 pub fn project_dir(home: &Path, cwd: &Path) -> PathBuf {
-    let resolved = std::fs::canonicalize(cwd).unwrap_or_else(|_missing| cwd.to_path_buf());
-    config_dir(home).join("projects").join(escape(&resolved))
+    let named = std::env::var_os(CONFIG_DIR_ENV)
+        .filter(|dir| !dir.is_empty())
+        .and_then(|_moved| std::env::var(PROJECT_DIR_NAME_ENV).ok())
+        .filter(|name| is_project_dir_name(name));
+    let key = named.unwrap_or_else(|| escape(&resolved(cwd)));
+    config_dir(home).join("projects").join(key)
 }
 
-/// A working directory as Claude Code names its project directory: every character that is not
-/// an ASCII letter or digit becomes `-`.
+/// `cwd` as the process running in it sees it: resolved where it exists, as given where not.
+#[must_use]
+pub fn resolved(cwd: &Path) -> PathBuf {
+    std::fs::canonicalize(cwd).unwrap_or_else(|_missing| cwd.to_path_buf())
+}
+
+/// Whether Claude Code takes `name` for a project directory's: up to 64 ASCII letters, digits,
+/// `_` and `-`, and no name Windows keeps for a device.
+fn is_project_dir_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let numbered = |stem: &str| {
+        lower
+            .strip_prefix(stem)
+            .is_some_and(|n| n.len() == 1 && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let device = matches!(lower.as_str(), "con" | "prn" | "aux" | "nul")
+        || numbered("com")
+        || numbered("lpt");
+    (1..=64).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && !device
+}
+
+/// The longest key Claude Code names a directory with whole; a longer one is cut there and told
+/// apart by a hash of the whole path.
+const KEY_MAX: usize = 200;
+
+/// A working directory as Claude Code names its project directory, and the session's own under
+/// its temporary root.
+///
+/// Every UTF-16 unit that is not an ASCII letter or digit becomes `-` (a character outside the
+/// BMP is two), and a key past 200 units is cut there and ends in `-` and the base-36 magnitude
+/// of the path's Java-style string hash, as JavaScript computes both.
 #[must_use]
 pub fn escape(cwd: &Path) -> String {
-    cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+    let path = cwd.to_string_lossy();
+    let key: String = path
+        .encode_utf16()
+        .map(|unit| match u8::try_from(unit) {
+            Ok(byte) if byte.is_ascii_alphanumeric() => char::from(byte),
+            _ => '-',
+        })
+        .collect();
+    if key.len() <= KEY_MAX {
+        return key;
+    }
+    let hash =
+        path.encode_utf16().fold(0_i32, |h, unit| h.wrapping_mul(31).wrapping_add(i32::from(unit)));
+    let cut = key.get(..KEY_MAX).unwrap_or(&key);
+    format!("{cut}-{}", base36(hash.unsigned_abs()))
+}
+
+/// `n` in base 36, in lowercase, as JavaScript's `toString(36)` writes it.
+fn base36(mut n: u32) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    loop {
+        let digit = usize::try_from(n % 36).unwrap_or_default();
+        out.push(DIGITS.get(digit).copied().unwrap_or(b'0'));
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
 }
 
 /// Session `session`'s main transcript, for an agent run in `cwd`.
@@ -518,6 +589,8 @@ pub struct Live {
     pub kind: String,
     /// Its process's start as `ps -o lstart=` says it in UTC, when it said.
     pub started: Option<String>,
+    /// When it began, by its own clock, when it said.
+    pub started_at: Option<WallMs>,
     /// Its version, when it said.
     pub version: Option<String>,
     /// The session's name as its TUI shows it (Claude Code's title, or the person's), when it
@@ -622,6 +695,10 @@ fn live_at(path: &Path) -> Option<Live> {
         cwd: text("cwd"),
         kind: text("kind").filter(|k| !k.is_empty()).unwrap_or_else(|| "interactive".to_owned()),
         started: text("procStart"),
+        started_at: record
+            .get("startedAt")
+            .and_then(serde_json::Value::as_u64)
+            .map(WallMs::from_millis),
         version: text("version").filter(|v| !v.trim().is_empty()),
         name: text("name").filter(|n| !n.trim().is_empty()),
         status: text("status").filter(|s| !s.trim().is_empty()),
@@ -647,6 +724,24 @@ mod tests {
             "-Volumes-Lacie-Workspace-oss-slopty"
         );
         assert_eq!(escape(Path::new("/Users/x/.config")), "-Users-x--config");
+        // Claude Code's own keys, as `bun` computes them with its code: a key of 200 units stays
+        // whole; a longer one is cut to 200 and ends in its path's hash; a character outside
+        // the BMP is two units, so two dashes.
+        let whole = format!("/w/{}", "é".repeat(197));
+        assert_eq!(escape(Path::new(&whole)), format!("-w{}", "-".repeat(198)));
+        let deep = format!("/Users/me/{}here", "deep/".repeat(40));
+        let cut = format!("-Users-me-{}-b4n7gx", "deep-".repeat(38));
+        assert_eq!(escape(Path::new(&deep)), cut);
+        let wide = format!("/Users/me/r\u{e9}sum\u{e9}/\u{1f600}/{}", "x".repeat(186));
+        assert_eq!(
+            escape(Path::new(&wide)),
+            format!("-Users-me-r-sum-----{}-pfa70t", "x".repeat(180))
+        );
+        assert_eq!(
+            base36(2_147_483_648),
+            "zik0zk",
+            "the magnitude of i32::MIN, as JavaScript says"
+        );
         let real = tempfile::tempdir().expect("tempdir");
         let canonical = std::fs::canonicalize(real.path()).expect("canonical");
         assert!(project_dir(Path::new("/Users/x"), real.path()).ends_with(escape(&canonical)));

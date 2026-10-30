@@ -2,24 +2,31 @@
 //! (`docs/decisions/ui.md`, "A session is its terminal, its inspector beside it").
 //!
 //! The person works in the agent's own TUI; the inspector keeps only what helps inspect the
-//! session, compact and quiet: a header (title, status, model, mode, context used, branch, time
-//! at work), what it is doing now (its phrase, its task list, the subagents and commands it has
-//! running), the files it changed with their counts, and its timeline, each turn rendered as
-//! the transcript renders it with tool calls folded to a line and opened whole. It sends nothing
-//! to the agent: copying and opening a file are its only actions, and the TUI does the rest.
+//! session, compact and quiet: a header (title, status, branch, time at work), what it is doing
+//! now (its task list, the subagents and commands it has running), the files it changed with
+//! their counts, its timeline, each turn rendered as the transcript renders it with tool calls
+//! folded to a line and opened whole, and under it the TUI's own prompt box, mirrored live (the
+//! prompts queued behind the turn, the draft, its pasted pictures). It sends nothing to the
+//! agent: copying, opening a file and looking at a picture are its only actions, and the TUI does
+//! the rest.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Task, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ObjectFit,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Subscription, Task, Window, div, img, prelude::FluentBuilder as _, px,
 };
-use slopty_view_doc::{ChatDock, MessagePart, MessageRole, SessionMessageEntry, WorkRow, WorkTray, calls};
+use slopty_view_doc::{
+    ChatDock, MessagePart, MessageRole, PromptImage, SessionMessageEntry, WorkRow, WorkTray, calls,
+};
 use slopty_view_proto::{ChatIndicator, TodoItem, TodoStatus, ToolCall};
 
+use crate::attachments::{AttachmentKey, AttachmentSnapshot, PreviewImage};
 use crate::icons::{self, icon};
 use crate::loaders::status_mark::{MARK_SMALL, MarkState, StatusMark};
+use crate::motion::{HoverFade as _, hover_blend};
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::transcript::Transcript;
@@ -31,6 +38,14 @@ const TASKS_SHOWN: usize = 6;
 const FILES_SHOWN: usize = 8;
 /// The inspector's side padding.
 const PAD: f32 = 12.0;
+/// The most prompts queued behind the turn shown, the next to run first.
+const QUEUED_SHOWN: usize = 4;
+/// The most lines of the prompt box's draft shown before it ends in an ellipsis.
+const DRAFT_LINES: usize = 6;
+/// The side of a pasted picture's thumbnail.
+const THUMB: f32 = 40.0;
+/// The wash a pressable row fades to under the pointer.
+const ROW_WASH: f32 = 0.03;
 
 /// What a press in the inspector asks of the shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +175,31 @@ pub(crate) fn elapsed_words(ms: i64) -> String {
     }
 }
 
+/// Where the TUI's placeholders stand in the prompt box's `text`: a pasted picture's
+/// (`[Image #2]`) and a long paste's (`[Pasted text #1 +5 lines]`), drawn apart from the words.
+pub(crate) fn placeholders(text: &str) -> Vec<std::ops::Range<usize>> {
+    const OPENS: [&str; 2] = ["[Image #", "[Pasted text #"];
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some((start, open)) = OPENS
+        .iter()
+        .filter_map(|open| text[from..].find(open).map(|at| (from + at, open.len())))
+        .min_by_key(|(at, _)| *at)
+    {
+        let rest = &text[start + open..];
+        match rest.find([']', '[', '\n']) {
+            Some(close) if rest.as_bytes()[close] == b']' => {
+                let end = start + open + close + 1;
+                out.push(start..end);
+                from = end;
+            }
+            // Left open, it is words; look on from after its opening.
+            _ => from = start + open,
+        }
+    }
+    out
+}
+
 /// The inspector of the selected session.
 pub struct Inspector {
     state: Entity<AppState>,
@@ -171,8 +211,20 @@ pub struct Inspector {
     watch: Vec<Task<()>>,
     /// The changed files shown whole, past [`FILES_SHOWN`].
     files_open: bool,
-    /// Ticks the time at work once a second while the session works.
+    /// The time it draws with, taken when anything it shows changes and at each whole second
+    /// of the time at work: a frame drawn between says what the last one did.
+    clock: chrono::DateTime<chrono::Utc>,
+    /// Takes the time again at the next whole second of the time at work, while the session
+    /// works.
     tick: Option<Task<()>>,
+    /// The reads of the prompt box's pictures under way, and the wake-ups that try a failed one
+    /// again, by their paths.
+    picture_loads: HashMap<String, Task<()>>,
+    /// The picture open in the lightbox, the keyboard's while it is, and where the keyboard
+    /// goes back to when it closes.
+    preview: Option<PreviewImage>,
+    preview_focus: gpui::FocusHandle,
+    preview_return: Option<gpui::FocusHandle>,
     _observe: Subscription,
 }
 
@@ -182,6 +234,7 @@ impl Inspector {
     pub fn new(state: Entity<AppState>, transcript: Entity<Transcript>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| {
             this.sync_watch(cx);
+            this.clock = crate::clock::utc(cx);
             cx.notify();
         });
         let mut inspector = Self {
@@ -192,7 +245,12 @@ impl Inspector {
             tray: None,
             watch: Vec::new(),
             files_open: false,
+            clock: crate::clock::utc(cx),
             tick: None,
+            picture_loads: HashMap::new(),
+            preview: None,
+            preview_focus: cx.focus_handle(),
+            preview_return: None,
             _observe: observe,
         };
         inspector.sync_watch(cx);
@@ -237,6 +295,7 @@ impl Inspector {
                         } else if let Ok(tray) = serde_json::from_value::<WorkTray>(value) {
                             this.tray = Some(Arc::new(tray));
                         }
+                        this.clock = crate::clock::utc(cx);
                         cx.notify();
                     });
                     if alive.is_err() {
@@ -247,8 +306,10 @@ impl Inspector {
         }
     }
 
-    /// Draw again in a second while the session works, so its time at work moves.
-    fn keep_ticking(&mut self, working: bool, cx: &mut Context<Self>) {
+    /// While the session works, take the time again and draw at the next whole second of its
+    /// time at work since `since` (in a second without one), when what the header says moves
+    /// on; the transcript's working line ticks the same way.
+    fn keep_ticking(&mut self, working: bool, since: Option<chrono::DateTime<chrono::Utc>>, cx: &mut Context<Self>) {
         if !working {
             self.tick = None;
             return;
@@ -256,22 +317,91 @@ impl Inspector {
         if self.tick.is_some() {
             return;
         }
+        let real = crate::clock::utc(cx);
+        let into = since.map_or(0, |since| (real - since).num_milliseconds().rem_euclid(1000));
+        let wait = std::time::Duration::from_millis(u64::try_from(1000 - into).unwrap_or(1000).clamp(1, 1000) + 2);
         self.tick = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+            cx.background_executor().timer(wait).await;
             let _gone = this.update(cx, |this, cx| {
                 this.tick = None;
+                this.clock = crate::clock::utc(cx);
                 cx.notify();
             });
         }));
     }
 
+    /// Picture `path` of the prompt box, as the timeline reads its own: from the chat's device,
+    /// through the same cache, read once and tried again after a failure's wait.
+    fn picture(&mut self, path: &str, cx: &mut Context<Self>) -> AttachmentSnapshot {
+        use crate::attachments::{attachment_snapshot_for, begin_load_for};
+        let state = self.state.read(cx);
+        let local = state.local_device_id.clone();
+        let Some(device) = state.selected_chat_row().map(|chat| chat.device_id.clone()).or_else(|| local.clone())
+        else {
+            return AttachmentSnapshot::Error { retry_in: std::time::Duration::MAX };
+        };
+        let key = AttachmentKey::new(&device, path, None);
+        if begin_load_for(&key) {
+            self.load_picture(key.clone(), path, (local.as_deref() != Some(device.as_str())).then_some(device), cx);
+        }
+        let snapshot = attachment_snapshot_for(&key);
+        if let AttachmentSnapshot::Error { retry_in } = snapshot
+            && retry_in != std::time::Duration::MAX
+            && !self.picture_loads.contains_key(path)
+        {
+            let wake = path.to_owned();
+            self.picture_loads.insert(
+                wake.clone(),
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(retry_in + std::time::Duration::from_millis(60)).await;
+                    let _gone = this.update(cx, |this, cx| {
+                        this.picture_loads.remove(&wake);
+                        cx.notify();
+                    });
+                }),
+            );
+        }
+        snapshot
+    }
+
+    /// Read the picture `key` names, from `target` when it is another device's.
+    fn load_picture(&mut self, key: AttachmentKey, path: &str, target: Option<String>, cx: &mut Context<Self>) {
+        use crate::attachments::{AttachmentLoadGuard, read_attachment_image, store_error_for, store_loaded_for};
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            store_error_for(&key);
+            return;
+        };
+        let (claim, path) = (AttachmentLoadGuard(key.clone()), path.to_owned());
+        let read = path.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let _claim = claim;
+            match read_attachment_image(&engine, cx.background_executor(), target.as_deref(), &read, None).await {
+                Some(loaded) => store_loaded_for(&key, loaded.name.into(), loaded.image),
+                None => store_error_for(&key),
+            }
+            let _gone = this.update(cx, |this, cx| {
+                this.picture_loads.remove(&read);
+                cx.notify();
+            });
+        });
+        self.picture_loads.insert(path, task);
+    }
+
+    /// Open `preview` in the lightbox, the keyboard with it until it closes.
+    fn show_picture(&mut self, preview: PreviewImage, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview_return = window.focused(cx);
+        preview.viewer.reset();
+        self.preview = Some(preview);
+        window.focus(&self.preview_focus, cx);
+        cx.notify();
+    }
+
     fn render_header(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let now = crate::clock::utc(cx);
+        let now = self.clock;
         let state = self.state.read(cx);
         let chat = state.selected_chat_row().cloned();
         let status = chat.as_ref().map_or(ChatIndicator::Idle, |chat| state.display_status_for(chat, now));
         let session = chat.as_ref().and_then(|chat| state.session_for(&chat.id)).cloned();
-        let context = state.context_usage.and_then(slopty_view_proto::ContextUsage::fraction);
         let parent = chat
             .as_ref()
             .filter(|chat| chat.subagent)
@@ -280,16 +410,11 @@ impl Inspector {
             .as_ref()
             .and_then(|chat| chat.title.clone().or_else(|| chat.last_message_preview.clone()))
             .map_or_else(|| "Session".into(), |title| crate::transcript::single_line(&title).into());
-        let model = chat.as_ref().and_then(|chat| chat.config.as_ref()?.model.clone());
         let branch = chat.as_ref().and_then(|chat| chat.branch.clone());
-        let dock = self.dock.clone();
         let working = status == ChatIndicator::Working;
-        self.keep_ticking(working, cx);
-        let at_work = session
-            .as_ref()
-            .and_then(|session| session.started_at)
-            .filter(|_| working)
-            .map(|since| elapsed_words((now - since).num_milliseconds()));
+        let since = session.as_ref().and_then(|session| session.started_at).filter(|_| working);
+        self.keep_ticking(working, since, cx);
+        let at_work = since.map(|since| elapsed_words((now - since).num_milliseconds()));
 
         let mut meta: Vec<AnyElement> = Vec::new();
         let quiet = |text: String| {
@@ -314,20 +439,6 @@ impl Inspector {
                     .child(div().text_size(ui_rems(12.0)).text_color(theme.text).child(words))
                     .into_any_element(),
             );
-        }
-        if let Some(model) = model {
-            meta.push(quiet(model));
-        }
-        if let Some(mode) = dock.as_ref().and_then(|dock| dock.mode.as_ref()).filter(|m| !m.label.is_empty()) {
-            meta.push(quiet(mode.label.clone()));
-        }
-        let context_words = dock
-            .as_ref()
-            .and_then(|dock| dock.context.as_ref())
-            .map(|context| format!("{}% context", context.used_percent))
-            .or_else(|| context.map(|used| format!("{:.0}% context", used * 100.0)));
-        if let Some(words) = context_words {
-            meta.push(quiet(words));
         }
         if let Some(branch) = branch {
             meta.push(
@@ -368,8 +479,8 @@ impl Inspector {
                         .mb(px(4.0))
                         .cursor_pointer()
                         .text_size(ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .hover(|style| style.text_color(theme.text))
+                        .text_color(hover_blend("inspector-back", theme.text_muted, theme.text))
+                        .hover_fade("inspector-back")
                         .aria_label("Back to its parent")
                         .child(icon(icons::ARROW_LEFT).size(px(12.0)))
                         .child("Parent session")
@@ -413,22 +524,16 @@ impl Inspector {
             .state
             .read(cx)
             .selected_chat_row()
-            .is_some_and(|chat| self.state.read(cx).display_status_for(chat, crate::clock::utc(cx)) == ChatIndicator::Working);
-        let doing = self
-            .dock
-            .as_ref()
-            .and_then(|dock| dock.activity.as_ref())
-            .filter(|_| working)
-            .and_then(|activity| activity.phrase.clone());
+            .is_some_and(|chat| self.state.read(cx).display_status_for(chat, self.clock) == ChatIndicator::Working);
         // A list all done leaves once the turn ends, as the TUI's own does.
         let tasks = latest_tasks(entries)
             .filter(|items| working || items.iter().any(|item| item.status() != TodoStatus::Completed));
         let running: Vec<WorkRow> = self
             .tray
             .as_ref()
-            .map(|tray| tray.rows.iter().filter(|row| row.live && !row.ambient).cloned().collect())
+            .map(|tray| tray.rows.clone())
             .unwrap_or_default();
-        if doing.is_none() && tasks.is_none() && running.is_empty() {
+        if tasks.is_none() && running.is_empty() {
             return None;
         }
         let mut section = div()
@@ -442,18 +547,6 @@ impl Inspector {
             .border_b_1()
             .border_color(theme.border)
             .child(Self::heading("Now", None, theme));
-        if let Some(doing) = doing {
-            section = section.child(
-                div()
-                    .id("inspector-doing")
-                    .role(gpui::Role::Status)
-                    .aria_label(SharedString::from(crate::transcript::single_line(&doing)))
-                    .text_size(ui_rems(12.5))
-                    .text_color(theme.text)
-                    .truncate()
-                    .child(crate::transcript::single_line(&doing)),
-            );
-        }
         if let Some(items) = tasks {
             let done = items.iter().filter(|item| item.status() == TodoStatus::Completed).count();
             let current = items.iter().position(|item| item.status() == TodoStatus::InProgress);
@@ -523,7 +616,10 @@ impl Inspector {
                         .rounded(px(5.0))
                         .role(if chat_id.is_some() { gpui::Role::Button } else { gpui::Role::ListItem })
                         .when(chat_id.is_some(), |el| {
-                            el.cursor_pointer().hover(|style| style.bg(theme.element_hover))
+                            let fade = format!("inspector-work-{ix}");
+                            el.cursor_pointer()
+                                .bg(hover_blend(&fade, gpui::transparent_black(), theme.ink(ROW_WASH)))
+                                .hover_fade(fade)
                         })
                         .aria_label(SharedString::from(format!("{} {}", row.noun, row.title)))
                         .child(icon(glyph).size(px(12.0)).flex_none().text_color(theme.text_muted))
@@ -610,7 +706,8 @@ impl Inspector {
                     .mx(px(-4.0))
                     .rounded(px(5.0))
                     .cursor_pointer()
-                    .hover(|style| style.bg(theme.element_hover))
+                    .bg(hover_blend(&format!("inspector-file-{ix}"), gpui::transparent_black(), theme.ink(ROW_WASH)))
+                    .hover_fade(format!("inspector-file-{ix}"))
                     .aria_label(SharedString::from(format!("Open the diff of {said}")))
                     .child(
                         crate::file_icons::icon(
@@ -647,8 +744,8 @@ impl Inspector {
                     .aria_label(if open { "Fewer files".to_owned() } else { format!("{} more files", count - shown) })
                     .cursor_pointer()
                     .text_size(ui_rems(11.5))
-                    .text_color(theme.text_faint)
-                    .hover(|style| style.text_color(theme.text_muted))
+                    .text_color(hover_blend("inspector-files-more", theme.text_faint, theme.text_muted))
+                    .hover_fade("inspector-files-more")
                     .child(if open { "Fewer".to_owned() } else { format!("{} more", count - shown) })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.files_open = !this.files_open;
@@ -658,15 +755,136 @@ impl Inspector {
         }
         Some(section.into_any_element())
     }
+
+    /// The agent's prompt box as its TUI holds it, mirrored live under the timeline as the TUI
+    /// keeps it under the conversation: the prompts queued behind the turn under way, then the
+    /// draft, its placeholders drawn apart, and the pictures pasted into it, each a press away
+    /// from the lightbox. It is shown only while the box holds something, with no caret: what
+    /// it says is typed in the TUI, and nothing here types.
+    fn render_prompt(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let prompt = self.dock.as_ref()?.prompt.clone().filter(|prompt| !prompt.is_empty())?;
+        let queued = (!prompt.queued.is_empty()).then(|| format!("{} queued", prompt.queued.len()));
+        let mut section = div()
+            .id("inspector-prompt")
+            .debug_selector(|| "inspector-prompt".into())
+            .role(gpui::Role::Group)
+            .aria_label("Prompt box")
+            .flex_none()
+            .flex()
+            .flex_col()
+            .px(px(PAD))
+            .pt(px(6.0))
+            .pb(px(10.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(Self::heading("Prompt", queued, theme));
+        for (ix, words) in prompt.queued.iter().take(QUEUED_SHOWN).enumerate() {
+            let line = crate::transcript::single_line(words);
+            section = section.child(
+                div()
+                    .id(("inspector-queued", ix))
+                    .role(gpui::Role::ListItem)
+                    .aria_label(SharedString::from(format!("Queued: {line}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .min_h(px(20.0))
+                    .text_size(ui_rems(12.0))
+                    .child(div().flex_none().text_color(theme.text_faint).child("\u{276F}"))
+                    .child(div().min_w_0().truncate().text_color(theme.text_muted).child(line)),
+            );
+        }
+        let later = prompt.queued.len().saturating_sub(QUEUED_SHOWN);
+        if later > 0 {
+            section = section.child(
+                div()
+                    .pl(px(14.0))
+                    .text_size(ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(format!("{later} more")),
+            );
+        }
+        let text = prompt.text.trim_end();
+        if !text.trim().is_empty() {
+            let text = SharedString::from(text.to_owned());
+            let marks = placeholders(&text);
+            section = section.child(
+                div()
+                    .id("inspector-draft")
+                    .role(gpui::Role::Paragraph)
+                    .aria_label(text.clone())
+                    .when(!prompt.queued.is_empty(), |el| el.mt(px(4.0)))
+                    .overflow_hidden()
+                    .line_clamp(DRAFT_LINES)
+                    .text_ellipsis()
+                    .text_size(ui_rems(12.0))
+                    .text_color(theme.text_muted)
+                    .child(crate::popover::search_highlight_ranges(text, marks, theme)),
+            );
+        }
+        if !prompt.images.is_empty() {
+            let mut strip = div().flex().flex_wrap().gap(px(6.0)).pt(px(6.0));
+            for picture in &prompt.images {
+                let snapshot = self.picture(&picture.path, cx);
+                strip = strip.child(self.render_picture(picture, snapshot, theme, cx));
+            }
+            section = section.child(strip);
+        }
+        Some(section.into_any_element())
+    }
+
+    /// A picture pasted into the prompt box, as a thumbnail: once its bytes are here, a press
+    /// opens it in the lightbox the timeline's pictures open in; until then, a still wash; one
+    /// that cannot be read, a dashed frame.
+    fn render_picture(&self, picture: &PromptImage, snapshot: AttachmentSnapshot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let name = SharedString::from(format!("Image #{}", picture.number));
+        let id = SharedString::from(format!("inspector-picture-{}", picture.path));
+        let frame = div().id(id.clone()).flex_none().size(px(THUMB)).rounded(px(6.0)).overflow_hidden().border_1();
+        match snapshot {
+            AttachmentSnapshot::Loaded(image) => {
+                let preview = PreviewImage::new(name.clone(), image.image.clone());
+                frame
+                    .role(gpui::Role::Button)
+                    .aria_label(name.clone())
+                    .border_color(hover_blend(&id, theme.hairline(0.11), theme.hairline(0.28)))
+                    .bg(theme.ink(0.035))
+                    .cursor_pointer()
+                    .hover_fade(id)
+                    .tooltip(crate::settings::widgets::text_tooltip(format!("Open {name}")))
+                    .on_click(cx.listener(move |this, _, window, cx| this.show_picture(preview.clone(), window, cx)))
+                    .child(
+                        img(image.image)
+                            .size(px(THUMB - 2.0))
+                            .rounded(px(5.0))
+                            .object_fit(ObjectFit::Cover),
+                    )
+                    .into_any_element()
+            }
+            AttachmentSnapshot::Loading => frame
+                .role(gpui::Role::Image)
+                .aria_label(name)
+                .border_color(theme.hairline(0.08))
+                .bg(theme.ink(0.055))
+                .into_any_element(),
+            AttachmentSnapshot::Error { .. } => frame
+                .role(gpui::Role::Image)
+                .aria_label(SharedString::from(format!("{name}, unavailable")))
+                .border_dashed()
+                .border_color(theme.hairline(0.14))
+                .bg(theme.ink(0.025))
+                .into_any_element(),
+        }
+    }
 }
 
 impl gpui::Render for Inspector {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let entries = self.state.read(cx).transcript.clone();
         let header = self.render_header(&theme, cx);
         let now = self.render_now(&entries, &theme, cx);
         let changes = self.render_changes(&entries, &theme, cx);
+        let prompt = self.render_prompt(&theme, cx);
         div()
             .id("inspector")
             .debug_selector(|| "inspector".into())
@@ -686,6 +904,26 @@ impl gpui::Render for Inspector {
                     .min_h_0()
                     .child(self.transcript.clone()),
             )
+            .children(prompt)
+            .children(self.preview.clone().map(|preview| {
+                let weak = cx.weak_entity();
+                crate::attachments::lightbox(
+                    window,
+                    &preview,
+                    &self.preview_focus,
+                    move |window, cx| {
+                        let back = weak.update(cx, |this, cx| {
+                            this.preview = None;
+                            cx.notify();
+                            this.preview_return.take()
+                        });
+                        if let Ok(Some(focus)) = back {
+                            window.focus(&focus, cx);
+                        }
+                    },
+                    cx,
+                )
+            }))
     }
 }
 
@@ -779,6 +1017,22 @@ mod tests {
         assert_eq!(task_window(10, Some(5)), 4..10);
         assert_eq!(task_window(10, Some(0)), 0..6);
         assert_eq!(task_window(10, None), 4..10);
+    }
+
+    /// The TUI's placeholders are found wherever they stand, a picture's and a long paste's
+    /// alike; brackets of the person's own, or one left open, are words.
+    #[test]
+    fn the_prompt_boxs_placeholders_are_drawn_apart_from_its_words() {
+        let text = "Look at [Image #1] and [Pasted text #2 +5 lines], not [this] or [Image #3";
+        let found: Vec<&str> = placeholders(text).into_iter().map(|range| &text[range]).collect();
+        assert_eq!(found, ["[Image #1]", "[Pasted text #2 +5 lines]"]);
+        assert_eq!(placeholders("[Image #2][Image #1]").len(), 2, "side by side");
+        let open = "[Image #3 then [Image #1]";
+        let found: Vec<&str> = placeholders(open).into_iter().map(|range| &open[range]).collect();
+        assert_eq!(found, ["[Image #1]"], "one left open never swallows the next");
+        assert!(placeholders("[Image #4\n]").is_empty(), "a placeholder is one line");
+        assert!(placeholders("no pictures").is_empty());
+        assert!(placeholders("").is_empty());
     }
 
     #[test]

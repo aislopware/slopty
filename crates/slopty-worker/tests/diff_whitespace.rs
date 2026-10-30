@@ -9,7 +9,6 @@ mod diff_whitespace {
 
     use slopty_proto::git::{GitDone, GitOp, GitOutcome};
     use slopty_proto::thread::wire::{Against, Review};
-    use slopty_proto::thread::{TreeRef, TurnId};
     use slopty_worker::repo::commit::{Programs, apply};
 
     fn git() -> PathBuf {
@@ -58,23 +57,6 @@ mod diff_whitespace {
 
     fn paths(review: &Review) -> Vec<&str> {
         review.files.iter().map(|file| file.path.as_str()).collect()
-    }
-
-    /// A turn's diff is refused: no snapshot is taken of a turn, so there is nothing to
-    /// compare it by.
-    #[tokio::test]
-    async fn a_turn_s_diff_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = repository(dir.path());
-        let tree = TreeRef("0".repeat(40));
-        let turn =
-            GitOp::Turn { turn: TurnId(1), before: tree, after: None, ignore_whitespace: false };
-        match apply(&programs(), &root.to_string_lossy(), turn, &[]).await {
-            GitOutcome::Failed { said } => {
-                assert_eq!(said, slopty_worker::thread::review::NO_TURN_SNAPSHOTS);
-            }
-            other => panic!("not refused: {other:?}"),
-        }
     }
 
     /// With whitespace not counting, a reindented line is no change: a file changed only in

@@ -108,7 +108,6 @@ mod golden_agent {
             phase: Phase::Idle,
             wait: None,
             ended: false,
-            asks: None,
             last: Some("Done: the store keeps them.".to_owned()),
             since_ms: at(),
             rests: true,
@@ -129,9 +128,7 @@ mod golden_agent {
             model: None,
             mode: Some("edits".to_owned()),
             effort: None,
-            attachments: Vec::new(),
             args: Vec::new(),
-            options: BTreeMap::new(),
             worktree: Some(NewWorktree {
                 name: "store".to_owned(),
                 base: None,
@@ -173,15 +170,12 @@ mod golden_agent {
         snap("fs_done", &reply(Outcome::FsDone { path: "/Users/c/notes".to_owned() }));
     }
 
-    /// A thread read and answered through the thread model, whatever its agent: sent to its
-    /// worker once found, the whole turns it gives with an open request, and the person's
-    /// answer to that request.
+    /// A thread read through the thread model, whatever its agent: sent to its worker once
+    /// found, the whole turns it gives, and the person's message to it.
     #[test]
     fn thread_reads() {
-        use slopty_proto::orchestration::{
-            ReadEntry, RequestRead, ThreadRead, ThreadView, TurnRead,
-        };
-        use slopty_proto::thread::{AskId, Choice, Effect, ToolState, TurnId, TurnState};
+        use slopty_proto::orchestration::{ReadEntry, ThreadRead, ThreadView, TurnRead};
+        use slopty_proto::thread::{ToolState, TurnId, TurnState};
 
         let found = Verb::ReadThread {
             of: ThreadOf::On { worker: term().worker, thread: thread(0x7e7e) },
@@ -218,39 +212,11 @@ mod golden_agent {
                     },
                 ],
             }],
-            requests: vec![RequestRead {
-                ask: AskId("7".to_owned()),
-                kind: "approval".to_owned(),
-                title: "Run cargo test?".to_owned(),
-                choices: vec![Choice {
-                    id: "allow".to_owned(),
-                    label: "Allow".to_owned(),
-                    effect: Effect::Allow,
-                    scope: Some("this session".to_owned()),
-                    folders: Vec::new(),
-                    stops: false,
-                }],
-                questions: Vec::new(),
-                picks: Vec::new(),
-                needs_presence: false,
-            }],
             next: TurnId(4),
             truncated: true,
             skipped: false,
         };
         snap("thread_read", &reply(Outcome::Thread(Box::new(read))));
-        let answer = Verb::AnswerRequest {
-            of: ThreadOf::Thread(thread(0x7e7e)),
-            ask: AskId("7".to_owned()),
-            choice: "deny".to_owned(),
-            message: Some("Not on main.".to_owned()),
-        };
-        snap("answer_request", &request(answer));
-        let reply = Verb::SendMessage {
-            of: ThreadOf::Thread(thread(0x7e7e)),
-            text: "Use the staging database.".to_owned(),
-        };
-        snap("send_message", &request(reply));
     }
 
     /// A daemon's own settings, read and edited from another device.

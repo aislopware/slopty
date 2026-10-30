@@ -17,7 +17,7 @@ mod tests {
     use slopty_proto::server::{FromServer, Liveness, Os, Role, ToServer, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_proto::thread::attention::Rung;
-    use slopty_proto::thread::{AgentId, Phase, ThreadId};
+    use slopty_proto::thread::{AgentId, Phase, ThreadId, Wait, kind};
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::{Child, ChildStdin, ChildStdout, Command};
     use tokio::sync::{broadcast, mpsc};
@@ -96,8 +96,7 @@ mod tests {
             title: "Fix the build".to_owned(),
             rung: Rung::NeedsYou,
             phase: Phase::NeedsYou,
-            wait: None,
-            asks: Some(asks.to_owned()),
+            wait: Some(Wait { kind: kind::QUESTION.to_owned(), text: asks.to_owned() }),
             since_ms: WallMs::ZERO,
         }
     }
@@ -457,7 +456,7 @@ mod tests {
         assert_eq!(note["method"], "notifications/message", "{note}");
         assert_eq!(note["params"]["level"], "warning");
         assert_eq!(note["params"]["data"]["term"], format!("{}/{}", studio(), shell()));
-        assert_eq!(note["params"]["data"]["agent"]["asks"], "Which branch?");
+        assert_eq!(note["params"]["data"]["agent"]["waits"], "Which branch?");
         assert!(
             note["params"]["data"]["message"].as_str().unwrap().contains("mac-studio"),
             "{note}"

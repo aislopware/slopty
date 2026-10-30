@@ -19,6 +19,13 @@
 //!   event's own fields), to its end before the next, as a model's own pace keeps them apart.
 //! - **Its terminal**: raw, with bracketed paste turned on, so a paste arrives whole between its
 //!   markers and the Enter that sends it is a key of its own.
+//! - **Its prompt box, through Slopty's mod**: given `--plugin-dir=<dir>`, it runs the relay
+//!   `<dir>/hooks/register.ts` names (`const RELAY = [<program>, "hook"]`, as the worker writes it)
+//!   after each read that changed the line being typed, with the `PromptDraft` payload the mod
+//!   hands it (`session_id`, `prompt`, and `tmpdir` when `CLAUDE_CODE_TMPDIR` is set). A paste that
+//!   is the path of a PNG, JPEG, GIF or WebP file is a picture, as Claude Code takes one: its bytes
+//!   stored at `<CLAUDE_CODE_TMPDIR or /tmp>/claude-<uid>/<cwd's key>/<session>/images/<N>.<ext>`
+//!   and `[Image #N]` put in the line, numbered from 1 in each session.
 //!
 //! What it is typed is a line, sent by Enter. The turn is chosen by the first word of the line's
 //! last line (an agent's words come framed, the words last):
@@ -37,13 +44,16 @@
 //!   closing.
 //! - anything else: answered at once, `Done: <line>`.
 //!
-//! Each line typed while a held turn runs waits for it to end.
+//! Each line typed while a held turn runs waits for it to end, queued as Claude Code queues it: a
+//! `queue-operation` record in the transcript, `enqueue` with the line as it is typed and
+//! `dequeue` as it goes to the agent.
 //!
 //! What it did goes to `STUB_RECORD` as one JSON document, replaced whole as it changes: its pid,
 //! when it started (`started_us`, microseconds since the epoch), its arguments and directory, the
 //! Slopty seat it runs in (`SLOPTY_SESSION`), every variable's name with a digest of its value
 //! (`crate::env::digests`), each read of its terminal with when it was made (`reads`), each line
-//! it took (`prompts`), each hook it ran (`hooks`), the sessions it held (`sessions`), when each
+//! it took (`prompts`), each hook it ran (`hooks`), each draft it relayed (`drafts`), the sessions
+//! it held (`sessions`), when each
 //! transcript record was written (`wrote`) and its tools' results (`mcp`).
 //! In `STUB_RECORD`, `{session}` is the seat (`none` outside one) and `{pid}` its pid.
 
@@ -82,6 +92,12 @@ const WAITING: &str = "waiting";
 /// What its record says a question waits for.
 const INPUT_NEEDED: &str = "input needed";
 
+/// The line of the mod's module that names its relay, before the relay itself.
+const RELAY_LINE: &str = "const RELAY = ";
+
+/// The variable that moves Claude Code's temporary root, where pasted pictures are kept.
+const TMPDIR_ENV: &str = "CLAUDE_CODE_TMPDIR";
+
 /// Run the TUI as `args` ask, until its session ends.
 #[must_use]
 pub fn run(args: &[String]) -> ExitCode {
@@ -105,17 +121,54 @@ struct Input {
     line: Vec<u8>,
     pending: Vec<u8>,
     pasting: bool,
+    /// The paste under way, taken whole at its end.
+    paste: Vec<u8>,
+    /// Where the session keeps pasted pictures, and how many it has.
+    pictures: Option<(PathBuf, u32)>,
 }
 
 impl Input {
+    /// Keep pasted pictures in `dir` from now on: numbered from 1 again in another session's.
+    fn keep_pictures(&mut self, dir: PathBuf) {
+        if self.pictures.as_ref().is_none_or(|(had, _)| *had != dir) {
+            self.pictures = Some((dir, 0));
+        }
+    }
+
+    /// A paste of `bytes` that is the path of a picture, stored as Claude Code stores it: the
+    /// placeholder that stands for it in the line.
+    fn picture(&mut self, bytes: &[u8]) -> Option<String> {
+        let path = std::str::from_utf8(bytes).ok()?.trim();
+        let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+        let ext = match ext.as_str() {
+            "png" => "png",
+            "jpg" | "jpeg" => "jpg",
+            "gif" => "gif",
+            "webp" => "webp",
+            _ => return None,
+        };
+        let picture = std::fs::read(path).ok()?;
+        let (dir, count) = self.pictures.as_mut()?;
+        let n = count.saturating_add(1);
+        std::fs::create_dir_all(&*dir).ok()?;
+        std::fs::write(dir.join(format!("{n}.{ext}")), picture).ok()?;
+        *count = n;
+        Some(format!("[Image #{n}]"))
+    }
+
     /// Take the first `n` bytes of what is pending.
     fn cut(&mut self, n: usize) -> Vec<u8> {
         let rest = self.pending.split_off(n.min(self.pending.len()));
         std::mem::replace(&mut self.pending, rest)
     }
 
-    /// Add pasted bytes to the line, a return in them a new line.
+    /// Add a whole paste to the line: a picture as its placeholder, words as they are with a
+    /// return in them a new line.
     fn pasted(&mut self, bytes: &[u8]) {
+        if let Some(placeholder) = self.picture(bytes) {
+            self.line.extend_from_slice(placeholder.as_bytes());
+            return;
+        }
         self.line.extend(bytes.iter().map(|b| if *b == b'\r' { b'\n' } else { *b }));
     }
 
@@ -127,9 +180,11 @@ impl Input {
             if self.pasting {
                 if let Some(at) = find(&self.pending, PASTE_END) {
                     let pasted = self.cut(at);
-                    self.pasted(&pasted);
+                    self.paste.extend_from_slice(&pasted);
                     drop(self.cut(PASTE_END.len()));
                     self.pasting = false;
+                    let whole = std::mem::take(&mut self.paste);
+                    self.pasted(&whole);
                     continue;
                 }
                 // All but what may begin the end marker, which the next read completes.
@@ -138,7 +193,7 @@ impl Input {
                     .find(|n| self.pending.ends_with(PASTE_END.get(..*n).unwrap_or_default()))
                     .unwrap_or(0);
                 let pasted = self.cut(self.pending.len().saturating_sub(keep));
-                self.pasted(&pasted);
+                self.paste.extend_from_slice(&pasted);
                 break;
             }
             let Some(&byte) = self.pending.first() else { break };
@@ -231,6 +286,9 @@ struct Tui {
     /// What its record says it does, what for while it waits, and since when (milliseconds
     /// since the epoch).
     doing: (&'static str, Option<&'static str>, u64),
+    /// The relay Slopty's mod names, when one was loaded, and the draft it was last handed.
+    relay: Option<Vec<String>>,
+    drafted: String,
 }
 
 impl Tui {
@@ -256,7 +314,7 @@ impl Tui {
             "seat": seat,
             "env": crate::env::digests(),
             "sessions": [session],
-            "reads": [], "prompts": [], "hooks": [], "wrote": [], "mcp": [],
+            "reads": [], "prompts": [], "hooks": [], "drafts": [], "wrote": [], "mcp": [],
         });
         let mut tui = Self {
             args: args.to_vec(),
@@ -276,6 +334,8 @@ impl Tui {
             record,
             doc,
             doing: (IDLE, None, now_us() / 1000),
+            relay: flag(args, "--plugin-dir").and_then(|dir| relay_of(Path::new(&dir))),
+            drafted: String::new(),
         };
         if tui.resumed {
             tui.last = std::fs::read_to_string(tui.transcript()).ok().and_then(|text| {
@@ -324,6 +384,7 @@ impl Tui {
                 "reads",
                 json!({ "at_us": now_us(), "bytes": String::from_utf8_lossy(bytes) }),
             );
+            input.keep_pictures(self.pictures());
             for key in input.take(bytes) {
                 let done = match key {
                     Key::Line(line) => self.line(line),
@@ -335,9 +396,46 @@ impl Tui {
                     break 'reading;
                 }
             }
+            self.draft(&input.line);
             self.save();
         }
         self.end(ended, terminal)
+    }
+
+    /// Where the session keeps the pictures pasted into its box, as Claude Code keeps them.
+    fn pictures(&self) -> PathBuf {
+        let root = std::env::var_os(TMPDIR_ENV)
+            .filter(|t| !t.is_empty())
+            .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        let root = std::fs::canonicalize(&root).unwrap_or(root);
+        let uid = rustix::process::getuid().as_raw();
+        root.join(format!("claude-{uid}"))
+            .join(escaped(&self.cwd))
+            .join(&self.session)
+            .join("images")
+    }
+
+    /// Hand the mod's relay the box's `line`, when one was loaded and the line changed, as the
+    /// mod does once typing pauses.
+    fn draft(&mut self, line: &[u8]) {
+        let Some((program, args)) = self.relay.as_ref().and_then(|r| r.split_first()) else {
+            return;
+        };
+        let text = String::from_utf8_lossy(line).into_owned();
+        if text == self.drafted {
+            return;
+        }
+        let entry = json!({ "type": "command", "command": program, "args": args });
+        let mut payload = json!({
+            "hook_event_name": "PromptDraft", "session_id": self.session, "prompt": text,
+        });
+        if let Some(tmpdir) = std::env::var(TMPDIR_ENV).ok().filter(|t| !t.is_empty()) {
+            merge(&mut payload, &json!({ "tmpdir": tmpdir }));
+        }
+        let ran = run_hook(&entry, &payload);
+        let noted = json!({ "session": self.session, "text": text, "at_us": now_us(), "ran": ran });
+        self.note("drafts", noted);
+        self.drafted = text;
     }
 
     /// The session ends as `reason` says: its hook run, its record of itself removed.
@@ -360,6 +458,7 @@ impl Tui {
             }
             State::Holding => {
                 self.state = State::Holding;
+                self.queue("enqueue", Some(&line));
                 self.waiting.push(line);
                 return false;
             }
@@ -451,6 +550,7 @@ impl Tui {
     fn after_turn(&mut self) -> bool {
         while matches!(self.state, State::Idle) && !self.waiting.is_empty() {
             let next = self.waiting.remove(0);
+            self.queue("dequeue", None);
             if self.line(next) {
                 return true;
             }
@@ -571,6 +671,22 @@ impl Tui {
         self.put(&record)
     }
 
+    /// Record a queue operation on the prompts typed while a turn runs, as Claude Code records
+    /// one: no link in the chain of messages, the prompt itself on an `enqueue`.
+    fn queue(&mut self, operation: &str, content: Option<&str>) {
+        let mut record = json!({
+            "type": "queue-operation", "operation": operation, "timestamp": timestamp(),
+            "sessionId": self.session,
+        });
+        if let (Some(fields), Some(content)) = (record.as_object_mut(), content) {
+            fields.insert("content".to_owned(), Value::from(content));
+        }
+        append(&self.transcript(), &record);
+        let noted =
+            json!({ "at_us": now_us(), "type": "queue-operation", "session": self.session });
+        self.note("wrote", noted);
+    }
+
     /// The fields every record of `kind` has.
     fn base(&self, kind: &str) -> Value {
         json!({
@@ -666,6 +782,14 @@ fn call_until(configs: &[Value], call: &Value, until_ok: bool) -> Value {
         }
         pause(UNTIL_OK.1);
     }
+}
+
+/// The relay the mod at `dir` names in its module, as the worker writes it: a JSON array of the
+/// program and its arguments.
+fn relay_of(dir: &Path) -> Option<Vec<String>> {
+    let module = std::fs::read_to_string(dir.join("hooks").join("register.ts")).ok()?;
+    let named = module.lines().find_map(|line| line.trim().strip_prefix(RELAY_LINE))?;
+    serde_json::from_str::<Vec<String>>(named.trim().trim_end_matches(';')).ok()
 }
 
 /// Run hook `entry` on `payload`, to its end or its timeout; whether it ran.

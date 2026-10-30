@@ -32,7 +32,7 @@ mod screens {
         fn new(dir: &std::path::Path, world: Arc<Mutex<World>>) -> Self {
             let host = Host::open(&dir.join("threads"), Limits::default()).unwrap();
             let session = "11111111-2222-4333-8444-555555555555";
-            let mut history = History::new(session, "2.1.312", "/work", &[], WallMs::ZERO);
+            let mut history = History::new(session, "2.1.312", "/work", WallMs::ZERO);
             let Some(Out::Begin(meta)) = history.drain().into_iter().next() else { panic!() };
             let thread = meta.id;
             host.create(*meta).unwrap();
@@ -54,8 +54,6 @@ mod screens {
                 usage: Usage::default(),
                 models: Vec::new(),
                 changed: Changed::default(),
-                before: None,
-                after: None,
             }));
         }
 

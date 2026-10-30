@@ -33,15 +33,13 @@ pub(super) struct Turns {
 
 impl WorkspaceView {
     /// What the bell counts: the agents and threads that need the person, those whose turn
-    /// failed, those whose changes wait to be reviewed, and the agents' turns left unread. A
-    /// shell's finish is not counted.
+    /// failed, and the agents' turns left unread. A shell's finish is not counted.
     #[must_use]
     pub fn bell_count(&self) -> usize {
         use slopty_proto::thread::attention::Rung;
         let on = |rung: Rung| self.threads_on(rung).len();
         self.needs_you_count()
             .saturating_add(on(Rung::Failed))
-            .saturating_add(on(Rung::ToReview))
             .saturating_add(self.agent_turns().count())
     }
 

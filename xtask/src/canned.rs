@@ -69,6 +69,10 @@ fn serve_api(stream: TcpStream) -> Result<()> {
         ("application/json", json!({ "input_tokens": 100 }).to_string())
     } else if line.starts_with("POST") && line.contains("/v1/messages") {
         let (blocks, stop) = answer(&body);
+        if held(&body) {
+            // A turn the person types beside (`fixtures claude-mod`): its prompt queues.
+            crate::claude_mod::pause(HOLD);
+        }
         // The model asked for answers, as the API's does: the recording names what Claude Code
         // resolved its alias to.
         let model = body.get("model").and_then(Value::as_str).unwrap_or("claude-haiku");
@@ -89,6 +93,16 @@ fn serve_api(stream: TcpStream) -> Result<()> {
     Ok(())
 }
 
+/// How long a `scenario:hold` turn's answers wait.
+const HOLD: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Whether `body` is a `scenario:hold` turn's request (not one of Claude Code's side requests).
+fn held(body: &Value) -> bool {
+    let tools = body.get("tools").and_then(Value::as_array).is_some_and(|t| !t.is_empty());
+    let messages = body.get("messages").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    tools && named(messages).contains("scenario:hold")
+}
+
 /// A content block the fake model writes, in pieces.
 enum Block {
     Text(&'static [&'static str]),
@@ -106,6 +120,11 @@ fn text_of(m: &Value) -> String {
     }
 }
 
+/// The person's latest words that name a scenario: a session's later prompt may name another.
+fn named(messages: &[Value]) -> String {
+    messages.iter().rev().map(text_of).find(|t| t.contains("scenario:")).unwrap_or_default()
+}
+
 /// The fake model's answer to a request: its blocks and its stop reason.
 fn answer(body: &Value) -> (Vec<Block>, &'static str) {
     // Claude Code 2.1.295 appends `system` entries (context reminders) after the turn, so the
@@ -118,7 +137,7 @@ fn answer(body: &Value) -> (Vec<Block>, &'static str) {
         .filter(|m| m.get("role").and_then(Value::as_str) != Some("system"))
         .cloned()
         .collect();
-    let first = messages.first().map(text_of).unwrap_or_default();
+    let first = named(&messages);
     let tool_result =
         messages.last().and_then(|m| m.get("content")).and_then(Value::as_array).is_some_and(
             |parts| {
@@ -135,6 +154,13 @@ fn answer(body: &Value) -> (Vec<Block>, &'static str) {
         (vec![Block::Text(&["It ", "finished."])], "end_turn")
     } else if tool_result {
         (vec![Block::Text(&["Done", ": the ", "command said hi."])], "end_turn")
+    } else if first.contains("scenario:ask") {
+        // A call the session may not make unasked: the TUI's permission dialog takes the keys.
+        let input: &[&str] =
+            &[r#"{"command": "touch asked.txt", "#, r#""description": "Make a file"}"#];
+        (vec![Block::Tool { id: "toolu_fake4", name: "Bash", input }], "tool_use")
+    } else if first.contains("scenario:hold") {
+        (vec![Block::Text(&["Held."])], "end_turn")
     } else if first.contains("scenario:background") {
         let input: &[&str] = &[
             r#"{"command": "sleep 3; echo woke", "#,

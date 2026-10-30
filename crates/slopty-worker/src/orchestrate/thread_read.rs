@@ -9,7 +9,7 @@
 //! goes on from the cursor misses nothing the budget left out.
 
 use slopty_core::WorkerId;
-use slopty_proto::orchestration::{ReadEntry, RequestRead, ThreadRead, ThreadView, TurnRead};
+use slopty_proto::orchestration::{ReadEntry, ThreadRead, ThreadView, TurnRead};
 use slopty_proto::thread::{Clipped, ItemBody, ThreadState, TurnId, TurnState};
 
 /// Most characters of one message or answer a read gives: its head.
@@ -69,20 +69,6 @@ pub fn read(
             entries,
         });
     }
-    let requests = state
-        .requests
-        .iter()
-        .filter(|r| r.is_open())
-        .map(|r| RequestRead {
-            ask: r.id.clone(),
-            kind: r.kind.clone(),
-            title: r.title.clone(),
-            choices: r.options.clone(),
-            questions: r.questions.iter().map(|q| q.text.clone()).collect(),
-            picks: slopty_proto::thread::wire::NoteChoice::of(r),
-            needs_presence: r.needs_presence,
-        })
-        .collect();
     ThreadRead {
         worker,
         thread: state.meta.id,
@@ -92,7 +78,6 @@ pub fn read(
         phase: state.status.phase,
         wait: state.status.wait.as_ref().map(|w| w.text.clone()),
         turns,
-        requests,
         next,
         truncated,
         skipped,

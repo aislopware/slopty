@@ -3,10 +3,8 @@
 use slopty_core::SessionId;
 use slopty_proto::server::ToServer;
 use slopty_proto::thread::attention::Counts;
-use slopty_proto::thread::wire::{NoteChoice, PullSeen, PullStands, RequestCard};
 use slopty_proto::thread::{
-    AgentId, AskId, Changed, Cursor, Drive, ItemId, Link, Liveness, Meters, Phase, Request, Status,
-    TurnId,
+    AgentId, Changed, Cursor, Drive, ItemId, Link, Liveness, Phase, Status, TurnId, Wait,
 };
 
 use super::super::tests::{registration, summary};
@@ -26,21 +24,15 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, seat: Option<SessionId>) -> 
             liveness: Liveness::Live,
             since_ms: WallMs::from_millis(since),
         },
-        requests: Vec::new(),
         last_line: Some("Done.".to_owned()),
         doing: None,
         changed: Changed::default(),
         parent: None,
         drive: Drive::named(Drive::DRIVEN),
-        caps: Vec::new(),
         facts,
-        to_review: false,
-        pull: None,
-        meters: Meters::default(),
         ended: None,
         began_ms: None,
         seen: TurnId::BEFORE,
-        draft: None,
         created_ms: WallMs::from_millis(since),
         updated_ms: WallMs::from_millis(since),
         cwd: None,
@@ -50,39 +42,17 @@ pub(in crate::hub) fn row(phase: Phase, since: u64, seat: Option<SessionId>) -> 
     }
 }
 
-/// Pull request #42 standing as `stands`, its one failed check `lint` when a check failed.
-pub(in crate::hub) fn pull_seen(stands: PullStands) -> PullSeen {
-    PullSeen {
-        forge: slopty_proto::git::Forge::GitHub,
-        number: 42,
-        url: "https://github.com/o/r/pull/42".to_owned(),
-        title: "Fix the login".to_owned(),
-        base: "main".to_owned(),
-        stands,
-        failed: u32::from(stands == PullStands::ChecksFailed),
-        failed_first: (stands == PullStands::ChecksFailed).then(|| "lint".to_owned()),
-        running: 0,
-    }
-}
-
-pub(in crate::hub) fn asking(mut row: ThreadRow, title: &str) -> ThreadRow {
-    row.requests.push(RequestCard {
-        id: AskId("1".to_owned()),
-        item: None,
-        kind: "permission".to_owned(),
-        title: title.to_owned(),
-        options: Vec::new(),
-        buttons: Vec::new(),
-        opened_ms: row.status.since_ms,
-        needs_presence: false,
-    });
+/// `row` asking the person `text` at its TUI's dialog.
+pub(in crate::hub) fn asking(mut row: ThreadRow, text: &str) -> ThreadRow {
+    row.status.wait = Some(Wait { kind: "permission".to_owned(), text: text.to_owned() });
     row
 }
 
 /// `row` as it stands at `since` on `phase`, nothing asked.
 fn moved(row: &ThreadRow, phase: Phase, since: u64) -> ThreadRow {
-    let status = Status { phase, since_ms: WallMs::from_millis(since), ..row.status.clone() };
-    ThreadRow { status, requests: Vec::new(), ..row.clone() }
+    let status =
+        Status { phase, wait: None, since_ms: WallMs::from_millis(since), ..row.status.clone() };
+    ThreadRow { status, ..row.clone() }
 }
 
 pub(in crate::hub) fn under(mut child: ThreadRow, parent: &ThreadRow) -> ThreadRow {
@@ -110,8 +80,7 @@ fn standing<'a, K: PartialEq>(list: &'a [(K, Standing)], key: &K) -> &'a Standin
 
 /// A subagent stands with the thread it hangs from, so the one the person sees needs them;
 /// the rest roll up by tile, worker, agent tree (across workers), space and fleet, each
-/// counting a thread once and naming the one to go to first. A thread at rest with changes not
-/// kept is to review, above working.
+/// counting a thread once and naming the one to go to first.
 #[tokio::test]
 async fn subagents_fold_into_their_parents_and_every_node_rolls_up() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -132,8 +101,8 @@ async fn subagents_fold_into_their_parents_and_every_node_rolls_up() {
         started_by(in_space(row(Phase::Working, 20, Some(building)), "/src/app"), &orchestrator);
     let tester = started_by(row(Phase::Working, 30, Some(testing)), &builder);
     let subagent = under(asking(row(Phase::NeedsYou, 40, None), "Run cargo test?"), &tester);
-    let reviewed = ThreadRow { to_review: true, ..row(Phase::Done, 50, None) };
-    lease.handle(snapshot(vec![orchestrator.clone(), builder.clone(), reviewed.clone()]));
+    let rested = row(Phase::Done, 50, None);
+    lease.handle(snapshot(vec![orchestrator.clone(), builder.clone(), rested.clone()]));
     away.handle(snapshot(vec![tester.clone(), subagent.clone()]));
     hub.rank_ladder();
     let ladder = hub.ladder();
@@ -142,7 +111,7 @@ async fn subagents_fold_into_their_parents_and_every_node_rolls_up() {
     assert_eq!(ladder.threads.len(), 4, "the subagent stands with its parent");
     assert_eq!(ladder.rung(at(other, &tester)), Some(Rung::NeedsYou));
     assert_eq!(ladder.rung(at(other, &subagent)), None);
-    assert_eq!(ladder.rung(at(worker, &reviewed)), Some(Rung::ToReview));
+    assert_eq!(ladder.rung(at(worker, &rested)), Some(Rung::Idle));
     assert_eq!(ladder.tile(term(orchestrating)).map(|(_, s)| s.rung), Some(Rung::Idle));
 
     let tree = standing(&ladder.trees, &at(worker, &orchestrator));
@@ -155,19 +124,16 @@ async fn subagents_fold_into_their_parents_and_every_node_rolls_up() {
     let space = standing(&ladder.spaces, &space);
     assert_eq!(space.counts, Counts { working: 1, idle: 1, ..Counts::default() });
 
-    let expected = Counts { needs_you: 1, to_review: 1, working: 1, idle: 1, ..Counts::default() };
+    let expected = Counts { needs_you: 1, working: 1, idle: 2, ..Counts::default() };
     assert_eq!(ladder.fleet.counts, expected);
     let workspace = ladder.over([term(building), term(orchestrating), term(building)]);
     assert_eq!((workspace.rung, workspace.counts.total()), (Rung::Working, 2));
 
-    // The subagent's request answered, the to-review thread kept: the ladder moves down.
-    let kept = ThreadRow { to_review: false, ..reviewed.clone() };
+    // The subagent's question answered: the ladder moves down.
     away.handle(delta(vec![moved(&subagent, Phase::Working, 60)]));
-    lease.handle(delta(vec![kept]));
     hub.rank_ladder();
     let ladder = hub.ladder();
     assert_eq!(ladder.rung(at(other, &tester)), Some(Rung::Working));
-    assert_eq!(ladder.rung(at(worker, &reviewed)), Some(Rung::Idle));
     assert_eq!(ladder.fleet.counts, Counts { working: 2, idle: 2, ..Counts::default() });
 }
 
@@ -337,51 +303,6 @@ async fn an_agent_another_started_that_finishes_sends_the_person_no_notice() {
     assert_eq!(kinds, [NoticeKind::Finished], "the parent's own still says so");
 }
 
-/// A thread's pull request lifts it while it rests: a failed check needs the person, said in
-/// the pull request's words, and one ready to merge is to review. While the agent works it
-/// stays working.
-#[tokio::test]
-async fn a_resting_thread_s_pull_request_lifts_it() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (shell, worker) = (SessionId::new(), WorkerId::new());
-    let (tx, _rx) = mpsc::channel(8);
-    let lease = hub
-        .register(registration(worker, vec![summary(shell)]), [100, 64, 0, 7].into(), tx)
-        .unwrap();
-    let mut desk = Client::sit(&hub, "mac");
-    desk.at(&hub, Seat::Desk, true, Vec::new());
-    let pull = pull_seen;
-    let mine = row(Phase::Done, 1_000, Some(shell));
-    lease.handle(snapshot(vec![mine.clone()]));
-    hub.rank_ladder();
-    let rank = |rows: Vec<ThreadRow>| {
-        lease.handle(delta(rows));
-        hub.rank_ladder();
-        hub.ladder()
-    };
-    let at = |row: &ThreadRow| ThreadAt { worker, thread: row.id };
-    let with = |row: &ThreadRow, phase, stands| ThreadRow {
-        pull: Some(pull(stands)),
-        ..moved(row, phase, 2_000)
-    };
-
-    let ladder = rank(vec![with(&mine, Phase::Working, PullStands::ChecksFailed)]);
-    assert_eq!(ladder.rung(at(&mine)), Some(Rung::Working), "its agent may be on it");
-    let ladder = rank(vec![with(&mine, Phase::Done, PullStands::ChecksFailed)]);
-    assert_eq!(ladder.rung(at(&mine)), Some(Rung::NeedsYou));
-    let heard = desk.notices();
-    let said: Vec<(NoticeKind, &str)> = heard.iter().map(|n| (n.kind, n.text.as_str())).collect();
-    assert_eq!(
-        said,
-        [(NoticeKind::NeedsYou, "#42: lint failed")],
-        "work that ends on a failed check needs you"
-    );
-    let ladder = rank(vec![with(&mine, Phase::Done, PullStands::Ready)]);
-    assert_eq!(ladder.rung(at(&mine)), Some(Rung::ToReview), "ready to merge");
-    let ladder = rank(vec![with(&mine, Phase::Done, PullStands::Waiting)]);
-    assert_eq!(ladder.rung(at(&mine)), Some(Rung::Idle));
-}
-
 /// A pusher that answers every push with what it was given, and counts them.
 #[derive(Debug)]
 struct Answering(slopty_push::apns::Outcome, std::sync::atomic::AtomicUsize);
@@ -470,7 +391,6 @@ fn urgent(push: &Outgoing) -> bool {
 #[tokio::test]
 async fn needs_you_pushes_once_per_ask() {
     use slopty_proto::push::PushDevice;
-    use slopty_proto::thread::{Choice, Effect};
 
     let hub = Hub::new("server".to_owned(), Vec::new());
     let kept = hub.keep_phones(PushKept::default());
@@ -512,17 +432,7 @@ async fn needs_you_pushes_once_per_ask() {
     let thread = row(Phase::Working, 1_000, Some(shell));
     lease.handle(snapshot(vec![thread.clone()]));
     hub.rank_ladder();
-    let choice = |id: &str, effect| Choice {
-        id: id.to_owned(),
-        label: id.to_owned(),
-        effect,
-        scope: None,
-        folders: Vec::new(),
-        stops: false,
-    };
-    let mut needs = asking(moved(&thread, Phase::NeedsYou, 2_000), "Run cargo test?");
-    needs.requests[0].kind = Request::APPROVAL.to_owned();
-    needs.requests[0].options = vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)];
+    let needs = asking(moved(&thread, Phase::NeedsYou, 2_000), "Run cargo test?");
     phone.at(&hub, Seat::Handheld, false, Vec::new());
     rank(vec![needs.clone()]);
     assert!(pushes().is_empty(), "a phone listening on its link hears it there");
@@ -544,11 +454,6 @@ async fn needs_you_pushes_once_per_ask() {
     let pushed_body = body(push);
     assert_eq!(pushed_body.notice.kind, NoticeKind::NeedsYou);
     assert_eq!(pushed_body.notice.text, "Run cargo test?");
-    assert_eq!(
-        (&pushed_body.ask, pushed_body.picks.len(), pushed_body.quiet),
-        (&None, 0, false),
-        "a note answers nothing: it opens its session, where the terminal takes the answer"
-    );
     assert!(urgent(push));
     hub.rank_ladder();
     rank(vec![needs.clone()]);
@@ -561,16 +466,11 @@ async fn needs_you_pushes_once_per_ask() {
     assert_eq!(back[0].what, Sending::TakeBack(vec![about]));
     rank(vec![moved(&thread, Phase::Working, 4_500)]);
     assert!(pushes().is_empty(), "taken back once");
-    let mut question = asking(moved(&thread, Phase::NeedsYou, 4_600), "Which database?");
-    question.requests[0].kind = Request::QUESTION.to_owned();
-    question.requests[0].buttons = ["Postgres", "SQLite"]
-        .map(|label| NoteChoice { label: label.to_owned(), choice: format!("[{label}]") })
-        .to_vec();
+    let question = asking(moved(&thread, Phase::NeedsYou, 4_600), "Which database?");
     rank(vec![question]);
     let asked = pushes();
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert_eq!(body(&asked[0]).notice.text, "Which database?");
-    assert!(body(&asked[0]).picks.is_empty(), "no button of its own for an option");
     rank(vec![moved(&thread, Phase::Working, 4_700)]);
     assert_eq!(pushes().len(), 1, "taken back");
     mac.at(&hub, Seat::Desk, true, Vec::new());
@@ -588,7 +488,6 @@ async fn needs_you_pushes_once_per_ask() {
     let finished = pushes();
     assert_eq!(finished.len(), 1);
     assert_eq!(body(&finished[0]).notice.kind, NoticeKind::Finished);
-    assert_eq!(body(&finished[0]).ask, None);
     assert!(!urgent(&finished[0]));
 
     drop(phone);
@@ -984,7 +883,6 @@ async fn a_need_told_at_the_desk_is_pushed_once_the_person_leaves_it() {
     let [Sending::Note(note)] = left.as_slice() else { panic!("{left:?}") };
     assert_eq!(note.notice.about, Subject::Thread(ThreadAt { worker, thread: one.id }));
     assert_eq!(note.notice.kind, NoticeKind::NeedsYou);
-    assert_eq!(note.ask, None, "a note answers nothing");
     assert_eq!(desk.notices(), [], "the desk holds it already");
 
     desk.at(&hub, Seat::Desk, true, Vec::new());
@@ -1001,23 +899,6 @@ async fn a_need_told_at_the_desk_is_pushed_once_the_person_leaves_it() {
     assert_eq!(pushes().len(), 1, "a need that finds the person away");
 }
 
-/// `row` asking a plain yes or no of the person.
-fn approval(row: &ThreadRow, since: u64, title: &str) -> ThreadRow {
-    use slopty_proto::thread::{Choice, Effect};
-    let choice = |id: &str, effect| Choice {
-        id: id.to_owned(),
-        label: id.to_owned(),
-        effect,
-        scope: None,
-        folders: Vec::new(),
-        stops: false,
-    };
-    let mut needs = asking(moved(row, Phase::NeedsYou, since), title);
-    needs.requests[0].kind = Request::APPROVAL.to_owned();
-    needs.requests[0].options = vec![choice("yes", Effect::Allow), choice("no", Effect::Deny)];
-    needs
-}
-
 /// A thread first seen already needing the person (the server just started, or its worker
 /// linked again) is pushed to a pocketed phone, once, as a need that came while they were away
 /// would be. A server started again from the store does not push it again to a phone already
@@ -1032,13 +913,13 @@ async fn a_need_first_seen_is_pushed_to_a_phone_not_showing_it() {
     let phone = Client::sit(&hub, "phone");
     let client = ClientId::new();
     pocketed_phone(&hub, phone.seated.link(), client);
-    let needs = approval(&row(Phase::Working, 1_000, None), 1_000, "Run cargo test?");
+    let needs = asking(moved(&row(Phase::Working, 1_000, None), Phase::NeedsYou, 1_000), "Run?");
     let (tx, _rx) = mpsc::channel(8);
     let lease = hub.register(registration(worker, Vec::new()), [100, 64, 0, 9].into(), tx).unwrap();
     lease.handle(snapshot(vec![needs.clone()]));
     hub.rank_ladder();
     let first = pushed.try_recv().expect("first seen needing the person");
-    assert_eq!((body(&first).notice.kind, body(&first).quiet), (NoticeKind::NeedsYou, false));
+    assert_eq!(body(&first).notice.kind, NoticeKind::NeedsYou);
     hub.rank_ladder();
     assert!(pushed.try_recv().is_err(), "once");
 

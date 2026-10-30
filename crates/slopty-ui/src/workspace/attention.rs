@@ -152,7 +152,6 @@ impl Asking {
             body: self.body.clone(),
             info: self.route.info(),
             urgent: true,
-            ..Note::default()
         }
     }
 }

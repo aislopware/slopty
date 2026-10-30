@@ -7,9 +7,10 @@
 //!   on a stream of the thread's own by the actions after it, when the log still holds them in the
 //!   same epoch, else by a [`ThreadFrame::Snapshot`] of the last turns, then live
 //!   [`ThreadFrame::Actions`]. Older turns come by [`ThreadRequest::Page`].
-//! - **Intents.** Everything a client asks a thread to do is an [`Intent`] under a client-made
-//!   [`IntentId`]. The worker acts on an id once and answers each with an [`IntentDone`]; a repeat
-//!   gets the first answer again.
+//! - **Intents.** A start, and the person's own marks on a thread ([`Intent`]), go under a
+//!   client-made [`IntentId`]. The worker acts on an id once and answers each with an
+//!   [`IntentDone`]; a repeat gets the first answer again. Everything else is done in the agent's
+//!   own terminal.
 
 use std::collections::BTreeMap;
 
@@ -17,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use slopty_core::WallMs;
 
 use super::{
-    Action, AgentId, AskId, Cap, Changed, Choice, ContentRef, Cursor, Delivery, Drive, IntentId,
-    Item, ItemId, Link, Patch, Status, ThreadId, ThreadState, TreeRef, Turn, TurnId,
+    Action, AgentId, Changed, ContentRef, Cursor, Drive, IntentId, Item, ItemId, Link, Patch,
+    Status, ThreadId, ThreadState, TreeRef, Turn, TurnId,
 };
 use crate::search::Span;
 
@@ -133,21 +134,14 @@ pub struct Start {
     pub prompt: Option<String>,
     /// The model, by the agent's own id.
     pub model: Option<String>,
-    /// The mode it starts in, by the agent's own name
-    /// ([`Offers::modes`](super::Offers::modes)); the agent's own default when `None`. An
-    /// agent that names no modes refuses one.
+    /// The mode it starts in, by the agent's own name for it (Claude Code's permission mode,
+    /// Codex's approval policy); the agent's own default when `None`.
     pub mode: Option<String>,
-    /// How hard it starts thinking, by the agent's own name
-    /// ([`Offers::efforts`](super::Offers::efforts)); the agent's own default when `None`.
+    /// How hard it starts thinking, by the agent's own name for it; the agent's own default
+    /// when `None`.
     pub effort: Option<String>,
-    /// Files sent with the first message, as [`Intent::Send`]'s `attachments`.
-    pub attachments: Vec<String>,
     /// More arguments for the agent, checked by its adapter.
     pub args: Vec<String>,
-    /// The model's options it starts with, by option id to choice id
-    /// ([`Model::options`](super::Model::options)); the agent's own defaults for those left out.
-    #[serde(default)]
-    pub options: BTreeMap<String, String>,
     /// A git worktree of its own to work in: the worker makes it from the clone `cwd` is in
     /// (`.claude/worktrees/<name>` on branch `worktree-<name>`), or reopens it when it is
     /// there, and the agent starts in it where `cwd` stands in the clone. A start whose `cwd`
@@ -204,333 +198,31 @@ impl Setup {
     pub const TAIL: usize = 12;
 }
 
-/// Something a client asks a thread to do.
+/// The person's own mark on a thread: all a client asks of a thread once it runs.
+///
+/// Everything else is done in the agent's own terminal, which Slopty reads but never types into
+/// (`docs/decisions/agents.md`, "TUI-first"). Any thread takes either.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Intent {
-    /// Send a message.
-    Send {
-        /// What it says.
-        text: String,
-        /// When it goes.
-        delivery: Delivery,
-        /// Files sent with it: absolute paths on the worker, where an upload landed them
-        /// (`transfer::Dest::Attachment`, which needs no terminal) or where they already were.
-        /// Each adapter gives them to its agent in the agent's own form: a picture as a picture
-        /// where the agent takes one, any other file by its path.
-        attachments: Vec<String>,
-    },
-    /// Take back a message that has not gone yet.
-    Withdraw {
-        /// The intent that sent it.
-        pending: IntentId,
-    },
-    /// Change a message that has not gone yet.
-    Edit {
-        /// The intent that sent it.
-        pending: IntentId,
-        /// What it says now.
-        text: String,
-        /// The files that go with it now, as [`Intent::Send`] names them.
-        attachments: Vec<String>,
-    },
-    /// Send a queued message now: into the turn under way, as a steer would go, where the agent
-    /// takes one ([`Cap::STEER`]), else first after stopping that turn; with no turn under way it
-    /// starts one. Any thread that
-    /// holds messages takes it ([`Cap::QUEUE`]).
-    Promote {
-        /// The intent that sent it.
-        pending: IntentId,
-    },
-    /// Move a message that has not gone yet to another place in the queue: just before
-    /// `before`, or last when `None`. Refused for one on its way, or one kept for its moment.
-    Move {
-        /// The intent that sent it.
-        pending: IntentId,
-        /// The message it goes before; last when `None`.
-        before: Option<IntentId>,
-    },
-    /// Stop the turn under way.
-    Interrupt,
-    /// Answer a request.
-    Answer {
-        /// The request.
-        ask: AskId,
-        /// The choice taken ([`Choice::id`]), or the answers to a request's questions.
-        ///
-        /// One answer answers all of a request's questions
-        /// ([`detail::Answer::choice`](super::detail::Answer::choice)): the words typed, for
-        /// a lone question that offers nothing; otherwise a JSON list of
-        /// [`detail::Answer`](super::detail::Answer), one per question keyed by its text,
-        /// several picks of one question joined with `", "` and the words of one's own last
-        /// ([`detail::Answer::JOIN`](super::detail::Answer::JOIN)). Claude Code takes the list
-        /// as `AskUserQuestion`'s answers as they are; an adapter whose agent takes picks apart
-        /// splits them again ([`detail::Answer::parts`](super::detail::Answer::parts)).
-        choice: String,
-        /// Words to go with it, where the agent takes them.
-        message: Option<String>,
-    },
-    /// Switch the model, by the agent's own id.
-    SetModel {
-        /// The model.
-        model: String,
-    },
-    /// Switch the permission mode, by the agent's own name.
-    SetMode {
-        /// The mode.
-        mode: String,
-    },
-    /// Take a change into what the person has kept ([`ReviewScope::Kept`]): the whole file,
-    /// or the hunks named. Refused when the file or what was kept no longer is what the
-    /// review showed.
-    Keep(Pick),
-    /// Put a change back in the working tree as it was: the whole file, or the hunks named.
-    /// Refused when the file no longer is what the review showed.
-    Revert(Pick),
-    /// Branch a new thread off this one, sharing its turns through `after`, or all of them
-    /// ([`Cap::FORK`]). Answered with [`Outcome::Started`] and the new thread, whose
-    /// [`ThreadMeta::forked_from`](super::ThreadMeta::forked_from) says where it branched; this
-    /// one goes on as it was.
-    Fork {
-        /// The last turn the new thread shares with this one; `None` for all of them.
-        after: Option<TurnId>,
-    },
-    /// Set how hard the model thinks, by the agent's own name for the level
-    /// ([`ThreadMeta::efforts`](super::ThreadMeta::efforts)).
-    SetEffort {
-        /// The level.
-        effort: String,
-    },
-    /// Ask aside: branch the whole thread into a new one marked as its aside
-    /// ([`ThreadMeta::ASIDE_FACT`](super::ThreadMeta::ASIDE_FACT)), for a side question that
-    /// stays out of this thread and shares its context ([`Cap::FORK`]). Answered with
-    /// [`Outcome::Started`] and the aside, which takes the question as its first message.
-    Aside,
-    /// Close a thread for good: an aside put away, or the runs of a message the person did not
-    /// keep. Its agent ends and the worker forgets it; the agent's session stays wherever the
-    /// agent keeps it. A worktree an agent works in under its clone's `.claude/worktrees/` goes
-    /// too, changes not committed and all, unless another thread or a terminal works in it; its
-    /// branch goes only once every commit on it has landed, so no commit is lost.
-    Discard,
-    /// Keep an aside as an ordinary thread of its own: it shows from then on.
-    KeepAside,
-    /// Ask the thread's agent for its own review of a change ([`Cap::REVIEW`]): what differs
-    /// between two snapshots of its working tree, as a review showed them ([`Review::from`],
-    /// [`Review::to`]). The agent reviews through its own door, as the person's turn, and its
-    /// findings come back as its answer in the thread.
-    Review {
-        /// The old side.
-        from: TreeRef,
-        /// The new side.
-        to: TreeRef,
-    },
     /// The person saw the thread's turns through `turn`, on whichever device: its row's
     /// [`ThreadRow::seen`] moves up to it and never back, so every device reads one account of
-    /// what is unread. Any thread takes it.
+    /// what is unread.
     Seen {
         /// The last turn seen.
         turn: TurnId,
     },
-    /// What the person is writing to the thread and has not sent, as a device last kept it:
-    /// its row's [`ThreadRow::draft`], stamped by the worker, so another device takes it up.
-    /// Empty words clear it, leaving a tombstone with its time. Refused past
-    /// [`Draft::MAX_BYTES`]. Any thread takes it.
-    Draft {
-        /// The words.
-        text: String,
-    },
     /// The person's own name for the thread: what every list shows over the agent's own
     /// ([`ThreadRow::title`]), on every device. Empty words take it back. At most
-    /// [`Self::NAME_MAX`] characters. Any thread takes it.
+    /// [`Self::NAME_MAX`] characters.
     Name {
         /// The name.
         title: String,
     },
-    /// The person's own words for a message Slopty gave the agent in the agent's words (a
-    /// chip spelled out as a path or a tool's name): what every device shows for it, in the
-    /// queue and in the transcript ([`ThreadState::said`](super::ThreadState::said)). At most
-    /// [`Draft::MAX_BYTES`]; empty words take them back. Any thread takes it.
-    Said {
-        /// The intent that sent the message: its send, or the start whose first message it is.
-        message: IntentId,
-        /// The words as the person wrote them.
-        words: String,
-    },
-    /// End the agent's process, and with it every piece of background work it runs, keeping
-    /// its conversation to take up again ([`Cap::END`]): the stop for work a turn left running
-    /// (a subagent, a background command) and the last word on an agent that does not stop.
-    /// The thread is left exited and resumable, with a notice of how it ended.
-    End,
-    /// Choose one of the options the thread's model offers
-    /// ([`Model::options`](super::Model::options)), by their ids: Claude Code's fast mode
-    /// through its own command, Codex's service tier on its next turn ([`Cap::SET_OPTION`]).
-    SetOption {
-        /// The option ([`OptionOffer::id`](super::OptionOffer::id)).
-        option: String,
-        /// The choice ([`OptionChoice::id`](super::OptionChoice::id)).
-        choice: String,
-    },
-    /// Stop one piece of the agent's background work, by its id
-    /// ([`BackgroundTask::id`](super::BackgroundTask::id)): a command, a monitor, a loop, a
-    /// subagent ([`Cap::STOP_TASK`]). The one stop verb for background work; "stop all" is one
-    /// per running task. Its notice comes back as the task's row when the agent says it stopped.
-    StopTask {
-        /// The task.
-        task: String,
-    },
-    /// Move a call that blocks the turn into the background, where it goes on and the turn goes
-    /// on past it: the one started by `item`, or every one when `None` (the TUI's Ctrl+B)
-    /// ([`Cap::BACKGROUND`]).
-    Background {
-        /// The call.
-        item: Option<ItemId>,
-    },
-    /// Run `command` in the thread's folder on its machine, as the TUI's `!` does
-    /// ([`Cap::SHELL`]): while it runs it is a call of its own in the thread (kind
-    /// [`kind::EXEC`](super::kind::EXEC), its output streaming), and once it ends the command and
-    /// its output go to the agent as the person's next message, which the agent answers unless
-    /// its settings say it takes them without a reply.
-    Shell {
-        /// The command line, for the person's shell.
-        command: String,
-    },
-    /// Put the files back as they were before turn `turn` began, through the agent's own
-    /// checkpoints ([`Cap::REWIND`]). The conversation is branched there by
-    /// [`Intent::Fork`] with `after` the turn before, so "restore code and conversation" is the
-    /// two; what was put back comes as a [`Notice::REWOUND`](super::Notice::REWOUND) row.
-    Rewind {
-        /// The turn whose start the files go back to.
-        turn: TurnId,
-    },
-    /// Take the conversation back to before turn `turn` in this thread, through the agent's own
-    /// door ([`Cap::REWIND_CONVERSATION`]): the agent forgets the turn and every one after, and
-    /// they go from the thread ([`Action::Truncated`]). The chat stays
-    /// one chat, as the TUI's `/rewind` keeps it; an agent without the door is branched by
-    /// [`Intent::Fork`] instead.
-    RewindConversation {
-        /// The first turn taken back.
-        turn: TurnId,
-    },
-    /// Undo the last rewind: the thread's folder put back as it was just before it
-    /// ([`ThreadState::rewound`](super::ThreadState::rewound)), named by what the worker kept
-    /// then, so an undo of an older rewind is refused ([`Cap::REWIND`]).
-    Unrewind {
-        /// The folder before the rewind ([`Rewound::tree`](super::Rewound::tree)).
-        tree: TreeRef,
-    },
-    /// Add or remove one of the agent's permission rules, in the settings file of its scope
-    /// ([`Cap::RULES`]); the rules as the agent then lists them come back as
-    /// [`Action::RulesSet`].
-    Rule(super::RuleChange),
-    /// The person acted in a mod's surface ([`Cap::SURFACES`]).
-    Surface {
-        /// The surface ([`Surface::id`](super::Surface::id)).
-        surface: String,
-        /// The element acted on, by its id in the surface's tree; empty for the surface itself.
-        element: String,
-        /// What they did.
-        event: super::SurfaceEvent,
-    },
-    /// Ask the agent `question` beside the conversation ([`Cap::SIDE`]): it answers from the
-    /// conversation so far, without tools, never entering it and never stopping the turn under
-    /// way (Claude Code's `/btw`). The question and its answer come as
-    /// [`Action::Side`] under this intent's id.
-    Side {
-        /// The question.
-        question: String,
-    },
-    /// Connect one of the agent's MCP servers again, by its name
-    /// ([`McpServer::name`](super::McpServer::name)): one that failed, dropped or still waits
-    /// ([`Cap::MCP_SERVERS`]). Done once it went to the agent; a reconnect that fails comes
-    /// back as a notice with the agent's reason, and the servers as the agent then lists them
-    /// as [`Action::McpServersSet`]. Only the person's word sends it: Slopty never reconnects
-    /// on its own.
-    McpReconnect {
-        /// The server.
-        server: String,
-    },
-    /// Turn one of the agent's MCP servers on or off, by its name ([`Cap::MCP_SERVERS`]), as
-    /// the TUI's `/mcp` does: the agent keeps the choice in its own settings.
-    McpEnable {
-        /// The server.
-        server: String,
-        /// On, or off.
-        enabled: bool,
-    },
-}
-
-/// A file's change as a review showed it, or some of its hunks.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Pick {
-    /// The file, from the repository's root.
-    pub path: String,
-    /// Its blob on the review's old side ([`FileDiff::from`]).
-    pub from: Option<String>,
-    /// Its blob on the new side, as the review showed it ([`FileDiff::to`]): the stamp the
-    /// worker checks the file against.
-    pub stamp: Option<String>,
-    /// The hunks, by their place in [`FileDiff::patch`]; empty for the whole file.
-    pub hunks: Vec<u32>,
-    /// Where the file was on the old side when the review found it renamed
-    /// ([`FileDiff::old_path`]); `None` otherwise. Keeping a rename takes the old path away;
-    /// putting it back whole puts the file back there.
-    pub old_path: Option<String>,
 }
 
 impl Intent {
     /// The most characters a thread's name ([`Self::Name`]) holds.
     pub const NAME_MAX: usize = 200;
-
-    /// The capability a thread needs for this intent; none for closing it ([`Self::Discard`])
-    /// or for the person's own marks on it ([`Self::Seen`], [`Self::Draft`], [`Self::Name`]),
-    /// which the worker
-    /// does whatever its agent can.
-    #[must_use]
-    pub const fn needs(&self) -> Option<&'static str> {
-        Some(match self {
-            Self::Discard
-            | Self::Seen { .. }
-            | Self::Draft { .. }
-            | Self::Name { .. }
-            | Self::Said { .. } => {
-                return None;
-            }
-            Self::Send { delivery: Delivery::Steer, .. } => Cap::STEER,
-            Self::Send { delivery: Delivery::At { .. }, .. } => Cap::SCHEDULE,
-            Self::Send { delivery: Delivery::Queue, .. }
-            | Self::Withdraw { .. }
-            | Self::Edit { .. }
-            | Self::Promote { .. }
-            | Self::Move { .. } => Cap::QUEUE,
-            Self::Interrupt => Cap::INTERRUPT,
-            Self::End => Cap::END,
-            Self::SetOption { .. } => Cap::SET_OPTION,
-            Self::Answer { .. } => Cap::APPROVALS,
-            Self::SetModel { .. } => Cap::SET_MODEL,
-            Self::SetMode { .. } => Cap::SET_MODE,
-            Self::SetEffort { .. } => Cap::SET_EFFORT,
-            Self::Fork { .. } | Self::Aside | Self::KeepAside => Cap::FORK,
-            Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
-            Self::Review { .. } => Cap::REVIEW,
-            Self::StopTask { .. } => Cap::STOP_TASK,
-            Self::Background { .. } => Cap::BACKGROUND,
-            Self::Shell { .. } => Cap::SHELL,
-            Self::Rewind { .. } | Self::Unrewind { .. } => Cap::REWIND,
-            Self::RewindConversation { .. } => Cap::REWIND_CONVERSATION,
-            Self::Rule(_) => Cap::RULES,
-            Self::Surface { .. } => Cap::SURFACES,
-            Self::Side { .. } => Cap::SIDE,
-            Self::McpReconnect { .. } | Self::McpEnable { .. } => Cap::MCP_SERVERS,
-        })
-    }
-
-    /// The answer to this intent from an agent that cannot do it: the capability it lacks.
-    #[must_use]
-    pub fn unsupported(&self) -> Outcome {
-        self.needs().map_or_else(
-            || Outcome::Refused { reason: "not something this agent does".to_owned() },
-            |cap| Outcome::Unsupported { cap: Cap::named(cap) },
-        )
-    }
 }
 
 /// The worker's answer to an intent. A repeat of an id is answered with the first answer.
@@ -547,8 +239,6 @@ pub struct IntentDone {
 pub enum Outcome {
     /// Done.
     Done,
-    /// Taken, and held on the worker until its moment: a queued message, a send behind a draft.
-    Accepted,
     /// A thread was started.
     Started {
         /// It.
@@ -558,11 +248,6 @@ pub enum Outcome {
     Refused {
         /// Why.
         reason: String,
-    },
-    /// The thread's agent cannot do it through Slopty.
-    Unsupported {
-        /// What it lacks.
-        cap: Cap,
     },
     /// A start's worktree was made, but the repository's setup in it failed: the worktree is
     /// kept, and the start can be tried again, or made without the setup
@@ -619,18 +304,11 @@ pub enum ThreadFrame {
     },
 }
 
-/// The span of work a review covers: a diff between two trees of the working tree.
+/// The span of work a review covers: a diff between two trees of a repository.
 ///
-/// "Now" is one taken for the review. A thread's spans are between its snapshots
-/// ([`Action::Snapshot`]); [`Self::WorkingTree`] is any folder's, a thread's or none.
+/// "Now" is one taken for the review, of any folder's working tree, a thread's or none.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ReviewScope {
-    /// One turn: from its start to its end, or to now while it runs.
-    Turn(TurnId),
-    /// From a turn's start to now.
-    Since(TurnId),
-    /// From what the person has kept ([`Intent::Keep`]) to now; what is left to review.
-    Kept,
     /// The working tree now, new files and all, against a commit of its repository
     /// (`crate::git::GitOp::Changes` asks it of a folder with no thread).
     WorkingTree(Against),
@@ -689,7 +367,7 @@ pub struct FileDiff {
     /// Its mode on each side, when the two differ (an executable bit set, a file become a
     /// link); `None` when they are the same or a side is absent.
     pub modes: Option<Modes>,
-    /// Its hunks, the ones [`Pick::hunks`] count; none unless it is [`FileKind::Text`].
+    /// Its hunks, in order; none unless it is [`FileKind::Text`].
     pub patch: Patch,
 }
 
@@ -850,8 +528,6 @@ pub struct ThreadRow {
     pub title: String,
     /// Where it is.
     pub status: Status,
-    /// Its open requests, as cards a list can answer.
-    pub requests: Vec<RequestCard>,
     /// The last line the agent wrote.
     pub last_line: Option<String>,
     /// What it is doing now: the title of its newest tool call that runs or waits on the
@@ -869,16 +545,8 @@ pub struct ThreadRow {
     pub parent: Option<Link>,
     /// How Slopty reaches it.
     pub drive: Drive,
-    /// What it can do through Slopty.
-    pub caps: Vec<Cap>,
     /// Its open facts.
     pub facts: BTreeMap<String, String>,
-    /// Whether its tree holds changes the person has not kept ([`super::Action::ToReview`]).
-    pub to_review: bool,
-    /// Its branch's pull request, as the worker last read it ([`super::Action::PullSeen`]).
-    pub pull: Option<PullSeen>,
-    /// Its meters: model, mode, context, cost, the plan's rate windows.
-    pub meters: super::Meters,
     /// Its latest turn that ended, so a device that was not linked when it ended still knows.
     pub ended: Option<TurnEnded>,
     /// When its turn under way began, while one is: its time at work runs from here, whatever
@@ -887,9 +555,6 @@ pub struct ThreadRow {
     /// The last turn the person has seen, on any device ([`Intent::Seen`]): a turn in
     /// [`Self::ended`] past it is unread. [`TurnId::BEFORE`] until one is seen.
     pub seen: TurnId,
-    /// What the person was writing to it and has not sent, as a device last kept it
-    /// ([`Intent::Draft`]); empty words once cleared; none before any was kept.
-    pub draft: Option<Draft>,
     /// When the worker last heard its agent alive during a turn, by the worker's clock
     /// ([`super::Action::Lease`]): a client shows a turn as running only while this is fresh,
     /// and none before any turn was leased.
@@ -923,48 +588,6 @@ pub struct TurnEnded {
     pub answered: bool,
 }
 
-/// What the person was writing to a thread and has not sent ([`ThreadRow::draft`]).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Draft {
-    /// The words; empty for words cleared at [`Self::at_ms`], sent or wiped, so a device still
-    /// showing what it last shared clears them too rather than keeping them.
-    pub text: String,
-    /// When a device last kept them, on the worker's clock: a device holding words of its own
-    /// keeps the newer.
-    pub at_ms: WallMs,
-}
-
-impl Draft {
-    /// The longest draft a worker keeps, in bytes: the row travels in every table frame. A
-    /// longer one stays on the device that has it.
-    pub const MAX_BYTES: usize = 16 * 1024;
-}
-
-/// A thread's pull request in a line: what a list shows of it and what the attention ladder
-/// reads, the worker's summary of the forge's own answer ([`crate::git::PullStatus`]).
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct PullSeen {
-    /// Where it lives, which says what it is called and how its number is written.
-    pub forge: crate::git::Forge,
-    /// Its number.
-    pub number: u32,
-    /// Its page.
-    pub url: String,
-    /// Its title.
-    pub title: String,
-    /// The branch it merges into, as the forge names it: what its whole change is read
-    /// against.
-    pub base: String,
-    /// Where it stands.
-    pub stands: PullStands,
-    /// How many of its checks failed.
-    pub failed: u32,
-    /// The first of them, by name.
-    pub failed_first: Option<String>,
-    /// How many still run.
-    pub running: u32,
-}
-
 /// Where a pull request stands, as the person reads it: the first that holds, in this order
 /// ([`crate::git::PullStatus::standing`]).
 ///
@@ -992,130 +615,6 @@ pub enum PullStands {
     Waiting,
     /// Nothing stands between it and a merge.
     Ready,
-}
-
-impl PullStands {
-    /// Whether it waits on the person: a check failed, changes were asked for, or it
-    /// conflicts.
-    #[must_use]
-    pub const fn needs_you(self) -> bool {
-        matches!(self, Self::Conflicted | Self::ChecksFailed | Self::ChangesRequested)
-    }
-}
-
-impl PullSeen {
-    /// Its number as its forge writes it: `#42`, a merge request's `!42`.
-    #[must_use]
-    pub fn named(&self) -> String {
-        format!("{}{}", self.forge.mark(), self.number)
-    }
-
-    /// What it says of itself in a line: "#42: lint failed", "!42 is ready to merge".
-    #[must_use]
-    pub fn line(&self) -> String {
-        let n = self.named();
-        match self.stands {
-            PullStands::Merged => format!("{n} merged"),
-            PullStands::Closed => format!("{n} closed"),
-            PullStands::Draft => format!("{n} is a draft"),
-            PullStands::Conflicted => format!("{n} conflicts with its base"),
-            PullStands::ChecksFailed => match (&self.failed_first, self.failed) {
-                (Some(first), 1) => format!("{n}: {first} failed"),
-                (Some(first), more) => {
-                    format!("{n}: {first} and {} more failed", more.saturating_sub(1))
-                }
-                (None, more) => format!("{n}: {more} checks failed"),
-            },
-            PullStands::ChangesRequested => format!("{n}: changes requested"),
-            PullStands::Running => format!("{n}: checks running"),
-            PullStands::Waiting => format!("{n} waits on a review"),
-            PullStands::Ready => format!("{n} is ready to merge"),
-        }
-    }
-}
-
-/// An open request, small enough for a list, a notification or the inbox to answer.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct RequestCard {
-    /// The request.
-    pub id: AskId,
-    /// The call it is about.
-    pub item: Option<ItemId>,
-    /// What it asks ([`super::Request::kind`]).
-    pub kind: String,
-    /// In a line.
-    pub title: String,
-    /// The answers the agent offers.
-    pub options: Vec<Choice>,
-    /// The answers a note offers as buttons of their own ([`NoteChoice::of`]); none for a
-    /// request that is not a question that small.
-    pub buttons: Vec<NoteChoice>,
-    /// When it opened.
-    pub opened_ms: WallMs,
-    /// Only the person at its card answers it ([`super::Request::needs_presence`]): a note
-    /// offers no answer of it.
-    #[serde(default)]
-    pub needs_presence: bool,
-}
-
-/// An answer a note offers as a button of its own: one of the options of a question that asks
-/// one thing and takes one of a few answers.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct NoteChoice {
-    /// What the button says: the option's label.
-    pub label: String,
-    /// What pressing it answers the request with ([`Intent::Answer`]'s `choice`).
-    pub choice: String,
-}
-
-impl NoteChoice {
-    /// The most options a note offers as buttons: what a notification's actions show.
-    pub const MAX: usize = 4;
-
-    /// The buttons of `request`: one per option of a question that asks one thing, takes one
-    /// answer and offers at most [`Self::MAX`], each answering with that option alone, as the
-    /// question's own dialog would. None for anything else, which is opened or replied to, and
-    /// none for a request only the person at its card answers.
-    #[must_use]
-    pub fn of(request: &super::Request) -> Vec<Self> {
-        if request.needs_presence {
-            return Vec::new();
-        }
-        let [question] = request.questions.as_slice() else { return Vec::new() };
-        if request.kind != super::Request::QUESTION
-            || question.multi_select
-            || question.options.is_empty()
-            || question.options.len() > Self::MAX
-        {
-            return Vec::new();
-        }
-        question
-            .options
-            .iter()
-            .map(|offered| {
-                let answer = super::detail::Answer {
-                    question: question.text.clone(),
-                    answer: offered.label.clone(),
-                };
-                let choice = super::detail::Answer::choice(&request.questions, &[answer]);
-                Self { label: offered.label.clone(), choice }
-            })
-            .collect()
-    }
-}
-
-impl RequestCard {
-    /// Whether it is a yes or no that "Allow" and "Deny" answer whole, where it is shown: an
-    /// approval offering a plain allow and a deny ([`super::once`]), which does not need the
-    /// person at its card. A note's buttons, on the phone or in the app, answer only such a
-    /// request.
-    #[must_use]
-    pub fn answerable(&self) -> bool {
-        !self.needs_presence
-            && self.kind == super::Request::APPROVAL
-            && super::once(&self.options, true).is_some()
-            && super::once(&self.options, false).is_some()
-    }
 }
 
 /// Past sessions: the answer to [`ThreadRequest::Sessions`].

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use slopty_proto::screen::{DisplayInfo, VideoCodec};
 use slopty_proto::server::{Fact, Facts, Form, InstalledAgent, Os, WorkerCaps};
-use slopty_proto::thread::{AgentId, Offers};
+use slopty_proto::thread::AgentId;
 use tokio::sync::watch;
 
 /// How often permissions and displays are looked at: TCC and display changes come with no
@@ -127,7 +127,7 @@ pub fn agents_in(agents: &Facts) -> Vec<InstalledAgent> {
                 Fact::Text(version) => version.clone(),
                 _ => String::new(),
             };
-            Some(InstalledAgent { agent: AgentId::named(name), version, offers: Offers::default() })
+            Some(InstalledAgent { agent: AgentId::named(name), version })
         })
         .collect()
 }

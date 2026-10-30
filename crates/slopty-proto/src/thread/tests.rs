@@ -6,8 +6,6 @@ use super::*;
 
 fn meta() -> ThreadMeta {
     ThreadMeta {
-        modes: Vec::new(),
-        efforts: Vec::new(),
         id: ThreadId::from_uuid(Uuid::from_u128(1)),
         agent: AgentId::named(AgentId::CLAUDE_CODE),
         agent_version: "2.1.286".to_owned(),
@@ -16,10 +14,7 @@ fn meta() -> ThreadMeta {
         title: "Fix the build".to_owned(),
         parent: None,
         origin: ThreadMeta::PERSON.to_owned(),
-        forked_from: None,
         drive: Drive::named(Drive::DRIVEN),
-        caps: vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)],
-        models: Vec::new(),
         facts: BTreeMap::new(),
         created_ms: WallMs::from_millis(1),
     }
@@ -35,8 +30,6 @@ fn turn(n: u32) -> Turn {
         usage: Usage::default(),
         models: Vec::new(),
         changed: Changed { added: n, removed: 1 },
-        before: None,
-        after: None,
     }
 }
 
@@ -66,33 +59,6 @@ fn tool(id: &str, state: ToolState) -> Item {
             child: None,
             ended_ms: None,
         })),
-    }
-}
-
-fn request(id: &str) -> Request {
-    Request {
-        id: AskId(id.to_owned()),
-        item: None,
-        kind: Request::APPROVAL.to_owned(),
-        title: "Run cargo test?".to_owned(),
-        text: None,
-        options: vec![Choice {
-            id: "allow".to_owned(),
-            label: "Allow".to_owned(),
-            effect: Effect::Allow,
-            scope: None,
-            folders: Vec::new(),
-            stops: false,
-        }],
-        questions: Vec::new(),
-        proposed: None,
-        schema_json: None,
-        url: None,
-        reason: None,
-        state: RequestState::Open,
-        opened_ms: WallMs::ZERO,
-        until_ms: None,
-        needs_presence: false,
     }
 }
 
@@ -158,47 +124,16 @@ fn a_tool_call_moves_forward_only() {
     assert!(ToolState::Streaming.may_become(&ToolState::Completed));
 }
 
-/// Requests open and settle; the row carries only the open ones; settled ones are kept up to a
-/// bound, oldest dropped first.
+/// A rewind drops the turns after it, and their items.
 #[test]
-fn requests_settle_and_the_settled_are_bounded() {
-    let mut state = run(&[Action::RequestOpened(Box::new(request("r0")))]);
-    assert_eq!(state.row(WallMs::ZERO).requests.len(), 1);
-    let by = Answerer { client: None, name: "terminal".to_owned() };
-    let answered = RequestState::Answered { by, choice: "allow".to_owned() };
-    state.apply(&Action::RequestResolved { id: AskId("r0".to_owned()), state: answered.clone() });
-    assert!(state.row(WallMs::ZERO).requests.is_empty(), "no open request");
-    assert_eq!(state.requests.first().map(|r| &r.state), Some(&answered), "who answered");
-    let extra = RESOLVED_KEPT.saturating_add(3);
-    for n in 1..=extra {
-        let id = AskId(format!("r{n}"));
-        state.apply(&Action::RequestOpened(Box::new(request(&id.0))));
-        state.apply(&Action::RequestResolved { id, state: RequestState::Withdrawn });
-    }
-    state.apply(&Action::RequestOpened(Box::new(request("open"))));
-    assert_eq!(state.requests.len(), RESOLVED_KEPT.saturating_add(1));
-    assert_eq!(state.requests.first().map(|r| r.id.0.as_str()), Some("r4"), "oldest dropped");
-    assert_eq!(state.open_requests().count(), 1);
-}
-
-/// A rewind drops the turns after it, and their items; snapshots land on their turn's edge and
-/// stay there when the agent tells the turn again.
-#[test]
-fn truncation_and_snapshots() {
+fn truncation_drops_the_turns_after_it() {
     let mut state = run(&[
         Action::ItemStarted(text("pre", 0, "resumed")),
         Action::TurnStarted(turn(1)),
         Action::ItemStarted(text("a", 1, "one")),
         Action::TurnStarted(turn(2)),
         Action::ItemStarted(text("b", 2, "two")),
-        Action::Snapshot { turn: TurnId(2), edge: Edge::Before, tree: TreeRef("t2".to_owned()) },
     ]);
-    state.apply(&Action::TurnStarted(turn(2)));
-    assert_eq!(
-        state.turn(TurnId(2)).and_then(|t| t.before.clone()),
-        Some(TreeRef("t2".to_owned())),
-        "a turn told again keeps its snapshot"
-    );
     state.apply(&Action::Truncated { after: Some(TurnId(1)) });
     let ids: Vec<&str> = state.items.iter().map(|i| i.id.0.as_str()).collect();
     assert_eq!(ids, ["pre", "a"]);
@@ -278,9 +213,9 @@ fn a_row_says_what_runs_now() {
 }
 
 /// A row says the latest turn once it ended, how long it ran and whether the agent answered
-/// it; the person's seen mark only moves up, and their draft is kept until cleared.
+/// it; the person's seen mark only moves up.
 #[test]
-fn a_row_carries_the_turn_that_ended_what_was_seen_and_the_draft() {
+fn a_row_carries_the_turn_that_ended_and_what_was_seen() {
     let ended = |n: u32, state: TurnState| Action::TurnEnded {
         turn: TurnId(n),
         state,
@@ -302,7 +237,7 @@ fn a_row_carries_the_turn_that_ended_what_was_seen_and_the_draft() {
             answered: true,
         })
     );
-    assert_eq!((row.seen, row.draft), (TurnId::BEFORE, None));
+    assert_eq!(row.seen, TurnId::BEFORE);
     state.apply(&Action::TurnStarted(turn(2)));
     state.apply(&ended(2, TurnState::Interrupted));
     assert_eq!(
@@ -313,12 +248,37 @@ fn a_row_carries_the_turn_that_ended_what_was_seen_and_the_draft() {
     state.apply(&Action::Seen(TurnId(2)));
     state.apply(&Action::Seen(TurnId(1)));
     assert_eq!(state.row(WallMs::ZERO).seen, TurnId(2), "a seen mark never moves back");
-    let draft = wire::Draft { text: "and the README".to_owned(), at_ms: WallMs::from_millis(5) };
-    state.apply(&Action::DraftSet(draft.clone()));
-    assert_eq!(state.row(WallMs::ZERO).draft, Some(draft));
-    let cleared = wire::Draft { text: String::new(), at_ms: WallMs::from_millis(9) };
-    state.apply(&Action::DraftSet(cleared.clone()));
-    assert_eq!(state.row(WallMs::ZERO).draft, Some(cleared), "a tombstone with its time");
+}
+
+/// The prompt box is what the agent last said of it, a picture pasted in and all, and nothing
+/// once it holds nothing; the queue is the last list said, in its order. Neither touches the
+/// turns.
+#[test]
+fn the_prompt_box_and_the_queue_are_the_last_said() {
+    let image = Image {
+        digest: "ab".repeat(32),
+        media_type: "image/png".to_owned(),
+        bytes: 68,
+        width: 1,
+        height: 1,
+        at: ContentRef("draft-image:2.png".to_owned()),
+    };
+    let draft = Draft {
+        text: "see [Image #2]".to_owned(),
+        images: vec![DraftImage { n: 2, image }],
+        at_ms: WallMs::from_millis(5),
+    };
+    let queued = vec!["first".to_owned(), "then this".to_owned()];
+    let mut state = run(&[
+        Action::TurnStarted(turn(1)),
+        Action::DraftSet(Some(draft.clone())),
+        Action::QueuedSet(queued.clone()),
+    ]);
+    assert_eq!((state.draft.as_ref(), state.queued.as_slice()), (Some(&draft), queued.as_slice()));
+    assert_eq!(state.turns.len(), 1);
+    state.apply(&Action::DraftSet(None));
+    state.apply(&Action::QueuedSet(vec!["then this".to_owned()]));
+    assert_eq!((state.draft, state.queued), (None, vec!["then this".to_owned()]));
 }
 
 /// Appends split one text at chosen char boundaries.
@@ -365,10 +325,10 @@ proptest! {
         let mut actions = vec![
             Action::TurnStarted(turn(1)),
             Action::ItemStarted(text("a", 1, "")),
-            Action::RequestOpened(Box::new(request("r"))),
+            Action::QueuedSet(vec!["next".to_owned()]),
         ];
         actions.extend(chunked("a", &words, &cuts));
-        actions.push(Action::RequestResolved { id: AskId("r".to_owned()), state: RequestState::Released });
+        actions.push(Action::QueuedSet(Vec::new()));
         actions.push(Action::TurnEnded {
             turn: TurnId(1), state: TurnState::Complete, usage: Usage::default(),
             ended_ms: WallMs::from_millis(9),
@@ -484,10 +444,10 @@ fn a_subagents_thread_is_named_by_its_session_and_agent() {
     assert_eq!(main.subagent("a1b2").to_string(), "1fc1bce5-1343-8f7f-9a36-75875446afad");
 }
 
-/// What a resting thread left that asks for a look (changes to review, its error) ranks it
-/// above one at rest. Every rung is counted, and the ladder runs down to rest.
+/// A thread that stopped on an error ranks above one at rest. Every rung is counted, and the
+/// ladder runs down to rest.
 #[test]
-fn what_a_resting_thread_left_ranks_it_above_rest() {
+fn a_failed_thread_ranks_above_rest() {
     use attention::{Counts, Rung};
     let mut state = ThreadState::new(meta());
     state.status = Status {
@@ -500,9 +460,6 @@ fn what_a_resting_thread_left_ranks_it_above_rest() {
     assert_eq!(rung(&state), Rung::Idle);
     assert_eq!(Rung::Idle.word(), None);
     assert_eq!(Rung::Waiting.word(), Some("Background work"), "its own work, not the person");
-    state.to_review = true;
-    assert_eq!(rung(&state), Rung::ToReview);
-    state.to_review = false;
     state.status.phase = Phase::Failed;
     assert_eq!(rung(&state), Rung::Failed);
     assert_eq!(Rung::DOWN.last(), Some(&Rung::Idle));
@@ -510,7 +467,7 @@ fn what_a_resting_thread_left_ranks_it_above_rest() {
     for rung in Rung::DOWN {
         counts.count(rung);
     }
-    assert_eq!((counts.on(Rung::Idle), counts.total()), (1, 6));
+    assert_eq!((counts.on(Rung::Idle), counts.total()), (1, 5));
 }
 
 /// The screens an agent drives are what the worker last said, and none once it says none.
@@ -530,35 +487,6 @@ fn the_screens_are_the_last_said() {
     assert_eq!(state.screens, []);
 }
 
-/// A message for now steers where the agent can, and queues only where it cannot steer but can
-/// queue; one for after the turn queues wherever the agent queues. An agent that says neither is
-/// sent a steer for its worker to answer.
-#[test]
-fn a_message_goes_now_or_after_the_turn_by_what_the_agent_can_do() {
-    let with =
-        |caps: &[&str]| ThreadMeta { caps: caps.iter().map(|c| Cap::named(c)).collect(), ..meta() };
-    let both = with(&[Cap::STEER, Cap::QUEUE]);
-    assert_eq!(
-        (both.delivery_now(), both.delivery_after_turn()),
-        (Delivery::Steer, Delivery::Queue)
-    );
-    let queues = with(&[Cap::QUEUE, Cap::INTERRUPT]);
-    assert_eq!(
-        (queues.delivery_now(), queues.delivery_after_turn()),
-        (Delivery::Queue, Delivery::Queue)
-    );
-    let steers = with(&[Cap::STEER]);
-    assert_eq!(
-        (steers.delivery_now(), steers.delivery_after_turn()),
-        (Delivery::Steer, Delivery::Steer)
-    );
-    let neither = with(&[]);
-    assert_eq!(
-        (neither.delivery_now(), neither.delivery_after_turn()),
-        (Delivery::Steer, Delivery::Steer)
-    );
-}
-
 /// A blob is named as `blob:` and its id, and read back; any other content names none.
 #[test]
 fn a_content_ref_names_a_blob() {
@@ -570,63 +498,8 @@ fn a_content_ref_names_a_blob() {
     assert_eq!(ContentRef("blob:".to_owned()).blob_id(), None, "no id");
 }
 
-fn note(key: &str, text: &str) -> AgentNote {
-    AgentNote {
-        key: key.to_owned(),
-        text: text.to_owned(),
-        priority: "low".to_owned(),
-        color: None,
-        at_ms: WallMs::ZERO,
-        until_ms: None,
-    }
-}
-
-/// A notification takes the place of one of its key, and only the newest are kept.
-#[test]
-fn notifications_keep_one_per_key_and_the_newest() {
-    let mut actions = vec![Action::Notified(note("mcp", "1 MCP server failed"))];
-    actions.push(Action::Notified(note("mcp", "2 MCP servers failed")));
-    for n in 0..AgentNote::KEPT {
-        actions.push(Action::Notified(note(&format!("k{n}"), "x")));
-    }
-    let state = run(&actions);
-    assert_eq!(state.notes.len(), AgentNote::KEPT);
-    assert!(state.notes.iter().all(|n| n.key != "mcp"), "the oldest went: {:?}", state.notes);
-    let state = run(&[
-        Action::Notified(note("mcp", "1 MCP server failed")),
-        Action::Notified(note("ctx", "Context low")),
-        Action::Notified(note("mcp", "2 MCP servers failed")),
-    ]);
-    let words: Vec<&str> = state.notes.iter().map(|n| n.text.as_str()).collect();
-    assert_eq!(words, ["Context low", "2 MCP servers failed"]);
-}
-
-/// A side question's answer takes the place of its question, and only the newest
-/// [`SideExchange::KEPT`] are kept.
-#[test]
-fn side_questions_keep_their_answers_and_the_newest() {
-    let asked = |n: u128, question: &str| SideExchange {
-        intent: IntentId::from_uuid(Uuid::from_u128(n)),
-        question: question.to_owned(),
-        answer: None,
-        failed: None,
-        at_ms: WallMs::ZERO,
-    };
-    let answered = SideExchange { answer: Some("In codec.rs".to_owned()), ..asked(1, "Where?") };
-    let state = run(&[Action::Side(asked(1, "Where?")), Action::Side(answered.clone())]);
-    assert_eq!(state.side, [answered], "one exchange, answered");
-    assert!(!state.side[0].pending());
-    let actions: Vec<Action> = (0..=SideExchange::KEPT as u128)
-        .map(|n| Action::Side(asked(n, &format!("q{n}"))))
-        .collect();
-    let state = run(&actions);
-    assert_eq!(state.side.len(), SideExchange::KEPT);
-    assert_eq!(state.side[0].question, "q1", "the oldest went");
-    assert!(state.side.iter().all(SideExchange::pending));
-}
-
 /// A call's note lands only on a call the state holds, goes with it, and travels with the
-/// window and the page it is in; a task's output lands on that task alone.
+/// window and the page it is in.
 #[test]
 fn call_notes_follow_their_calls() {
     let said = CallNote { said: Some("exit code 2".to_owned()), ..CallNote::default() };
@@ -636,20 +509,8 @@ fn call_notes_follow_their_calls() {
         Action::ItemStarted(tool("t1", ToolState::Completed)),
         noted("t1"),
         noted("nowhere"),
-        Action::TasksSet(vec![BackgroundTask::new(
-            "b1",
-            BackgroundTask::SHELL,
-            "dev",
-            WallMs::ZERO,
-        )]),
-        Action::TaskOutput { task: "b1".to_owned(), output: Clipped::whole("ready") },
-        Action::TaskOutput { task: "b9".to_owned(), output: Clipped::whole("nobody") },
     ]);
     assert_eq!(state.calls.keys().map(|k| k.0.as_str()).collect::<Vec<_>>(), ["t1"]);
-    assert_eq!(
-        state.tasks.first().and_then(|t| t.output.as_ref()).map(|o| o.text.as_str()),
-        Some("ready")
-    );
     let page = state.page(TurnId(2), 5);
     assert_eq!(page.calls.len(), 1, "the page carries its calls' notes");
     let mut fresh = ThreadState::new(meta());
@@ -687,68 +548,11 @@ fn a_call_note_keeps_what_a_later_one_leaves_unsaid() {
     assert_eq!(said, Some("exit code 2"), "a later word replaces an earlier one");
 }
 
-/// A surface is set in place by its id and goes by it.
+/// An item's asset names its item and name, and nothing else reads as one.
 #[test]
-fn surfaces_replace_by_id_and_go() {
-    let surface = |id: &str, text: &str| Surface {
-        id: id.to_owned(),
-        kind: Surface::STATUS.to_owned(),
-        plugin: "p".to_owned(),
-        title: None,
-        text: Some(text.to_owned()),
-        tree: String::new(),
-        until_ms: None,
-    };
-    let state = run(&[
-        Action::SurfaceSet(surface("a", "one")),
-        Action::SurfaceSet(surface("b", "two")),
-        Action::SurfaceSet(surface("a", "three")),
-        Action::SurfaceGone { id: "b".to_owned() },
-    ]);
-    assert_eq!(state.surfaces, [surface("a", "three")]);
-}
-
-/// A dialog's kind is read from its request's kind; an item's asset names its item and name,
-/// and nothing else reads as one.
-#[test]
-fn dialogs_and_item_assets_read_back() {
-    let mut dialog = request("d1");
-    dialog.kind = format!("{}goal_proposal", Request::DIALOG);
-    assert_eq!(dialog.dialog_kind(), Some("goal_proposal"));
-    assert_eq!(request("r").dialog_kind(), None);
+fn item_assets_read_back() {
     let asset = ContentRef::item_asset("toolu_1", "models/a.glb");
     assert_eq!(asset.item_asset_of(), Some(("toolu_1", "models/a.glb")));
     assert_eq!(ContentRef("item-asset:toolu_1".to_owned()).item_asset_of(), None);
     assert_eq!(ContentRef::blob("abc").item_asset_of(), None);
-}
-
-/// The MCP servers the agent last listed replace the ones before, and a server off or connected
-/// offers no reconnect.
-#[test]
-fn mcp_servers_are_replaced_whole_and_offer_a_reconnect_only_when_down() {
-    let server = |name: &str, status: &str| McpServer {
-        name: name.to_owned(),
-        status: status.to_owned(),
-        error: None,
-        source: None,
-    };
-    let state = run(&[
-        Action::McpServersSet(vec![
-            server("a", McpServer::FAILED),
-            server("b", McpServer::PENDING),
-        ]),
-        Action::McpServersSet(vec![server("a", McpServer::CONNECTED)]),
-    ]);
-    assert_eq!(state.servers, vec![server("a", McpServer::CONNECTED)]);
-    let offers: Vec<bool> = [
-        McpServer::CONNECTED,
-        McpServer::DISABLED,
-        McpServer::FAILED,
-        McpServer::NEEDS_AUTH,
-        McpServer::PENDING,
-    ]
-    .iter()
-    .map(|status| server("s", status).reconnects())
-    .collect();
-    assert_eq!(offers, [false, false, true, true, true]);
 }

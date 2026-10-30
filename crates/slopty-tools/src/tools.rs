@@ -245,16 +245,16 @@ pub fn list() -> Vec<Tool> {
             "agent_read",
             "An agent's thread: whole `turns` after `after`, each with its `entries` (`user` and \
              `agent` messages; with view `activity` also each `tool` call with its `state`, the \
-             end of its `output` and the `child` thread it started), its `phase`, what it \
-             `wait`s on, and the `requests` open on it. `truncated` says something was cut; \
-             `next` is the `after` to read on from.",
+             end of its `output` and the `child` thread it started), its `phase`, and what it \
+             `wait`s on (the person answers that in its terminal). `truncated` says something \
+             was cut; `next` is the `after` to read on from.",
             Kind::Read,
         ),
         tool::<AgentWaitArgs>(
             "agent_wait",
             "Wait until one of `agents` (or each, with `all`) has come to rest, needs the \
-             person or ended. Returns each as it stands (`phase`, `asks`, `last` words, \
-             `rests`) and `timed_out` when time ran out first.",
+             person or ended. Returns each as it stands (`phase`, what it `wait`s on, its `last` \
+             words, `rests`) and `timed_out` when time ran out first.",
             Kind::Read,
         ),
         tool::<AgentStopArgs>(
@@ -266,7 +266,7 @@ pub fn list() -> Vec<Tool> {
         bare(
             "agents",
             "Every agent on the fleet that runs or was started by another: its `id`, `parent`, \
-             `worker`, `agent`, `title`, `folder`, `branch`, `phase`, what it `asks`, its \
+             `worker`, `agent`, `title`, `folder`, `branch`, `phase`, what it `wait`s on, its \
              `last` words.",
             Kind::Read,
         ),
@@ -498,7 +498,6 @@ mod tests {
             phase: Phase::Idle,
             wait: None,
             ended: false,
-            asks: None,
             last: Some("Done.".to_owned()),
             since_ms: WallMs::ZERO,
             rests: true,
@@ -579,7 +578,6 @@ mod tests {
                         phase: Phase::Working,
                         wait: None,
                         turns: Vec::new(),
-                        requests: Vec::new(),
                         next: after.unwrap_or(TurnId(0)),
                         truncated: false,
                         skipped: false,

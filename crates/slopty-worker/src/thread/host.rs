@@ -440,15 +440,13 @@ impl Host {
         let inner = &mut *guard;
         inner.load(thread);
         let Some(hosted) = inner.threads.get_mut(&thread) else { return Ok(None) };
-        // The person's own marks (how far they have seen it, what they were writing, their name
-        // for it and their own words for its messages) are the worker's, which no agent's
-        // session has: they stay.
+        // The person's own marks (how far they have seen it, their name for it) are the
+        // worker's, which no agent's session has: they stay. What the agent's TUI holds (its
+        // prompt box, its queue) is told again by whoever reads the session.
         let mut state = state;
         hosted.own.meta(&mut state.meta);
         state.seen = hosted.log.state().seen;
-        state.draft.clone_from(&hosted.log.state().draft);
         state.named.clone_from(&hosted.log.state().named);
-        state.said.clone_from(&hosted.log.state().said);
         hosted.log.reset(state)?;
         let cursor = hosted.log.cursor();
         let row = hosted.log.state().row(WallMs::now());

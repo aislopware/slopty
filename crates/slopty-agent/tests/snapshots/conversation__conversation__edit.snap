@@ -138,13 +138,9 @@ expression: "decode(\"edit\").snapshot()"
       ended_ms: 1793273681057
       models:
         - claude-haiku-5-5
-      requests: 5
       usage:
         input: 10
         cache_read: 86859
         cache_write: 7935
         output: 531
         thinking: 119
-      context_tokens: 19321
-      mode: default
-      stop: end_turn

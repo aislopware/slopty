@@ -121,13 +121,12 @@ fn chats_are_found_by_their_words(cx: &mut gpui::TestAppContext) {
 /// When a usage limit holding the agent lifts: its failed turn's own word.
 #[test]
 fn a_limit_says_when_it_lifts() {
-    use slopty_proto::thread::{Phase, Wait};
+    use slopty_proto::thread::Phase;
     let mut state = fixtures::thread("tools");
     assert_eq!(super::limit_resets(&state), None);
     let until = WallMs::from_millis(1_760_000_000_000);
     state.turns.last_mut().expect("a turn").state =
         TurnState::Failed { error: "limit".to_owned(), until_ms: Some(until) };
     state.status.phase = Phase::Failed;
-    state.status.wait = Some(Wait { kind: Wait::LIMIT.to_owned(), text: String::new() });
     assert_eq!(super::limit_resets(&state), Some(crate::view_model::rows::time(until)));
 }

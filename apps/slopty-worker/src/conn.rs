@@ -1443,7 +1443,7 @@ impl Peer<'_> {
             XferMsg::Begin { xfer, dest: Some(dest), files, bytes } => {
                 let in_session = match &dest {
                     Dest::SessionCwd(session) => Some(*session),
-                    Dest::Staging | Dest::Path(_) | Dest::Attachment | Dest::Drag(_) => None,
+                    Dest::Staging | Dest::Path(_) | Dest::Drag(_) => None,
                 };
                 let (daemon, client) = (self.daemon.clone(), self.client);
                 // Begun again from a link after the one that heard it end: told again.
@@ -1794,16 +1794,8 @@ impl Peer<'_> {
         }
     }
 
-    /// Hand `req` to `session`'s actor; a submit its agent's dialog would take as an answer
-    /// is refused instead, with why.
+    /// Hand `req` to `session`'s actor.
     fn request(&self, session: SessionId, req: TermRequest) {
-        if matches!(req, TermRequest::Submit { .. })
-            && let Some(why) = self.daemon.submit_refused(session)
-        {
-            tracing::info!(client = %self.client, %session, %why, "a submit was refused");
-            let event = TermEvent::Error(TermError::Refused(why));
-            return self.post(WorkerMsg::Term { session, event });
-        }
         let outcome = self.daemon.worker.get(session).and_then(|h| h.request(self.client, req));
         if let Err(e) = outcome {
             self.fail(session, &e);

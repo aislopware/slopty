@@ -23,8 +23,7 @@ expression: events(&page)
         "agent": "claude-code",
         "thread": "0199a000-0000-7000-8000-000000007101",
         "status": "needs_you",
-        "waits": null,
-        "asks": "Which branch?",
+        "waits": "Which branch?",
         "needs_human": true
       }
     }

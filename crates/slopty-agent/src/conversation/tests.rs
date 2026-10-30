@@ -621,14 +621,11 @@ fn answered(uuid: &str, message: &str, blocks: &Value, usage: &Value, stop: Opti
 }
 
 /// A turn counts each request once, however many records it wrote, and adds up its tokens; it
-/// knows its model, the context its last request carried, why the model stopped, the mode the
-/// prompt was sent in, and when Claude Code closed it.
+/// knows its model and when Claude Code closed it.
 #[test]
 fn a_turn_adds_up_its_requests() {
     let mut c = Conversation::default();
-    let mut prompt = user("p1", None, &json!("go"));
-    prompt["permissionMode"] = json!("plan");
-    c.ingest(&MAIN, &prompt);
+    c.ingest(&MAIN, &user("p1", None, &json!("go")));
     let first = json!({
         "input_tokens": 10, "cache_read_input_tokens": 1_000, "cache_creation_input_tokens": 200,
         "output_tokens": 50, "output_tokens_details": {"thinking_tokens": 20},
@@ -659,14 +656,11 @@ fn a_turn_adds_up_its_requests() {
         changes.iter().any(|ch| matches!(ch, Change::Turn { turn, .. } if turn.prompt == "p1"))
     );
     let [turn] = c.turns(&MAIN) else { panic!("one turn: {:?}", c.turns(&MAIN)) };
-    assert_eq!(turn.requests, 2, "a user record between them makes two requests of one id");
     assert_eq!(
         turn.usage,
         Usage { input: 15, cache_read: 2_300, cache_write: 200, output: 80, thinking: 20 }
     );
-    assert_eq!(turn.context_tokens, Some(1_305));
     assert_eq!(turn.models, ["claude-opus-5-5"]);
-    assert_eq!((turn.stop.as_deref(), turn.mode.as_deref()), (Some("end_turn"), Some("plan")));
     assert_eq!(turn.ended_ms, None);
     let mut end = json!({
         "type": "system", "subtype": "stop_hook_summary", "uuid": "s1",

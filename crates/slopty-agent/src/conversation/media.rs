@@ -112,7 +112,8 @@ pub fn bytes_at(record: &Value, part: &Part) -> Option<Vec<u8>> {
 }
 
 /// The media type a picture's first bytes say.
-fn sniff(bytes: &[u8]) -> Option<&'static str> {
+#[must_use]
+pub fn sniff(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
     } else if bytes.starts_with(&[0xff, 0xd8]) {

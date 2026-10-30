@@ -139,7 +139,7 @@ impl Upload {
     pub fn taken_up(tile: ItemRef, dest: &Dest) -> Self {
         let dir = match dest {
             Dest::Path(dir) => Some(dir.clone()),
-            Dest::SessionCwd(_) | Dest::Staging | Dest::Attachment | Dest::Drag(_) => None,
+            Dest::SessionCwd(_) | Dest::Staging | Dest::Drag(_) => None,
         };
         Self { dir, taken_up: true, ..Self::to_staging(tile) }
     }

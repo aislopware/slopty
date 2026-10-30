@@ -60,13 +60,9 @@ expression: "decode(\"interrupt\").snapshot()"
       ended_ms: 1793275248668
       models:
         - claude-haiku-5-5
-      requests: 1
       usage:
         input: 2
         cache_read: 18465
         cache_write: 0
         output: 79
         thinking: 0
-      context_tokens: 18467
-      mode: default
-      stop: tool_use

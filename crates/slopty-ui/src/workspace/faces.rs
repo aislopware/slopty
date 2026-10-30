@@ -2,8 +2,6 @@
 //! ([`WorkspaceView::threads_linked`], [`WorkspaceView::thread_table`],
 //! [`WorkspaceView::thread_frame`], [`WorkspaceView::thread_done`]), and what their tables last
 //! said of each thread: its title, its place and where it stands.
-//!
-//! An aside ([`hub::is_aside`]) is the shell's own business: it is no row here.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -13,7 +11,7 @@ use slopty_client::WorkerKey;
 use slopty_proto::RequestId;
 use slopty_proto::git::GitOutcome;
 use slopty_proto::thread::attention::{Ladder, Rung};
-use slopty_proto::thread::wire::{IntentDone, RequestCard, TableFrame, ThreadFrame, ThreadRow};
+use slopty_proto::thread::wire::{IntentDone, TableFrame, ThreadFrame, ThreadRow};
 use slopty_proto::thread::{self, AgentId, ThreadId, TurnId};
 
 use super::{WorkspaceEvent, WorkspaceView};
@@ -35,8 +33,6 @@ pub(super) struct ThreadPlace {
     pub repo: Option<String>,
     /// Which repository that is on every machine.
     pub repo_id: Option<slopty_proto::terminal::RepoId>,
-    /// Its branch's pull request, as its worker last read it.
-    pub pull: Option<thread::wire::PullSeen>,
 }
 
 /// Each worker's threads, and the thread view of each agent tile that shows one.
@@ -69,35 +65,6 @@ pub(super) struct ThreadFaces {
     /// Where each thread stands as the server's ladder last said: what speaks for the threads
     /// of a worker this client has no link to.
     server: HashMap<ThreadId, ThreadStand>,
-    /// Each machine's plan windows as its agents' rows last said them, for the cluster.
-    meters: slopty_client::meters::PlanMeters,
-}
-
-impl ThreadFaces {
-    /// Forget a machine's plan windows, as it goes from the workspace.
-    pub(super) fn forget_meters(&mut self, worker: WorkerKey) {
-        self.meters.forget(worker);
-    }
-
-    // slopty: an agent's plan windows on the Agents page.
-    /// The windows `agent` said last on any machine, those still holding at `now`, and when it
-    /// said them; `None` while it has said none.
-    pub(in crate::workspace) fn usage_of(
-        &self,
-        agent: &str,
-        now: slopty_core::WallMs,
-    ) -> Option<slopty_view_proto::AgentUsage> {
-        let (_, _, reading) = self
-            .meters
-            .all(now)
-            .filter(|(_, name, _)| *name == agent)
-            .max_by_key(|(_, _, reading)| reading.heard)?;
-        let holding: Vec<_> = reading.current(now).cloned().collect();
-        Some(slopty_view_proto::AgentUsage {
-            windows: crate::view_model::rows::limits(&holding),
-            fetched_at: Some(crate::view_model::rows::time(reading.heard)),
-        })
-    }
 }
 
 impl WorkspaceView {
@@ -272,11 +239,10 @@ impl WorkspaceView {
     }
 
     /// What `key`'s table says of its threads: where each stands, its title, place and agent.
-    /// A subagent's thread is its parent's business, and an aside its asker's.
+    /// A subagent's thread is its parent's business.
     pub(super) fn threads_heard(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let Some(hub) = self.faces.threads.hubs.get(&key) else { return };
-        let rows: Vec<&ThreadRow> =
-            hub.read(cx).threads().rows().rows.values().filter(|r| !hub::is_aside(r)).collect();
+        let rows: Vec<&ThreadRow> = hub.read(cx).threads().rows().rows.values().collect();
         let stands = stands_of(key, rows.iter().copied());
         let old = &self.faces.threads.stands;
         let moved = old.values().filter(|s| s.worker == key).count() != stands.len()
@@ -295,7 +261,6 @@ impl WorkspaceView {
         self.faces.threads.stands.retain(|_, stand| stand.worker != key);
         self.faces.threads.stands.extend(stands);
         self.faces.threads.heard.insert(key);
-        let meters_before = self.faces.threads.meters.clone();
         for row in &rows {
             self.faces.threads.titles.insert(row.id, row.title.clone());
             match &row.last_line {
@@ -308,10 +273,8 @@ impl WorkspaceView {
                 cwd: row.cwd.clone(),
                 repo: row.repo.clone(),
                 repo_id: row.repo_id.clone(),
-                pull: row.pull.clone(),
             };
             self.faces.threads.places.insert(row.id, place);
-            self.faces.threads.meters.hear(key, &row.agent.0, &row.meters.limits, row.updated_ms);
         }
         self.turns_heard(key, !heard, cx);
         let linked = self.workers.get(&key).is_some_and(|w| w.link.is_some());
@@ -321,9 +284,6 @@ impl WorkspaceView {
         if moved {
             self.update_awake(cx);
             self.agents_moved(cx);
-        }
-        if self.faces.threads.meters != meters_before {
-            cx.notify();
         }
         cx.notify();
     }
@@ -343,7 +303,6 @@ impl WorkspaceView {
                 let stand = ThreadStand {
                     worker: super::keys::worker_key(r.at.worker),
                     rung: r.rung,
-                    asks: None,
                     since: r.since_ms,
                     status: None,
                     doing: None,
@@ -438,8 +397,6 @@ pub(super) struct ThreadStand {
     pub worker: WorkerKey,
     /// Its rung on the attention ladder, its subagents' folded in.
     pub rung: Rung,
-    /// What it asks while it waits on the person: its first open request.
-    pub asks: Option<RequestCard>,
     /// When its row last changed, by its worker's clock.
     pub since: slopty_core::WallMs,
     /// Where its own agent is, as its adapter maps it (its subagents' not folded in), and
@@ -491,7 +448,6 @@ fn stands_of<'a>(
             let stand = ThreadStand {
                 worker: key,
                 rung: Rung::of(r),
-                asks: r.requests.first().cloned(),
                 since: r.updated_ms,
                 status: Some(r.status.clone()),
                 doing: r.doing.clone(),
@@ -508,64 +464,7 @@ fn stands_of<'a>(
                 stand.rung = rung;
                 stand.since = row.updated_ms;
             }
-            if stand.asks.is_none() {
-                stand.asks = row.requests.first().cloned();
-            }
         }
     }
     out
-}
-
-// slopty: an agent's plan windows on the Agents page.
-#[cfg(test)]
-mod usage_tests {
-    use slopty_client::WorkerKey;
-    use slopty_core::WallMs;
-    use slopty_proto::thread::Limit;
-
-    use super::ThreadFaces;
-
-    fn limit(name: &str, used_bp: u32) -> Limit {
-        Limit { name: name.to_owned(), used_bp, resets_ms: Some(WallMs::from_millis(1_000_000)) }
-    }
-
-    /// Two threads of one agent said their windows: the newer reading is the agent's, on one
-    /// machine or across two, and another agent's says nothing of it.
-    #[test]
-    fn the_newer_meter_of_an_agents_threads_wins() {
-        let (studio, laptop) = (WorkerKey::new(1), WorkerKey::new(2));
-        let mut faces = ThreadFaces::default();
-        let now = WallMs::from_millis(5_000);
-        assert!(faces.usage_of("claude-code", now).is_none(), "nothing heard, nothing shown");
-        faces.meters.hear(
-            studio,
-            "claude-code",
-            &[limit("five-hour", 2_000)],
-            WallMs::from_millis(300),
-        );
-        // A second thread on the same machine, said earlier: the newer word stays.
-        faces.meters.hear(
-            studio,
-            "claude-code",
-            &[limit("five-hour", 9_000)],
-            WallMs::from_millis(100),
-        );
-        faces.meters.hear(laptop, "codex", &[limit("five-hour", 7_000)], WallMs::from_millis(900));
-        let usage = faces.usage_of("claude-code", now).expect("heard");
-        assert_eq!(usage.windows.len(), 1);
-        assert!((usage.windows[0].used_fraction - 0.2).abs() < 1e-6);
-        // Another machine's thread of it says more, later: that reading is the agent's now.
-        faces.meters.hear(
-            laptop,
-            "claude-code",
-            &[limit("seven-day", 4_000)],
-            WallMs::from_millis(800),
-        );
-        let usage = faces.usage_of("claude-code", now).expect("heard");
-        assert_eq!(
-            usage.windows[0].label,
-            crate::view_model::rows::limits(&[limit("seven-day", 4_000)])[0].label
-        );
-        assert_eq!(usage.fetched_at, Some(crate::view_model::rows::time(WallMs::from_millis(800))));
-    }
 }

@@ -214,6 +214,7 @@ struct Batch {
     upserts: HashMap<(ThreadId, String), usize>,
     tasks: HashMap<ThreadId, usize>,
     turns: HashMap<(ThreadId, String), usize>,
+    queued: Option<usize>,
 }
 
 impl Batch {
@@ -239,6 +240,15 @@ impl Batch {
         }
         self.tasks.insert(thread.clone(), self.changes.len());
         self.changes.push(Change::Tasks { thread: thread.clone(), tasks });
+    }
+
+    fn queued(&mut self, queued: Vec<Queued>) {
+        if let Some(change) = self.queued.and_then(|at| self.changes.get_mut(at)) {
+            *change = Change::Queued(queued);
+            return;
+        }
+        self.queued = Some(self.changes.len());
+        self.changes.push(Change::Queued(queued));
     }
 
     fn turn(&mut self, thread: &ThreadId, turn: Turn) {
@@ -270,6 +280,8 @@ pub struct Conversation {
     /// the same notice read twice (its queueing and its delivery) is one row.
     task_rows: std::collections::HashSet<(String, String, String, String)>,
     task_counts: HashMap<String, u32>,
+    /// The prompts the person queued in the TUI behind the main thread's turn, in their order.
+    queue: Vec<Queued>,
 }
 
 impl Conversation {
@@ -378,16 +390,47 @@ impl Conversation {
             .collect()
     }
 
+    /// Apply one of the TUI's queue operations on the person's prompts: one queued at the end
+    /// (`enqueue`), all taken back into the box (`popAll`), the first given the agent
+    /// (`dequeue`), or one taken out (`remove`). Its background work's notices ride the same
+    /// queue and are not the person's; they are queued at a lower priority, so a `dequeue`,
+    /// which names nothing, takes the person's first. Whether the queue changed.
+    fn queue_op(&mut self, operation: Option<&str>, record: &Value, at_ms: WallMs) -> bool {
+        let content = record.get("content");
+        match operation {
+            Some("enqueue") => {
+                let text = content.map(joined_text).unwrap_or_default();
+                self.queue.push(Queued { text, at_ms });
+                true
+            }
+            Some("popAll") => !std::mem::take(&mut self.queue).is_empty(),
+            Some("dequeue") if !self.queue.is_empty() => {
+                let _given = self.queue.remove(0);
+                true
+            }
+            Some("remove") => {
+                let text = content.map(joined_text).unwrap_or_default();
+                let at = self.queue.iter().position(|q| q.text == text);
+                at.map(|at| self.queue.remove(at)).is_some()
+            }
+            _ => false,
+        }
+    }
+
     fn record(&mut self, source: &ThreadId, record: &Value, batch: &mut Batch) {
         let kind = str_at(record, "type").unwrap_or_default();
         if kind == "queue-operation" {
+            let at_ms = str_at(record, "timestamp").and_then(parse_ms).unwrap_or_default();
+            let operation = str_at(record, "operation");
             // Written the moment background work ends, before the model takes the notice in.
-            if str_at(record, "operation") == Some("enqueue")
+            if operation == Some("enqueue")
                 && let Some(mut notice) = str_at(record, "content").and_then(parse_notice)
             {
-                notice.at_ms = str_at(record, "timestamp").and_then(parse_ms).unwrap_or_default();
+                notice.at_ms = at_ms;
                 self.task_row(source, None, &notice, batch);
                 self.notice(notice, batch);
+            } else if *source == ThreadId::Main && self.queue_op(operation, record, at_ms) {
+                batch.queued(self.queue.clone());
             }
             return;
         }
@@ -639,7 +682,7 @@ impl Conversation {
             let ends_turn = matches!(body, Body::Interrupted { .. });
             self.add(ctx, id.clone(), body, batch);
             if opens_turn {
-                self.start_turn(ctx, &id, string_at(record, "permissionMode"), batch);
+                self.start_turn(ctx, &id, batch);
             } else if ends_turn {
                 self.end_turn(ctx, batch);
             }
@@ -652,21 +695,20 @@ impl Conversation {
                 command: None,
             });
             self.add(ctx, ctx.uuid.to_owned(), body, batch);
-            self.start_turn(ctx, ctx.uuid, string_at(record, "permissionMode"), batch);
+            self.start_turn(ctx, ctx.uuid, batch);
         }
     }
 
     /// A prompt opens a turn: what the thread's records say from here on is its. One the person
     /// sent while the turn before it still ran ends that turn here, if Claude Code did not
     /// close it first: no turn stays running behind a later one.
-    fn start_turn(&mut self, ctx: &Ctx<'_>, prompt: &str, mode: Option<String>, batch: &mut Batch) {
+    fn start_turn(&mut self, ctx: &Ctx<'_>, prompt: &str, batch: &mut Batch) {
         let thread = self.threads.entry(ctx.thread.clone()).or_default();
         if let Some(open) = thread.turns.last_mut().filter(|t| t.ended_ms.is_none()) {
             open.ended_ms = Some(ctx.at_ms);
             batch.turn(ctx.thread, open.clone());
         }
-        let turn =
-            Turn { prompt: prompt.to_owned(), started_ms: ctx.at_ms, mode, ..Turn::default() };
+        let turn = Turn { prompt: prompt.to_owned(), started_ms: ctx.at_ms, ..Turn::default() };
         thread.turns.push(turn.clone());
         batch.turn(ctx.thread, turn);
     }
@@ -703,17 +745,12 @@ impl Conversation {
         if let Some(before) = counted {
             turn.usage = turn.usage.minus(before).plus(now);
         } else {
-            turn.requests = turn.requests.saturating_add(1);
             turn.usage = turn.usage.plus(now);
         }
-        turn.context_tokens = Some(now.context());
         if let Some(model) = model
             && !turn.models.iter().any(|m| m == model)
         {
             turn.models.push(model.to_owned());
-        }
-        if let Some(stop) = str_at(message, "stop_reason") {
-            turn.stop = Some(stop.to_owned());
         }
         let turn = turn.clone();
         batch.turn(ctx.thread, turn);
@@ -1802,7 +1839,7 @@ fn apply_result(
             mcp.structured = crate::shown::structured(field("structuredContent"));
             mcp.links = field("resourceLinks")
                 .and_then(Value::as_array)
-                .map(|links| crate::shown::mcp_content(links).links)
+                .map(|links| crate::shown::mcp_links(links))
                 .unwrap_or_default();
             let mut spelled = serde_json::Map::new();
             for key in ["content", "structuredContent", "_meta"] {
