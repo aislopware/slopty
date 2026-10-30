@@ -405,11 +405,11 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
     }
     made.flush();
     let Made { mut out, turns, .. } = made;
-    // slopty: what the TUI folds of task notices, and each finished turn's done line.
+    // slopty: what the TUI folds of task notices, and each finished turn's done line. Subagents
+    // started together are the shell's to head with one line, live (`transcript/subagents.rs`).
     for entry in &mut out {
         if entry.role == MessageRole::Assistant {
             entry.parts = super::folds::fold_tasks(std::mem::take(&mut entry.parts));
-            super::folds::agent_groups(&mut entry.parts);
         }
     }
     super::folds::done_lines(state, &mut out, &turns, &chrono::Local);

@@ -1,31 +1,24 @@
-//! slopty: a subagent's card, where its parent's call started it (Slopty's own; zeron's spawn
-//! chip opens a right-pane tab instead).
+//! slopty: a subagent, a nested step of its parent's trace (`docs/decisions/inspector.md`, "A
+//! subagent is a nested step, opened in place").
 //!
-//! A subagent lives only in its parent's chat (`docs/decisions/ui.md`, "Subagents live in their
-//! parent's chat"): this card in the inspector's timeline, and the drill-in. The
-//! card is zeron's chip anatomy: an icon tile, the task as its label, its kind and model faint
-//! on the right; under it the subagent's step and figures, live while it runs and settled to
-//! its outcome after (slopty: a run that went well says what it answered, and "Done" only when
-//! it answered nothing). A click (or ↵) opens the child's transcript in place, capped in height
-//! and scrolling on its own, following its end while it runs; the newest running child of the
-//! turn under way opens itself while it is what the parent waits on, and closes once the turn
-//! moves on, unless the person opened or closed it. Open (⌘↵) drills into the child as the
-//! session view; Escape closes the card. Stopping it is the agent's TUI's.
+//! A spawn is one row like any call: its kind and task; while it runs, a heartbeat from its own
+//! records ("Haiku 4.5 · Read parser.rs · 12 tools") with "quiet 3m" once they stop for a while;
+//! once done, the first line of what it answered; its figures and its status. Nothing opens it by
+//! itself. A press splices its steps in under it, one level in, in the same list
+//! ([`Transcript::nest`]): its brief first, folded to three lines, then its steps in the parent's
+//! own rows, its report last; another press takes them out again. Enter, or its Open, drills in:
+//! the inspector pushes its trace on a stack of its own (`inspector.rs`), and the terminal, the
+//! sidebar and the prompt box's mirror stay where they were. Subagents started
+//! together share one line over their rows, "3 Explore agents · 2 working · 1m 12s".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use gpui::{
-    AnyElement, Context, Entity, FocusHandle, SharedString, Subscription, div, prelude::*,
-    px,
-};
+use gpui::{AnyElement, ClickEvent, Context, KeyboardButton, SharedString, div, prelude::*, px};
 use slopty_view_doc::{SubagentProgress, SubagentStatus};
 
-use super::{CHIP_CARD_HEIGHT, ToolItem, Transcript, TranscriptEvent, subagent_tab_title};
-use crate::theme::Theme;
+use super::{ToolItem, Transcript, subagent_tab_title};
 use crate::motion::HoverFade as _;
-
-/// The step line under a card's header.
-const STEP_LINE_HEIGHT: f32 = 20.0;
+use crate::theme::Theme;
 
 /// slopty: the first line of what a run answered (its spawn call's result), its heading and
 /// strong marks left out; none when it answered nothing (#23).
@@ -38,20 +31,23 @@ fn reply_line(tool: &ToolItem) -> Option<String> {
         .map(|line| line.trim_start_matches('#').replace("**", "").trim().to_owned())
         .find(|line| !line.is_empty())
 }
-/// slopty: what a card's quiet control (Stop, Open) takes in its header's row.
+
+/// slopty: what a row's quiet Open takes in its line.
 const QUIET_FOOTPRINT: f32 = 18.0;
-/// The least and most room a card's child transcript may take; it takes only its rows' height
-/// within it.
-const CHILD_MIN_HEIGHT: f32 = 160.0;
-const CHILD_MAX_HEIGHT: f32 = 480.0;
-/// The share of the window's height a child transcript opens to, within those.
-const CHILD_VIEWPORT_SHARE: f32 = 0.4;
-/// A window narrower than this is a phone's (`shell/compact.rs`): a card there drills in.
+/// A window narrower than this is a phone's (`shell/compact.rs`).
 const PHONE_BELOW: f32 = 700.0;
 /// slopty: a phone's side margin at a compact width (UIKit's `systemMinimumLayoutMargins`).
 const PHONE_MARGIN: f32 = 16.0;
+/// How far each level of nesting sits in from its parent's rows: the chevron's gutter, so a
+/// child's chevrons and icons stand under its parent's title.
+pub(super) const NEST_INDENT: f32 = 22.0;
+/// The deepest level the rows move in by; deeper runs keep that indent (traces §2, a hard cap).
+const NEST_LEVELS: u8 = 4;
+/// A running subagent whose records have not moved for this long says for how long ("quiet
+/// 3m"), as claude-code-log's live page does (traces §10.3).
+const QUIET_AFTER_MS: i64 = 60_000;
 
-/// slopty: a card's status word swaps as Amp's does (`AJ/46b413b6.js:10505-10535`): the new word
+/// slopty: a row's status word swaps as Amp's does (`AJ/46b413b6.js:10505-10535`): the new word
 /// enters from 4 pt below over 350 ms as the old one leaves 4 pt up over 150 ms.
 const STATUS_IN: crate::motion::MotionSpec =
     crate::motion::MotionSpec::new(350, crate::motion::EASE_OUT_QUINT);
@@ -62,7 +58,7 @@ const STATUS_TRAVEL: f32 = 4.0;
 const STATUS_KEYS: usize = 256;
 
 thread_local! {
-    /// Each card's last status word, and the word it swaps from and since when, while it does.
+    /// Each row's last status word, and the word it swaps from and since when, while it does.
     static STATUS: std::cell::RefCell<HashMap<SharedString, (SharedString, Option<(SharedString, std::time::Instant)>)>> =
         std::cell::RefCell::new(HashMap::new());
 }
@@ -98,7 +94,7 @@ fn status_swap(
     })
 }
 
-/// slopty: `text` as the card's status word, swapping in from the one it last said.
+/// slopty: `text` as the row's status word, swapping in from the one it last said.
 fn status_word(key: SharedString, text: SharedString, view: gpui::EntityId, cx: &mut gpui::App) -> gpui::Div {
     let (reduced, now) = (cx.reduce_motion(), crate::clock::now(cx));
     let Some((from, ms)) = status_swap(&key, &text, reduced, now) else {
@@ -130,78 +126,98 @@ fn status_word(key: SharedString, text: SharedString, view: gpui::EntityId, cx: 
                 .child(from),
         )
 }
-/// Where a card's lines start: past its icon tile, under its title. Its child's rows start there
-/// too.
-pub(super) const CHILD_INSET: f32 = Theme::SPACE_SM + 18.0 + Theme::SPACE_SM;
-/// The lines of its task a card's open run shows.
+
+/// `row` set in the tool rows' label type, as a call's row is: a subagent's row and its batch's
+/// line read as steps among the calls.
+fn label_type<E: Styled>(row: E) -> E {
+    row.text_size(px(super::TOOL_LABEL_SIZE)).line_height(px(super::TOOL_LABEL_LINE_HEIGHT))
+}
+
+/// The lines of its brief a subagent opened in place shows until pressed.
 pub(super) const TASK_LINES: usize = 3;
 
-/// What subagent cards keep between frames.
+/// What the subagents of a transcript keep between frames.
 #[derive(Default)]
 pub(super) struct SubagentsState {
-    /// Cards the person opened (`true`) or closed: their word wins over the frontier rule.
-    toggled: HashMap<SharedString, bool>,
-    /// Child transcripts open in place, by the child's chat.
-    open: HashMap<String, InlineChild>,
-    /// Each card's keyboard focus, by card.
-    focus: HashMap<SharedString, FocusHandle>,
-    /// Each card's run, as open as it was last drawn: whether it was open, and its height then.
-    drawn: HashMap<SharedString, (bool, f32)>,
-    /// Cards opening or closing: the height each moves from, and since when.
-    moving: HashMap<SharedString, (f32, std::time::Instant)>,
+    /// The subagents open in place, by their row: the chat whose steps are spliced in under it.
+    pub(super) open: HashMap<SharedString, String>,
+    /// How deep each spliced row sits under the transcript's own, by row; a row of the
+    /// transcript's own is not in it.
+    pub(super) depths: HashMap<SharedString, u8>,
+    /// The briefs of runs opened in place that the person pressed open past their first lines,
+    /// by row.
+    pub(super) briefs_open: HashSet<SharedString>,
+    /// The runs open in place whose record has not arrived, "Loading its steps…" under their row.
+    pub(super) loading: HashSet<SharedString>,
     /// The window's size as of the last frame.
     pub(super) window: gpui::Size<gpui::Pixels>,
 }
 
-/// A child's transcript, open in its card.
-struct InlineChild {
-    transcript: Entity<Transcript>,
-    /// Its rows' height as last laid out, which the card takes up to its room.
-    rows: std::rc::Rc<std::cell::Cell<Option<f32>>>,
-    _events: Subscription,
-}
-
-/// A subagent as its card reads it.
+/// A subagent as its row reads it.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Card {
-    /// The task, the card's label.
+pub(crate) struct Run {
+    /// Its task, as its parent's agent named it: the row's label.
     pub title: SharedString,
-    /// Its kind and model, faint on the right: "Explore · haiku".
+    /// Its kind, as the agent names it ("Explore").
     pub kind: Option<SharedString>,
+    /// The model it runs on, in words ("Haiku 4.5").
+    pub model: Option<SharedString>,
     /// Its run's chat, where Slopty keeps one: what opens in place and drills in.
     pub chat: Option<String>,
-    /// Its tray row, which Stop stops.
-    pub row: Option<String>,
     pub running: bool,
     pub failed: bool,
     /// The state word ([`SubagentProgress::RUNNING`] and the rest).
     pub state: String,
-    /// The step line's left: its step while it runs, its outcome after.
+    /// Its step while it runs, its outcome after.
     pub step: Option<String>,
-    /// The step line's right, time left out: "12 tools · 41k tokens".
+    /// Its figures, time left out: "12 tools · 41k tokens".
     pub figures: String,
-    /// When it began, for a running card's elapsed time.
+    /// When it began, for a running one's time.
     pub started_at: Option<i64>,
     /// How long it ran, once it says.
     pub duration_ms: Option<u64>,
-    /// What it asks of the person, answered in the parent's dock.
+    /// When its records last moved, while it runs.
+    pub heard_at: Option<i64>,
+    /// What it asks of the person, answered in its own TUI.
     pub needs_you: Option<String>,
 }
 
-impl Card {
-    /// The card of spawn call `tool`: its progress where the view model gave it, else what the
-    /// chip itself carries.
+/// slopty: a model's id in words: "claude-haiku-5-5" reads "Haiku 5.5", a dated
+/// "claude-sonnet-4-5-20250929" "Sonnet 4.5", a bare "opus" "Opus"; an id of another maker's
+/// stays as it is.
+pub(crate) fn model_words(id: &str) -> String {
+    let id = id.trim();
+    let rest = id.strip_prefix("claude-").unwrap_or(id);
+    let mut parts = rest.split('-');
+    let family = parts.next().unwrap_or_default();
+    if !matches!(family, "haiku" | "sonnet" | "opus" | "fable") {
+        return id.to_owned();
+    }
+    let version: Vec<&str> = parts
+        .take_while(|part| part.len() <= 2 && part.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    let mut chars = family.chars();
+    let name: String = chars.next().map(|c| c.to_ascii_uppercase()).into_iter().chain(chars).collect();
+    if version.is_empty() { name } else { format!("{name} {}", version.join(".")) }
+}
+
+impl Run {
+    /// The subagent spawn call `tool` started: its progress where the view model gave it, else
+    /// what the call itself carries.
     pub fn of(tool: &ToolItem) -> Self {
         let progress = tool.facts.as_ref().and_then(|facts| facts.subagent_progress.as_ref());
         let status_running = matches!(tool.subagent_status, Some(SubagentStatus::Running));
         let status_failed = matches!(tool.subagent_status, Some(SubagentStatus::Failed));
-        let model = tool.call.subagent_model().map(str::to_owned);
+        let model = progress
+            .and_then(|progress| progress.model.as_deref())
+            .or_else(|| tool.call.subagent_model())
+            .map(|model| SharedString::from(model_words(model)));
         let Some(progress) = progress else {
             return Self {
                 title: subagent_tab_title(&tool.call),
-                kind: model.map(SharedString::from),
+                kind: None,
+                model,
                 chat: tool.subagent_ref.as_ref().map(ToString::to_string),
-                row: tool.subagent_ref.as_ref().map(|chat| format!("chat:{chat}")),
                 running: status_running,
                 failed: tool.is_error || status_failed,
                 state: if status_running {
@@ -218,15 +234,10 @@ impl Card {
                 figures: String::new(),
                 started_at: None,
                 duration_ms: None,
+                heard_at: None,
                 needs_you: None,
             };
         };
-        let kind = [progress.agent_type.clone(), model]
-            .into_iter()
-            .flatten()
-            .filter(|word| !word.is_empty())
-            .collect::<Vec<_>>()
-            .join(" · ");
         let step = if progress.running {
             progress.step.clone()
         } else if progress.state == SubagentProgress::DONE && !tool.is_error {
@@ -238,12 +249,12 @@ impl Card {
         };
         Self {
             title: subagent_tab_title(&tool.call),
-            kind: (!kind.is_empty()).then(|| kind.into()),
+            kind: progress.agent_type.clone().filter(|kind| !kind.is_empty()).map(Into::into),
+            model,
             chat: progress
                 .chat_id
                 .clone()
                 .or_else(|| tool.subagent_ref.as_ref().map(ToString::to_string)),
-            row: progress.row.clone(),
             running: progress.running,
             failed: tool.is_error || progress.state == SubagentProgress::FAILED,
             state: progress.state.clone(),
@@ -251,56 +262,121 @@ impl Card {
             figures: progress.figures.clone(),
             started_at: progress.started_at,
             duration_ms: progress.duration_ms,
+            heard_at: progress.heard_at,
             needs_you: progress.needs_you.clone(),
         }
     }
 
-    /// The step line's right at `now`: its figures and how long it has run.
-    pub fn figures_at(&self, now: i64) -> String {
-        let elapsed = if self.running {
-            self.started_at
-                .map(|start| u64::try_from(now.saturating_sub(start)).unwrap_or(0))
+    /// How long it has run at `now`, or ran, in ms, once known.
+    fn elapsed_ms(&self, now: i64) -> Option<u64> {
+        if self.running {
+            self.started_at.map(|start| u64::try_from(now.saturating_sub(start)).unwrap_or(0))
         } else {
             self.duration_ms
-        };
-        let elapsed = elapsed.map(slopty_view_doc::duration_words);
-        [Some(self.figures.clone()).filter(|f| !f.is_empty()), elapsed]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ")
-    }
-}
-
-impl SubagentsState {
-    /// Close every child open in place: the transcript shows another chat now, or goes.
-    pub fn close_all(&mut self, state: &Entity<crate::state::AppState>, cx: &mut gpui::App) {
-        let children: Vec<String> = self.open.drain().map(|(chat, _)| chat).collect();
-        self.toggled.clear();
-        self.drawn.clear();
-        self.moving.clear();
-        if children.is_empty() {
-            return;
         }
-        state.update(cx, |state, _| {
-            for chat in &children {
-                state.unwatch_subagent_doc(chat);
-            }
-        });
     }
 
+    /// Its facts at `now`, after its step: while it runs, its heartbeat's model and figures,
+    /// "quiet 3m" once its records stopped a while, and how long it has run; once done, its model,
+    /// figures and how long it took.
+    pub fn facts_at(&self, now: i64) -> String {
+        let quiet = self
+            .heard_at
+            .filter(|_| self.running && self.needs_you.is_none())
+            .map(|heard| now.saturating_sub(heard))
+            .filter(|ms| *ms >= QUIET_AFTER_MS)
+            // In whole minutes: it moves once a minute, not every second.
+            .map(|ms| u64::try_from(ms - ms % QUIET_AFTER_MS).unwrap_or(0))
+            .map(|ms| format!("quiet {}", slopty_view_doc::duration_words(ms)));
+        [
+            self.model.as_ref().map(ToString::to_string),
+            Some(self.figures.clone()).filter(|figures| !figures.is_empty()),
+            quiet,
+            self.elapsed_ms(now).map(slopty_view_doc::duration_words),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
 
+    /// Its one line of facts, as a drilled-in trace heads with it: kind, model, status, figures
+    /// and time ("Explore · Haiku 4.5 · Done · 3 tools · 14.6k tokens · 4s").
+    pub fn summary_at(&self, now: i64) -> String {
+        let status = match self.state.as_str() {
+            _ if self.needs_you.is_some() => "Needs you",
+            SubagentProgress::RUNNING => "Running",
+            SubagentProgress::WAITING => "Waiting",
+            SubagentProgress::NEEDS_YOU => "Needs you",
+            SubagentProgress::FAILED => "Failed",
+            SubagentProgress::STOPPED => "Stopped",
+            _ => "Done",
+        };
+        [
+            self.kind.as_ref().map(ToString::to_string),
+            self.model.as_ref().map(ToString::to_string),
+            Some(status.to_owned()),
+            Some(self.figures.clone()).filter(|figures| !figures.is_empty()),
+            self.elapsed_ms(now).map(slopty_view_doc::duration_words),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
 
-    /// The most room a child transcript open in a card takes: a share of the window's height.
-    pub(super) fn child_room(&self) -> f32 {
-        let viewport = f32::from(self.window.height);
-        (viewport * CHILD_VIEWPORT_SHARE).clamp(CHILD_MIN_HEIGHT, CHILD_MAX_HEIGHT)
+    /// Its status mark: the ring turning while it works, closed amber while it waits on the
+    /// person, the tick once it answered, the red `!` if it failed; one stopped has none.
+    pub fn mark(&self) -> Option<crate::loaders::status_mark::MarkState> {
+        use crate::loaders::status_mark::MarkState;
+        match self.state.as_str() {
+            _ if self.needs_you.is_some() || self.state == SubagentProgress::NEEDS_YOU => Some(MarkState::Waiting),
+            _ if self.running => Some(MarkState::Working),
+            SubagentProgress::DONE => Some(MarkState::Done),
+            SubagentProgress::FAILED => Some(MarkState::Failed),
+            _ => None,
+        }
     }
 }
 
-/// The words that started a run: its task, as its parent's agent wrote it, quiet, and cut to
-/// `lines` (its card's [`TASK_LINES`]; the whole of it drilled into).
-pub(super) fn task_words(row: &SharedString, text: &SharedString, lines: Option<usize>, theme: &Theme) -> AnyElement {
+/// slopty: the one line over subagents started together (t3code §2.3): how many and of what kind,
+/// how many still work, how many failed, and the time across them from the first start to the
+/// last end, live while any runs: "3 Explore agents · 2 working · 1m 12s", then "3 Explore agents
+/// finished · 1 failed · 2m 5s".
+pub(super) fn batch_words(runs: &[Run], now: i64) -> String {
+    let kinds: Vec<Option<&SharedString>> = runs.iter().map(|run| run.kind.as_ref()).collect();
+    let noun = match kinds.first().copied().flatten() {
+        Some(kind) if kinds.iter().all(|k| *k == Some(kind)) => format!("{kind} agents"),
+        _ => "agents".to_owned(),
+    };
+    let working = runs.iter().filter(|run| run.running).count();
+    let failed = runs.iter().filter(|run| run.failed).count();
+    let start = runs.iter().filter_map(|run| run.started_at).min();
+    let end = if working > 0 {
+        Some(now)
+    } else {
+        runs.iter()
+            .filter_map(|run| Some(run.started_at? + i64::try_from(run.duration_ms?).ok()?))
+            .max()
+    };
+    let span = start
+        .zip(end)
+        .map(|(start, end)| slopty_view_doc::duration_words(u64::try_from(end.saturating_sub(start)).unwrap_or(0)));
+    let head = if working > 0 {
+        format!("{} {noun} · {working} working", runs.len())
+    } else {
+        format!("{} {noun} finished", runs.len())
+    };
+    [Some(head), (failed > 0).then(|| format!("{failed} failed")), span]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The words that started a run: its brief, as its parent's agent wrote it, quiet, and cut to
+/// `lines` until pressed ([`TASK_LINES`]; the whole of it in a drilled-in trace).
+pub(super) fn task_words(row: &SharedString, text: &SharedString, lines: Option<usize>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     let words = div()
         .id(SharedString::from(format!("{row}-task")))
         .role(gpui::Role::Paragraph)
@@ -318,7 +394,6 @@ pub(super) fn task_words(row: &SharedString, text: &SharedString, lines: Option<
         None => words,
     }
     .child(text.clone())
-    .into_any_element()
 }
 
 impl Transcript {
@@ -335,161 +410,211 @@ impl Transcript {
     pub(super) fn row_inset(&self) -> f32 {
         if self.on_phone() { PHONE_MARGIN } else { 48.0 }
     }
-}
 
-impl Transcript {
-    /// Whether the card `key` of a child is open: the person's word, else the frontier rule.
-    fn card_open(&self, key: &SharedString, frontier: bool) -> bool {
-        self.subagents.toggled.get(key).copied().unwrap_or(frontier)
+    /// How deep row `row` sits under the transcript's own rows: 0 for its own.
+    pub(super) fn depth_of(&self, row: &SharedString) -> u8 {
+        self.subagents.depths.get(row).copied().unwrap_or(0)
     }
 
-    /// Open or close the card `key` of child `chat`.
-    fn toggle_card(&mut self, key: SharedString, open_now: bool, cx: &mut Context<Self>) {
-        let row = key.rsplit_once("#s").map_or("", |(row, _)| row).to_owned();
-        self.subagents.toggled.insert(key, !open_now);
-        // slopty: the card's row grows or shrinks by the run under it.
-        self.row_resized(&row, cx);
+    /// How far a row at `depth` moves in.
+    pub(super) fn nest_inset(depth: u8) -> f32 {
+        f32::from(depth.min(NEST_LEVELS)) * NEST_INDENT
     }
 
-    /// The child `chat`'s transcript, open in place in a card of row `row`: watched from its first
-    /// showing.
-    fn inline_child(
-        &mut self,
-        row: &SharedString,
-        chat: &str,
-        live: bool,
-        cx: &mut Context<Self>,
-    ) -> (Entity<Transcript>, Option<f32>) {
-        if let Some(child) = self.subagents.open.get(chat) {
-            return (child.transcript.clone(), child.rows.get());
+    /// Whether the subagent of row `row` is open in place.
+    pub(crate) fn spawn_open(&self, row: &SharedString) -> bool {
+        self.subagents.open.contains_key(row)
+    }
+
+    /// The subagent of row `row`, as its row reads it now.
+    pub(crate) fn spawn_run(&self, row: &str) -> Option<Run> {
+        self.rows.iter().find(|r| r.id.as_ref() == row).and_then(|r| match &r.kind {
+            super::RowKind::Spawn { tool } => Some(Run::of(tool)),
+            _ => None,
+        })
+    }
+
+    /// The row of the subagent whose run is chat `chat`, where this transcript shows one.
+    pub(crate) fn spawn_row_of(&self, chat: &str) -> Option<SharedString> {
+        self.rows.iter().find_map(|row| match &row.kind {
+            super::RowKind::Spawn { tool } if Run::of(tool).chat.as_deref() == Some(chat) => Some(row.id.clone()),
+            _ => None,
+        })
+    }
+
+    /// Whether the run `chat` is open in place here, so its feed must stay watched.
+    pub(crate) fn watches(&self, chat: &str) -> bool {
+        self.subagents.open.values().any(|open| open == chat)
+    }
+
+    /// Open the subagent of row `row`, run `chat`, in place, or take its steps out again. Its
+    /// feed is watched while it is open; the rows above it stay where they were.
+    pub(super) fn toggle_spawn(&mut self, row: SharedString, chat: String, cx: &mut Context<Self>) {
+        if self.subagents.open.remove(&row).is_some() {
+            self.subagents.loading.remove(&row);
+            // Its own subagents open in place close with it: the rows under it a level deeper.
+            let depth = self.depth_of(&row);
+            let under: Vec<SharedString> = self
+                .rows
+                .iter()
+                .skip_while(|r| r.id != row)
+                .skip(1)
+                .take_while(|r| self.depth_of(&r.id) > depth)
+                .map(|r| r.id.clone())
+                .collect();
+            let mut gone = vec![chat];
+            for key in under {
+                self.subagents.briefs_open.remove(&key);
+                self.subagents.loading.remove(&key);
+                if let Some(chat) = self.subagents.open.remove(&key) {
+                    gone.push(chat);
+                }
+            }
+            self.state.update(cx, |state, _| {
+                for chat in &gone {
+                    state.unwatch_subagent_doc(chat);
+                }
+            });
+        } else {
+            self.subagents.open.insert(row.clone(), chat.clone());
+            self.state.update(cx, |state, cx| state.watch_subagent_doc(chat, cx));
+            self.reveal_opened(row);
         }
-        let state = self.state.clone();
-        state.update(cx, |state, cx| state.watch_subagent_doc(chat.to_owned(), cx));
-        let transcript = cx.new(|cx| Transcript::for_doc(state, chat.to_owned(), live, cx));
-        if let Some(links) = self.workspace_link.clone() {
-            transcript.update(cx, |child, _| child.set_workspace_link_handler(links));
+        self.last_source = None;
+        self.sync(cx);
+        cx.notify();
+    }
+
+    /// Take every subagent's steps out: the transcript shows another chat now, or goes.
+    pub(super) fn close_spawns(&mut self, cx: &mut gpui::App) {
+        let open: Vec<String> = self.subagents.open.drain().map(|(_, chat)| chat).collect();
+        self.subagents.depths.clear();
+        self.subagents.briefs_open.clear();
+        self.subagents.loading.clear();
+        if open.is_empty() {
+            return;
         }
-        // A card inside the child drills in, or reveals the tray, as one here does.
-        let events = cx.subscribe(&transcript, |_, _, event: &TranscriptEvent, cx| {
-            cx.emit(event.clone());
+        self.state.update(cx, |state, _| {
+            for chat in &open {
+                state.unwatch_subagent_doc(chat);
+            }
         });
-        let rows = std::rc::Rc::default();
-        let card = cx.weak_entity();
-        transcript.update(cx, |child, _| child.fit_to(card, row.clone(), std::rc::Rc::clone(&rows)));
-        self.subagents.open.insert(
-            chat.to_owned(),
-            InlineChild {
-                transcript: transcript.clone(),
-                rows,
-                _events: events,
-            },
-        );
-        (transcript, None)
     }
 
-    /// Close the child `chat` open in place.
-    fn close_child(&mut self, chat: &str, cx: &mut Context<Self>) {
-        if self.subagents.open.remove(chat).is_some() {
-            self.state
-                .update(cx, |state, _| state.unwatch_subagent_doc(chat));
+    /// Hand over the runs open in place without unwatching them: the inspector, which holds
+    /// other transcripts over the same feeds, decides which still serve one (`inspector.rs`).
+    pub(crate) fn release_spawns(&mut self) -> Vec<String> {
+        self.subagents.depths.clear();
+        self.subagents.briefs_open.clear();
+        self.subagents.loading.clear();
+        self.subagents.open.drain().map(|(_, chat)| chat).collect()
+    }
+
+    /// slopty: `rows` with the steps of each subagent open in place spliced in under its row, a
+    /// level deeper, as deep as they open: the brief, the steps and the report of its run's
+    /// record, in the same rows as the parent's. Each spliced row's depth is kept for its inset.
+    pub(super) fn nest(
+        &mut self,
+        rows: Vec<super::Row>,
+        state: &crate::state::AppState,
+        depth: u8,
+        out: &mut Vec<super::Row>,
+    ) {
+        for row in rows {
+            let open = match &row.kind {
+                super::RowKind::Spawn { .. } => self.subagents.open.get(&row.id).cloned(),
+                _ => None,
+            };
+            if depth > 0 {
+                self.subagents.depths.insert(row.id.clone(), depth);
+            }
+            let row_id = row.id.clone();
+            out.push(row);
+            // A run's record never holds its own spawn; the cap stops a malformed one anyway.
+            let Some(chat) = open.filter(|_| depth < u8::MAX - 1) else {
+                continue;
+            };
+            let mut child = Vec::new();
+            for entry in state.sub_transcript(&chat) {
+                child.extend(self.rows_for(entry, false));
+            }
+            if child.is_empty() {
+                self.subagents.loading.insert(row_id.clone());
+                // Its record is on its way: a quiet line holds its place under the row.
+                child.push(super::Row {
+                    id: SharedString::from(format!("{row_id}#loading")),
+                    version: 0,
+                    turn_start: false,
+                    kind: super::RowKind::Marker { text: "Loading its steps…".into() },
+                    entry_id: row_id.clone(),
+                    timestamp: None,
+                    copy_text: None,
+                    compact_fold: None,
+                });
+            } else if self.subagents.loading.remove(&row_id) {
+                // Its record arrived: what the person opened comes into view.
+                self.reveal_opened(row_id.clone());
+            }
+            self.nest(child, state, depth + 1, out);
         }
     }
 
-    /// The card of spawn call `tool`, the `ix`th of group row `row_id`. `frontier`: it is the
-    /// newest running child of the turn under way, which opens itself. `rail`: it sits in a
-    /// fold's rail (compact mode), where it never opens in place.
-    pub(super) fn render_subagent_card(
+    /// slopty: the row of subagent `tool`, `row_id` its key: one line at a step's height, its
+    /// chevron opening its steps in place, Enter or its Open drilling in.
+    pub(super) fn render_spawn(
         &mut self,
         row_id: &SharedString,
-        ix: usize,
         tool: &ToolItem,
-        frontier: bool,
-        rail: bool,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let card = Card::of(tool);
-        let key = SharedString::from(format!("{row_id}#s{ix}"));
-        let width = f32::from(self.subagents.window.width);
-        let phone = width > 0.0 && width < PHONE_BELOW;
-        let can_open_in_place = card.chat.is_some() && !rail && !phone;
-        let open = can_open_in_place && self.card_open(&key, frontier && card.running);
-        // Opening or closing, by the person or the frontier, the run slides from where it was
-        // drawn: its height eases to its own, or to none.
-        let moment = crate::clock::now(cx);
-        let reduced = crate::motion::reduced_motion(cx);
-        let drawn = self.subagents.drawn.get(&key).copied();
-        if let Some((was_open, height)) = drawn
-            && was_open != open
-            && !reduced
-        {
-            self.subagents.moving.insert(key.clone(), (height, moment));
-        }
-        let moving = self.subagents.moving.get(&key).copied();
-        // A card the frontier opened closes with it, its child let go once it slid shut.
-        if let Some(chat) = card.chat.as_deref()
-            && !open
-            && moving.is_none()
-            && self.subagents.open.contains_key(chat)
-        {
-            self.close_child(chat, cx);
-        }
-        if card.running {
+        use crate::loaders::status_mark::{MARK_SMALL, StatusMark};
+        let run = Run::of(tool);
+        let open = self.spawn_open(row_id);
+        if run.running {
             self.tick_soon(cx);
         }
-        let focus = self
-            .subagents
-            .focus
-            .entry(key.clone())
-            // slopty: a tab stop: a tracked handle is one only when it says so (#9).
-            .or_insert_with(|| cx.focus_handle().tab_stop(true))
-            .clone();
         let now = self.clock.timestamp_millis();
-        let figures = card.figures_at(now);
-
-        // The trailing glyph: the working spinner, the calm clock of one waiting on its own work,
-        // the amber dot of one waiting on the person.
-        // slopty: the one status mark (design-inspiration item 1): its ring turns while the run
-        // works, closes amber when it needs the person, and draws its tick as it finishes, a red
-        // `!` if it failed; a run stopped leaves no mark.
-        use crate::loaders::status_mark::{MARK_SMALL, MarkState, StatusMark};
-        let mark = |state| {
-            StatusMark::new(SharedString::from(format!("subagent-mark-{key}")), state)
-                .size(MARK_SMALL)
-                // The tick is cut through the disc in the card's own ground.
-                .ground(crate::theme::flatten(crate::theme::ink(0.03), theme.bg))
-                .into_any_element()
+        let facts = run.facts_at(now);
+        let hover = format!("{row_id}-hover");
+        let shown = crate::motion::revealed_by_hover(&hover).max(if crate::shell::touch_screen() { 1.0 } else { 0.0 });
+        let step = match (&run.needs_you, &run.step) {
+            (Some(ask), _) => Some(format!("Needs you · {ask}")),
+            (None, step) => step.clone(),
         };
-        let glyph: Option<AnyElement> = match card.state.as_str() {
-            _ if card.needs_you.is_some() || card.state == SubagentProgress::NEEDS_YOU => {
-                Some(mark(MarkState::Waiting))
-            }
-            SubagentProgress::WAITING => Some(
-                crate::icons::icon(crate::icons::CLOCK_CIRCLE)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .into_any_element(),
-            ),
-            _ if card.running => Some(mark(MarkState::Working)),
-            SubagentProgress::DONE => Some(mark(MarkState::Done)),
-            SubagentProgress::FAILED => Some(mark(MarkState::Failed)),
-            _ => None,
+        let step_tint = if run.needs_you.is_some() {
+            theme.warning
+        } else if run.failed {
+            theme.danger
+        } else {
+            theme.text_muted
         };
-        // slopty: the card's hover, faded; its quiet controls fade in with it, each laid out in
-        // an 18 pt footprint and pressed over 24 (44 on a touch screen: `press_target`, M25).
-        let card_fade = format!("{key}-card-hover");
-        // slopty: on a touch screen, which has no hover, they stand at rest
-        // (`.research/opencode-study-2026-10-19.md` item 4).
-        let shown = crate::motion::revealed_by_hover(&card_fade);
-        let quiet = |id: String, label: &'static str, glyph: &'static str| {
-            let fade = format!("{id}-hover");
-            crate::surface_chrome::press_target(SharedString::from(id), QUIET_FOOTPRINT)
+        let view = cx.entity_id();
+        // Its chevron's gutter, kept when it has no run to open so its icon lines up with its
+        // neighbours'.
+        let chevron = div().w(px(NEST_INDENT)).h(px(18.0)).flex_none().relative().children(run.chat.is_some().then(|| {
+            crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                .absolute()
+                .left(px(super::ACTIVITY_TRUNK_X - 7.0))
+                .top(px(2.0))
+                .size(px(14.0))
+                .with_transformation(gpui::Transformation::rotate(gpui::radians(if open {
+                    0.0
+                } else {
+                    -std::f32::consts::FRAC_PI_2
+                })))
+                .text_color(theme.text_muted)
+                .opacity(shown.max(if open { 1.0 } else { 0.0 }))
+        }));
+        let drill = run.chat.clone().map(|chat| {
+            let fade = format!("{row_id}-open-hover");
+            let row = row_id.clone();
+            crate::surface_chrome::press_target(SharedString::from(format!("{row_id}-open")), QUIET_FOOTPRINT)
                 .role(gpui::Role::Button)
-                .aria_label(label)
+                .aria_label("Open subagent")
                 .rounded(px(6.0))
                 .cursor_pointer()
                 .opacity(shown)
-                // slopty: a tab stop, shown while it has the keyboard.
                 .tab_index(0)
                 .focus_visible({
                     let ring = crate::surface_chrome::ring(theme, crate::surface_chrome::RING_OFFSET);
@@ -497,300 +622,122 @@ impl Transcript {
                 })
                 .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
                 .hover_fade(fade)
-                .tooltip(crate::settings::widgets::text_tooltip(label))
+                .tooltip(crate::settings::widgets::text_tooltip("Open subagent"))
                 .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-                .child(
-                    crate::icons::icon(glyph)
-                        .size(px(12.0))
-                        .text_color(theme.text_muted),
-                )
-        };
-        let drill = card.chat.clone().map(|chat| {
-            quiet(format!("{key}-open"), "Open subagent", crate::icons::ARROW_UP_RIGHT).on_click(
-                cx.listener(move |_, _, _, cx| {
+                .child(crate::icons::icon(crate::icons::ARROW_UP_RIGHT).size(px(12.0)).text_color(theme.text_muted))
+                // A press drills in and gives this control no keyboard: it goes with the trace it
+                // is in (the inspector moves the keyboard to its way back instead).
+                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                     cx.stop_propagation();
-                    cx.emit(TranscriptEvent::OpenSubagent {
-                        chat_id: chat.clone(),
-                    });
-                }),
-            )
+                    cx.emit(super::SubagentDrill { chat_id: chat.clone(), row: row.clone() });
+                }))
         });
-        // How open the run is, 0 to 1, as it slides; the chevron turns with it, as a tool
-        // group's does.
-        let (from, since) = moving.unwrap_or((0.0, moment));
-        let room = self.subagents.child_room();
-        let full = |rows: Option<f32>| rows.map_or(room, |rows| (rows + 1.0).min(room));
-        let target_rows = card
-            .chat
-            .as_deref()
-            .and_then(|chat| self.subagents.open.get(chat))
-            .and_then(|child| child.rows.get());
-        let target = if open { full(target_rows) } else { 0.0 };
-        // slopty: as the one fold moves (`motion::fold_frame`; design-inspiration item 7): the
-        // height first, the run fading in and rising after it; closing, gone before it lands.
-        let fold = crate::motion::fold_frame(open, moment.saturating_duration_since(since), false);
-        let t = moving.map_or(1.0, |_| if open { fold.height } else { 1.0 - fold.height });
-        let (contents, rise) = if moving.is_some() { (fold.opacity, fold.rise) } else { (1.0, 0.0) };
-        let height = crate::motion::lerp(from, target, t);
-        let openness = if full(target_rows) > 0.0 { (height / full(target_rows)).clamp(0.0, 1.0) } else { 0.0 };
-        // slopty: the chevron arrives with the card's hover, as opencode's card action does: from
-        // no width, sliding in from 4 pt back and fading up; an open run keeps it, to close by,
-        // and a touch screen shows it at rest (item 26).
-        let arrived = shown.max(openness);
-        let chevron = can_open_in_place.then(|| {
-            div()
-                .debug_selector(|| "subagent-chevron".into()) // slopty: for the tests
-                .w(px(18.0 * arrived))
-                .h(px(18.0))
-                .ml(px(-Theme::SPACE_SM * (1.0 - arrived)))
-                .overflow_hidden()
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .opacity(arrived)
-                .child(
-                    crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                        .relative()
-                        .left(px(-4.0 * (1.0 - arrived)))
-                        .size(px(12.0))
-                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            -std::f32::consts::FRAC_PI_2 * (1.0 - openness),
-                        )))
-                        .text_color(theme.text_faint),
-                )
+        let mark = run.mark().map(|state| {
+            StatusMark::new(SharedString::from(format!("subagent-mark-{row_id}")), state)
+                .size(MARK_SMALL)
+                .into_any_element()
         });
-        let label_tint = if card.failed { theme.danger } else { theme.text };
-        let header = div()
-            .h(px(CHIP_CARD_HEIGHT - 2.0))
+        let value = [step.clone(), Some(facts.clone()).filter(|f| !f.is_empty())]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let toggle = (row_id.clone(), run.chat.clone());
+        label_type(crate::surface_chrome::key_stop_inset(div().id(row_id.clone()), theme))
+            .hover_fade(hover)
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("Subagent {}", run.title)))
+            .aria_value(SharedString::from(value))
+            .when(run.chat.is_some(), |row| row.aria_expanded(open))
+            .rounded(px(4.0))
+            .h(px(super::tool_group_header_height()))
             .w_full()
             .min_w_0()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(Theme::SPACE_SM))
-            .px(px(Theme::SPACE_SM))
-            .child(
-                div()
-                    .size(px(18.0))
-                    .flex_none()
-                    .rounded(px(5.0))
-                    .bg(crate::theme::ink(0.08))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        crate::icons::icon(crate::icons::BOT)
-                            .size(px(12.0))
-                            .text_color(theme.text_muted),
-                    ),
-            )
+            .gap(px(6.0))
+            .pr(px(4.0))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                let (row, chat) = toggle.clone();
+                let Some(chat) = chat else { return };
+                cx.stop_propagation();
+                // Enter drills in, as a trace viewer's does; a press or Space opens it in place.
+                if matches!(event, ClickEvent::Keyboard(key) if key.button == KeyboardButton::Enter) {
+                    cx.emit(super::SubagentDrill { chat_id: chat, row });
+                } else {
+                    this.toggle_spawn(row, chat, cx);
+                }
+            }))
+            .child(chevron)
+            .child(crate::icons::icon(crate::icons::BOT).size(px(13.0)).flex_none().text_color(theme.text_muted))
+            .children(run.kind.clone().map(|kind| {
+                div().flex_none().text_color(theme.text_faint).child(kind)
+            }))
             .child(
                 div()
                     .min_w_0()
-                    .flex_1()
+                    .flex_shrink(1.0)
                     .truncate()
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(label_tint.opacity(0.9))
-                    .child(card.title.clone()),
+                    .text_color(if run.failed { theme.danger } else { theme.text })
+                    .child(run.title.clone()),
             )
-            .when_some(card.kind.clone(), |row, kind| {
-                row.child(
-                    div()
-                        .flex_none()
-                        .max_w(px(200.0))
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child(kind),
-                )
-            })
+            .children(step.map(|step| {
+                // slopty: the word swaps as it changes (Amp).
+                status_word(SharedString::from(format!("{row_id}-status")), step.into(), view, cx)
+                    .min_w_0()
+                    .flex_shrink(1.0)
+                    .text_color(step_tint)
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(facts)),
+            )
             .children(drill)
-            .children(glyph.map(|glyph| div().flex_none().child(glyph)))
-            .children(chevron);
-        let view = cx.entity_id();
-        let step_line = (card.step.is_some() || !figures.is_empty()).then(|| {
-            div()
-                .h(px(STEP_LINE_HEIGHT))
-                .w_full()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(Theme::SPACE_SM))
-                .pl(px(Theme::SPACE_SM + 18.0 + Theme::SPACE_SM))
-                .pr(px(Theme::SPACE_SM))
-                .pb(px(2.0))
-                .text_size(crate::typography::ui_rems(11.5))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_color(if card.failed {
-                            theme.danger
-                        } else {
-                            theme.text_muted
-                        })
-                        // slopty: the word swaps as it changes (Amp).
-                        .child(status_word(
-                            SharedString::from(format!("{key}-status")),
-                            SharedString::from(card.step.clone().unwrap_or_default()),
-                            view,
-                            cx,
-                        )),
-                )
-                .when(!figures.is_empty(), |line| {
-                    line.child(
-                        div()
-                            .flex_none()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(figures.clone())),
-                    )
-                })
-        });
-        let needs_you = card.needs_you.clone().map(|ask| {
-            div()
-                .w_full()
-                .min_w_0()
-                .pl(px(Theme::SPACE_SM + 18.0 + Theme::SPACE_SM))
-                .pr(px(Theme::SPACE_SM))
-                .pb(px(Theme::SPACE_XS))
-                .truncate()
-                .text_size(crate::typography::ui_rems(11.5))
-                .text_color(theme.warning)
-                .child(SharedString::from(format!("Needs you · {ask}")))
-        });
-        let sliding = moving.is_some() && (t < 1.0 || (open && contents < 1.0));
-        let child = card.chat.clone().filter(|_| open || sliding).map(|chat| {
-            let (transcript, rows) = self.inline_child(row_id, &chat, card.running, cx);
-            // As tall as its rows, up to its room: a short run leaves no room under its last
-            // line. Before its rows laid out, the room. It slides open over its whole height,
-            // so nothing in it moves as it shows. The hairline over it is its own pixel.
-            let whole = if open { full(rows) } else { from.max(height) };
-            div()
-                .id(SharedString::from(format!("{key}-child")))
-                .role(gpui::Role::Group)
-                .aria_label(SharedString::from(format!("Transcript of {}", card.title)))
-                .w_full()
-                .flex_none()
-                .overflow_hidden()
-                .h(px(height))
-                .opacity(contents)
-                .child(
-                    div()
-                        .w_full()
-                        .mt(px(rise))
-                        .h(px(whole))
-                        .border_t_1()
-                        .border_color(crate::theme::hairline(0.06))
-                        .child(transcript),
-                )
-        });
-        // Each frame of the slide measures the card's row again, until it lands.
-        self.subagents.drawn.insert(key.clone(), (open, height));
-        let slide = if sliding {
-            let row = row_id.clone();
-            let this = cx.weak_entity();
-            Some(
-                gpui::canvas(
-                    move |_, window, _| {
-                        window.on_next_frame(move |_, cx| {
-                            this.update(cx, |this, cx| this.row_resized(&row, cx)).ok();
-                        });
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_0(),
-            )
-        } else {
-            if moving.is_some() {
-                self.subagents.moving.remove(&key);
-                if !open {
-                    // Slid shut: let its child go, and the row take its closed height.
-                    if let Some(chat) = card.chat.as_deref() {
-                        self.close_child(chat, cx);
-                    }
-                    // After this layout, which holds the list's state.
-                    let row = row_id.clone();
-                    let this = cx.weak_entity();
-                    cx.defer(move |cx| {
-                        this.update(cx, |this, cx| this.row_resized(&row, cx)).ok();
-                    });
-                }
-            }
-            None
-        };
-        let value = [card.step.clone(), Some(figures).filter(|f| !f.is_empty())]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let toggle_key = key.clone();
-        let key_chat = card.chat.clone();
-        div()
-            .id(key.clone())
-            .track_focus(&focus)
-            // slopty: its ring inside its edge (the group's body clips it); Enter or Space
-            // presses it as a click does (#9).
-            .map(|card| crate::surface_chrome::focus_ring_inset(card, theme))
-            .group("subagent-card")
-            .role(gpui::Role::Button)
-            .aria_label(SharedString::from(format!("Subagent {}", card.title)))
-            .aria_value(SharedString::from(value))
-            .when(can_open_in_place, |card| card.aria_expanded(open))
-            .my(px(Theme::SPACE_XS))
+            .children(mark.map(|mark| div().flex_none().child(mark)))
+            .into_any_element()
+    }
+
+    /// slopty: the one line over subagents started together, `tools` their spawns.
+    pub(super) fn render_spawns(
+        &mut self,
+        row_id: &SharedString,
+        tools: &[ToolItem],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let runs: Vec<Run> = tools.iter().map(Run::of).collect();
+        if runs.iter().any(|run| run.running) {
+            self.tick_soon(cx);
+        }
+        let words = batch_words(&runs, self.clock.timestamp_millis());
+        let failed = runs.iter().any(|run| run.failed);
+        label_type(div().id(SharedString::from(format!("{row_id}-batch"))))
+            .role(gpui::Role::Heading)
+            .aria_label(SharedString::from(words.clone()))
+            .h(px(super::tool_group_header_height()))
             .w_full()
             .min_w_0()
             .flex()
-            .flex_col()
-            .overflow_hidden()
-            .rounded(px(super::TRANSCRIPT_CARD_RADIUS))
-            .border_1()
-            .border_color(if card.needs_you.is_some() {
-                theme.warning.opacity(0.35)
-            } else {
-                theme.border
-            })
-            .text_size(px(super::TOOL_LABEL_SIZE))
-            .line_height(px(super::TOOL_LABEL_LINE_HEIGHT))
-            .cursor_pointer()
-            .bg(crate::motion::hover_blend(&card_fade, crate::theme::ink(0.03), crate::theme::ink(0.05)))
-            .hover_fade(card_fade)
-            .on_click(cx.listener({
-                let key = toggle_key.clone();
-                let chat = card.chat.clone();
-                move |this, _, window, cx| {
-                    window.focus(&this.subagents.focus[&key], cx);
-                    if can_open_in_place {
-                        this.toggle_card(key.clone(), open, cx);
-                    } else if let Some(chat) = chat.clone() {
-                        // A phone, or a fold's rail: the card drills in.
-                        cx.emit(TranscriptEvent::OpenSubagent { chat_id: chat });
-                    }
-                }
-            }))
-            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                let keys = &event.keystroke;
-                let command = keys.modifiers.platform;
-                match keys.key.as_str() {
-                    "enter" if command => {
-                        if let Some(chat) = key_chat.clone() {
-                            cx.emit(TranscriptEvent::OpenSubagent { chat_id: chat });
-                        }
-                    }
-                    "escape" if open => this.toggle_card(toggle_key.clone(), open, cx),
-                    _ => return,
-                }
-                cx.stop_propagation();
-            }))
-            .relative()
-            .child(header)
-            .children(step_line)
-            .children(needs_you)
-            .children(child)
-            .children(slide)
+            .items_center()
+            .gap(px(6.0))
+            .child(div().w(px(NEST_INDENT)).flex_none())
+            .child(crate::icons::icon(crate::icons::BOT).size(px(13.0)).flex_none().text_color(theme.text_muted))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if failed { theme.danger } else { theme.text_muted })
+                    .child(SharedString::from(words)),
+            )
             .into_any_element()
     }
 }
@@ -829,68 +776,107 @@ mod tests {
         }
     }
 
-    /// A running card reads its step, and its figures with the time it has run; settled, its
-    /// outcome and the time it took.
+    /// A running subagent reads its heartbeat (its model, its step, its figures) with the time
+    /// it has run, and says "quiet" once its records stopped a minute; settled, its outcome and
+    /// the time it took, and one line of facts for a drilled-in trace.
     #[test]
-    fn a_card_reads_its_step_then_its_outcome() {
+    fn a_run_reads_its_heartbeat_then_its_outcome() {
         let mut progress = SubagentProgress {
             agent_type: Some("Explore".into()),
+            model: Some("claude-haiku-5-5".into()),
             running: true,
             state: SubagentProgress::RUNNING.into(),
-            step: Some("Reading parser.rs".into()),
+            step: Some("Read parser.rs".into()),
             tool_uses: Some(12),
             tokens: Some(41_000),
             started_at: Some(1_000),
+            heard_at: Some(100_000),
             figures: "12 tools · 41k tokens".into(),
             chat_id: Some("child-chat".into()),
-            row: Some("task:a1".into()),
             ..SubagentProgress::default()
         };
-        let card = Card::of(&spawn(Some(progress.clone())));
-        assert_eq!(card.title.as_ref(), "Count lines");
-        assert_eq!(card.kind.as_deref(), Some("Explore"));
-        assert_eq!(card.chat.as_deref(), Some("child-chat"));
-        assert_eq!(card.step.as_deref(), Some("Reading parser.rs"));
-        assert_eq!(card.figures_at(124_000), "12 tools · 41k tokens · 2m 3s");
+        let run = Run::of(&spawn(Some(progress.clone())));
+        assert_eq!(run.title.as_ref(), "Count lines");
+        assert_eq!(run.kind.as_deref(), Some("Explore"));
+        assert_eq!(run.chat.as_deref(), Some("child-chat"));
+        assert_eq!(run.step.as_deref(), Some("Read parser.rs"));
+        assert_eq!(run.facts_at(124_000), "Haiku 5.5 · 12 tools · 41k tokens · 2m 3s");
+        assert_eq!(run.facts_at(281_000), "Haiku 5.5 · 12 tools · 41k tokens · quiet 3m · 4m 40s");
         progress.running = false;
         progress.state = SubagentProgress::DONE.into();
         progress.duration_ms = Some(65_000);
         progress.outcome = Some("4".into());
-        let settled = Card::of(&spawn(Some(progress.clone())));
+        let settled = Run::of(&spawn(Some(progress.clone())));
         // slopty: done, it says what it answered (#23): the view model's outcome is the report's
         // first line where the call carries no result, as Claude Code's spawn calls do.
         assert_eq!(settled.step.as_deref(), Some("4"));
-        assert_eq!(settled.figures_at(999_999), "12 tools · 41k tokens · 1m 5s");
+        assert_eq!(settled.facts_at(999_999), "Haiku 5.5 · 12 tools · 41k tokens · 1m 5s", "no quiet once done");
+        assert_eq!(settled.summary_at(999_999), "Explore · Haiku 5.5 · Done · 12 tools · 41k tokens · 1m 5s");
         let mut answered = spawn(Some(progress.clone()));
         answered.detail = super::super::tool_detail(Some("\n## **4** lines\n\nagentId: a1\n"), None, None)
             .map(std::sync::Arc::new);
-        assert_eq!(Card::of(&answered).step.as_deref(), Some("4 lines"));
+        assert_eq!(Run::of(&answered).step.as_deref(), Some("4 lines"));
         // A run that failed or was stopped still says so.
         progress.state = SubagentProgress::FAILED.into();
         progress.outcome = Some("Failed: out of turns".into());
         let mut failed = spawn(Some(progress.clone()));
         failed.detail = answered.detail.clone();
-        assert_eq!(Card::of(&failed).step.as_deref(), Some("Failed: out of turns"));
+        assert_eq!(Run::of(&failed).step.as_deref(), Some("Failed: out of turns"));
         progress.state = SubagentProgress::STOPPED.into();
         progress.outcome = Some("Stopped".into());
-        assert_eq!(Card::of(&spawn(Some(progress))).step.as_deref(), Some("Stopped"));
+        let stopped = Run::of(&spawn(Some(progress)));
+        assert_eq!(stopped.step.as_deref(), Some("Stopped"));
+        assert_eq!(stopped.mark(), None, "a run stopped leaves no mark");
     }
 
-    /// Without progress from the view model, the card stands on what the chip carries.
+    /// Without progress from the view model, the row stands on what the call carries.
     #[test]
-    fn a_card_without_progress_names_its_chat_and_row() {
-        let card = Card::of(&spawn(None));
-        assert!(card.running);
-        assert_eq!(card.chat.as_deref(), Some("child"));
-        assert_eq!(card.row.as_deref(), Some("chat:child"));
-        assert_eq!(card.figures_at(5), "");
+    fn a_run_without_progress_names_its_chat() {
+        let run = Run::of(&spawn(None));
+        assert!(run.running);
+        assert_eq!(run.chat.as_deref(), Some("child"));
+        assert_eq!(run.facts_at(5), "");
     }
 
-    /// slopty: a card's status word swaps as Amp's does: the first sight stands still, a new word
+    /// A model's id reads as its name and version.
+    #[test]
+    fn a_model_reads_as_its_name() {
+        assert_eq!(model_words("claude-haiku-5-5"), "Haiku 5.5");
+        assert_eq!(model_words("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
+        assert_eq!(model_words("opus"), "Opus");
+        assert_eq!(model_words("gpt-5.1-codex"), "gpt-5.1-codex");
+    }
+
+    /// Subagents started together read on one line: how many of what kind, how many still work,
+    /// the time across them; then that they finished, and how many failed.
+    #[test]
+    fn a_batch_says_who_still_works() {
+        let run = |kind: &str, running: bool, failed: bool, started: i64, took: u64| Run {
+            title: "x".into(),
+            kind: Some(kind.to_owned().into()),
+            model: None,
+            chat: None,
+            running,
+            failed,
+            state: String::new(),
+            step: None,
+            figures: String::new(),
+            started_at: Some(started),
+            duration_ms: (!running).then_some(took),
+            heard_at: None,
+            needs_you: None,
+        };
+        let live = [run("Explore", true, false, 0, 0), run("Explore", true, false, 2_000, 0), run("Explore", false, false, 1_000, 5_000)];
+        assert_eq!(batch_words(&live, 72_000), "3 Explore agents · 2 working · 1m 12s");
+        let done = [run("Explore", false, false, 0, 125_000), run("Plan", false, true, 1_000, 10_000)];
+        assert_eq!(batch_words(&done, 999_999), "2 agents finished · 1 failed · 2m 5s");
+    }
+
+    /// slopty: a row's status word swaps as Amp's does: the first sight stands still, a new word
     /// swaps in from the last for 350 ms, and reduced motion swaps at once.
     #[test]
     fn a_status_word_swaps_from_the_last() {
-        let key = SharedString::from("card-status");
+        let key = SharedString::from("run-status");
         let start = std::time::Instant::now();
         let at = |ms: u64| start + std::time::Duration::from_millis(ms);
         assert_eq!(status_swap(&key, &"Thinking".into(), false, start), None, "first sight");

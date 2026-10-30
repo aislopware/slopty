@@ -310,11 +310,15 @@ fn a_subagent_card_follows_its_run() {
     let asking = progress(&state, Some(&child), &spawn);
     assert_eq!(asking.state, SubagentProgress::NEEDS_YOU);
     assert_eq!(asking.chat_id.as_deref(), Some("c9"));
+    // While it runs, when its records last moved, for the row's "quiet 3m".
+    let heard = ChildRun { heard_ms: Some(ms(42)), ..child };
+    assert_eq!(progress(&state, Some(&heard), &spawn).heard_at, Some(super::at(ms(42))));
     state.tasks.clear();
     let ended = AgentDetail {
         tokens: Some(9_000),
         tool_uses: Some(3),
         duration_ms: Some(125_000),
+        model: Some("claude-haiku-5-5".into()),
         ..agent
     };
     let done = call("Agent", "agent", Some(ToolDetail::Agent(ended.clone())), ToolState::Completed);
@@ -323,6 +327,8 @@ fn a_subagent_card_follows_its_run() {
     assert_eq!(settled.outcome.as_deref(), Some("Done"), "the time is the figures' to say");
     assert_eq!(settled.duration_ms, Some(125_000));
     assert_eq!(settled.figures, "3 tools · 9k tokens");
+    assert_eq!(settled.model.as_deref(), Some("claude-haiku-5-5"), "the model it resolved");
+    assert_eq!(settled.heard_at, None, "a quiet is said only while it runs");
     assert!(!settled.running && settled.step.is_none());
     // What it answered is its outcome: the report's first line, as Claude Code records it.
     let answered = AgentDetail {

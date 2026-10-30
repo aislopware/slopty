@@ -68,6 +68,7 @@ pub mod work;
 pub(crate) mod find;
 mod jump; // slopty: the pill that says what waits below and goes back to it.
 pub use extras::{claude_too_old, serve_terminal_runs};
+pub(crate) use subagents::Run;
 pub use find::{FindInThread, FindNext, FindPrevious};
 
 // ---------------------------------------------------------------------------
@@ -257,60 +258,8 @@ fn message_article(row: &SharedString, who: impl Into<SharedString>, inner: AnyE
         .into_any_element()
 }
 
-/// slopty: where a transcript fit to its rows tells their height: the card it is open in.
-#[derive(Clone)]
-struct Fit {
-    card: gpui::WeakEntity<Transcript>,
-    /// The card's row there.
-    row: SharedString,
-    height: Rc<Cell<Option<f32>>>,
-}
 
-impl Fit {
-    /// After the list's layout, its rows' height from `list`: the card is drawn again when it
-    /// moves, so the card's height is always the one this frame measured.
-    fn measure(self, list: ListState) -> AnyElement {
-        gpui::canvas(
-            move |_, _, cx| {
-                let now = rows_height(&list);
-                let moved = match (self.height.get(), now) {
-                    (Some(had), Some(now)) => (had - now).abs() > 0.5,
-                    (had, now) => had.is_some() != now.is_some(),
-                };
-                if moved {
-                    self.height.set(now);
-                    let (card, row) = (self.card.clone(), self.row.clone());
-                    cx.defer(move |cx| {
-                        card.update(cx, |card, cx| card.row_resized(&row, cx)).ok();
-                    });
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_0()
-        .into_any_element()
-    }
-}
 
-/// slopty: the height `list`'s rows take as last laid out, to its last row's end; past its
-/// viewport, more than any room (`f32::MAX`), as rows not yet laid out are not measured, so the
-/// card takes its whole room and measures again; `None` before it laid out any.
-fn rows_height(list: &ListState) -> Option<f32> {
-    let count = list.item_count();
-    let last = count.checked_sub(1)?;
-    let viewport = list.viewport_bounds();
-    let shown = f32::from(viewport.size.height);
-    if shown <= 0.0 {
-        return None;
-    }
-    let past = f32::from(list.max_offset_for_scrollbar().y);
-    if past > 0.5 {
-        return Some(f32::MAX);
-    }
-    let end = list.bounds_for_item(last)?;
-    Some(f32::from(end.bottom() - viewport.top()))
-}
 
 
 
@@ -1147,6 +1096,17 @@ pub enum RowKind {
         summary: Sentence,
         tools: Arc<Vec<ToolItem>>,
     },
+    /// slopty: a subagent, one row like any call: its kind and task, its heartbeat or what it
+    /// answered, its figures and its status. A press splices its steps in under it, Enter drills
+    /// in (`transcript/subagents.rs`; `inspector.md`, "A subagent is a nested step").
+    Spawn {
+        tool: Arc<ToolItem>,
+    },
+    /// slopty: the one line over subagents started together ("3 Explore agents · 2 working ·
+    /// 1m 12s"); each keeps its own row under it.
+    Spawns {
+        tools: Arc<Vec<ToolItem>>,
+    },
     InputChip {
         /// slopty: what kind of ask it was: "Question", "Approval", "Confirm", "Form", "Plan".
         label: SharedString,
@@ -1537,11 +1497,39 @@ pub fn rows_for_entry(
     }
 
     // Assistant/system: split parts into block rows, folding consecutive
-    // ordinary tools. Agent/spawn chips flush into their own group so they
-    // never share a collapse with Reads/Runs.
+    // ordinary tools. slopty: a subagent is a row of its own, never in a group's fold; those
+    // started together are headed by one line.
     let last_part_ix = entry.parts.len().saturating_sub(1);
     let mut pending_group: Vec<ToolItem> = Vec::new();
     let mut group_last_part_ix = 0usize;
+    let mut pending_spawns: Vec<ToolItem> = Vec::new();
+    let flush_spawns = |rows: &mut Vec<Row>, spawns: &mut Vec<ToolItem>| {
+        let spawns = std::mem::take(spawns);
+        if spawns.len() > 1 {
+            rows.push(Row {
+                id: format!("{}#p:{}", entry.id, spawns[0].part_id).into(),
+                version: tool_fingerprint(&spawns),
+                turn_start: false,
+                kind: RowKind::Spawns { tools: Arc::new(spawns.clone()) },
+                entry_id: entry.id.clone().into(),
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+            });
+        }
+        for tool in spawns {
+            rows.push(Row {
+                id: format!("{}#a:{}", entry.id, tool.part_id).into(),
+                version: tool_fingerprint(std::slice::from_ref(&tool)),
+                turn_start: false,
+                kind: RowKind::Spawn { tool: Arc::new(tool) },
+                entry_id: entry.id.clone().into(),
+                timestamp: None,
+                copy_text: None,
+                compact_fold: None,
+            });
+        }
+    };
 
     // slopty: a group is keyed by its first step's record id, so a group that grows, or that a
     // spawn splits as its input lands, keeps its key and its fold (`inspector.md`, "Keys").
@@ -1608,14 +1596,12 @@ pub fn rows_for_entry(
                     images: crate::tool_images::image_paths(call, output.as_deref()),
                     facts: facts.as_deref().cloned().map(Arc::new), // slopty: its facts.
                 };
-                if pending_group
-                    .first()
-                    .is_some_and(|head| is_agent_tool(head) != is_agent_tool(&item))
-                {
-                    // Agent chips don't share a fold with ordinary tools:
-                    // flush whenever the genus flips so each group is uniform.
+                if is_agent_tool(&item) {
                     flush_group(&mut rows, &mut pending_group, group_last_part_ix);
+                    pending_spawns.push(item);
+                    continue;
                 }
+                flush_spawns(&mut rows, &mut pending_spawns);
                 pending_group.push(item);
                 group_last_part_ix = part_ix;
             }
@@ -1641,16 +1627,13 @@ pub fn rows_for_entry(
                         ..slopty_view_doc::ToolFacts::default()
                     }));
                 }
-                if pending_group.first().is_some_and(is_agent_tool) {
-                    // Thoughts join ordinary tool groups; agent (spawn-link)
-                    // groups stay pure, exactly like the tool genus rule.
-                    flush_group(&mut rows, &mut pending_group, group_last_part_ix);
-                }
+                flush_spawns(&mut rows, &mut pending_spawns);
                 pending_group.push(item);
                 group_last_part_ix = part_ix;
             }
             other => {
                 flush_group(&mut rows, &mut pending_group, group_last_part_ix);
+                flush_spawns(&mut rows, &mut pending_spawns);
                 match other {
                     MessagePart::Text { id: part_id, text } => {
                         if text.trim().is_empty() {
@@ -1850,6 +1833,7 @@ pub fn rows_for_entry(
         }
     }
     flush_group(&mut rows, &mut pending_group, group_last_part_ix);
+    flush_spawns(&mut rows, &mut pending_spawns);
 
     // slopty: a settled turn says what it changed, above its done line, which ends it (#4).
     let done = rows.last().is_some_and(is_done_line);
@@ -2058,11 +2042,14 @@ pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     let same_part_markdown = prev.is_some_and(|p| {
         is_md(&p.kind) && is_md(&row.kind) && part_prefix(&p.id) == part_prefix(&row.id)
     });
+    let spawn = |k: &RowKind| matches!(k, RowKind::Spawn { .. } | RowKind::Spawns { .. });
+    let step = |k: &RowKind| spawn(k) || matches!(k, RowKind::ToolGroup { .. });
     if same_part_markdown {
         render::MD_BLOCK_GAP
-    } else if matches!(row.kind, RowKind::ToolGroup { .. })
-        || prev.is_some_and(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
-    {
+    } else if spawn(&row.kind) && prev.is_some_and(|prev| spawn(&prev.kind)) {
+        // slopty: subagents started together stand in one block, line under line.
+        0.0
+    } else if step(&row.kind) || prev.is_some_and(|row| step(&row.kind)) {
         Theme::SPACE_MD
     } else {
         Theme::SPACE_SM
@@ -3373,13 +3360,6 @@ pub struct Transcript {
     /// post-restore finalizer waits until one layout completes without another
     /// invalidation, avoiding a stale jump-button decision.
     viewport_layout_revision: u64,
-    /// One-shot "open at the latest content" for UNPINNED (frozen) override
-    /// instances: rows land ASYNC after the tab opens (watch replay / blob
-    /// fetch), so the end-scroll fires on the first non-empty sync, then
-    /// never again — landing at the end and FOLLOWING it are different
-    /// states, and the user owns the viewport from there. Pinned instances
-    /// don't need it (the pin branch already opens at the end).
-    land_end_pending: bool,
     row_cache: HashMap<String, CachedRows>,
     live_parsers: HashMap<String, IncrementalParser>,
     tree_cache: HashMap<String, (usize, Arc<BlockTree>)>,
@@ -3484,9 +3464,6 @@ pub struct Transcript {
     /// zone. Dropping it on mouse-up stops all selection scroll work.
     selection_scroll_task: Option<Task<()>>,
     // slopty: no composer stack over the transcript's bottom, so no clearance under it.
-    /// slopty: a subagent's transcript open in its card (`transcript/subagents.rs`), which
-    /// takes the height its rows measure: told to the card after each layout.
-    fit: Option<Fit>,
     /// slopty: the time the working line reads: taken when the transcript's state moves and on
     /// the working timer's tick, never as a frame is built, so a frame built again (from
     /// scratch, or for a hover) says the second the frame shown says.
@@ -3564,6 +3541,8 @@ pub struct Transcript {
     attachment_retries: HashMap<(String, String), Task<()>>,
     // slopty: Slopty's own rows' state, and find in thread.
     extras: extras::ExtrasState,
+    /// slopty: what the person last opened in place, brought into view as it lays out.
+    reveal: Option<Reveal>,
     find: find::FindState,
     /// Sidecar blob fetches keyed by doc ref (`chatId/partId[.diff]`,
     /// chat2-sync A3). `Ready` holds the UPGRADED detail, built once on
@@ -3580,6 +3559,18 @@ pub struct Transcript {
     _text_changes: Subscription,
 }
 
+/// slopty: what the person opened in place, a group, a step's detail or a subagent's run, brought
+/// into view as it lays out (`inspector.md`, "Follow and anchor"): the view holds still under
+/// what grows by itself, but what the person opens at the end of the trace would open out of
+/// sight below it.
+struct Reveal {
+    /// The row pressed open.
+    row: SharedString,
+    /// The frames drawn since, and the moment of the first.
+    frames: u8,
+    since: Option<std::time::Instant>,
+}
+
 /// One sidecar blob fetch's lifecycle.
 enum BlobFetch {
     Loading(#[allow(dead_code)] Task<()>),
@@ -3588,17 +3579,16 @@ enum BlobFetch {
     Ready(Arc<ToolDetail>),
 }
 
-/// Shell-facing events (the transcript itself hosts no surfaces).
+/// slopty: Enter on a subagent's row, or its Open: the inspector pushes the subagent's run,
+/// `chat_id`, on a stack of its own, its facts read from row `row` here (`inspector.md`, "A long
+/// or nested run drills in, inside the inspector").
 #[derive(Debug, Clone)]
-pub enum TranscriptEvent {
-    // slopty: a subagent's card drills in; it no longer opens a right-pane tab.
-    /// A subagent card's Open: the session view shows the subagent's run, `chat_id`, with a
-    /// breadcrumb back to its parent (`docs/decisions/ui.md`, "Subagents live in their parent's
-    /// chat").
-    OpenSubagent { chat_id: String },
+pub struct SubagentDrill {
+    pub chat_id: String,
+    pub row: SharedString,
 }
 
-impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
+impl gpui::EventEmitter<SubagentDrill> for Transcript {}
 
 impl Transcript {
     pub(crate) fn set_workspace_link_handler(&mut self, handler: render::LinkUi) {
@@ -3721,12 +3711,10 @@ impl Transcript {
         Self::build(state, None, true, cx)
     }
 
-    /// A read-only transcript over one SUBAGENT doc (right-pane tab). The
-    /// caller starts the feed (`watch_subagent_doc` or the frozen snapshot);
-    /// this instance only renders whatever lands under `doc_id`. `follow` =
-    /// the doc is live: engage the end-follow pin from the start. Either
-    /// way the tab OPENS at the latest content — a frozen transcript lands
-    /// at the end once, unpinned, and free-scrolls from there.
+    /// A read-only transcript over one SUBAGENT doc: a trace the inspector drilled into
+    /// (`inspector.rs`). The caller starts the feed (`watch_subagent_doc` or the frozen
+    /// snapshot); this instance only renders whatever lands under `doc_id`. `follow` = the run
+    /// is live: it opens at its newest step, following it; a finished one opens at its brief.
     pub fn for_doc(
         state: Entity<AppState>,
         doc_id: String,
@@ -3765,9 +3753,8 @@ impl Transcript {
         let list = Self::new_list(list_top, cx);
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         cx.on_release(|this: &mut Self, cx| {
-            // slopty: children open in place stop being watched with their card.
-            let state = this.state.clone();
-            this.subagents.close_all(&state, cx);
+            // slopty: runs open in place stop being watched with the transcript.
+            this.close_spawns(cx);
             this.close_diagram_zoom(cx);
             crate::image_media::release_media(this.diagrams.borrow_mut().drain(), cx);
             this.tool_images.clear(cx);
@@ -3807,7 +3794,6 @@ impl Transcript {
             retain_on_deselect: false,
             footer: None,
             footer_press: false,
-            land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
             doc_override,
             saved_viewports: SavedViewportCache::default(),
@@ -3855,7 +3841,6 @@ impl Transcript {
             landed: None,
             selection_drag_position: None,
             selection_scroll_task: None,
-            fit: None,
             clock: crate::clock::utc(cx),
             clock_tick: None,
             page_viewport: gpui::Bounds::default(),
@@ -3889,6 +3874,7 @@ impl Transcript {
             fences: Default::default(),    // slopty: and chart fences.
             attachment_retries: HashMap::new(),
             extras: Default::default(), // slopty: Slopty's own rows.
+            reveal: None,
             find: Default::default(),
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
@@ -3912,16 +3898,6 @@ impl Transcript {
         }
     }
 
-    /// slopty: measure the rows' height after each layout into `height`, and have `card`
-    /// drawn again when it moves (a subagent's card, which takes that height up to its room).
-    pub(crate) fn fit_to(
-        &mut self,
-        card: gpui::WeakEntity<Transcript>,
-        row: SharedString,
-        height: Rc<Cell<Option<f32>>>,
-    ) {
-        self.fit = Some(Fit { card, row, height });
-    }
 
     /// slopty: row `row` takes another height (a subagent's card opened, closed, or fit to its
     /// run): it is measured again, and the list's layer painted afresh with it, so no row under
@@ -3956,6 +3932,12 @@ impl Transcript {
             .w_full()
             .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &gpui::MouseDownEvent, _, _| this.footer_press = true))
             .child(footer)
+    }
+
+    /// Whether the prompt box's mirror stands at its foot.
+    #[cfg(test)]
+    pub(crate) fn has_footer(&self) -> bool {
+        self.footer.is_some()
     }
 
     pub(crate) fn list_state(&self) -> &ListState {
@@ -4098,6 +4080,48 @@ impl Transcript {
         self.jump_mark = self.rows.last().map(|row| row.id.clone());
     }
 
+    /// slopty: bring what the person opened in place under row `row` into view as it lays out
+    /// ([`Reveal`]).
+    pub(super) fn reveal_opened(&mut self, row: SharedString) {
+        self.reveal = Some(Reveal { row, frames: 0, since: None });
+    }
+
+    /// slopty: one frame of a [`Reveal`]: the first lays out what opened; from the next its rows
+    /// have their heights, and the view moves down as far as the end of what opened needs, never
+    /// so far that the row pressed leaves the top. It looks again while a fold's tween grows the
+    /// row, and once after a move, which lays in rows not measured before.
+    fn step_reveal(&mut self, window: &mut Window, cx: &Context<Self>) {
+        let Some(reveal) = self.reveal.as_mut() else { return };
+        let now = crate::clock::now(cx);
+        reveal.frames += 1;
+        let since = *reveal.since.get_or_insert(now);
+        if reveal.frames == 1 {
+            window.request_animation_frame();
+            return;
+        }
+        let (row, frames) = (reveal.row.clone(), reveal.frames);
+        let by = self.rows.iter().position(|r| r.id == row).and_then(|ix| {
+            let pressed = self.list.bounds_for_item(ix)?;
+            // What opened ends at the last row spliced in under it, or at the row itself.
+            let depth = self.depth_of(&row);
+            let end = ix + self.rows[ix + 1..].iter().take_while(|r| self.depth_of(&r.id) > depth).count();
+            let viewport = self.list.viewport_bounds();
+            // An end not laid out lies past the overdraw, far enough below to move all the room.
+            let below = self.list.bounds_for_item(end).map_or(f32::INFINITY, |b| f32::from(b.bottom() - viewport.bottom()));
+            Some(below.min(f32::from(pressed.top() - viewport.top())))
+        });
+        let moved = by.filter(|by| *by > 0.5);
+        if let Some(by) = moved {
+            self.list.scroll_by(px(by));
+        }
+        let tweening = !motion::reduced_motion(cx) && now.saturating_duration_since(since) < FOLD_TWEEN_WINDOW;
+        if (moved.is_some() && frames < 4) || tweening {
+            window.request_animation_frame();
+        } else {
+            self.reveal = None;
+        }
+    }
+
     /// slopty: store the glide after [`Self::begin_scroll_navigation`] (`rail.rs`).
     pub(crate) fn set_glide(&mut self, glide: Option<crate::rail::Glide>) {
         self.glide = glide;
@@ -4108,10 +4132,10 @@ impl Transcript {
         self.glide.take()
     }
 
-    /// slopty: the size and line height its prose reads at: a run in its card at the card's
-    /// compact body, under the card's title, not larger than it (#24).
-    fn markdown_body(&self) -> (f32, f32) {
-        if self.fit.is_some() {
+    /// slopty: the size and line height row `row`'s prose reads at: a run opened in place at the
+    /// compact body, under its subagent's row, not larger than it (#24).
+    fn markdown_body(&self, row: &SharedString) -> (f32, f32) {
+        if self.depth_of(row) > 0 {
             (render::MD_COMPACT_TEXT_SIZE, render::MD_COMPACT_LINE_HEIGHT)
         } else {
             (render::MD_TEXT_SIZE, render::MD_LINE_HEIGHT)
@@ -4375,10 +4399,10 @@ impl Transcript {
     }
 
     /// slopty: the jump pill, at the list's foot while it does not follow its end and something
-    /// waits below; a run in its card or a subagent's doc has none.
+    /// waits below; a drilled subagent's trace has none.
     fn render_jump(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         const KEY: &str = "transcript-jump";
-        if self.fit.is_some() || self.doc_override.is_some() {
+        if self.doc_override.is_some() {
             return None;
         }
         let now = crate::clock::now(cx);
@@ -4446,7 +4470,7 @@ impl Transcript {
     }
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
-    fn sync(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync(&mut self, cx: &mut Context<Self>) {
         self.clock = crate::clock::utc(cx);
         if self.retain_on_deselect
             && self.doc_override.is_none()
@@ -4517,9 +4541,8 @@ impl Transcript {
             self.veil_attach_pending = true;
         }
         if attached {
-            // slopty: another chat's cards; the children this one opened close.
-            let state = self.state.clone();
-            self.subagents.close_all(&state, cx);
+            // slopty: another chat's subagents; the runs this one opened in place close.
+            self.close_spawns(cx);
             self.pages.clear();
             self.fences.borrow_mut().clear(); // slopty: chart fences too (M)
             // Read the incoming snapshot before inserting the outgoing one:
@@ -4617,6 +4640,12 @@ impl Transcript {
                 } else {
                     new_rows.extend(self.rows_for(entry, false));
                 }
+            }
+            // slopty: each subagent open in place has its run's steps spliced in under it.
+            self.subagents.depths.clear();
+            if !self.subagents.open.is_empty() {
+                let own = std::mem::take(&mut new_rows);
+                self.nest(own, state, 0, &mut new_rows);
             }
             entries.is_empty()
         };
@@ -4941,16 +4970,6 @@ impl Transcript {
         self.refresh_protected_attachments(cx);
         self.release_departed_tool_images(cx);
         self.restore_pending_viewport(replay);
-        if self.land_end_pending && !self.rows.is_empty() {
-            // First content for an unpinned override tab: land at the end.
-            // `scroll_to_end` is ITEM-anchored (past-the-end offset that the
-            // next layout materializes) — a pixel scroll off `max_offset`
-            // would land short here, since the freshly-spliced rows are
-            // still unmeasured. Short content clamps back to the top under
-            // Top alignment, so "end" and "top" coincide there.
-            self.land_end_pending = false;
-            self.list.scroll_to_end();
-        }
         // slopty: following, the list's tail mode keeps its end in view on every layout.
         cx.notify();
     }
@@ -5201,13 +5220,16 @@ impl Transcript {
     /// slopty: open or shut the group `row_id`, as the person asked: the tween runs from the
     /// height it was drawn at (`open_height` open, none shut).
     fn toggle_fold(&mut self, row_id: SharedString, open_height: f32, cx: &mut Context<Self>) {
-        let entry = self.folds.entry(row_id).or_default();
+        let entry = self.folds.entry(row_id.clone()).or_default();
         let was_open = entry.open.unwrap_or(false);
         entry.from = if was_open { open_height } else { 0.0 };
         entry.open = Some(!was_open);
         entry.epoch += 1;
         entry.toggled_at = Some(crate::clock::now(cx));
         entry.disclosure_at = entry.toggled_at;
+        if !was_open {
+            self.reveal_opened(row_id);
+        }
     }
 
     // ---- attachment read-back (user-attachments.tsx + transcript cache) ----
@@ -6641,6 +6663,8 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
+        // slopty: how deep under the transcript's own rows it sits: a run opened in place.
+        let depth = self.depth_of(&row.id);
         // slopty: a subagent's words to start it are its task, which its parent's agent wrote.
         let (workspace_root, task, agent) = {
             let state = self.state.read(cx);
@@ -6651,7 +6675,7 @@ impl Transcript {
                 .or_else(|| state.selected_chat_row());
             (
                 chat.and_then(|chat| chat.cwd.as_deref()).map(SharedString::from),
-                self.fit.is_some() || chat.is_some_and(|chat| chat.subagent),
+                depth > 0 || self.doc_override.is_some() || chat.is_some_and(|chat| chat.subagent),
                 // slopty: a reply is said by the chat's agent, by its harness's name (#10).
                 agent_name(chat.and_then(|chat| chat.config.as_ref()).map(|config| config.harness)),
             )
@@ -6659,11 +6683,7 @@ impl Transcript {
         // slopty: the transcript lays out inside its pane, which clears the window's chrome
         // itself: the first row keeps only the ordinary gap under the pane's header.
         let top_gap = if ix == 0 {
-            if self.fit.is_some() {
-                Theme::SPACE_SM // slopty: in a card, under its header's hairline
-            } else {
-                Theme::SPACE_LG
-            }
+            Theme::SPACE_LG
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), &row)
         };
@@ -6672,10 +6692,7 @@ impl Transcript {
         // transcript is pinned to the bottom.
         // slopty: no composer stack under it to clear as well.
         let is_last = ix + 1 == self.rows.len();
-        let bottom_pad = if is_last && self.fit.is_some() {
-            // slopty: fit to its rows, nothing scrolls under it and no fade covers its end.
-            Theme::SPACE_SM
-        } else if is_last {
+        let bottom_pad = if is_last {
             Theme::TRANSCRIPT_FADE_BAND + 8.0
         } else {
             0.0
@@ -6732,7 +6749,7 @@ impl Transcript {
         // task, which the person never sent, has none either.
         let strip = row
             .timestamp
-            .filter(|_| self.fit.is_none() && !(is_user_row && task))
+            .filter(|_| depth == 0 && !(is_user_row && task))
             .map(|ms| {
             // slopty: the day only when it is not today, the full moment on hover (#17); worded
             // only while the strip shows, and the full moment only once its tooltip opens (#13).
@@ -6857,11 +6874,27 @@ impl Transcript {
                         cx,
                     ));
                 }
-                // slopty: a run's first words are its task, which its parent's agent wrote: a
-                // quiet paragraph, not the person's bubble, cut short in its card.
+                // slopty: a run's first words are its brief, which its parent's agent wrote: a
+                // quiet paragraph, not the person's bubble; opened in place, cut to its first
+                // lines until pressed (`inspector.md`, "its brief comes first, folded").
                 if !text.is_empty() && task {
-                    let lines = self.fit.is_some().then_some(subagents::TASK_LINES);
-                    column = column.child(subagents::task_words(&row.id, &text, lines, &theme));
+                    let folded = depth > 0 && !self.subagents.briefs_open.contains(&row.id);
+                    let brief = subagents::task_words(&row.id, &text, folded.then_some(subagents::TASK_LINES), &theme);
+                    let brief = if depth > 0 {
+                        let key = row.id.clone();
+                        brief
+                            .cursor_pointer()
+                            .aria_expanded(!folded)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.subagents.briefs_open.remove(&key) {
+                                    this.subagents.briefs_open.insert(key.clone());
+                                }
+                                this.row_resized(&key, cx);
+                            }))
+                    } else {
+                        brief
+                    };
+                    column = column.child(brief);
                 } else if !text.is_empty() {
                     // `min_w_0` is load-bearing: gpui text answers min/max-content
                     // probes with its UNWRAPPED width, so without it the bubble's
@@ -6948,7 +6981,7 @@ impl Transcript {
                     code,
                     run: self.run_ui(cx), // slopty: Run in terminal.
                     code_menu: Some(self.code_menu_ui(cx)),
-                    body: self.markdown_body(), // slopty: a card's run reads compact (#24).
+                    body: self.markdown_body(&row.id), // slopty: a run in place reads compact (#24).
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
@@ -7022,7 +7055,7 @@ impl Transcript {
                     code,
                     run: self.run_ui(cx), // slopty: Run in terminal.
                     code_menu: Some(self.code_menu_ui(cx)),
-                    body: self.markdown_body(), // slopty: a card's run reads compact (#24).
+                    body: self.markdown_body(&row.id), // slopty: a run in place reads compact (#24).
                 };
                 if seed_history && let Some(veil) = &veil {
                     let historical = &self.historical_markdown[&row.id];
@@ -7078,6 +7111,8 @@ impl Transcript {
             RowKind::ToolGroup { tools, summary } => {
                 self.render_tool_group(&row.id, tools, summary, &theme, cx)
             }
+            RowKind::Spawn { tool } => self.render_spawn(&row.id, tool, &theme, cx),
+            RowKind::Spawns { tools } => self.render_spawns(&row.id, tools, &theme, cx),
             RowKind::InputChip { label, header, resolved } => {
                 input_chip(&row.id, label.clone(), header.clone(), *resolved, &theme)
             }
@@ -7211,24 +7246,43 @@ impl Transcript {
             .w_full()
             .flex()
             .justify_center()
-            .pt(px(top_gap))
+            // slopty: a row opened in place takes its gap inside its column, so the guides of
+            // the runs it sits in run on through the gap.
+            .pt(px(if depth > 0 { 0.0 } else { top_gap }))
             .pb(px(bottom_pad))
             // Keep side gutters as the configurable column shrinks to fit;
             // a docked side card's room comes off the right.
-            // slopty: in a card, its rows start under its title.
-            .pl(px(if self.fit.is_some() { subagents::CHILD_INSET } else { self.row_inset() }))
-            .pr(px(if self.fit.is_some() {
-                Theme::SPACE_MD
-            } else {
-                self.row_inset() + self.right_reserve
-            }))
+            .pl(px(self.row_inset()))
+            .pr(px(self.row_inset() + self.right_reserve))
             .child(
                 div()
                     .w_full()
                     .max_w(px(self.content_width))
                     .min_w_0()
-                    .child(inner)
-                    .children(lane)
+                    .child(
+                        // slopty: a run opened in place sits a level in, a hairline down the
+                        // gutter of each subagent it is under.
+                        div()
+                            .relative()
+                            .w_full()
+                            .min_w_0()
+                            .when(depth > 0, |column| {
+                                column
+                                    .pt(px(top_gap))
+                                    .pl(px(Self::nest_inset(depth)))
+                                    .children((0..depth).map(|level| {
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .bottom_0()
+                                            .left(px(Self::nest_inset(level) + ACTIVITY_TRUNK_X))
+                                            .w(px(1.0))
+                                            .bg(theme.border)
+                                    }))
+                            })
+                            .child(inner)
+                            .children(lane),
+                    )
                     .children(self.footer.clone().filter(|_| is_last).map(|footer| Self::footer_frame(footer, cx))),
             );
         outer.into_any_element()
@@ -7821,11 +7875,6 @@ impl Transcript {
                 let continuation_reveal =
                     tool_connector_continuation(connector_progress.get(ix + 1).copied());
                 let row_height = row_heights[ix];
-                // slopty: a spawn is its subagent's card, which opens in place and drills in
-                // (`transcript/subagents.rs`), only as the person asks.
-                if is_spawn_link(tool) {
-                    return self.render_subagent_card(row_id, ix, tool, false, collapses, theme, cx);
-                }
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 if detail.is_none() && invocation.is_none() && !chip_has_images(tool) {
@@ -7863,6 +7912,7 @@ impl Transcript {
                         .toggled_at
                         .is_some_and(|at| frame_now.saturating_duration_since(at) < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
+                let reveal_row = row_id.clone();
                 let mut card = div()
                     .my(px((base_row_height - CHIP_CARD_HEIGHT) / 2.0))
                     .when(collapses, |el| el.ml(px(activity_text_gap(solo))))
@@ -7905,6 +7955,9 @@ impl Transcript {
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
                                 entry.toggled_at = Some(crate::clock::now(cx));
+                                if !currently_open {
+                                    this.reveal_opened(reveal_row.clone());
+                                }
                                 cx.notify();
                             }))
                             .child(chip_header(
@@ -9698,7 +9751,7 @@ impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // slopty: before the list lays out, where reading it borrows nothing.
         self.page_viewport = self.list.viewport_bounds();
-        // slopty: a subagent's card sizes its child by the window, and drills in on a phone's.
+        // slopty: a phone's window keeps the platform's margins (`row_inset`).
         self.subagents.window = window.viewport_size();
         // slopty: the list stopped following on an input of its own (its scrollbar's drag), so
         // the rule lets go too.
@@ -9763,6 +9816,7 @@ impl Render for Transcript {
         if !released_diagrams.is_empty() {
             crate::image_media::release_media(released_diagrams, cx);
         }
+        self.step_reveal(window, cx);
         let frame_asked_at = crate::clock::now(cx);
         // slopty: a jump's glide steps once a frame (#13).
         if self.glide.is_some()
@@ -9876,7 +9930,6 @@ impl Render for Transcript {
             // slopty: find's per-row counts start again each frame, before any row paints.
             .child(crate::markdown::find::frame_reset(cx.entity_id().as_u64()))
             .child(content)
-            .children(self.fit.clone().map(|fit| fit.measure(self.list.clone()))) // slopty
             // slopty: with no row to end, the footer stands at the foot alone.
             .children(self.footer.clone().filter(|_| self.rows.is_empty()).map(|footer| {
                 let footer = Self::footer_frame(footer, cx);
@@ -12133,11 +12186,10 @@ mod tests {
         }
     }
 
+    /// slopty: a subagent is a row of its own, never in a group's fold; those started together
+    /// stand under one line, each its own row (`inspector.md`, "A subagent is a nested step").
     #[test]
-    fn agent_calls_split_out_of_ordinary_tool_groups() {
-        // Agent/spawn chips must not share a collapse with Reads/Runs: a
-        // lone Agent used to hide behind "Called 1 tool", and a mixed
-        // group hid the running subagent until the user opened the fold.
+    fn a_subagent_is_a_row_of_its_own() {
         let entry = assistant(
             "m-agent",
             MessageStatus::Complete,
@@ -12159,38 +12211,25 @@ mod tests {
             [
                 "m-agent#t0.0",
                 "m-agent#g:a",
-                "m-agent#g:s1",
+                "m-agent#a:s1",
                 "m-agent#g:c",
-                "m-agent#g:s2",
+                "m-agent#p:s2",
+                "m-agent#a:s2",
+                "m-agent#a:s3",
                 "m-agent#t1.0",
             ]
         );
-
         let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
             panic!("ordinary group expected")
         };
         assert_eq!(tools.len(), 2);
         assert!(tool_group_collapses(tools));
-
-        let RowKind::ToolGroup { tools, .. } = &rows[2].kind else {
-            panic!("agent group expected")
-        };
-        assert_eq!(tools.len(), 1);
-        assert!(!tool_group_collapses(tools));
-        assert!(is_agent_tool(&tools[0]));
-
-        let RowKind::ToolGroup { tools, .. } = &rows[3].kind else {
-            panic!("ordinary group expected")
-        };
-        assert_eq!(tools.len(), 1);
-        assert!(tool_group_collapses(tools));
-
-        let RowKind::ToolGroup { tools, .. } = &rows[4].kind else {
-            panic!("consecutive agents share a group")
+        assert!(matches!(&rows[2].kind, RowKind::Spawn { tool } if is_agent_tool(tool)), "a lone one is its row");
+        let RowKind::Spawns { tools } = &rows[4].kind else {
+            panic!("a batch's line expected")
         };
         assert_eq!(tools.len(), 2);
-        assert!(!tool_group_collapses(tools));
-        assert!(tools.iter().all(is_agent_tool));
+        assert!(rows[5..7].iter().all(|row| matches!(row.kind, RowKind::Spawn { .. })), "each its own row");
     }
 
     #[test]
@@ -12216,7 +12255,7 @@ mod tests {
             vec![tool_part("a", "ls"), stray, tool_part("c", "make")],
         );
         let rows = rows_for_entry(&entry, false, &mut parse);
-        assert_eq!(rows.len(), 1, "one folded group, no agent split");
+        assert_eq!(rows.len(), 1, "one folded group, no subagent row");
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("tool group expected")
         };
@@ -12226,21 +12265,6 @@ mod tests {
         assert!(tools.iter().all(|t| !is_spawn_link(t)));
     }
 
-    #[test]
-    fn lone_completed_agent_stays_uncollapsed() {
-        let entry = assistant(
-            "m-lone",
-            MessageStatus::Complete,
-            vec![agent_part("s1", "scan repo")],
-        );
-        let rows = rows_for_entry(&entry, false, &mut parse);
-        assert_eq!(rows.len(), 1);
-        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
-            panic!("agent group expected")
-        };
-        assert_eq!(tools.len(), 1);
-        assert!(!tool_group_collapses(tools), "no 'Called 1 tool' wrap");
-    }
 
     #[test]
     fn pre_spawn_agent_name_is_enough_to_split() {
@@ -12268,11 +12292,7 @@ mod tests {
             panic!()
         };
         assert!(tool_group_collapses(tools));
-        let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
-            panic!()
-        };
-        assert!(!tool_group_collapses(tools));
-        assert!(is_agent_call(&tools[0].call));
+        assert!(matches!(&rows[1].kind, RowKind::Spawn { tool } if is_agent_call(&tool.call)));
     }
 
     /// slopty: a group opens only as the person asks: not while its calls run, not as more

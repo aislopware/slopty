@@ -1,4 +1,4 @@
-//! slopty: the transcript's own rows as assistive tech reads them: a subagent's card, the rows
+//! slopty: the transcript's own rows as assistive tech reads them: a subagent's row, the rows
 //! of background work, a reply's images and formulas. Each test draws a real transcript in a
 //! test window and judges by its accessibility tree.
 
@@ -15,7 +15,7 @@ use slopty_view_doc::{
 };
 use slopty_view_proto::ToolCall;
 
-use super::{Transcript, TranscriptEvent};
+use super::{SubagentDrill, Transcript};
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -95,6 +95,18 @@ fn draw(cx: &mut VisualTestContext) -> HashMap<NodeId, Node> {
     })
 }
 
+/// The frames after a press, as the platform delivers them: each frame asked for, then drawn.
+fn settle(cx: &mut VisualTestContext) -> HashMap<NodeId, Node> {
+    let mut nodes = draw(cx);
+    for _ in 0..4 {
+        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+            break;
+        }
+        nodes = draw(cx);
+    }
+    nodes
+}
+
 fn entry(status: MessageStatus, parts: Vec<MessagePart>) -> SessionMessageEntry {
     SessionMessageEntry {
         id: "reply".into(),
@@ -171,10 +183,31 @@ fn spawn(progress: SubagentProgress) -> MessagePart {
     }
 }
 
-/// A subagent's card reads its step; a click opens its run in place, Escape folds it, and
-/// ⌘↩ drills into it.
+/// The drills `transcript` asks of the inspector from here on, as their runs' chats.
+fn drills(transcript: &Entity<Transcript>, cx: &mut VisualTestContext) -> (Rc<RefCell<Vec<String>>>, gpui::Subscription) {
+    let drilled = Rc::new(RefCell::new(Vec::new()));
+    let events = cx.update(|_, cx| {
+        let drilled = drilled.clone();
+        cx.subscribe(transcript, move |_, event: &SubagentDrill, _| {
+            drilled.borrow_mut().push(event.chat_id.clone());
+        })
+    });
+    (drilled, events)
+}
+
+/// The words of a run's own steps: "Line {n} of the run.", one entry each.
+fn run_line(n: usize) -> SessionMessageEntry {
+    SessionMessageEntry {
+        id: format!("child:{n}"),
+        parts: vec![MessagePart::Text { id: format!("child:{n}:t"), text: format!("Line {n} of the run.") }],
+        ..entry(MessageStatus::Complete, Vec::new())
+    }
+}
+
+/// A subagent's row reads its step and never opens by itself; a press splices its run's steps
+/// in under it, a level in, and another takes them out; Enter on it drills in.
 #[gpui::test]
-fn a_subagent_card_opens_in_place_and_drills_in(cx: &mut gpui::TestAppContext) {
+fn a_subagents_row_opens_its_steps_in_place_and_drills_in(cx: &mut gpui::TestAppContext) {
     let progress = SubagentProgress {
         agent_type: Some("Explore".into()),
         running: true,
@@ -187,92 +220,98 @@ fn a_subagent_card_opens_in_place_and_drills_in(cx: &mut gpui::TestAppContext) {
         ..SubagentProgress::default()
     };
     let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
-    let opened = Rc::new(RefCell::new(Vec::new()));
-    let _events = cx.update(|_, cx| {
-        let opened = opened.clone();
-        cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
-            let TranscriptEvent::OpenSubagent { chat_id } = event;
-            opened.borrow_mut().push(chat_id.clone());
-        })
-    });
+    let (drilled, _events) = drills(&transcript, cx);
+    let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
+    state.update(cx, |state, _| state.set_subagent_snapshot("child-chat".into(), (0..2).map(run_line).collect()));
     let nodes = draw(cx);
-    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
-    assert!(card.value.starts_with("Reading parser.rs"), "{card:?}");
-    assert_eq!(card.expanded, Some(false));
-    assert!(find(&nodes, Role::Group, "Transcript of Count lines").is_none());
+    let row = find(&nodes, Role::Button, "Subagent Count lines").expect("the row").clone();
+    assert!(row.value.starts_with("Reading parser.rs · 12 tools"), "its step, then its facts: {row:?}");
+    assert_eq!(row.expanded, Some(false));
+    assert!(row.height < 40.0, "one line: {row:?}");
+    assert!(find(&nodes, Role::Paragraph, "Line 0 of the run.").is_none(), "shut until pressed");
 
-    cx.simulate_click(card.center, gpui::Modifiers::default());
-    let nodes = draw(cx);
-    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card");
-    assert_eq!(card.expanded, Some(true));
-    assert!(find(&nodes, Role::Group, "Transcript of Count lines").is_some(), "open in place");
+    cx.simulate_click(row.center, gpui::Modifiers::default());
+    // What opened at the end of the trace comes into view as it lays out.
+    let nodes = settle(cx);
+    assert_eq!(find(&nodes, Role::Button, "Subagent Count lines").unwrap().expanded, Some(true));
+    let step = find(&nodes, Role::Paragraph, "Line 1 of the run.").expect("its steps, in place").clone();
+    let row = find(&nodes, Role::Button, "Subagent Count lines").unwrap().clone();
+    assert!(top(&step) > bottom(&row), "under its row: {step:?}");
+    // The parent's reply is the first of the replies shown; its run's own replies are under it.
+    let parent = nodes
+        .values()
+        .filter(|node| node.role == Role::Article && node.label == "Agent")
+        .min_by(|a, b| a.center.y.partial_cmp(&b.center.y).unwrap_or(std::cmp::Ordering::Equal))
+        .expect("the parent's reply")
+        .clone();
+    let inset = |node: &Node| f32::from(node.center.x) - node.width / 2.0;
+    assert!(inset(&step) >= inset(&parent) + super::subagents::NEST_INDENT - 0.5, "a level in: {step:?} {parent:?}");
+    assert!(drilled.borrow().is_empty(), "a press opens it in place, never drills");
 
-    cx.simulate_keystrokes("escape");
+    cx.simulate_click(row.center, gpui::Modifiers::default());
     let nodes = draw(cx);
     assert_eq!(find(&nodes, Role::Button, "Subagent Count lines").unwrap().expanded, Some(false));
-    assert!(find(&nodes, Role::Group, "Transcript of Count lines").is_none(), "folded");
+    assert!(find(&nodes, Role::Paragraph, "Line 1 of the run.").is_none(), "taken out again");
 
-    cx.simulate_keystrokes("cmd-enter");
+    while !focused(cx).starts_with("Subagent Count lines") {
+        tab(cx);
+    }
+    press_enter(cx);
     draw(cx);
-    assert_eq!(*opened.borrow(), ["child-chat"]);
+    assert_eq!(*drilled.borrow(), ["child-chat"], "Enter drills in");
+    assert_eq!(find(&draw(cx), Role::Button, "Subagent Count lines").unwrap().expanded, Some(false), "and opens nothing here");
 }
 
-/// slopty: a subagent card's chevron takes no room at rest and arrives with the pointer, as
-/// opencode's card action does; an open run keeps it after the pointer leaves.
+/// slopty: subagents started together stand under one line that says how many work, each its
+/// own row under it, with no gap between them.
 #[gpui::test]
-fn a_subagent_cards_chevron_arrives_with_the_pointer(cx: &mut gpui::TestAppContext) {
-    let progress = SubagentProgress {
-        running: true,
-        state: SubagentProgress::RUNNING.into(),
-        step: Some("Reading parser.rs".into()),
-        chat_id: Some("child-chat".into()),
-        row: Some("task:a1".into()),
-        ..SubagentProgress::default()
+fn subagents_started_together_stand_under_one_line(cx: &mut gpui::TestAppContext) {
+    let run = |id: &str, chat: &str, running: bool| {
+        let MessagePart::Tool { call, subagent_status, facts, .. } = spawn(SubagentProgress {
+            agent_type: Some("Explore".into()),
+            running,
+            state: if running { SubagentProgress::RUNNING } else { SubagentProgress::DONE }.into(),
+            chat_id: Some(chat.into()),
+            ..SubagentProgress::default()
+        }) else {
+            unreachable!()
+        };
+        MessagePart::Tool {
+            id: id.into(),
+            call,
+            is_error: false,
+            resolved: !running,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: Some(chat.into()),
+            subagent_status: if running { subagent_status } else { Some(SubagentStatus::Done) },
+            subagent_tail: None,
+            facts,
+        }
     };
-    let (_transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
+    let (_, cx) = open(
+        cx,
+        entry(MessageStatus::Complete, vec![run("a", "chat-a", true), run("b", "chat-b", false), text("Waiting on them.")]),
+    );
     let nodes = draw(cx);
-    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
-    let width = |cx: &mut VisualTestContext| cx.debug_bounds("subagent-chevron").map_or(0.0, |b| f32::from(b.size.width));
-    assert!(width(cx) < 0.5, "no room at rest");
-    cx.simulate_mouse_move(card.center, None, gpui::Modifiers::default());
-    draw(cx);
-    assert!((width(cx) - 18.0).abs() < 0.5, "arrived under the pointer: {}", width(cx));
-    cx.simulate_click(card.center, gpui::Modifiers::default());
-    draw(cx);
-    cx.simulate_mouse_move(gpui::point(px(2.0), px(2.0)), None, gpui::Modifiers::default());
-    draw(cx);
-    assert!((width(cx) - 18.0).abs() < 0.5, "kept while the run is open: {}", width(cx));
+    let line = nodes
+        .values()
+        .find(|node| node.role == Role::Heading && node.label.starts_with("2 Explore agents · 1 working"))
+        .expect("the batch's line")
+        .clone();
+    let mut rows: Vec<&Node> =
+        nodes.values().filter(|node| node.role == Role::Button && node.label == "Subagent Count lines").collect();
+    rows.sort_by(|a, b| top(a).total_cmp(&top(b)));
+    assert_eq!(rows.len(), 2, "a row each");
+    assert!(top(rows[0]) >= bottom(&line) - 0.5, "under its line");
+    assert!((top(rows[1]) - bottom(rows[0])).abs() < 1.0, "line under line: {rows:?}");
 }
 
-/// slopty: on a phone a tap on a subagent's card drills into its run: no room to open it in
-/// place, so it says no open state and asks the shell for the run's chat.
-#[gpui::test]
-fn a_phones_tap_on_a_subagents_card_drills_in(cx: &mut gpui::TestAppContext) {
-    let progress = SubagentProgress {
-        running: true,
-        state: SubagentProgress::RUNNING.into(),
-        step: Some("Reading parser.rs".into()),
-        chat_id: Some("child-chat".into()),
-        row: Some("task:a1".into()),
-        ..SubagentProgress::default()
-    };
-    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
-    cx.simulate_resize(gpui::size(px(390.0), px(800.0)));
-    let opened = Rc::new(RefCell::new(Vec::new()));
-    let _events = cx.update(|_, cx| {
-        let opened = opened.clone();
-        cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
-            let TranscriptEvent::OpenSubagent { chat_id } = event;
-            opened.borrow_mut().push(chat_id.clone());
-        })
-    });
-    let nodes = draw(cx);
-    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
-    assert_eq!(card.expanded, None, "a phone's card does not open in place: {card:?}");
-    cx.simulate_click(card.center, gpui::Modifiers::default());
-    draw(cx);
-    assert_eq!(*opened.borrow(), ["child-chat"], "the tap drills in");
-}
+
 
 /// The footer a transcript ends with (the inspector's mirror of the prompt box): a box of its own.
 struct Footer;
@@ -441,9 +480,8 @@ fn an_error_card_copies_its_error_and_scrolls_its_detail(cx: &mut gpui::TestAppC
 
 
 
-/// A subagent's card clicked open before its run arrived (the run is fetched once the card
-/// opens) holds its run in place on every frame after, and takes the run's height once it
-/// arrives.
+/// A subagent opened in place before its run arrived (its run is fetched once it opens) says
+/// its steps are on their way on every frame, and shows them in their place once they land.
 fn opened_before_its_run(cx: &mut gpui::TestAppContext, running: bool) {
     let progress = SubagentProgress {
         running,
@@ -454,40 +492,37 @@ fn opened_before_its_run(cx: &mut gpui::TestAppContext, running: bool) {
     };
     let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
     let nodes = draw(cx);
-    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
-    cx.simulate_click(card.center, gpui::Modifiers::default());
+    let row = find(&nodes, Role::Button, "Subagent Count lines").expect("the row").clone();
+    cx.simulate_click(row.center, gpui::Modifiers::default());
+    let loading = |nodes: &HashMap<NodeId, Node>| nodes.values().any(|node| node.label.contains("Loading its steps"));
     for frame in 0..4 {
         let nodes = draw(cx);
-        let run = find(&nodes, Role::Group, "Transcript of Count lines");
-        assert!(run.is_some_and(|run| run.height > 0.5), "frame {frame}: {run:?}");
+        assert!(loading(&nodes), "frame {frame}: on their way");
     }
-    let said = |n: usize| SessionMessageEntry {
-        id: format!("child:{n}"),
-        parts: vec![MessagePart::Text {
-            id: format!("child:{n}:t"),
-            text: format!("Line {n} of the run."),
-        }],
-        ..entry(MessageStatus::Complete, Vec::new())
-    };
     let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
     state.update(cx, |state, cx| {
-        state.set_subagent_snapshot("child-chat".into(), vec![said(0), said(1)]);
+        state.set_subagent_snapshot("child-chat".into(), vec![run_line(0), run_line(1)]);
+        state.transcript_revision += 1;
         cx.notify();
     });
+    // Its steps land in view: what the person opened comes into view once its record is in.
+    settle(cx);
+    let row = find(&draw(cx), Role::Button, "Subagent Count lines").expect("the row").clone();
     for frame in 0..4 {
         let nodes = draw(cx);
-        let run = find(&nodes, Role::Group, "Transcript of Count lines");
-        assert!(run.is_some_and(|run| run.height > 20.0), "its rows in, frame {frame}: {run:?}");
+        let step = find(&nodes, Role::Paragraph, "Line 1 of the run.");
+        assert!(step.is_some_and(|step| top(step) > bottom(&row)), "its steps in, frame {frame}: {step:?}");
+        assert!(!loading(&nodes), "frame {frame}: no longer on their way");
     }
 }
 
 #[gpui::test]
-fn a_card_opened_before_its_ended_run_arrives_holds_it(cx: &mut gpui::TestAppContext) {
+fn an_ended_run_opened_before_it_arrives_shows_it_once_in(cx: &mut gpui::TestAppContext) {
     opened_before_its_run(cx, false);
 }
 
 #[gpui::test]
-fn a_card_opened_before_its_running_run_arrives_holds_it(cx: &mut gpui::TestAppContext) {
+fn a_running_run_opened_before_it_arrives_shows_it_once_in(cx: &mut gpui::TestAppContext) {
     opened_before_its_run(cx, true);
 }
 
@@ -572,10 +607,10 @@ fn a_link_to_a_chat_says_how_it_stands_now(cx: &mut gpui::TestAppContext) {
     draw(cx);
 }
 
-/// slopty: a subagent card's quiet Open draws in its 18 pt footprint but takes a press over at
-/// least 24 pt (`surface_chrome::press_target`): a press 1.5 pt past its footprint opens the run.
+/// slopty: a subagent row's quiet Open draws in its 18 pt footprint but takes a press over at
+/// least 24 pt (`surface_chrome::press_target`): a press 1.5 pt past its footprint drills in.
 #[gpui::test]
-fn a_cards_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppContext) {
+fn a_subagents_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppContext) {
     let progress = SubagentProgress {
         running: false,
         state: SubagentProgress::DONE.into(),
@@ -583,14 +618,7 @@ fn a_cards_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppCon
         ..SubagentProgress::default()
     };
     let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![spawn(progress)]));
-    let opened = Rc::new(RefCell::new(Vec::new()));
-    let _events = cx.update(|_, cx| {
-        let opened = opened.clone();
-        cx.subscribe(&transcript, move |_, event: &TranscriptEvent, _| {
-            let TranscriptEvent::OpenSubagent { chat_id } = event;
-            opened.borrow_mut().push(chat_id.clone());
-        })
-    });
+    let (opened, _events) = drills(&transcript, cx);
     let nodes = draw(cx);
     let target = find(&nodes, Role::Button, "Open subagent").expect("the quiet Open").clone();
     assert!(target.height >= 24.0, "pressed over 24 pt: {target:?}");
@@ -600,13 +628,13 @@ fn a_cards_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppCon
     assert_eq!(*opened.borrow(), ["child-chat"], "a press past the 18 pt footprint opens it");
 }
 
-/// slopty: a click on a subagent's card between two reads of the tree, as the self-test's driver
+/// slopty: a click on a subagent's row between two reads of the tree, as the self-test's driver
 /// clicks: the frames around it drawn as a person's are (no screen reader, the list scrolled onto
-/// its layer), rows under the card, its run there to fit to. Once the frames settle, the run is
+/// its layer), rows under it, its run there to splice in. Once the frames settle, the run is
 /// open in place and the frame shown is the one the same state draws from scratch: no row under
-/// the card is left where it stood before the card grew.
+/// it is left where it stood before its steps came in.
 #[gpui::test]
-fn a_card_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppContext) {
+fn a_subagent_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppContext) {
     let progress = SubagentProgress {
         running: false,
         state: SubagentProgress::DONE.into(),
@@ -618,19 +646,13 @@ fn a_card_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppCon
         cx,
         entry(MessageStatus::Complete, vec![text(&words), spawn(progress), text("Counted.")]),
     );
-    let said = |n: usize| SessionMessageEntry {
-        id: format!("child:{n}"),
-        parts: vec![MessagePart::Text {
-            id: format!("child:{n}:t"),
-            text: format!("Line {n} of the run."),
-        }],
-        ..entry(MessageStatus::Complete, Vec::new())
-    };
     let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
-    state.update(cx, |state, _| state.set_subagent_snapshot("child-chat".into(), (0..3).map(said).collect()));
+    state.update(cx, |state, _| state.set_subagent_snapshot("child-chat".into(), (0..3).map(run_line).collect()));
+    // A frame as the platform draws one: the frames asked for, then the draw.
     let plain = |cx: &mut VisualTestContext| {
         cx.run_until_parked();
         cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
             window.set_a11y_active(false);
             window.draw(cx).clear(cx);
         });
@@ -645,7 +667,7 @@ fn a_card_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppCon
         plain(cx);
     }
     // A dump: the tree from a frame of its own.
-    let card = find(&draw(cx), Role::Button, "Subagent Count lines").expect("the card").center;
+    let card = find(&draw(cx), Role::Button, "Subagent Count lines").expect("the row").center;
     plain(cx);
     cx.simulate_event(gpui::MouseMoveEvent { position: card, ..Default::default() });
     cx.simulate_event(gpui::MouseDownEvent {
@@ -660,7 +682,7 @@ fn a_card_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppCon
         click_count: 1,
         ..Default::default()
     });
-    // The frames settle: the run lays out, then the card takes its height.
+    // The frames settle: its steps come in under it and lay out.
     for _ in 0..4 {
         plain(cx);
     }
@@ -680,15 +702,14 @@ fn a_card_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAppCon
     assert!(missed.is_empty() && extra.is_empty(), "stale once open: missed {missed:#?}, extra {extra:#?}");
     let nodes = draw(cx);
     assert_eq!(find(&nodes, Role::Button, "Subagent Count lines").and_then(|c| c.expanded), Some(true));
-    let run = find(&nodes, Role::Group, "Transcript of Count lines").expect("open in place");
-    assert!(run.height > 20.0, "fit to its run: {run:?}");
+    assert!(find(&nodes, Role::Paragraph, "Line 2 of the run.").is_some(), "its steps, in place");
 }
 
 /// slopty: what runs reads the transcript's clock, taken on its tick and when its state moves,
-/// never as a frame is built: a running subagent's card says the time the clock says, and a
+/// never as a frame is built: a running subagent's row says the time the clock says, and a
 /// frame built again from scratch later says the same.
 #[gpui::test]
-fn a_running_card_says_the_clocks_time_in_every_frame(cx: &mut gpui::TestAppContext) {
+fn a_running_subagent_says_the_clocks_time_in_every_frame(cx: &mut gpui::TestAppContext) {
     let started = 1_700_000_000_000_i64;
     let progress = SubagentProgress {
         running: true,
@@ -703,9 +724,9 @@ fn a_running_card_says_the_clocks_time_in_every_frame(cx: &mut gpui::TestAppCont
         cx.notify();
     });
     let value = |cx: &mut VisualTestContext| {
-        find(&draw(cx), Role::Button, "Subagent Count lines").map(|card| card.value.clone())
+        find(&draw(cx), Role::Button, "Subagent Count lines").map(|row| row.value.clone())
     };
-    let first = value(cx).expect("the card");
+    let first = value(cx).expect("the row");
     assert!(first.contains("42s"), "{first}");
     assert_eq!(value(cx).as_deref(), Some(first.as_str()), "drawn again, the same second");
 }
@@ -1218,7 +1239,7 @@ fn a_failed_call_tints_only_its_icon_and_result() {
     assert!(super::fails_loudly(&failed, false), "a card, with no rail, keeps the tint");
 }
 
-/// #9: Tab reaches a reply's controls: its group's summary, its call rows, the subagent card,
+/// #9: Tab reaches a reply's controls: its group's summary, its call rows, the subagent's row,
 /// the files card, and the strip's Copy, which a hover alone showed before.
 #[gpui::test]
 fn the_keyboard_reaches_the_controls_of_a_reply(cx: &mut gpui::TestAppContext) {
@@ -1371,10 +1392,10 @@ fn a_sent_bubble_fades_up_from_pending(cx: &mut gpui::TestAppContext) {
     });
 }
 
-/// #24: a run read in its card speaks at the card's compact body, a 20 pt line under its 12 pt
-/// title; the reply around the card keeps its 22.
+/// #24: a run opened in place speaks at the compact body, a 20 pt line under its subagent's
+/// 12 pt row; the reply around it keeps its 22.
 #[gpui::test]
-fn a_run_in_its_card_reads_compact(cx: &mut gpui::TestAppContext) {
+fn a_run_opened_in_place_reads_compact(cx: &mut gpui::TestAppContext) {
     let progress = SubagentProgress {
         running: false,
         state: SubagentProgress::DONE.into(),
@@ -1391,9 +1412,9 @@ fn a_run_in_its_card_reads_compact(cx: &mut gpui::TestAppContext) {
     let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
     state.update(cx, |state, _| state.set_subagent_snapshot("child-chat".into(), vec![said]));
     let nodes = draw(cx);
-    let card = find(&nodes, Role::Button, "Subagent Count lines").expect("the card").clone();
-    cx.simulate_click(card.center, gpui::Modifiers::default());
-    let nodes = (0..4).map(|_| draw(cx)).last().unwrap_or_default();
+    let row = find(&nodes, Role::Button, "Subagent Count lines").expect("the row").clone();
+    cx.simulate_click(row.center, gpui::Modifiers::default());
+    let nodes = settle(cx);
     let child = find(&nodes, Role::Paragraph, "Four.").expect("the run's words").clone();
     let parent = find(&nodes, Role::Paragraph, "Counting.").expect("the reply's words").clone();
     assert!((child.height - super::render::MD_COMPACT_LINE_HEIGHT).abs() <= 0.5, "{child:?}");
@@ -1401,7 +1422,7 @@ fn a_run_in_its_card_reads_compact(cx: &mut gpui::TestAppContext) {
 }
 
 /// #14: a call under way sweeps its words with its group title's light; a settled one, a
-/// thought and a subagent's spawn, whose card says it runs, do not. (The headless text system
+/// thought and a subagent, whose own row says it runs, do not. (The headless text system
 /// paints no glyphs, so the sweep is judged where it is decided.)
 #[test]
 fn a_running_call_sweeps_its_words() {
@@ -1425,7 +1446,12 @@ fn a_running_call_sweeps_its_words() {
         .flatten()
         .collect();
     let swept: Vec<bool> = tools.iter().map(super::sweeps).collect();
-    assert_eq!(swept, [true, false, false], "{tools:?}");
+    assert_eq!(swept, [true, false], "{tools:?}");
+    let spawn = rows.iter().find_map(|row| match &row.kind {
+        super::RowKind::Spawn { tool } => Some(tool.clone()),
+        _ => None,
+    });
+    assert!(spawn.is_some_and(|tool| !super::sweeps(&tool)), "its own row, unswept");
 }
 
 /// #18: a fetch that failed says so in the transcript's voice, and offers one Retry that says

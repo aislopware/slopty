@@ -36,6 +36,8 @@ pub struct ChildRun {
     pub needs_you: Option<String>,
     /// When its turn under way began, else when it began.
     pub started_ms: Option<slopty_core::WallMs>,
+    /// When its row last changed: its records last moved.
+    pub heard_ms: Option<slopty_core::WallMs>,
 }
 
 impl ChildRun {
@@ -49,6 +51,7 @@ impl ChildRun {
             step: row.doing.clone(),
             needs_you: super::work::child_asks(row),
             started_ms: row.began_ms.or(Some(row.created_ms)).filter(|ms| !ms.is_zero()),
+            heard_ms: Some(row.updated_ms).filter(|ms| !ms.is_zero()),
         }
     }
 }
@@ -873,6 +876,8 @@ fn progress(
         needs_you,
         chat_id: child.map(|c| c.chat.clone()),
         row,
+        model: agent.and_then(|a| a.model.clone()),
+        heard_at: child.and_then(|c| c.heard_ms).map(at).filter(|_| running),
     }
 }
 

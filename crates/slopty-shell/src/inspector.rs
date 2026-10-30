@@ -5,9 +5,13 @@
 //! session did. Its frame is fixed (`inspector.md`, "Fixed frame"): one line each for the header
 //! (status, branch), what it is doing now (its tasks and running work, opened as a card) and the
 //! files it changed (opened as a card), then its timeline, whose last row is the TUI's own prompt
-//! box, mirrored live (the prompts queued behind the turn, the draft, its pasted pictures). It
-//! sends nothing to the agent: copying, opening a file and looking at a picture are its only
-//! actions, and the TUI does the rest.
+//! box, mirrored live (the prompts queued behind the turn, the draft, its pasted pictures). A
+//! subagent's run drills in on a stack of the inspector's own (`inspector.md`, "A long or nested
+//! run drills in, inside the inspector"): its trace takes the timeline's place under a header
+//! that leads back; the terminal, the selection and the mirror stay where they were, and the
+//! keyboard stays the inspector's, on the way back, so Esc goes back. It sends nothing to the
+//! agent: copying, opening a file and looking at a picture are its only actions, and the TUI
+//! does the rest.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -15,7 +19,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseDownEvent, ObjectFit, ParentElement as _, Pixels, SharedString,
     StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Task, WeakEntity, Window,
     canvas, div, img, prelude::FluentBuilder as _, px,
@@ -29,7 +33,7 @@ use crate::loaders::status_mark::{MARK_SMALL, StatusMark};
 use crate::motion::{HoverFade as _, hover_blend};
 use crate::state::AppState;
 use crate::theme::Theme;
-use crate::transcript::Transcript;
+use crate::transcript::{Run, SubagentDrill, Transcript};
 use crate::typography::ui_rems;
 
 /// The height of each of the inspector's fixed lines: the header, Now and Changes.
@@ -54,10 +58,6 @@ const ROW_WASH: f32 = 0.03;
 pub enum InspectorEvent {
     /// Show `path`'s diff in Changes.
     OpenChange { path: String },
-    /// Show the subagent `chat_id`'s own timeline.
-    OpenSubagent { chat_id: String },
-    /// Back from a subagent's timeline to its parent's.
-    Back { chat_id: String },
 }
 
 /// One file the session changed, with its lines added and removed over the session.
@@ -205,6 +205,21 @@ struct Facts {
     tasks: Option<Arc<[TodoItem]>>,
 }
 
+/// A subagent's run drilled into, on the inspector's stack.
+struct Drilled {
+    /// Its run's chat, whose feed is watched while it is on the stack.
+    chat: String,
+    /// The trace it was drilled from and its row there, which says its facts; none when it was
+    /// drilled from the Now card and the trace shows no row of it.
+    from: Entity<Transcript>,
+    row: Option<SharedString>,
+    /// Its task's name as it was drilled, for when its row is gone.
+    title: SharedString,
+    /// Its own trace.
+    transcript: Entity<Transcript>,
+    _drills: Subscription,
+}
+
 /// The inspector of the selected session.
 pub struct Inspector {
     state: Entity<AppState>,
@@ -230,6 +245,19 @@ pub struct Inspector {
     preview: Option<PreviewImage>,
     preview_focus: FocusHandle,
     preview_return: Option<FocusHandle>,
+    /// The runs drilled into, the last one shown.
+    stack: Vec<Drilled>,
+    /// The inspector's own place for the keyboard, which a press in it takes (as a split in a
+    /// terminal does); the way back, the keyboard's after a drill while the inspector holds it,
+    /// so Esc goes back a level and never reaches the TUI; and the header's line, where it waits
+    /// once the last way back is gone. A drill never takes the keyboard from the terminal.
+    root: FocusHandle,
+    back: FocusHandle,
+    home: FocusHandle,
+    focus_back: bool,
+    /// The wake-up that moves a running run's time on in the header.
+    tick: Option<Task<()>>,
+    _drills: Subscription,
     _observe: Subscription,
 }
 
@@ -245,6 +273,9 @@ impl Inspector {
         let weak = cx.weak_entity();
         let mirror = cx.new(|_| PromptMirror::new(state.clone(), weak));
         transcript.update(cx, |transcript, cx| transcript.set_footer(Some(mirror.clone().into()), cx));
+        let drills = cx.subscribe(&transcript, |this: &mut Self, from, event: &SubagentDrill, cx| {
+            this.drill(from, event.chat_id.clone(), Some(event.row.clone()), None, cx);
+        });
         let mut inspector = Self {
             state,
             transcript,
@@ -261,15 +292,109 @@ impl Inspector {
             preview: None,
             preview_focus: cx.focus_handle(),
             preview_return: None,
+            stack: Vec::new(),
+            root: cx.focus_handle(),
+            back: cx.focus_handle().tab_stop(true),
+            home: cx.focus_handle(),
+            focus_back: false,
+            tick: None,
+            _drills: drills,
             _observe: observe,
         };
         inspector.sync_watch(cx);
         inspector
     }
 
-    /// The timeline it shows.
-    pub fn transcript(&self) -> &Entity<Transcript> {
-        &self.transcript
+    /// The timeline shown: the run drilled into last, else the session's.
+    fn shown(&self) -> &Entity<Transcript> {
+        self.stack.last().map_or(&self.transcript, |drilled| &drilled.transcript)
+    }
+
+    /// Drill into subagent run `chat` from `from`, its row there `row` (or, from the Now card,
+    /// none, `title` naming it): its trace takes the timeline's place, following its newest step
+    /// while it runs, at its brief once it ended, and the prompt box's mirror moves under it. A
+    /// run already on the stack is gone back to instead. Where the inspector holds the keyboard,
+    /// it moves to the way back: what held it (the row, its Open) went with the trace it was in.
+    fn drill(
+        &mut self,
+        from: Entity<Transcript>,
+        chat: String,
+        row: Option<SharedString>,
+        title: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(at) = self.stack.iter().position(|drilled| drilled.chat == chat) {
+            self.pop_to(at + 1, cx);
+            return;
+        }
+        let run = row.as_ref().and_then(|row| from.read(cx).spawn_run(row));
+        let title = run.as_ref().map(|run| run.title.clone()).or(title).unwrap_or_else(|| "Subagent".into());
+        let running = run.as_ref().is_none_or(|run| run.running);
+        self.state.update(cx, |state, cx| state.watch_subagent_doc(chat.clone(), cx));
+        let (state, doc) = (self.state.clone(), chat.clone());
+        let transcript = cx.new(|cx| Transcript::for_doc(state, doc, running, cx));
+        let drills = cx.subscribe(&transcript, |this: &mut Self, from, event: &SubagentDrill, cx| {
+            this.drill(from, event.chat_id.clone(), Some(event.row.clone()), None, cx);
+        });
+        let mirror = self.mirror.clone();
+        self.shown().clone().update(cx, |shown, cx| shown.set_footer(None, cx));
+        transcript.update(cx, |transcript, cx| transcript.set_footer(Some(mirror.into()), cx));
+        self.stack.push(Drilled { chat, from, row, title, transcript, _drills: drills });
+        self.card = None;
+        self.focus_back = true;
+        cx.notify();
+    }
+
+    /// Go back to `depth` runs drilled into (0, the session's own timeline). The feeds of the
+    /// runs left stop being watched, and of those they opened in place, unless a trace still
+    /// held shows them too.
+    fn pop_to(&mut self, depth: usize, cx: &mut Context<Self>) {
+        if self.stack.len() <= depth {
+            return;
+        }
+        let left: Vec<Drilled> = self.stack.drain(depth..).collect();
+        let mut gone = Vec::new();
+        for drilled in &left {
+            gone.push(drilled.chat.clone());
+            gone.extend(drilled.transcript.update(cx, |transcript, cx| {
+                transcript.set_footer(None, cx);
+                transcript.release_spawns()
+            }));
+        }
+        let held: Vec<Entity<Transcript>> = std::iter::once(self.transcript.clone())
+            .chain(self.stack.iter().map(|drilled| drilled.transcript.clone()))
+            .collect();
+        gone.retain(|chat| {
+            !self.stack.iter().any(|drilled| &drilled.chat == chat)
+                && !held.iter().any(|transcript| transcript.read(cx).watches(chat))
+        });
+        self.state.update(cx, |state, _| {
+            for chat in &gone {
+                state.unwatch_subagent_doc(chat);
+            }
+        });
+        let mirror = self.mirror.clone();
+        self.shown().clone().update(cx, |shown, cx| shown.set_footer(Some(mirror.into()), cx));
+        cx.notify();
+    }
+
+    /// Whether the keyboard is the inspector's: on it or inside it, or on the pane that holds it.
+    fn holds_keyboard(&self, window: &Window, cx: &mut App) -> bool {
+        self.root.contains_focused(window, cx) || self.root.within_focused(window, cx)
+    }
+
+    /// After a way back, where the inspector holds the keyboard, it goes to the way back still
+    /// shown, or to the header's line: what held it went with the trace it was in.
+    fn refocus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.holds_keyboard(window, cx) {
+            window.focus(if self.stack.is_empty() { &self.home } else { &self.back }, cx);
+        }
+    }
+
+    /// The run shown, as its row reads it now, when one is drilled into and its row is there.
+    fn drilled_run(&self, cx: &Context<Self>) -> Option<Run> {
+        let drilled = self.stack.last()?;
+        drilled.row.as_ref().and_then(|row| drilled.from.read(cx).spawn_run(row))
     }
 
     /// Keep the selected chat's dock and work watched; the watch follows the selection.
@@ -281,6 +406,7 @@ impl Inspector {
         self.watched = chat.clone();
         self.tray = None;
         self.card = None;
+        self.pop_to(0, cx);
         self.mirror.update(cx, |mirror, cx| mirror.show(None, cx));
         self.watch.clear();
         let (Some(chat), Some(engine)) = (chat, self.state.read(cx).engine().cloned()) else {
@@ -460,10 +586,13 @@ impl Inspector {
         crate::popover::anchored_menu_below_gap("inspector-card", body.into_any_element(), None, 0.0)
     }
 
-    /// The session's status and branch, on one line that is always drawn; a subagent's timeline
-    /// adds its task's name and the way back to its parent. The session's own title is not said
-    /// again here: its terminal's title bar and its sidebar row say it.
+    /// The session's status and branch, on one line that is always drawn; drilled into a run,
+    /// the way back instead ([`Self::render_drilled_header`]). The session's own title is not
+    /// said again here: its terminal's title bar and its sidebar row say it.
     fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if !self.stack.is_empty() {
+            return self.render_drilled_header(theme, cx);
+        }
         let state = self.state.read(cx);
         let chat = state.selected_chat_row().cloned();
         let status = chat.as_ref().map_or(ChatIndicator::Idle, |chat| state.display_status_for(chat, self.clock));
@@ -471,49 +600,12 @@ impl Inspector {
         // is a glyph").
         let session = chat.as_ref().and_then(|chat| state.session_for(&chat.id));
         let mark = crate::shell::marks::Mark::of(status, session, self.clock);
-        let parent = chat
-            .as_ref()
-            .filter(|chat| chat.subagent)
-            .and_then(|chat| chat.parent_chat_id.clone());
-        let title: SharedString = chat
-            .as_ref()
-            .and_then(|chat| chat.title.clone().or_else(|| chat.last_message_preview.clone()))
-            .map_or_else(|| "Session".into(), |title| crate::transcript::single_line(&title).into());
         let branch = chat.as_ref().and_then(|chat| chat.branch.clone());
-        let task = parent.is_some().then_some(title);
         self.line("inspector-header", None, theme, cx)
             .gap(px(10.0))
-            .when_some(parent, |line, parent| {
-                let ink = hover_blend("inspector-back", theme.text_muted, theme.text);
-                line.child(
-                    div()
-                        .id("inspector-back")
-                        .role(gpui::Role::Button)
-                        .flex_none()
-                        .cursor_pointer()
-                        .hover_fade("inspector-back")
-                        .aria_label("Back to its parent")
-                        .tooltip(crate::settings::widgets::text_tooltip("Back to its parent"))
-                        // An SVG paints only in a colour of its own.
-                        .child(icon(icons::ARROW_LEFT).size(px(12.0)).text_color(ink))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(InspectorEvent::Back { chat_id: parent.clone() });
-                        })),
-                )
-            })
-            .children(task.map(|title| {
-                div()
-                    .id("inspector-title")
-                    .debug_selector(|| "inspector-title".into())
-                    .role(gpui::Role::Heading)
-                    .aria_label(title.clone())
-                    .min_w_0()
-                    .truncate()
-                    .text_size(ui_rems(13.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(title)
-            }))
+            // The keyboard's place after the last way back: a press here keeps it where it was.
+            .track_focus(&self.home)
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
             .children(mark.word().zip(mark.drawn()).map(|(words, mark)| {
                 div()
                     .id("inspector-status")
@@ -538,9 +630,139 @@ impl Inspector {
             .into_any_element()
     }
 
+    /// Drilled into a run: the way back, the runs it is under (each a press away), its task's
+    /// name and its status mark, on the header's line.
+    fn render_drilled_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let depth = self.stack.len();
+        let parent: SharedString = match depth {
+            0 | 1 => "the session".into(),
+            _ => self.stack[depth - 2].title.clone(),
+        };
+        let run = self.drilled_run(cx);
+        let title = run.as_ref().map_or_else(|| self.stack[depth - 1].title.clone(), |run| run.title.clone());
+        let back_ink = hover_blend("inspector-back", theme.text_muted, theme.text);
+        let back = div()
+            .id("inspector-back")
+            .track_focus(&self.back)
+            .role(gpui::Role::Button)
+            .flex_none()
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover_fade("inspector-back")
+            .focus_visible({
+                let ring = crate::surface_chrome::ring(theme, crate::surface_chrome::RING_OFFSET);
+                move |s| s.outline_ring(ring)
+            })
+            .aria_label(SharedString::from(format!("Back to {parent}")))
+            .tooltip(crate::settings::widgets::text_tooltip(format!("Back to {parent}")))
+            // An SVG paints only in a colour of its own.
+            .child(icon(icons::ARROW_LEFT).size(px(12.0)).text_color(back_ink))
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.pop_to(depth - 1, cx);
+                this.refocus(window, cx);
+            }));
+        let crumbs: Vec<AnyElement> = std::iter::once(SharedString::from("Session"))
+            .chain(self.stack[..depth - 1].iter().map(|drilled| drilled.title.clone()))
+            .enumerate()
+            .map(|(level, name)| {
+                let fade = format!("inspector-crumb-{level}");
+                div()
+                    .id(("inspector-crumb", level))
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!("Back to {name}")))
+                    .min_w(px(24.0))
+                    .flex_shrink(1.0)
+                    .truncate()
+                    .cursor_pointer()
+                    .text_color(hover_blend(&fade, theme.text_faint, theme.text_muted))
+                    .hover_fade(fade)
+                    .child(crate::transcript::single_line(&name))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.pop_to(level, cx);
+                        this.refocus(window, cx);
+                    }))
+                    .into_any_element()
+            })
+            .flat_map(|crumb| [crumb, div().flex_none().text_color(theme.text_faint).child("\u{203A}").into_any_element()])
+            .collect();
+        self.line("inspector-header", None, theme, cx)
+            .gap(px(6.0))
+            .text_size(ui_rems(12.0))
+            .child(back)
+            .children(crumbs)
+            .child(
+                div()
+                    .id("inspector-title")
+                    .debug_selector(|| "inspector-title".into())
+                    .role(gpui::Role::Heading)
+                    .aria_label(title.clone())
+                    .min_w_0()
+                    .flex_shrink_0()
+                    .max_w(gpui::relative(0.7))
+                    .truncate()
+                    .text_size(ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(if run.as_ref().is_some_and(|run| run.failed) { theme.danger } else { theme.text })
+                    .child(crate::transcript::single_line(&title)),
+            )
+            .children(run.as_ref().and_then(Run::mark).map(|mark| {
+                div()
+                    .flex_none()
+                    .child(StatusMark::new("inspector-run-mark", mark).size(MARK_SMALL))
+            }))
+            .into_any_element()
+    }
+
+    /// Drilled into a run: what it does now (its step, what it asks of the person, or what it
+    /// answered) and its facts, on the Now line, which opens nothing.
+    fn render_drilled_now(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let run = self.drilled_run(cx);
+        let now = self.clock.timestamp_millis();
+        let (said, tint) = match &run {
+            Some(run) if run.needs_you.is_some() => {
+                (format!("Needs you · {}", run.needs_you.clone().unwrap_or_default()), theme.warning)
+            }
+            Some(run) => (run.step.clone().unwrap_or_default(), if run.failed { theme.danger } else { theme.text }),
+            None => (String::new(), theme.text),
+        };
+        let facts = run.as_ref().map(|run| run.summary_at(now)).unwrap_or_default();
+        self.line("inspector-now", None, theme, cx)
+            .aria_label(SharedString::from(match (said.is_empty(), facts.is_empty()) {
+                (false, false) => format!("Now: {said}, {facts}"),
+                (false, true) => format!("Now: {said}"),
+                (true, false) => format!("Now: {facts}"),
+                (true, true) => "Now: nothing".to_owned(),
+            }))
+            .child(Self::name("Now", theme))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(ui_rems(12.0))
+                    .text_color(tint)
+                    .child(crate::transcript::single_line(&said)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_shrink(1.0)
+                    .truncate()
+                    .text_size(ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(facts),
+            )
+            .into_any_element()
+    }
+
     /// What the session is doing now, on one line ("Tasks 2/4 · Write the tests", "2
     /// running"), opening to its task list and its running work.
     fn render_now(&self, tasks: Option<&[TodoItem]>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if !self.stack.is_empty() {
+            return self.render_drilled_now(theme, cx);
+        }
         let working = self
             .state
             .read(cx)
@@ -617,6 +839,7 @@ impl Inspector {
             let glyph = if row.kind == WorkRow::SUBAGENT { icons::BOT } else { icons::TERMINAL };
             let detail = row.step.clone().unwrap_or_else(|| row.state_words.clone());
             let chat_id = row.chat_id.clone();
+            let title = SharedString::from(crate::transcript::single_line(&row.title));
             let fade = format!("inspector-work-{ix}");
             rows.push(
                 div()
@@ -654,9 +877,12 @@ impl Inspector {
                             .child(crate::transcript::single_line(&detail)),
                     )
                     .when_some(chat_id, |el, chat_id| {
+                        // A running subagent drills in, as its row in the timeline does.
                         el.on_click(cx.listener(move |this, _, window, cx| {
                             this.close_card(window, cx);
-                            cx.emit(InspectorEvent::OpenSubagent { chat_id: chat_id.clone() });
+                            let from = this.transcript.clone();
+                            let row = from.read(cx).spawn_row_of(&chat_id);
+                            this.drill(from, chat_id.clone(), row, Some(title.clone()), cx);
                         }))
                     })
                     .into_any_element(),
@@ -971,6 +1197,20 @@ impl gpui::Render for PromptMirror {
 impl gpui::Render for Inspector {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
+        if std::mem::take(&mut self.focus_back) && !self.stack.is_empty() && self.holds_keyboard(window, cx) {
+            window.focus(&self.back, cx);
+        }
+        // A running run's time moves on in the header, once a second.
+        if self.tick.is_none() && self.drilled_run(cx).is_some_and(|run| run.running) {
+            self.tick = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(1)).await;
+                let _gone = this.update(cx, |this, cx| {
+                    this.tick = None;
+                    this.clock = crate::clock::utc(cx);
+                    cx.notify();
+                });
+            }));
+        }
         let (files, tasks) = self.facts(cx);
         let header = self.render_header(&theme, cx);
         let now = self.render_now(tasks.as_deref(), &theme, cx);
@@ -978,10 +1218,21 @@ impl gpui::Render for Inspector {
         div()
             .id("inspector")
             .debug_selector(|| "inspector".into())
+            .track_focus(&self.root)
             .size_full()
             .flex()
             .flex_col()
             .overflow_hidden()
+            // Esc goes back a run where the keyboard is in the inspector; in the terminal it is
+            // the TUI's.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && !this.stack.is_empty() {
+                    cx.stop_propagation();
+                    let depth = this.stack.len() - 1;
+                    this.pop_to(depth, cx);
+                    this.refocus(window, cx);
+                }
+            }))
             .child(header)
             .child(now)
             .child(changes)
@@ -992,7 +1243,7 @@ impl gpui::Render for Inspector {
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .child(self.transcript.clone()),
+                    .child(self.shown().clone()),
             )
             .children(self.preview.clone().map(|preview| {
                 let weak = cx.weak_entity();
@@ -1040,8 +1291,9 @@ pub fn inspects(state: &AppState, chat: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use slopty_view_doc::ToolDiffStat;
+
+    use super::*;
 
     fn assistant(parts: Vec<MessagePart>) -> SessionMessageEntry {
         SessionMessageEntry {
@@ -1136,5 +1388,254 @@ mod tests {
         assert!(placeholders("[Image #4\n]").is_empty(), "a placeholder is one line");
         assert!(placeholders("no pictures").is_empty());
         assert!(placeholders("").is_empty());
+    }
+
+    /// The window a drill is judged in: a stand-in for the session's terminal beside the pane
+    /// that holds the inspector, which takes the keyboard on a press in it, as the shell's does
+    /// (`shell/navigation_focus.rs`).
+    struct Host {
+        terminal: FocusHandle,
+        pane: FocusHandle,
+        inspector: Entity<Inspector>,
+    }
+
+    impl gpui::Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let pane = self.pane.clone();
+            div()
+                .size_full()
+                .flex()
+                .child(div().id("terminal").track_focus(&self.terminal).w(px(200.0)).h_full())
+                .child(
+                    div()
+                        .id("pane")
+                        .track_focus(&self.pane)
+                        .capture_any_mouse_down(move |_, window, cx| {
+                            if !pane.contains_focused(window, cx) {
+                                window.focus(&pane, cx);
+                            }
+                        })
+                        .flex_1()
+                        .h_full()
+                        .child(self.inspector.clone()),
+                )
+        }
+    }
+
+    /// A finished subagent's spawn, `id`, whose run is chat `chat`, doing `task`.
+    fn spawn(id: &str, chat: &str, task: &str) -> MessagePart {
+        MessagePart::Tool {
+            id: id.to_owned(),
+            call: ToolCall::Unknown {
+                name: format!("Agent: {task}"),
+                input: Some(serde_json::json!({ "description": task })),
+            },
+            is_error: false,
+            resolved: true,
+            output: None,
+            diff: None,
+            output_ref: None,
+            output_bytes: None,
+            diff_ref: None,
+            diff_stats: None,
+            subagent_ref: Some(chat.to_owned()),
+            subagent_status: Some(slopty_view_doc::SubagentStatus::Done),
+            subagent_tail: None,
+            facts: Some(Box::new(slopty_view_doc::ToolFacts {
+                subagent_progress: Some(slopty_view_doc::SubagentProgress {
+                    agent_type: Some("Explore".into()),
+                    state: slopty_view_doc::SubagentProgress::DONE.into(),
+                    chat_id: Some(chat.into()),
+                    ..slopty_view_doc::SubagentProgress::default()
+                }),
+                ..slopty_view_doc::ToolFacts::default()
+            })),
+        }
+    }
+
+    fn says(id: &str, parts: Vec<MessagePart>) -> SessionMessageEntry {
+        SessionMessageEntry { id: id.to_owned(), status: Some(slopty_view_doc::MessageStatus::Complete), ..assistant(parts) }
+    }
+
+    fn words(id: &str, text: &str) -> MessagePart {
+        MessagePart::Text { id: id.to_owned(), text: text.to_owned() }
+    }
+
+    /// The last frame's accessibility tree, as (role, label, centre) of each node.
+    fn draw(cx: &mut gpui::VisualTestContext) -> Vec<(gpui::accesskit::Role, String, gpui::Point<Pixels>)> {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let scale = f64::from(window.scale_factor());
+            let Some(update) = window.a11y_tree() else { return Vec::new() };
+            update
+                .nodes
+                .iter()
+                .map(|(_, node)| {
+                    let r = node.bounds().unwrap_or_default();
+                    let centre = gpui::point(
+                        px(((r.x0 + r.x1) / 2.0 / scale) as f32),
+                        px(((r.y0 + r.y1) / 2.0 / scale) as f32),
+                    );
+                    (node.role(), node.label().unwrap_or_default().to_owned(), centre)
+                })
+                .collect()
+        })
+    }
+
+    fn at(nodes: &[(gpui::accesskit::Role, String, gpui::Point<Pixels>)], label: &str) -> Option<gpui::Point<Pixels>> {
+        nodes.iter().find(|(_, said, _)| said == label).map(|(_, _, centre)| *centre)
+    }
+
+    /// A drill stays inside the inspector. Asked while the terminal holds the keyboard, it
+    /// leaves the keyboard there. A press on a run's Open (which gives the pane the keyboard)
+    /// shows its trace under a header that leads back, with the keyboard on the way back, and
+    /// leaves the selection and the prompt box's mirror (which moves under the trace shown)
+    /// alone; a run inside it drills a level deeper, drilling one already on the stack goes back
+    /// to it, and Esc goes back a level. A crumb goes back to its level and lets go of the runs'
+    /// feeds, the keyboard waiting on the header's line. Enter on a run's row drills too.
+    #[gpui::test]
+    fn a_drill_stays_inside_the_inspector(cx: &mut gpui::TestAppContext) {
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            cx.set_reduce_motion(true);
+        });
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, _| {
+            state.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "chat", "title": "Chat", "deviceId": "dev", "archived": false,
+                    "createdAt": chrono::Utc::now(), "cwd": "/work/app",
+                }))
+                .unwrap(),
+            ];
+            state.selected_chat = Some("chat".into());
+            state.transcript_replayed = true;
+            state.transcript = vec![says("reply", vec![words("lead", "Sending a scout."), spawn("spawn", "child", "Count lines")])];
+            state.transcript_revision += 1;
+        });
+        let snapshots = |state: &Entity<AppState>, cx: &mut gpui::VisualTestContext| {
+            state.update(cx, |state, _| {
+                state.set_subagent_snapshot(
+                    "child".into(),
+                    vec![says("c", vec![words("c-lead", "Counting in the child."), spawn("inner", "grand", "Read parser")])],
+                );
+                state.set_subagent_snapshot("grand".into(), vec![says("g", vec![words("g-lead", "Reading in the grandchild.")])]);
+            });
+        };
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |this, cx| this.sync(cx));
+        let inspector = cx.new(|cx| Inspector::new(state.clone(), transcript.clone(), cx));
+        let (terminal, pane) = cx.update(|cx| (cx.focus_handle(), cx.focus_handle()));
+        let (_, cx) = cx.add_window_view(|_, _| Host {
+            terminal: terminal.clone(),
+            pane: pane.clone(),
+            inspector: inspector.clone(),
+        });
+        cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+        snapshots(&state, cx);
+        let footers = |cx: &mut gpui::VisualTestContext| {
+            inspector.read_with(cx, |inspector, cx| {
+                std::iter::once(&inspector.transcript)
+                    .chain(inspector.stack.iter().map(|drilled| &drilled.transcript))
+                    .map(|transcript| transcript.read(cx).has_footer())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let depth = |cx: &mut gpui::VisualTestContext| inspector.read_with(cx, |inspector, _| inspector.stack.len());
+        let (back, home) = inspector.read_with(cx, |inspector, _| (inspector.back.clone(), inspector.home.clone()));
+        let holds = |handle: &FocusHandle, cx: &mut gpui::VisualTestContext| cx.update(|window, _| handle.is_focused(window));
+
+        // Asked while the terminal holds the keyboard, a drill leaves it there.
+        cx.update(|window, cx| window.focus(&terminal, cx));
+        draw(cx);
+        inspector.update(cx, |inspector, cx| {
+            let from = inspector.transcript.clone();
+            let row = from.read(cx).spawn_row_of("child");
+            inspector.drill(from, "child".into(), row, None, cx);
+        });
+        let nodes = draw(cx);
+        assert!(at(&nodes, "Counting in the child.").is_some(), "its trace takes the timeline's place");
+        assert!(holds(&terminal, cx), "the terminal keeps the keyboard");
+        inspector.update(cx, |inspector, cx| inspector.pop_to(0, cx));
+        snapshots(&state, cx);
+
+        // A press on its Open: the pane takes the keyboard, and the drill puts it on the way back.
+        let nodes = draw(cx);
+        assert!(at(&nodes, "Counting in the child.").is_none(), "the child's steps wait for a drill");
+        let open = at(&nodes, "Open subagent").expect("the run's Open");
+        cx.simulate_click(open, gpui::Modifiers::default());
+        let nodes = draw(cx);
+        assert!(at(&nodes, "Counting in the child.").is_some(), "its trace takes the timeline's place");
+        assert!(at(&nodes, "Sending a scout.").is_none(), "the session's own steps are under it");
+        assert!(at(&nodes, "Back to the session").is_some(), "a way back");
+        assert!(at(&nodes, "Count lines").is_some(), "its task heads it");
+        assert_eq!(state.read_with(cx, |state, _| state.selected_chat.clone()).as_deref(), Some("chat"), "the selection stays");
+        assert!(holds(&back, cx), "the keyboard is on the way back, so Esc never reaches the TUI");
+        assert_eq!(footers(cx), [false, true], "the prompt box's mirror moves under the trace shown");
+
+        let open = at(&nodes, "Open subagent").expect("the grandchild's Open");
+        cx.simulate_click(open, gpui::Modifiers::default());
+        let nodes = draw(cx);
+        assert!(at(&nodes, "Reading in the grandchild.").is_some(), "a level deeper");
+        assert!(at(&nodes, "Back to Count lines").is_some(), "the way back names the run it leads to");
+        assert_eq!(footers(cx), [false, false, true]);
+        assert!(holds(&back, cx));
+
+        // Drilling a run already on the stack goes back to it.
+        inspector.update(cx, |inspector, cx| {
+            let from = inspector.transcript.clone();
+            inspector.drill(from, "child".into(), None, None, cx);
+        });
+        assert_eq!(depth(cx), 1, "back to the run already drilled");
+        assert!(at(&draw(cx), "Counting in the child.").is_some());
+
+        // Esc goes back a level, the keyboard to the header's line once at the session.
+        cx.simulate_keystrokes("escape");
+        let nodes = draw(cx);
+        assert_eq!(depth(cx), 0, "Esc goes back");
+        assert!(at(&nodes, "Sending a scout.").is_some(), "the session's timeline again");
+        assert_eq!(footers(cx), [true], "the mirror is under the session's timeline again");
+        assert!(holds(&home, cx), "the keyboard waits on the header");
+        assert!(state.read_with(cx, |state, _| state.sub_transcript("child").is_empty()), "the run's feed is let go");
+
+        // A crumb goes back to its level.
+        snapshots(&state, cx);
+        let open = at(&draw(cx), "Open subagent").expect("the run's Open");
+        cx.simulate_click(open, gpui::Modifiers::default());
+        let crumb = at(&draw(cx), "Back to Session").expect("the session's crumb");
+        cx.simulate_click(crumb, gpui::Modifiers::default());
+        let nodes = draw(cx);
+        assert_eq!(depth(cx), 0, "the crumb goes back");
+        assert!(at(&nodes, "Back to the session").is_none(), "no way back at the session");
+        assert!(holds(&home, cx), "the keyboard waits on the header");
+
+        // Enter on the run's row drills too.
+        snapshots(&state, cx);
+        let focused = |cx: &mut gpui::VisualTestContext| {
+            draw(cx);
+            cx.update(|window, _| {
+                let update = window.a11y_tree()?;
+                update.nodes.iter().find(|(id, _)| *id == update.focus).and_then(|(_, node)| node.label().map(str::to_owned))
+            })
+            .unwrap_or_default()
+        };
+        let mut stops = 0;
+        while focused(cx) != "Subagent Count lines" {
+            assert!(stops < 40, "Tab reaches the run's row");
+            stops += 1;
+            cx.update(|window, cx| window.focus_next(cx));
+        }
+        // A key press clicks as it comes up.
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse("enter").unwrap() });
+        draw(cx);
+        assert_eq!(depth(cx), 1, "Enter drills in");
+        assert!(holds(&back, cx), "the keyboard goes to the way back");
     }
 }

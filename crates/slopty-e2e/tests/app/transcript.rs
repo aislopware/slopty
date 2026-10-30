@@ -92,35 +92,43 @@ async fn press(drv: &mut Driver, node: &A11yNode) {
     tokio::time::sleep(SETTLE).await;
 }
 
-/// The subagent's card, "Subagent Count lines": a click opens its run in place (a group
-/// "Transcript of Count lines" under it) and another folds it; its Open shows the run as the
-/// inspector's own timeline, titled for its task, whose Back leads to the parent's. What the
-/// frames fail to say goes to `missing`.
+/// Whether the subagent's run stands open in place: its brief ("Task: …") is a row of the trace.
+fn brief_shown(dump: &Dump) -> bool {
+    inspector(dump).into_iter().any(|n| {
+        n.role == "Paragraph" && n.label.as_deref().is_some_and(|l| l.starts_with("Task: "))
+    })
+}
+
+/// The subagent's row, "Subagent Count lines": a click splices its run's steps in under it, its
+/// brief first, and another takes them out; its Open drills in, the run as the inspector's own
+/// timeline under its task's name, whose way back leads to the session's. What the frames fail
+/// to say goes to `missing`.
 async fn subagent_card(drv: &mut Driver, renders: &Path, missing: &mut Vec<String>) {
     const CARD: &str = "Subagent Count lines";
-    const RUN: &str = "Transcript of Count lines";
     let shown = drv.dump().await.unwrap();
     let Some(card) = labelled(&shown, "Button", CARD).cloned() else {
-        missing.push(format!("the card {CARD:?}"));
+        missing.push(format!("the row {CARD:?}"));
         return;
     };
-    // Settled, it says what its run answered ("4"), never a blank line.
-    if !card.value.as_deref().is_some_and(|value| value.starts_with("4 · ")) {
-        missing.push(format!("the settled card says its run's answer: {:?}", card.value));
+    // Settled, it says what its run answered ("4"), then its figures, never a blank line.
+    if !card.value.as_deref().is_some_and(|value| value == "4" || value.starts_with("4 · ")) {
+        missing.push(format!("the settled row says its run's answer: {:?}", card.value));
+    }
+    if brief_shown(&shown) {
+        missing.push("the run stays shut until a click".to_owned());
     }
     press(drv, &card).await;
-    let open = drv.dump().await.unwrap();
-    if open.a11y_node("Group", Some(RUN)).is_none() {
-        missing.push(format!("a click on the card opens {RUN:?} in place"));
+    if drv.wait_for("its run in place", STEP, brief_shown).await.is_err() {
+        missing.push("a click on the row splices its run in under it".to_owned());
         return;
     }
     goldens(drv, renders, "inspector-subagent-open").await;
     let card = labelled(&drv.dump().await.unwrap(), "Button", CARD).cloned().unwrap_or(card);
     press(drv, &card).await;
-    if drv.dump().await.unwrap().a11y_node("Group", Some(RUN)).is_some() {
-        missing.push("a second click folds the subagent's run".to_owned());
+    if brief_shown(&drv.dump().await.unwrap()) {
+        missing.push("a second click takes the subagent's run out".to_owned());
     }
-    // Open, on the card's hover: the run as the inspector's timeline, under its task's name.
+    // Open, on the row's hover: the run as the inspector's timeline, under its task's name.
     let (x, y) = middle(&card);
     drv.ok(&Command::Move { x, y }).await.unwrap();
     let Ok(hovered) = drv
@@ -134,7 +142,7 @@ async fn subagent_card(drv: &mut Driver, renders: &Path, missing: &mut Vec<Strin
     let drilled = drv
         .wait_for("the run's own timeline", STEP, |d| {
             labelled(d, "Heading", "Count lines").is_some()
-                && labelled(d, "Button", "Back to its parent").is_some()
+                && labelled(d, "Button", "Back to the session").is_some()
         })
         .await;
     let Ok(drilled) = drilled else {
@@ -142,13 +150,13 @@ async fn subagent_card(drv: &mut Driver, renders: &Path, missing: &mut Vec<Strin
         return;
     };
     goldens(drv, renders, "inspector-subagent-drilled").await;
-    press(drv, labelled(&drilled, "Button", "Back to its parent").unwrap()).await;
+    press(drv, labelled(&drilled, "Button", "Back to the session").unwrap()).await;
     if drv
         .wait_for("back in the parent", STEP, |d| labelled(d, "Button", CARD).is_some())
         .await
         .is_err()
     {
-        missing.push("Back leads to the parent's timeline".to_owned());
+        missing.push("the way back leads to the session's timeline".to_owned());
     }
 }
 
@@ -158,7 +166,7 @@ async fn subagent_card(drv: &mut Driver, renders: &Path, missing: &mut Vec<Strin
 /// leaves Now saying nothing. Its calls fold under a summary between the words the agent said,
 /// counting them by kind ("Ran 2 commands (1 failed)", the glob and grep as searches), and a call
 /// alone between them shows itself (the background command, the file written); the subagent the
-/// turn ran is a card that opens in place and drills in; a click on a summary opens its group.
+/// turn ran is a row that opens in place and drills in; a click on a summary opens its group.
 /// Changes counts the file the session wrote, and its card names it.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]

@@ -212,3 +212,45 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
   - **The prompt box is the list's footer.** It is drawn under the last row rather than as an
     item of its own, so every list index stays a row's and the follow rule treats its growth as
     the end's.
+- ✅ **How subagents are built as nested steps (2026-10-30).** Choices the ruling left open, made
+  while building "A subagent is a nested step, opened in place":
+  - **A spawn cuts its group.** A run of calls stops at a spawn, which becomes a row of its own
+    keyed `{entry}#a:{call id}`. Spawns that stand together get one line over them, keyed by the
+    first, `{entry}#p:{call id}`. A batch that grows keeps its line's key, and a spawn that lands
+    late splits its group without moving the folds of the rows around it. The view model's
+    fold of agents started together (`folds.rs` `agent_groups`) is deleted: the line is the
+    transcript's to draw, from the rows that stand together.
+  - **Opening in place splices the child's own rows.** The child's record goes through the same
+    row builder as the parent's, and each spliced row keeps its depth for its inset: 22 pt a
+    level, the chevron's gutter, so a child's icons stand under its parent's title, for up to
+    four levels (traces §2). Below that, rows keep the fourth level's inset. Hairlines on the
+    activity trunk show the levels. A child row reads compact, as a drilled run does. Its brief
+    folds to three lines and a press opens it. Until its record arrives, "Loading its steps…"
+    holds the place. Folding a run shuts the runs opened inside it and lets go of their feeds.
+    The nested card, its scroller and the frame-late measure (`Fit`) are deleted.
+  - **A press opens in place; Enter and Open drill.** A press or Space opens a run in place, as
+    any step opens. Enter, or the row's Open (↗, shown on hover or focus), drills, as a trace
+    viewer's Enter goes into a span. A press in the inspector gives its pane the keyboard, as a
+    split in a terminal takes it, and a drill then puts the keyboard on the way back, because the
+    row or Open that held it goes with the trace it was in. Esc there goes back a level and
+    never reaches the TUI, where it would interrupt the agent. After a way back the keyboard
+    lands on the way back still shown, or on the header's line. A drill asked while the terminal
+    holds the keyboard leaves it there. A press on the prompt box's mirror, which is no row,
+    leaves the view following the end.
+  - **What the person opens comes into view.** The view holds still under what grows by
+    itself, but a group, a step's detail or a run the person opens at the end of the trace would
+    open out of sight below it, since the trace's reading place is its end. Once what opened has
+    laid out, the view moves down as far as its end needs, never so far that the row pressed
+    leaves the top. It keeps up through a fold's tween, and a run opened before its record
+    arrived comes into view when the record lands.
+  - **The drilled header.** It holds the way back ("←", named "Back to {parent}"), crumbs
+    ("Session › {parent} ›", each a press back to its level), the run's task and its status
+    mark, all on the 28 pt header line. The Now line then says the run's step, what it asks of
+    the person ("Needs you · …"), or its failure, then its facts, and opens nothing. The header's
+    time moves on once a second while the run runs. Changes stays the session's.
+  - **The stack owns the feeds it opened.** A drilled run's record is watched while it is on
+    the stack. Going back lets go of it, and of the runs opened in place inside it, unless a
+    trace still held shows one of them. A new selection empties the stack. Drilling a run that
+    is already on the stack goes back to it instead of pushing it twice.
+  - **The prompt box's mirror moves to the trace shown.** It stays the session's prompt box, the
+    one the person types into, so it stands at the foot of whatever trace is shown.

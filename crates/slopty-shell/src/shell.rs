@@ -57,7 +57,7 @@ use crate::state::{
 use crate::terminal::panel::TerminalPanel;
 use crate::settings::widgets::{ActionHint as _, Keys}; // slopty: tooltips with their key
 use crate::theme::Theme;
-use crate::transcript::{self, Transcript, TranscriptEvent};
+use crate::transcript::{self, Transcript};
 
 mod actions_ui;
 #[cfg(test)]
@@ -1304,8 +1304,6 @@ pub struct Shell {
     _inspector_events: Subscription,
     /// Hears the session terminal's ground change, which the titlebar row wears.
     _session_terminal_events: Subscription,
-    /// The primary transcript's spawn-chip events (subagent tabs).
-    _transcript_events: Subscription,
     _transcript_invalidation: Subscription,
 }
 
@@ -1350,8 +1348,6 @@ impl Shell {
             });
         let inspector = cx.new(|cx| crate::inspector::Inspector::new(state.clone(), transcript.clone(), cx));
         let inspector_events = cx.subscribe(&inspector, Self::on_inspector_event);
-        // Spawn chips open their subagent's transcript as a right-pane tab.
-        let transcript_events = cx.subscribe(&transcript, Self::on_transcript_event);
         let data_dir = boot.data_dir.clone();
         let mut settings = settings::current(cx);
         state.update(cx, |state, cx| state.watch_clock_transitions(cx));
@@ -1571,7 +1567,6 @@ impl Shell {
             new_session: None,
             starting: None,
             _starting_redraw: None,
-            _transcript_events: transcript_events,
             _transcript_invalidation: transcript_invalidation,
         }
     }
@@ -1825,17 +1820,12 @@ impl Shell {
         event: &crate::inspector::InspectorEvent,
         cx: &mut Context<Self>,
     ) {
-        use crate::inspector::InspectorEvent;
-        match event {
-            InspectorEvent::OpenChange { path } => {
-                self.pending_change = Some(path.clone());
-                cx.notify();
-            }
-            InspectorEvent::OpenSubagent { chat_id } => {
-                self.open_chat(chat_id.clone(), cx);
-            }
-            InspectorEvent::Back { chat_id } => self.open_chat(chat_id.clone(), cx),
-        }
+        // slopty: a subagent drills in inside the inspector itself (`inspector.md`, "A long or
+        // nested run drills in, inside the inspector"): the selection, the terminal and the
+        // keyboard stay where they are.
+        let crate::inspector::InspectorEvent::OpenChange { path } = event;
+        self.pending_change = Some(path.clone());
+        cx.notify();
     }
 
     fn suspend_file_images(&mut self, cx: &mut Context<Self>) {
@@ -2330,21 +2320,6 @@ impl Shell {
         self.diffs.insert(id, changes);
         self.diff_subs.insert(id, sub);
         self.open_view(RightSurface::Diff(id), cx);
-    }
-
-    /// Spawn-chip events from the primary transcript AND from subagent-tab
-    /// transcripts (nested spawns open their own tabs).
-    fn on_transcript_event(
-        &mut self,
-        _: Entity<Transcript>,
-        event: &TranscriptEvent,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            // slopty: a subagent's card opens its own timeline in the inspector; the session's
-            // terminal stays (a subagent runs inside its agent's session, `panel_owner`).
-            TranscriptEvent::OpenSubagent { chat_id } => self.open_chat(chat_id.clone(), cx),
-        }
     }
 
     fn on_file_close_ready(

@@ -119,10 +119,10 @@ pub struct ToolTimer {
     pub timeout_ms: Option<u64>,
 }
 
-/// A subagent's progress, on the card of the call that started it.
+/// A subagent's progress, on the row of the call that started it.
 ///
-/// Collapsed, the card reads "{agentType} · {step}" and "{figures} · {elapsed}"; it settles to
-/// its outcome and figures once the subagent ends.
+/// While it runs, the row reads its heartbeat ("{model} · {step} · {figures} · {elapsed}"); it
+/// settles to its outcome and figures once the subagent ends.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentProgress {
@@ -166,6 +166,13 @@ pub struct SubagentProgress {
     /// Its tray row (`task:{id}` or `chat:{chatId}`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<String>,
+    /// The model it runs on, as the agent resolved it (`claude-haiku-5-5`), once it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// When its own records last moved (epoch ms), while it runs: a long quiet is said
+    /// ("quiet 3m").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heard_at: Option<i64>,
 }
 
 impl SubagentProgress {
