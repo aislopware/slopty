@@ -1886,6 +1886,55 @@ done"#
         session.close();
     }
 
+    /// A session adopted after its child exited is gone from its start: a waiter on its
+    /// activity sees it at once, and a viewer that attaches is told how it ended.
+    #[tokio::test]
+    async fn a_session_adopted_after_its_child_exited_is_gone_from_its_start() {
+        let pty = Pty::open(size(40, 6)).unwrap();
+        let slopty_pty::Spawned { mut child, term } = pty
+            .spawn(&SpawnSpec {
+                command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "exit 4".to_owned()],
+                cwd: None,
+                env: Vec::new(),
+                size: size(40, 6),
+            })
+            .unwrap();
+        let status = child.wait().await.unwrap().code().unwrap();
+        let (tap, _taps) = mpsc::channel(64);
+        let session = session::spawn(SessionStart {
+            id: SessionId::new(),
+            master: pty.into_master(),
+            term,
+            checkpoint: Vec::new(),
+            backlog: Vec::new(),
+            tap,
+            size: size(40, 6),
+            scrollback_lines: 1000,
+            queued_max_bytes: session::QUEUED_MAX_BYTES,
+            exited: Some(Exit::with(status)),
+            port_hints: None,
+            moves: None,
+            touched: None,
+            restored: None,
+            divide: false,
+            cwd: None,
+        })
+        .unwrap();
+        assert!(session.activity().borrow().exited, "gone before anything happens in it");
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        let (events, _) =
+            wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Exited { .. })))
+                .await;
+        let told = events.iter().find_map(|e| match e {
+            TermEvent::Exited { status } => Some(*status),
+            _ => None,
+        });
+        assert_eq!(told, Some(Some(4)));
+        session.close();
+    }
+
     /// A program that begins synchronized output and never ends it is let go after the
     /// timeout, whether or not it writes again: its screen does not freeze.
     #[tokio::test]
@@ -2622,6 +2671,92 @@ done"#
         }
         session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
         read_until(&mut rx, &mut state, answer, |s| b(s) > 0 && text(s).contains("DONE")).await;
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// The starts of the `FetchLines` replies among `events`, in order.
+    fn replies(events: &[TermEvent]) -> Vec<LineIndex> {
+        events
+            .iter()
+            .filter_map(
+                |e| if let TermEvent::Lines { start, .. } = e { Some(*start) } else { None },
+            )
+            .collect()
+    }
+
+    /// Reads `viewer`'s sink until it has been quiet a moment: what it was sent is in.
+    async fn drained(viewer: &mut Viewer) {
+        while let Ok(Some(out)) =
+            tokio::time::timeout(Duration::from_millis(500), viewer.rx.recv()).await
+        {
+            let _effects = viewer.state.apply(event(&out));
+        }
+    }
+
+    /// A viewer that stops reading a moment in a real session (16 MiB may wait for it) is sent
+    /// all that waited, in order, once it reads: replies its full sink held back are kept, not
+    /// dropped with the queue.
+    #[tokio::test]
+    async fn a_viewer_that_stops_reading_a_moment_is_sent_all_that_waited() {
+        let (session, mut child) = start(&[
+            "/bin/sh",
+            "-c",
+            "i=0; while [ $i -lt 20 ]; do echo line$i; i=$((i+1)); done; read x",
+        ]);
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(1);
+        session.attach(me, size(40, 6), tx).unwrap();
+        wait_for(&mut rx, |_, s| text(s).contains("line19")).await;
+        drained(&mut rx).await;
+        for start in 0..3 {
+            session
+                .request(me, TermRequest::FetchLines { start: LineIndex(start), count: 1 })
+                .unwrap();
+        }
+        // The first fills the sink; the others wait behind it until the viewer reads.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (events, _) = wait_for(&mut rx, |ev, _| replies(ev).len() == 3).await;
+        assert_eq!(replies(&events), [LineIndex(0), LineIndex(1), LineIndex(2)]);
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A viewer's queue is dropped only once it passes what may wait: one exactly that size is
+    /// sent whole. What may wait here is one reply's size, measured on a session like it, so
+    /// the second of two replies its full sink holds back fills the queue to the byte.
+    #[tokio::test]
+    async fn a_queue_at_its_cap_is_kept_whole() {
+        let script = ["/bin/sh", "-c", "echo line0; read x"];
+        let fetch = TermRequest::FetchLines { start: LineIndex(0), count: 1 };
+        let me = ClientId::new();
+        let reply_bytes = {
+            let (session, mut child) = start(&script);
+            let (tx, mut rx) = viewer(64);
+            session.attach(me, size(40, 6), tx).unwrap();
+            wait_for(&mut rx, |_, s| text(s).contains("line0")).await;
+            session.request(me, fetch.clone()).unwrap();
+            let bytes = loop {
+                let out = rx.rx.recv().await.expect("sink open");
+                if matches!(event(&out), TermEvent::Lines { .. }) {
+                    break out.wire().len();
+                }
+            };
+            session.close();
+            let _killed = child.kill().await;
+            bytes
+        };
+        let (session, mut child, _taps) =
+            start_holding(&script, Vec::new(), None, 1000, reply_bytes);
+        let (tx, mut rx) = viewer(1);
+        session.attach(me, size(40, 6), tx).unwrap();
+        wait_for(&mut rx, |_, s| text(s).contains("line0")).await;
+        drained(&mut rx).await;
+        session.request(me, fetch.clone()).unwrap();
+        session.request(me, fetch).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (events, _) = wait_for(&mut rx, |ev, _| replies(ev).len() == 2).await;
+        assert_eq!(replies(&events), [LineIndex(0), LineIndex(0)], "{reply_bytes} B each");
         session.close();
         let _killed = child.kill().await;
     }
