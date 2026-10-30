@@ -133,6 +133,10 @@ async fn applied(programs: &Programs, repo: &str, op: GitOp, terminals: &[PathBu
             .await
             .map(|review| GitDone::Changes(Box::new(review)))
             .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
+        GitOp::Show { commit } => super::snapshot::commit(git, &root, &commit)
+            .await
+            .map(|review| GitDone::Changes(Box::new(review)))
+            .map_err(|failed| GitOutcome::Failed { said: failed.0 }),
         GitOp::FileDiff { from, to, ignore_whitespace } => super::snapshot::file_diff(
             git,
             &root,

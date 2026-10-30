@@ -315,6 +315,75 @@ mod review {
         );
     }
 
+    /// A commit picked on a terminal's screen is reviewed as committed (`GitOp::Show`): from its
+    /// first parent to it, by its whole or abbreviated hash, so neither later commits nor the
+    /// working tree count; a root commit against the empty tree; a hash that names no commit, a
+    /// ref and an option say so and run nothing; nothing in the repository moves; and a thread's
+    /// review of the same commit reads the same.
+    #[tokio::test]
+    async fn a_commit_is_reviewed_alone_against_its_parent() {
+        use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+        use slopty_worker::repo::commit::{Programs, apply};
+        use slopty_worker::repo::snapshot::NO_COMMIT;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        let root = run(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("goal.txt"), "the goal\n").unwrap();
+        run(&repo, &["add", "goal.txt"]);
+        run(&repo, &["rm", "-q", "gone.txt"]);
+        run(&repo, &["commit", "-q", "-m", "goal"]);
+        let goal = run(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("later.txt"), "moved on\n").unwrap();
+        run(&repo, &["add", "later.txt"]);
+        run(&repo, &["commit", "-q", "-m", "later"]);
+        std::fs::write(repo.join("a.txt"), A.replace("two", "TWO")).unwrap();
+        let (head, index) =
+            (run(&repo, &["rev-parse", "HEAD"]), std::fs::read(repo.join(".git/index")).unwrap());
+        let programs = Programs { git: Some(git()), gh: None, glab: None, path: None };
+        let folder = repo.to_string_lossy().into_owned();
+        let show = async |commit: &str| {
+            let op = GitOp::Show { commit: commit.to_owned() };
+            match apply(&programs, &folder, op, &[]).await {
+                GitOutcome::Done(GitDone::Changes(review)) => *review,
+                other => panic!("{other:?}"),
+            }
+        };
+        let paths =
+            |review: &Review| review.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+
+        let short = goal.get(..7).unwrap();
+        let one = show(short).await;
+        assert_eq!(one.scope, ReviewScope::Commit { commit: short.to_owned() });
+        assert_eq!(paths(&one), ["goal.txt", "gone.txt"], "that commit's files, nothing else");
+        assert_eq!(one.absent, None);
+        assert_eq!(paths(&show(&goal).await), ["goal.txt", "gone.txt"], "by its whole hash too");
+        assert_eq!(run(&repo, &["rev-parse", "HEAD"]), head, "HEAD stays");
+        assert_eq!(std::fs::read(repo.join(".git/index")).unwrap(), index, "the index untouched");
+        assert_eq!(run(&repo, &["status", "--porcelain"]), "M a.txt", "the working tree untouched");
+
+        let first = show(&root).await;
+        assert_eq!(paths(&first), ["a.txt", "gone.txt"], "a root commit against nothing");
+
+        for not in [
+            "deadbeef",
+            "main",
+            "HEAD~1",
+            "--all",
+            "abc",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+        ] {
+            let none = show(not).await;
+            assert_eq!(none.absent.as_deref(), Some(NO_COMMIT), "{not:?} names no commit");
+            assert_eq!(none.files, Vec::new());
+        }
+
+        let (reviews, thread) = reviews_in(dir.path(), &repo);
+        let threads =
+            reviews.review(thread, ReviewScope::Commit { commit: short.to_owned() }).await;
+        assert_eq!(paths(&threads), ["goal.txt", "gone.txt"], "a thread's reads the same");
+    }
+
     /// A review past its line budget spends it in the order the files are read, the
     /// weightiest first and the quiet ones last, so a lock file is the one left without hunks
     /// rather than the source after it; a file past the budget says how many lines it has, and

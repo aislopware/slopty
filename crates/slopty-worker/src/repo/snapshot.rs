@@ -391,6 +391,9 @@ pub const NO_BRANCH: &str = "The branch is not in this clone or its origin";
 /// What a range's review says when its two branches share no history.
 pub const NO_FORK: &str = "The two branches share no history";
 
+/// What a commit's review says when its hash names no one commit in the repository.
+pub const NO_COMMIT: &str = "No such commit in this repository";
+
 /// The working tree of the repository at `root` now, new files and all, as a review against
 /// `against`.
 ///
@@ -479,6 +482,49 @@ pub async fn range(git: &Path, root: &Path, base: &str, head: &str) -> Result<Re
     };
     let from = TreeRef(repo.line(&["rev-parse", &format!("{fork}^{{tree}}")], None).await?);
     let to = TreeRef(repo.line(&["rev-parse", &format!("{new}^{{tree}}")], None).await?);
+    let files = repo.changes(&from, &to).await?;
+    Ok(Review { scope, from: Some(from), to: Some(to), files, absent: None })
+}
+
+/// One commit as committed, in the repository at `root` ([`ReviewScope::Commit`]): from its
+/// first parent's tree, the empty tree for a root commit, to its own.
+///
+/// `commit` is a hash as a terminal's screen showed it, whole or abbreviated; anything else (a
+/// ref, a range, an option), a hash that names no commit here or one too short to name only
+/// one, says so in `absent`. No index, checkout or ref is touched.
+///
+/// # Errors
+///
+/// When git fails.
+pub async fn commit(git: &Path, root: &Path, commit: &str) -> Result<Review, Failed> {
+    // Only committed objects are read: no index is ever named.
+    let repo = Repo { git: git.to_owned(), root: root.to_owned(), index: PathBuf::new() };
+    let scope = ReviewScope::Commit { commit: commit.to_owned() };
+    let absent = |why: &str| Review {
+        scope: scope.clone(),
+        from: None,
+        to: None,
+        files: Vec::new(),
+        absent: Some(why.to_owned()),
+    };
+    let hex = commit.bytes().all(|b| b.is_ascii_hexdigit());
+    if !hex || !(4..=64).contains(&commit.len()) {
+        return Ok(absent(NO_COMMIT));
+    }
+    let verify = async |spec: String| {
+        repo.line(&["rev-parse", "-q", "--verify", "--end-of-options", &spec], None).await.ok()
+    };
+    let Some(full) = verify(format!("{commit}^{{commit}}")).await else {
+        return Ok(absent(NO_COMMIT));
+    };
+    let to = TreeRef(repo.line(&["rev-parse", &format!("{full}^{{tree}}")], None).await?);
+    // A root commit has no parent: it is read against the empty tree, in the repository's hash.
+    let from = if let Some(parent) = verify(format!("{full}^1^{{tree}}")).await {
+        TreeRef(parent)
+    } else {
+        let empty = repo.run(&["hash-object", "-t", "tree", "--stdin"], None, Some(b""));
+        TreeRef(String::from_utf8_lossy(&empty.await?).trim().to_owned())
+    };
     let files = repo.changes(&from, &to).await?;
     Ok(Review { scope, from: Some(from), to: Some(to), files, absent: None })
 }

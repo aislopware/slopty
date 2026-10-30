@@ -45,6 +45,9 @@ impl Reviews {
             ReviewScope::Range { base, head } => {
                 crate::repo::snapshot::range(&git, &root, base, head).await
             }
+            ReviewScope::Commit { commit } => {
+                crate::repo::snapshot::commit(&git, &root, commit).await
+            }
         };
         read.unwrap_or_else(|e| absent(&e.to_string()))
     }
