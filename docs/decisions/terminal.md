@@ -3173,12 +3173,51 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the primary's cursor. A program that had entered by `?47h` or `?1047h` saved none (or kept
     an older one), so after a replay, leaving by `?1049l` put the cursor back where the primary
     had been, in its pen, instead of home in the default pen. The engine now keeps which of the
-    three the program entered by, as it splits the read at the switch, and the replay enters
-    the same way. A switch it did not see (split past what it keeps, or set among other modes)
-    is read from the modes the terminal holds. Tests:
-    `a_checkpoint_on_the_alternate_screen_enters_it_the_way_the_program_did` in slopty-engine
-    and `regressions/terminal/checkpoint-alt-screen-entered-without-saving-the-cursor`, found
-    by the terminal fuzz target.
+    three the program entered by, at the switch (below), and the replay enters the same way.
+    Tests: `a_checkpoint_on_the_alternate_screen_enters_it_the_way_the_program_did` in
+    slopty-engine and `regressions/terminal/checkpoint-alt-screen-entered-without-saving-the-cursor`,
+    found by the terminal fuzz target.
+  - **The switch to the alternate screen is found by the parse that makes it** (aislopware/ghostty
+    #16, `18fb1bb11`, pinned by libghostty-rs #16, `7fcd83bd`; 2026-10-30). The engine found the
+    switch by scanning each read for `CSI ? 1049 h` and its two siblings, and kept a read's
+    unfinished tail for the next one. The parse also takes the switch among other modes
+    (`?25;1049h`), split at any byte, with a C0 control inside (it runs where it stands) or with a
+    byte from 0xA0 to 0xFF inside (the CSI states ignore it). The scan matched none of these, so
+    no snapshot of the primary was taken and a checkpoint on the alternate screen brought back an
+    older primary, or none. The fork's `vt_write_until` now has a `SCREEN_SWITCH` boundary. It
+    stops right before the final byte of a set or reset of 47, 1047 or 1049 and names the mode and
+    the byte. Its predicate reads the parser's state as the dispatch then does: the `?` alone, and
+    not dropped for a colon or for too many parameters. The bulk parameter path leaves such a byte
+    to the per-byte path, where the stop is made. The engine writes each read up to a switch and
+    settles it. Before a switch to the alternate screen it keeps the primary and the entry the
+    stop names. Then it writes the final byte and goes on. A read that leaves and enters again
+    keeps the primary of its last entry. A read that opens on the switch, out of any sequence,
+    changed nothing before it, so the primary formatted since (a checkpoint's) is kept rather than
+    formatted again. The scan, its kept tail and the entry read back from the modes are deleted.
+    Tests: the fork's `nextSliceUntil screen switch` oracle and its differential test,
+    libghostty-rs `vt_write_until_stops_before_a_screen_switch`,
+    `the_primary_is_kept_however_the_program_switches` in slopty-engine (red on the old scan),
+    `a_switch_right_after_a_checkpoint_keeps_its_primary`, and
+    `regressions/terminal/checkpoint-alt-screen-entered-with-an-ignored-byte`.
+  - **A pin on an erased row is garbage** (aislopware/ghostty #16). Erasing a row moved the pins
+    below it up but left a pin on the row itself pointing at the row that took its place, never
+    garbage. This happened on a scroll of a screen that keeps no history, under a scroll region
+    (`eraseRowBounded`) and on the screen's fast scroll-up. So a mark on a row the alternate
+    screen scrolled off moved onto the next row, and there a command end's status overwrote the
+    one that row had. A selection or a kitty placement pinned to the row moved the same way. The
+    fork now marks those pins garbage, as the history's eviction does. The engine drops a garbage
+    pin's mark. It used to count a mark whose row went away in the same write on the top row, and
+    now keeps that mark on no line, as when the row goes in a later write. Tests: the fork's
+    `eraseRow`, `eraseRowBounded`, `cursorScrollRegionUp` and `cursorDownScroll` pin tests,
+    `a_mark_scrolled_off_the_alternate_screen_goes_with_its_row` in slopty-engine, and
+    `regressions/terminal/frame-mark-on-a-row-scrolled-off-the-alt-screen`.
+  - **A saved pending wrap keeps its row's wrap** (aislopware/ghostty #16). Over an empty cell the
+    formatter wrote the saved cursor's pending wrap as a space, then erased it back with `ESC 7
+    CSI X ESC 8`. ECH resets the pending wrap, and with it the row's soft wrap and the next row's
+    continuation, so a row that wrapped came back as two lines. The last column of a wrapped row
+    is written as a space anyway, so the erase is now skipped on such a row. Tests: the fork's
+    `saved cursor with a pending wrap on a row that wraps keeps the wrap` and
+    `regressions/terminal/checkpoint-saved-pending-wrap-on-a-wrapped-row`.
   - **Kitty graphics are left open.** The formatter writes no image. Upstream's PR #12182
     (open since April) adds a `kitty_graphics` extra. Taking it means re-sending each image's
     pixels in every checkpoint, so it comes with a decision on checkpoint size and cadence

@@ -18401,3 +18401,35 @@ SLOPTY_LANE=F cargo xtask remote -p slopty-e2e --e2e ios \
 # The tap's stack, in the guest while the case taps:
 sudo sample <the app's pid> 45 1 -mayDie -file /tmp/slopty.sample.txt
 ```
+
+## 2026-10-30 — the engine's writes stopped at a screen switch
+
+mac-studio, release, retired instructions per operation (`slopty_testkit::bench`), one run each
+under a load average of 25 to 180 (instructions do not move with load). Before: HEAD at
+286206a4f, its byte scan for `CSI ? 1049 h`, ghostty `b4344e7a4`, libghostty-rs `8b996bdb`.
+After: every write through `vt_write_until(SCREEN_SWITCH)`, ghostty `18fb1bb11` (#16),
+libghostty-rs `7fcd83bd` (#16) (`docs/decisions/terminal.md`, "The switch to the alternate screen
+is found by the parse that makes it").
+
+```sh
+cd target/local/K/tree
+cargo nextest run -p slopty-engine --release --run-ignored only --no-capture -E \
+  'test(=ghostty::checkpoint_tests::checkpoint_cost) | test(frame_cost) | test(osc_write_cost)'
+```
+
+| series | before | after | |
+| --- | --- | --- | --- |
+| `checkpoint_cost.fill_engine` (10 024 coloured lines) | 31 832 299 | 32 126 656 | +0.9 % |
+| `checkpoint_cost.fill_raw_vt` (`vt_write` alone) | 26 427 647 | 26 492 182 | +0.2 % |
+| `checkpoint_cost.format` | 45 990 732 | 45 996 258 | 0.0 % |
+| `checkpoint_cost.replay_one_chunk` | 34 960 288 | 35 617 459 | +1.9 % |
+| `checkpoint_cost.replay_64k_chunks` | 32 917 164 | 33 466 698 | +1.7 % |
+| `frame_cost.write` | 813 | 769 | −5 % |
+| `osc_write_cost.per_osc` | 6 938 | 6 999 | +0.9 % |
+
+The write path pays for the parse's stop: the stream's until loop checks each byte inside a CSI
+for the switch, so output dense in SGR (the fill's colour per line, a replay's pens) costs 0.9 to
+1.9 % more, about 0.4 instructions a byte. A small write costs less (44 instructions, within the
+run-to-run step of 25 to 50): the old scan searched each read for `ESC [ ?` and its last escape.
+`fill_raw_vt` is `vt_write` on both sides, so its 0.2 % is ghostty's other two fixes and noise.
+Every series is inside its budget (`xtask/budgets.toml`, 5 % slack).

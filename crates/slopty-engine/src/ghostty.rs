@@ -17,7 +17,7 @@ use libghostty_vt::screen::{
 use libghostty_vt::selection::Selection;
 use libghostty_vt::style::{PaletteIndex, RgbColor};
 use libghostty_vt::terminal::{
-    ClipboardLocation, ColorScheme, Mode, Point, PointCoordinate, PointSpace,
+    Boundaries, ClipboardLocation, ColorScheme, Mode, Point, PointCoordinate, PointSpace,
     ProgressState as VtProgress,
 };
 use libghostty_vt::{Terminal, focus, key, mouse, paste};
@@ -134,8 +134,8 @@ pub struct GhosttyEngine {
     /// The primary screen as VT bytes, taken just before the program switched to the alternate
     /// screen, so a checkpoint made on the alternate screen can carry both.
     primary_snapshot: Option<Vec<u8>>,
-    /// How the program entered the alternate screen it is on, when [`Self::feed`] saw the
-    /// switch: a checkpoint's replay enters it the same way ([`AltEntry`]).
+    /// How the program entered the alternate screen it is on ([`Self::feed`] sees every
+    /// switch): a checkpoint's replay enters it the same way ([`AltEntry`]).
     alt_entry: Option<AltEntry>,
     /// Counts the writes, resizes and colour changes, so work over the whole terminal (the
     /// primary snapshot, search's plain text) is redone only when something changed.
@@ -153,9 +153,6 @@ pub struct GhosttyEngine {
     /// sequence, so the next write checks them again: a read may split a sequence anywhere,
     /// and across any number of writes.
     colours_touched: bool,
-    /// The tail of the last chunk when it ended inside a possible alternate-screen switch
-    /// (`ESC [ ? 10`), so a switch split across two reads is still seen before it completes.
-    alt_prefix: Vec<u8>,
     /// The buttons whose press the program was told of and whose release it was not, one bit
     /// per button: a motion report under 1002 carries whether any is down.
     buttons_down: u8,
@@ -525,7 +522,6 @@ impl GhosttyEngine {
             last_kept: std::cell::Cell::new(None),
             history: search::History::default(),
             colours_touched: false,
-            alt_prefix: Vec::new(),
             buttons_down: 0,
             line_discipline: None,
             discipline_changed: false,
@@ -682,10 +678,7 @@ impl GhosttyEngine {
         // snapshot set, or none. Then home: the formatter writes content from wherever the
         // cursor is, and it is where the primary left it. The switch among the modes the
         // alternate screen's blob emits finds it already there.
-        let entry = match self.alt_entry {
-            Some(entry) => entry,
-            None => self.alt_entry_of_modes()?,
-        };
+        let entry = self.alt_entry.unwrap_or(AltEntry::SavingTheCursor);
         out.extend_from_slice(entry.sequence());
         // The cursor's shape is the terminal's, and the primary's blob set the one it had then:
         // give the alternate screen the default back for its own blob to set its shape over.
@@ -707,29 +700,13 @@ impl GhosttyEngine {
     }
 
     /// The primary screen as VT bytes now, formatted again only if something changed since
-    /// the last time. Also the fallback for an alternate-screen switch [`Self::feed`] fails to
-    /// see: at worst the primary comes back as of the last checkpoint.
+    /// the last time.
     fn primary_now(&mut self) -> Result<&[u8], EngineError> {
         if self.primary_at != self.generation || self.primary_snapshot.is_none() {
             self.primary_snapshot = Some(self.format_active_screen()?);
             self.primary_at = self.generation;
         }
         Ok(self.primary_snapshot.as_deref().unwrap_or_default())
-    }
-
-    /// How the program entered the alternate screen, read from the modes it holds, when
-    /// [`Self::feed`] did not see the switch (split past what it keeps, or set among other
-    /// modes): by the mode that saves the cursor when that one is on, as most programs do.
-    fn alt_entry_of_modes(&self) -> Result<AltEntry, EngineError> {
-        Ok(if self.term.mode(Mode::ALT_SCREEN_SAVE)? {
-            AltEntry::SavingTheCursor
-        } else if self.term.mode(Mode::ALT_SCREEN)? {
-            AltEntry::Plain
-        } else if self.term.mode(Mode::ALT_SCREEN_LEGACY)? {
-            AltEntry::Legacy
-        } else {
-            AltEntry::SavingTheCursor
-        })
     }
 
     /// The active screen and the terminal state around it, as VT bytes.
@@ -948,42 +925,47 @@ impl GhosttyEngine {
         tracing::debug!(epoch = self.epoch, "line numbering invalidated");
     }
 
-    /// Feed one chunk. If the chunk switches to the alternate screen, the primary screen is
-    /// snapshotted first (for [`Self::checkpoint`]): the bytes before the switch are fed, the
-    /// snapshot taken, then the rest.
+    /// Feed one chunk. A switch of screens stops the write right before the byte that makes it,
+    /// found by the parse that then switches, however the program wrote it (split across reads,
+    /// among other modes, with a control or an ignored byte inside): the write so far settles,
+    /// and before a switch to the alternate screen the primary is kept as the program left it
+    /// (for [`Self::checkpoint`]). Then the switch's own byte, which a write until the next
+    /// switch would stop before again, and the rest.
     fn feed(&mut self, chunk: &[u8]) {
-        if !self.on_alt && !self.alt_prefix.is_empty() {
-            // The last chunk ended inside `ESC [ ? 10…`: if this one completes a switch, the
-            // terminal is still on the primary (the sequence is not finished), so snapshot now.
-            let mut probe = std::mem::take(&mut self.alt_prefix);
-            probe.extend(chunk.iter().take(8));
-            if let Some((0, entry)) = alt_enter_at(&probe) {
-                self.alt_entry = Some(entry);
+        let mut rest = chunk;
+        loop {
+            // A read that opens on the switch, out of any sequence, changes nothing before it:
+            // the primary formatted since (a checkpoint's) is still the one to keep.
+            let opens = rest.starts_with(b"\x1b[?") && self.term.is_vt_ground().unwrap_or(false);
+            let stop = self.term.vt_write_until(rest, Boundaries::SCREEN_SWITCH).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "a write until a screen switch failed; written whole");
+                self.term.vt_write(rest);
+                None
+            });
+            let on_the_switch = opens
+                && stop
+                    .as_ref()
+                    .and_then(|stop| rest.get(3..stop.consumed))
+                    .is_some_and(|params| params.iter().all(|&b| b.is_ascii_digit() || b == b';'));
+            if !on_the_switch {
+                self.generation = self.generation.wrapping_add(1);
+            }
+            self.settle_or_bump();
+            let Some(stop) = stop else { return };
+            if let Some(switch) = stop.screen
+                && switch.set
+                && !self.on_alt
+            {
+                self.alt_entry = AltEntry::of_mode(switch.mode);
                 self.snapshot_primary();
             }
-        }
-        let switch_at = if self.on_alt { None } else { alt_enter_at(chunk) };
-        let rest = match switch_at {
-            Some((at, entry)) => {
-                let (before, from_switch) = chunk.split_at(at);
-                if !before.is_empty() {
-                    self.generation = self.generation.wrapping_add(1);
-                    self.term.vt_write(before);
-                    self.settle_or_bump();
-                }
-                if !self.on_alt {
-                    self.alt_entry = Some(entry);
-                    self.snapshot_primary();
-                }
-                from_switch
-            }
-            None => chunk,
-        };
-        self.generation = self.generation.wrapping_add(1);
-        self.term.vt_write(rest);
-        self.settle_or_bump();
-        if !self.on_alt {
-            self.alt_prefix = alt_prefix_of(chunk).to_vec();
+            let Some((byte, after)) = rest.get(stop.consumed..).and_then(<[u8]>::split_first)
+            else {
+                return;
+            };
+            self.term.vt_write(std::slice::from_ref(byte));
+            self.generation = self.generation.wrapping_add(1);
+            rest = after;
         }
     }
 
@@ -1052,12 +1034,13 @@ impl GhosttyEngine {
                     if screen != self.active_screen() {
                         continue;
                     }
-                    // Its row went out of the history in the same write: counted at the oldest
-                    // line, so a command end still ends its command.
+                    // Its row went away in the same write (out of the history, or off a
+                    // screen that keeps none): kept on no line, as when the row goes in a later
+                    // write and its mark with it ([`Self::follow_marks`]).
                     let y = row.as_ref().and_then(|r| r.point(PointSpace::Screen).ok().flatten());
-                    let line = self.base.saturating_add(y.map_or(0, |p| u64::from(p.y)));
+                    let line = y.map(|p| self.base.saturating_add(u64::from(p.y)));
                     self.record_mark(mark, line, col);
-                    if let Some(row) = row.filter(|_| y.is_some()) {
+                    if let (Some(line), Some(row)) = (line, row) {
                         self.pin(line, row);
                     }
                 }
@@ -1189,9 +1172,10 @@ impl GhosttyEngine {
     }
 
     /// The shell wrote a prompt mark on absolute `line` at `col`: remember where, and the
-    /// status.
-    fn record_mark(&mut self, mark: osc133::Mark, line: u64, col: u16) {
-        self.note_command_mark(line, col, mark);
+    /// status. A mark whose row is gone (no `line`) is kept on no line, but still ends its
+    /// command, counted at the oldest line.
+    fn record_mark(&mut self, mark: osc133::Mark, line: Option<u64>, col: u16) {
+        self.note_command_mark(line.unwrap_or(self.base), col, mark);
         // Evicted history can never be read again; drop its marks with it.
         let base = self.base;
         if self.exit_marks.first_key_value().is_some_and(|(&l, _)| l < base)
@@ -1203,12 +1187,13 @@ impl GhosttyEngine {
                 *starts = starts.split_off(&base);
             });
         }
+        // The progress a prompt ends went in its place among the reports (`install_marks`).
+        if matches!(mark, osc133::Mark::PromptStart) && self.program.prompt() {
+            self.program_moved();
+        }
+        let Some(line) = line else { return };
         match mark {
             osc133::Mark::PromptStart => {
-                // The progress it ends went in its place among the reports (`install_marks`).
-                if self.program.prompt() {
-                    self.program_moved();
-                }
                 let (marks, starts) = (&mut self.exit_marks, &mut self.prompt_starts);
                 remark(marks, starts, &mut self.remarked_rows, line, |_, starts| {
                     starts.insert(line);
@@ -2218,18 +2203,6 @@ fn mode_resets(blob: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The tail of `chunk` from its last escape when that tail is an unfinished start of an
-/// alternate-screen switch (a proper prefix of `ESC [ ? 1049 h` and friends), else empty.
-fn alt_prefix_of(chunk: &[u8]) -> &[u8] {
-    let Some(esc) = memchr::memrchr(0x1b, chunk) else { return &[] };
-    let tail = chunk.get(esc..).unwrap_or_default();
-    let unfinished = AltEntry::ALL
-        .iter()
-        .map(|entry| entry.sequence())
-        .any(|seq| seq.len() > tail.len() && seq.starts_with(tail));
-    if unfinished { tail } else { &[] }
-}
-
 /// How a program enters the alternate screen. Only `?1049h` saves the primary's cursor (where
 /// it is, in its pen), which leaving by `?1049l` puts back; `?47h` and `?1047h` leave the one
 /// the primary saved before, or none, and leaving by `?1049l` then puts the cursor home in the
@@ -2245,7 +2218,15 @@ enum AltEntry {
 }
 
 impl AltEntry {
-    const ALL: [Self; 3] = [Self::SavingTheCursor, Self::Plain, Self::Legacy];
+    /// The entry by the mode the program set, as a screen switch's stop names it.
+    const fn of_mode(mode: u16) -> Option<Self> {
+        match mode {
+            47 => Some(Self::Legacy),
+            1047 => Some(Self::Plain),
+            1049 => Some(Self::SavingTheCursor),
+            _ => None,
+        }
+    }
 
     const fn sequence(self) -> &'static [u8] {
         match self {
@@ -2254,24 +2235,6 @@ impl AltEntry {
             Self::SavingTheCursor => b"\x1b[?1049h",
         }
     }
-}
-
-/// Byte offset of the first sequence that enters the alternate screen (`CSI ? 1049 h`,
-/// `CSI ? 1047 h`, `CSI ? 47 h`), and which, if the chunk holds one. A split sequence (the
-/// `ESC [ ?` at the end of one read and the digits in the next) is not found; the primary
-/// snapshot is then the one from the last checkpoint, which is only staler by the output
-/// between them.
-fn alt_enter_at(chunk: &[u8]) -> Option<(usize, AltEntry)> {
-    let mut from = 0;
-    while let Some(rel) = memchr::memmem::find(chunk.get(from..)?, b"\x1b[?") {
-        let at = from.saturating_add(rel);
-        let rest = chunk.get(at..).unwrap_or_default();
-        if let Some(entry) = AltEntry::ALL.into_iter().find(|e| rest.starts_with(e.sequence())) {
-            return Some((at, entry));
-        }
-        from = at.saturating_add(3);
-    }
-    None
 }
 
 /// OSC 7 payload (`file://host/percent%20encoded/path`) → local path. Non-file URLs and paths on
@@ -4091,16 +4054,6 @@ mod tests {
     }
 
     #[test]
-    fn the_alternate_switch_prefix_is_a_proper_prefix_only() {
-        assert_eq!(alt_prefix_of(b"abc\x1b[?10"), b"\x1b[?10");
-        assert_eq!(alt_prefix_of(b"\x1b[?4"), b"\x1b[?4");
-        assert_eq!(alt_prefix_of(b"\x1b[?1049h"), b"", "complete: nothing pending");
-        assert_eq!(alt_prefix_of(b"x\x1b[31m"), b"", "short but not a prefix");
-        assert_eq!(alt_prefix_of(b"\x1b[?1049l"), b"");
-        assert_eq!(alt_prefix_of(b"plain"), b"");
-    }
-
-    #[test]
     fn link_runs_merge_one_uri_and_drop_empty_ones() {
         let mut r = LinkRuns::default();
         r.push(0, Some(b"a"), false);
@@ -5195,6 +5148,39 @@ mod tests {
         assert_eq!(marks(&[prompt, scroll]), whole, "the scroll in a later write");
         let one: Vec<&[u8]> = bytes.chunks(1).collect();
         assert_eq!(marks(&one), whole, "a byte at a time");
+    }
+
+    /// A mark on a row that scrolls off a screen with no history goes with its row, whether
+    /// the scroll comes in the write that marked the row or in a later one: the next prompt
+    /// reads the status of a command end still on the screen, never of one scrolled off
+    /// (fuzz `regressions/terminal/frame-mark-on-a-row-scrolled-off-the-alt-screen`, byte
+    /// chunking): libghostty left the pin of a row the alternate screen scrolled off on the
+    /// row that moved up in its place, so a byte at a time the gone row's command end
+    /// overwrote that row's; and in one write, a command end whose row was gone was counted
+    /// on the top row.
+    #[test]
+    fn a_mark_scrolled_off_the_alternate_screen_goes_with_its_row() {
+        let marks = |writes: &[&[u8]]| -> Vec<SemanticMark> {
+            let mut e = engine(10, 4);
+            e.write(b"\x1b[?1049h");
+            for write in writes {
+                e.write(write);
+            }
+            e.full_frame(0).unwrap().updates.iter().map(|u| u.line.mark).collect()
+        };
+        let prompt = b"\x1b]133;A\x07$ ".as_slice();
+        // Command ends on rows 0 and 1, then a line feed at the bottom erases row 0.
+        let two = [b"a\x1b]133;D;2\x07\r\nb\x1b]133;D;1\x07\r\n\r\n".as_slice(), b"\r\n", prompt];
+        // A command end on row 0, which the line feed erases.
+        let gone = [b"a\x1b]133;D;2\x07\r\n\r\n\r\n".as_slice(), b"\r\n", prompt];
+        for (writes, exit) in [(two, Some(1)), (gone, None)] {
+            let bytes = writes.concat();
+            let whole = marks(&[&bytes]);
+            assert_eq!(whole[3], SemanticMark::Prompt { exit, input: None }, "{whole:?}");
+            assert_eq!(marks(&writes), whole, "the scroll in a later write");
+            let one: Vec<&[u8]> = bytes.chunks(1).collect();
+            assert_eq!(marks(&one), whole, "a byte at a time");
+        }
     }
 
     #[test]
@@ -6706,26 +6692,49 @@ mod checkpoint_tests {
         assert_eq!(mode_resets(b"plain\x1b[31m\x1b[3;4r"), Vec::<u8>::new());
     }
 
+    /// The primary is kept at a switch to the alternate screen however the program wrote it:
+    /// split across reads, among other modes, or with a control or a byte the parse ignores
+    /// inside (fuzz `regressions/terminal/checkpoint-alt-screen-entered-with-an-ignored-byte`).
+    /// A checkpoint taken there brings the primary back as the program left it, with the line
+    /// feed inside the sequence, and leaving puts the cursor back where the program's did.
     #[test]
-    fn an_alternate_screen_switch_split_across_reads_still_snapshots_the_primary() {
-        let mut a = engine(20, 3, 100);
-        a.write(b"before\r\n");
-        a.write(b"\x1b[?10");
-        assert!(!a.modes().unwrap().contains(TermModes::ALT_SCREEN));
-        a.write(b"49h\x1b[Halt");
-        assert!(a.modes().unwrap().contains(TermModes::ALT_SCREEN));
-        let checkpoint = {
-            let mut v = Vec::new();
-            a.checkpoint(&mut v).unwrap();
-            v
-        };
-        let mut b = engine(20, 3, 100);
-        b.write(&checkpoint);
-        assert_eq!(all_text(&b), all_text(&a));
-        a.write(b"\x1b[?1049l");
-        b.write(b"\x1b[?1049l");
-        assert_eq!(all_text(&b), ["before", "", ""]);
-        assert_eq!(all_text(&b), all_text(&a));
+    fn the_primary_is_kept_however_the_program_switches() {
+        for switch in [
+            &b"\x1b[?1049h"[..],
+            b"\x1b[?104\xa39h",
+            b"\x1b[?10\n49h",
+            b"\x1b[?25;1049;2004h",
+            b"\x1b[?1047h",
+            b"\x1b[?47h",
+        ] {
+            for split in [false, true] {
+                let what =
+                    format!("{}{}", switch.escape_ascii(), if split { " bytewise" } else { "" });
+                let input = [switch, b"\x1b[Halt"].concat();
+                let mut a = engine(20, 3, 100);
+                a.write(b"before\r\nmore");
+                if split {
+                    for byte in &input {
+                        a.write(std::slice::from_ref(byte));
+                    }
+                } else {
+                    a.write(&input);
+                }
+                assert!(a.modes().unwrap().contains(TermModes::ALT_SCREEN), "{what}");
+                let mut b = replayed(&mut a);
+                assert_eq!(all_text(&b), all_text(&a), "{what}");
+                a.write(b"\x1b[?1049l");
+                b.write(b"\x1b[?1049l");
+                assert_eq!(all_text(&a)[..2], ["before", "more"], "{what}");
+                assert_eq!(all_text(&b), all_text(&a), "{what}");
+                let (fa, fb) = (a.full_frame(0).unwrap(), b.full_frame(0).unwrap());
+                let (got, want) = ((fb.cursor.row, fb.cursor.col), (fa.cursor.row, fa.cursor.col));
+                assert_eq!(got, want, "{what}");
+                a.write(b"x");
+                b.write(b"x");
+                assert_eq!(all_text(&b), all_text(&a), "{what}");
+            }
+        }
     }
 
     /// A program that enters the alternate screen with one mode and leaves it with another
@@ -6769,25 +6778,26 @@ mod checkpoint_tests {
         assert!(!b.modes().unwrap().contains(TermModes::APP_CURSOR_KEYS));
     }
 
+    /// A program that switches right after a checkpoint, with nothing written since, keeps the
+    /// primary the checkpoint formatted rather than format the whole history again. Anything
+    /// the read does before the switch, a control inside its sequence too, formats it again.
     #[test]
-    fn a_primary_checkpoint_stays_as_the_fallback_snapshot() {
-        let mut a = engine(20, 3, 100);
-        a.write(b"kept\r\n");
-        let _first = {
-            let mut v = Vec::new();
-            a.checkpoint(&mut v).unwrap();
-            v
-        };
-        assert!(a.primary_snapshot.is_some());
-    }
-
-    #[test]
-    fn the_alternate_screen_switch_is_found_mid_chunk() {
-        assert_eq!(alt_enter_at(b"abc\x1b[?1049hxyz"), Some((3, AltEntry::SavingTheCursor)));
-        assert_eq!(alt_enter_at(b"\x1b[?25l\x1b[?47h"), Some((6, AltEntry::Legacy)));
-        assert_eq!(alt_enter_at(b"\x1b[?1047h"), Some((0, AltEntry::Plain)));
-        assert_eq!(alt_enter_at(b"\x1b[?1049l\x1b[?2004h"), None);
-        assert_eq!(alt_enter_at(b"plain"), None);
+    fn a_switch_right_after_a_checkpoint_keeps_its_primary() {
+        for (read, again) in [
+            (&b"\x1b[?1049h\x1b[Halt"[..], false),
+            (b"\x1b[?25;1049h", false),
+            (b"x\x1b[?1049h", true),
+            (b"\x1b7\x1b[?1049h", true),
+            (b"\x1b[?10\n49h", true),
+        ] {
+            let mut a = engine(20, 3, 100);
+            a.write(b"kept\r\n");
+            a.checkpoint(&mut Vec::new()).unwrap();
+            let formatted = a.primary_at;
+            a.write(read);
+            assert!(a.modes().unwrap().contains(TermModes::ALT_SCREEN), "{}", read.escape_ascii());
+            assert_eq!(a.primary_at != formatted, again, "{}", read.escape_ascii());
+        }
     }
 }
 
