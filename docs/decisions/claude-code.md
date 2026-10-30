@@ -2770,7 +2770,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     launcher call, which then rejects `--no-config` as a Claude flag. The official build, run
     the same way, lists the file. `USE_BUILTIN_RIPGREP=0` makes Claude Code use the system
     `rg`, and the `tools` recording was made again that way (2026-10-30): Glob finds `main.rs`
-    and Grep its `println`. Record with it until the launcher passes such a spawn through.
+    and Grep its `println`. The launcher passes such a spawn through since its update the
+    same day, and with it Glob finds `main.rs` without the switch, so recordings need none.
   - **Fixes only, otherwise**, among them a `PreCompact` hook's output cut at 10 000
     characters (the relay prints none), `--setting-sources` now excluding all a file holds
     (auto mode rules and saved consents too, so a recording depends less on the machine), and a
