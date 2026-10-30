@@ -379,16 +379,6 @@ impl Host {
         Some((state.meta.clone(), state.status.clone()))
     }
 
-    /// The thread whose agent runs in terminal `terminal` now, as its
-    /// [`ThreadMeta::TERMINAL_FACT`] says, and its status.
-    #[must_use]
-    pub fn at_terminal(&self, terminal: SessionId) -> Option<(ThreadId, Status)> {
-        let mut found = self.visit(|s| {
-            (s.meta.terminal() == Some(terminal)).then(|| (s.meta.id, s.status.clone()))
-        });
-        found.pop()
-    }
-
     /// Apply `actions` to `thread`, log them and send them to its followers; the cursor after
     /// them, or `None` for a thread not held. A log that cannot be written is warned of, and
     /// the actions count anyway.
