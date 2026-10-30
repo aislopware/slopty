@@ -1,4 +1,4 @@
-//! slopty: a page part's row hosts its card ([`crate::page::PageCardView`]), kept per row so the
+//! A page part's row hosts its card ([`crate::page::PageCardView`]), kept per row so the
 //! page's web view and watch outlive a frame; a chart fence in a reply hosts one too
 //! ([`crate::page::FenceChart`]).
 

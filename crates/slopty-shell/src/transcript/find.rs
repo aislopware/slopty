@@ -1,4 +1,4 @@
-//! slopty: find in the current thread (⌘F). A field on the transcript's own overlay card,
+//! Find in the current thread (⌘F). A field on the transcript's own overlay card,
 //! under the titlebar: the tally ("2 of 5"), ↑ and ↓ to step, every match washed where it
 //! stands and the current one stronger, landed below the titlebar the way every jump lands.
 //! The keys are the shell keymap's ([`FindInThread`], [`FindNext`], [`FindPrevious`]); with no
@@ -310,7 +310,7 @@ fn with_target(cx: &mut App, act: impl FnOnce(&mut Transcript, &mut Window, &mut
     let Some(window) = window.or_else(|| cx.active_window()) else {
         return;
     };
-    // slopty: a key the window dispatches reaches this while the window is being updated, which
+    // A key the window dispatches reaches this while the window is being updated, which
     // cannot be updated again inside itself: the transcript acts once the dispatch is done.
     cx.defer(move |cx| {
         let _ = window.update(cx, |_, window, cx| {
@@ -335,11 +335,6 @@ impl Transcript {
         app.on_action(|_: &FindPrevious, cx| {
             with_target(cx, |this, window, cx| this.find_step(-1, window, cx))
         });
-    }
-
-    /// Whether find is open, and its tally.
-    pub(crate) fn find_tally(&self) -> Option<String> {
-        self.find.open.then(|| self.find.tally()).flatten()
     }
 
     /// Open find with the selection's words (when there is one) and give it the keyboard.
@@ -426,7 +421,7 @@ impl Transcript {
             let detail = hit.step.is_some() && place >= hit.in_line;
             let cursor = Cursor { row: hit.row.clone(), step: hit.step.clone() };
             if let Some(ix) = self.open_to(cursor, detail, cx) {
-                // slopty: a text's match marks the landing; anything else flashes its row.
+                // A text's match marks the landing; anything else flashes its row.
                 self.glide_to_row(ix, !hit.text, cx);
             }
         }
@@ -455,7 +450,7 @@ impl Transcript {
             .as_ref()
             .map(|input| input.read(cx).text().to_owned())
             .unwrap_or_default();
-        // slopty: the whole trace, what the depth hides included.
+        // The whole trace, what the depth hides included.
         let rows = self.whole_rows();
         let signature = rows_signature(rows);
         let filter = self.find.filter;
@@ -494,7 +489,7 @@ impl Transcript {
             paint::clear(surface);
             return;
         }
-        // slopty: the washes are the texts'; a step's match is marked by the cursor on it.
+        // The washes are the texts'; a step's match is marked by the cursor on it.
         let active = self
             .find
             .active
@@ -528,10 +523,10 @@ impl Transcript {
         let theme = Theme::of(cx).clone();
         let tally = self.find.tally();
         let has = self.find.total > 0;
-        // slopty: at the top of the pane the transcript lays out in, which clears the window's
+        // At the top of the pane the transcript lays out in, which clears the window's
         // chrome itself.
         let top = Theme::SPACE_SM;
-        // slopty: the house's find card (the diff's and the terminal's anatomy): its steps name
+        // The house's find card (the diff's and the terminal's anatomy): its steps name
         // their keys, a step with nowhere to go dims, and it enters as a menu does. Under the
         // field, the filters that share its match.
         let field = div()
@@ -614,8 +609,8 @@ impl Transcript {
         )
     }
 
-    /// slopty: find's keys go to the window this transcript draws in, whether or not that
-    /// window is the key one (`cx.active_window()` is `None` then, and ⌘F did nothing).
+    /// Find's keys go to the window this transcript draws in, whether or not that
+    /// window is the key one (`cx.active_window()` is `None` then).
     fn note_find_window(&self, window: &Window, cx: &mut Context<Self>) {
         let handle = window.window_handle();
         let me = cx.entity_id();

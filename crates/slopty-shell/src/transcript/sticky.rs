@@ -1,5 +1,4 @@
-// slopty: Slopty's own file (not in zeron).
-//! slopty: an open tool group's header held at the top while its rows scroll (opencode's sticky
+//! An open tool group's header held at the top while its rows scroll (opencode's sticky
 //! group trigger, `.research/opencode-study-2026-10-19.md` item 3): once the header has scrolled
 //! past the transcript's top while its rows still reach past it, a band of it spans that edge, on
 //! the pane's own ground, ending in a soft scroll edge rather than a hairline. A press folds the
@@ -99,7 +98,7 @@ impl Transcript {
     }
 
 
-    /// slopty: what the transcript holds at its top: the open group's band, and a watch that
+    /// What the transcript holds at its top: the open group's band, and a watch that
     /// draws the transcript again when the next frame's layout holds another.
     pub(super) fn render_sticky_group(&self, _window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let group = self.sticky_group();
@@ -143,7 +142,7 @@ impl Transcript {
                 crate::frost::MENU_BLUR,
                 div()
                     .id("sticky-group-band")
-                    .debug_selector(|| "sticky-group".into()) // slopty: for the tests
+                    .debug_selector(|| "sticky-group".into()) // for the tests
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .w_full()
                     .h(px(band_height()))
@@ -264,7 +263,7 @@ mod tests {
         }
     }
 
-    /// slopty: an open group's header holds at the transcript's top while its rows scroll, not
+    /// An open group's header holds at the transcript's top while its rows scroll, not
     /// before its header has scrolled under, nor once its rows have gone by; it says the group's
     /// sentence, and a press on it folds the group.
     #[gpui::test]

@@ -1,4 +1,4 @@
-//! slopty: Slopty's own transcript rows, drawn in zeron's anatomy: an error that keeps what the
+//! The transcript's rows of Slopty's own: an error that keeps what the
 //! agent said behind its copy and can be tried again, a quiet divider no one wrote (a
 //! compaction, a subagent's news), a proposed plan as a card folded past its first lines, and
 //! the working line's current step.
@@ -153,10 +153,10 @@ pub fn error_card_row(entry_id: &str, part_id: &str, message: &str, detail: Opti
     }
 }
 
-/// slopty: the longest first sentence an error card takes for its title.
+/// The longest first sentence an error card takes for its title.
 const TITLE_MOST: usize = 90;
 
-/// slopty: an error's words as a card says them (Amp): its first sentence, what happened, is
+/// An error's words as a card says them (Amp): its first sentence, what happened, is
 /// the title; the next, what to do, is the one sentence under it. Words that do not split read
 /// under a calm "Something went wrong".
 pub(super) fn error_title(message: &str) -> (SharedString, Option<SharedString>) {
@@ -262,7 +262,7 @@ pub fn step_words(call: &ToolCall) -> String {
         ToolCall::Exec { command } => format!("Running {command}"),
         ToolCall::ReadFile { path } => format!("Reading {}", file_name(path)),
         ToolCall::WriteFile { path, .. } => format!("Writing {}", file_name(path)),
-        // slopty: a notebook's cell, in the TUI's words.
+        // A notebook's cell, in the TUI's words.
         ToolCall::EditFile { path, .. } if path.ends_with(".ipynb") => {
             format!("Editing notebook {}", file_name(path))
         }
@@ -289,14 +289,14 @@ pub fn step_words(call: &ToolCall) -> String {
         ToolCall::Unknown { name, input } => match name.strip_prefix("Agent: ") {
             Some(description) => format!("Running an agent: {description}"),
             None if name == "Agent" => "Running an agent".to_owned(),
-            // slopty: a monitor says what it watches, as the TUI's spinner does.
+            // A monitor says what it watches, as the TUI's spinner does.
             None if name == "Monitor" => {
                 match input.as_ref().and_then(|i| i.get("description")?.as_str()) {
                     Some(description) => format!("Monitoring: {description}"),
                     None => "Monitoring".to_owned(),
                 }
             }
-            // slopty: the advisor model reviewing the conversation, as the TUI's spinner says.
+            // The advisor model reviewing the conversation, as the TUI's spinner says.
             None if name == "advisor" => "Advising".to_owned(),
             None => format!("Using {name}"),
         },
@@ -346,7 +346,7 @@ impl Transcript {
     fn copy_extra(&mut self, row_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
         cx.stop_propagation();
         cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-        // slopty: the house's copy span: the check comes back off on its own.
+        // The house's copy span: the check comes back off on its own.
         crate::motion::copy_feedback(format!("copy-plan-{row_id}"), cx);
         cx.notify();
     }
@@ -372,7 +372,7 @@ impl Transcript {
         }
     }
 
-    /// slopty: an error as Amp says one (`.research/amp-study-2026-10-19.md` item 8): a title
+    /// An error as Amp says one (`.research/amp-study-2026-10-19.md` item 8): a title
     /// and one calm sentence; the agent's own words open under Details, and the whole error
     /// copies. It sends nothing: what to do next is done in the agent's TUI. A request tried
     /// again counts down in its own row (`RetryLine`).
@@ -399,11 +399,11 @@ impl Transcript {
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                // slopty: a tab stop with the shared ring.
+                // A tab stop with the shared ring.
                 .tab_index(0)
                 .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .text_size(crate::typography::ui_rems(12.0))
-                // slopty: the faded hover, at the control strength.
+                // The faded hover, at the control strength.
                 .text_color(crate::motion::mix(theme.text_muted, theme.text, crate::motion::hover_t(&fade)))
                 .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
                 .hover_fade(fade)
@@ -414,7 +414,7 @@ impl Transcript {
             let id = row.id.clone();
             actions = actions.child(
                 quiet(format!("{}-details", row.id), if open { "Hide details" } else { "Details" })
-                    // slopty: said whole to the screen reader, as its action.
+                    // Said whole to the screen reader, as its action.
                     .aria_label(if open { "Hide details" } else { "Show details" })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.extras.details_open.remove(&id) {
@@ -424,7 +424,7 @@ impl Transcript {
                     })),
             );
         }
-        // slopty: the error's words and its detail, to paste where help is asked (T51).
+        // The error's words and its detail, to paste where help is asked (T51).
         let copy_key = format!("{}-copy-error", row.id);
         let copied = crate::motion::copied(&copy_key, cx);
         let copy_text = match detail {
@@ -433,18 +433,18 @@ impl Transcript {
         };
         actions = actions.child(
             quiet(copy_key.clone(), if copied { "Copied" } else { "Copy" })
-                // slopty: what it copies, for the screen reader.
+                // What it copies, for the screen reader.
                 .aria_label(if copied { "Copied" } else { "Copy error" })
                 .on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
                 crate::motion::copy_feedback(copy_key.clone(), cx);
             }),
         );
-        // slopty: a long detail scrolls in its box rather than being cut (T51).
+        // A long detail scrolls in its box rather than being cut (T51).
         let detail_block = detail.filter(|_| open).map(|detail| {
             div()
                 .id(SharedString::from(format!("{}-detail", row.id)))
-                // slopty: the detail says why to the screen reader too: a paragraph of its words.
+                // The detail says why to the screen reader too: a paragraph of its words.
                 .role(gpui::Role::Paragraph)
                 .aria_label(detail.clone())
                 .w_full()
@@ -549,7 +549,7 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .cursor_pointer()
-            // slopty: a tab stop with the shared ring.
+            // A tab stop with the shared ring.
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .text_size(crate::typography::ui_rems(12.0))
@@ -587,7 +587,7 @@ impl Transcript {
         let copied = crate::motion::copied(&format!("copy-plan-{}", row.id), cx);
         let plan_copy_hover = SharedString::from(format!("{}-copy-hover", row.id));
         let (id, text) = (row.id.clone(), copy.clone());
-        // slopty: a plan the person sent to be carried out is headed as the TUI boxes it.
+        // A plan the person sent to be carried out is headed as the TUI boxes it.
         let title = if row.id.contains("#plan:implement:") { "Plan to implement" } else { "Plan" };
         div()
             .id(SharedString::from(format!("{}-heading", row.id)))
@@ -623,7 +623,7 @@ impl Transcript {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    // slopty: a tab stop with the shared ring.
+                    // A tab stop with the shared ring.
                     .tab_index(0)
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .bg(crate::motion::hover_blend(&plan_copy_hover, gpui::transparent_black(), crate::theme::ink(0.08)))
@@ -676,7 +676,7 @@ impl Transcript {
                     .role(gpui::Role::Button)
                     .aria_label(label.clone())
                     .aria_expanded(open)
-                    // slopty: a finger's row on a touch screen (#23).
+                    // A finger's row on a touch screen (#23).
                     .h(px(crate::surface_chrome::touch_row_height(28.0)))
                     .px(px(10.0))
                     .rounded(px(Theme::CONTROL_RADIUS))
@@ -685,11 +685,11 @@ impl Transcript {
                     .items_center()
                     .gap(px(6.0))
                     .cursor_pointer()
-                    // slopty: a tab stop with the shared ring.
+                    // A tab stop with the shared ring.
                     .tab_index(0)
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .text_size(crate::typography::ui_rems(12.0))
-                    // slopty: the faded hover, at the control strength.
+                    // The faded hover, at the control strength.
                     .text_color(crate::motion::mix(
                         theme.text_muted,
                         theme.text,
@@ -1017,7 +1017,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "a short plan has no fold");
     }
 
-    /// slopty: an error card says its first sentence as its title and the next as its one
+    /// An error card says its first sentence as its title and the next as its one
     /// sentence; words that do not split read under a calm title.
     #[test]
     fn an_error_says_a_title_and_one_sentence() {

@@ -1,4 +1,4 @@
-//! slopty: a subagent, a nested step of its parent's trace (`docs/decisions/inspector.md`, "A
+//! A subagent, a nested step of its parent's trace (`docs/decisions/inspector.md`, "A
 //! subagent is a nested step, opened in place").
 //!
 //! A spawn is one row like any call: its kind and task; while it runs, a heartbeat from its own
@@ -20,7 +20,7 @@ use super::{ToolItem, Transcript, subagent_tab_title};
 use crate::motion::HoverFade as _;
 use crate::theme::Theme;
 
-/// slopty: the first line of what a run answered (its spawn call's result), its heading and
+/// The first line of what a run answered (its spawn call's result), its heading and
 /// strong marks left out; none when it answered nothing (#23).
 fn reply_line(tool: &ToolItem) -> Option<String> {
     let Some(super::ToolDetail::Output { lines, .. }) = tool.detail.as_deref() else {
@@ -32,11 +32,11 @@ fn reply_line(tool: &ToolItem) -> Option<String> {
         .find(|line| !line.is_empty())
 }
 
-/// slopty: what a row's quiet Open takes in its line.
+/// What a row's quiet Open takes in its line.
 const QUIET_FOOTPRINT: f32 = 18.0;
 /// A window narrower than this is a phone's (`shell/compact.rs`).
 const PHONE_BELOW: f32 = 700.0;
-/// slopty: a phone's side margin at a compact width (UIKit's `systemMinimumLayoutMargins`).
+/// A phone's side margin at a compact width (UIKit's `systemMinimumLayoutMargins`).
 const PHONE_MARGIN: f32 = 16.0;
 /// How far each level of nesting sits in from its parent's rows: the chevron's gutter, so a
 /// child's chevrons and icons stand under its parent's title.
@@ -47,7 +47,7 @@ const NEST_LEVELS: u8 = 4;
 /// 3m"), as claude-code-log's live page does (traces §10.3).
 const QUIET_AFTER_MS: i64 = 60_000;
 
-/// slopty: a row's status word swaps as Amp's does (`AJ/46b413b6.js:10505-10535`): the new word
+/// A row's status word swaps as Amp's does (`AJ/46b413b6.js:10505-10535`): the new word
 /// enters from 4 pt below over 350 ms as the old one leaves 4 pt up over 150 ms.
 const STATUS_IN: crate::motion::MotionSpec =
     crate::motion::MotionSpec::new(350, crate::motion::EASE_OUT_QUINT);
@@ -63,7 +63,7 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// slopty: where `key`'s status swap stands at `now`, `text` its word: the word it leaves and how
+/// Where `key`'s status swap stands at `now`, `text` its word: the word it leaves and how
 /// far it has gone, `None` at rest. The first sight of a key never swaps; reduced motion never
 /// does.
 fn status_swap(
@@ -94,7 +94,7 @@ fn status_swap(
     })
 }
 
-/// slopty: `text` as the row's status word, swapping in from the one it last said.
+/// `text` as the row's status word, swapping in from the one it last said.
 fn status_word(key: SharedString, text: SharedString, view: gpui::EntityId, cx: &mut gpui::App) -> gpui::Div {
     let (reduced, now) = (cx.reduce_motion(), crate::clock::now(cx));
     let Some((from, ms)) = status_swap(&key, &text, reduced, now) else {
@@ -182,7 +182,7 @@ pub(crate) struct Run {
     pub needs_you: Option<String>,
 }
 
-/// slopty: a model's id in words: "claude-haiku-5-5" reads "Haiku 5.5", a dated
+/// A model's id in words: "claude-haiku-5-5" reads "Haiku 5.5", a dated
 /// "claude-sonnet-4-5-20250929" "Sonnet 4.5", a bare "opus" "Opus"; an id of another maker's
 /// stays as it is.
 pub(crate) fn model_words(id: &str) -> String {
@@ -241,7 +241,7 @@ impl Run {
         let step = if progress.running {
             progress.step.clone()
         } else if progress.state == SubagentProgress::DONE && !tool.is_error {
-            // slopty: a run that went well says the first line of what it answered (#23): its
+            // A run that went well says the first line of what it answered (#23): its
             // call's result, else its report as the view model words it, never a blank line.
             reply_line(tool).or_else(|| progress.outcome.clone())
         } else {
@@ -339,7 +339,7 @@ impl Run {
     }
 }
 
-/// slopty: the one line over subagents started together (t3code §2.3): how many and of what kind,
+/// The one line over subagents started together (t3code §2.3): how many and of what kind,
 /// how many still work, how many failed, and the time across them from the first start to the
 /// last end, live while any runs: "3 Explore agents · 2 working · 1m 12s", then "3 Explore agents
 /// finished · 1 failed · 2m 5s".
@@ -397,14 +397,14 @@ pub(super) fn task_words(row: &SharedString, text: &SharedString, lines: Option<
 }
 
 impl Transcript {
-    /// slopty: the window, as last drawn, is a phone's: a touch screen narrower than
+    /// The window, as last drawn, is a phone's: a touch screen narrower than
     /// [`PHONE_BELOW`], where the shell puts its navigation bar for the titlebar.
     pub(super) fn on_phone(&self) -> bool {
         let width = f32::from(self.subagents.window.width);
         crate::shell::touch_screen() && width > 0.0 && width < PHONE_BELOW
     }
 
-    /// slopty: the side gutter the rows keep in their pane: on a phone the platform's own
+    /// The side gutter the rows keep in their pane: on a phone the platform's own
     /// margin (UIKit's 16 pt at a compact width), so the timeline lines up with the sheet's
     /// words; elsewhere the reading column's 48.
     pub(super) fn row_inset(&self) -> f32 {
@@ -510,7 +510,7 @@ impl Transcript {
         self.subagents.open.drain().map(|(_, chat)| chat).collect()
     }
 
-    /// slopty: `rows` with the steps of each subagent open in place spliced in under its row, a
+    /// `rows` with the steps of each subagent open in place spliced in under its row, a
     /// level deeper, as deep as they open: the brief, the steps and the report of its run's
     /// record, in the same rows as the parent's. Each spliced row's depth is kept for its inset.
     pub(super) fn nest(
@@ -559,7 +559,7 @@ impl Transcript {
         }
     }
 
-    /// slopty: the row of subagent `tool`, `row_id` its key: one line at a step's height, its
+    /// The row of subagent `tool`, `row_id` its key: one line at a step's height, its
     /// chevron opening its steps in place, Enter or its Open drilling in.
     pub(super) fn render_spawn(
         &mut self,
@@ -686,7 +686,7 @@ impl Transcript {
                     .child(run.title.clone()),
             )
             .children(step.map(|step| {
-                // slopty: the word swaps as it changes (Amp).
+                // The word swaps as it changes (Amp).
                 status_word(SharedString::from(format!("{row_id}-status")), step.into(), view, cx)
                     .min_w_0()
                     .flex_shrink(1.0)
@@ -706,7 +706,7 @@ impl Transcript {
             .into_any_element()
     }
 
-    /// slopty: the one line over subagents started together, `tools` their spawns.
+    /// The one line over subagents started together, `tools` their spawns.
     pub(super) fn render_spawns(
         &mut self,
         row_id: &SharedString,
@@ -807,7 +807,7 @@ mod tests {
         progress.duration_ms = Some(65_000);
         progress.outcome = Some("4".into());
         let settled = Run::of(&spawn(Some(progress.clone())));
-        // slopty: done, it says what it answered (#23): the view model's outcome is the report's
+        // Done, it says what it answered (#23): the view model's outcome is the report's
         // first line where the call carries no result, as Claude Code's spawn calls do.
         assert_eq!(settled.step.as_deref(), Some("4"));
         assert_eq!(settled.facts_at(999_999), "Haiku 5.5 · 12 tools · 41k tokens · 1m 5s", "no quiet once done");
@@ -872,7 +872,7 @@ mod tests {
         assert_eq!(batch_words(&done, 999_999), "2 agents finished · 1 failed · 2m 5s");
     }
 
-    /// slopty: a row's status word swaps as Amp's does: the first sight stands still, a new word
+    /// A row's status word swaps as Amp's does: the first sight stands still, a new word
     /// swaps in from the last for 350 ms, and reduced motion swaps at once.
     #[test]
     fn a_status_word_swaps_from_the_last() {

@@ -1,4 +1,4 @@
-//! slopty: the jump pill at the foot of a transcript that no longer follows its end: an arrow,
+//! The jump pill at the foot of a transcript that no longer follows its end: an arrow,
 //! and how many steps arrived below since it let go ("↓ 12 new steps"; `docs/decisions/
 //! inspector.md`, "Follow and anchor"). A press goes back to the end, following it.
 
@@ -10,13 +10,13 @@ use gpui::{
 use crate::motion::{self, AnimationExt as _, HoverFade as _};
 use crate::theme::Theme;
 
-// slopty: the jump button's shape and arrival (opencode's, `.research/opencode-study-2026-10-19.md`
+// The jump button's shape and arrival (opencode's, `.research/opencode-study-2026-10-19.md`
 // item 18): 32 × 28 with corners of 8, rising 8 px into place over 200 ms on an ease-out.
 const JUMP_WIDTH: f32 = 32.0;
 const JUMP_HEIGHT: f32 = 28.0;
 const JUMP_RADIUS: f32 = 8.0;
 const JUMP_RISE: f32 = 8.0;
-// slopty: in on the quint ease-out over 200 ms, out over 300 ms on (0.7, 0, 0.84, 0), gathering
+// In on the quint ease-out over 200 ms, out over 300 ms on (0.7, 0, 0.84, 0), gathering
 // speed as it sinks back the way it came (HextaUI's `MessageScrollerButton`;
 // design-inspiration item 11). Its 0.95 scale is left out: a div has no scale here.
 const JUMP_IN: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT_QUINT);
@@ -27,14 +27,14 @@ const JUMP_OUT: motion::MotionSpec =
 const JUMP_PAD: f32 = (JUMP_WIDTH - 16.0 - 2.0) / 2.0;
 
 thread_local! {
-    /// slopty: each jump button's last showing, when it began to leave, and how many leaves it
+    /// Each jump button's last showing, when it began to leave, and how many leaves it
     /// has begun.
     static JUMP_SHOWN: std::cell::RefCell<JumpMarks> = std::cell::RefCell::new(JumpMarks::new());
 }
 
 type JumpMarks = std::collections::HashMap<&'static str, (bool, Option<std::time::Instant>, u64)>;
 
-/// slopty: whether `key`'s jump button is drawn at `now`: `None` gone, `Some(None)` shown, and
+/// Whether `key`'s jump button is drawn at `now`: `None` gone, `Some(None)` shown, and
 /// `Some(Some(n))` leaving, `n` naming this leave so its animation plays once.
 pub(super) fn presence(key: &'static str, shown: bool, now: std::time::Instant) -> Option<Option<u64>> {
     JUMP_SHOWN.with(|marks| {
@@ -58,7 +58,7 @@ pub(super) fn presence(key: &'static str, shown: bool, now: std::time::Instant) 
     })
 }
 
-/// slopty: the jump button leaving: faded out and sunk [`JUMP_RISE`] over [`JUMP_OUT`].
+/// The jump button leaving: faded out and sunk [`JUMP_RISE`] over [`JUMP_OUT`].
 pub(super) fn leave(key: &'static str, leaving: Option<u64>, button: AnyElement) -> AnyElement {
     let Some(n) = leaving else {
         return button;
@@ -73,7 +73,7 @@ pub(super) fn leave(key: &'static str, leaving: Option<u64>, button: AnyElement)
         .into_any_element()
 }
 
-/// slopty: the button that takes a transcript back to its end, `on_click`.
+/// The button that takes a transcript back to its end, `on_click`.
 pub(super) fn button(
     anim_key: &'static str,
     hover_key: &'static str,
@@ -82,7 +82,7 @@ pub(super) fn button(
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    // slopty: opencode's jump button (`.research/opencode-study-2026-10-19.md` item 18): the
+    // The jump button is opencode's (`.research/opencode-study-2026-10-19.md` item 18): the
     // arrow alone, 32 × 28 with corners of 8, on the popover's frosted surface, lifted and
     // ringed by a halo of the page's own colour so the text scrolling under it never touches
     // its edge; it says what it does to a screen reader and in its tooltip.
@@ -101,7 +101,7 @@ pub(super) fn button(
         .aria_label("Scroll to bottom")
         .tooltip(crate::settings::widgets::text_tooltip("Scroll to bottom"))
         .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-        // slopty: as wide as the arrow and the count it says; with none, [`JUMP_WIDTH`].
+        // As wide as the arrow and the count it says; with none, [`JUMP_WIDTH`].
         .min_w(px(JUMP_WIDTH))
         .h(px(JUMP_HEIGHT))
         .flex_none()
@@ -141,7 +141,7 @@ pub(super) fn button(
                 .justify_center()
                 .bg(wash)
                 .child(crate::icons::icon(crate::icons::ARROW_DOWN).size(px(16.0)).text_color(theme.text_muted))
-                // slopty: "↓ 3 new steps", the count in the accent as new content is, each part
+                // "↓ 3 new steps", the count in the accent as new content is, each part
                 // rolled in and out (`roll_text`), the button's width gliding with them.
                 .child(
                     div()
@@ -170,7 +170,7 @@ pub(super) fn button(
     crate::frost::frosted(JUMP_RADIUS, crate::frost::MENU_BLUR, button).into_any_element()
 }
 
-/// slopty: the jump button arriving: faded in and risen [`JUMP_RISE`] into place.
+/// The jump button arriving: faded in and risen [`JUMP_RISE`] into place.
 fn arrive<E>(id: impl Into<gpui::ElementId>, element: E) -> gpui::AnimationElement<E>
 where
     E: Styled + IntoElement + 'static,
@@ -202,7 +202,7 @@ mod tests {
         }
     }
 
-    /// slopty: the jump to the end is the arrow alone on a 32 × 28 button (opencode's), named
+    /// The jump to the end is the arrow alone on a 32 × 28 button (opencode's), named
     /// for a screen reader, and a click on it jumps.
     #[gpui::test]
     fn the_jump_button_is_an_arrow_that_jumps(cx: &mut TestAppContext) {
@@ -228,7 +228,7 @@ mod tests {
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
         assert_eq!(clicks.get(), 1, "a click jumps");
 
-        // slopty: rows that arrived while the person read above widen it to say so (item 11).
+        // Rows that arrived while the person read above widen it to say so (item 11).
         view.update(cx, |host, cx| {
             host.1 = 3;
             cx.notify();
@@ -238,7 +238,7 @@ mod tests {
         assert!(f32::from(wide.size.width) > JUMP_WIDTH + 20.0, "it says \"3 new steps\": {wide:?}");
     }
 
-    /// slopty: the jump button leaves over 300 ms, and plays its leave once.
+    /// The jump button leaves over 300 ms, and plays its leave once.
     #[test]
     fn the_jump_button_plays_one_leave_then_goes() {
         let start = std::time::Instant::now();

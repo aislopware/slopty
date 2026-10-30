@@ -1,4 +1,4 @@
-//! slopty: the transcript's own rows as assistive tech reads them: a subagent's row, the rows
+//! The transcript's own rows as assistive tech reads them: a subagent's row, the rows
 //! of background work, a reply's images and formulas. Each test draws a real transcript in a
 //! test window and judges by its accessibility tree.
 
@@ -261,7 +261,7 @@ fn a_subagents_row_opens_its_steps_in_place_and_drills_in(cx: &mut gpui::TestApp
     assert_eq!(find(&draw(cx), Role::Button, "Subagent Count lines").unwrap().expanded, Some(false), "and opens nothing here");
 }
 
-/// slopty: subagents started together stand under one line that says how many work, each its
+/// Subagents started together stand under one line that says how many work, each its
 /// own row under it, with no gap between them.
 #[gpui::test]
 fn subagents_started_together_stand_under_one_line(cx: &mut gpui::TestAppContext) {
@@ -452,7 +452,7 @@ fn display_formulas_typeset_once_settled(cx: &mut gpui::TestAppContext) {
     assert!(nodes.values().all(|node| node.role != Role::Math), "the tail keeps text");
 }
 
-/// slopty: a failed turn's card offers its error to copy, the agent's words with its detail, and
+/// A failed turn's card offers its error to copy, the agent's words with its detail, and
 /// the detail opens in a box that scrolls (T51) and says it to the screen reader.
 #[gpui::test]
 fn an_error_card_copies_its_error_and_scrolls_its_detail(cx: &mut gpui::TestAppContext) {
@@ -524,7 +524,7 @@ fn a_running_run_opened_before_it_arrives_shows_it_once_in(cx: &mut gpui::TestAp
     opened_before_its_run(cx, true);
 }
 
-/// slopty: the transcript's words are in the accessibility tree: the person's message is an
+/// The transcript's words are in the accessibility tree: the person's message is an
 /// article "You" holding a paragraph of their words, the reply an article named by its agent
 /// ("Agent" when the chat names none) at its first row, and each of the reply's blocks a
 /// paragraph of its plain text.
@@ -539,7 +539,7 @@ fn a_chats_words_are_articles_and_paragraphs(cx: &mut gpui::TestAppContext) {
         status: None,
         ..reply.clone()
     };
-    // slopty: a fork's seam is the app's, not a message the agent said (#8).
+    // A fork's seam is the app's, not a message the agent said (#8).
     let seam = SessionMessageEntry {
         id: "seam".into(),
         role: MessageRole::System,
@@ -566,7 +566,7 @@ fn a_chats_words_are_articles_and_paragraphs(cx: &mut gpui::TestAppContext) {
     assert_eq!(articles, 2, "one article a message, none for the seam");
 }
 
-/// slopty: a link to a chat in a reply is a live chip: it says the chat's title and how it
+/// A link to a chat in a reply is a live chip: it says the chat's title and how it
 /// stands as they are now, and says the new ones once they change.
 #[gpui::test]
 fn a_link_to_a_chat_says_how_it_stands_now(cx: &mut gpui::TestAppContext) {
@@ -605,7 +605,7 @@ fn a_link_to_a_chat_says_how_it_stands_now(cx: &mut gpui::TestAppContext) {
     draw(cx);
 }
 
-/// slopty: a subagent row's quiet Open draws in its 18 pt footprint but takes a press over at
+/// A subagent row's quiet Open draws in its 18 pt footprint but takes a press over at
 /// least 24 pt (`surface_chrome::press_target`): a press 1.5 pt past its footprint drills in.
 #[gpui::test]
 fn a_subagents_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAppContext) {
@@ -626,7 +626,7 @@ fn a_subagents_quiet_open_takes_a_press_past_what_it_draws(cx: &mut gpui::TestAp
     assert_eq!(*opened.borrow(), ["child-chat"], "a press past the 18 pt footprint opens it");
 }
 
-/// slopty: a click on a subagent's row between two reads of the tree, as the self-test's driver
+/// A click on a subagent's row between two reads of the tree, as the self-test's driver
 /// clicks: the frames around it drawn as a person's are (no screen reader, the list scrolled onto
 /// its layer), rows under it, its run there to splice in. Once the frames settle, the run is
 /// open in place and the frame shown is the one the same state draws from scratch: no row under
@@ -703,7 +703,7 @@ fn a_subagent_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAp
     assert!(find(&nodes, Role::Paragraph, "Line 2 of the run.").is_some(), "its steps, in place");
 }
 
-/// slopty: what runs reads the transcript's clock, taken on its tick and when its state moves,
+/// What runs reads the transcript's clock, taken on its tick and when its state moves,
 /// never as a frame is built: a running subagent's row says the time the clock says, and a
 /// frame built again from scratch later says the same.
 #[gpui::test]
@@ -729,7 +729,7 @@ fn a_running_subagent_says_the_clocks_time_in_every_frame(cx: &mut gpui::TestApp
     assert_eq!(value(cx).as_deref(), Some(first.as_str()), "drawn again, the same second");
 }
 
-/// slopty: on a touch screen a reply's controls take a finger's 44 pt press (#23): its tool
+/// On a touch screen a reply's controls take a finger's 44 pt press (#23): its tool
 /// group's summary row and the strip's Copy; on a Mac each is its drawn size.
 #[gpui::test]
 fn the_controls_of_a_reply_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
@@ -748,7 +748,7 @@ fn the_controls_of_a_reply_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
         subagent_status: None,
         facts: None,
     };
-    // slopty: two calls before a reply, so their group draws its summary row.
+    // Two calls before a reply, so their group draws its summary row.
     let again = exec("run2", "cargo build", true, false);
     crate::shell::force_touch(true);
     let (transcript, cx) =
@@ -777,7 +777,7 @@ fn the_controls_of_a_reply_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
 }
 
 // ---------------------------------------------------------------------------
-// slopty: the transcript's polish (`docs/decisions/ui.md`, "The transcript reads as one
+// The transcript's polish (`docs/decisions/ui.md`, "The transcript reads as one
 // conversation"): each test proves one of the audit's changes by what assistive tech reads.
 // ---------------------------------------------------------------------------
 
@@ -1422,8 +1422,9 @@ fn find_opens_what_hides_the_step_it_lands_on(cx: &mut gpui::TestAppContext) {
     transcript.read_with(cx, |this, _| {
         assert_eq!(this.depth(), Depth::Steps, "the steps show");
         assert_eq!(this.folds.get(&group).and_then(|fold| fold.open), Some(true), "its group opens");
-        assert_eq!(this.cursor(), Some(&Cursor { row: group.clone(), step: Some("t2".into()) }), "the cursor on it");
-        assert_eq!(this.find_tally().as_deref(), Some("1 of 1"));
+        assert_eq!(this.cursor.as_ref(), Some(&Cursor { row: group.clone(), step: Some("t2".into()) }), "the cursor on it");
+        assert!(this.find.open, "find stays open");
+        assert_eq!(this.find.tally().as_deref(), Some("1 of 1"));
     });
 }
 
@@ -1449,7 +1450,7 @@ fn the_traces_keys_move_its_cursor_and_e_lands_on_the_failure(cx: &mut gpui::Tes
         let keys = transcript.read(cx).keys_handle();
         window.focus(&keys, cx);
     });
-    let at = |cx: &mut VisualTestContext| transcript.read_with(cx, |this, _| this.cursor().cloned());
+    let at = |cx: &mut VisualTestContext| transcript.read_with(cx, |this, _| this.cursor.clone());
     cx.simulate_keystrokes("e");
     draw(cx);
     assert_eq!(at(cx), Some(Cursor { row: group.clone(), step: Some("t2".into()) }), "on the failure");

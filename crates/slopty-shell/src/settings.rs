@@ -19,22 +19,18 @@ use gpui::{App, Global, Task};
 use serde::{Deserialize, Serialize};
 use slopty_view_proto::{AuthState, WorkspaceScope};
 
-// slopty: no agent accounts: Slopty never touches a credential.
-// slopty: Settings → Devices' Add device dialog.
+// Settings → Devices' Add device dialog.
 pub mod add_device;
 pub mod appearance;
 pub mod archived;
-// slopty: no composer, so no picks of its to remember.
 pub mod devices;
 pub mod files;
 pub mod harnesses;
-// slopty: the code a phone or iPad scans for the server.
+// The code a phone or iPad scans for the server.
 pub mod invite;
 pub mod notifications;
 pub mod shortcuts;
-// slopty: no thread naming: an agent's thread is titled by the agent.
 pub mod widgets;
-// slopty: no per-device worktree locations (the engine side is not taken).
 
 /// Sidebar drag-resize bounds (px). The minimum keeps the sidebar options
 /// button inside the sidebar beside the titlebar controls: 88 (past the
@@ -75,10 +71,8 @@ pub const FILES_AUTOSAVE_DELAY_MAX_MS: u64 = 10_000;
 
 const FILE_NAME: &str = "ui-settings.json";
 
-// slopty: no History surface (ruled out).
-
-/// slopty: how wide a conversation reads, as one of Amp's three presets in place of a pixel
-/// slider (prune P9, `docs/decisions/ui.md`): measured against the window, as Amp's breakpoints.
+/// How wide a conversation reads, as one of Amp's three presets (prune P9,
+/// `docs/decisions/ui.md`): measured against the window, as Amp's breakpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConversationWidth {
@@ -150,8 +144,6 @@ pub enum SavePolicy {
     Immediate,
 }
 
-// slopty: no pull-request pages.
-
 /// The sole in-process owner and writer of `ui-settings.json`.
 ///
 /// Mutations land in `current` before any timer starts. Replacing a pending
@@ -163,7 +155,7 @@ pub struct SettingsStore {
     revision: u64,
     saved_revision: u64,
     save_task: Option<Task<()>>,
-    // slopty: a file [`UiSettings::load`] moved aside, until [`announce_set_aside`] says so.
+    // A file [`UiSettings::load`] moved aside, until [`announce_set_aside`] says so.
     set_aside: Option<Option<PathBuf>>,
 }
 
@@ -193,7 +185,6 @@ impl SettingsStore {
 
 pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     let data_dir: PathBuf = data_dir.into();
-    // slopty: dictation removed.
     let set_aside = take_set_aside(&data_dir);
     cx.set_global(SettingsStore {
         current: settings,
@@ -234,14 +225,14 @@ pub fn smooth_scrolling(cx: &App) -> bool {
         .is_some_and(|store| store.current.smooth_scrolling)
 }
 
-/// slopty: the format the person chose for the output of steps of kind `kind`, read on every
+/// The format the person chose for the output of steps of kind `kind`, read on every
 /// frame an open step draws, so without cloning the settings; `None` when they never chose one.
 pub fn output_format(kind: &str, cx: &App) -> Option<String> {
     cx.try_global::<SettingsStore>()
         .and_then(|store| store.current.output_formats.get(kind).cloned())
 }
 
-/// slopty: keep `format` as how the output of steps of kind `kind` is shown.
+/// Keep `format` as how the output of steps of kind `kind` is shown.
 pub fn set_output_format(kind: &str, format: &str, cx: &mut App) {
     update(SavePolicy::Immediate, cx, |settings| {
         settings.output_formats.insert(kind.to_owned(), format.to_owned());
@@ -271,8 +262,6 @@ fn schedule(policy: SavePolicy, cx: &mut App) {
         }
     }
 }
-
-// slopty: no History surface (ruled out).
 
 /// Persist the latest revision. Safe to call at shutdown.
 pub fn flush(cx: &mut App) {
@@ -391,7 +380,7 @@ pub const SKILL_COMPLETION_HARNESSES: [(slopty_view_proto::HarnessId, &str); 9] 
     (slopty_view_proto::HarnessId::OPENCODE, "OpenCode"),
 ];
 
-/// slopty: the surface tabs one chat's pane showed, in their order, and the one in front.
+/// The surface tabs one chat's pane showed, in their order, and the one in front.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SavedTabs {
@@ -399,7 +388,7 @@ pub struct SavedTabs {
     pub active: Option<usize>,
 }
 
-/// slopty: one surface tab as kept: what opens it again.
+/// One surface tab as kept: what opens it again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SavedSurface {
@@ -413,9 +402,9 @@ pub enum SavedSurface {
     Diff,
     /// A remote window or desktop, by what was chosen.
     Screen { screen: String, title: String },
-    /// slopty: the session's inspector.
+    /// The session's inspector.
     Inspector,
-    /// slopty: the session's files.
+    /// The session's files.
     Files,
 }
 
@@ -429,7 +418,7 @@ pub struct PaletteUse {
     pub last_ms: i64,
 }
 
-/// slopty: one chat's open panes, as `ui-settings.json` keeps them.
+/// One chat's open panes, as `ui-settings.json` keeps them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SavedPanels {
@@ -442,14 +431,10 @@ pub struct SavedPanels {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
-    // slopty: dictation removed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
-    // slopty: `$` skills and `/` commands for every agent; the toggles are gone (P11).
-    // slopty: the compact model picker is the one picker (Amp's prune P6).
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
-    // slopty: no Star on GitHub banner.
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -467,43 +452,40 @@ pub struct UiSettings {
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
-    /// slopty: the sidebar's machine filter, beside the project's: a device id, or `None` for
+    /// The sidebar's machine filter, beside the project's: a device id, or `None` for
     /// every machine (`docs/decisions/layout.md`, "the machine is a quiet subtitle on a row and
     /// a filter, not a level").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_filter: Option<String>,
-    /// slopty: the system's notes for a session in the background that needs the person, failed
+    /// The system's notes for a session in the background that needs the person, failed
     /// or finished (`slopty_ui`'s `workspace::attention`); none make a sound
     /// (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a feed").
     pub notifications_enabled: bool,
     pub files_panel_width: f32,
     pub right_pane_width: f32,
     pub terminal_height: f32,
-    /// slopty: which panes each chat had open, kept across launches (`shell::SessionPanels`).
+    /// Which panes each chat had open, kept across launches (`shell::SessionPanels`).
     pub session_panels: std::collections::BTreeMap<String, SavedPanels>,
-    /// slopty: what each chat's pane showed, kept across launches (`shell::kept_tabs`).
+    /// What each chat's pane showed, kept across launches (`shell::kept_tabs`).
     pub session_tabs: std::collections::BTreeMap<String, SavedTabs>,
     /// How often and how lately the person ran each palette command, by its name: the palette
     /// ranks by it (`shell::command_palette`, WezTerm's frecency).
     pub palette_uses: std::collections::BTreeMap<String, PaletteUse>,
-    /// slopty: how the inspector shows each kind of step's output, by the kind's name, as the
+    /// How the inspector shows each kind of step's output, by the kind's name, as the
     /// person last chose it in a step's format menu (`transcript::detail`): `text`, `json` or
     /// `markdown`. A kind not here is shown as its output reads.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub output_formats: std::collections::BTreeMap<String, String>,
-    /// Customizable shortcut combos (feature-inventory §1.4). slopty: kept as `shortcuts`, only
-    /// what the person changed; the `keymap` before it froze every default and is not read.
+    /// Customizable shortcut combos (feature-inventory §1.4), kept as `shortcuts`: only what the
+    /// person changed.
     #[serde(rename = "shortcuts")]
     pub keymap: KeymapConfig,
-    // slopty: appshots removed.
-    // slopty: no Compact-mode, Esc-to-stop, code-fence-fit or maths settings: each has one behaviour.
     /// The Settings section last viewed. ⌘, / Ctrl+,, the footer gear and the
     /// palette reopen it; links naming a section replace it. Files without
     /// it, or with a name this build does not know, open on General.
     pub settings_section: crate::shell::SettingsSection,
     /// Light/dark preference. Defaults to following the OS.
     pub appearance: crate::appearance::AppearanceMode,
-    // slopty: no History surface (ruled out).
     /// Interface and conversational-prose family. Device-local by design.
     pub ui_font_family: crate::typography::UiFontFamily,
     /// Base size for interface and conversational prose.
@@ -521,7 +503,7 @@ pub struct UiSettings {
     pub diff_split: bool,
     /// Changes pane: wrap long source lines instead of scrolling horizontally.
     pub diff_wrap: bool,
-    // slopty: the review aids' last choices, kept across launches.
+    // The review aids' last choices, kept across launches.
     /// Changes pane: leave whitespace-only changes out of the diff.
     pub diff_ignore_whitespace: bool,
     /// Changes pane: the changed files' tree beside the diff.
@@ -532,7 +514,6 @@ pub struct UiSettings {
     /// Open a normal web-link activation in the session Browser. Explicit
     /// context-menu actions remain available regardless of this preference.
     pub open_web_links_in_slopty: bool,
-    // slopty: no pull-request pages.
     /// Save edited workspace files automatically after the configured delay.
     pub files_autosave_enabled: bool,
     /// Idle time before an edited workspace file is saved automatically.
@@ -545,43 +526,35 @@ pub struct UiSettings {
     pub accent: slopty_shell_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
     pub surface: slopty_shell_theme::SurfacePreference,
-    // slopty: the new-chat canvas's artwork, its wallpaper colours and its glyph field went with
-    // the canvas (TUI-first: a session is its terminal).
-    // slopty: reduced motion follows the OS alone (Amp's prune P12).
     /// Also snap animations while the main window is not focused.
     pub pause_animations_in_background: bool,
     /// Mouse-wheel notches glide instead of jumping (`smooth_scroll`).
     /// Trackpads already scroll smoothly; reduced motion overrides.
     pub smooth_scrolling: bool,
-    // slopty: voice removed.
 }
 
 impl Default for UiSettings {
     fn default() -> Self {
         Self {
-            // slopty: dictation removed.
             window_geometry: None,
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
-            // slopty: no Star on GitHub banner.
             last_space_id: None,
             last_project_action_by_space_id: std::collections::HashMap::new(),
             open_tabs: None,
             space_filter: None,
-            machine_filter: None, // slopty
+            machine_filter: None,
             notifications_enabled: true,
             files_panel_width: FILES_PANEL_DEFAULT,
             right_pane_width: RIGHT_PANE_DEFAULT,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
-            session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
-            session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
+            session_panels: std::collections::BTreeMap::new(),
+            session_tabs: std::collections::BTreeMap::new(),
             palette_uses: std::collections::BTreeMap::new(),
-            output_formats: std::collections::BTreeMap::new(), // slopty: the inspector's formats
+            output_formats: std::collections::BTreeMap::new(),
             keymap: KeymapConfig::default(),
             settings_section: crate::shell::SettingsSection::default(),
-            // slopty: appshots removed.
             appearance: crate::appearance::AppearanceMode::default(),
-            // slopty: no History surface (ruled out).
             ui_font_family: crate::typography::UiFontFamily::default(),
             ui_font_size: crate::typography::UiFontSize::default(),
             terminal_font_family: crate::typography::UiFontFamily::GeistMono,
@@ -591,11 +564,10 @@ impl Default for UiSettings {
             theme_selection: slopty_shell_theme::ThemeSelection::default(),
             diff_split: false,
             diff_wrap: false,
-            diff_ignore_whitespace: false, // slopty
-            diff_show_tree: false,         // slopty
+            diff_ignore_whitespace: false,
+            diff_show_tree: false,
             conversation_width: ConversationWidth::Default,
             open_web_links_in_slopty: true,
-            // slopty: no pull-request pages.
             files_autosave_enabled: false,
             files_autosave_delay_ms: FILES_AUTOSAVE_DELAY_DEFAULT_MS,
             files_word_wrap: false,
@@ -604,7 +576,6 @@ impl Default for UiSettings {
             surface: slopty_shell_theme::SurfacePreference::default(),
             pause_animations_in_background: false,
             smooth_scrolling: true,
-            // slopty: voice removed.
         }
     }
 }
@@ -621,7 +592,7 @@ pub const JUMP_SLOTS: usize = 9;
 const JUMP_DEFAULTS: [&str; JUMP_SLOTS] = [
     "mod-1", "mod-2", "mod-3", "mod-4", "mod-5", "mod-6", "mod-7", "mod-8", "mod-9",
 ];
-// slopty: one noun for what an agent works in everywhere: session (TUI-first, `docs/decisions/ui.md`,
+// One noun for what an agent works in everywhere: session (TUI-first, `docs/decisions/ui.md`,
 // "A session is its terminal, its inspector beside it").
 const JUMP_LABELS: [&str; JUMP_SLOTS] = [
     "Jump to session 1",
@@ -640,7 +611,6 @@ const JUMP_LABELS: [&str; JUMP_SLOTS] = [
 /// rather than panicking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutId {
-    // slopty: dictation, appshots and the wallpaper shuffle removed.
     SaveFile,
     BrowserReload,
     ToggleSidebar,
@@ -651,15 +621,15 @@ pub enum ShortcutId {
     NextSession,
     PrevSession,
     ArchiveSession,
-    // slopty: the right pane's last closed tab.
+    // The right pane's last closed tab.
     ReopenClosedTab,
-    NextNeedsYou, // slopty: the next chat waiting on the person (`shell::sidebar_status`)
-    Inbox, // slopty: what needs the person, across sessions and machines (`shell::inbox`)
+    NextNeedsYou, // the next chat waiting on the person (`shell::sidebar_status`)
+    Inbox, // what needs the person, across sessions and machines (`shell::inbox`)
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 13 + JUMP_SLOTS] = [ // slopty: dictation, appshots and the composer's pickers removed.
+    pub const ALL: [ShortcutId; 13 + JUMP_SLOTS] = [
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
         ShortcutId::ToggleSidebar,
@@ -670,9 +640,9 @@ impl ShortcutId {
         ShortcutId::NextSession,
         ShortcutId::PrevSession,
         ShortcutId::ArchiveSession,
-        ShortcutId::ReopenClosedTab, // slopty
-        ShortcutId::NextNeedsYou, // slopty
-        ShortcutId::Inbox, // slopty
+        ShortcutId::ReopenClosedTab,
+        ShortcutId::NextNeedsYou,
+        ShortcutId::Inbox,
         ShortcutId::JumpSession(0),
         ShortcutId::JumpSession(1),
         ShortcutId::JumpSession(2),
@@ -684,18 +654,14 @@ impl ShortcutId {
         ShortcutId::JumpSession(8),
     ];
 
-    // slopty: appshots removed.
-
     /// Row label (slopty lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim).
     pub fn label(self) -> &'static str {
         match self {
-            // slopty: dictation removed.
-            // slopty: appshots removed.
             ShortcutId::SaveFile => "Save file",
-            // slopty: each name is the one its button, menu and palette row use.
+            // Each name is the one its button, menu and palette row use.
             ShortcutId::BrowserReload => "Reload page",
             ShortcutId::ToggleSidebar => "Toggle sidebar",
-            // slopty: the views a key summons beside the session, by the View menu's names.
+            // The views a key summons beside the session, by the View menu's names.
             ShortcutId::ToggleChanges => "Changes",
             ShortcutId::ToggleFiles => "Files",
             ShortcutId::NewSession => "New session",
@@ -703,15 +669,15 @@ impl ShortcutId {
             ShortcutId::NextSession => "Next session",
             ShortcutId::PrevSession => "Previous session",
             ShortcutId::ArchiveSession => "Archive session",
-            ShortcutId::ReopenClosedTab => "Reopen closed view", // slopty
-            ShortcutId::NextNeedsYou => "Next session that needs you", // slopty
-            ShortcutId::Inbox => "Inbox", // slopty: the titlebar eye's name
+            ShortcutId::ReopenClosedTab => "Reopen closed view",
+            ShortcutId::NextNeedsYou => "Next session that needs you",
+            ShortcutId::Inbox => "Inbox", // the titlebar eye's name
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
 
     pub fn default_combo(self) -> &'static str {
-        self.default_combo_on(crate::keys::MOD_IS_COMMAND) // slopty: every Apple keyboard
+        self.default_combo_on(crate::keys::MOD_IS_COMMAND) // every Apple keyboard
     }
 
     /// `default_combo` for an explicit platform, so the spelling invariant is
@@ -719,8 +685,6 @@ impl ShortcutId {
     /// this guards against only exists off macOS).
     pub fn default_combo_on(self, mac: bool) -> &'static str {
         match self {
-            // slopty: dictation removed.
-            // slopty: appshots removed.
             ShortcutId::SaveFile => "mod-s",
             ShortcutId::BrowserReload => "mod-shift-r",
             ShortcutId::ToggleSidebar => "mod-b",
@@ -746,8 +710,8 @@ impl ShortcutId {
             // Mod+A is the composer's Select all, so archiving takes the
             // shifted combo.
             ShortcutId::ArchiveSession => "mod-shift-a",
-            ShortcutId::ReopenClosedTab => "mod-shift-t", // slopty
-            // slopty: ⌘J is the jump, in the bottom panel's toggle's place, and the inbox it
+            ShortcutId::ReopenClosedTab => "mod-shift-t",
+            // ⌘J is the jump, in the bottom panel's toggle's place, and the inbox it
             // walks sits beside it on ⇧⌘J (`docs/decisions/layout.md`).
             ShortcutId::NextNeedsYou => "mod-j",
             ShortcutId::Inbox => "mod-shift-j",
@@ -763,7 +727,7 @@ impl ShortcutId {
         }
     }
 
-    /// slopty: its name in `ui-settings.json`'s `shortcuts` ([`StoredKeymap`]); a jump slot is
+    /// Its name in `ui-settings.json`'s `shortcuts` ([`StoredKeymap`]); a jump slot is
     /// counted from 1, as its key.
     pub fn stored_key(self) -> std::borrow::Cow<'static, str> {
         let name = match self {
@@ -787,12 +751,11 @@ impl ShortcutId {
 }
 
 /// Persisted shortcut combos. Stored platform-neutral ("mod-s"); translated to
-/// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`]. slopty: the file keeps only what the
+/// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`]. The file keeps only what the
 /// person changed ([`StoredKeymap`]), so a default that moves reaches everyone who left it be.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "StoredKeymap", into = "StoredKeymap")]
 pub struct KeymapConfig {
-    // slopty: dictation, appshots and the wallpaper shuffle removed.
     pub save_file: String,
     pub browser_reload: String,
     pub toggle_sidebar: String,
@@ -803,15 +766,15 @@ pub struct KeymapConfig {
     pub next_session: String,
     pub prev_session: String,
     pub archive_session: String,
-    // slopty: the right pane's last closed tab.
+    // The right pane's last closed tab.
     pub reopen_closed_tab: String,
-    pub next_needs_you: String, // slopty: the next chat waiting on the person
-    pub inbox: String, // slopty: what needs the person
+    pub next_needs_you: String, // the next chat waiting on the person
+    pub inbox: String, // what needs the person
     /// One combo per jump slot, in slot order; [`Self::heal_jump_slots`] keeps its length.
     pub jump_session: Vec<String>,
 }
 
-/// slopty: the keymap as `ui-settings.json` keeps it: by each shortcut's [`ShortcutId::stored_key`],
+/// The keymap as `ui-settings.json` keeps it: by each shortcut's [`ShortcutId::stored_key`],
 /// only the combos that differ from their default ("" for one the person unbound). An entry
 /// that is not a string is skipped, so one bad value costs nothing else.
 #[derive(Serialize, Deserialize)]
@@ -902,7 +865,6 @@ pub fn workspace_profile_key(
 impl Default for KeymapConfig {
     fn default() -> Self {
         Self {
-            // slopty: dictation and appshots removed.
             save_file: ShortcutId::SaveFile.default_combo().into(),
             browser_reload: ShortcutId::BrowserReload.default_combo().into(),
             toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
@@ -913,9 +875,9 @@ impl Default for KeymapConfig {
             next_session: ShortcutId::NextSession.default_combo().into(),
             prev_session: ShortcutId::PrevSession.default_combo().into(),
             archive_session: ShortcutId::ArchiveSession.default_combo().into(),
-            reopen_closed_tab: ShortcutId::ReopenClosedTab.default_combo().into(), // slopty
-            next_needs_you: ShortcutId::NextNeedsYou.default_combo().into(), // slopty
-            inbox: ShortcutId::Inbox.default_combo().into(), // slopty
+            reopen_closed_tab: ShortcutId::ReopenClosedTab.default_combo().into(),
+            next_needs_you: ShortcutId::NextNeedsYou.default_combo().into(),
+            inbox: ShortcutId::Inbox.default_combo().into(),
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
     }
@@ -924,7 +886,6 @@ impl Default for KeymapConfig {
 impl KeymapConfig {
     pub fn get(&self, id: ShortcutId) -> &str {
         match id {
-            // slopty: dictation and appshots removed.
             ShortcutId::SaveFile => &self.save_file,
             ShortcutId::BrowserReload => &self.browser_reload,
             ShortcutId::ToggleSidebar => &self.toggle_sidebar,
@@ -935,9 +896,9 @@ impl KeymapConfig {
             ShortcutId::NextSession => &self.next_session,
             ShortcutId::PrevSession => &self.prev_session,
             ShortcutId::ArchiveSession => &self.archive_session,
-            ShortcutId::ReopenClosedTab => &self.reopen_closed_tab, // slopty
-            ShortcutId::NextNeedsYou => &self.next_needs_you, // slopty
-            ShortcutId::Inbox => &self.inbox, // slopty
+            ShortcutId::ReopenClosedTab => &self.reopen_closed_tab,
+            ShortcutId::NextNeedsYou => &self.next_needs_you,
+            ShortcutId::Inbox => &self.inbox,
             ShortcutId::JumpSession(slot) => self
                 .jump_session
                 .get(slot)
@@ -948,7 +909,6 @@ impl KeymapConfig {
 
     pub fn set(&mut self, id: ShortcutId, combo: String) {
         match id {
-            // slopty: dictation and appshots removed.
             ShortcutId::SaveFile => self.save_file = combo,
             ShortcutId::BrowserReload => self.browser_reload = combo,
             ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
@@ -959,9 +919,9 @@ impl KeymapConfig {
             ShortcutId::NextSession => self.next_session = combo,
             ShortcutId::PrevSession => self.prev_session = combo,
             ShortcutId::ArchiveSession => self.archive_session = combo,
-            ShortcutId::ReopenClosedTab => self.reopen_closed_tab = combo, // slopty
-            ShortcutId::NextNeedsYou => self.next_needs_you = combo, // slopty
-            ShortcutId::Inbox => self.inbox = combo, // slopty
+            ShortcutId::ReopenClosedTab => self.reopen_closed_tab = combo,
+            ShortcutId::NextNeedsYou => self.next_needs_you = combo,
+            ShortcutId::Inbox => self.inbox = combo,
             ShortcutId::JumpSession(slot) => {
                 if slot < JUMP_SLOTS {
                     if self.jump_session.len() < JUMP_SLOTS {
@@ -999,7 +959,7 @@ pub fn combo_from_keystroke(
     cmd: bool,
     key: &str,
 ) -> Option<String> {
-    // slopty: an iPad's ⌘ too.
+    // An iPad's ⌘ too.
     combo_from_keystroke_on(crate::keys::MOD_IS_COMMAND, ctrl, alt, shift, cmd, key)
 }
 
@@ -1049,7 +1009,7 @@ pub fn conflicted_shortcuts(keymap: &KeymapConfig) -> Vec<ShortcutId> {
         .into_iter()
         .filter(|&id| {
             let combo = keymap.get(id);
-            !combo.is_empty() // slopty: appshots removed.
+            !combo.is_empty()
                 && ShortcutId::ALL
                     .into_iter()
                     .any(|other| other != id && keymap.get(other) == combo)
@@ -1089,10 +1049,10 @@ pub fn jump_hints_visible(keymap: &KeymapConfig, primary: bool, alt: bool, shift
 
 /// Translate a stored combo into a bindable keystroke for this platform.
 pub fn platform_combo(combo: &str) -> String {
-    platform_combo_on(crate::keys::MOD_IS_COMMAND, combo) // slopty: an iPad's ⌘ too
+    platform_combo_on(crate::keys::MOD_IS_COMMAND, combo) // an iPad's ⌘ too
 }
 
-/// slopty: a stored combo as the keystroke [`platform_combo`] binds, parsed for this platform.
+/// A stored combo as the keystroke [`platform_combo`] binds, parsed for this platform.
 pub fn parse_combo(combo: &str) -> Result<gpui::Keystroke, gpui::InvalidKeystrokeError> {
     gpui::Keystroke::parse_with_os(&platform_combo(combo), crate::keys::OS)
 }
@@ -1122,7 +1082,7 @@ pub fn key_equivalents(cx: &App) -> KeyEquivalents {
 }
 
 thread_local! {
-    /// The table the keymap was last bound against. slopty: a chord read outside gpui's keymap
+    /// The table the keymap was last bound against. A chord read outside gpui's keymap
     /// matches by its US spelling through it ([`bound_canonical_combo`]); hints read the bound
     /// keymap itself.
     static BOUND_KEY_EQUIVALENTS: RefCell<KeyEquivalents> = RefCell::default();
@@ -1244,7 +1204,6 @@ pub fn bound_canonical_combo(combo: &str) -> Option<String> {
     BOUND_KEY_EQUIVALENTS.with_borrow(|equivalents| canonical_combo(combo, equivalents))
 }
 impl UiSettings {
-    // slopty: appshots removed.
     /// Three-way merge for a view that keeps a working copy of the settings:
     /// fields `edited` changed since `base` win, every other field keeps
     /// `current`. A stale copy therefore never reverts a choice another
@@ -1260,11 +1219,9 @@ impl UiSettings {
             }};
         }
         merge!(
-            // slopty: dictation removed.
             window_geometry,
             sidebar_width,
             sidebar_collapsed,
-            // slopty: no Star on GitHub banner.
             last_space_id,
             last_project_action_by_space_id,
             open_tabs,
@@ -1274,15 +1231,13 @@ impl UiSettings {
             files_panel_width,
             right_pane_width,
             terminal_height,
-            session_panels, // slopty: kept panes
-            session_tabs, // slopty: kept panes
+            session_panels,
+            session_tabs,
             output_formats,
             palette_uses,
             keymap,
-            // slopty: appshots removed.
             settings_section,
             appearance,
-            // slopty: no History surface (ruled out).
             ui_font_family,
             ui_font_size,
             terminal_font_family,
@@ -1292,8 +1247,8 @@ impl UiSettings {
             theme_selection,
             diff_split,
             diff_wrap,
-            diff_ignore_whitespace, // slopty
-            diff_show_tree,         // slopty
+            diff_ignore_whitespace,
+            diff_show_tree,
             conversation_width,
             open_web_links_in_slopty,
             files_autosave_enabled,
@@ -1304,8 +1259,6 @@ impl UiSettings {
             surface,
             pause_animations_in_background,
             smooth_scrolling,
-            // slopty: voice removed.
-            // slopty: no pull-request pages.
         );
         current
     }
@@ -1349,10 +1302,8 @@ impl UiSettings {
             crate::typography::FONT_SIZE_MAX,
             crate::typography::CODE_FONT_SIZE_DEFAULT,
         );
-        // slopty: no History surface (ruled out).
         self.ui_font_size = self.ui_font_size.normalized();
         self.keymap.heal_jump_slots();
-        // slopty: no composer holds a key, so none is healed for one.
         self
     }
 
@@ -1364,7 +1315,6 @@ impl UiSettings {
             Ok(text) => {
                 match serde_json::from_str::<serde_json::Value>(&text).and_then(|mut value| {
                     if let Some(settings) = value.as_object_mut() {
-                        // slopty: appshots removed.
                         // The files-editor size was the first user-facing code
                         // size; it now drives every code surface.
                         if let Some(legacy) = settings.remove("filesEditorFontSize") {
@@ -1375,7 +1325,7 @@ impl UiSettings {
                 }) {
                     Ok(settings) => settings.clamped(),
                     Err(err) => {
-                        // slopty: a file that does not parse is moved aside and said, never
+                        // A file that does not parse is moved aside and said, never
                         // overwritten by the next save.
                         tracing::warn!(error = %err, "ui-settings corrupt; using defaults");
                         set_aside(data_dir);
@@ -1383,7 +1333,7 @@ impl UiSettings {
                     }
                 }
             }
-            // slopty: none yet is the defaults; one that cannot be read (not UTF-8, refused)
+            // None yet is the defaults; one that cannot be read (not UTF-8, refused)
             // is moved aside as a corrupt one is.
             Err(err) if err.kind() == io::ErrorKind::NotFound => Self::default(),
             Err(err) => {
@@ -1410,7 +1360,6 @@ impl UiSettings {
     }
 }
 
-// slopty: a settings file that could not be read, moved aside rather than overwritten.
 /// Settings files [`UiSettings::load`] could not read, by the data directory they were in, with
 /// where each was moved (`None` when the move failed too), until [`init`] for that directory
 /// takes them.
@@ -1515,7 +1464,6 @@ mod tests {
             height: 800.0,
         };
         let settings = UiSettings {
-            // slopty: dictation removed.
             window_geometry: Some(geometry),
             ..Default::default()
         };
@@ -1797,11 +1745,9 @@ mod tests {
     fn round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = UiSettings {
-            // slopty: dictation and voice removed.
             window_geometry: None,
             sidebar_width: 300.0,
             sidebar_collapsed: true,
-            // slopty: no Star on GitHub banner.
             last_space_id: Some("space-1".into()),
             last_project_action_by_space_id: std::collections::HashMap::from([(
                 "space-1".into(),
@@ -1809,27 +1755,24 @@ mod tests {
             )]),
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
-            machine_filter: Some("studio".into()), // slopty
+            machine_filter: Some("studio".into()),
             notifications_enabled: false,
             files_panel_width: 310.0,
             right_pane_width: 700.0,
             terminal_height: 320.0,
-            session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
-            session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
+            session_panels: std::collections::BTreeMap::new(),
+            session_tabs: std::collections::BTreeMap::new(),
             palette_uses: std::collections::BTreeMap::from([(
                 "Toggle sidebar".into(),
                 PaletteUse { count: 3, last_ms: 1_793_000_000_000 },
             )]),
-            // slopty: the inspector's format for a kind of step's output.
             output_formats: std::collections::BTreeMap::from([("Bash".into(), "markdown".into())]),
             keymap: KeymapConfig {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()
             },
             settings_section: crate::shell::SettingsSection::Shortcuts,
-            // slopty: appshots removed.
             appearance: crate::appearance::AppearanceMode::Light,
-            // slopty: no History surface (ruled out).
             ui_font_family: crate::typography::UiFontFamily::Installed("Arial".into()),
             ui_font_size: crate::typography::UiFontSize::ALL[5],
             theme_selection: slopty_shell_theme::ThemeSelection {
@@ -1838,11 +1781,10 @@ mod tests {
             },
             diff_split: true,
             diff_wrap: true,
-            diff_ignore_whitespace: true, // slopty
-            diff_show_tree: true,         // slopty
+            diff_ignore_whitespace: true,
+            diff_show_tree: true,
             conversation_width: ConversationWidth::Wide,
             open_web_links_in_slopty: false,
-            // slopty: no pull-request pages.
             files_autosave_enabled: true,
             files_autosave_delay_ms: 1_500,
             files_word_wrap: true,
@@ -1859,9 +1801,9 @@ mod tests {
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(json.contains(r#""diffWrap": true"#));
-        assert!(json.contains(r#""machineFilter": "studio""#)); // slopty
-        assert!(json.contains(r#""outputFormats": {"#)); // slopty
-        // slopty: the shortcuts keep only the changed combo.
+        assert!(json.contains(r#""machineFilter": "studio""#));
+        assert!(json.contains(r#""outputFormats": {"#));
+        // The shortcuts keep only the changed combo.
         assert!(json.contains(r#""toggleSidebar": "mod-shift-s""#));
         assert!(!json.contains(r#""saveFile""#));
         assert_eq!(UiSettings::load(dir.path()), settings);
@@ -1907,7 +1849,7 @@ mod tests {
         );
     }
 
-    // slopty: each preset's cap against the window, Amp's breakpoints; the choice persists.
+    // Each preset's cap against the window, Amp's breakpoints; the choice persists.
     #[test]
     fn conversation_widths_follow_the_window_and_persist() {
         use ConversationWidth::*;
@@ -1961,7 +1903,6 @@ mod tests {
             crate::typography::TERMINAL_FONT_SIZE_DEFAULT
         );
         assert!(!loaded.files_show_all);
-        // slopty: no History surface (ruled out).
     }
 
     #[test]
@@ -2015,7 +1956,7 @@ mod tests {
         assert_eq!(loaded.sidebar_width, 300.0);
     }
 
-    // slopty: a file that cannot be read is moved aside and said, and the next save never
+    // A file that cannot be read is moved aside and said, and the next save never
     // writes over it; none at all is quietly the defaults.
     #[gpui::test]
     fn a_corrupt_file_is_moved_aside_and_said(cx: &mut gpui::TestAppContext) {
@@ -2212,8 +2153,6 @@ mod tests {
         );
     }
 
-    // slopty: no History surface (ruled out).
-
     #[test]
     fn large_right_pane_width_is_preserved() {
         let loaded = UiSettings {
@@ -2243,7 +2182,7 @@ mod tests {
         assert!(!d.sidebar_collapsed);
     }
 
-    // slopty: settings a pre-release build stopped keeping are deleted outright; a file that
+    // Settings a pre-release build stopped keeping are deleted outright; a file that
     // still holds them loads as if they were not there, its other choices kept.
     #[test]
     fn a_file_holding_deleted_settings_still_loads() {
@@ -2320,7 +2259,7 @@ mod tests {
         }
     }
 
-    /// slopty: the file keeps only what the person changed, so a default that moves reaches
+    /// The file keeps only what the person changed, so a default that moves reaches
     /// every shortcut left alone.
     #[test]
     fn the_file_keeps_only_the_combos_the_person_changed() {
@@ -2356,9 +2295,9 @@ mod tests {
         assert_eq!(keymap.get(ShortcutId::SaveFile), "mod-s");
         assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-b");
         assert_eq!(keymap.get(ShortcutId::ToggleChanges), "mod-r");
-        assert_eq!(keymap.get(ShortcutId::NextNeedsYou), "mod-j"); // slopty
-        assert_eq!(keymap.get(ShortcutId::Inbox), "mod-shift-j"); // slopty
-        let ctrl = if crate::keys::MOD_IS_COMMAND { // slopty
+        assert_eq!(keymap.get(ShortcutId::NextNeedsYou), "mod-j");
+        assert_eq!(keymap.get(ShortcutId::Inbox), "mod-shift-j");
+        let ctrl = if crate::keys::MOD_IS_COMMAND {
             "ctrl"
         } else {
             "mod"
@@ -2398,7 +2337,7 @@ mod tests {
     fn combo_recording() {
         // How this platform spells a recorded ctrl (see `combo_from_keystroke_on`).
         let ctrl_combo = |suffix: &str| {
-            if crate::keys::MOD_IS_COMMAND { // slopty
+            if crate::keys::MOD_IS_COMMAND {
                 format!("ctrl-{suffix}")
             } else {
                 format!("mod-{suffix}")
@@ -2494,7 +2433,7 @@ mod tests {
 
     #[test]
     fn combo_translation() {
-        let primary = if crate::keys::MOD_IS_COMMAND { // slopty
+        let primary = if crate::keys::MOD_IS_COMMAND {
             "cmd"
         } else {
             "ctrl"
@@ -2508,7 +2447,7 @@ mod tests {
 
     #[test]
     fn a_file_without_shortcuts_takes_every_default() {
-        // slopty: the old `keymap`, which froze every default it was saved with, is not read.
+        // The old `keymap`, which froze every default it was saved with, is not read.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
@@ -2676,7 +2615,7 @@ mod tests {
 
     #[test]
     fn a_default_yields_to_a_chord_the_person_gave_another_action() {
-        // slopty: ⌘J moved to the jump; a person who had put it on another action keeps it there
+        // ⌘J is the jump's; a person who had put it on another action keeps it there
         // and the jump arrives unbound, rather than one chord binding twice.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(

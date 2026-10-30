@@ -1,5 +1,4 @@
-//! slopty: the images a reply's markdown names, drawn in the transcript (zeron leaves
-//! `![alt](path)` as text there).
+//! The images a reply's markdown names, drawn in the transcript.
 //!
 //! A path resolves in the chat's folder, as T3 Code does: relative to it, or absolute inside
 //! it; one that leaves the folder is refused and never read. The file is read through the
@@ -142,7 +141,7 @@ pub(super) fn element(
                         .w_full()
                         .max_w(px(widest))
                         .aspect_ratio(aspect)
-                        // slopty: the transcript's one card corner and hairline.
+                        // The transcript's one card corner and hairline.
                         .rounded(px(crate::transcript::TRANSCRIPT_CARD_RADIUS))
                         .overflow_hidden()
                         .border_1()
@@ -168,7 +167,7 @@ pub(super) fn element(
         .into_any_element()
 }
 
-/// slopty: an image's room while it loads: its final box once its first bytes said its shape
+/// An image's room while it loads: its final box once its first bytes said its shape
 /// (so nothing under it moves when it arrives), else 4:3.
 fn placeholder(
     id: SharedString,

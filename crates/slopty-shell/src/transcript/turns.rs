@@ -1,4 +1,4 @@
-//! slopty: a turn's root row (`docs/decisions/inspector.md`, "The turn is the root row"). The
+//! A turn's root row (`docs/decisions/inspector.md`, "The turn is the root row"). The
 //! prompt that opened the turn is its row, and one line under the prompt says the turn's figures:
 //! how it ended when it did not end well, the models that answered, the tokens it took (read
 //! fresh, from the cache, and written; every kind in the tooltip), the lines it changed, and its

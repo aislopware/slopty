@@ -1,5 +1,5 @@
-//! slopty: what an open step's detail holds past zeron's body (`inspector.md`, "Any step opens to
-//! its whole detail").
+//! What an open step's detail holds past its output's plain lines (`inspector.md`, "Any step
+//! opens to its whole detail").
 //!
 //! - Its output in the format the person keeps for its kind: text as the TUI shows it, JSON as a
 //!   tree, markdown rendered. The menu always offers all three, so it never changes shape; one

@@ -1,4 +1,3 @@
-// slopty: Slopty's own file (not in zeron).
 //! Right-click in the chat opens a menu where people expect one: on selected text, Copy; on a
 //! code block, its header's actions (Copy code, Fit content or Use
 //! horizontal scrolling, Run in terminal). The menu is the house's floating menu
@@ -27,8 +26,8 @@ struct ContextMenu {
     active: Option<usize>,
 }
 
-/// The menu of a selection of `words`: Copy. slopty: no Quote in reply; the inspector is
-/// read-only toward the agent.
+/// The menu of a selection of `words`: Copy alone, since the inspector is read-only toward
+/// the agent.
 pub(super) fn selection_choices(words: &str) -> Vec<MenuChoice> {
     let copied = words.to_owned();
     vec![MenuChoice {

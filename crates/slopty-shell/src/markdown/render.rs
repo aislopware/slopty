@@ -23,7 +23,7 @@ use gpui::{
 };
 use slopty_syntax::{HighlightKind, HighlightSpan, HighlightedDocument};
 
-use crate::settings::widgets::ActionHint as _; // slopty: tooltips name their key.
+use crate::settings::widgets::ActionHint as _; // tooltips name their key.
 use crate::theme::Theme;
 
 use super::parser::{Block, BlockTree, InlineRun, TableAlign};
@@ -32,7 +32,6 @@ use crate::motion::HoverFade as _;
 
 /// Gap between markdown blocks inside one message (slopty mdBlockGap).
 pub const MD_BLOCK_GAP: f32 = 12.0;
-// slopty: a gallery's tiles, for two or more images in a row.
 /// A gallery tile's width; its image keeps its aspect within it.
 pub const GALLERY_TILE: f32 = 220.0;
 const GALLERY_GAP: f32 = 8.0;
@@ -44,10 +43,10 @@ pub const GALLERY_ID: &str = "gallery";
 pub fn in_gallery(id: &str) -> bool {
     id.contains("-gallery-")
 }
-/// Body text size / line height (slopty: 14px / 22px).
+/// Body text size / line height (14px / 22px).
 pub const MD_TEXT_SIZE: f32 = 14.0;
 pub const MD_LINE_HEIGHT: f32 = 22.0;
-/// slopty: the prose of a run read in its card, under the card's 12 pt title: Claude's compact
+/// The prose of a run read in its card, under the card's 12 pt title: Claude's compact
 /// body (#24).
 pub const MD_COMPACT_TEXT_SIZE: f32 = 13.0;
 pub const MD_COMPACT_LINE_HEIGHT: f32 = 20.0;
@@ -60,7 +59,7 @@ const CODE_LINE_HEIGHT_RATIO: f32 = CODE_LINE_HEIGHT / CODE_TEXT_SIZE;
 pub const CODE_PADDING_X: f32 = 12.0;
 pub const CODE_PADDING_Y: f32 = 10.0;
 const CODE_HEADER_HEIGHT: f32 = 28.0;
-// slopty: a header action is a 24 px target (the house's minimum) with a 12 px glyph.
+// A header action is a 24 px target (the house's minimum) with a 12 px glyph.
 const CODE_ACTION_SIZE: f32 = 24.0;
 const CODE_ACTION_GLYPH: f32 = 12.0;
 const CODE_SCROLLBAR_HIT_HEIGHT: f32 = 10.0;
@@ -121,14 +120,14 @@ pub struct RenderOptions {
     /// scroll state, keyed by the same element discriminator passed to
     /// [`render_block`]. `None` keeps non-chat Markdown surfaces unchanged.
     pub code: Option<HashMap<usize, CodeUi>>,
-    // slopty: a code block's right-click menu, its header's actions; `None` offers none.
+    // A code block's right-click menu, its header's actions; `None` offers none.
     pub code_menu: Option<Rc<MenuFn>>,
-    /// slopty: the prose's size and line height, in points: paragraphs and list items
+    /// The prose's size and line height, in points: paragraphs and list items
     /// ([`MD_TEXT_SIZE`], or [`MD_COMPACT_TEXT_SIZE`] in a card).
     pub body: (f32, f32),
 }
 
-/// slopty: one choice of a right-click menu: its words, the key that does the same (in
+/// One choice of a right-click menu: its words, the key that does the same (in
 /// `keys::combo_text`'s spelling), and what it does.
 #[derive(Clone)]
 pub struct MenuChoice {
@@ -137,7 +136,7 @@ pub struct MenuChoice {
     pub act: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
 }
 
-/// slopty: open the menu named `label` of `choices` at the pointer.
+/// Open the menu named `label` of `choices` at the pointer.
 pub type MenuFn = dyn Fn(&'static str, Vec<MenuChoice>, gpui::Point<gpui::Pixels>, &mut Window, &mut gpui::App);
 
 #[derive(Clone)]
@@ -145,13 +144,13 @@ pub struct TaskUi {
     pub toggle: Option<Rc<dyn Fn(&super::parser::TaskMarker, &mut Window, &mut gpui::App)>>,
 }
 
-/// slopty: a chart fence's page card for its language, code and frame id; `None` when the
+/// A chart fence's page card for its language, code and frame id; `None` when the
 /// language names no chart.
 pub type ChartFn = dyn Fn(&str, &str, SharedString, &Theme) -> Option<AnyElement>;
 
 #[derive(Clone)]
 pub struct MediaUi {
-    /// slopty: chart fences (```` ```vega-lite ````, ```` ```plotly ````) draw as page cards.
+    /// Chart fences (```` ```vega-lite ````, ```` ```plotly ````) draw as page cards.
     pub chart: Option<Rc<ChartFn>>,
     pub diagram: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramView>>,
     /// `None` keeps inline images in their ordinary text rendering.
@@ -295,7 +294,7 @@ pub struct CodeFenceRuntime {
 }
 
 /// Build the interaction state shared by chat and file-preview code fences:
-/// scroll and drag state stay with one fence. // slopty: a fence always scrolls
+/// scroll and drag state stay with one fence. A fence always scrolls
 /// sideways, full width, and never wraps (the Amp study's P8).
 pub fn code_ui_for<V, F>(
     key: SharedString,
@@ -726,7 +725,7 @@ pub fn render_block(
                             .min_w(px(18.0))
                             .text_size(crate::typography::ui_rems(opts.body.0))
                             .line_height(crate::typography::ui_rems(opts.body.1))
-                            // slopty: figures that line up.
+                            // Figures that line up.
                             .text_color(theme.accent)
                             .font_features(crate::typography::tabular())
                             .child(SharedString::from(format!("{}.", start + item_ix as u64)))
@@ -787,7 +786,7 @@ pub fn render_block(
             rows,
             align,
         } => {
-            // slopty: a table copies as Markdown or as CSV from its hover.
+            // A table copies as Markdown or as CSV from its hover.
             let table = render_table(header, rows, align, top_ix, ix, opts, theme, window);
             table_with_copy(table, header, rows, ix, opts, theme)
         }
@@ -861,7 +860,7 @@ fn render_math_block(
     scroller.into_any_element()
 }
 
-/// Tight monochrome heading scale (slopty: h2 ≈ 16px semibold; headings step
+/// Tight monochrome heading scale (h2 ≈ 16px semibold; headings step
 /// down quickly toward body size).
 fn heading_metrics(level: u8) -> (f32, f32) {
     match level {
@@ -1193,11 +1192,11 @@ pub fn inline_code_wash(theme: &Theme) -> Hsla {
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
 /// x extends 1px past the glyphs, y insets 2px from the 22px line box).
-/// slopty: the wash meets the hair spaces either side of the code ([`CODE_HAIR`]), which give
+/// The wash meets the hair spaces either side of the code ([`CODE_HAIR`]), which give
 /// it room in the line rather than painting over the words beside it (#20).
 pub const INLINE_CODE_RADIUS: f32 = 4.5;
 pub const INLINE_CODE_PAD_X: f32 = 1.0;
-/// slopty: the hair space (U+200A) either side of inline code, inside its wash: shown, but
+/// The hair space (U+200A) either side of inline code, inside its wash: shown, but
 /// never copied or found (#20). The one before holds to the code with a word joiner (U+2060),
 /// so a line never breaks between them and leaves a sliver of wash at its end.
 pub const CODE_HAIR_BEFORE: &str = "\u{200A}\u{2060}";
@@ -1218,7 +1217,7 @@ pub fn flatten_runs(runs: &[InlineRun], theme: &Theme, bold_default: bool) -> Fl
 }
 
 /// [`flatten_runs`] with an explicit base weight (table headers are 700 per
-/// slopty's `table.headerWeight`; strong runs never drop below semibold).
+/// `table.headerWeight`; strong runs never drop below semibold).
 fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWeight) -> FlatText {
     let mut text = String::new();
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
@@ -1228,7 +1227,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
     // A run may stand for a longer source text than it shows (a file link
     // labeled by its file name, a formula's slot). The source is only kept
     // when some run does.
-    // slopty: and inline code, whose hair spaces are shown but not its source (#20).
+    // and inline code, whose hair spaces are shown but not its source (#20).
     let relabeled = runs
         .iter()
         .any(|run| run.style.file_label.is_some() || run.style.math || run.style.code);
@@ -1248,7 +1247,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         if run.text.is_empty() {
             continue;
         }
-        // slopty: a stretch of inline code opens and closes on a hair space (#20).
+        // A stretch of inline code opens and closes on a hair space (#20).
         let hair_lead = haired(run) && !after_code;
         let hair_trail = haired(run)
             && !runs[run_ix + 1..].iter().find(|next| !next.text.is_empty()).is_some_and(haired);
@@ -1319,7 +1318,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
                 formula,
                 display: false,
                 scale: super::math::MATH_SCALE,
-                tex: run.text.clone().into(), // slopty: its math node's label
+                tex: run.text.clone().into(), // its math node's label
             });
         }
         let mut f = if slot.is_some() {
@@ -1345,7 +1344,7 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         // Links stay monochrome — foreground with an underline (slopty's md
         // theme underlines in the text color; indigo is reserved for primary
         // actions).
-        // slopty: a link to a chat shown as its chip (`chat_links.rs`) sits in the code wash,
+        // A link to a chat shown as its chip (`chat_links.rs`) sits in the code wash,
         // not underlined.
         let chip = run.style.file_label.is_some()
             && run.style.link.as_deref().is_some_and(super::chat_links::is_chat_link);
@@ -1573,7 +1572,7 @@ pub(super) fn flat_text_presented_element(
                     ));
                 }
             }
-            // slopty: find in thread washes its matches here too.
+            // Find in thread washes its matches here too.
             super::find::paint(window, surface, &sel_key, &flat_text, &layout, &|range| {
                 offsets
                     .as_ref()
@@ -1732,7 +1731,7 @@ fn paint_text_selection_with_wash(
             ));
         }
     }
-    super::find::paint(window, surface, key, text, layout, &|range| range); // slopty: find.
+    super::find::paint(window, surface, key, text, layout, &|range| range);
     REGISTRY.with(|r| {
         r.borrow_mut().push(RegEntry {
             surface,
@@ -1802,17 +1801,6 @@ thread_local! {
     static PAINTING_SURFACE: Cell<u64> = const { Cell::new(0) };
     /// Surfaces whose reset painted since the latest one's previous reset.
     static PAINTED_SURFACES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-}
-
-#[cfg(test)]
-pub(crate) fn selection_test_entry_count(prefix: &str) -> usize {
-    REGISTRY.with(|registry| {
-        registry
-            .borrow()
-            .iter()
-            .filter(|entry| entry.key.starts_with(prefix))
-            .count()
-    })
 }
 
 #[cfg(test)]
@@ -2185,7 +2173,7 @@ pub(super) fn text_element(
 ) -> AnyElement {
     if let Some(image_ui) = opts.media.as_ref().and_then(|media| media.image.as_ref()) {
         if runs.iter().any(|run| run.style.image.is_some()) {
-            // slopty: images with nothing but space between them make one gallery.
+            // Images with nothing but space between them make one gallery.
             let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
             let mut start = 0;
             for (index, run) in runs.iter().enumerate() {
@@ -2437,7 +2425,7 @@ fn render_code_block(
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
-    // slopty: a chart fence draws as its page card.
+    // A chart fence draws as its page card.
     if let Some(language) = language
         && let Some(chart) = opts.media.as_ref().and_then(|media| media.chart.as_ref())
         && let Some(card) = chart(language, code, format!("{}-chart-{ix}", opts.row_key).into(), theme)
@@ -2521,7 +2509,7 @@ fn code_icon_action(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        // slopty: a tab stop with the shared ring (M8).
+        // A tab stop with the shared ring (M8).
         .tab_index(0)
         .map(|el| crate::surface_chrome::focus_ring(el, theme))
         .bg(crate::motion::hover_blend(
@@ -2534,7 +2522,7 @@ fn code_icon_action(
             cx.stop_propagation();
             handler(window, cx);
         })
-        // slopty: the house tooltip; one glyph size across the header.
+        // The house tooltip; one glyph size across the header.
         .hint(label)
         .child(
             crate::icons::icon(icon_path)
@@ -2573,7 +2561,7 @@ fn code_copy_button(
         let code_text: SharedString = code.to_string().into();
         let handler = copy.handler.clone();
         let fade_key = format!("{}-copy{ix}", opts.row_key);
-        // slopty: the copy keeps its size: its tooltip says "Copied" while the check is drawn in
+        // The copy keeps its size: its tooltip says "Copied" while the check is drawn in
         // (`CopyGlyph`; design-inspiration item 12), so Run beside it never moves under the
         // pointer.
         let copied_key = SharedString::from(format!("{}-copied{ix}", opts.row_key));
@@ -2588,7 +2576,7 @@ fn code_copy_button(
             .items_center()
             .justify_center()
             .cursor_pointer()
-            // slopty: a tab stop with the shared ring (M8).
+            // A tab stop with the shared ring (M8).
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .bg(crate::motion::hover_blend(
@@ -2648,7 +2636,7 @@ fn code_block_header(
     )
 }
 
-// slopty: a table's copy.
+// A table's copy.
 fn cell_text(cell: &[InlineRun]) -> String {
     cell.iter().map(|run| run.text.as_str()).collect::<String>().replace('\n', " ")
 }
@@ -2713,7 +2701,7 @@ fn table_with_copy(
         let copied = copy.copied_ix == Some(TABLE_COPY_IX + ix * 2 + kind);
         let id: SharedString = format!("{group}-{kind}").into();
         let text: SharedString = text.into();
-        // slopty: the chip keeps its words and size; its glyph and tooltip say "Copied".
+        // The chip keeps its words and size; its glyph and tooltip say "Copied".
         let fade = id.to_string();
         div()
             .id(id)
@@ -2773,7 +2761,7 @@ fn table_with_copy(
         .into_any_element()
 }
 
-/// slopty: the faces a code fence falls back to, as the terminal's chain
+/// The faces a code fence falls back to, as the terminal's chain
 /// (`slopty_kit::fonts::terminal_fallbacks`, registered with CoreText at launch): the symbol face
 /// first (powerline, devicons, box drawing), then the platform's monospace and colour emoji.
 fn code_fallbacks() -> gpui::FontFallbacks {
@@ -2841,10 +2829,10 @@ fn render_code_block_source_with_actions(
     highlight: CodeHighlight,
     extra_actions: Vec<AnyElement>,
 ) -> AnyElement {
-    // slopty: a prompt's powerline and Nerd glyphs draw from the bundled symbol face.
+    // A prompt's powerline and Nerd glyphs draw from the bundled symbol face.
     let mut mono = font(theme.font_mono.clone());
     mono.fallbacks = Some(code_fallbacks());
-    // slopty: terminal output draws in its colours; what shows, copies and runs is its text.
+    // Terminal output draws in its colours; what shows, copies and runs is its text.
     let ansi = super::ansi::is_ansi_fence(language, code).then(|| super::ansi::parse(language, code));
     let plain = ansi
         .as_ref()
@@ -3014,7 +3002,7 @@ fn render_code_block_source_with_actions(
         });
 
     let frame_body = div().w_full().relative().child(body).children(scrollbar);
-    // slopty: the header's actions again under a right-click.
+    // The header's actions again under a right-click.
     let menu_choices = opts.code_menu.as_ref().map(|_| {
         let mut choices = Vec::new();
         if let Some(copy) = opts.copy.as_ref() {
@@ -3214,7 +3202,7 @@ mod tests {
         })
     }
 
-    /// Where the glyph at `ix` of `key`'s copy text is drawn (slopty: past the hair spaces
+    /// Where the glyph at `ix` of `key`'s copy text is drawn (past the hair spaces
     /// inline code shows, which its copy text does not hold).
     fn selection_position(key: &str, ix: usize) -> gpui::Point<gpui::Pixels> {
         let (_, layout, offsets) = selection_test_snapshot(key);
@@ -3337,7 +3325,7 @@ mod tests {
         );
     }
 
-    /// slopty: a reply of `count` paragraphs, each with a formula in its line and one on its own,
+    /// A reply of `count` paragraphs, each with a formula in its line and one on its own,
     /// none the same as another's, so none is laid out before.
     fn formula_reply(count: usize, salt: &str) -> String {
         (0..count)
@@ -3350,7 +3338,7 @@ mod tests {
             .collect()
     }
 
-    /// slopty: a reply with formulas, set as the window draws it.
+    /// A reply with formulas, set as the window draws it.
     struct MathCostHarness(String);
 
     impl Render for MathCostHarness {
@@ -3367,7 +3355,7 @@ mod tests {
         }
     }
 
-    /// slopty: what a formula costs a frame: the first frame lays out and paints every formula,
+    /// What a formula costs a frame: the first frame lays out and paints every formula,
     /// later ones only paint (docs/MEASUREMENTS.md, "Math typeset by zatex"). The same reply with
     /// its `$` delimiters gone, its formulas plain words, is the baseline.
     #[gpui::test]
@@ -4258,7 +4246,7 @@ mod tests {
             false,
         );
         // Adjacent code runs merge into ONE wash box; separated ones don't.
-        // slopty: each box holds its hair spaces, one either side of its code (#20).
+        // Each box holds its hair spaces, one either side of its code (#20).
         let (before, after) = (CODE_HAIR_BEFORE.len(), CODE_HAIR_AFTER.len());
         assert_eq!(
             flat.text.as_ref(),
@@ -4269,7 +4257,7 @@ mod tests {
             flat.code_ranges,
             vec![4..4 + before + 5 + after, second..second + before + 3 + after]
         );
-        // slopty: and they are only shown: copy and find read the source.
+        // And they are only shown: copy and find read the source.
         let original = flat.original.as_ref().expect("the source is kept");
         assert_eq!(original.text.as_ref(), "use foo() and bar");
         assert_eq!(original.offsets.original(4 + before), 4, "foo starts where it did");
@@ -4279,7 +4267,7 @@ mod tests {
         assert_eq!(flat.runs[2].color, inline_code_text(&theme));
         assert_eq!(flat.runs[2].background_color, None);
         assert_eq!(flat.runs[0].color, theme.text);
-        // slopty: an empty run between two code runs is passed over by the lead as by the trail:
+        // An empty run between two code runs is passed over by the lead as by the trail:
         // one box, its hair spaces one either side.
         let flat = flatten_runs(&[code("foo"), plain(""), code("()")], &theme, false);
         assert_eq!(flat.text.as_ref(), format!("{CODE_HAIR_BEFORE}foo(){CODE_HAIR_AFTER}"));
@@ -4639,10 +4627,4 @@ mod tests {
         );
         assert!(cache.code.is_empty());
     }
-}
-
-/// Native fixture access to actual shaped link ranges; absent in shipped builds.
-#[cfg(feature = "browser-fixture")]
-pub fn fixture_link(target: &str) -> Option<(gpui::Point<gpui::Pixels>, gpui::FocusHandle)> {
-    super::link_interaction::fixture_link(target)
 }

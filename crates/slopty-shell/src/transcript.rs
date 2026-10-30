@@ -15,7 +15,7 @@
 //!   messages rebuild (the anti-"streaming stutter" trick);
 //! - row-set changes diff by (id, version) into one minimal `splice`.
 //!
-//! slopty: the follow rule (`docs/decisions/inspector.md`, "Follow and anchor"): the list
+//! The follow rule (`docs/decisions/inspector.md`, "Follow and anchor"): the list
 //! follows its end (GPUI's `FollowMode::Tail`) only while within [`FOLLOW_PX`] of it, and lets
 //! go only on the person's own move: a wheel or drag up, a scroll key, a jump, or a press or a
 //! selection in a row. Otherwise the first row in view holds its place by its key, whatever
@@ -48,29 +48,26 @@ use crate::markdown::veil::RowVeil;
 use crate::motion::{self, AnimationExt as _};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
-use crate::settings::widgets::ActionHint as _; // slopty: tooltips name their key.
+use crate::settings::widgets::ActionHint as _; // tooltips name their key.
 use crate::theme::Theme;
 use slopty_syntax::LanguageId as Lang;
 use crate::motion::HoverFade as _;
 
-// slopty: Slopty's own rows, and find in thread.
-mod context_menu; // slopty: right-click menus in the chat.
-mod detail; // slopty: an open step's format, running box, exit code and fetched sections.
+mod context_menu; // right-click menus in the chat.
+mod detail; // an open step's format, running box, exit code and fetched sections.
 mod extras;
-// slopty: background work in the transcript (task notices, notices, a call's facts) and a
-// subagent's card, which opens in place.
 mod md_images;
 mod pages;
-mod sticky; // slopty: the prompt a long turn answers, held at the top.
+mod sticky; // an open group's header, held at the top while its rows scroll.
 mod subagents;
 #[cfg(test)]
-mod surface_tests; // slopty: the transcript's own rows, read by assistive tech.
+mod surface_tests; // the transcript's own rows, read by assistive tech.
 pub mod work;
 pub(crate) mod find;
-mod jump; // slopty: the pill that says what waits below and goes back to it.
-mod json_tree; // slopty: JSON as a tree, for an output and a raw record.
-mod turns; // slopty: a turn's root row, its figures under its prompt.
-pub(crate) mod trace; // slopty: the trace's one fold depth.
+mod jump; // the pill that says what waits below and goes back to it.
+mod json_tree; // JSON as a tree, for an output and a raw record.
+mod turns; // a turn's root row, its figures under its prompt.
+pub(crate) mod trace; // the trace's one fold depth.
 pub use extras::claude_too_old;
 pub(crate) use subagents::Run;
 pub use find::{FindInThread, FindNext, FindPrevious};
@@ -81,7 +78,7 @@ pub use find::{FindInThread, FindNext, FindPrevious};
 
 /// List overdraw beyond the viewport.
 pub const OVERDRAW_PX: f32 = 320.0;
-/// slopty: the jump pill shows, with no new row below, once the view is this far from the end.
+/// The jump pill shows, with no new row below, once the view is this far from the end.
 pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
 /// Bound session-local viewport memory independently of total chat history.
 const MAX_SAVED_VIEWPORTS: usize = 256;
@@ -90,7 +87,7 @@ const MAX_SAVED_VIEWPORTS: usize = 256;
 /// on low-end devices.
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
 const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
-// slopty: the working line's words, in its muted ink, read at a glance beside the reply (Claude
+// The working line's words, in its muted ink, read at a glance beside the reply (Claude
 // desktop's status line).
 const WORKING_LEAD_SIZE: f32 = 13.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
@@ -114,21 +111,21 @@ const ACTIVITY_TRUNK_X: f32 = 12.5;
 const ACTIVITY_BEND_RADIUS: f32 = 6.0;
 const ACTIVITY_BRANCH_END_X: f32 = 28.0;
 const ACTIVITY_ICON_LEFT: f32 = 32.0;
-/// slopty: where an activity line's words start: a group's summary after its chevron, a lone
+/// Where an activity line's words start: a group's summary after its chevron, a lone
 /// call after its icon, a notice after its dot (#2, #4).
 const ACTIVITY_TITLE_X: f32 = 28.0;
-/// slopty: every bordered card in the transcript's column (code, files, subagents, pages,
+/// Every bordered card in the transcript's column (code, files, subagents, pages,
 /// images, requests) shares one corner and the theme's hairline.
 pub(crate) const TRANSCRIPT_CARD_RADIUS: f32 = 10.0;
-/// slopty: the copy span's key for entry `entry`'s message.
+/// The copy span's key for entry `entry`'s message.
 fn copy_message_key(entry: &str) -> String {
     format!("copy-message-{entry}")
 }
 
-/// slopty: the lane under an entry's last row: its hover strip (timestamp, copy) and, under the
+/// The lane under an entry's last row: its hover strip (timestamp, copy) and, under the
 /// last row of a live turn, the working line in the same room.
 pub(crate) const ROW_LANE_HEIGHT: f32 = Theme::SPACE_SM + Theme::SPACE_MD * 2.0;
-/// slopty: the step before a person's prompt, which heads its turn (#1).
+/// The step before a person's prompt, which heads its turn (#1).
 const PROMPT_GAP: f32 = Theme::SPACE_LG + Theme::SPACE_SM;
 const ACTIVITY_ICON_SIZE: f32 = 16.0;
 const TOOL_TEXT_SIZE: f32 = 12.0;
@@ -136,14 +133,14 @@ const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
 const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
 const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
 
-/// slopty: a tool group's summary row as drawn: a finger's row on a touch screen (#23).
+/// A tool group's summary row as drawn: a finger's row on a touch screen (#23).
 fn tool_group_header_height() -> f32 {
     crate::surface_chrome::touch_row_height(TOOL_GROUP_HEADER_HEIGHT)
 }
 
 /// Compact rows retain the analytic heights used by row and group folds.
 const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
-/// slopty: a jump's landing flash fading out (Claude's `code-reply-flash`, 1.2 s ease-out, #13).
+/// A jump's landing flash fading out (Claude's `code-reply-flash`, 1.2 s ease-out, #13).
 const LANDING_FLASH: motion::MotionSpec = motion::MotionSpec::new(1_200, motion::EASE_OUT);
 
 /// Each newly appended row reveals quickly enough to read as a continuous log
@@ -204,7 +201,7 @@ const USER_FOLD_OVERDRAW_LINES: usize = 2;
 pub const USER_COLLAPSE_CHARS: usize = 400;
 /// Vertical separation before the plain expand/collapse link.
 const USER_TOGGLE_GAP: f32 = 4.0;
-/// slopty: the expander's line, at its 12 pt (#6).
+/// The expander's line, at its 12 pt (#6).
 const USER_TOGGLE_LINE_HEIGHT: f32 = 18.0;
 /// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
 /// a wrapping strip. Fixed thumbnail sizes keep load-state flips from
@@ -212,14 +209,14 @@ const USER_TOGGLE_LINE_HEIGHT: f32 = 18.0;
 pub const ATT_THUMB_W: f32 = 112.0;
 pub const ATT_THUMB_H: f32 = 80.0;
 
-/// slopty: the view follows its end only while within this of it (`inspector.md`, "Follow and
+/// The view follows its end only while within this of it (`inspector.md`, "Follow and
 /// anchor").
 pub const FOLLOW_PX: f32 = 2.0;
-/// slopty: a row a jump lands on rests this far below the transcript viewport's top (`rail.rs`):
+/// A row a jump lands on rests this far below the transcript viewport's top (`rail.rs`):
 /// the transcript lays out inside its pane, which clears the window's chrome, so the inset is
 /// only its own top scroll edge, and the row rests where that fade ends.
 pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TRANSCRIPT_FADE_BAND;
-/// slopty: what a markdown block says, as plain text: its texts as drawn (a relabelled link by
+/// What a markdown block says, as plain text: its texts as drawn (a relabelled link by
 /// its label), in paint order, a line each.
 fn block_words(block: &crate::markdown::Block) -> String {
     let mut texts = Vec::new();
@@ -227,7 +224,7 @@ fn block_words(block: &crate::markdown::Block) -> String {
     texts.join("\n")
 }
 
-/// slopty: an agent of `harness` by name, "Agent" when the chat names none (#10).
+/// An agent of `harness` by name, "Agent" when the chat names none (#10).
 fn agent_name(harness: Option<slopty_view_proto::HarnessId>) -> SharedString {
     let Some(harness) = harness else { return "Agent".into() };
     crate::settings::SKILL_COMPLETION_HARNESSES
@@ -236,13 +233,13 @@ fn agent_name(harness: Option<slopty_view_proto::HarnessId>) -> SharedString {
         .map_or_else(|| harness.as_str().into(), |(_, name)| (*name).into())
 }
 
-/// slopty: the focus of a strip's Copy, and what redraws the strip as it gains or loses it.
+/// The focus of a strip's Copy, and what redraws the strip as it gains or loses it.
 struct StripFocus {
     copy: gpui::FocusHandle,
     _redraw: [gpui::Subscription; 2],
 }
 
-/// slopty: `inner` as the start of a message `who` said, to the accessibility tree.
+/// `inner` as the start of a message `who` said, to the accessibility tree.
 fn message_article(row: &SharedString, who: impl Into<SharedString>, inner: AnyElement) -> AnyElement {
     div()
         .id(SharedString::from(format!("{row}-message")))
@@ -311,13 +308,13 @@ pub struct ToolItem {
     /// part. A `Thought`'s text is the `detail`; `resolved == false` means it
     /// is still streaming.
     pub kind: ToolItemKind,
-    /// slopty: its output's text as the doc holds it, which its format menu reads as JSON or
+    /// Its output's text as the doc holds it, which its format menu reads as JSON or
     /// markdown (`transcript/detail.rs`).
     pub output_text: Option<Arc<str>>,
     /// Image files the call read, wrote or printed (as reported; relative
     /// paths resolve against the chat cwd). Expanding the chip previews them.
     pub images: Arc<[SharedString]>,
-    // slopty: what the call says beyond zeron's chip, in the TUI's words (`transcript/work.rs`).
+    // What the call says beyond its chip, in the TUI's words (`transcript/work.rs`).
     pub facts: Option<Arc<slopty_view_doc::ToolFacts>>,
 }
 
@@ -340,7 +337,7 @@ fn is_agent_tool(item: &ToolItem) -> bool {
 
 /// A chip renders as the spawn LINK (whole-card click → subagent tab) only
 /// when an agent call has actually been bound to its doc.
-// slopty: the subagent's card (`transcript/subagents.rs`), once its run is known: bound to its
+// The subagent's card (`transcript/subagents.rs`), once its run is known: bound to its
 // chat, or with its progress from the view model.
 fn is_spawn_link(item: &ToolItem) -> bool {
     is_agent_call(&item.call)
@@ -357,7 +354,7 @@ fn tool_group_collapses(tools: &[ToolItem]) -> bool {
     tools.iter().any(|t| !is_agent_tool(t))
 }
 
-/// slopty: whether a group folds behind its header, and whether it is one call shown as itself.
+/// Whether a group folds behind its header, and whether it is one call shown as itself.
 /// Agent/spawn chips never fold (a running subagent stays visible). A group of one call (or one
 /// thought) shows the call itself ("Read main.rs"), not a summary to open to learn it ("Read 1
 /// file ›") (#2).
@@ -544,7 +541,7 @@ fn wrap_styled_runs(runs: &[InlineRun], indent: usize, out: &mut Vec<Vec<InlineR
 /// One markdown block into thought detail lines, `indent` spaces deep.
 fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun>>) {
     match block {
-        // slopty: a heading in a thought reads as its prose does, at the body's size and weight
+        // A heading in a thought reads as its prose does, at the body's size and weight
         // (opencode's reasoning): a thought never outranks the answer.
         Block::Paragraph { runs } | Block::Heading { runs, .. } => wrap_styled_runs(runs, indent, out),
         // Interim: display math shows its TeX source like a code block.
@@ -703,7 +700,7 @@ pub enum ToolDetail {
     Output {
         lines: Vec<SharedString>,
         truncated_by: usize,
-        /// slopty: the first of `lines` that is the command's standard error, drawn in the
+        /// The first of `lines` that is the command's standard error, drawn in the
         /// danger colour after its output, as the TUI does.
         stderr_from: Option<usize>,
     },
@@ -728,7 +725,7 @@ pub enum ToolDetail {
     Stats {
         stats: Arc<Vec<slopty_view_doc::ToolDiffStat>>,
     },
-    /// slopty: JSON as a tree, laid out with the folds the person changed in section `key`, one
+    /// JSON as a tree, laid out with the folds the person changed in section `key`, one
     /// fixed-height line each (`transcript/json_tree.rs`).
     Json {
         lines: Arc<Vec<json_tree::Line>>,
@@ -737,7 +734,7 @@ pub enum ToolDetail {
     },
 }
 
-/// Max verbatim output lines per chip before the counted tail row. slopty: the view model's own,
+/// Max verbatim output lines per chip before the counted tail row. The view model's own,
 /// which offers the whole of a longer one.
 pub const OUTPUT_DETAIL_MAX_LINES: usize = slopty_view_doc::OUTPUT_HEAD_LINES;
 
@@ -786,7 +783,7 @@ pub fn tool_detail(
         });
     }
     let output = output?;
-    let mut lines = output_lines(output); // slopty
+    let mut lines = output_lines(output);
     // Trim trailing blank output lines so the block hugs its content.
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
@@ -803,7 +800,7 @@ pub fn tool_detail(
     })
 }
 
-/// slopty: an output's lines as its block draws them: a line of JSON pretty-printed, as the
+/// An output's lines as its block draws them: a line of JSON pretty-printed, as the
 /// TUI's output does.
 fn output_lines(output: &str) -> Vec<SharedString> {
     output
@@ -818,7 +815,7 @@ fn output_lines(output: &str) -> Vec<SharedString> {
 /// Longest line of JSON an output pretty-prints, as the TUI's.
 const PRETTY_JSON_MAX_CHARS: usize = 10_000;
 
-/// slopty: `line` pretty-printed when it is one JSON object or array on its own, as the TUI
+/// `line` pretty-printed when it is one JSON object or array on its own, as the TUI
 /// shows a tool's JSON output.
 fn pretty_json(line: &str) -> Option<String> {
     let trimmed = line.trim();
@@ -835,7 +832,7 @@ fn pretty_json(line: &str) -> Option<String> {
 /// Lines of a command's standard error a chip shows under its output.
 const STDERR_MAX_LINES: usize = 10;
 
-/// slopty: `detail` with the command's standard error after its output, marked to draw in the
+/// `detail` with the command's standard error after its output, marked to draw in the
 /// danger colour; an output of standard error alone when there was no other.
 pub fn with_stderr(detail: Option<ToolDetail>, stderr: Option<&str>) -> Option<ToolDetail> {
     let Some(stderr) = stderr.filter(|s| !s.trim().is_empty()) else { return detail };
@@ -856,7 +853,7 @@ pub fn with_stderr(detail: Option<ToolDetail>, stderr: Option<&str>) -> Option<T
     }
 }
 
-/// slopty: the URL a line of output names, when it names one: the TUI makes it a link.
+/// The URL a line of output names, when it names one: the TUI makes it a link.
 fn line_url(line: &str) -> Option<(usize, &str)> {
     let start = line.find("https://").or_else(|| line.find("http://"))?;
     let rest = line.get(start..)?;
@@ -1038,11 +1035,11 @@ pub fn diff_to_file(diff: &slopty_view_proto::ToolDiff) -> crate::changes::FileD
     }
 }
 
-/// slopty: how a picture a tool returned is named (`slopty_ui::view_model::transcript::image_path`):
+/// How a picture a tool returned is named (`slopty_ui::view_model::transcript::image_path`):
 /// a file read names its file, unlike a picture the agent generated.
 const TOOL_IMAGE_SCHEME: &str = "slopty-image:";
 
-/// slopty: what a picture in the chat is called: one a tool returned by its name ("Image:
+/// What a picture in the chat is called: one a tool returned by its name ("Image:
 /// plot.png"), one the agent generated as such.
 fn image_label(path: &str, name: &str) -> SharedString {
     if path.starts_with(TOOL_IMAGE_SCHEME) && !name.trim().is_empty() {
@@ -1075,7 +1072,7 @@ pub enum RowKind {
         /// Image refs parsed out of the message text (message-attachments.ts):
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
-        /// slopty: the figures of the turn this prompt opened, which its row says under it
+        /// The figures of the turn this prompt opened, which its row says under it
         /// (`inspector.md`, "The turn is the root row").
         turn: Option<Arc<slopty_view_doc::TurnFacts>>,
     },
@@ -1092,28 +1089,28 @@ pub enum RowKind {
         tree: Arc<BlockTree>,
         block_ix: usize,
     },
-    /// slopty: a run of calls and thoughts, folded to one line until the person opens it;
+    /// A run of calls and thoughts, folded to one line until the person opens it;
     /// nothing opens it by itself (`docs/decisions/inspector.md`, "One fold depth").
     ToolGroup {
         summary: Sentence,
         tools: Arc<Vec<ToolItem>>,
     },
-    /// slopty: a subagent, one row like any call: its kind and task, its heartbeat or what it
+    /// A subagent, one row like any call: its kind and task, its heartbeat or what it
     /// answered, its figures and its status. A press splices its steps in under it, Enter drills
     /// in (`transcript/subagents.rs`; `inspector.md`, "A subagent is a nested step").
     Spawn {
         tool: Arc<ToolItem>,
     },
-    /// slopty: the one line over subagents started together ("3 Explore agents · 2 working ·
+    /// The one line over subagents started together ("3 Explore agents · 2 working ·
     /// 1m 12s"); each keeps its own row under it.
     Spawns {
         tools: Arc<Vec<ToolItem>>,
     },
     InputChip {
-        /// slopty: what kind of ask it was: "Question", "Approval", "Confirm", "Form", "Plan".
+        /// What kind of ask it was: "Question", "Approval", "Confirm", "Form", "Plan".
         label: SharedString,
         /// What the chip shows beside its label: a question's header, an approval's command
-        /// (chat-view.tsx `InputChip`). slopty: an open ask's label says what it waits for
+        /// (chat-view.tsx `InputChip`). An open ask's label says what it waits for
         /// ("Waiting for your answer"), which stays TRUE even across a run death: the composer
         /// keeps the panel up until the user answers, and the engine delivers a dead run's
         /// answer as a resumed turn.
@@ -1123,8 +1120,6 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
-    // slopty: Slopty's own rows (`transcript/extras.rs`): an error that says what the agent
-    // said and can be tried again, a quiet divider, a plan's card.
     /// A Claude Code too old to drive: the machine's version and the least one Slopty drives.
     UpdateNeeded {
         least: SharedString,
@@ -1144,7 +1139,7 @@ pub enum RowKind {
         fold: SharedString,
         hidden_lines: usize,
     },
-    // slopty: a background task's notice and a quiet notice of the agent's (`transcript/work.rs`),
+    // A background task's notice and a quiet notice of the agent's (`transcript/work.rs`),
     // and a page shown inline (`crate::page`).
     TaskNote {
         task: Arc<slopty_view_doc::TaskRow>,
@@ -1187,11 +1182,11 @@ pub struct Row {
     /// settled row, beside the timestamp; tools and transport-only metadata
     /// are deliberately excluded.
     pub copy_text: Option<SharedString>,
-    /// slopty: hidden while the named fold is closed (a long plan's rows past its first lines).
+    /// Hidden while the named fold is closed (a long plan's rows past its first lines).
     pub compact_fold: Option<SharedString>,
 }
 
-/// slopty: how a time of day reads everywhere, as the system's clock is set: "%-I:%M %p"
+/// How a time of day reads everywhere, as the system's clock is set: "%-I:%M %p"
 /// ("11:12 PM") on a 12-hour clock, "%H:%M" ("23:12") on a 24-hour one. Read once.
 pub fn clock_format() -> &'static str {
     static TWELVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1214,7 +1209,7 @@ fn system_twelve_hour() -> bool {
     true
 }
 
-/// slopty: the hover strip's time, as near as it is to `now_ms` (#17): the time alone today,
+/// The hover strip's time, as near as it is to `now_ms` (#17): the time alone today,
 /// "Yesterday 3:45 PM", "Jul 1, 3:45 PM" this year, "Jul 1, 2025" before. On the system's clock;
 /// pure over an explicit timezone so tests don't depend on the host's local time.
 pub fn format_timestamp_near<Tz: chrono::TimeZone>(ms: i64, now_ms: i64, tz: &Tz) -> String
@@ -1241,7 +1236,7 @@ where
     }
 }
 
-/// slopty: the hover strip time's whole moment, for its tooltip: "Wednesday, Jul 1, 2026,
+/// The hover strip time's whole moment, for its tooltip: "Wednesday, Jul 1, 2026,
 /// 3:45 PM" (#17).
 pub fn format_full_timestamp<Tz: chrono::TimeZone>(ms: i64, tz: &Tz) -> String
 where
@@ -1334,7 +1329,7 @@ fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
                     acc.extend_from_slice(&stat.deletions.to_le_bytes());
                 }
             }
-            // slopty: a tree is laid out as it is drawn, never held by a row.
+            // A tree is laid out as it is drawn, never held by a row.
             Some(ToolDetail::Json { .. }) => acc.push(5),
         }
         // The invocation block is pure over `call`, which the one-line hash
@@ -1365,7 +1360,7 @@ fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
                     Some(SubagentStatus::Failed) => 3 << 1,
                 },
         );
-        // slopty: facts change in place (a timer, a step, a result line).
+        // Facts change in place (a timer, a step, a result line).
         if let Some(facts) = &t.facts {
             work::hash_into(&mut acc, facts.as_ref());
         }
@@ -1428,7 +1423,7 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
 /// incremental parsers for live parts and a cache for complete ones; tests pass
 /// a plain `parse_full`.
-/// slopty: a turn's rows are its records in the order they were written, never re-sorted
+/// A turn's rows are its records in the order they were written, never re-sorted
 /// (`docs/decisions/inspector.md`, "Rows in record order"): its narration where it was said, each
 /// run of calls and thoughts one group line, each notice and error where it happened. A late
 /// record lands in its place and no row ever changes container, so the turn's end moves nothing.
@@ -1456,9 +1451,9 @@ pub fn rows_for_entry(
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
         let parsed = crate::attachments::parse_user_message_images(&raw);
-        // slopty: the words as the agent's record has them: a TUI's prompt holds no chips.
+        // The words as the agent's record has them: a TUI's prompt holds no chips.
         let text = agent_message_display(&parsed.text);
-        // slopty: a TUI's prompt holds no chips, so any prompt may render its Markdown.
+        // A TUI's prompt holds no chips, so any prompt may render its Markdown.
         let markdown = Some(crate::markdown::parse_message(&text))
             .filter(|tree| !plain_markdown(tree))
             .map(|tree| UserMarkdown {
@@ -1472,7 +1467,7 @@ pub fn rows_for_entry(
             MessagePart::Note { note, .. } => note.turn.as_deref().cloned().map(Arc::new),
             _ => None,
         });
-        // slopty: the turn's figures change while it runs, and with them the row.
+        // The turn's figures change while it runs, and with them the row.
         let mut figures = Vec::new();
         if let Some(turn) = &turn {
             work::hash_into(&mut figures, turn.as_ref());
@@ -1497,7 +1492,7 @@ pub fn rows_for_entry(
     }
 
     // Assistant/system: split parts into block rows, folding consecutive
-    // ordinary tools. slopty: a subagent is a row of its own, never in a group's fold; those
+    // ordinary tools. A subagent is a row of its own, never in a group's fold; those
     // started together are headed by one line.
     let last_part_ix = entry.parts.len().saturating_sub(1);
     let mut pending_group: Vec<ToolItem> = Vec::new();
@@ -1531,7 +1526,7 @@ pub fn rows_for_entry(
         }
     };
 
-    // slopty: a group is keyed by its first step's record id, so a group that grows, or that a
+    // A group is keyed by its first step's record id, so a group that grows, or that a
     // spawn splits as its input lands, keeps its key and its fold (`inspector.md`, "Keys").
     let flush_group = |rows: &mut Vec<Row>, group: &mut Vec<ToolItem>, last_ix: usize| {
         let Some(first) = group.first() else {
@@ -1591,9 +1586,9 @@ pub fn rows_for_entry(
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
                     kind: ToolItemKind::Call,
-                    output_text: output.as_deref().map(Arc::from), // slopty: for its formats
+                    output_text: output.as_deref().map(Arc::from), // for its formats
                     images: crate::tool_images::image_paths(call, output.as_deref()),
-                    facts: facts.as_deref().cloned().map(Arc::new), // slopty: its facts.
+                    facts: facts.as_deref().cloned().map(Arc::new),
                 };
                 if is_agent_tool(&item) {
                     flush_group(&mut rows, &mut pending_group, group_last_part_ix);
@@ -1619,7 +1614,7 @@ pub fn rows_for_entry(
                 // settled cache once complete.
                 let tree = parse(&format!("{}#{}", entry.id, part_id), text);
                 let mut item = thought_item(part_id, &tree, live);
-                // slopty: how long it thought, for the group's line.
+                // How long it thought, for the group's line.
                 if let Some(ms) = *thought_ms {
                     item.facts = Some(Arc::new(slopty_view_doc::ToolFacts {
                         thought_ms: Some(ms),
@@ -1640,7 +1635,7 @@ pub fn rows_for_entry(
                         }
                         let key = format!("{}#{}", entry.id, part_id);
                         let tree = parse(&key, text);
-                        // slopty: a proposed plan is a card, folded past its first lines.
+                        // A proposed plan is a card, folded past its first lines.
                         if extras::is_plan_part(part_id) {
                             extras::plan_rows(&mut rows, entry, &key, text, &tree, streaming);
                             continue;
@@ -1735,7 +1730,7 @@ pub fn rows_for_entry(
                         resolved,
                         ..
                     } => {
-                        // slopty: the chip names what was asked by its kind, and shows the ask.
+                        // The chip names what was asked by its kind, and shows the ask.
                         let (label, header) = input_chip_words(questions);
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
@@ -1753,7 +1748,7 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
-                    // slopty: a Claude Code too old to drive is a banner naming its machine.
+                    // A Claude Code too old to drive is a banner naming its machine.
                     MessagePart::Error {
                         id: part_id,
                         message,
@@ -1764,7 +1759,7 @@ pub fn rows_for_entry(
                             rows.push(row);
                         }
                     }
-                    // slopty: an error with the agent's own words is a card.
+                    // An error with the agent's own words is a card.
                     MessagePart::Error {
                         id: part_id,
                         message,
@@ -1791,11 +1786,11 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
-                    // slopty: a quiet divider.
+                    // A quiet divider.
                     MessagePart::Marker { id: part_id, text } => {
                         rows.push(extras::marker_row(&entry.id, part_id, text));
                     }
-                    // slopty: a task's notice, a quiet notice, a page shown inline.
+                    // A task's notice, a quiet notice, a page shown inline.
                     MessagePart::Task { id: part_id, task } => {
                         rows.push(work::task_row(&entry.id, part_id, task));
                     }
@@ -1830,7 +1825,7 @@ pub fn rows_for_entry(
     rows
 }
 
-/// slopty: what a request right after a group holds its open call up for (#3).
+/// What a request right after a group holds its open call up for (#3).
 fn waiting_on(next: Option<&MessagePart>) -> Option<&'static str> {
     match next {
         Some(MessagePart::Input { resolved: false, questions, .. }) => {
@@ -1995,7 +1990,7 @@ fn part_prefix(id: &str) -> &str {
 /// step on either boundary so their dense chip stack has room to breathe.
 pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     if row.turn_start {
-        // slopty: a prompt heads its turn: the big step comes before it, and its answer starts
+        // A prompt heads its turn: the big step comes before it, and its answer starts
         // one turn gap under it, with no hidden lane between them (#1).
         return if matches!(row.kind, RowKind::User { .. }) { PROMPT_GAP } else { Theme::SPACE_LG };
     }
@@ -2008,7 +2003,7 @@ pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
     if same_part_markdown {
         render::MD_BLOCK_GAP
     } else if spawn(&row.kind) && prev.is_some_and(|prev| spawn(&prev.kind)) {
-        // slopty: subagents started together stand in one block, line under line.
+        // Subagents started together stand in one block, line under line.
         0.0
     } else if step(&row.kind) || prev.is_some_and(|row| step(&row.kind)) {
         Theme::SPACE_MD
@@ -2041,7 +2036,7 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 // Tool summaries / chips (pure)
 // ---------------------------------------------------------------------------
 
-/// slopty: a work group's summary as one sentence (Amp, `.research/amp-study-2026-10-19.md`
+/// A work group's summary as one sentence (Amp, `.research/amp-study-2026-10-19.md`
 /// item 2): its clauses joined by ", ", or " and " between two, each followed by what it adds in
 /// parentheses: "Ran 3 commands (1 failed), edited 2 files (+40 −12)". `marks` say which spans
 /// are drawn apart: the joins and parentheses faint, an edit's counts as a diff's.
@@ -2051,7 +2046,7 @@ pub struct Sentence {
     pub marks: Arc<[(Range<usize>, Mark)]>,
 }
 
-/// slopty: how a span of a [`Sentence`] is drawn apart from its words.
+/// How a span of a [`Sentence`] is drawn apart from its words.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     /// A join or a parenthesis, in faint ink.
@@ -2081,13 +2076,13 @@ impl std::fmt::Display for Sentence {
     }
 }
 
-/// slopty: one clause of a [`Sentence`]: its words, then what it adds.
+/// One clause of a [`Sentence`]: its words, then what it adds.
 struct Clause {
     words: String,
     adds: Vec<Adds>,
 }
 
-/// slopty: what a clause adds in its parentheses.
+/// What a clause adds in its parentheses.
 enum Adds {
     Words(String),
     /// Lines added and removed.
@@ -2107,7 +2102,7 @@ impl Clause {
     }
 }
 
-/// slopty: `clauses` as one sentence, its first letter lifted.
+/// `clauses` as one sentence, its first letter lifted.
 fn sentence(clauses: Vec<Clause>) -> Sentence {
     let mut text = String::new();
     let mut marks: Vec<(Range<usize>, Mark)> = Vec::new();
@@ -2154,7 +2149,7 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     tool_group_summary_waiting(tools, None, false).text.to_string()
 }
 
-/// slopty: [`tool_group_summary`] in the tense of each call (#3): what settled is said in the
+/// [`tool_group_summary`] in the tense of each call (#3): what settled is said in the
 /// past ("Read 3 files"), what is under way in its participle ("running 1 command"), and the
 /// call a request holds up says what it waits for (`waiting`, "approval") and what it is
 /// ("waiting for approval (run touch refused.txt)"). Once its turn is over (`turn_over`), a call
@@ -2198,7 +2193,7 @@ pub fn tool_group_summary_waiting(tools: &[ToolItem], waiting: Option<&str>, tur
     sentence(clauses)
 }
 
-/// slopty: the calls a turn ended on before they settled (an interrupted run, a record without
+/// The calls a turn ended on before they settled (an interrupted run, a record without
 /// its results), said as stopped, never as still running (#12).
 fn stopped_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
     let commands = tools.iter().filter(|t| matches!(t.call, ToolCall::Exec { .. })).count();
@@ -2217,12 +2212,12 @@ fn stopped_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
     clauses
 }
 
-/// slopty: `n` of a noun, one or many.
+/// `n` of a noun, one or many.
 fn counted(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
 }
 
-/// slopty: what a call is, for the clause that counts it.
+/// What a call is, for the clause that counts it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CallKind {
     Command,
@@ -2232,7 +2227,7 @@ enum CallKind {
     Search,
     Fetch,
     Todo,
-    /// slopty: a subagent's run, said as the work it hands off, not as a tool called.
+    /// A subagent's run, said as the work it hands off, not as a tool called.
     Subagent,
     Other,
 }
@@ -2251,7 +2246,7 @@ fn call_kind(call: &ToolCall) -> CallKind {
     }
 }
 
-/// slopty: the files `tools` edited, each once, in order.
+/// The files `tools` edited, each once, in order.
 fn edited_paths<'a>(tools: &[&'a ToolItem]) -> Vec<&'a str> {
     let mut edited: Vec<&str> = Vec::new();
     for t in tools {
@@ -2267,7 +2262,7 @@ fn edited_paths<'a>(tools: &[&'a ToolItem]) -> Vec<&'a str> {
     edited
 }
 
-/// slopty: what the calls under way are doing, in the TUI's live verbs (#3).
+/// What the calls under way are doing, in the TUI's live verbs (#3).
 fn live_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
     let of = |kind: CallKind| tools.iter().filter(|t| call_kind(&t.call) == kind).count();
     let edits: Vec<&ToolItem> = tools.iter().copied().filter(|t| call_kind(&t.call) == CallKind::Edit).collect();
@@ -2306,7 +2301,7 @@ fn live_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
 /// at the end.
 fn past_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
     let calls: Vec<&ToolItem> = tools.iter().copied().filter(|t| t.kind == ToolItemKind::Call).collect();
-    // slopty: directory listings are counted apart from commands, as the TUI's group line
+    // Directory listings are counted apart from commands, as the TUI's group line
     // counts them ("listed 2 directories"). A listing that failed listed nothing: it counts as
     // the failed command it was.
     let kind = |t: &ToolItem| match call_kind(&t.call) {
@@ -2316,7 +2311,7 @@ fn past_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
     let of = |want: CallKind| calls.iter().copied().filter(|t| kind(t) == want).collect::<Vec<_>>();
     let failed = |of: &[&ToolItem]| of.iter().filter(|t| t.is_error && !denied(t)).count();
     let mut clauses: Vec<Clause> = Vec::new();
-    // slopty: how long it thought, where each thought says, as the TUI's "Thought for 12s".
+    // How long it thought, where each thought says, as the TUI's "Thought for 12s".
     let thoughts = tools.iter().filter(|t| t.kind == ToolItemKind::Thought).count();
     let thought_ms: Option<u64> = tools
         .iter()
@@ -2329,13 +2324,13 @@ fn past_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
             "thought for {}",
             slopty_view_doc::work::duration_words(ms)
         ))),
-        // slopty: a clause says what was done, as its siblings do ("Thought once and ran 1
+        // A clause says what was done, as its siblings do ("Thought once and ran 1
         // command"); "Thought for 4s" is a thought's own row, never a clause of a sentence.
         (_, Some(_)) => clauses.push(Clause::new("thought briefly")),
         (1, None) => clauses.push(Clause::new("thought once")),
         (n, None) => clauses.push(Clause::new(format!("thought {n} times"))),
     }
-    // slopty: the agent's words between its calls are no work done ("wrote 8 notes" read as
+    // The agent's words between its calls are no work done ("wrote 8 notes" read as
     // files written): they read in place once the divider opens.
     let commands = of(CallKind::Command);
     if !commands.is_empty() {
@@ -2347,7 +2342,7 @@ fn past_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
     let edits = of(CallKind::Edit);
     let edited = edited_paths(&edits);
     if !edited.is_empty() {
-        // slopty: the lines its edits added and removed, the number a reviewer wants first.
+        // The lines its edits added and removed, the number a reviewer wants first.
         let (added, removed) = edits
             .iter()
             .filter_map(|t| t.facts.as_ref().and_then(|facts| facts.changed))
@@ -2377,12 +2372,12 @@ fn past_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
     if !todos.is_empty() {
         clauses.push(Clause::new("updated todos").failed(failed(&todos)));
     }
-    // slopty: what the commands landed ("committed 1a2b3c4", "pushed to main").
+    // What the commands landed ("committed 1a2b3c4", "pushed to main").
     let settled: Vec<ToolItem> = tools.iter().map(|t| (*t).clone()).collect();
     clauses.extend(landed_words(&settled).into_iter().map(Clause::new));
     clauses
 }
-// slopty: a call that only lists a directory, as the TUI's group line counts it.
+// A call that only lists a directory, as the TUI's group line counts it.
 fn lists_directory(call: &ToolCall) -> bool {
     match call {
         ToolCall::Exec { command } => {
@@ -2395,7 +2390,7 @@ fn lists_directory(call: &ToolCall) -> bool {
     }
 }
 
-// slopty: what the group's commands landed, each once, in order.
+// What the group's commands landed, each once, in order.
 fn landed_words(tools: &[ToolItem]) -> Vec<String> {
     let mut said: Vec<String> = Vec::new();
     for words in tools.iter().filter_map(|t| t.facts.as_ref().and_then(|facts| facts.landed.as_deref())) {
@@ -2408,7 +2403,7 @@ fn landed_words(tools: &[ToolItem]) -> Vec<String> {
     said
 }
 
-// slopty: a title under way shimmers as every live line in the app does (opencode's
+// A title under way shimmers as every live line in the app does (opencode's
 // `text-shimmer`, `.research/opencode-study-2026-10-19.md` item 1): `motion::shimmer_ink` inks each
 // glyph from faint to full as the band crosses it, on the process's one clock, so the group's
 // summary and its running row move in step with the working line. Settled, the title is plain
@@ -2439,7 +2434,7 @@ fn tool_group_title(
     StyledText::new(text).with_highlights(runs.collect::<Vec<_>>()).into_any_element()
 }
 
-/// slopty: the ink of each glyph of `text` at `phase` ms into the shimmer's cycle.
+/// The ink of each glyph of `text` at `phase` ms into the shimmer's cycle.
 fn title_shimmer_runs(text: &str, phase: f32, theme: &Theme) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
     text.char_indices()
         .enumerate()
@@ -2450,7 +2445,7 @@ fn title_shimmer_runs(text: &str, phase: f32, theme: &Theme) -> Vec<(Range<usize
         .collect()
 }
 
-/// slopty: where the shimmer stands at `moment`, in milliseconds into its cycle.
+/// Where the shimmer stands at `moment`, in milliseconds into its cycle.
 fn shimmer_ms(moment: Instant) -> f32 {
     let cycle = Duration::from_secs_f32(motion::SHIMMER_PERIOD_MS / 1000.0);
     motion::locked_phase(cycle, moment) * motion::SHIMMER_PERIOD_MS
@@ -2522,7 +2517,7 @@ fn chip_has_images(tool: &ToolItem) -> bool {
     !tool.images.is_empty() && !is_spawn_link(tool)
 }
 
-/// slopty: a read that went through shows its path and nothing more (Amp): what it read is the
+/// A read that went through shows its path and nothing more (Amp): what it read is the
 /// file, which its path opens; only a failed read, or one that read an image, opens in place.
 fn quiet_read(tool: &ToolItem) -> bool {
     matches!(tool.call, ToolCall::ReadFile { .. }) && !tool.is_error && !chip_has_images(tool)
@@ -2539,7 +2534,7 @@ pub const BLOB_AFFORDANCE_HEIGHT: f32 = 24.0;
 struct ChipAffordance {
     blob_ref: SharedString,
     label: SharedString,
-    /// slopty: the fetch failed; a "Retry" follows the words (#18).
+    /// The fetch failed; a "Retry" follows the words (#18).
     retry: bool,
 }
 
@@ -2555,7 +2550,7 @@ fn blob_detail(text: &str, is_diff: bool) -> Option<ToolDetail> {
         let diff: slopty_view_proto::ToolDiff = serde_json::from_str(text).ok()?;
         return tool_detail(None, Some(&diff), None);
     }
-    // slopty: the whole output reads as its summary does, JSON pretty-printed.
+    // The whole output reads as its summary does, JSON pretty-printed.
     let mut lines = output_lines(text);
     while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
@@ -2617,12 +2612,12 @@ pub fn flavour_seed(chat_id: &str) -> u64 {
 /// Compact elapsed formatting, using at most two units up to days.
 pub fn format_elapsed(secs: i64) -> String {
     let secs = secs.max(0);
-    // slopty: a second unit of nothing is left out ("1m", never "1m 0s"), as
+    // A second unit of nothing is left out ("1m", never "1m 0s"), as
     // `slopty_view_doc::work::duration_words` says it.
     slopty_view_doc::work::duration_words(u64::try_from(secs).unwrap_or_default().saturating_mul(1_000))
 }
 
-/// slopty: a timer that ticks: [`format_elapsed`] with its second unit padded ("1m 05s",
+/// A timer that ticks: [`format_elapsed`] with its second unit padded ("1m 05s",
 /// "1h 05m"), so in tabular figures the line holds its width as it counts.
 pub fn ticking_elapsed(secs: i64) -> String {
     let secs = secs.max(0);
@@ -3010,7 +3005,7 @@ fn activity_branch_points(progress: f32) -> Vec<Point<f32>> {
     visible
 }
 
-/// slopty: where a tool fold toggled toward `open` at `at` stands at `now`, as the one fold
+/// Where a tool fold toggled toward `open` at `at` stands at `now`, as the one fold
 /// moves (`motion::fold_frame`; design-inspiration item 7): the height opens on `FOLD_OPEN` and
 /// the contents fade in and rise after it; closing, they are gone before it lands on
 /// `FOLD_CLOSE`.
@@ -3052,7 +3047,7 @@ struct UserCollapseScroll {
     target_top: f32,
 }
 
-/// slopty: a step asked for on the window's next frame, one in flight at a time. A view keeps
+/// A step asked for on the window's next frame, one in flight at a time. A view keeps
 /// its note that it asked, but the callback it asked for can be lost: GPUI's check of a retained
 /// frame draws the window again from scratch and drops the callbacks that draw asked for, while
 /// the view keeps the note. A note that waited past [`FRAME_ASK_PATIENCE`] is asked again rather
@@ -3279,7 +3274,7 @@ impl SavedViewportCache {
 pub struct Transcript {
     state: Entity<AppState>,
     list: ListState,
-    /// slopty: whether `list` aligns its rows to its top: a subagent's run, in a doc of its own
+    /// Whether `list` aligns its rows to its top: a subagent's run, in a doc of its own
     /// or drilled into as a chat, reads like a fresh notes page (#5).
     list_top: bool,
     rows: Vec<Row>,
@@ -3288,23 +3283,23 @@ pub struct Transcript {
     /// The shell may retain this already-laid-out view briefly for its exit.
     /// Cleared as soon as the exit is invisible; never used for another chat.
     retain_on_deselect: bool,
-    /// slopty: what the list ends with, under its last row (the inspector's mirror of the TUI's
+    /// What the list ends with, under its last row (the inspector's mirror of the TUI's
     /// prompt box, [`Self::set_footer`]).
     footer: Option<gpui::AnyView>,
-    /// slopty: the press under way began on the footer, which is no row: it leaves the follow
+    /// The press under way began on the footer, which is no row: it leaves the follow
     /// rule alone (`inspector.md`, "Follow and anchor": a press in a row lets go).
     footer_press: bool,
-    /// slopty: ⌥ is held where the inspector holds the keyboard: every step's lane says the time
+    /// ⌥ is held where the inspector holds the keyboard: every step's lane says the time
     /// of day it began (`inspector.md`, "A step row reads at a glance").
     alt: bool,
-    /// slopty: how much of the trace shows ([`trace::Depth`]).
+    /// How much of the trace shows ([`trace::Depth`]).
     depth: trace::Depth,
-    /// slopty: the trace's place for the keyboard, where its keys reach it, and their cursor.
+    /// The trace's place for the keyboard, where its keys reach it, and their cursor.
     keys: gpui::FocusHandle,
     cursor: Option<trace::Cursor>,
-    /// slopty: the trace held the keyboard when it last drew, which its cursor's ink says.
+    /// The trace held the keyboard when it last drew, which its cursor's ink says.
     keys_held: bool,
-    /// slopty: every row of the trace while the depth hides some ([`trace::Depth::Prompts`]).
+    /// Every row of the trace while the depth hides some ([`trace::Depth::Prompts`]).
     whole: Option<Vec<Row>>,
     /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
     /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
@@ -3320,7 +3315,7 @@ pub struct Transcript {
     /// A transcript instance is shared across tabs, so the active ListState is
     /// reset on every attach and cannot retain these positions by itself.
     saved_viewports: SavedViewportCache,
-    /// slopty: the work groups the person opened or shut in each chat visited, so a chat left
+    /// The work groups the person opened or shut in each chat visited, so a chat left
     /// and come back to (a subagent drilled into, then Escape) reads as they left it, and its
     /// saved viewport lands on rows that are still drawn. Kept for the chats whose viewport is.
     saved_folds: HashMap<String, HashMap<SharedString, bool>>,
@@ -3390,7 +3385,7 @@ pub struct Transcript {
     /// frames reuse settled blocks' text+runs; the incremental parser's stable
     /// boundary invalidates only the live tail per commit.
     render_cache: Rc<RefCell<RenderCache>>,
-    /// slopty: what each row's chat chips last said (`markdown/chat_links.rs`): a row whose
+    /// What each row's chat chips last said (`markdown/chat_links.rs`): a row whose
     /// chips say something new flattens again.
     chip_words: HashMap<SharedString, String>,
     workspace_link: Option<render::LinkUi>,
@@ -3406,7 +3401,7 @@ pub struct Transcript {
     /// link-roots revision that resets `file_link_roots`.
     inline_code_links: crate::markdown::inline_code_links::InlineCodeLinkCache,
     rendered_rows: HashSet<SharedString>,
-    /// slopty: the entries of the shown transcript the agent did not say (the person's, a
+    /// The entries of the shown transcript the agent did not say (the person's, a
     /// compaction note, a fork's seam): none opens a message in the agent's name (#8).
     unsaid_entries: HashSet<SharedString>,
     /// Last UI typography generation reflected in `list` item measurements.
@@ -3418,35 +3413,34 @@ pub struct Transcript {
     /// reading column centers in what remains.
     right_reserve: f32,
     highlights: HighlightStore,
-    /// slopty: the last row there was when the person left the end; the jump pill counts the
+    /// The last row there was when the person left the end; the jump pill counts the
     /// rows after it as new (design-inspiration item 11).
     jump_mark: Option<SharedString>,
-    /// slopty: each message strip fading in or out: whether it shows, where its fade started
+    /// Each message strip fading in or out: whether it shows, where its fade started
     /// and when ([`Transcript::strip_fade`]).
     strip_fades: HashMap<SharedString, (bool, f32, Instant)>,
     /// Distance from the bottom at the person's last scroll.
     last_scroll_distance: f32,
-    /// slopty: whether the view follows its end (the list's `FollowMode::Tail`), the follow
+    /// Whether the view follows its end (the list's `FollowMode::Tail`), the follow
     /// rule's one state ([`Transcript::follow`], [`Transcript::let_go`]).
     pinned: bool,
-    /// slopty: a jump's glide under way, stepped once a frame (`rail.rs`, #13), and whether
+    /// A jump's glide under way, stepped once a frame (`rail.rs`, #13), and whether
     /// its next frame is asked for.
     glide: Option<crate::rail::Glide>,
     glide_scheduled: FrameAsk,
-    /// slopty: the row a jump landed on, when, and which landing it was: it flashes (#13).
+    /// The row a jump landed on, when, and which landing it was: it flashes (#13).
     landed: Option<(SharedString, Instant, u64)>,
     /// Last pointer sample while markdown selection owns a left-button drag.
     selection_drag_position: Option<Point<Pixels>>,
     /// One-shot timer rescheduled only while the pointer remains in an edge
     /// zone. Dropping it on mouse-up stops all selection scroll work.
     selection_scroll_task: Option<Task<()>>,
-    // slopty: no composer stack over the transcript's bottom, so no clearance under it.
-    /// slopty: the time everything that runs reads (a turn's time, a step's lane, the working
+    /// The time everything that runs reads (a turn's time, a step's lane, the working
     /// line's word): taken when the transcript's state moves and on the one tick
     /// ([`Transcript::tick_soon`]), never as a frame is built, so a frame built again (from
     /// scratch, or for a hover) says the second the frame shown says.
     clock: chrono::DateTime<chrono::Utc>,
-    /// slopty: the list's viewport as this frame began. A page row reads it while the list lays
+    /// The list's viewport as this frame began. A page row reads it while the list lays
     /// out, when asking the list itself would borrow it twice.
     page_viewport: gpui::Bounds<Pixels>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
@@ -3455,13 +3449,13 @@ pub struct Transcript {
     /// clear the reveal when the old row's leave event arrives after the new
     /// row's enter (enter/leave order across rows is not guaranteed).
     hovered_entry: Option<(SharedString, SharedString)>,
-    /// slopty: each drawn strip's controls' focus (Copy, Rewind), by its entry, and what redraws
+    /// Each drawn strip's controls' focus (Copy, Rewind), by its entry, and what redraws
     /// the strip as one gains or loses it: a focused control shows its strip as a hover does
     /// (#9). Only strips drawn in the last frame, or holding focus, keep theirs (#13).
     strip_focus: HashMap<SharedString, StripFocus>,
-    /// slopty: the entries whose strip this frame drew, for pruning [`Self::strip_focus`].
+    /// The entries whose strip this frame drew, for pruning [`Self::strip_focus`].
     strip_drawn: HashSet<SharedString>,
-    /// slopty: the last row's lane (its working line, then its timestamp strip) and the
+    /// The last row's lane (its working line, then its timestamp strip) and the
     /// tallest that lane has drawn while it stayed last: the lane never shrinks under it, so
     /// a Stop or a turn's end swaps the working line for the strip without moving a row.
     last_lane: Option<(SharedString, Rc<Cell<f32>>)>,
@@ -3485,7 +3479,7 @@ pub struct Transcript {
     diagrams: Rc<RefCell<MermaidCache>>,
     /// The media handler over `diagrams`, built once and shared by every row.
     diagram_media: Option<render::MediaUi>,
-    // slopty: the images a reply's markdown names (`transcript/md_images.rs`).
+    // The images a reply's markdown names (`transcript/md_images.rs`).
     md_images: Rc<RefCell<md_images::MdImages>>,
     /// The single serialized diagram render loop, while requests remain.
     diagram_worker: Option<Task<()>>,
@@ -3503,18 +3497,18 @@ pub struct Transcript {
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
     /// Inline `show_visual` visuals, keyed by row id.
     visuals: HashMap<SharedString, Entity<crate::visuals::VisualFrame>>,
-    // slopty: background work's rows, subagents' cards, and pages shown inline, keyed by row id.
+    // Background work's rows, subagents' cards, and pages shown inline, keyed by row id.
     work: work::WorkState,
     subagents: subagents::SubagentsState,
-    // slopty: the right-click menu.
+    // The right-click menu.
     context_menu: context_menu::ContextMenuState,
     pages: HashMap<SharedString, Entity<crate::page::PageCardView>>,
-    fences: crate::page::FenceCards, // slopty: chart fences' cards (M)
+    fences: crate::page::FenceCards, // chart fences' cards (M)
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
     attachment_retries: HashMap<(String, String), Task<()>>,
-    // slopty: Slopty's own rows' state, and find in thread.
+    // Slopty's own rows' state, and find in thread.
     extras: extras::ExtrasState,
-    /// slopty: what the person last opened in place, brought into view as it lays out.
+    /// What the person last opened in place, brought into view as it lays out.
     reveal: Option<Reveal>,
     find: find::FindState,
     /// Sidecar blob fetches keyed by doc ref (`chatId/partId[.diff]`,
@@ -3528,13 +3522,13 @@ pub struct Transcript {
     /// recently (click "Show full output" after a diff → see the output).
     blob_fetch_order: HashMap<SharedString, u64>,
     blob_fetch_counter: u64,
-    /// slopty: what open steps' details keep: fetched texts, formats' forms, folds, boxes.
+    /// What open steps' details keep: fetched texts, formats' forms, folds, boxes.
     step_detail: detail::DetailState,
     _observe: Subscription,
     _text_changes: Subscription,
 }
 
-/// slopty: what the person opened in place, a group, a step's detail or a subagent's run, brought
+/// What the person opened in place, a group, a step's detail or a subagent's run, brought
 /// into view as it lays out (`inspector.md`, "Follow and anchor"): the view holds still under
 /// what grows by itself, but what the person opens at the end of the trace would open out of
 /// sight below it.
@@ -3554,7 +3548,7 @@ enum BlobFetch {
     Ready(Arc<ToolDetail>),
 }
 
-/// slopty: Enter on a subagent's row, or its Open: the inspector pushes the subagent's run,
+/// Enter on a subagent's row, or its Open: the inspector pushes the subagent's run,
 /// `chat_id`, on a stack of its own, its facts read from row `row` here (`inspector.md`, "A long
 /// or nested run drills in, inside the inspector").
 #[derive(Debug, Clone)]
@@ -3643,7 +3637,7 @@ impl Transcript {
             .linked_tree(tree, roots, ui.source_local)
     }
 
-    /// slopty: `tree` with its links to chats shown as live chips, each saying the chat's
+    /// `tree` with its links to chats shown as live chips, each saying the chat's
     /// title and how it stands now (`markdown/chat_links.rs`). The flatten cache is kept per
     /// row, so a row whose chips say something new since it last drew flattens again.
     fn chat_chips(
@@ -3682,7 +3676,7 @@ impl Transcript {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        Self::install_find(cx); // slopty: find's keys reach the main transcript.
+        Self::install_find(cx); // find's keys reach the main transcript.
         Self::build(state, None, true, cx)
     }
 
@@ -3728,7 +3722,7 @@ impl Transcript {
         let list = Self::new_list(list_top, cx);
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
         cx.on_release(|this: &mut Self, cx| {
-            // slopty: runs open in place stop being watched with the transcript.
+            // Runs open in place stop being watched with the transcript.
             this.close_spawns(cx);
             this.close_diagram_zoom(cx);
             crate::image_media::release_media(this.diagrams.borrow_mut().drain(), cx);
@@ -3809,7 +3803,7 @@ impl Transcript {
             rendered_rows: HashSet::new(),
             unsaid_entries: HashSet::new(),
             typography_generation: crate::typography::generation(cx),
-            // slopty: the window's width arrives with the first render.
+            // The window's width arrives with the first render.
             content_width: crate::settings::transcript_width(0.0, cx),
             right_reserve: 0.0,
             highlights: HighlightStore::default(),
@@ -3845,13 +3839,13 @@ impl Transcript {
             image_copy: None,
             attachment_loads: HashMap::new(),
             visuals: HashMap::new(),
-            work: Default::default(),      // slopty: background work,
+            work: Default::default(),
             context_menu: Default::default(),
             subagents: Default::default(), // subagents' cards,
             pages: HashMap::new(),         // and pages.
-            fences: Default::default(),    // slopty: and chart fences.
+            fences: Default::default(),
             attachment_retries: HashMap::new(),
-            extras: Default::default(), // slopty: Slopty's own rows.
+            extras: Default::default(),
             reveal: None,
             find: Default::default(),
             blob_details: HashMap::new(),
@@ -3878,7 +3872,7 @@ impl Transcript {
     }
 
 
-    /// slopty: row `row` takes another height (a subagent's card opened, closed, or fit to its
+    /// Row `row` takes another height (a subagent's card opened, closed, or fit to its
     /// run): it is measured again, and the list's layer painted afresh with it, so no row under
     /// it is shown where it stood before.
     /// As a diagram's row does, it lets the follow rule take the new height: a list following
@@ -3888,11 +3882,7 @@ impl Transcript {
         cx.notify();
     }
 
-    pub(crate) fn rows(&self) -> &[Row] {
-        &self.rows
-    }
-
-    /// slopty: end the list with `footer`, under its last row, as the TUI keeps its prompt box
+    /// End the list with `footer`, under its last row, as the TUI keeps its prompt box
     /// under the conversation: what grows there grows at the list's end, which the follow rule
     /// follows, so nothing above it moves (`docs/decisions/inspector.md`, "Fixed frame"). With
     /// no rows it stands at the foot alone.
@@ -3904,7 +3894,7 @@ impl Transcript {
         cx.notify();
     }
 
-    /// slopty: hold ⌥ (`held`) or let it go: while it is held, every step's lane says the time of
+    /// Hold ⌥ (`held`) or let it go: while it is held, every step's lane says the time of
     /// day it began instead of its time, the lanes reserved so nothing moves.
     pub(crate) fn hold_alt(&mut self, held: bool, cx: &mut Context<Self>) {
         if self.alt != held {
@@ -3913,7 +3903,7 @@ impl Transcript {
         }
     }
 
-    /// slopty: `footer` in a frame that marks a press begun on it, before the transcript's own
+    /// `footer` in a frame that marks a press begun on it, before the transcript's own
     /// press handler hears it ([`Self::footer_press`]).
     fn footer_frame(footer: gpui::AnyView, cx: &mut Context<Self>) -> gpui::Div {
         div()
@@ -3962,7 +3952,7 @@ impl Transcript {
         self.saved_viewports.insert(chat_id, viewport);
     }
 
-    /// slopty: keep the outgoing chat's opened and shut work groups for its return, and drop
+    /// Keep the outgoing chat's opened and shut work groups for its return, and drop
     /// those of chats whose viewport is no longer kept, `incoming` aside.
     fn remember_folds(&mut self, incoming: Option<&str>) {
         if let Some(chat_id) = self.chat_id.clone() {
@@ -4029,10 +4019,6 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn state_entity(&self) -> &Entity<AppState> {
-        &self.state
-    }
-
     /// Hand viewport ownership to explicit rail/navigation input before its
     /// reduced-motion or animated branch moves the list.
     pub(crate) fn begin_scroll_navigation(&mut self) {
@@ -4047,7 +4033,7 @@ impl Transcript {
         self.glide = None;
     }
 
-    /// slopty: follow the list's end: GPUI's tail mode snaps to it on every layout, so what
+    /// Follow the list's end: GPUI's tail mode snaps to it on every layout, so what
     /// grows at the end stays in view (`inspector.md`, "Follow and anchor").
     pub(crate) fn follow(&mut self) {
         self.pinned = true;
@@ -4056,7 +4042,7 @@ impl Transcript {
         self.list.set_follow_mode(FollowMode::Tail);
     }
 
-    /// slopty: stop following, on the person's own move: the first row in view holds its place
+    /// Stop following, on the person's own move: the first row in view holds its place
     /// from here, whatever lands below, and the rows that do are counted for the jump pill.
     pub(crate) fn let_go(&mut self) {
         if !self.pinned {
@@ -4068,13 +4054,13 @@ impl Transcript {
         self.jump_mark = self.rows.last().map(|row| row.id.clone());
     }
 
-    /// slopty: bring what the person opened in place under row `row` into view as it lays out
+    /// Bring what the person opened in place under row `row` into view as it lays out
     /// ([`Reveal`]).
     pub(super) fn reveal_opened(&mut self, row: SharedString) {
         self.reveal = Some(Reveal { row, frames: 0, since: None });
     }
 
-    /// slopty: one frame of a [`Reveal`]: the first lays out what opened; from the next its rows
+    /// One frame of a [`Reveal`]: the first lays out what opened; from the next its rows
     /// have their heights, and the view moves down as far as the end of what opened needs, never
     /// so far that the row pressed leaves the top. It looks again while a fold's tween grows the
     /// row, and once after a move, which lays in rows not measured before.
@@ -4110,17 +4096,17 @@ impl Transcript {
         }
     }
 
-    /// slopty: store the glide after [`Self::begin_scroll_navigation`] (`rail.rs`).
+    /// Store the glide after [`Self::begin_scroll_navigation`] (`rail.rs`).
     pub(crate) fn set_glide(&mut self, glide: Option<crate::rail::Glide>) {
         self.glide = glide;
     }
 
-    /// slopty: the glide under way, taken to step it.
+    /// The glide under way, taken to step it.
     pub(crate) fn take_glide(&mut self) -> Option<crate::rail::Glide> {
         self.glide.take()
     }
 
-    /// slopty: the size and line height row `row`'s prose reads at: a run opened in place at the
+    /// The size and line height row `row`'s prose reads at: a run opened in place at the
     /// compact body, under its subagent's row, not larger than it (#24).
     fn markdown_body(&self, row: &SharedString) -> (f32, f32) {
         if self.depth_of(row) > 0 {
@@ -4131,7 +4117,7 @@ impl Transcript {
     }
 
 
-    /// slopty: mark the row at `ix` a jump landed on: it flashes and fades (#13).
+    /// Mark the row at `ix` a jump landed on: it flashes and fades (#13).
     pub(crate) fn flash_landing(&mut self, ix: usize, cx: &Context<Self>) {
         if motion::reduced_motion(cx) {
             return;
@@ -4150,14 +4136,14 @@ impl Transcript {
 
 
 
-    /// slopty: the person moved the list (its wheel or touch; programmatic scrolls never come
+    /// The person moved the list (its wheel or touch; programmatic scrolls never come
     /// here): back within [`FOLLOW_PX`] of the end it follows again, and away from it, it lets go.
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
         // Cancel synchronously, before a queued animation frame can undo the
         // wheel/touch input. Neither operation reads the borrowed ListState.
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
-        // slopty: a live page the scroll moved looks again at where it lies.
+        // A live page the scroll moved looks again at where it lies.
         let fences: Vec<_> = self.fences.borrow().values().cloned().collect();
         // Only those are touched: one updated keeps the scroll from being composited.
         for card in self.pages.values().chain(&fences) {
@@ -4208,7 +4194,7 @@ impl Transcript {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // slopty: a press in a row lets go of the end, so what it pressed stays where it is as
+        // A press in a row lets go of the end, so what it pressed stays where it is as
         // more arrives (`inspector.md`, "Follow and anchor"); a selection's drag too, before a
         // stream commit can virtualize its anchor. Keep the user bubble's long-press timer. A
         // press on the footer (the prompt box's mirror, no row) leaves the view following.
@@ -4348,7 +4334,7 @@ impl Transcript {
         self.pinned
     }
 
-    /// slopty: whether the jump pill shows: the view does not follow, and rows arrived below
+    /// Whether the jump pill shows: the view does not follow, and rows arrived below
     /// since it let go, or it is more than [`SCROLL_BUTTON_THRESHOLD_PX`] from the end.
     pub fn jump_button_shown(&self) -> bool {
         !self.pinned && (self.jump_unseen() > 0 || self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX)
@@ -4358,7 +4344,7 @@ impl Transcript {
         strip_fade(&mut self.strip_fades, key, shown, now, still || TOUCH)
     }
 
-    /// slopty: how many rows arrived since the view let go of the end, for the jump pill to say.
+    /// How many rows arrived since the view let go of the end, for the jump pill to say.
     pub fn jump_unseen(&self) -> usize {
         let Some(mark) = self.jump_mark.as_ref().filter(|_| !self.pinned) else {
             return 0;
@@ -4366,7 +4352,7 @@ impl Transcript {
         self.rows.iter().rposition(|row| &row.id == mark).map_or(0, |ix| self.rows.len() - ix - 1)
     }
 
-    /// slopty: the jump pill, at the list's foot while it does not follow its end and something
+    /// The jump pill, at the list's foot while it does not follow its end and something
     /// waits below; a drilled subagent's trace has none.
     fn render_jump(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         const KEY: &str = "transcript-jump";
@@ -4400,7 +4386,7 @@ impl Transcript {
         )
     }
 
-    /// slopty: the jump pill's press: back to the end, following it.
+    /// The jump pill's press: back to the end, following it.
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
@@ -4420,21 +4406,6 @@ impl Transcript {
 
     pub(crate) fn retain_for_route_exit(&mut self) {
         self.retain_on_deselect = true;
-    }
-
-    fn route_exit_pending(&self, cx: &gpui::App) -> bool {
-        self.retain_on_deselect
-            && self.doc_override.is_none()
-            && self.state.read(cx).selected_chat.is_none()
-            && self.chat_id.is_some()
-    }
-
-    pub(crate) fn finish_route_exit(&mut self, cx: &mut Context<Self>) {
-        if self.state.read(cx).selected_chat.is_none() && self.chat_id.is_some() {
-            self.retain_on_deselect = false;
-            self.sync(cx);
-            self.retain_on_deselect = true;
-        }
     }
 
     /// Rebuild rows from app state; splice minimal ranges into the list.
@@ -4470,7 +4441,7 @@ impl Transcript {
             }
         };
 
-        // slopty: what the selected chat is, read each time the state moves: a chat drilled
+        // What the selected chat is, read each time the state moves: a chat drilled
         // into before the list lists it (a note tapped at launch) takes a subagent run's
         // alignment once it is listed, not only as it opens (#17).
         let run = {
@@ -4482,7 +4453,7 @@ impl Transcript {
         };
         let top = self.doc_override.is_some() || run;
         if top != self.list_top {
-            // slopty: a drilled subagent's run reads from the top, as one in its own doc does;
+            // A drilled subagent's run reads from the top, as one in its own doc does;
             // the list takes the alignment its chat reads in, its rows laid in again (#5).
             self.list = Self::new_list(top, cx);
             self.list_top = top;
@@ -4509,10 +4480,10 @@ impl Transcript {
             self.veil_attach_pending = true;
         }
         if attached {
-            // slopty: another chat's subagents; the runs this one opened in place close.
+            // Another chat's subagents; the runs this one opened in place close.
             self.close_spawns(cx);
             self.pages.clear();
-            self.fences.borrow_mut().clear(); // slopty: chart fences too (M)
+            self.fences.borrow_mut().clear(); // chart fences too (M)
             // Read the incoming snapshot before inserting the outgoing one:
             // a full bounded cache may evict its oldest entry, which can be
             // exactly the chat the user is reopening.
@@ -4524,12 +4495,12 @@ impl Transcript {
             self.chat_id = selected;
             self.rows.clear();
             self.tool_images.clear(cx);
-            self.md_images.borrow_mut().clear(); // slopty
+            self.md_images.borrow_mut().clear();
             self.row_cache.clear();
             self.live_parsers.clear();
             self.tree_cache.clear();
             self.folds.clear();
-            // slopty: the incoming chat's work opens as the person left it, before its rows are
+            // The incoming chat's work opens as the person left it, before its rows are
             // built, so its saved viewport resolves against them.
             let pins = self.chat_id.as_ref().and_then(|chat| self.saved_folds.get(chat));
             for (id, open) in pins.into_iter().flatten() {
@@ -4540,8 +4511,8 @@ impl Transcript {
             self.historical_markdown.clear();
             self.user_folds.clear();
             self.user_heights.clear();
-            self.strip_focus.clear(); // slopty
-            // slopty: the row the pointer was on left with its chat, unmounted with no leave, so
+            self.strip_focus.clear();
+            // The row the pointer was on left with its chat, unmounted with no leave, so
             // its strip must not come back lit on the return.
             self.hovered_entry = None;
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
@@ -4560,7 +4531,7 @@ impl Transcript {
                 distance_from_bottom,
             }) = saved_viewport
             {
-                // slopty: back where the person was reading, not following; the rows it resolves
+                // Back where the person was reading, not following; the rows it resolves
                 // against arrive with the replay.
                 self.pinned = false;
                 self.list.set_follow_mode(FollowMode::Normal);
@@ -4592,7 +4563,7 @@ impl Transcript {
                 .chat_id
                 .as_ref()
                 .and_then(|id| state.prepared_transcripts.get(id));
-            // slopty: the entries the agent did not say (the person's, a compaction, a fork's
+            // The entries the agent did not say (the person's, a compaction, a fork's
             // seam, a relayed marker).
             self.unsaid_entries = entries
                 .iter()
@@ -4601,19 +4572,19 @@ impl Transcript {
                 .collect();
             for entry in entries {
                 if let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id)) {
-                    // slopty: a plan's fold hides its rows here too.
+                    // A plan's fold hides its rows here too.
                     new_rows.extend(rows.iter().filter(|row| self.fold_shows(row)).cloned());
                 } else {
                     new_rows.extend(self.rows_for(entry));
                 }
             }
-            // slopty: each subagent open in place has its run's steps spliced in under it.
+            // Each subagent open in place has its run's steps spliced in under it.
             self.subagents.depths.clear();
             if !self.subagents.open.is_empty() {
                 let own = std::mem::take(&mut new_rows);
                 self.nest(own, state, 0, &mut new_rows);
             }
-            // slopty: at Prompts, each turn's root row and its last reply alone; find and the key
+            // At Prompts, each turn's root row and its last reply alone; find and the key
             // to the next failure still look through the whole trace.
             if self.depth == trace::Depth::Prompts {
                 self.whole = Some(new_rows.clone());
@@ -4874,7 +4845,7 @@ impl Transcript {
         self.historical_markdown
             .retain(|id, _| active_markdown.contains(id));
 
-        // slopty: not following, the first row in view holds its place by its key, whatever the
+        // Not following, the first row in view holds its place by its key, whatever the
         // splice replaces around it (`inspector.md`, "Follow and anchor"). A list the layout
         // clamped to its end (its rows under the held one no longer filled the view) is held by
         // the row it shows first, so what lands below never carries it along.
@@ -4928,7 +4899,7 @@ impl Transcript {
             }
         }
         self.rows = new_rows;
-        // slopty: a cursor whose row went (a fold, a depth) goes with it.
+        // A cursor whose row went (a fold, a depth) goes with it.
         if self.cursor.as_ref().is_some_and(|cursor| !self.rows.iter().any(|row| row.id == cursor.row)) {
             self.cursor = None;
         }
@@ -4946,7 +4917,7 @@ impl Transcript {
         self.refresh_protected_attachments(cx);
         self.release_departed_tool_images(cx);
         self.restore_pending_viewport(replay);
-        // slopty: following, the list's tail mode keeps its end in view on every layout.
+        // Following, the list's tail mode keeps its end in view on every layout.
         cx.notify();
     }
 
@@ -4985,7 +4956,7 @@ impl Transcript {
                 },
             );
         }
-        rows.retain(|row| self.fold_shows(row)); // slopty: shared with the prepared rows.
+        rows.retain(|row| self.fold_shows(row)); // shared with the prepared rows.
         rows
     }
 
@@ -5037,7 +5008,7 @@ impl Transcript {
                         .unwrap_or_default();
                     let fetched = blob_detail(text, is_diff)
                         .map_or_else(|| BlobFetch::Failed("it came back empty".into()), |d| BlobFetch::Ready(Arc::new(d)));
-                    // slopty: the text too, which a step's formats and its raw record read.
+                    // The text too, which a step's formats and its raw record read.
                     (fetched, (!is_diff).then(|| text.to_owned()))
                 }
                 Err(err) => (BlobFetch::Failed(SharedString::from(err)), None),
@@ -5197,7 +5168,7 @@ impl Transcript {
         cx.notify();
     }
 
-    /// slopty: open or shut the group `row_id`, as the person asked: the tween runs from the
+    /// Open or shut the group `row_id`, as the person asked: the tween runs from the
     /// height it was drawn at (`open_height` open, none shut).
     fn toggle_fold(&mut self, row_id: SharedString, open_height: f32, cx: &mut Context<Self>) {
         let all = self.depth == trace::Depth::All;
@@ -5496,7 +5467,7 @@ impl Transcript {
         let live: HashSet<&str> = self
             .rows
             .iter()
-            // slopty: and markdown rows, which hold the images they name.
+            // And markdown rows, which hold the images they name.
             .filter(|row| {
                 matches!(
                     row.kind,
@@ -5542,7 +5513,7 @@ impl Transcript {
                 .border_1()
                 .border_color(crate::theme::hairline(0.07))
                 .bg(crate::theme::ink(0.035))
-                .role(gpui::Role::Image) // slopty: a picture to assistive tech.
+                .role(gpui::Role::Image) // a picture to assistive tech.
                 .aria_label(name.clone())
                 .on_mouse_down(
                     gpui::MouseButton::Right,
@@ -5595,7 +5566,7 @@ impl Transcript {
             .child(
                 div()
                     .id(SharedString::from(format!("{chip}-images")))
-                    // slopty: a call's pictures read as one gallery.
+                    // A call's pictures read as one gallery.
                     .when(image_count > 1, |strip| {
                         strip
                             .role(gpui::Role::Group)
@@ -5791,7 +5762,7 @@ impl Transcript {
         let line_height =
             f32::from(crate::typography::ui_rems(USER_LINE_HEIGHT).to_pixels(window.rem_size()));
         let collapsed_text_h = USER_COLLAPSED_LINES as f32 * line_height;
-        // slopty: no continuation line: the clipped text fades out over its last line (#6).
+        // No continuation line: the clipped text fades out over its last line (#6).
         let collapsed_h = collapsed_text_h;
         let measured_h = self
             .user_heights
@@ -5884,7 +5855,7 @@ impl Transcript {
                 ),
                 None => user_bubble_text(row_id, text, theme, measured_h.clone(), cx.entity_id()),
             });
-        // slopty: the clipped text fades out over its last line, as the pane's edges do (#6).
+        // The clipped text fades out over its last line, as the pane's edges do (#6).
         let faded = |clip: AnyElement| {
             crate::edge_fade::edge_faded(line_height, false, true, clip).into_any_element()
         };
@@ -5965,13 +5936,13 @@ impl Transcript {
             row_key: row_key.clone(),
             veil: None,
             cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-            now: cx.frame_time(), // slopty: the frame's moment
+            now: cx.frame_time(), // the frame's moment
             copy: Some(self.copy_ui_for(&row_key, cx)),
             link,
             workspace_root: self.workspace_root(cx),
             code: (!code.is_empty()).then_some(code),
             code_menu: Some(self.code_menu_ui(cx)),
-            body: (render::MD_TEXT_SIZE, USER_LINE_HEIGHT), // slopty: the bubble's own size
+            body: (render::MD_TEXT_SIZE, USER_LINE_HEIGHT), // the bubble's own size
         };
         let highlight = self.code_highlight_for(&row_key, &tree, None, cx);
         let entity_id = cx.entity_id();
@@ -5986,7 +5957,7 @@ impl Transcript {
                             let height = f32::from(height);
                             if (measured_h.get() - height).abs() > 0.5 {
                                 measured_h.set(height);
-                                // slopty: told once this frame is drawn, as the plain bubble is.
+                                // Told once this frame is drawn, as the plain bubble is.
                                 cx.defer(move |cx| cx.notify(entity_id));
                             }
                         },
@@ -6020,7 +5991,7 @@ impl Transcript {
             crate::icons::ALT_ARROW_DOWN
         };
         let label = if expanded { "Show less" } else { "Show more" };
-        // slopty: a quiet 12 pt control under the words, not a line of them, which the keyboard
+        // A quiet 12 pt control under the words, not a line of them, which the keyboard
         // reaches (#6, #9).
         let button = crate::surface_chrome::key_stop(
             div().id(SharedString::from(format!("{row_id}-expander"))),
@@ -6076,10 +6047,10 @@ impl Transcript {
         let cache = self.diagrams.clone();
         let owner = cx.weak_entity();
         let images = self.md_images.clone();
-        let chart = self.chart_media(cx); // slopty: chart fences draw as pages (M)
+        let chart = self.chart_media(cx); // chart fences draw as pages (M)
         let media = self.diagram_media.get_or_insert_with(|| render::MediaUi {
             chart: None,
-            // slopty: a reply's images draw, read from the chat's folder.
+            // A reply's images draw, read from the chat's folder.
             image: Some(Rc::new(move |image, id, theme| {
                 md_images::element(&images, image, id, theme)
             })),
@@ -6121,7 +6092,7 @@ impl Transcript {
                 }
             })),
         });
-        media.chart = Some(chart); // slopty:
+        media.chart = Some(chart);
         media.clone()
     }
 
@@ -6266,7 +6237,7 @@ impl Transcript {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(TRANSCRIPT_CARD_RADIUS)) // slopty: the column's card (#19).
+            .rounded(px(TRANSCRIPT_CARD_RADIUS)) // the column's card (#19).
             .overflow_hidden()
             .bg(crate::theme::ink(0.045));
         match state {
@@ -6294,14 +6265,14 @@ impl Transcript {
                         }),
                     )
                     .w(px(dimensions.0 as f32 * scale))
-                    // slopty: as tall as the picture at the width its column leaves it (the
+                    // As tall as the picture at the width its column leaves it (the
                     // inspector's is narrower than 512), never a letterbox round it.
                     .h_auto()
                     .role(gpui::Role::Button)
                     .aria_label(image_label(path, name))
                     .tab_index(0)
                     .cursor_pointer()
-                    // slopty: the shared ring, outside the picture: focus covers none of it.
+                    // The shared ring, outside the picture: focus covers none of it.
                     .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.attachment_preview_return_focus = window.focused(cx);
@@ -6410,7 +6381,6 @@ impl Transcript {
                 continue;
             }
             let state = self.attachment_state(&device_ids, &att.path, None, cx);
-            // slopty: appshots removed.
             let frame = div()
                 .flex_none()
                 .w(px(ATT_THUMB_W))
@@ -6502,7 +6472,7 @@ impl Transcript {
     /// The working loader, INSIDE the conversation flow: appended under the
     /// last row while the run is live (moved out of the shell's status strip
     /// — user request), so it reads as part of the streaming reply and
-    /// scrolls away with it. slopty: it says no time: the turn's line under
+    /// scrolls away with it. It says no time: the turn's line under
     /// its prompt does, once.
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = self.clock;
@@ -6543,9 +6513,9 @@ impl Transcript {
             };
             (elapsed, flavour_seed(&chat_id), turn)
         };
-        // slopty: the flavour word turns on the one tick everything that runs reads.
+        // The flavour word turns on the one tick everything that runs reads.
         self.tick_soon(cx);
-        // slopty: the call under way, or the newest thought, in place of the flavour word.
+        // The call under way, or the newest thought, in place of the flavour word.
         let step = {
             let state = self.state.read(cx);
             let entries = match &self.doc_override {
@@ -6563,7 +6533,7 @@ impl Transcript {
         let spoken = word.to_owned();
         Some(
             div()
-                // slopty: the working line says what it shows: the step, or the word.
+                // The working line says what it shows: the step, or the word.
                 .id("working-line")
                 .role(gpui::Role::Status)
                 .aria_label(SharedString::from(spoken))
@@ -6571,7 +6541,7 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM))
-                // slopty: the row lane's anatomy (`ROW_LANE_HEIGHT`).
+                // The row lane's anatomy (`ROW_LANE_HEIGHT`).
                 .pt(px(Theme::SPACE_SM))
                 .h(px(ROW_LANE_HEIGHT))
                 .child(crate::loaders::gradient_spinner(
@@ -6605,9 +6575,9 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
-        // slopty: how deep under the transcript's own rows it sits: a run opened in place.
+        // How deep under the transcript's own rows it sits: a run opened in place.
         let depth = self.depth_of(&row.id);
-        // slopty: a subagent's words to start it are its task, which its parent's agent wrote.
+        // A subagent's words to start it are its task, which its parent's agent wrote.
         let (workspace_root, task, agent) = {
             let state = self.state.read(cx);
             let chat = self
@@ -6618,11 +6588,11 @@ impl Transcript {
             (
                 chat.and_then(|chat| chat.cwd.as_deref()).map(SharedString::from),
                 depth > 0 || self.doc_override.is_some() || chat.is_some_and(|chat| chat.subagent),
-                // slopty: a reply is said by the chat's agent, by its harness's name (#10).
+                // A reply is said by the chat's agent, by its harness's name (#10).
                 agent_name(chat.and_then(|chat| chat.config.as_ref()).map(|config| config.harness)),
             )
         };
-        // slopty: the transcript lays out inside its pane, which clears the window's chrome
+        // The transcript lays out inside its pane, which clears the window's chrome
         // itself: the first row keeps only the ordinary gap under the pane's header.
         let top_gap = if ix == 0 {
             Theme::SPACE_LG
@@ -6632,7 +6602,6 @@ impl Transcript {
         // The last row must clear the fade band at the bottom, or the timestamp strip
         // (the row's lowest content) renders half-faded (or hidden) when the
         // transcript is pinned to the bottom.
-        // slopty: no composer stack under it to clear as well.
         let is_last = ix + 1 == self.rows.len();
         let cursor_here = self.cursor.as_ref().is_some_and(|cursor| cursor.row == row.id && cursor.step.is_none());
         let bottom_pad = if is_last {
@@ -6656,14 +6625,14 @@ impl Transcript {
             .hovered_entry
             .as_ref()
             .is_some_and(|(_, entry)| entry == &row.entry_id)
-            // slopty: touch has no hover, so every strip is there at rest, as opencode gates each
+            // Touch has no hover, so every strip is there at rest, as opencode gates each
             // reveal on a hover the screen has (`.research/opencode-study-2026-10-19.md` item 4).
             || TOUCH;
-        // slopty: the keyboard reaches the strip too: its controls stay mounted, unseen, and one
+        // The keyboard reaches the strip too: its controls stay mounted, unseen, and one
         // holding focus shows the strip as a hover does (#9); only a row with a strip has them.
         let copy_focus = row.timestamp.map(|_| self.strip_focus(&row.entry_id, window, cx));
         let shown = hovered || copy_focus.as_ref().is_some_and(|f| f.is_focused(window));
-        // slopty: the strip fades in and out over 200 ms as the pointer comes and goes (Amp's
+        // The strip fades in and out over 200 ms as the pointer comes and goes (Amp's
         // message actions; the Amp study's item 9).
         let (strip_t, strip_moving) = if row.timestamp.is_some() {
             self.strip_fade(&row.id, shown, window.frame_time(), motion::reduced_motion(cx))
@@ -6673,25 +6642,25 @@ impl Transcript {
         if strip_moving {
             window.request_animation_frame();
         }
-        // slopty: the house's copy span (`motion::copy_feedback`).
+        // The house's copy span (`motion::copy_feedback`).
         let copied_message =
             motion::copied(&copy_message_key(&row.entry_id), cx);
         let copy_text = row.copy_text.clone();
         let copy_entry_id = row.entry_id.clone();
         let now_ms = self.clock.timestamp_millis();
-        // slopty: under a pointer, the person's strip waits beside the bubble's foot and takes no
+        // Under a pointer, the person's strip waits beside the bubble's foot and takes no
         // room under it, so their answer starts right under their question (#1). A touch screen
         // keeps the lane, where the strip shows without a hover; an image-only send keeps it too.
         let beside_bubble = !TOUCH
             && !task
             && matches!(&row.kind, RowKind::User { text, .. } if !text.is_empty());
-        // slopty: a run in its card shows its work, not its messages' times and actions; a run's
+        // A run in its card shows its work, not its messages' times and actions; a run's
         // task, which the person never sent, has none either.
         let strip = row
             .timestamp
             .filter(|_| depth == 0 && !(is_user_row && task))
             .map(|ms| {
-            // slopty: the day only when it is not today, the full moment on hover (#17); worded
+            // The day only when it is not today, the full moment on hover (#17); worded
             // only while the strip shows, and the full moment only once its tooltip opens (#13).
             let timestamp = (ms > 0 && strip_t > 0.0).then(|| {
                 div()
@@ -6713,10 +6682,10 @@ impl Transcript {
                 let entry_id = copy_entry_id.clone();
                 let glyph_key = copy_message_key(&entry_id);
                 let fade_key = format!("copy-message-hover-{entry_id}");
-                // slopty: a finger's press on a touch screen, the wash drawn on the 24 (#23).
+                // A finger's press on a touch screen, the wash drawn on the 24 (#23).
                 let (press, reach) = strip_press(format!("copy-message-{entry_id}"));
                 let press = match &copy_focus {
-                    Some(focus) => press.track_focus(focus), // slopty: a tab stop.
+                    Some(focus) => press.track_focus(focus), // a tab stop.
                     None => press,
                 };
                 strip_control(press, &theme, reach)
@@ -6725,7 +6694,7 @@ impl Transcript {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_message(entry_id.clone(), text.clone(), cx)
                     }))
-                    // slopty: keeps its size; its tooltip says "Copied" for the span; a role.
+                    // Keeps its size; its tooltip says "Copied" for the span; a role.
                     .role(gpui::Role::Button)
                     .hint(if copied_message { "Copied" } else { "Copy message" })
                     .child(
@@ -6737,7 +6706,7 @@ impl Transcript {
                                 gpui::transparent_black(),
                                 crate::theme::ink(0.08),
                             ))
-                            // slopty: its check drawn in as the copy lands (`CopyGlyph`).
+                            // Its check drawn in as the copy lands (`CopyGlyph`).
                             .child(crate::loaders::copy_glyph::CopyGlyph::new(
                                 glyph_key,
                                 14.0,
@@ -6750,13 +6719,12 @@ impl Transcript {
                 .flex_row()
                 .items_center()
                 .gap(px(Theme::SPACE_SM));
-            // slopty: a time the agent never said (0) shows none; the copy action stays.
+            // A time the agent never said (0) shows none; the copy action stays.
             let metadata = metadata.children(timestamp).children(copy);
-            // slopty: TUI-first: the TUI goes back to a message (`/rewind`), not the record.
-            // slopty: unseen until hovered or focused, but there for the keyboard (#9).
+            // Unseen until hovered or focused, but there for the keyboard (#9).
             let metadata = metadata.opacity(strip_t).into_any_element();
             if beside_bubble {
-                // slopty: at the bubble's foot, to its left, drawn over the gutter (#1).
+                // At the bubble's foot, to its left, drawn over the gutter (#1).
                 return div()
                     .absolute()
                     .bottom_0()
@@ -6781,7 +6749,7 @@ impl Transcript {
                 // so the label must too — assistant label's left edge on the
                 // text's first-character x, user label's right edge on the
                 // bubble's right edge (user-reported 4px drift).
-                .when(is_user_row && !task, |el| el.justify_end()) // slopty: a task reads left.
+                .when(is_user_row && !task, |el| el.justify_end()) // a task reads left.
                 .child(metadata)
                 .into_any_element()
         });
@@ -6809,7 +6777,7 @@ impl Transcript {
                         cx,
                     ));
                 }
-                // slopty: a run's first words are its brief, which its parent's agent wrote: a
+                // A run's first words are its brief, which its parent's agent wrote: a
                 // quiet paragraph, not the person's bubble; opened in place, cut to its first
                 // lines until pressed (`inspector.md`, "its brief comes first, folded").
                 if !text.is_empty() && task {
@@ -6837,7 +6805,7 @@ impl Transcript {
                     // item can't shrink, `justify_end` pushes the overflow off the
                     // left edge, and long prompts render as one clipped line
                     // instead of wrapping inside the 80% column cap.
-                    // slopty: the person's own words are in the accessibility tree, as the
+                    // The person's own words are in the accessibility tree, as the
                     // agent's are: the bubble is a paragraph saying them.
                     let spoken = text.clone();
                     let bubble = div()
@@ -6853,13 +6821,13 @@ impl Transcript {
                                 .text_size(crate::typography::ui_rems(14.0))
                                 .line_height(crate::typography::ui_rems(USER_LINE_HEIGHT))
                                 .text_color(theme.text)
-                                // slopty: lit faintly in the theme's hues, under the words (Amp).
+                                // Lit faintly in the theme's hues, under the words (Amp).
                                 .relative()
                                 .children(crate::lit::light_over(px(Theme::BUBBLE_RADIUS), &theme))
                                 .child(self.render_user_body(
                                     &row.id, ix, text, markdown, &theme, window, cx,
                                 ));
-                    // slopty: the strip waits at the bubble's foot (#1).
+                    // The strip waits at the bubble's foot (#1).
                     let foot = div()
                         .relative()
                         .min_w_0()
@@ -6868,7 +6836,7 @@ impl Transcript {
                         .children(beside.take());
                     column = column.child(div().w_full().flex().justify_end().child(foot));
                 }
-                // slopty: a session's prompt is its turn's root row: the turn's figures under it,
+                // A session's prompt is its turn's root row: the turn's figures under it,
                 // on a line always there (`inspector.md`, "The turn is the root row").
                 if depth == 0 && !task {
                     column = column.child(self.render_turn_line(&row.id, turn.as_deref(), &theme, cx));
@@ -6878,7 +6846,7 @@ impl Transcript {
             RowKind::Markdown { tree, block_ix } => {
                 let link = self.link_ui(cx);
                 let tree = self.inline_code_tree(tree, link.as_ref(), cx);
-                let tree = self.chat_chips(&row.id, tree, cx); // slopty
+                let tree = self.chat_chips(&row.id, tree, cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6889,13 +6857,13 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: None,
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: cx.frame_time(), // slopty: the frame's moment
+                    now: cx.frame_time(), // the frame's moment
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
                     code_menu: Some(self.code_menu_ui(cx)),
-                    body: self.markdown_body(&row.id), // slopty: a run in place reads compact (#24).
+                    body: self.markdown_body(&row.id), // a run in place reads compact (#24).
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
@@ -6914,7 +6882,7 @@ impl Transcript {
             RowKind::LiveMarkdown { tree, block_ix } => {
                 let link = self.link_ui(cx);
                 let tree = self.inline_code_tree(tree, link.as_ref(), cx);
-                let tree = self.chat_chips(&row.id, tree, cx); // slopty
+                let tree = self.chat_chips(&row.id, tree, cx);
                 let Some(top) = tree.blocks.get(*block_ix) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -6962,13 +6930,13 @@ impl Transcript {
                     row_key: row.id.clone(),
                     veil: veil.clone(),
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                    now: motion::pulse_moment(cx.entity_id(), cx), // slopty: the veil's tick, which drew it
+                    now: motion::pulse_moment(cx.entity_id(), cx), // the veil's tick, which drew it
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
                     code_menu: Some(self.code_menu_ui(cx)),
-                    body: self.markdown_body(&row.id), // slopty: a run in place reads compact (#24).
+                    body: self.markdown_body(&row.id), // a run in place reads compact (#24).
                 };
                 if seed_history && let Some(veil) = &veil {
                     let historical = &self.historical_markdown[&row.id];
@@ -7038,9 +7006,8 @@ impl Transcript {
             RowKind::Visual { owner, path, title } => {
                 self.render_visual(&row.id, owner, path, title, cx)
             }
-            // slopty: a title and one sentence (`extras::render_error_card`).
+            // A title and one sentence (`extras::render_error_card`).
             RowKind::ErrorChip { message } => self.render_error_card(&row, message, None, &theme, cx),
-            // slopty: Slopty's own rows.
             RowKind::ErrorCard { .. }
             | RowKind::UpdateNeeded { .. }
             | RowKind::Marker { .. }
@@ -7052,9 +7019,9 @@ impl Transcript {
             }
             RowKind::Page { owner, card } => self.render_page(&row, owner, card, window, cx),
         };
-        // slopty: a plan's rows draw as one card.
+        // A plan's rows draw as one card.
         let (inner, top_gap) = self.plan_card_segment(ix, inner, top_gap, &theme);
-        // slopty: the transcript's words in the accessibility tree: a markdown block is a
+        // The transcript's words in the accessibility tree: a markdown block is a
         // paragraph saying its plain text, and a message opens at an article named for who said
         // it ("You" round the person's bubble, the agent's name round the reply's first row).
         let inner = match &row.kind {
@@ -7071,12 +7038,12 @@ impl Transcript {
                     .child(inner)
                     .into_any_element()
             }
-            // slopty: a run's first words are its task, which its parent's agent wrote.
+            // A run's first words are its task, which its parent's agent wrote.
             RowKind::User { .. } if task => message_article(&row.id, "Task", inner),
             RowKind::User { .. } => message_article(&row.id, "You", inner),
             _ => inner,
         };
-        // slopty: a reply opens at its first row, whatever it is, so its first calls are heard
+        // A reply opens at its first row, whatever it is, so its first calls are heard
         // as its own (#10); what no one said is no one's message (#8).
         let opens_entry = ix == 0 || self.rows[ix - 1].entry_id != row.entry_id;
         let inner = if opens_entry
@@ -7087,7 +7054,7 @@ impl Transcript {
         } else {
             inner
         };
-        // slopty: where a jump landed flashes and fades, as Claude's reply flash does (#13).
+        // Where a jump landed flashes and fades, as Claude's reply flash does (#13).
         let now = cx.frame_time();
         let inner = match self.landed.as_ref().filter(|(id, at, _)| {
             id == &row.id && now.saturating_duration_since(*at) < LANDING_FLASH.total()
@@ -7114,11 +7081,11 @@ impl Transcript {
         };
         // Diagram fences this row just requested start rendering after layout.
         self.ensure_diagram_worker(cx);
-        // slopty: and the images it showed are held, read when new.
+        // And the images it showed are held, read when new.
         let markdown = matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
         self.hold_md_images(&row.id, markdown, cx);
 
-        // slopty: the last row's lane holds its working line, then its strip: one lane that
+        // The last row's lane holds its working line, then its strip: one lane that
         // never shrinks while the row stays last, so Stop and a turn's end move nothing.
         let lane = if is_last {
             self.last_row_lane(&row.id, trailer.or(strip), cx.entity_id())
@@ -7130,7 +7097,7 @@ impl Transcript {
         let pressed_row = row.id.clone();
         let outer = div()
             .id(row.id.clone())
-            // slopty: a press puts the keyboard's cursor on its row (`transcript/trace.rs`).
+            // A press puts the keyboard's cursor on its row (`transcript/trace.rs`).
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {
                 let here = trace::Cursor { row: pressed_row.clone(), step: None };
                 if this.cursor.as_ref() != Some(&here) {
@@ -7166,7 +7133,7 @@ impl Transcript {
             .w_full()
             .flex()
             .justify_center()
-            // slopty: a row opened in place takes its gap inside its column, so the guides of
+            // A row opened in place takes its gap inside its column, so the guides of
             // the runs it sits in run on through the gap.
             .pt(px(if depth > 0 { 0.0 } else { top_gap }))
             .pb(px(bottom_pad))
@@ -7180,7 +7147,7 @@ impl Transcript {
                     .max_w(px(self.content_width))
                     .min_w_0()
                     .child(
-                        // slopty: a run opened in place sits a level in, a hairline down the
+                        // A run opened in place sits a level in, a hairline down the
                         // gutter of each subagent it is under.
                         div()
                             .relative()
@@ -7201,7 +7168,7 @@ impl Transcript {
                                     }))
                             })
                             .child(inner)
-                            // slopty: the keyboard's cursor on this row (`transcript/trace.rs`).
+                            // The keyboard's cursor on this row (`transcript/trace.rs`).
                             .when(cursor_here, |column| column.child(cursor_bar(self.keys_held, &theme)))
                             .children(lane),
                     )
@@ -7210,7 +7177,7 @@ impl Transcript {
         outer.into_any_element()
     }
 
-    /// slopty: the last row's lane: `body` (its working line or its strip) at no less than the
+    /// The last row's lane: `body` (its working line or its strip) at no less than the
     /// tallest the lane has drawn while this row was last.
     /// A lane that grew asks its view to draw again, so what is drawn always reads the floor
     /// it holds (a retained frame never keeps an older one).
@@ -7254,7 +7221,7 @@ impl Transcript {
         )
     }
 
-    /// slopty: the focus of `entry`'s strip Copy, made on first use and kept while its strip is
+    /// The focus of `entry`'s strip Copy, made on first use and kept while its strip is
     /// drawn: the keyboard reaches it, and its focus coming or going draws the strip again (#9).
     fn strip_focus(
         &mut self,
@@ -7278,7 +7245,7 @@ impl Transcript {
     fn copy_message(&mut self, entry_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
         cx.stop_propagation();
         cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-        // slopty: the house's copy span; its end redraws what read it (a global read).
+        // The house's copy span; its end redraws what read it (a global read).
         motion::copy_feedback(copy_message_key(&entry_id), cx);
         cx.notify();
     }
@@ -7302,7 +7269,7 @@ impl Transcript {
                     .update(cx, |this, cx| {
                         this.copied_code = Some((row_key, ix));
                         this.copied_clear = Some(cx.spawn(async move |this, cx| {
-                            // slopty: the house's copy span.
+                            // The house's copy span.
                             cx.background_executor().timer(motion::COPIED_FOR).await;
                             this.update(cx, |this, cx| {
                                 this.copied_code = None;
@@ -7426,9 +7393,9 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
-        let frame_now = cx.frame_time(); // slopty: the frame's moment, for its tweens
+        let frame_now = cx.frame_time(); // the frame's moment, for its tweens
         let file_opener = self.tool_file_opener(cx);
-        // slopty: what calls say beyond zeron's chip; a running timer draws again each second.
+        // What calls say beyond their chip; a running timer draws again each second.
         let chip_facts = self.chip_facts();
         if tools.iter().any(|tool| {
             !tool.resolved && tool.facts.as_ref().is_some_and(|facts| facts.timer.is_some())
@@ -7436,7 +7403,7 @@ impl Transcript {
             self.tick_soon(cx);
         }
         let (collapses, solo) = group_shape(tools);
-        // slopty: a group opens only as the person asks; nothing opens it by itself, not a
+        // A group opens only as the person asks; nothing opens it by itself, not a
         // running call and not one arriving (`inspector.md`, "One fold depth").
         let open = solo || !collapses || self.steps_shown(fold.open);
         if collapses {
@@ -7472,7 +7439,7 @@ impl Transcript {
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
         // needs no row rebuild — arrival is a cx.notify, like a fold toggle.
-        // slopty: and which fetched whole each shows, which its format menu reads.
+        // Each also says which fetched whole it shows, which its format menu reads.
         let (details, wholes): (Vec<Option<Arc<ToolDetail>>>, Vec<Option<SharedString>>) = tools
             .iter()
             .map(|tool| {
@@ -7546,10 +7513,10 @@ impl Transcript {
                             format!("Show full {what}")
                         }
                         Some(BlobFetch::Loading(_)) => format!("Loading full {what}…"),
-                        // slopty: what happened, then one action (#18).
+                        // What happened, then one action (#18).
                         Some(BlobFetch::Failed(why)) => format!("Couldn't load {what}: {why}"),
                         None => match bytes {
-                            // slopty: one size formatter ("12.3 KB").
+                            // One size formatter ("12.3 KB").
                             Some(b) => format!("Show full {what} ({})", slopty_view_doc::bytes_short(b)),
                             None => format!("Show full {what}"),
                         },
@@ -7585,7 +7552,7 @@ impl Transcript {
             .zip(&detail_folds)
             .zip(tools.iter())
             .map(|(((detail, invocation), fold), tool)| {
-                // slopty: a step's detail opens only as the person asks, a live thought's too.
+                // A step's detail opens only as the person asks, a live thought's too.
                 (detail.is_some() || invocation.is_some() || chip_has_images(tool))
                     && fold.open.unwrap_or(false)
             })
@@ -7603,7 +7570,7 @@ impl Transcript {
                     .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
             })
             .collect();
-        // slopty: what each step opened, or closing, shows past zeron's body: its output in its
+        // What each step opened, or closing, shows past its plain body: its output in its
         // format, its exit code and its fetched sections (`transcript/detail.rs`).
         let mut outputs: Vec<Option<detail::StepOutput>> = Vec::with_capacity(tools.len());
         let mut sections: Vec<Vec<detail::Section>> = Vec::with_capacity(tools.len());
@@ -7675,7 +7642,7 @@ impl Transcript {
             )
             .collect();
         let reduce_motion = cx.reduce_motion();
-        let now = cx.frame_time(); // slopty: the frame's moment
+        let now = cx.frame_time(); // the frame's moment
         let reveal_progress: Vec<f32> = (0..tools.len())
             .map(|ix| {
                 let start = self
@@ -7719,11 +7686,11 @@ impl Transcript {
                 .sum::<f32>();
         let viewport_height = revealed_height;
         let target = if open { viewport_height } else { 0.0 };
-        // slopty: a running call's row sweeps in phase with its group's title (#14).
+        // A running call's row sweeps in phase with its group's title (#14).
         let running_call = open && tools.iter().any(sweeps);
         let shimmer_phase = if (active || running_call) && !reduce_motion {
             motion::pulse_lease(cx.entity_id(), cx);
-            // slopty: the pulse's tick, which drew it, on the shimmer's one clock.
+            // The pulse's tick, which drew it, on the shimmer's one clock.
             Some(shimmer_ms(motion::pulse_moment(cx.entity_id(), cx)))
         } else {
             None
@@ -7747,15 +7714,15 @@ impl Transcript {
         let toggle_id = row_id.clone();
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
-        // slopty: a button the keyboard reaches, Enter or Space opening it (#9).
-        // slopty: its chevron arrives under the pointer and stays while the group is open (Amp);
+        // A button the keyboard reaches, Enter or Space opening it (#9).
+        // Its chevron arrives under the pointer and stays while the group is open (Amp);
         // on a touch screen it is there at rest.
         let header_hover = format!("{row_id}-hdr-hover");
         let chevron_shown = motion::revealed_by_hover(&header_hover).max(disclosure_progress);
         let header = crate::surface_chrome::key_stop(div().id(SharedString::from(format!("{row_id}-hdr"))), theme)
             .hover_fade(header_hover)
             .rounded(px(4.0))
-            // slopty: the group reads as a button named by its summary, open or not.
+            // The group reads as a button named by its summary, open or not.
             .role(gpui::Role::Button)
             .aria_label(summary.text.clone())
             .aria_expanded(open)
@@ -7765,7 +7732,7 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .pr(px(4.0))
-            // slopty: a finger's row on a touch screen (#23).
+            // A finger's row on a touch screen (#23).
             .h(px(tool_group_header_height()))
             .cursor_pointer()
             .text_size(px(TOOL_LABEL_SIZE))
@@ -7813,7 +7780,7 @@ impl Transcript {
                         tool_group_title(summary.text.clone(), &summary.marks, shimmer_phase, theme)
                     })),
             )
-            // slopty: its span in the time lane every step row keeps, and its mark only when all
+            // Its span in the time lane every step row keeps, and its mark only when all
             // its calls failed: the sentence names failures otherwise (`inspector.md`, "Runs of
             // calls fold to one sentence").
             .child(div().flex_1())
@@ -7835,7 +7802,7 @@ impl Transcript {
                 chip_facts.lane(row_id, span.as_ref(), None, !running, theme)
             });
 
-        // slopty: where the keyboard's cursor stands among the steps (`transcript/trace.rs`).
+        // Where the keyboard's cursor stands among the steps (`transcript/trace.rs`).
         let cursor_step = self
             .cursor
             .as_ref()
@@ -7903,13 +7870,13 @@ impl Transcript {
                     .flex_col()
                     .overflow_hidden()
                     .when(!collapses, |card| {
-                        card.rounded(px(TRANSCRIPT_CARD_RADIUS)) // slopty: the column's card (#19).
+                        card.rounded(px(TRANSCRIPT_CARD_RADIUS)) // the column's card (#19).
                             .border_1()
                             .border_color(theme.border)
                             .bg(crate::theme::ink(0.03))
                     })
                     .child(
-                        // slopty: a button named by its call, which the keyboard reaches and
+                        // A button named by its call, which the keyboard reaches and
                         // Enter or Space opens (#9, #10).
                         chip_a11y(
                             crate::surface_chrome::key_stop_inset(div().id(key.clone()), theme),
@@ -7958,7 +7925,7 @@ impl Transcript {
                 // Invocation first (what was asked), then output/diff (what
                 // came back), separated by a small gap.
                 if open || animating {
-                    // slopty: the details fade in after the row opens, and out before it shuts.
+                    // The details fade in after the row opens, and out before it shuts.
                     let contents = tool_fold(open, dfold.toggled_at.filter(|_| dfold.epoch > 0), frame_now, cx.reduce_motion());
                     let mut panel = div()
                         .flex_none()
@@ -7977,7 +7944,7 @@ impl Transcript {
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
                             .child(if matches!(tool.call, ToolCall::Exec { .. }) {
-                                // slopty: a command reads highlighted, as the shell would show it.
+                                // A command reads highlighted, as the shell would show it.
                                 extras::command_body(invocation, &format!("{key}-call"), theme)
                                     .unwrap_or_else(|| {
                                         detail_body(invocation, None, &format!("{key}-call"), theme)
@@ -7997,7 +7964,7 @@ impl Transcript {
                             .flex_none()
                             .when(!collapses, |line| line.bg(crate::theme::hairline(0.06)))
                     };
-                    // slopty: its output in its format, a running one in its box, its standard
+                    // Its output in its format, a running one in its box, its standard
                     // error apart under a format that is not text.
                     let output = outputs[ix].as_ref();
                     if let Some(menu) = output.and_then(|output| output.menu.as_ref()) {
@@ -8015,7 +7982,7 @@ impl Transcript {
                     if let Some(stderr) = output.and_then(|output| output.stderr.as_deref()) {
                         panel = panel.child(separator()).child(detail_body(stderr, None, &format!("{key}-err"), theme));
                     }
-                    // slopty: an output that never came says so, and when the step ran closes it.
+                    // An output that never came says so, and when the step ran closes it.
                     let said_none = no_output(tool, detail.is_some() || affordance.is_some());
                     if let Some(ChipAffordance { blob_ref, label, retry }) = affordance {
                         let loading = matches!(
@@ -8036,10 +8003,10 @@ impl Transcript {
                                 row.child(div().text_color(theme.text_muted).child("Retry"))
                             });
                         if !loading {
-                            // slopty: a button the keyboard reaches (#9).
+                            // A button the keyboard reaches (#9).
                             row = crate::surface_chrome::key_stop(row, theme)
                                 .role(gpui::Role::Button)
-                                // slopty: its Retry says what it fetches again (#18).
+                                // Its Retry says what it fetches again (#18).
                                 .aria_label(if retry {
                                     SharedString::from(
                                         label.replace("Couldn't load", "Retry loading").split(':').next().unwrap_or_default().to_owned(),
@@ -8067,7 +8034,7 @@ impl Transcript {
                         let words = work::timing_words(time, &chrono::Local);
                         panel = panel.child(detail_line(&format!("{key}-timing"), Some("Timing"), words.into(), theme));
                     }
-                    // slopty: what the model read where the step shows otherwise, and its raw
+                    // What the model read where the step shows otherwise, and its raw
                     // record, each fetched when opened.
                     for section in &sections[ix] {
                         panel = panel.child(self.section(section, theme, cx));
@@ -8105,7 +8072,7 @@ impl Transcript {
                     .into_any_element();
                 reveal_tool_row(row, row_height, reveal)
             }).enumerate().map(|(ix, step)| {
-                // slopty: the keyboard's cursor on a step of the group.
+                // The keyboard's cursor on a step of the group.
                 if Some(ix) == cursor_step {
                     div().relative().child(step).child(cursor_bar(keys_held, theme)).into_any_element()
                 } else {
@@ -8136,7 +8103,7 @@ impl Transcript {
             div()
                 .overflow_hidden()
                 .h(px(body_height))
-                // slopty: the calls fade in after the height opens, and out before it lands.
+                // The calls fade in after the height opens, and out before it lands.
                 .child(
                     div()
                         .when(group_fold.opacity < 1.0, |chips| chips.opacity(group_fold.opacity))
@@ -8415,7 +8382,7 @@ fn user_bubble_text(
                 // Invalidate the transcript once so the expander and clip are
                 // present even when glyph widths make a short-looking string
                 // exceed five visual lines.
-                // slopty: told once this frame is drawn: a view notified as its window paints
+                // Told once this frame is drawn: a view notified as its window paints
                 // asks for no frame (gpui-fast, as upstream), so the fold this height decides
                 // would wait for whatever drew next, and a window at rest kept the bubble as it
                 // was folded at the old width (the iPad fuzz's seed 4255).
@@ -8433,23 +8400,23 @@ fn user_bubble_text(
         .into_any_element()
 }
 
-/// slopty: a hover strip's control: a tab stop whose hairline takes the accent from the
+/// A hover strip's control: a tab stop whose hairline takes the accent from the
 /// keyboard, so focus never changes its size; the ring stands around what it draws, `reach`
 /// inside its press ([`strip_press`]).
 pub(super) fn strip_control<E: InteractiveElement + Styled>(el: E, theme: &Theme, reach: f32) -> E {
     crate::surface_chrome::focus_ring_within(el.tab_index(0), theme, reach)
 }
 
-/// slopty: what a hover strip's control draws, its wash and its icon.
+/// What a hover strip's control draws, its wash and its icon.
 const STRIP_CONTROL_SIZE: f32 = Theme::SPACE_MD * 2.0;
 
-/// slopty: a hover strip control's press: a finger's 44 pt on a touch screen around the
+/// A hover strip control's press: a finger's 44 pt on a touch screen around the
 /// [`strip_drawn`] it holds, the layout unchanged (#23); the drawn size under a pointer.
 pub(super) fn strip_press(id: impl Into<SharedString>) -> (gpui::Stateful<gpui::Div>, f32) {
     crate::composer::finger_press(id.into(), STRIP_CONTROL_SIZE, STRIP_CONTROL_SIZE)
 }
 
-/// slopty: a hover strip control as drawn, for its wash and its icon.
+/// A hover strip control as drawn, for its wash and its icon.
 pub(super) fn strip_drawn() -> gpui::Div {
     div()
         .size(px(STRIP_CONTROL_SIZE))
@@ -8508,7 +8475,7 @@ fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
 /// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
 /// text-[12px]`, a 20px `bg-white/[0.09]` icon tile, the medium label, then the
 /// truncating value. Neutral tones throughout; resolution never recolors the chip.
-/// slopty: the tile's icon says the ask's kind, an open ask's label says what it waits for in
+/// The tile's icon says the ask's kind, an open ask's label says what it waits for in
 /// the sidebar's words, and assistive tech reads it as a status (#8); its corner and hairline
 /// are the column's cards' (#19).
 fn input_chip(
@@ -8518,7 +8485,7 @@ fn input_chip(
     resolved: bool,
     theme: &Theme,
 ) -> AnyElement {
-    // slopty: one rule with the card's own marks: nothing an ask shows is locked; an approval
+    // One rule with the card's own marks: nothing an ask shows is locked; an approval
     // asks for the person's leave (a key), a confirmation informs (#19).
     let icon = match label.as_ref() {
         "Approval" => crate::icons::KEY_MINIMALISTIC,
@@ -8588,10 +8555,10 @@ fn input_chip(
         .into_any_element()
 }
 
-/// slopty: the chip's label for an agent's own questions.
+/// The chip's label for an agent's own questions.
 const QUESTION_CHIP: &str = "Question";
 
-/// slopty: an ask's chip words: its kind's label, and what it shows beside it. An agent's
+/// An ask's chip words: its kind's label, and what it shows beside it. An agent's
 /// questions show their header; an approval shows what it asks to run or change (its first
 /// line); any other ask (a dialog, a form) shows its title or its first line, so a dialog never
 /// reads as a question nobody can see.
@@ -8609,7 +8576,7 @@ fn input_chip_words(questions: &[slopty_view_proto::UserInputQuestion]) -> (Shar
     };
     let header = first.header.trim();
     let asked = first.question.lines().map(str::trim).find(|line| !line.is_empty());
-    // slopty: an approval shows what it would run or change ("touch refused.txt"), not its
+    // An approval shows what it would run or change ("touch refused.txt"), not its
     // generic header ("Bash command"), which says only the tool (#8): its command where it
     // runs one, which its words then only describe.
     let approval = label == "Approval";
@@ -8737,7 +8704,7 @@ fn detail_body(
                             .flex_1()
                             .child(selectable(stat_ix, path, runs)),
                     )
-                    // slopty: a file whose lines were never counted says no "+0 −0".
+                    // A file whose lines were never counted says no "+0 −0".
                     .when(stat.additions + stat.deletions > 0, |line| {
                         line.child(
                             div()
@@ -8754,7 +8721,7 @@ fn detail_body(
                     })
             }))
             .into_any_element(),
-        // slopty: the block says its lines to assistive tech, as a markdown block says its words.
+        // The block says its lines to assistive tech, as a markdown block says its words.
         ToolDetail::Output {
             lines,
             truncated_by,
@@ -8767,7 +8734,7 @@ fn detail_body(
             .font_family(theme.font_mono.clone())
             .text_size(px(TOOL_TEXT_SIZE))
             .children(lines.iter().enumerate().map(|(line_ix, line)| {
-                // slopty: standard error reads in the danger colour, as the TUI's.
+                // Standard error reads in the danger colour, as the TUI's.
                 let color = if stderr_from.is_some_and(|from| line_ix >= from) {
                     theme.danger
                 } else {
@@ -8783,7 +8750,7 @@ fn detail_body(
                 if line.is_empty() {
                     return row.into_any_element();
                 }
-                // slopty: a URL in the output is a link, as the TUI makes it one.
+                // A URL in the output is a link, as the TUI makes it one.
                 let Some((start, url)) = line_url(line) else {
                     return row
                         .child(selectable(line_ix, line.clone(), plain(line, color)))
@@ -8847,7 +8814,7 @@ fn detail_body(
                 block.child(more_lines_row(*truncated_by, theme))
             })
             .into_any_element(),
-        // slopty: a tree with no view to fold it reads as its lines (`Transcript::detail_element`
+        // A tree with no view to fold it reads as its lines (`Transcript::detail_element`
         // draws it with its folds).
         ToolDetail::Json { lines, truncated_by, .. } => body
             .py(px(6.0))
@@ -8882,24 +8849,24 @@ fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
         .child(SharedString::from(format!("+ {truncated_by} lines")))
 }
 
-/// slopty: when step `tool` ran, as its records say.
+/// When step `tool` ran, as its records say.
 fn step_time(tool: &ToolItem) -> Option<&slopty_view_doc::StepTime> {
     tool.facts.as_ref().and_then(|facts| facts.time.as_ref())
 }
 
-/// slopty: an open step that ended with nothing to show (`has_output`: an output, or one to
+/// An open step that ended with nothing to show (`has_output`: an output, or one to
 /// fetch) says "No output" rather than nothing (`inspector.md`, "Any step opens to its whole
 /// detail").
 fn no_output(tool: &ToolItem, has_output: bool) -> bool {
     tool.resolved && tool.kind == ToolItemKind::Call && !has_output && !chip_has_images(tool)
 }
 
-/// slopty: how step `tool`'s command exited, where its records say.
+/// How step `tool`'s command exited, where its records say.
 fn step_exit(tool: &ToolItem) -> Option<slopty_view_doc::ExitCode> {
     tool.facts.as_ref().and_then(|facts| facts.exit)
 }
 
-/// slopty: the one-line rows an open step's detail ends on: "No output", its exit code, and its
+/// The one-line rows an open step's detail ends on: "No output", its exit code, and its
 /// Timing.
 fn detail_lines(tool: &ToolItem, has_output: bool) -> usize {
     usize::from(no_output(tool, has_output))
@@ -8907,7 +8874,7 @@ fn detail_lines(tool: &ToolItem, has_output: bool) -> usize {
         + usize::from(step_time(tool).is_some())
 }
 
-/// slopty: one of those rows, [`BLOB_AFFORDANCE_HEIGHT`] tall: its section's name, then its words,
+/// One of those rows, [`BLOB_AFFORDANCE_HEIGHT`] tall: its section's name, then its words,
 /// cut short where the pane is narrow.
 fn detail_line(id: &str, section: Option<&'static str>, words: SharedString, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
@@ -8975,10 +8942,9 @@ fn thought_line_text(line: &[InlineRun], theme: &Theme) -> Option<(SharedString,
 
 /// The trailing tile on a chip header, when it has one.
 enum ChipTrail {
-    /// Expand/collapse chevron — flipped while the detail body is open. slopty: on an activity
+    /// Expand/collapse chevron — flipped while the detail body is open. On an activity
     /// row it shows as much as `shown`, its row's hover (Amp).
     Chevron { open: bool, shown: f32 },
-    // slopty: no open-arrow; a subagent's card has its own (`transcript/subagents.rs`).
 }
 
 /// Opens a tool chip's file in the files panel through the transcript's
@@ -9016,11 +8982,11 @@ impl ToolFileOpener {
 /// at the right of the ordinary static detail; done is the ordinary quiet
 /// chip; failed takes the danger tint — no status words, no live text (a
 /// header rewriting itself per stream delta read as noise — user report).
-/// slopty: a call's words as its row draws them: its verb and its target ("Read",
+/// A call's words as its row draws them: its verb and its target ("Read",
 /// "src/main.rs"), in the TUI's words where the call has them.
 fn chip_words(tool: &ToolItem) -> (String, String) {
     let (label, detail) = match tool.kind {
-        // slopty: a thought is a step too, said as the TUI says it: "Thinking" while it runs,
+        // A thought is a step too, said as the TUI says it: "Thinking" while it runs,
         // then how long it took (`inspector.md`, "Runs of calls fold to one sentence").
         ToolItemKind::Thought => (thought_words(tool), String::new()),
         ToolItemKind::Call => {
@@ -9028,12 +8994,12 @@ fn chip_words(tool: &ToolItem) -> (String, String) {
             (label.to_owned(), detail)
         }
     };
-    // slopty: a call zeron draws as `Tool · {name}` says itself in the TUI's words.
+    // A call with no words of its own (`Tool · {name}`) says itself in the TUI's words.
     let (label, detail) = match tool.facts.as_ref().and_then(|facts| facts.title.as_deref()) {
         Some(title) if tool.kind == ToolItemKind::Call => (title.to_owned(), String::new()),
         _ => (label, detail),
     };
-    // slopty: a file's path as the TUI shows it: relative to the chat's folder, its middle cut.
+    // A file's path as the TUI shows it: relative to the chat's folder, its middle cut.
     let detail = match tool.facts.as_ref().and_then(|facts| facts.detail.as_deref()) {
         Some(path) if tool.kind == ToolItemKind::Call && !detail.is_empty() => path.to_owned(),
         _ => detail,
@@ -9041,7 +9007,7 @@ fn chip_words(tool: &ToolItem) -> (String, String) {
     (label, detail)
 }
 
-/// slopty: a thought's row: "Thinking" while it runs, "Thought for 4s" once it said how long,
+/// A thought's row: "Thinking" while it runs, "Thought for 4s" once it said how long,
 /// "Thought briefly" under a second, else "Thought".
 fn thought_words(tool: &ToolItem) -> String {
     if !tool.resolved {
@@ -9059,12 +9025,12 @@ fn chip_name(tool: &ToolItem) -> SharedString {
     if detail.is_empty() { label.into() } else { format!("{label} {detail}").into() }
 }
 
-/// slopty: what a call's row says it came to ("exit code 2"), for assistive tech (#10).
+/// What a call's row says it came to ("exit code 2"), for assistive tech (#10).
 fn chip_result(tool: &ToolItem) -> Option<SharedString> {
     tool.facts.as_ref().and_then(|facts| facts.result.clone()).map(SharedString::from)
 }
 
-/// slopty: a call's row as assistive tech reads it: named by its call, valued by its result,
+/// A call's row as assistive tech reads it: named by its call, valued by its result,
 /// a list item, or a button when it opens (#10).
 fn chip_a11y(row: gpui::Stateful<gpui::Div>, tool: &ToolItem, open: Option<bool>) -> gpui::Stateful<gpui::Div> {
     let row = row
@@ -9080,7 +9046,7 @@ fn chip_a11y(row: gpui::Stateful<gpui::Div>, tool: &ToolItem, open: Option<bool>
     }
 }
 
-/// slopty: whether a call's row says its failure across its words. The person's own Deny ended
+/// Whether a call's row says its failure across its words. The person's own Deny ended
 /// the call; it did not fail, so it reads quiet. An activity row's failure says so in its rail
 /// icon and its result words ("exit code 2"), never across the whole line, which read as the
 /// loudest thing on screen for a failure the agent expected (#7); a card, with no rail, keeps
@@ -9103,7 +9069,7 @@ fn chip_header_row(
     cx: &mut gpui::App,
 ) -> gpui::Div {
     let (label, detail) = chip_words(tool);
-    // slopty: a call under way sweeps its verb with its group title's light, in phase (#14).
+    // A call under way sweeps its verb with its group title's light, in phase (#14).
     let shimmer = shimmer.filter(|_| sweeps(tool));
     let facts_trail = facts.zip(tool.facts.as_deref()).and_then(|(chip, facts)| {
         chip.trail(&tool.part_id, facts, tool.resolved, theme)
@@ -9290,7 +9256,7 @@ fn chip_header_row(
                     }
                 }),
         )
-        .children(facts_trail) // slopty: its result, timer, task and "Run in background".
+        .children(facts_trail) // its result, timer, task and "Run in background".
         .when_some(tool.call.subagent_model(), |row, model| {
             // Which model the child runs on, when the spawn named one.
             //
@@ -9359,7 +9325,7 @@ fn chip_header_row(
                 ),
             })
         })
-        // slopty: a step that ended badly says so with its mark, and its time stands in its lane
+        // A step that ended badly says so with its mark, and its time stands in its lane
         // at the trailing edge (`inspector.md`, "A step row reads at a glance").
         .when(activity && step_failed(tool), |row| {
             row.child(div().flex_none().child(
@@ -9382,7 +9348,7 @@ fn chip_header_row(
         })
 }
 
-/// slopty: the keyboard's cursor: a bar in the gutter at the left of the row or step it stands
+/// The keyboard's cursor: a bar in the gutter at the left of the row or step it stands
 /// on, in the accent while the trace holds the keyboard, faint while it does not.
 fn cursor_bar(held: bool, theme: &Theme) -> gpui::Div {
     div()
@@ -9395,14 +9361,14 @@ fn cursor_bar(held: bool, theme: &Theme) -> gpui::Div {
         .bg(if held { theme.accent } else { theme.text_faint })
 }
 
-/// slopty: whether a group ended badly: every call in it failed (`inspector.md`, "A group failed
+/// Whether a group ended badly: every call in it failed (`inspector.md`, "A group failed
 /// only if all of its calls failed").
 fn group_failed(tools: &[ToolItem]) -> bool {
     let mut calls = tools.iter().filter(|tool| tool.kind == ToolItemKind::Call).peekable();
     calls.peek().is_some() && calls.all(step_failed)
 }
 
-/// slopty: whether step `tool` ended badly: it failed, not by the person's own Deny.
+/// Whether step `tool` ended badly: it failed, not by the person's own Deny.
 fn step_failed(tool: &ToolItem) -> bool {
     tool.kind == ToolItemKind::Call && tool.is_error && !denied(tool)
 }
@@ -9508,8 +9474,7 @@ fn reveal_tool_row(row: AnyElement, height: f32, progress: f32) -> AnyElement {
         .into_any_element()
 }
 
-/// slopty: a touch screen, where nothing hovers.
-/// slopty: how far row `key`'s message strip has faded toward `shown` at `now`, and whether it
+/// How far row `key`'s message strip has faded toward `shown` at `now`, and whether it
 /// still moves, remembered in `fades`. `still` (reduced motion, or a touch screen, which shows it
 /// at rest) snaps it.
 fn strip_fade(
@@ -9545,11 +9510,11 @@ fn strip_fade(
 }
 
 const TOUCH: bool = cfg!(target_os = "ios");
-/// slopty: a message strip's fade as the pointer comes and goes (Amp's 200 ms, on the
+/// A message strip's fade as the pointer comes and goes (Amp's 200 ms, on the
 /// Tailwind ease the hover washes ride).
 const STRIP_FADE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_TAILWIND);
 
-/// slopty: whether the person turned the call down (their own Deny): an end, not a failure.
+/// Whether the person turned the call down (their own Deny): an end, not a failure.
 fn denied(tool: &ToolItem) -> bool {
     tool.facts.as_ref().is_some_and(|facts| facts.rejected)
 }
@@ -9657,7 +9622,7 @@ fn activity_ribbon(path: &mut PathBuilder, points: &[Point<Pixels>]) {
 }
 
 /// A plain activity row, or a card for a subagent without a linked document.
-/// slopty: `id` keys it for assistive tech, which reads it named by its call (#10); a lone call
+/// `id` keys it for assistive tech, which reads it named by its call (#10); a lone call
 /// (`solo`) wears its icon on the summary's chevron column, its words on the summaries' edge
 /// (#2); `shimmer` sweeps a running call's verb (#14).
 fn tool_chip(
@@ -9715,7 +9680,7 @@ fn tool_chip(
                 .items_center()
                 .overflow_hidden()
                 .when(!rail, |card| {
-                    card.rounded(px(TRANSCRIPT_CARD_RADIUS)) // slopty: the column's card (#19).
+                    card.rounded(px(TRANSCRIPT_CARD_RADIUS)) // the column's card (#19).
                         .border_1()
                         .border_color(theme.border)
                         .bg(crate::theme::ink(0.03))
@@ -9730,19 +9695,19 @@ fn tool_chip(
         .into_any_element()
 }
 
-/// slopty: whether `tool`'s row sweeps its words with its group title's light: a call under way,
+/// Whether `tool`'s row sweeps its words with its group title's light: a call under way,
 /// not a thought or a subagent, whose card says it runs (#14).
 fn sweeps(tool: &ToolItem) -> bool {
     !tool.resolved && tool.kind == ToolItemKind::Call && !is_spawn_link(tool)
 }
 
-/// slopty: where an activity row's words start past its rail: after the tree's gutter, or, for
+/// Where an activity row's words start past its rail: after the tree's gutter, or, for
 /// a lone call, on the summaries' edge (#2).
 fn activity_text_gap(solo: bool) -> f32 {
     if solo { ACTIVITY_TITLE_X - SOLO_RAIL_WIDTH } else { ACTIVITY_TEXT_GAP }
 }
 
-/// slopty: a lone call's rail: no tree, its icon centred on the summary chevron's column (#2).
+/// A lone call's rail: no tree, its icon centred on the summary chevron's column (#2).
 const SOLO_RAIL_WIDTH: f32 = 22.0;
 
 fn solo_rail(tool: &ToolItem, row_height: f32, theme: &Theme) -> gpui::Div {
@@ -9822,14 +9787,14 @@ fn entry_fingerprint(entry: &SessionMessageEntry) -> u64 {
         if let MessagePart::Input { resolved, .. } = part {
             acc.push(0x10 | *resolved as u8);
         }
-        // slopty: an error's and a divider's words change in place.
+        // An error's and a divider's words change in place.
         match part {
             MessagePart::Error { message, .. } => {
                 acc.push(0x20);
                 acc.extend_from_slice(message.as_bytes());
             }
             MessagePart::Marker { text, .. } => acc.extend_from_slice(text.as_bytes()),
-            // slopty: facts, a task's notice, a notice and a page change in place.
+            // Facts, a task's notice, a notice and a page change in place.
             MessagePart::Tool { facts: Some(facts), .. } => work::hash_into(&mut acc, facts),
             MessagePart::Task { task, .. } => work::hash_into(&mut acc, task),
             MessagePart::Note { note, .. } => work::hash_into(&mut acc, note),
@@ -9842,13 +9807,13 @@ fn entry_fingerprint(entry: &SessionMessageEntry) -> u64 {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // slopty: before the list lays out, where reading it borrows nothing.
+        // Before the list lays out, where reading it borrows nothing.
         self.page_viewport = self.list.viewport_bounds();
-        // slopty: a phone's window keeps the platform's margins (`row_inset`).
+        // A phone's window keeps the platform's margins (`row_inset`).
         self.subagents.window = window.viewport_size();
-        // slopty: the cursor's ink says whether the trace holds the keyboard.
+        // The cursor's ink says whether the trace holds the keyboard.
         self.keys_held = self.keys.is_focused(window);
-        // slopty: the list stopped following on an input of its own (its scrollbar's drag), so
+        // The list stopped following on an input of its own (its scrollbar's drag), so
         // the rule lets go too.
         if self.pinned && !self.list.is_following_tail() {
             self.let_go();
@@ -9866,7 +9831,7 @@ impl Render for Transcript {
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
         self.rendered_rows.clear();
-        // slopty: a strip no longer drawn lets its focus go, unless it holds the keyboard (#13).
+        // A strip no longer drawn lets its focus go, unless it holds the keyboard (#13).
         let drawn = std::mem::take(&mut self.strip_drawn);
         self.strip_focus.retain(|entry, focus| {
             drawn.contains(entry) || focus.copy.is_focused(window)
@@ -9913,7 +9878,7 @@ impl Render for Transcript {
         }
         self.step_reveal(window, cx);
         let frame_asked_at = crate::clock::now(cx);
-        // slopty: a jump's glide steps once a frame (#13).
+        // A jump's glide steps once a frame (#13).
         if self.glide.is_some()
             && let Some(ask) = self.glide_scheduled.ask(frame_asked_at)
         {
@@ -9985,7 +9950,7 @@ impl Render for Transcript {
                 .size_full()
                 .with_sizing_behavior(gpui::ListSizingBehavior::Auto),
         );
-        // slopty: every transcript owns its scroll edge, inside its pane: top edge only (nothing
+        // Every transcript owns its scroll edge, inside its pane: top edge only (nothing
         // overlays the pane's bottom). Its ramp is as tall as what lies above, read at paint
         // (HextaUI's scroll area; design-inspiration item 4), so a transcript at its top shows
         // none and a scroll of 4 px dims 4 px, never a whole band at once.
@@ -10002,11 +9967,11 @@ impl Render for Transcript {
             .relative()
             .size_full()
             .min_h_0()
-            // slopty: the trace's own place for the keyboard, which a press in it takes, as a
+            // The trace's own place for the keyboard, which a press in it takes, as a
             // split's does, and its keys (`transcript/trace.rs`).
             .track_focus(&self.keys)
             .on_key_down(cx.listener(Self::trace_key))
-            // slopty: every press starts off no footer's; the footer's own frame says otherwise
+            // Every press starts off no footer's; the footer's own frame says otherwise
             // before the press handler below hears it.
             .capture_any_mouse_down(cx.listener(|this, _: &gpui::MouseDownEvent, _, _| this.footer_press = false))
             .on_mouse_down(
@@ -10016,7 +9981,7 @@ impl Render for Transcript {
             .on_mouse_move(cx.listener(Self::on_selection_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
-            // slopty: a right-click on selected text opens its menu.
+            // A right-click on selected text opens its menu.
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_click))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
             // frame's markdown text-selection registry before any row's text
@@ -10026,20 +9991,20 @@ impl Render for Transcript {
             .child(crate::markdown::render::selection_frame_reset_for(
                 cx.entity_id().as_u64(),
             ))
-            // slopty: find's per-row counts start again each frame, before any row paints.
+            // Find's per-row counts start again each frame, before any row paints.
             .child(crate::markdown::find::frame_reset(cx.entity_id().as_u64()))
             .child(content)
-            // slopty: with no row to end, the footer stands at the foot alone.
+            // With no row to end, the footer stands at the foot alone.
             .children(self.footer.clone().filter(|_| self.rows.is_empty()).map(|footer| {
                 let footer = Self::footer_frame(footer, cx);
                 div().absolute().left_0().right_0().bottom_0().px(px(self.row_inset())).child(footer)
             }));
-        // slopty: the held group's band defers its paint above the top fade; added before the
+        // The held group's band defers its paint above the top fade; added before the
         // menus, which defer theirs too, so they open over it.
         let root = root.children(self.render_sticky_group(window, cx));
         let root = root.children(self.render_image_menu(cx));
-        let root = root.children(self.render_context_menu(cx)); // slopty
-        // slopty: find in thread, over the transcript's top right.
+        let root = root.children(self.render_context_menu(cx));
+        // Find in thread, over the transcript's top right.
         let root = root.children(self.render_find_bar(window, cx));
         let root = root.children(self.render_jump(cx));
         // Full-size viewer for a clicked user-bubble thumbnail
@@ -10078,7 +10043,7 @@ impl Render for Transcript {
 mod tests {
     use super::*;
 
-    /// slopty: the follow rule as a model (`docs/decisions/inspector.md`, "Follow and anchor"),
+    /// The follow rule as a model (`docs/decisions/inspector.md`, "Follow and anchor"),
     /// over seeded runs of record arrivals (below the view, above it, and a reply streaming at
     /// the end) and the person's moves (a wheel up or down, a press in a row). An arrival never
     /// changes whether the view follows; following, the view stays at the end; not following,
@@ -10275,31 +10240,6 @@ mod tests {
         assert!(end.0 && end.1 <= FOLLOW_PX, "the jump follows the end again: {end:?}");
     }
 
-    #[gpui::test]
-    fn departing_transcript_is_retained_only_until_hidden(cx: &mut gpui::TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
-            let state = cx.new(|_| AppState::new());
-            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-            transcript.update(cx, |transcript, cx| {
-                transcript.retain_for_route_exit();
-                transcript.chat_id = Some("departing".into());
-                transcript.last_source = None;
-                transcript.rows = vec![viewport_row("row", "message")];
-                transcript.list.reset(1);
-                transcript.sync(cx);
-                assert_eq!(transcript.rows.len(), 1);
-                assert!(transcript.route_exit_pending(cx));
-                transcript.finish_route_exit(cx);
-                assert!(transcript.rows.is_empty());
-                assert!(transcript.chat_id.is_none());
-                assert!(!transcript.route_exit_pending(cx));
-            });
-        });
-    }
     use slopty_view_doc::MessagePart;
 
     fn with_tool_group_navigation(
@@ -10331,7 +10271,7 @@ mod tests {
             state.transcript = vec![assistant(
                 "tools",
                 MessageStatus::Complete,
-                // slopty: two calls: a lone one shows itself, with nothing to fold (#2).
+                // Two calls: a lone one shows itself, with nothing to fold (#2).
                 vec![tool_part("call", "pwd"), tool_part("call-2", "cargo check")],
             )];
             state.transcript_revision += 1;
@@ -10380,36 +10320,29 @@ mod tests {
     #[gpui::test]
     fn tool_groups_stay_closed_after_rapid_new_chat_navigation(cx: &mut gpui::TestAppContext) {
         with_tool_group_navigation(cx, |state, transcript, cx| {
-            for finish_exit in [false, true] {
-                transcript.update(cx, |this, _| {
-                    // Navigate away during the previous close animation.
-                    this.folds.insert(
-                        "tools#g:call".into(),
-                        FoldState {
-                            open: Some(false),
-                            from: 120.0,
-                            toggled_at: Some(Instant::now()),
-                            disclosure_at: Some(Instant::now()),
-                            ..Default::default()
-                        },
-                    );
-                });
-                state.update(cx, |state, cx| state.select_chat(None, cx));
-                transcript.update(cx, |this, cx| {
-                    this.sync(cx);
-                    if finish_exit {
-                        this.finish_route_exit(cx);
-                    }
-                });
-                state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
-                transcript.update(cx, |this, cx| this.sync(cx));
-                replay_tool_group(&state, &transcript, "chat-a", cx);
-                assert_replayed_group_is_closed(&transcript, cx);
-            }
+            transcript.update(cx, |this, _| {
+                // Navigate away during the previous close animation.
+                this.folds.insert(
+                    "tools#g:call".into(),
+                    FoldState {
+                        open: Some(false),
+                        from: 120.0,
+                        toggled_at: Some(Instant::now()),
+                        disclosure_at: Some(Instant::now()),
+                        ..Default::default()
+                    },
+                );
+            });
+            state.update(cx, |state, cx| state.select_chat(None, cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            replay_tool_group(&state, &transcript, "chat-a", cx);
+            assert_replayed_group_is_closed(&transcript, cx);
         });
     }
 
-    /// slopty: a turn's work the person opened is open again when they come back to its chat,
+    /// A turn's work the person opened is open again when they come back to its chat,
     /// a subagent drilled into and left, so the saved viewport lands on rows still drawn; one they
     /// never touched comes back shut, and no strip comes back lit by the pointer that left.
     #[gpui::test]
@@ -10589,7 +10522,7 @@ mod tests {
     #[gpui::test]
     fn prepared_whale_open_and_revisit_do_not_build_rows_on_ui(cx: &mut gpui::TestAppContext) {
         let (update, prepared, preparation_ms) = std::thread::spawn(|| {
-            // slopty: replaying a `SLOPTY_WHALE_SNAPSHOT` needs the cut loro document.
+            // Replaying a `SLOPTY_WHALE_SNAPSHOT` needs the cut loro document.
             let entries = {
                 vec![assistant("whale-turn", MessageStatus::Complete, (0..5000).map(|i| {
                     MessagePart::Text { id: format!("part-{i}"), text: format!("## Result {i}\n\n**Markdown** with `code` and [links](https://example.com).\n") }
@@ -11366,7 +11299,7 @@ mod tests {
         MessagePart::Reasoning {
             id: id.into(),
             text: text.into(),
-            thought_ms: None, // slopty
+            thought_ms: None,
         }
     }
 
@@ -11462,7 +11395,7 @@ mod tests {
     }
 
 
-    /// slopty: a picture a tool returned is named by its file; one the agent generated says so.
+    /// A picture a tool returned is named by its file; one the agent generated says so.
     #[test]
     fn a_tool_picture_is_named_by_its_file() {
         assert_eq!(image_label("slopty-image:7/toolu_01/0/abc.png", "plot.png"), "Image: plot.png");
@@ -11470,7 +11403,7 @@ mod tests {
         assert_eq!(image_label("slopty-image:7/toolu_01/0/abc.png", " "), "Preview generated image");
     }
 
-    /// slopty: a prompt a jump goes to lands below the titlebar the transcript fades under,
+    /// A prompt a jump goes to lands below the titlebar the transcript fades under,
     /// where a sent prompt is held, not behind it.
     #[gpui::test]
     fn a_jump_lands_the_prompt_below_the_titlebar(cx: &mut gpui::TestAppContext) {
@@ -11507,7 +11440,7 @@ mod tests {
         });
     }
 
-    /// slopty: with motion, a jump glides a step a frame and lands its row below the titlebar,
+    /// With motion, a jump glides a step a frame and lands its row below the titlebar,
     /// where it flashes (#13).
     #[gpui::test]
     fn a_jump_glides_on_frames_and_flashes_where_it_lands(cx: &mut gpui::TestAppContext) {
@@ -11584,7 +11517,7 @@ mod tests {
         });
     }
 
-    /// slopty: a frame the view asked for can be lost (GPUI's retained check draws the window
+    /// A frame the view asked for can be lost (GPUI's retained check draws the window
     /// again and drops the callbacks that draw asked for) while the view keeps its note that it
     /// asked. The next draw past the patience asks again, so the glide still lands; a note that
     /// waited for good froze the chat after a send.
@@ -11653,7 +11586,7 @@ mod tests {
         });
     }
 
-    /// slopty: one ask waits at a time; past the patience it is asked again, and only the
+    /// One ask waits at a time; past the patience it is asked again, and only the
     /// latest ask's frame answers it.
     #[test]
     fn a_frame_ask_waits_its_patience_then_asks_again() {
@@ -11738,7 +11671,7 @@ mod tests {
     #[gpui::test]
     fn generated_image_fixture_uses_cache_and_retries(cx: &mut gpui::TestAppContext) {
         use crate::attachments::*;
-        forget_for_test(); // slopty: no load the last seed claimed
+        forget_for_test(); // no load the last seed claimed
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -11860,7 +11793,7 @@ mod tests {
             MessageStatus::Complete,
             vec![
                 reasoning_part("r0", "planning the first step"),
-                // slopty: a listing counts apart ("listed 1 directory"); a command here.
+                // A listing counts apart ("listed 1 directory"); a command here.
                 tool_part("t1", "cargo test"),
                 reasoning_part("r2", "now the second step"),
                 tool_part("t3", "pwd"),
@@ -11885,7 +11818,7 @@ mod tests {
         let summary = tool_group_summary(&tools);
         assert!(summary.starts_with("Thought 2 times"), "{summary}");
         assert!(summary.contains("2 commands"), "{summary}");
-        // slopty: a thought that says how long it took is named by it.
+        // A thought that says how long it took is named by it.
         let timed = assistant(
             "a2",
             MessageStatus::Complete,
@@ -11903,7 +11836,7 @@ mod tests {
             panic!("expected a tool group");
         };
         assert_eq!(tool_group_summary(tools), "Thought for 12s and ran 1 command");
-        // slopty: under a second, it thought briefly.
+        // Under a second, it thought briefly.
         let brief = assistant(
             "a2",
             MessageStatus::Complete,
@@ -11969,7 +11902,7 @@ mod tests {
         assert!(tools[0].resolved, "a followed thought is settled");
     }
 
-    /// slopty: a turn's rows are its records in the order they were written: its narration where
+    /// A turn's rows are its records in the order they were written: its narration where
     /// it was said, each run of calls and thoughts one group line keyed by its first call, an
     /// error where it happened. A group grows in place under its key, and the turn's end moves
     /// no row and changes no row's container (`docs/decisions/inspector.md`, "Rows in record
@@ -12122,7 +12055,7 @@ mod tests {
     fn thought_blocks_flatten_structurally() {
         let lines = thought_of("# Head\n\npara\n\n- one\n- two\n\n```rust\nlet x = 1;\n```");
         let flat: Vec<String> = lines.iter().map(|l| line_string(l)).collect();
-        // slopty: a heading reads as its prose: same size, not bold.
+        // A heading reads as its prose: same size, not bold.
         assert!(lines[0].iter().any(|r| r.text.contains("Head")));
         assert!(lines[0].iter().all(|r| !r.style.bold), "{:?}", lines[0]);
         // Blank separator rows between top-level blocks; tight list inside.
@@ -12283,7 +12216,7 @@ mod tests {
         }
     }
 
-    /// slopty: a subagent is a row of its own, never in a group's fold; those started together
+    /// A subagent is a row of its own, never in a group's fold; those started together
     /// stand under one line, each its own row (`inspector.md`, "A subagent is a nested step").
     #[test]
     fn a_subagent_is_a_row_of_its_own() {
@@ -12392,7 +12325,7 @@ mod tests {
         assert!(matches!(&rows[1].kind, RowKind::Spawn { tool } if is_agent_call(&tool.call)));
     }
 
-    /// slopty: a group opens only as the person asks: not while its calls run, not as more
+    /// A group opens only as the person asks: not while its calls run, not as more
     /// arrive, not at the turn's end (`docs/decisions/inspector.md`, "One fold depth").
     #[gpui::test]
     fn a_group_never_opens_by_itself(cx: &mut gpui::TestAppContext) {
@@ -12839,7 +12772,7 @@ mod tests {
             window: gpui::WindowHandle<CachedTranscript>,
             cx: &mut gpui::App,
         ) {
-            // slopty: the list follows its end in its own layout; a frame is all a tick is.
+            // The list follows its end in its own layout; a frame is all a tick is.
             transcript.update(cx, |_, cx| cx.notify());
             draw(window, cx);
         }
@@ -12945,8 +12878,8 @@ mod tests {
                             status: slopty_view_proto::SessionStatus::Working,
                             started_at: Some(chrono::Utc::now()),
                             updated_at: chrono::Utc::now(),
-                            status_since: None, // slopty: new field.
-                            waiting_on: None, // slopty: new field.
+                            status_since: None,
+                            waiting_on: None,
                         })
                     });
                 });
@@ -13045,7 +12978,7 @@ mod tests {
 
 
 
-        // slopty: a jump reaches the end though rows measured under its glide
+        // A jump reaches the end though rows measured under its glide
         // move the distance between wheel steps; a step up still breaks it.
         #[test]
         fn a_jump_reaches_the_end_whatever_rows_measure_under_it() {
@@ -13391,7 +13324,7 @@ mod tests {
     fn prompts_written_in_markdown_render_it() {
         let markdown = |text: &str| {
             let mut entry = assistant("u1", MessageStatus::Complete, vec![text_part("t0", text)]);
-            entry.role = MessageRole::User; // slopty: a prompt, as the record has it
+            entry.role = MessageRole::User; // a prompt, as the record has it
             entry.status = None;
             let rows = rows_for_entry(&entry, &mut parse);
             let RowKind::User { markdown, .. } = &rows[0].kind else {
@@ -13416,7 +13349,7 @@ mod tests {
     fn long_prompts_fold_to_their_leading_markdown() {
         let markdown = |text: &str| {
             let mut entry = assistant("u1", MessageStatus::Complete, vec![text_part("t0", text)]);
-            entry.role = MessageRole::User; // slopty: a prompt, as the record has it
+            entry.role = MessageRole::User; // a prompt, as the record has it
             entry.status = None;
             let rows = rows_for_entry(&entry, &mut parse);
             let RowKind::User { markdown, .. } = &rows[0].kind else {
@@ -13624,7 +13557,7 @@ mod tests {
             assert_eq!(lines[1].as_ref(), "short");
         }
 
-        // slopty: a line of JSON reads pretty-printed, in the summary and the whole output alike.
+        // A line of JSON reads pretty-printed, in the summary and the whole output alike.
         let json = r#"[{"name":"studio","liveness":"online"}]"#;
         for detail in [tool_detail(Some(json), None, None), blob_detail(json, false)] {
             let Some(ToolDetail::Output { lines, .. }) = detail else {
@@ -13680,7 +13613,7 @@ mod tests {
             facts: None,
         };
         let tools = vec![
-            // slopty: a listing counts apart ("listed 1 directory"); a command here.
+            // A listing counts apart ("listed 1 directory"); a command here.
             exec("git status"),
             exec("pwd"),
             exec("make"),
@@ -13691,7 +13624,7 @@ mod tests {
             tool_group_summary(&tools),
             "Ran 3 commands and edited 2 files"
         );
-        // slopty: the TUI's parts past the shared summary: an edit's line totals, directories
+        // The TUI's parts past the shared summary: an edit's line totals, directories
         // listed, and what commands landed, each once.
         let with = |mut item: ToolItem, facts: slopty_view_doc::ToolFacts| {
             item.facts = Some(Arc::new(facts));
@@ -13724,11 +13657,11 @@ mod tests {
         let mut failing = exec("boom");
         failing.is_error = true;
         assert_eq!(tool_group_summary(&[failing]), "Ran 1 command (1 failed)");
-        // slopty: a failed listing listed nothing: a failed command, said with the commands.
+        // A failed listing listed nothing: a failed command, said with the commands.
         let mut gone = exec("ls missing");
         gone.is_error = true;
         assert_eq!(tool_group_summary(&[exec("ls src"), exec("make"), gone]), "Ran 2 commands (1 failed) and listed 1 directory");
-        // slopty: the person's own Deny is no failure.
+        // The person's own Deny is no failure.
         let mut denied = exec("rm -rf build");
         denied.is_error = true;
         denied.facts = Some(std::sync::Arc::new(slopty_view_doc::ToolFacts {
@@ -13793,7 +13726,7 @@ mod tests {
             },
         ];
         assert_eq!(tool_group_summary(&tools), "Read 1 file and searched 2 times");
-        // slopty: a subagent's run is said as the work handed off, not as a tool called.
+        // A subagent's run is said as the work handed off, not as a tool called.
         let spawn = ToolItem {
             call: ToolCall::Unknown {
                 name: "Agent".into(),
@@ -14126,7 +14059,7 @@ mod tests {
     #[test]
     fn timestamp_strip_lands_on_the_last_settled_row() {
         use chrono::FixedOffset;
-        // Fixed zone (UTC−4). slopty: the time as near as it is (#17): alone today,
+        // Fixed zone (UTC−4). The time as near as it is (#17): alone today,
         // "Yesterday" the day before, the date this year, the year before it.
         let tz = FixedOffset::west_opt(4 * 3600).unwrap();
         let at = |rfc: &str| chrono::DateTime::parse_from_rfc3339(rfc).unwrap().timestamp_millis();
@@ -14215,7 +14148,7 @@ mod tests {
         assert_eq!(single_line("\n\n"), "");
     }
 
-    /// slopty: a dialog's chip names it a confirm and shows its ask; an agent's question keeps
+    /// A dialog's chip names it a confirm and shows its ask; an agent's question keeps
     /// its header; an approval shows its command, not its generic header (#8).
     #[test]
     fn an_ask_chip_names_its_kind_and_shows_the_ask() {
@@ -14345,7 +14278,7 @@ mod tests {
         }
     }
 
-    /// slopty: a title under way shimmers on the one clock every shimmer runs on: glyph by glyph
+    /// A title under way shimmers on the one clock every shimmer runs on: glyph by glyph
     /// from faint through the accent to its crest as the band crosses it (opencode's
     /// `text-shimmer`, HextaUI's accent crest).
     #[test]
@@ -14364,7 +14297,7 @@ mod tests {
         assert!(between != runs[0].1.color.expect("inked") && between != theme.text_faint, "the band's shoulder is between");
     }
 
-    /// slopty: a message's time and actions fade in over 200 ms as the pointer arrives, and out
+    /// A message's time and actions fade in over 200 ms as the pointer arrives, and out
     /// as it leaves, from wherever they stood (the Amp study's item 9); still, they snap.
     #[test]
     fn a_message_strip_fades_in_and_out() {
@@ -14414,7 +14347,7 @@ mod tests {
         }
     }
 
-    /// slopty: a live timer pads its second unit, so it holds its width as it counts.
+    /// A live timer pads its second unit, so it holds its width as it counts.
     #[test]
     fn a_ticking_timer_pads_its_second_unit() {
         assert_eq!(ticking_elapsed(9), "9s");
@@ -14433,5 +14366,3 @@ mod tests {
         assert!(rows_for_entry(&entry, &mut parse).is_empty());
     }
 }
-
-// slopty: appshots removed.

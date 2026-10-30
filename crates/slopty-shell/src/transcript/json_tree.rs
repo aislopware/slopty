@@ -1,4 +1,4 @@
-//! slopty: JSON as a tree, for a step's output read as JSON and for its raw record
+//! JSON as a tree, for a step's output read as JSON and for its raw record
 //! (`inspector.md`, "Any step opens to its whole detail").
 //!
 //! A document is parsed once into its values in reading order, each container followed by its

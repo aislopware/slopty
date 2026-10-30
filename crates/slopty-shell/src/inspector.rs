@@ -1,4 +1,4 @@
-//! slopty: the Inspector, a read-only view of the selected session beside its terminal
+//! The Inspector, a read-only view of the selected session beside its terminal
 //! (`docs/decisions/inspector.md`).
 //!
 //! The person works in the agent's own TUI; the inspector is where they look into what the
@@ -652,7 +652,7 @@ impl Inspector {
         let state = self.state.read(cx);
         let chat = state.selected_chat_row().cloned();
         let status = chat.as_ref().map_or(ChatIndicator::Idle, |chat| state.display_status_for(chat, self.clock));
-        // slopty: the one state vocabulary, its need's own glyph included (`layout.md`, "A state
+        // The one state vocabulary, its need's own glyph included (`layout.md`, "A state
         // is a glyph").
         let session = chat.as_ref().and_then(|chat| state.session_for(&chat.id));
         let mark = crate::shell::marks::Mark::of(status, session, self.clock);

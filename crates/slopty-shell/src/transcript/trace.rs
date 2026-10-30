@@ -1,4 +1,4 @@
-//! slopty: moving through the trace (`docs/decisions/inspector.md`, "One fold depth for the
+//! Moving through the trace (`docs/decisions/inspector.md`, "One fold depth for the
 //! whole trace", "Keys and find").
 //!
 //! - **One fold depth.** Prompts shows each turn's root row and its last reply; Steps, the
@@ -110,11 +110,6 @@ impl Transcript {
     /// The trace's place for the keyboard.
     pub(crate) fn keys_handle(&self) -> gpui::FocusHandle {
         self.keys.clone()
-    }
-
-    /// Where the cursor stands, while it does.
-    pub(crate) fn cursor(&self) -> Option<&Cursor> {
-        self.cursor.as_ref()
     }
 
     /// Whether group row `row` shows its steps as rows of their own: it folds more than one step

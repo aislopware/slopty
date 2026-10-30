@@ -1,6 +1,6 @@
-//! slopty: background work as the transcript shows it, Slopty's own (not in zeron): a
+//! Background work as the transcript shows it: a
 //! background task's notice as a quiet row, the agent's quiet notices (a request tried again
-//! counts down to its next attempt in place), and what a tool call says beyond zeron's chip: its
+//! counts down to its next attempt in place), and what a tool call says beyond its chip: its
 //! result in the TUI's words, and each step's time in a lane of its own at the row's trailing
 //! edge (`docs/decisions/inspector.md`, "A step row reads at a glance").
 //!
@@ -225,7 +225,7 @@ pub(super) fn span<'a>(times: impl IntoIterator<Item = &'a StepTime>, running: b
 
 /// What a tool chip's header adds from its call's facts: the result line and the time lane.
 pub(super) struct ChipFacts {
-    /// slopty: the time a running step reads (`Transcript::clock`), ms since the epoch.
+    /// The time a running step reads (`Transcript::clock`), ms since the epoch.
     pub now: i64,
     /// ⌥ is held: every lane says the time of day its step began.
     pub alt: bool,
@@ -240,7 +240,7 @@ impl ChipFacts {
         resolved: bool,
         theme: &Theme,
     ) -> Option<AnyElement> {
-        // slopty: a running step's time is its lane's; its trail keeps only its limit.
+        // A running step's time is its lane's; its trail keeps only its limit.
         let running_timer = facts.timer.as_ref().filter(|_| !resolved);
         let words = match (running_timer, &facts.result) {
             (Some(timer), _) => timer.timeout_ms.map(|limit| format!("timeout {}", slopty_view_doc::duration_words(limit))),
@@ -262,7 +262,7 @@ impl ChipFacts {
                 .max_w(px(260.0))
                 .truncate()
                 .text_size(crate::typography::ui_rems(11.0))
-                // slopty: a timer that ticks holds its width.
+                // A timer that ticks holds its width.
                 .font_features(crate::typography::tabular())
                 .text_color(tint)
                 .child(SharedString::from(words))
@@ -310,7 +310,7 @@ impl Transcript {
     }
 
     /// Draw again in a second: something drawn runs (a timer, a countdown). Each frame that
-    /// draws it asks again, so the redraws stop with the last of it. slopty: the one tick, on
+    /// draws it asks again, so the redraws stop with the last of it. It is the one tick, on
     /// the running turn's next whole second, so every time that runs moves on in one frame
     /// (`inspector.md`, "One clock").
     pub(super) fn tick_soon(&mut self, cx: &mut Context<Self>) {
@@ -330,7 +330,7 @@ impl Transcript {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
                 this.work.tick = None;
-                // slopty: what runs reads the time this tick took, in every frame built after it.
+                // What runs reads the time this tick took, in every frame built after it.
                 this.clock = crate::clock::utc(cx);
                 cx.notify();
             })
@@ -356,7 +356,7 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.work.open.contains(&row.id);
-        // slopty: the description on the right only where the words do not already say it
+        // The description on the right only where the words do not already say it
         // (`Background command "Build" completed` names its task).
         let title = Some(task.title.as_str()).filter(|t| !t.is_empty() && !task.text.contains(*t));
         let label = match title {
@@ -447,7 +447,7 @@ impl Transcript {
         }
         let words = notice_words(note, self.clock.timestamp_millis());
         let tint = tone_tint(&note.tone, theme);
-        // slopty: a plain notice ("+N more tasks") is no list item: no dot (#4).
+        // A plain notice ("+N more tasks") is no list item: no dot (#4).
         let plain = !matches!(note.tone.as_str(), NoteLine::ERROR | NoteLine::WARNING | NoteRow::SUCCESS);
         let lead: Option<AnyElement> = if retrying {
             Some(
@@ -507,7 +507,7 @@ impl Transcript {
     }
 }
 
-/// slopty: a notice's lead (its dot, or a retry's spinner) centred on the activity trunk, its
+/// A notice's lead (its dot, or a retry's spinner) centred on the activity trunk, its
 /// words starting on the group summaries' edge, [`super::ACTIVITY_TITLE_X`] (#4).
 fn lead_slot(lead: Option<AnyElement>) -> gpui::Div {
     div()
@@ -527,7 +527,7 @@ fn disclosure(
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
     let fade = SharedString::from(format!("{id}-hover"));
-    // slopty: a 24 px target drawn at 18 (its pad taken back), a faded hover, and its
+    // A 24 px target drawn at 18 (its pad taken back), a faded hover, and its
     // words on hover too; on a touch screen a finger's 44 around the 24 it draws (#23).
     let (press, reach) = crate::composer::finger_press(SharedString::from(id), 24.0, 24.0);
     crate::surface_chrome::focus_ring_within(press.m(px(-3.0 - reach)), theme, reach)
@@ -535,7 +535,7 @@ fn disclosure(
         .aria_expanded(open)
         .cursor_pointer()
         .hover_fade(fade.clone())
-        .tab_index(0) // slopty: a tab stop.
+        .tab_index(0) // a tab stop.
         .hint(if open { "Hide details" } else { "Show details" })
         .on_click(on_click)
         .child(
