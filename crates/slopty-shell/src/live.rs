@@ -487,6 +487,29 @@ pub fn dim(view: &AnyView, dimmed: bool, cx: &mut App) {
     dim(view, dimmed, cx);
 }
 
+type ClosableFn = dyn Fn(&AnyView, bool, &mut App);
+
+/// How the app tells one of its terminals whether the close key closes its pane.
+#[derive(Clone)]
+struct Closable(Rc<ClosableFn>);
+
+impl Global for Closable {}
+
+/// Serve [`closable`] with `closable`: the terminal's view, and whether the close key closes the
+/// pane it is drawn in.
+pub fn serve_closable(cx: &mut App, closable: impl Fn(&AnyView, bool, &mut App) + 'static) {
+    cx.set_global(Closable(Rc::new(closable)));
+}
+
+/// Tell the terminal drawn as `view` whether the shell's close key (⌘W) closes its pane.
+///
+/// It offers the key only where the key does that: a session's own pane on a touch screen
+/// stays, its window being the app's scene. Nothing with no host.
+pub fn closable(view: &AnyView, closable: bool, cx: &mut App) {
+    let Some(Closable(tell)) = cx.try_global::<Closable>().cloned() else { return };
+    tell(view, closable, cx);
+}
+
 type RunLineFn = dyn Fn(&str, &str, bool, &mut App) -> bool;
 
 /// How the app types a line into one of its terminals.

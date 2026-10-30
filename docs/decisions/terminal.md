@@ -4161,7 +4161,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the danger colour at half over it for a failure; ↩ asks for it again
     (`TerminalViewEvent::StartAgain`), which the workspace asks of the worker under the same id
     (`TermRequest::Restart`), so its item, its row and its tab stay, and the close key closes
-    it; the bar steps aside while the pointer is over it. How long it ran comes from the shell
+    it, offered only where it does: the shell tells each view (`live::closable`), and a
+    session's own pane on a touch screen, whose window is the app's scene, offers none; the bar
+    steps aside while the pointer is over it. How long it ran comes from the shell
     (`TerminalView::set_run`), since the stream says no exit time and a view attached to a
     session long after it began sees only the end; with no start said, the length is unknown
     and never tints. A run that starts again is timed from then.

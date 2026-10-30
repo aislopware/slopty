@@ -2,8 +2,8 @@
 //! `ChildExitedMessageBar` draws it (`docs/decisions/terminal.md`, "A session that ended says
 //! how"). It says who ended, how quickly when that was too quick to be a real run, and the
 //! code when it was not 0, tinted as an error then; ↩ starts the session again
-//! ([`TerminalViewEvent::StartAgain`]) and the shell's close key closes it. The bar steps aside
-//! while the pointer is over it, so the last lines stay readable.
+//! ([`TerminalViewEvent::StartAgain`]) and the shell's close key closes it, offered only where it
+//! does. The bar steps aside while the pointer is over it, so the last lines stay readable.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -42,6 +42,9 @@ pub(super) struct Run {
     lasted: Option<Duration>,
     /// The pointer is over the bar, which steps aside.
     hovered: bool,
+    /// The shell's close key leaves the pane this view is drawn in (a session's own on a touch
+    /// screen), so the bar offers no key to close it.
+    stays: bool,
 }
 
 impl Run {
@@ -96,6 +99,15 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Whether the shell's close key closes the pane this view is drawn in, as the shell says
+    /// ([`slopty_shell::live::closable`]): the bar offers the key only where it does.
+    pub fn set_closable(&mut self, closable: bool, cx: &mut Context<Self>) {
+        if self.run.stays == closable {
+            self.run.stays = !closable;
+            cx.notify();
+        }
+    }
+
     /// The program ended: how long it ran is read now.
     pub(super) fn run_ended(&mut self, cx: &Context<Self>) {
         self.run.ended(slopty_shell::clock::now(cx));
@@ -143,7 +155,12 @@ impl TerminalView {
         let fg = self.ground_text();
         let text = (f32::from(m.line_height) * 0.8).min(BAR_TEXT_MOST);
         let again = slopty_shell::keys::stroke_text(gpui::Modifiers::default(), "enter");
-        let close = slopty_shell::keys::for_action_anywhere(&slopty_shell::app_menus::CloseTab, cx);
+        // The shell's close key, where it closes the pane: a touch screen's session pane stays.
+        let close = if self.run.stays {
+            None
+        } else {
+            slopty_shell::keys::for_action_anywhere(&slopty_shell::app_menus::CloseTab, cx)
+        };
         let hint = |key: String, what: &'static str| {
             div()
                 .flex()
@@ -186,7 +203,10 @@ impl TerminalView {
                         .text_color(fg)
                         .child(div().flex_1().min_w_0().truncate().child(words))
                         .child(hint(again, "Start again"))
-                        .children(close.map(|close| hint(close.to_string(), "Close"))),
+                        .children(close.map(|close| {
+                            hint(close.to_string(), "Close")
+                                .debug_selector(|| "terminal-ended-close".to_owned())
+                        })),
                 )
                 .into_any_element(),
         )
@@ -196,6 +216,44 @@ impl TerminalView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bar offers the shell's close key where the key closes the pane, and none where the
+    /// shell says the key leaves it (a session's own pane on a touch screen); ↩ either way.
+    #[gpui::test]
+    fn the_bar_offers_the_close_key_only_where_it_closes_the_pane(cx: &mut gpui::TestAppContext) {
+        use slopty_proto::terminal::{TermEvent, TermSize};
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        cx.update(|cx| {
+            cx.set_global(slopty_shell::theme::Theme::default());
+            let close = gpui::KeyBinding::new("cmd-w", slopty_shell::app_menus::CloseTab, None);
+            cx.bind_keys([close]);
+        });
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+            let theme = slopty_theme::Theme::default();
+            TerminalView::new(slopty_core::SessionId::new(), size, tx, theme, cx)
+        });
+        cx.simulate_resize(gpui::size(px(400.0), px(300.0)));
+        view.update(cx, |view, cx| {
+            view.apply(TermEvent::Driver { you: true }, cx);
+            view.set_run("Claude Code", Duration::from_secs(60), cx);
+            view.apply(TermEvent::Exited { status: Some(0) }, cx);
+        });
+        let offers = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            let bar = cx.debug_bounds("terminal-ended").is_some();
+            (bar, cx.debug_bounds("terminal-ended-close").is_some())
+        };
+        assert_eq!(offers(cx), (true, true), "⌘W closes the pane: the bar offers it");
+        view.update(cx, |view, cx| view.set_closable(false, cx));
+        assert_eq!(offers(cx), (true, false), "the key leaves this pane: the bar offers ↩ alone");
+        view.update(cx, |view, cx| view.set_closable(true, cx));
+        assert_eq!(offers(cx), (true, true), "offered again where it closes");
+    }
 
     /// The words say who ended, how quickly only when that was too quick to be a run, and the
     /// code only when it was not 0; a failure is either.

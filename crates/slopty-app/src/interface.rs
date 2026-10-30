@@ -145,6 +145,12 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
             terminal.update(cx, |terminal, cx| terminal.set_dimmed(dimmed, cx));
         }
     });
+    // An ended terminal's bar offers the close key only where it closes the pane.
+    slopty_shell::live::serve_closable(cx, |view, closable, cx| {
+        if let Ok(terminal) = view.clone().downcast::<TerminalView>() {
+            terminal.update(cx, |terminal, cx| terminal.set_closable(closable, cx));
+        }
+    });
     // A line an orchestrating agent asks to run goes into the shell terminal it opened: typed and
     // run, or left at the prompt for the person to read first.
     let typed = view.downgrade();

@@ -107,6 +107,8 @@ pub struct TerminalPanel {
     /// view was last told of it, by its entity.
     dimmed: bool,
     told_dim: Option<(gpui::EntityId, bool)>,
+    /// Whether the shown view was last told the close key closes its pane, by its entity.
+    told_closable: Option<(gpui::EntityId, bool)>,
     /// How much narrower and shorter than the body the shown terminal fits its grid
     /// while the panes around the panel glide, and the view it holds ([`live::hold_fit`]).
     fit_hold: Size<Pixels>,
@@ -161,6 +163,7 @@ impl TerminalPanel {
             session_asked: HashMap::new(),
             dimmed: false,
             told_dim: None,
+            told_closable: None,
             fit_hold: Size::default(),
             held_view: None,
             tab_seq: 0,
@@ -781,6 +784,14 @@ impl Render for TerminalPanel {
                 self.told_dim = Some(told);
                 live::dim(&hosted.view, self.dimmed, cx);
             }
+            // ⌘W closes a shell's pane, and from the session's own pane its window, which a touch
+            // screen's never does: what the view offers of the key is what the key does.
+            let closable = !self.session || crate::app_menus::window_closes();
+            let told_close = (hosted.view.entity_id(), closable);
+            if self.told_closable != Some(told_close) {
+                self.told_closable = Some(told_close);
+                live::closable(&hosted.view, closable, cx);
+            }
         }
         // Focus lands on the panel's body once, and passes on to the terminal when it is there.
         if std::mem::take(&mut self.focus_pending) {
@@ -1104,6 +1115,87 @@ mod progress_tests {
         cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
         cx.run_until_parked();
         assert_eq!(told.get(), 1, "the same ground again is no news");
+    }
+
+    /// A session's own pane on a touch screen tells its terminal the close key leaves it, the
+    /// window being the app's scene there; on a Mac the key closes it (its window), and the
+    /// terminal hears that.
+    #[gpui::test]
+    fn a_touch_screens_session_pane_tells_its_terminal_the_close_key_leaves_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let told = Rc::new(RefCell::new(Vec::<bool>::new()));
+        crate::shell::force_touch(true);
+        cx.update(|cx| {
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+            crate::live::install(
+                cx,
+                |id, _, cx| {
+                    (id == "7").then(|| Hosted {
+                        view: cx.new(|_| Blank).into(),
+                        focus: cx.focus_handle(),
+                        title: None,
+                        ended: false,
+                        exit: None,
+                        progress: None,
+                        drop: None,
+                        ground: None,
+                    })
+                },
+                |_, _| None,
+                |_, _, _| None,
+            );
+            let told = Rc::clone(&told);
+            crate::live::serve_closable(cx, move |_, closable, _| {
+                told.borrow_mut().push(closable);
+            });
+        });
+        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
+            Arc::new(Machine),
+        ));
+        let (panel, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = crate::state::AppState::new();
+                state.set_test_engine(engine);
+                state.selected_chat = Some("a".into());
+                state
+            });
+            TerminalPanel::new_session(state, cx)
+        });
+        // Chat a's session runs in terminal 7.
+        panel.update(cx, |panel, cx| {
+            panel.state.update(cx, |state, cx| {
+                state.apply_session_terminals([("a".to_owned(), "7".to_owned())].into());
+                cx.notify();
+            });
+        });
+        let last = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..300 {
+                cx.run_until_parked();
+                runtime.block_on(async {
+                    for _ in 0..20 {
+                        tokio::task::yield_now().await;
+                    }
+                });
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+                if let Some(last) = told.borrow().last() {
+                    return *last;
+                }
+            }
+            panic!("the terminal was never told");
+        };
+        assert!(!last(cx), "a touch screen's session pane stays under ⌘W");
+        crate::shell::force_touch(false);
+        told.borrow_mut().clear();
+        assert!(last(cx), "a Mac's session pane closes its window under ⌘W");
     }
 
     /// A machine that opens terminal 7 and keeps what each open asked.

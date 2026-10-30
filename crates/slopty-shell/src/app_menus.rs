@@ -151,9 +151,15 @@ fn close_active_window(pane_first: bool, cx: &mut App) {
     }
 }
 
-/// Close `shell`'s focused pane with `pane_first` when it is not the session's, else its window,
-/// the unsaved-file gate and all. On a touch screen the window is the app's scene, which the
-/// system shows and puts away: there only the panes beside the session close.
+/// Whether the keyboard closes a shell window (⇧⌘W, and ⌘W from the session's own pane): on a
+/// Mac. A touch screen's window is the app's scene, which only the system shows and puts away,
+/// so there ⌘W closes only the panes beside the session.
+pub(crate) fn window_closes() -> bool {
+    !shell::touch_screen()
+}
+
+/// Close `shell`'s focused pane with `pane_first` when it is not the session's, else its window
+/// where the keyboard closes one ([`window_closes`]), the unsaved-file gate and all.
 fn close(
     shell: &mut shell::Shell,
     pane_first: bool,
@@ -163,7 +169,7 @@ fn close(
     if pane_first && shell.close_focused_pane(cx) {
         return;
     }
-    if !shell::touch_screen() && shell.prepare_window_close(cx) {
+    if window_closes() && shell.prepare_window_close(cx) {
         window.remove_window();
     }
 }
