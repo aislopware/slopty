@@ -352,6 +352,8 @@ fn older_turns_are_paged_once_until_every_turn_is_held() {
         usage: Usage::default(),
         models: Vec::new(),
         changed: Lines::default(),
+        mode: None,
+        context: None,
     };
     let thread = ThreadId::new();
     let mut threads = Threads::default();
