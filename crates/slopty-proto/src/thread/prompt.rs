@@ -31,6 +31,12 @@ impl Draft {
     pub const MAX_BYTES: usize = 16 * 1024;
 }
 
+const _: () = assert!(
+    Draft::MAX_BYTES >= 100 * 80 && Draft::MAX_BYTES <= crate::codec::MAX_FRAME_BYTES / 256,
+    "a draft holds a box far taller than a screen whole (a hundred lines of eighty columns), \
+     and one at its most stays a sliver of a frame beside the thread's other changes"
+);
+
 /// A picture pasted into the prompt box.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DraftImage {

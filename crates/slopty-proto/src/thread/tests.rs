@@ -444,8 +444,8 @@ fn a_subagents_thread_is_named_by_its_session_and_agent() {
     assert_eq!(main.subagent("a1b2").to_string(), "1fc1bce5-1343-8f7f-9a36-75875446afad");
 }
 
-/// A thread that stopped on an error ranks above one at rest. Every rung is counted, and the
-/// ladder runs down to rest.
+/// A thread that stopped on an error ranks above one at rest. Every rung is counted apart from
+/// the others, and the ladder runs down to rest.
 #[test]
 fn a_failed_thread_ranks_above_rest() {
     use attention::{Counts, Rung};
@@ -464,10 +464,27 @@ fn a_failed_thread_ranks_above_rest() {
     assert_eq!(rung(&state), Rung::Failed);
     assert_eq!(Rung::DOWN.last(), Some(&Rung::Idle));
     let mut counts = Counts::default();
-    for rung in Rung::DOWN {
+    for (more, rung) in (0..).zip(Rung::DOWN) {
         counts.count(rung);
+        counts.add(rung, more);
     }
-    assert_eq!((counts.on(Rung::Idle), counts.total()), (1, 5));
+    let on: Vec<u32> = Rung::DOWN.iter().map(|&rung| counts.on(rung)).collect();
+    assert_eq!((on, counts.total()), (vec![1, 2, 3, 4, 5], 15));
+}
+
+/// A thread names the terminal its agent runs in by a fact, which its row carries: the session
+/// it names, and none where no fact names one.
+#[test]
+fn a_thread_names_the_terminal_its_agent_runs_in() {
+    let mut meta = meta();
+    assert_eq!(meta.terminal(), None);
+    let session = slopty_core::SessionId::new();
+    meta.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), session.to_string());
+    assert_eq!(meta.terminal(), Some(session));
+    assert_eq!(ThreadState::new(meta.clone()).row(WallMs::ZERO).terminal(), Some(session));
+    meta.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), "tile 3".to_owned());
+    assert_eq!(meta.terminal(), None);
+    assert_eq!(ThreadState::new(meta).row(WallMs::ZERO).terminal(), None);
 }
 
 /// The screens an agent drives are what the worker last said, and none once it says none.
