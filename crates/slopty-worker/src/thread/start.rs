@@ -361,9 +361,10 @@ impl Starter {
         Ok(thread)
     }
 
-    /// Hold thread `thread` as `meta` says, naming `terminal`, seated at `seated`: a new one, or
-    /// the one held of the session taken up again, whose terminal and folder change in one step
-    /// with the look at what they were. What it did, for [`Self::unmade`].
+    /// Hold thread `thread` as `meta` says, naming `terminal`, seated at `seated`, in one step
+    /// with the look at whether it is held: a new one, or the one held of the session taken up
+    /// again, whose terminal and folder change from what they were. What it did, for
+    /// [`Self::unmade`].
     fn made(
         &self,
         thread: ThreadId,
@@ -373,25 +374,26 @@ impl Starter {
         seated: Option<&Seated>,
     ) -> Made {
         let named = terminal.to_string();
-        let held = self.host.update(thread, |state| {
+        meta.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), named.clone());
+        if let Some(seated) = seated {
+            ThreadMeta::ORCHESTRATED.clone_into(&mut meta.origin);
+            meta.facts.extend(seated.facts.iter().cloned());
+        }
+        let held = self.host.create_or_update(meta, |state| {
             let mut held = state.meta.clone();
-            let had = held.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), named.clone());
+            let had = held.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), named);
             let cwd = std::mem::replace(&mut held.cwd, start.cwd.clone());
             let changed = held != state.meta;
             let actions = if changed { vec![Action::Meta(Box::new(held))] } else { Vec::new() };
             (actions, Made::Held { had, cwd })
         });
-        let made = held.unwrap_or_else(|| {
-            meta.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), named);
-            if let Some(seated) = seated {
-                ThreadMeta::ORCHESTRATED.clone_into(&mut meta.origin);
-                meta.facts.extend(seated.facts.iter().cloned());
-            }
-            if let Err(e) = self.host.create(meta) {
+        let made = match held {
+            Ok(held) => held.unwrap_or(Made::New),
+            Err(e) => {
                 tracing::warn!(%thread, "a started agent's thread could not be made: {e}");
+                Made::New
             }
-            Made::New
-        });
+        };
         if let Some(seated) = seated {
             self.host.seated(thread, seated);
         }

@@ -289,9 +289,56 @@ impl Host {
     ///
     /// # Errors
     ///
-    /// When its log cannot be made.
+    /// When its log cannot be made, or the thread is held already
+    /// ([`io::ErrorKind::AlreadyExists`]): one is never made over another.
     pub fn create(&self, meta: ThreadMeta) -> io::Result<Cursor> {
         create(&mut self.inner.lock(), meta)
+    }
+
+    /// Host `meta`'s thread, or apply what `change` makes of it when it is held already, in one
+    /// step: nothing makes or changes it between the look and the write. `None` when it was
+    /// made here, else what `change` returned beside its actions.
+    ///
+    /// # Errors
+    ///
+    /// When its log cannot be made.
+    pub fn create_or_update<F, T>(&self, meta: ThreadMeta, change: F) -> io::Result<Option<T>>
+    where
+        F: FnOnce(&ThreadState) -> (Vec<Action>, T),
+    {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        inner.load(meta.id);
+        let Some(hosted) = inner.threads.get_mut(&meta.id) else {
+            return create(inner, meta).map(|_| None);
+        };
+        let (actions, out) = change(hosted.log.state());
+        if !actions.is_empty() {
+            apply(hosted, &mut inner.table, &inner.heard, actions);
+        }
+        Ok(Some(out))
+    }
+
+    /// Begin `state`'s thread anew, as its agent's records tell it from nothing, in one step:
+    /// hosted as `state` says when it is not; else its log started over from `state` as
+    /// [`Self::reset`] does, its meta what `meta` makes of the one held, so what others wrote of
+    /// it since the records were read is not lost.
+    ///
+    /// # Errors
+    ///
+    /// When its log cannot be made or written.
+    pub fn begin<F>(&self, mut state: ThreadState, meta: F) -> io::Result<Cursor>
+    where
+        F: FnOnce(&ThreadMeta) -> ThreadMeta,
+    {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        inner.load(state.meta.id);
+        let Some(hosted) = inner.threads.get_mut(&state.meta.id) else {
+            return create(inner, state.meta);
+        };
+        state.meta = meta(&hosted.log.state().meta);
+        restart(hosted, &mut inner.table, state)
     }
 
     /// Whether `thread` is held.
@@ -430,25 +477,7 @@ impl Host {
         let inner = &mut *guard;
         inner.load(thread);
         let Some(hosted) = inner.threads.get_mut(&thread) else { return Ok(None) };
-        // The person's own marks (how far they have seen it, their name for it) are the
-        // worker's, which no agent's session has: they stay. What the agent's TUI holds (its
-        // prompt box, its queue) is told again by whoever reads the session.
-        let mut state = state;
-        hosted.own.meta(&mut state.meta);
-        state.seen = hosted.log.state().seen;
-        state.named.clone_from(&hosted.log.state().named);
-        hosted.log.reset(state)?;
-        let cursor = hosted.log.cursor();
-        let row = hosted.log.state().row(WallMs::now());
-        if hosted.log.state().status.phase != Phase::Working
-            && let Err(e) = hosted.log.write_head(&row)
-        {
-            tracing::debug!(%thread, "a thread's head was not kept: {e}");
-        }
-        inner.table.put(row);
-        let _no_follower =
-            hosted.feed.send(Arc::new(Batch { epoch: cursor.epoch, seq: 0, actions: Vec::new() }));
-        Ok(Some(cursor))
+        restart(hosted, &mut inner.table, state).map(Some)
     }
 
     /// Stop hosting `thread` and delete its log. Its followers' feeds close.
@@ -473,21 +502,26 @@ impl Host {
     /// tells of it,
     /// and the seat is kept in its directory, so the thread taken up again after a restart is
     /// given the same. A seat that cannot be written is warned of.
+    ///
+    /// In one step: the row says the seat on the meta as it stands, so nothing written of the
+    /// thread meanwhile is lost.
     pub fn seated(&self, thread: ThreadId, seated: &Seated) {
-        let meta = {
-            let mut guard = self.inner.lock();
-            let inner = &mut *guard;
-            inner.load(thread);
-            let Some(hosted) = inner.threads.get_mut(&thread) else { return };
-            hosted.own.seat = Some(seated.seat.to_string());
-            hosted.own.seated = Some(seated.clone());
-            let dir = inner.dir.join(thread.to_string());
-            if let Err(e) = write_seat(&dir, seated) {
-                tracing::warn!(%thread, "its seat could not be kept: {e}");
-            }
-            hosted.log.state().meta.clone()
-        };
-        self.apply(thread, vec![Action::Meta(Box::new(meta))]);
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        inner.load(thread);
+        let Some(hosted) = inner.threads.get_mut(&thread) else { return };
+        hosted.own.seat = Some(seated.seat.to_string());
+        hosted.own.seated = Some(seated.clone());
+        let dir = inner.dir.join(thread.to_string());
+        if let Err(e) = write_seat(&dir, seated) {
+            tracing::warn!(%thread, "its seat could not be kept: {e}");
+        }
+        let held = &hosted.log.state().meta;
+        let mut meta = held.clone();
+        hosted.own.meta(&mut meta);
+        if meta != *held {
+            apply(hosted, &mut inner.table, &inner.heard, vec![Action::Meta(Box::new(meta))]);
+        }
     }
 
     /// Serve Slopty's tools through `cli mcp` to every agent started from now on, the person's
@@ -764,13 +798,40 @@ impl Inner {
     }
 }
 
+/// Host the new thread `meta` says, unless one is held as that thread already.
 fn create(inner: &mut Inner, meta: ThreadMeta) -> io::Result<Cursor> {
+    if inner.threads.contains_key(&meta.id) || inner.cold.contains_key(&meta.id) {
+        let held = format!("thread {} is held already", meta.id);
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, held));
+    }
     let dir = inner.dir.join(meta.id.to_string());
     let log = Log::create(&dir, ThreadState::new(meta), inner.limits)?;
     let cursor = log.cursor();
     inner.table.put(log.state().row(WallMs::now()));
     let hosted = Hosted::open(&dir, log)?;
     inner.threads.insert(hosted.log.id(), hosted);
+    Ok(cursor)
+}
+
+/// Start `hosted`'s log over from `state`, under a new epoch: every follower gets a snapshot.
+fn restart(hosted: &mut Hosted, table: &mut Table, mut state: ThreadState) -> io::Result<Cursor> {
+    // The person's own marks (how far they have seen it, their name for it) are the worker's,
+    // which no agent's session has: they stay. What the agent's TUI holds (its prompt box, its
+    // queue) is told again by whoever reads the session.
+    hosted.own.meta(&mut state.meta);
+    state.seen = hosted.log.state().seen;
+    state.named.clone_from(&hosted.log.state().named);
+    hosted.log.reset(state)?;
+    let cursor = hosted.log.cursor();
+    let row = hosted.log.state().row(WallMs::now());
+    if hosted.log.state().status.phase != Phase::Working
+        && let Err(e) = hosted.log.write_head(&row)
+    {
+        tracing::debug!(thread = %hosted.log.id(), "a thread's head was not kept: {e}");
+    }
+    table.put(row);
+    let _no_follower =
+        hosted.feed.send(Arc::new(Batch { epoch: cursor.epoch, seq: 0, actions: Vec::new() }));
     Ok(cursor)
 }
 
@@ -825,4 +886,134 @@ fn apply(
     let _no_follower =
         hosted.feed.send(Arc::new(Batch { epoch: first.epoch, seq: first.seq, actions }));
     hosted.log.cursor()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use slopty_proto::thread::Drive;
+
+    use super::*;
+
+    fn meta(title: &str) -> ThreadMeta {
+        ThreadMeta {
+            id: ThreadId::new(),
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            agent_version: "2.1.314".to_owned(),
+            native: "s1".to_owned(),
+            cwd: "/work".to_owned(),
+            title: title.to_owned(),
+            parent: None,
+            origin: ThreadMeta::PERSON.to_owned(),
+            drive: Drive::named(Drive::OBSERVED),
+            facts: BTreeMap::new(),
+            created_ms: WallMs::from_millis(1),
+        }
+    }
+
+    fn named(meta: &ThreadMeta, fact: &str, value: &str) -> ThreadMeta {
+        let mut meta = meta.clone();
+        meta.facts.insert(fact.to_owned(), value.to_owned());
+        meta
+    }
+
+    fn held(host: &Host, thread: ThreadId) -> ThreadState {
+        host.state(thread).expect("held").0
+    }
+
+    /// A thread is never made over one held: making it again is refused and leaves the one held
+    /// as it was, opened or not opened yet; one held already is changed instead in one step
+    /// with the look, which makes it only when none is held.
+    #[test]
+    fn a_thread_is_never_made_over_one_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host::open(dir.path(), Limits::default()).unwrap();
+        let first = meta("First");
+        let thread = first.id;
+        host.create(first.clone()).unwrap();
+        host.apply(thread, vec![Action::Meta(Box::new(named(&first, "kept", "yes")))]);
+        let again = ThreadMeta { title: "Second".to_owned(), ..first };
+        let refused = host.create(again.clone()).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+        let state = held(&host, thread);
+        assert_eq!(state.meta.title, "First", "the one held stays");
+        assert_eq!(state.meta.facts.get("kept").map(String::as_str), Some("yes"));
+        drop(host);
+
+        let host = Host::open(dir.path(), Limits::default()).unwrap();
+        let refused = host.create(again.clone()).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists, "not opened yet");
+        assert_eq!(held(&host, thread).meta.title, "First");
+
+        let looked = host.create_or_update(again, |state| {
+            let renamed = ThreadMeta { title: "Changed".to_owned(), ..state.meta.clone() };
+            (vec![Action::Meta(Box::new(renamed))], state.meta.title.clone())
+        });
+        assert_eq!(looked.unwrap(), Some("First".to_owned()), "the one held, changed");
+        assert_eq!(held(&host, thread).meta.title, "Changed");
+        let fresh = meta("Fresh");
+        let made = host.create_or_update(fresh.clone(), |_| -> (Vec<Action>, ()) {
+            panic!("none is held to change")
+        });
+        assert_eq!(made.unwrap(), None, "made");
+        assert_eq!(held(&host, fresh.id).meta, fresh);
+    }
+
+    /// A thread begun anew from its agent's records is made as they say when none is held;
+    /// else its log starts over, under a new epoch, from what they say, its meta what the caller
+    /// makes of the one held, the person's marks kept.
+    #[test]
+    fn a_thread_begun_anew_keeps_what_its_caller_keeps_of_the_one_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host::open(dir.path(), Limits::default()).unwrap();
+        let told = meta("Told");
+        let thread = told.id;
+        host.begin(ThreadState::new(told.clone()), |_| panic!("none is held")).unwrap();
+        assert_eq!(held(&host, thread).meta, told, "made as they say");
+
+        let worker = ThreadMeta { cwd: "/moved".to_owned(), ..named(&told, "terminal", "t1") };
+        host.apply(thread, vec![Action::Meta(Box::new(worker.clone()))]);
+        let before = host.state(thread).unwrap().1;
+        let retold = ThreadMeta { title: "Retold".to_owned(), ..told };
+        let kept = host
+            .begin(ThreadState::new(retold), |held| ThreadMeta {
+                title: "Retold".to_owned(),
+                ..held.clone()
+            })
+            .unwrap();
+        assert_ne!(kept.epoch, before.epoch, "started over");
+        let state = held(&host, thread);
+        assert_eq!(state.meta, ThreadMeta { title: "Retold".to_owned(), ..worker });
+    }
+
+    /// A thread seated says its seat on its meta as it stands, everything written of it kept,
+    /// in one batch; seated again the same, nothing is written.
+    #[test]
+    fn a_seat_is_said_on_the_meta_as_it_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host::open(dir.path(), Limits::default()).unwrap();
+        let started = meta("Started");
+        let thread = started.id;
+        host.create(started.clone()).unwrap();
+        let worker = named(&started, ThreadMeta::TERMINAL_FACT, "t1");
+        host.apply(thread, vec![Action::Meta(Box::new(worker))]);
+        let mut feed = host.watch(thread).unwrap();
+        let seated = Seated {
+            seat: SessionId::new(),
+            facts: vec![("parent".to_owned(), "p1".to_owned())],
+            system: None,
+        };
+        host.seated(thread, &seated);
+        let batch = feed.try_recv().expect("one batch");
+        let [Action::Meta(said)] = batch.actions.as_slice() else { panic!("{batch:?}") };
+        let facts = |meta: &ThreadMeta, name: &str| meta.facts.get(name).cloned();
+        assert_eq!(facts(said, ThreadMeta::TERMINAL_FACT).as_deref(), Some("t1"));
+        assert_eq!(facts(said, "parent").as_deref(), Some("p1"));
+        let seat = Some(seated.seat.to_string());
+        assert_eq!(facts(said, slopty_proto::agent::SEAT_FACT), seat);
+        assert_eq!(held(&host, thread).meta, **said);
+        host.seated(thread, &seated);
+        assert!(feed.try_recv().is_err(), "nothing more");
+    }
 }
