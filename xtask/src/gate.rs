@@ -2272,10 +2272,15 @@ let windows = cfg!(windows);
         assert!(started.elapsed() < short, "not waited out");
         let pid = std::fs::read_to_string(&pid_file).unwrap();
         std::fs::remove_file(&pid_file).unwrap();
-        // Killed: gone, or a zombie its new parent has yet to reap.
+        // Killed: gone, a zombie its new parent has yet to reap, or still on its way out (`E`,
+        // which a loaded machine shows for a moment after the kill).
         let state = Command::new("/bin/ps").args(["-o", "stat=", "-p", pid.trim()]).output();
         let state = String::from_utf8(state.unwrap().stdout).unwrap();
-        assert!(state.trim().is_empty() || state.starts_with('Z'), "the group's sleep: {state}");
+        let state = state.trim();
+        assert!(
+            state.is_empty() || state.starts_with('Z') || state.contains('E'),
+            "the group's sleep: {state}"
+        );
     }
 
     /// Here a lane builds into a target dir of its own; on a runner it leaves the environment's
