@@ -699,3 +699,120 @@ mod threads {
         assert!(open(dir.path()).starts_under_way().is_empty(), "a refusal settles it too");
     }
 }
+
+/// The relations Claude Code's hooks keep with a thread, over every recorded scenario
+/// (`slopty-agent`'s `tests/fixtures/conversation`, a real Claude Code's transcript and the hook
+/// payloads it ran beside it): the status a session settles on, and its turns, are the same
+/// whether each hook comes once or twice, and whether its transcript is on disk before the hooks
+/// or only after them. A turn's state is not held: `Stop` ends the turn open when it is heard,
+/// so with the whole transcript read first it ends the last one (`compact`'s `/compact`), and
+/// with none read it ends none.
+#[cfg(test)]
+mod hooks {
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use serde_json::Value;
+    use slopty_core::SessionId;
+    use slopty_proto::thread::{Status, ThreadState, TurnId};
+    use slopty_worker::thread::Host;
+    use slopty_worker::thread::claude::{Claude, Place};
+    use slopty_worker::thread::log::Limits;
+
+    fn fixtures() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../slopty-agent/tests/fixtures/conversation")
+    }
+
+    fn lines(path: &Path) -> Vec<Value> {
+        let text = std::fs::read_to_string(path).expect("a fixture");
+        text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+    }
+
+    /// How the hooks reach the worker.
+    #[derive(Clone, Copy, Debug)]
+    struct Arrival {
+        /// Each hook comes twice, at the same instant, as a relay run again would bring it.
+        twice: bool,
+        /// The transcript is written only once every hook was heard.
+        transcript_after: bool,
+    }
+
+    /// What the thread of scenario `name` settles on when its hooks arrive as `arrival` says:
+    /// its status, and its turns.
+    async fn settled(name: &str, arrival: Arrival) -> (Status, Vec<TurnId>) {
+        let scenario = fixtures().join(name);
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let host = Host::open(&dir.path().join("threads"), Limits::default()).unwrap();
+        let place = Place { home: home.clone(), path: None, data: dir.path().join("data") };
+        let (claude, watching) = Claude::spawn(host.clone(), place);
+        let records = lines(&scenario.join("transcript.jsonl"));
+        let session = records
+            .iter()
+            .find_map(|r| r.get("sessionId").and_then(Value::as_str))
+            .expect("a session id")
+            .to_owned();
+        let main = slopty_agent::claude::sessions::transcript(&home, Path::new("/work"), &session);
+        let plant = || {
+            std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+            std::fs::copy(scenario.join("transcript.jsonl"), &main).unwrap();
+            let agents = scenario.join("subagents");
+            if agents.is_dir() {
+                let into = slopty_agent::conversation::subagents_dir(&main);
+                std::fs::create_dir_all(&into).unwrap();
+                for agent in std::fs::read_dir(&agents).unwrap() {
+                    let agent = agent.unwrap().path();
+                    std::fs::copy(&agent, into.join(agent.file_name().unwrap())).unwrap();
+                }
+            }
+        };
+        if !arrival.transcript_after {
+            plant();
+        }
+        let terminal = SessionId::new();
+        let hooks = lines(&scenario.join("hooks.jsonl"));
+        // The session's end would leave every status the same; what is held is the live one.
+        let live = hooks.iter().filter(|h| h["input"]["hook_event_name"] != "SessionEnd");
+        for (n, hook) in (0_u64..).zip(live) {
+            let mut payload = hook["input"].clone();
+            payload["transcript_path"] = Value::from(main.to_string_lossy().into_owned());
+            let at_us = 1_800_000_000_000_000_u64.saturating_add(n.saturating_mul(1_000));
+            for _ in 0..if arrival.twice { 2 } else { 1 } {
+                claude.hook(terminal, at_us, payload.to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        if arrival.transcript_after {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            plant();
+        }
+        // The follower looks at its files every second as well as on each event.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let thread = slopty_agent::claude::thread_of(&session);
+        let (state, _cursor): (ThreadState, _) = host.state(thread).expect("the thread");
+        drop(claude);
+        watching.abort();
+        (state.status, state.turns.iter().map(|turn| turn.id).collect())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_hooks_settle_on_one_status_however_they_arrive() {
+        let mut names: Vec<String> = std::fs::read_dir(fixtures())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert!(names.len() >= 9, "{names:?}");
+        for name in &names {
+            let once = Arrival { twice: false, transcript_after: false };
+            let base = settled(name, once).await;
+            for arrival in [
+                Arrival { twice: true, transcript_after: false },
+                Arrival { twice: false, transcript_after: true },
+                Arrival { twice: true, transcript_after: true },
+            ] {
+                assert_eq!(settled(name, arrival).await, base, "{name}: {arrival:?}");
+            }
+        }
+    }
+}
