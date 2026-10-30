@@ -338,3 +338,59 @@ impl Starter {
 const fn refused(reason: String) -> Outcome {
     Outcome::Refused { reason }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn start(agent: &str, args: &[&str]) -> Start {
+        Start {
+            agent: AgentId::named(agent),
+            cwd: "/work".to_owned(),
+            drive: None,
+            prompt: None,
+            model: None,
+            mode: None,
+            effort: None,
+            args: args.iter().map(|&arg| arg.to_owned()).collect(),
+            worktree: None,
+        }
+    }
+
+    /// A start names an agent this machine starts, and no arguments but the session it takes
+    /// up again, in that agent's own words: anything else is refused before a terminal opens.
+    #[test]
+    fn a_start_takes_only_a_known_agent_and_the_session_it_takes_up_again() {
+        let session = "0198f3c2-7b1a-7c3e-9d4f-5a6b7c8d9e0f";
+        for agent in [AgentId::CLAUDE_CODE, AgentId::CODEX, AgentId::PI] {
+            assert_eq!(Starter::checked(&start(agent, &[])), Ok(()), "{agent}");
+            assert_eq!(Starter::resumed(&start(agent, &[])), None, "{agent}");
+        }
+        let taken_up = [
+            (AgentId::CLAUDE_CODE, [agent::RESUME_FLAG, session]),
+            (AgentId::CODEX, [slopty_agent::codex::RESUME, session]),
+            (AgentId::PI, [slopty_agent::pi::sessions::SESSION_FLAG, session]),
+        ];
+        for (agent, args) in taken_up {
+            let asked = start(agent, &args);
+            assert_eq!(Starter::checked(&asked), Ok(()), "{agent}: {args:?}");
+            assert_eq!(Starter::resumed(&asked), Some(session), "{agent}: {args:?}");
+        }
+
+        let unknown = Starter::checked(&start("aider", &[])).unwrap_err();
+        assert_eq!(unknown, "aider is no agent this machine starts");
+        let refused = [
+            (AgentId::CLAUDE_CODE, vec!["--model", "opus"]),
+            (AgentId::CLAUDE_CODE, vec![agent::RESUME_FLAG, "a session/../of another"]),
+            (AgentId::CLAUDE_CODE, vec![agent::RESUME_FLAG, session, "--model"]),
+            (AgentId::CLAUDE_CODE, vec![slopty_agent::codex::RESUME, session]),
+            (AgentId::CODEX, vec![agent::RESUME_FLAG, session]),
+            (AgentId::PI, vec![slopty_agent::pi::sessions::SESSION_FLAG, session, "-p"]),
+        ];
+        for (agent, args) in refused {
+            let asked = start(agent, &args);
+            assert_eq!(Starter::resumed(&asked), None, "{agent}: {args:?}");
+            assert_eq!(Starter::checked(&asked), Err(ONLY_RESUME.to_owned()), "{agent}: {args:?}");
+        }
+    }
+}
