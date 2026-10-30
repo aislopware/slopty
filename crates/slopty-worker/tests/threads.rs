@@ -700,13 +700,17 @@ mod threads {
     }
 }
 
-/// The relations Claude Code's hooks keep with a thread, over every recorded scenario
-/// (`slopty-agent`'s `tests/fixtures/conversation`, a real Claude Code's transcript and the hook
-/// payloads it ran beside it): the status a session settles on, and its turns, are the same
-/// whether each hook comes once or twice, and whether its transcript is on disk before the hooks
-/// or only after them. A turn's state is not held: `Stop` ends the turn open when it is heard,
-/// so with the whole transcript read first it ends the last one (`compact`'s `/compact`), and
-/// with none read it ends none.
+/// Claude Code's sessions as the observer follows them, from what a real Claude Code wrote
+/// (`slopty-agent`'s `tests/fixtures`: each scenario's transcript, the hook payloads it ran
+/// beside it and the order they came in; what Slopty's mod relayed of its prompt box).
+///
+/// The status a session settles on, and its turns, are the same whether each hook comes once or
+/// twice, and whether its transcript is on disk before the hooks or only after them. A turn's
+/// state is not held: `Stop` ends the turn open when it is heard, so with the whole transcript
+/// read first it ends the last one (`compact`'s `/compact`), and with none read it ends none.
+/// Replayed in the order it was recorded, a session shows each moment as it came, heard by its
+/// hooks or by Claude Code's record of itself alone; a thread ends once its terminal no longer
+/// runs its agent; the prompt box shows as the mod relays it.
 #[cfg(test)]
 mod hooks {
     use std::path::{Path, PathBuf};
@@ -714,9 +718,9 @@ mod hooks {
 
     use serde_json::Value;
     use slopty_core::{SessionId, WallMs};
-    use slopty_proto::thread::{Status, ThreadState, TurnId, TurnState};
+    use slopty_proto::thread::{Status, ThreadId, ThreadState, TurnId, TurnState};
     use slopty_worker::thread::Host;
-    use slopty_worker::thread::claude::{Claude, Place};
+    use slopty_worker::thread::claude::{Claude, Foreground, Place, is_claude};
     use slopty_worker::thread::log::Limits;
 
     fn fixtures() -> PathBuf {
@@ -818,5 +822,607 @@ mod hooks {
                 assert_eq!(settled(name, arrival).await, base, "{name}: {arrival:?}");
             }
         }
+    }
+
+    /// The moment RFC 3339 UTC stamp `stamp` (`2026-10-30T07:38:52.606Z`) names, in ms since the
+    /// epoch.
+    #[expect(clippy::arithmetic_side_effects, reason = "a recording's stamps, far inside u64")]
+    fn ms_of(stamp: &str) -> u64 {
+        let number = |part: &str| part.parse::<u64>().unwrap();
+        let parts = |text: &str, by: char| {
+            <[u64; 3]>::try_from(text.split(by).map(number).collect::<Vec<_>>()).unwrap()
+        };
+        let (date, time) = stamp.strip_suffix('Z').unwrap().split_once('T').unwrap();
+        let [year, month, day] = parts(date, '-');
+        // Days from the civil date (Howard Hinnant's `days_from_civil`), the year from March.
+        let (year, month) = if month <= 2 { (year - 1, month + 9) } else { (year, month - 3) };
+        let days = 365 * year + year / 4 - year / 100 + year / 400 + (153 * month + 2) / 5 + day
+            - 1
+            - 719_468;
+        let (clock, millis) = time.split_once('.').unwrap_or((time, "0"));
+        let [hour, minute, second] = parts(clock, ':');
+        ((days * 24 + hour) * 60 + minute) * 60_000 + second * 1_000 + number(millis)
+    }
+
+    /// How many lines arrival `step` wrote, and when, in ms into the recording.
+    fn step_of(step: &Value) -> (usize, u64) {
+        let lines = usize::try_from(step["lines"].as_u64().unwrap()).unwrap();
+        (lines, step["ms"].as_u64().unwrap())
+    }
+
+    /// When the recording of `scenario` began, in ms since the epoch: as late as its transcript
+    /// allows, each line stamped no later than it was seen written (`steps`, its arrivals).
+    fn began(scenario: &Path, steps: &[Value]) -> u64 {
+        let text = std::fs::read_to_string(scenario.join("transcript.jsonl")).unwrap();
+        let mut lines = text.lines();
+        let mut began = 0;
+        for step in steps.iter().filter(|s| s["file"] == "transcript.jsonl") {
+            let (count, ms) = step_of(step);
+            for line in lines.by_ref().take(count) {
+                let Ok(record) = serde_json::from_str::<Value>(line) else { continue };
+                if let Some(stamp) = record["timestamp"].as_str() {
+                    began = began.max(ms_of(stamp).saturating_sub(ms));
+                }
+            }
+        }
+        began
+    }
+
+    /// A recording's moments, from its start (`base`, ms since the epoch) to its end (`span`
+    /// later): a time shown after the start, `before` it, or `now` for the test's own clock.
+    #[derive(Clone, Copy)]
+    struct Recorded {
+        base: u64,
+        span: u64,
+    }
+
+    impl Recorded {
+        fn at(self, ms: WallMs) -> String {
+            match ms.as_millis().checked_sub(self.base) {
+                None => "before".to_owned(),
+                Some(after) if after > self.span => "now".to_owned(),
+                Some(after) => format!("+{after}"),
+            }
+        }
+
+        /// What thread `thread` shows: its phase, what it waits for and since when, each turn's
+        /// state and end, and its title.
+        fn shown(self, host: &Host, thread: ThreadId) -> String {
+            let Some((state, _)) = host.state(thread) else { return "none".to_owned() };
+            let status = &state.status;
+            let wait =
+                status.wait.as_ref().map_or(String::new(), |w| format!(" {}: {}", w.kind, w.text));
+            let turns: Vec<String> = state
+                .turns
+                .iter()
+                .map(|t| {
+                    let ended = t.ended_ms.map_or(String::new(), |e| format!(" {}", self.at(e)));
+                    format!("{:?}{ended}", t.state)
+                })
+                .collect();
+            let (phase, liveness, since) =
+                (status.phase, status.liveness, self.at(status.since_ms));
+            format!(
+                "{phase:?} {liveness:?}{wait} {since} | {} | {}",
+                turns.join(", "),
+                state.meta.title
+            )
+        }
+    }
+
+    /// How a recording's session is heard.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Heard {
+        /// By its hooks as they came, beside the record Claude Code keeps of itself.
+        Hooks,
+        /// By the record alone, as a session typed by hand that runs no hook.
+        Record,
+    }
+
+    /// What Claude Code's record of itself says while hook `event` is run: at work, waiting on
+    /// the person at a dialog, or at rest; `None` for its end, which leaves the record as it was.
+    /// A dialog is answered by the next hook, or by its call's result where none comes first (a
+    /// refusal).
+    fn record_status(event: &str) -> Option<&'static str> {
+        match event {
+            "SessionStart" | "Stop" => Some("idle"),
+            "PermissionRequest" => Some("waiting"),
+            "SessionEnd" => None,
+            _ => Some("busy"),
+        }
+    }
+
+    /// No process has this id (macOS's run to 99 999): the record of a Claude Code that is gone.
+    const GONE: u32 = i32::MAX.unsigned_abs();
+
+    /// A recorded session replayed under `home`, its recording begun at `base`.
+    struct Replay {
+        name: String,
+        scenario: PathBuf,
+        home: PathBuf,
+        session: String,
+        main: PathBuf,
+        base: u64,
+    }
+
+    impl Replay {
+        fn new(name: &str, home: &Path) -> Self {
+            let scenario = fixtures().join(name);
+            let records = lines(&scenario.join("transcript.jsonl"));
+            let session = records
+                .iter()
+                .find_map(|r| r.get("sessionId").and_then(Value::as_str))
+                .expect("a session id")
+                .to_owned();
+            let main =
+                slopty_agent::claude::sessions::transcript(home, Path::new("/work"), &session);
+            let base = began(&scenario, &lines(&scenario.join("arrivals.jsonl")));
+            let home = home.to_path_buf();
+            Self { name: name.to_owned(), scenario, home, session, main, base }
+        }
+
+        /// Claude Code's record of itself (`~/.claude/sessions/<pid>.json`) says `status` since
+        /// `ms` into the recording.
+        fn says(&self, status: &str, ms: u64) {
+            use slopty_agent::claude::sessions;
+            let live = serde_json::json!({
+                "pid": GONE, "sessionId": self.session, "cwd": "/work", "kind": "interactive",
+                "startedAt": self.base, "version": "2.1.314", "name": self.name,
+                "status": status, "waitingFor": (status == "waiting").then_some("permission prompt"),
+                "statusUpdatedAt": self.base.saturating_add(ms),
+            });
+            let dir = sessions::config_dir(&self.home).join(sessions::LIVE_DIR);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(format!("{GONE}.json")), live.to_string()).unwrap();
+        }
+
+        /// Hook `hook` as the relay brings it, at `ms` into the recording.
+        fn hook(&self, claude: &Claude, terminal: SessionId, hook: &Value, ms: u64) {
+            let mut payload = hook["input"].clone();
+            payload["transcript_path"] = Value::from(self.main.to_string_lossy().into_owned());
+            let at_us = self.base.saturating_add(ms).saturating_mul(1_000);
+            claude.hook(terminal, at_us, payload.to_string());
+        }
+
+        /// `lines` written at the end of recorded file `file`: the transcript, or a subagent's.
+        fn write(&self, file: &str, lines: &[&str]) {
+            let into = match file.strip_prefix("subagents/") {
+                Some(agent) => slopty_agent::conversation::subagents_dir(&self.main).join(agent),
+                None => self.main.clone(),
+            };
+            std::fs::create_dir_all(into.parent().unwrap()).unwrap();
+            let mut out =
+                std::fs::OpenOptions::new().create(true).append(true).open(&into).unwrap();
+            std::io::Write::write_all(&mut out, lines.concat().as_bytes()).unwrap();
+        }
+    }
+
+    /// Scenario `name` replayed in the order Claude Code made it (`arrivals.jsonl`), heard as
+    /// `heard` says: each hook as it came, each file's lines as they were written, Claude Code's
+    /// record of itself saying what each hook says, and a tick after each step, as the daemon's,
+    /// every step read before the next. Claude Code is in the foreground until its end's step,
+    /// and gone after. What the thread shows after each step, a moment shown once however many
+    /// steps leave it.
+    async fn replayed(name: &str, heard: Heard) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host::open(&dir.path().join("threads"), Limits::default()).unwrap();
+        let replay = Replay::new(name, &dir.path().join("home"));
+        let place = Place { home: replay.home.clone(), path: None, data: dir.path().join("data") };
+        let (claude, watching) = Claude::spawn(host.clone(), place);
+        let thread = slopty_agent::claude::thread_of(&replay.session);
+        let hooks = lines(&replay.scenario.join("hooks.jsonl"));
+        let steps = lines(&replay.scenario.join("arrivals.jsonl"));
+        let last = steps.last().map_or(0, |s| step_of(s).1);
+        let recorded = Recorded { base: replay.base, span: last.saturating_add(60_000) };
+        let terminal = SessionId::new();
+        let there =
+            || vec![(terminal, Foreground::Claude { pid: GONE, cwd: Some("/work".into()) })];
+        let mut written: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut waiting = false;
+        let mut moments: Vec<String> = Vec::new();
+        for step in &steps {
+            let file = step["file"].as_str().unwrap();
+            let (count, ms) = step_of(step);
+            let from = written.get(file).copied().unwrap_or(0);
+            written.insert(file.to_owned(), from.saturating_add(count));
+            if file == "hooks.jsonl" {
+                for hook in hooks.iter().skip(from).take(count) {
+                    let event = hook["input"]["hook_event_name"].as_str().unwrap();
+                    if let Some(status) = record_status(event) {
+                        replay.says(status, ms);
+                        waiting = status == "waiting";
+                    }
+                    if heard == Heard::Hooks {
+                        replay.hook(&claude, terminal, hook, ms);
+                    }
+                }
+            } else {
+                let text = std::fs::read_to_string(replay.scenario.join(file)).unwrap();
+                let mut gained: Vec<&str> =
+                    text.split_inclusive('\n').skip(from).take(count).collect();
+                let answer = gained.iter().position(|l| l.contains("\"tool_result\""));
+                let answered = answer.filter(|_| waiting).map(|at| gained.split_off(at));
+                replay.write(file, &gained);
+                if let Some(rest) = answered {
+                    replay.says("busy", ms);
+                    waiting = false;
+                    replay.write(file, &rest);
+                }
+            }
+            claude.tick(there());
+            // Past the follower's look at its files, so this step is read before the next.
+            tokio::time::sleep(Duration::from_millis(1_100)).await;
+            keep(&mut moments, recorded.shown(&host, thread));
+        }
+        if heard == Heard::Hooks {
+            // A hook relayed late, after the end: one older than the last heard is passed over.
+            let prompt = hooks.iter().find(|h| h["input"]["hook_event_name"] == "UserPromptSubmit");
+            replay.hook(&claude, terminal, prompt.unwrap(), 0);
+        }
+        claude.tick(vec![(terminal, Foreground::Other)]);
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        keep(&mut moments, recorded.shown(&host, thread));
+        drop(claude);
+        watching.abort();
+        moments
+    }
+
+    /// `now` kept after `moments`, unless the last is the same.
+    fn keep(moments: &mut Vec<String>, now: String) {
+        if moments.last() != Some(&now) {
+            moments.push(now);
+        }
+    }
+
+    /// The recorded sessions by name, sorted.
+    fn scenarios() -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(fixtures())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Each moment a recorded session shows as it is replayed, heard by its hooks or by its
+    /// record alone: a dialog said of the call it is about (by the record once the transcript
+    /// wrote the call, at the dialog's time), a turn its `Stop` ends and its records then
+    /// stamp, an interruption the transcript tells, a compaction shown while it runs (over the
+    /// phase it began in, and that phase's time) with the session begun again after it, the
+    /// end at its hook's moment or once its process is gone, and a hook relayed late passed over.
+    #[tokio::test(start_paused = true)]
+    async fn each_recorded_session_shows_each_moment_as_it_came() {
+        let pinned: [(&str, Heard, &[&str]); 5] = [
+            (
+                "permission",
+                Heard::Hooks,
+                &[
+                    "Idle Live now |  | permission",
+                    "Working Live +68 |  | permission",
+                    "Working Live +68 | Active | permission",
+                    "NeedsYou Live permission: Run touch refused.txt +2581 | Active | permission",
+                    "Working Live +4123 | Active | permission",
+                    "NeedsYou Live permission: Run touch allowed.txt +4131 | Active | permission",
+                    "Working Live +4356 | Active | permission",
+                    "NeedsYou Live permission: Edit /work/notes.txt +7669 | Active | permission",
+                    "Working Live +7680 | Active | permission",
+                    "NeedsYou Live permission: Write /work/todo.txt +7808 | Active | permission",
+                    "Working Live +7819 | Active | permission",
+                    "Working Live +7819 | Complete +9389 | permission",
+                    "Done Live +9392 | Complete +9389 | permission",
+                    "Done Exited { resumable: true } +9425 | Complete +9389 | permission",
+                ],
+            ),
+            (
+                "permission",
+                Heard::Record,
+                &[
+                    "Idle Live now |  | permission",
+                    "Working Live +54 | Active | permission",
+                    "NeedsYou Live permission: Wants permission +2581 | Active | permission",
+                    "Working Live +2633 | Active | permission",
+                    "NeedsYou Live permission: Wants permission +4131 | Active | permission",
+                    "NeedsYou Live permission: Run touch allowed.txt +4131 | Active | permission",
+                    "Working Live +4356 | Active | permission",
+                    "NeedsYou Live permission: Wants permission +7669 | Active | permission",
+                    "Working Live +7680 | Active | permission",
+                    "NeedsYou Live permission: Wants permission +7808 | Active | permission",
+                    "Working Live +7819 | Active | permission",
+                    "Done Live +9389 | Complete +9389 | permission",
+                    "Done Exited { resumable: true } now | Complete +9389 | permission",
+                ],
+            ),
+            (
+                "interrupt",
+                Heard::Hooks,
+                &[
+                    "Idle Live now |  | interrupt",
+                    "Working Live +143 |  | interrupt",
+                    "Working Live +143 | Active | interrupt",
+                    "Stopped Live +5186 | Interrupted +5186 | interrupt",
+                    "Stopped Exited { resumable: true } +5209 | Interrupted +5186 | interrupt",
+                ],
+            ),
+            (
+                "interrupt",
+                Heard::Record,
+                &[
+                    "Idle Live now |  | interrupt",
+                    "Working Live +108 | Active | interrupt",
+                    "Stopped Live +5186 | Interrupted +5186 | interrupt",
+                    "Stopped Exited { resumable: true } now | Interrupted +5186 | interrupt",
+                ],
+            ),
+            (
+                "compact",
+                Heard::Hooks,
+                &[
+                    "Idle Live now |  | compact",
+                    "Working Live +430 |  | compact",
+                    "Working Live +430 | Active | compact",
+                    "Done Live +2326 | Complete +2326 | compact",
+                    "Done Live +2326 | Complete +2227 | compact",
+                    "Done Live +2326 | Complete +2227, Complete +2259 | compact",
+                    "Working Live compacting: Compacting the conversation +2326 \
+                 | Complete +2227, Complete +2259 | compact",
+                    "Working Live compacting: Compacting the conversation +6877 \
+                 | Complete +2227, Complete +2259 | compact",
+                    "Idle Live +6877 | Complete +2227, Complete +2259 | compact",
+                    "Idle Live +6877 | Complete +2227, Complete +2259, Complete +6883 | compact",
+                    "Idle Exited { resumable: true } +6900 \
+                 | Complete +2227, Complete +2259, Complete +6883 | compact",
+                ],
+            ),
+        ];
+        for (name, heard, moments) in pinned {
+            assert_eq!(replayed(name, heard).await, moments, "{name}, heard by {heard:?}");
+        }
+    }
+
+    /// However a recorded session is heard, by its hooks or by its record alone, its turns end
+    /// the same, each moment bears the name its record gives it, and it ends exited and
+    /// resumable in the phase it rested in.
+    #[tokio::test(start_paused = true)]
+    async fn a_session_ends_the_same_heard_by_its_hooks_or_its_record() {
+        let names = scenarios();
+        assert!(names.len() >= 9, "{names:?}");
+        let turns = |moments: &[String]| {
+            moments.last().and_then(|m| m.split(" | ").nth(1)).map(str::to_owned)
+        };
+        for name in &names {
+            let hooks = replayed(name, Heard::Hooks).await;
+            let record = replayed(name, Heard::Record).await;
+            assert_eq!(turns(&hooks), turns(&record), "{name}: {hooks:#?} {record:#?}");
+            for moments in [&hooks, &record] {
+                let named = format!(" | {name}");
+                assert!(moments.iter().all(|m| m.ends_with(&named)), "{name}: {moments:#?}");
+                let [.., rested, exited] = moments.as_slice() else { panic!("{moments:#?}") };
+                let phase = |m: &str| m.split(' ').next().map(str::to_owned);
+                assert_eq!(phase(rested), phase(exited), "{name}: {moments:#?}");
+                assert!(rested.contains(" Live "), "{name}: {moments:#?}");
+                assert!(exited.contains(" Exited { resumable: true } "), "{name}: {moments:#?}");
+            }
+        }
+    }
+
+    /// A thread whose terminal no longer runs its agent ends, exited and resumable, its work
+    /// stopped: one an earlier worker left naming a terminal once the worker has had its
+    /// terminals back (four ticks), one Slopty began once its launcher has had time to start
+    /// Claude Code (eight more), and another agent's row as soon as its terminal is gone. A
+    /// session followed, a row, and a thread that names no terminal are left alone meanwhile.
+    #[tokio::test(start_paused = true)]
+    async fn a_thread_ends_once_its_terminal_no_longer_runs_its_agent() {
+        use slopty_proto::thread::{Action, AgentId, Drive, Liveness, Phase, ThreadMeta};
+        let dir = tempfile::tempdir().unwrap();
+        let threads = dir.path().join("threads");
+        let home = dir.path().join("home");
+        let place = || Place { home: home.clone(), path: None, data: dir.path().join("data") };
+        let earlier = Replay::new("permission", &home);
+        {
+            // An earlier worker heard a session begin, and stopped.
+            let host = Host::open(&threads, Limits::default()).unwrap();
+            let (claude, watching) = Claude::spawn(host.clone(), place());
+            let began = &lines(&earlier.scenario.join("hooks.jsonl"))[0];
+            earlier.hook(&claude, SessionId::new(), began, 0);
+            tokio::time::sleep(Duration::from_millis(1_100)).await;
+            drop(claude);
+            watching.await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1_100)).await;
+        }
+        let host = Host::open(&threads, Limits::default()).unwrap();
+        let left = slopty_agent::claude::thread_of(&earlier.session);
+        let (claude, watching) = Claude::spawn(host.clone(), place());
+        let launching = SessionId::new();
+        let native = "00000000-0000-4000-8000-0000000000b9";
+        claude.begun(launching, native.to_owned(), "/work".to_owned(), "2.1.314".to_owned());
+        let begun = slopty_agent::claude::thread_of(native);
+        // Another agent's threads: a row in a terminal of its own, and one naming none.
+        let at_work = |terminal: Option<SessionId>| {
+            let mut facts = std::collections::BTreeMap::new();
+            if let Some(terminal) = terminal {
+                facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), terminal.to_string());
+            }
+            let meta = ThreadMeta {
+                id: ThreadId::new(),
+                agent: AgentId::named(AgentId::CODEX),
+                agent_version: "0.200.0".to_owned(),
+                native: ThreadId::new().to_string(),
+                cwd: "/work".to_owned(),
+                title: "Elsewhere".to_owned(),
+                parent: None,
+                origin: ThreadMeta::PERSON.to_owned(),
+                drive: Drive::named(Drive::OBSERVED),
+                facts,
+                created_ms: WallMs::from_millis(1),
+            };
+            let id = meta.id;
+            host.create(meta).unwrap();
+            let since_ms = WallMs::from_millis(2);
+            let working =
+                Status { phase: Phase::Working, wait: None, liveness: Liveness::Live, since_ms };
+            host.apply(id, vec![Action::Status(working)]).unwrap();
+            id
+        };
+        let row_terminal = SessionId::new();
+        let row = at_work(Some(row_terminal));
+        let loose = at_work(None);
+        claude.row(row_terminal, row);
+        let status = |thread| host.state(thread).map(|(s, _)| (s.status.phase, s.status.liveness));
+        let live = |phase| Some((phase, Liveness::Live));
+        let exited = |phase| Some((phase, Liveness::Exited { resumable: true }));
+        // After so many ticks: the earlier worker's thread, the one Slopty began, and the row.
+        let mut ticks = 0_u32;
+        for (until, row_there, now) in [
+            (3, true, [live(Phase::Idle), live(Phase::Idle), live(Phase::Working)]),
+            (4, true, [exited(Phase::Idle), live(Phase::Idle), live(Phase::Working)]),
+            (8, true, [exited(Phase::Idle), live(Phase::Idle), live(Phase::Working)]),
+            (9, false, [exited(Phase::Idle), exited(Phase::Idle), exited(Phase::Stopped)]),
+        ] {
+            let seen = if row_there { vec![(row_terminal, Foreground::Other)] } else { vec![] };
+            for _ in ticks..until {
+                claude.tick(seen.clone());
+                tokio::time::sleep(Duration::from_millis(1_100)).await;
+            }
+            ticks = until;
+            assert_eq!([status(left), status(begun), status(row)], now, "after {ticks} ticks");
+            assert_eq!(status(loose), live(Phase::Working), "after {ticks} ticks");
+        }
+        for thread in [left, begun, row] {
+            let named = host.state(thread).and_then(|(s, _)| s.meta.terminal());
+            assert_eq!(named, None, "{thread} names no terminal once ended");
+        }
+        let claude_code = |thread| host.state(thread).is_some_and(|(s, _)| is_claude(&s));
+        assert!(claude_code(left) && claude_code(begun), "Claude Code's");
+        assert!(!claude_code(row) && !claude_code(loose), "another agent's");
+        drop(claude);
+        watching.abort();
+    }
+
+    /// A picture as Claude Code stores one pasted into its box: a PNG, two pixels wide.
+    fn picture() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+        encoder.set_color(png::ColorType::Rgb);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[0; 6]).unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
+    /// The prompt box of a Claude Code Slopty started shows in its thread as Slopty's mod relays
+    /// it (`slopty-agent`'s `tests/fixtures/claude-mod/drafts.jsonl`, what the mod relayed of a
+    /// real one's box): each draft once heard, nothing for an empty box, and a picture pasted
+    /// into it once Claude Code has stored it, looked for again a moment later when it had not
+    /// yet, and read from its store while the box shows it. A draft of another session, or one
+    /// relayed after a later one, is passed over; the box goes with the session.
+    #[tokio::test(start_paused = true)]
+    async fn the_prompt_box_shows_as_the_mod_relays_it() {
+        use slopty_agent::claude::draft;
+        use slopty_proto::thread::wire::Expanded;
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host::open(&dir.path().join("threads"), Limits::default()).unwrap();
+        let home = dir.path().join("home");
+        let place = Place { home: home.clone(), path: None, data: dir.path().join("data") };
+        let (claude, watching) = Claude::spawn(host.clone(), place);
+        let tmp = dir.path().join("tmp").to_string_lossy().into_owned();
+        let uid = rustix::process::getuid().as_raw();
+        let store = draft::images_dir(Some(&tmp), uid, Path::new("/work"), "session-1");
+        let terminal = SessionId::new();
+        let main =
+            slopty_agent::claude::sessions::transcript(&home, Path::new("/work"), "session-1");
+        let began = serde_json::json!({
+            "hook_event_name": "SessionStart", "session_id": "session-1", "source": "startup",
+            "cwd": "/work", "transcript_path": main.to_string_lossy(),
+        });
+        let mut at_us = 1_800_000_000_000_000_u64;
+        let mut heard = |payload: &Value| {
+            at_us = at_us.saturating_add(1_000_000);
+            claude.hook(terminal, at_us, payload.to_string());
+            at_us
+        };
+        heard(&began);
+        let thread = slopty_agent::claude::thread_of("session-1");
+        let shown = || {
+            host.state(thread).and_then(|(s, _)| s.draft).map_or_else(
+                || "none".to_owned(),
+                |d| format!("{:?} {:?}", d.text, d.images.iter().map(|i| i.n).collect::<Vec<_>>()),
+            )
+        };
+        let expanded = || claude.expand(thread, draft::image_ref("2.png"));
+        let look = || tokio::time::sleep(Duration::from_millis(1_100));
+        let mut moments = Vec::new();
+        let relays = lines(&fixtures().join("../claude-mod/drafts.jsonl"));
+        for relay in &relays {
+            let mut payload = relay["payload"].clone();
+            payload["tmpdir"] = Value::from(tmp.clone());
+            let at = heard(&payload);
+            look().await;
+            moments.push(format!("{}: {}", relay["act"].as_str().unwrap(), shown()));
+            if relay["act"] == "image" {
+                // Not stored yet: looked for again a moment later, and found once it is.
+                look().await;
+                moments.push(format!("looked again: {}", shown()));
+                assert_eq!(expanded().await, Expanded::Gone, "no picture before it is stored");
+                std::fs::create_dir_all(&store).unwrap();
+                std::fs::write(store.join("2.png"), picture()).unwrap();
+                look().await;
+                moments.push(format!("stored: {}", shown()));
+                assert_eq!(
+                    expanded().await,
+                    Expanded::Bytes(picture()),
+                    "its bytes, from its store"
+                );
+                let mut elsewhere = payload.clone();
+                elsewhere["session_id"] = Value::from("session-2");
+                elsewhere["prompt"] = Value::from("another session's");
+                heard(&elsewhere);
+                let mut late = payload.clone();
+                late["prompt"] = Value::from("hell");
+                claude.hook(terminal, at.saturating_sub(1), late.to_string());
+                look().await;
+                moments.push(format!("passed over: {}", shown()));
+            }
+            if relay["act"] == "clear" {
+                assert_eq!(expanded().await, Expanded::Gone, "nothing read once the box is clear");
+            }
+        }
+        // The session ends while its box holds a picture: the box goes, and the picture's store.
+        let recalled = relays.iter().find(|r| r["act"] == "recall").unwrap();
+        let mut payload = recalled["payload"].clone();
+        payload["tmpdir"] = Value::from(tmp.clone());
+        heard(&payload);
+        look().await;
+        assert_eq!(expanded().await, Expanded::Bytes(picture()), "shown again");
+        heard(&serde_json::json!({ "hook_event_name": "SessionEnd", "session_id": "session-1" }));
+        look().await;
+        moments.push(format!("ended: {}", shown()));
+        assert_eq!(expanded().await, Expanded::Gone, "nothing read once the session ended");
+        let pasted = r#""hell one\ntwo[Pasted text #1 +5 lines][Image #2]""#;
+        assert_eq!(
+            moments,
+            [
+                r#"typed: "hello" []"#.to_owned(),
+                r#"backspace: "hell" []"#.to_owned(),
+                r#"short paste: "hell one\ntwo" []"#.to_owned(),
+                r#"long paste: "hell one\ntwo[Pasted text #1 +5 lines]" []"#.to_owned(),
+                format!("image: {pasted} []"),
+                format!("looked again: {pasted} []"),
+                format!("stored: {pasted} [2]"),
+                format!("passed over: {pasted} [2]"),
+                "clear: none".to_owned(),
+                format!("recall: {pasted} [2]"),
+                "back: none".to_owned(),
+                r#"submit: "scenario" []"#.to_owned(),
+                "submit: none".to_owned(),
+                r#"pull back: "queued" []"#.to_owned(),
+                "queue again: none".to_owned(),
+                r#"ask: "scenario" []"#.to_owned(),
+                "ask: none".to_owned(),
+                "ended: none".to_owned(),
+            ]
+        );
+        drop(claude);
+        watching.abort();
     }
 }
