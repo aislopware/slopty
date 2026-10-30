@@ -90,7 +90,7 @@ checkout = ".research/libghostty-rs"
 strategy = "rebase"
 base = "9ede35b8ea94a55ed3608408d67e102883129f1e"
 base_date = "2026-10-24"
-checked = "2026-10-29"
+checked = "2026-10-30"
 check_every_days = 7
 
 # noq is vendored, not forked: `vendor/noq-proto` is the published noq-proto 1.3.0 (tag
