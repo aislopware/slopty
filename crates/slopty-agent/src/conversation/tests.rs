@@ -489,6 +489,48 @@ fn the_task_tools_keep_the_list() {
     assert_eq!(subjects, ["a", "b"]);
 }
 
+/// What a dialog about a call is worded from, when only the transcript names the call, is kept
+/// in each tool's own fields (`call_input`, which the worker reads).
+#[test]
+fn a_calls_input_keeps_the_fields_a_dialog_is_worded_from() {
+    let mcp = json!({"server": "arg", "n": 2});
+    let untyped = json!({"anything": ["kept", "whole"]});
+    let plan = json!({"plan": "1. Read\n2. Write"});
+    let cases = [
+        (
+            "Bash",
+            json!({"command": "cargo t", "description": "Tests"}),
+            json!({"command": "cargo t"}),
+        ),
+        (
+            "Edit",
+            json!({"file_path": "/a.rs", "old_string": "a", "new_string": "b"}),
+            json!({"file_path": "/a.rs"}),
+        ),
+        ("Write", json!({"file_path": "/b.rs", "content": "x"}), json!({"file_path": "/b.rs"})),
+        ("Read", json!({"file_path": "/c.rs", "offset": 3}), json!({"file_path": "/c.rs"})),
+        ("Grep", json!({"pattern": "fn main", "path": "src"}), json!({"pattern": "fn main"})),
+        ("Glob", json!({"pattern": "**/*.rs"}), json!({"pattern": "**/*.rs"})),
+        (
+            "WebFetch",
+            json!({"url": "https://a.example", "prompt": "Sum"}),
+            json!({"url": "https://a.example"}),
+        ),
+        ("WebSearch", json!({"query": "loom"}), json!({"query": "loom"})),
+        (
+            "Agent",
+            json!({"description": "Count", "prompt": "Count lines"}),
+            json!({"description": "Count"}),
+        ),
+        ("mcp__srv__tool", mcp.clone(), mcp),
+        ("SomeTool", untyped.clone(), untyped),
+        ("ExitPlanMode", plan.clone(), plan),
+    ];
+    for (name, input, kept) in cases {
+        assert_eq!(call_input(&detail(name, &input, None)), kept, "{name}");
+    }
+}
+
 /// Questions, plans and the web tools have details of their own.
 #[test]
 fn questions_plans_and_the_web_are_typed() {
