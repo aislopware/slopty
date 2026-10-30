@@ -495,7 +495,7 @@ impl Inspector {
                     .role(gpui::Role::Heading)
                     .aria_label(title.clone())
                     .truncate()
-                    .text_size(ui_rems(13.5))
+                    .text_size(ui_rems(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(title),
@@ -511,7 +511,7 @@ impl Inspector {
             .items_center()
             .gap(px(6.0))
             .h(px(24.0))
-            .text_size(ui_rems(11.5))
+            .text_size(ui_rems(11.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.text_muted)
             .child(name)
@@ -581,7 +581,7 @@ impl Inspector {
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(ui_rems(12.5))
+                                .text_size(ui_rems(12.0))
                                 .text_color(text)
                                 .when(item.status() == TodoStatus::Completed, |el| el.line_through())
                                 .child(crate::transcript::single_line(&words)),
@@ -592,7 +592,7 @@ impl Inspector {
             if hidden > 0 {
                 section = section.child(
                     div()
-                        .text_size(ui_rems(11.5))
+                        .text_size(ui_rems(11.0))
                         .text_color(theme.text_faint)
                         .child(format!("{hidden} more")),
                 );
@@ -628,7 +628,7 @@ impl Inspector {
                                 .min_w_0()
                                 .flex_1()
                                 .truncate()
-                                .text_size(ui_rems(12.5))
+                                .text_size(ui_rems(12.0))
                                 .text_color(theme.text)
                                 .child(crate::transcript::single_line(&row.title)),
                         )
@@ -637,7 +637,7 @@ impl Inspector {
                                 .flex_none()
                                 .max_w(px(140.0))
                                 .truncate()
-                                .text_size(ui_rems(11.5))
+                                .text_size(ui_rems(11.0))
                                 .text_color(theme.text_faint)
                                 .child(crate::transcript::single_line(&detail)),
                         )
@@ -668,7 +668,7 @@ impl Inspector {
                 .flex_none()
                 .gap(px(4.0))
                 .font_family(theme.font_mono.clone())
-                .text_size(ui_rems(11.5))
+                .text_size(ui_rems(11.0))
                 .when(additions > 0, |el| el.child(div().text_color(theme.diff_add).child(format!("+{additions}"))))
                 .when(deletions > 0, |el| el.child(div().text_color(theme.diff_del).child(format!("\u{2212}{deletions}"))))
         };
@@ -724,9 +724,9 @@ impl Inspector {
                             .flex()
                             .gap(px(6.0))
                             .overflow_hidden()
-                            .child(div().flex_none().text_size(ui_rems(12.5)).text_color(theme.text).child(name))
+                            .child(div().flex_none().text_size(ui_rems(12.0)).text_color(theme.text).child(name))
                             .children(dir.map(|dir| {
-                                div().min_w_0().truncate().text_size(ui_rems(11.5)).text_color(theme.text_faint).child(dir)
+                                div().min_w_0().truncate().text_size(ui_rems(11.0)).text_color(theme.text_faint).child(dir)
                             })),
                     )
                     .child(counts(file.additions, file.deletions))
@@ -743,7 +743,7 @@ impl Inspector {
                     .role(gpui::Role::Button)
                     .aria_label(if open { "Fewer files".to_owned() } else { format!("{} more files", count - shown) })
                     .cursor_pointer()
-                    .text_size(ui_rems(11.5))
+                    .text_size(ui_rems(11.0))
                     .text_color(hover_blend("inspector-files-more", theme.text_faint, theme.text_muted))
                     .hover_fade("inspector-files-more")
                     .child(if open { "Fewer".to_owned() } else { format!("{} more", count - shown) })
