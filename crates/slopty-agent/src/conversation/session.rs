@@ -346,7 +346,8 @@ mod tests {
     }
 
     /// `/clear` moves the agent to a new file: the changes reset every thread and bring the new
-    /// file whole. A file the hooks name outside the directory is read too.
+    /// file whole. A file the hooks name outside the directory is read too, and the files to
+    /// follow are then the new one and that one, no longer the old.
     #[test]
     fn another_transcript_starts_over() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -364,6 +365,7 @@ mod tests {
             ["reset None", "Main v1", "Agent(\"a1\") s1:0"]
         );
         assert_eq!(transcripts.conversation().entries(&ThreadId::Main).len(), 1);
+        assert_eq!(transcripts.read_files(), [second, elsewhere], "the files to follow now");
     }
 
     /// A main file rewritten shorter drops every thread in the decoder, so the subagents'
