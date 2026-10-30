@@ -1394,7 +1394,6 @@ mod tests {
             diff_stats: Some(vec![ToolDiffStat { path: path.to_owned(), additions, deletions }]),
             subagent_ref: None,
             subagent_status: None,
-            subagent_tail: None,
             facts: None,
         }
     }
@@ -1512,7 +1511,6 @@ mod tests {
             diff_stats: None,
             subagent_ref: Some(chat.to_owned()),
             subagent_status: Some(slopty_view_doc::SubagentStatus::Done),
-            subagent_tail: None,
             facts: Some(Box::new(slopty_view_doc::ToolFacts {
                 subagent_progress: Some(slopty_view_doc::SubagentProgress {
                     agent_type: Some("Explore".into()),

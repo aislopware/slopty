@@ -697,7 +697,6 @@ mod tests {
             diff_ref: None,
             subagent_ref: None,
             subagent_status: None,
-            subagent_tail: None,
             kind: ToolItemKind::Call,
             images: Arc::new([]),
             facts: None,

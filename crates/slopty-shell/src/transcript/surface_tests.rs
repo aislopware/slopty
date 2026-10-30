@@ -175,7 +175,6 @@ fn spawn(progress: SubagentProgress) -> MessagePart {
         diff_stats: None,
         subagent_ref: Some("child-chat".into()),
         subagent_status: Some(SubagentStatus::Running),
-        subagent_tail: None,
         facts: Some(Box::new(ToolFacts {
             subagent_progress: Some(progress),
             ..ToolFacts::default()
@@ -289,7 +288,6 @@ fn subagents_started_together_stand_under_one_line(cx: &mut gpui::TestAppContext
             diff_stats: None,
             subagent_ref: Some(chat.into()),
             subagent_status: if running { subagent_status } else { Some(SubagentStatus::Done) },
-            subagent_tail: None,
             facts,
         }
     };
@@ -748,7 +746,6 @@ fn the_controls_of_a_reply_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
         diff_stats: None,
         subagent_ref: None,
         subagent_status: None,
-        subagent_tail: None,
         facts: None,
     };
     // slopty: two calls before a reply, so their group draws its summary row.
@@ -799,7 +796,6 @@ fn exec(id: &str, command: &str, resolved: bool, is_error: bool) -> MessagePart 
         diff_stats: None,
         subagent_ref: None,
         subagent_status: None,
-        subagent_tail: None,
         facts: None,
     }
 }
@@ -971,7 +967,7 @@ fn a_finished_turns_summary_never_says_running() {
         MessageStatus::Complete,
         vec![exec("one", "cargo fmt", true, false), exec("two", "cargo test", false, false)],
     );
-    let rows = super::rows_for_entry(&reply, false, &mut |_, text| {
+    let rows = super::rows_for_entry(&reply, &mut |_, text| {
         Arc::new(crate::markdown::parse_full(text))
     });
     let summaries: Vec<String> = rows
@@ -1145,7 +1141,6 @@ fn a_failed_call_tints_only_its_icon_and_result() {
         diff_ref: None,
         subagent_ref: None,
         subagent_status: None,
-        subagent_tail: None,
         kind: super::ToolItemKind::Call,
         images: Arc::new([]),
         facts: None,
@@ -1155,7 +1150,7 @@ fn a_failed_call_tints_only_its_icon_and_result() {
 }
 
 /// #9: Tab reaches a reply's controls: its group's summary, its call rows, the subagent's row,
-/// the files card, and the strip's Copy, which a hover alone showed before.
+/// and the strip's Copy, which a hover alone showed before.
 #[gpui::test]
 fn the_keyboard_reaches_the_controls_of_a_reply(cx: &mut gpui::TestAppContext) {
     let progress = SubagentProgress {
@@ -1181,7 +1176,6 @@ fn the_keyboard_reaches_the_controls_of_a_reply(cx: &mut gpui::TestAppContext) {
         }]),
         subagent_ref: None,
         subagent_status: None,
-        subagent_tail: None,
         facts: None,
     };
     let (_, cx) = open(
@@ -1208,10 +1202,9 @@ fn the_keyboard_reaches_the_controls_of_a_reply(cx: &mut gpui::TestAppContext) {
         }
         reached
     };
-    // The settled turn's steps each take the keyboard where they were said, then what it changed
-    // and its strip.
+    // The settled turn's steps each take the keyboard where they were said, then its strip.
     let reached = reach(cx);
-    for want in ["Ran 2 commands", "Subagent Count lines", "2 files changed", "Copy message"] {
+    for want in ["Ran 2 commands", "Subagent Count lines", "Copy message"] {
         assert!(reached.iter().any(|label| label.starts_with(want)), "{want}: {reached:?}");
     }
     // Enter opens the focused summary, as a click does.
@@ -1243,68 +1236,6 @@ fn a_reply_opens_at_its_first_row(cx: &mut gpui::TestAppContext) {
         buttons.iter().any(|button| button.label.starts_with("Ran 2 commands")),
         "the first group is the reply's: {buttons:?}"
     );
-}
-
-/// #12: the files card names a lone file in itself; several open under a chevron, tweened.
-#[gpui::test]
-fn the_files_card_names_a_lone_file(cx: &mut gpui::TestAppContext) {
-    let edit = |id: &str, path: &str| MessagePart::Tool {
-        id: id.into(),
-        call: ToolCall::WriteFile { path: path.into(), content: None },
-        is_error: false,
-        resolved: true,
-        output: None,
-        diff: None,
-        output_ref: None,
-        output_bytes: None,
-        diff_ref: None,
-        diff_stats: Some(vec![slopty_view_doc::ToolDiffStat {
-            path: path.into(),
-            additions: 2,
-            deletions: 0,
-        }]),
-        subagent_ref: None,
-        subagent_status: None,
-        subagent_tail: None,
-        facts: None,
-    };
-    let (transcript, cx) =
-        open(cx, entry(MessageStatus::Complete, vec![edit("e1", "/work/app/main.rs"), text("Done.")]));
-    let nodes = draw(cx);
-    let card = find(&nodes, Role::Group, "main.rs +2 −0").expect("the lone file, named").clone();
-    assert_eq!(card.expanded, None, "nothing to open");
-    let nodes = show(
-        &transcript,
-        vec![entry(
-            MessageStatus::Complete,
-            vec![edit("e1", "/work/app/main.rs"), edit("e2", "/work/app/lib.rs"), text("Done.")],
-        )],
-        cx,
-    );
-    let card = find(&nodes, Role::Button, "2 files changed +4 −0").expect("the card").clone();
-    assert_eq!(card.expanded, Some(false));
-    cx.simulate_click(card.center, gpui::Modifiers::default());
-    let nodes = draw(cx);
-    assert_eq!(find(&nodes, Role::Button, "2 files changed +4 −0").and_then(|c| c.expanded), Some(true));
-    assert!(find(&nodes, Role::ListItem, "lib.rs +2 −0").is_some(), "its files listed");
-}
-
-/// #15: a bubble that sends fades up from pending rather than snapping to full, once.
-#[gpui::test]
-fn a_sent_bubble_fades_up_from_pending(cx: &mut gpui::TestAppContext) {
-    let (transcript, cx) = open(cx, answer("a1", "Earlier."));
-    cx.update(|_, cx| cx.set_reduce_motion(false));
-    transcript.update(cx, |this, cx| {
-        let row: gpui::SharedString = "p1#row".into();
-        assert!(!this.bubble_sent(&row, true, cx), "pending holds its dim");
-        assert!(this.bubble_sent(&row, false, cx), "sent, it fades up");
-        assert!(!this.bubble_sent(&"a1#row".into(), false, cx), "never pending, nothing fades");
-    });
-    cx.executor().advance_clock(std::time::Duration::from_millis(200));
-    draw(cx);
-    transcript.update(cx, |this, cx| {
-        assert!(!this.bubble_sent(&"p1#row".into(), false, cx), "full once faded");
-    });
 }
 
 /// #24: a run opened in place speaks at the compact body, a 20 pt line under its subagent's
@@ -1349,7 +1280,7 @@ fn a_running_call_sweeps_its_words() {
             spawn(SubagentProgress::default()),
         ],
     );
-    let rows = super::rows_for_entry(&entry, false, &mut |_, text| {
+    let rows = super::rows_for_entry(&entry, &mut |_, text| {
         Arc::new(crate::markdown::parse_full(text))
     });
     let tools: Vec<_> = rows
@@ -1465,4 +1396,121 @@ fn the_traces_keys_move_its_cursor_and_e_lands_on_the_failure(cx: &mut gpui::Tes
         this.rows.get(ix + 1).map(|row| row.id.clone())
     });
     assert_eq!(at(cx).map(|cursor| cursor.row), below, "over the folded group to the row under it");
+}
+
+/// The inspector's frame on a long session (`docs/MEASUREMENTS.md`): 300 turns, each a prompt
+/// and an answer of a sentence, six commands with twelve lines of output and a closing reply with
+/// a list and a code fence, in a 480 × 900 pt pane. Three arms of 300 frames each, timed from the
+/// state's change to the drawn scene: held at the end, scrolled through the middle 53 pt a
+/// frame, and following an answer that streams a sentence a frame. Each frame also counts the
+/// rows it built, which the list's virtualisation keeps to those in view.
+#[gpui::test]
+#[ignore = "a measurement: run in release with --ignored --nocapture"]
+fn long_trace_frame_cost(cx: &mut gpui::TestAppContext) {
+    use std::time::{Duration, Instant};
+    const TURNS: usize = 300;
+    const FRAMES: usize = 300;
+    let call = |id: String, n: usize| MessagePart::Tool {
+        id,
+        call: ToolCall::Exec { command: format!("cargo test -p crate{n} -- --nocapture") },
+        is_error: n == 4,
+        resolved: true,
+        output: Some((0..12).map(|line| format!("test parser::case_{line} ... ok\n")).collect()),
+        diff: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: None,
+        subagent_status: None,
+        facts: None,
+    };
+    let mut entries = Vec::new();
+    for turn in 0..TURNS {
+        entries.push(prompt(
+            &format!("p{turn}"),
+            &format!("Turn {turn}: make the parser take nested lists, then run the tests and say what failed."),
+        ));
+        let mut parts = vec![text(&format!("Looking at the parser for turn {turn}."))];
+        parts.extend((0..6).map(|n| call(format!("t{turn}-{n}"), n)));
+        parts.push(text(&format!(
+            "Turn {turn} is done.\n\n- The lists nest now.\n- Two tests failed: `nested_quote` and \
+             `deep_list`.\n\n```rust\nfn parse(input: &str) -> Tree {{\n    Tree::new(input)\n}}\n```"
+        )));
+        entries.push(SessionMessageEntry { id: format!("a{turn}"), ..entry(MessageStatus::Complete, parts) });
+    }
+    let (transcript, cx) = open(cx, answer("a", "First."));
+    show(&transcript, entries, cx);
+    cx.simulate_resize(gpui::size(px(480.0), px(900.0)));
+    cx.update(|window, _| window.set_a11y_active(false));
+    let frame = |cx: &mut VisualTestContext| {
+        let started = Instant::now();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        let took = started.elapsed();
+        (took, transcript.read_with(cx, |this, _| this.rendered_rows.len()))
+    };
+    for _ in 0..30 {
+        frame(cx);
+    }
+    let total = transcript.read_with(cx, |this, _| this.rows.len());
+    let report = |name: &str, samples: Vec<(Duration, usize)>| {
+        let mut took: Vec<f64> = samples.iter().map(|(took, _)| took.as_secs_f64() * 1e6).collect();
+        took.sort_by(f64::total_cmp);
+        let at = |q: f64| took[((took.len() - 1) as f64 * q).round() as usize];
+        let rows: Vec<usize> = samples.iter().map(|(_, rows)| *rows).collect();
+        println!(
+            "MEASURE long_trace {name}: p50 {:.0} µs, p95 {:.0} µs, max {:.0} µs; rows built {}–{} of {total}",
+            at(0.5),
+            at(0.95),
+            at(1.0),
+            rows.iter().min().unwrap_or(&0),
+            rows.iter().max().unwrap_or(&0),
+        );
+    };
+    transcript.update(cx, |this, _| this.follow());
+    report("held at the end", (0..FRAMES).map(|_| frame(cx)).collect());
+    transcript.update(cx, |this, _| {
+        this.let_go();
+        this.list.scroll_to(gpui::ListOffset { item_ix: total / 2, offset_in_item: px(0.0) });
+    });
+    let scrolled = (0..FRAMES)
+        .map(|_| {
+            transcript.update(cx, |this, _| this.list.scroll_by(px(53.0)));
+            frame(cx)
+        })
+        .collect();
+    report("scrolled through the middle", scrolled);
+    transcript.update(cx, |this, cx| {
+        this.follow();
+        this.state.update(cx, |state, _| {
+            let words = MessagePart::Text { id: "live:t".into(), text: "The answer begins.".into() };
+            state.transcript.push(SessionMessageEntry {
+                id: "live".into(),
+                ..entry(MessageStatus::Streaming, vec![words])
+            });
+            state.transcript_revision += 1;
+        });
+        this.sync(cx);
+    });
+    let streamed = (0..FRAMES)
+        .map(|n| {
+            let started = Instant::now();
+            transcript.update(cx, |this, cx| {
+                this.state.update(cx, |state, _| {
+                    let live = state.transcript.last_mut().expect("the live answer");
+                    if let Some(MessagePart::Text { text, .. }) = live.parts.last_mut() {
+                        text.push_str(&format!(" Sentence {n} of the answer as it streams."));
+                    }
+                    state.transcript_revision += 1;
+                });
+                this.sync(cx);
+            });
+            let (_, rows) = frame(cx);
+            (started.elapsed(), rows)
+        })
+        .collect();
+    report("following a streaming answer", streamed);
 }

@@ -536,7 +536,7 @@ impl Transcript {
             };
             let mut child = Vec::new();
             for entry in state.sub_transcript(&chat) {
-                child.extend(self.rows_for(entry, false));
+                child.extend(self.rows_for(entry));
             }
             if child.is_empty() {
                 self.subagents.loading.insert(row_id.clone());
@@ -764,7 +764,6 @@ mod tests {
             diff_ref: None,
             subagent_ref: Some("child".into()),
             subagent_status: Some(SubagentStatus::Running),
-            subagent_tail: None,
             kind: super::super::ToolItemKind::Call,
             images: std::sync::Arc::new([]),
             facts: progress.map(|progress| {

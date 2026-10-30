@@ -1,9 +1,9 @@
 //! slopty: Slopty's own transcript rows, drawn in zeron's anatomy: an error that keeps what the
 //! agent said behind its copy and can be tried again, a quiet divider no one wrote (a
-//! compaction, a subagent's news), a proposed plan as a card folded past its first lines, what
-//! a settled turn changed, and the working line's current step.
+//! compaction, a subagent's news), a proposed plan as a card folded past its first lines, and
+//! the working line's current step.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{AnyElement, ClipboardItem, Context, SharedString, div, prelude::*, px};
@@ -16,33 +16,17 @@ use crate::notice::{NoticeChipIcon::Tile, notice_chip};
 use crate::theme::Theme;
 use crate::motion::HoverFade as _;
 
-/// slopty: a turn-changes card's file row, and the pad above and below its list.
-const TURN_FILE_ROW_HEIGHT: f32 = 26.0;
-const TURN_FILES_PAD_Y: f32 = 4.0;
-
 /// A plan shows this many source lines before it folds.
 pub const PLAN_FOLD_LINES: usize = 20;
 
 /// The longest step the working line shows, in characters.
 const STEP_MAX_CHARS: usize = 64;
 
-/// One file a turn changed, with its line counts.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TurnFile {
-    pub path: SharedString,
-    pub additions: u64,
-    pub deletions: u64,
-}
-
 /// What the rows of this module keep between frames.
 #[derive(Default)]
 pub(super) struct ExtrasState {
     /// Error cards whose detail is shown.
     details_open: HashSet<SharedString>,
-    /// Turn-changes rows whose file list is shown.
-    changes_open: HashSet<SharedString>,
-    /// slopty: when each turn-changes row's list last opened or closed, for its tween (#12).
-    changes_toggled: HashMap<SharedString, std::time::Instant>,
 }
 
 /// A text part the view model marks as a proposed plan (`plan:<id>`).
@@ -252,128 +236,6 @@ pub fn marker_row(entry_id: &str, part_id: &str, text: &str) -> Row {
     }
 }
 
-/// The files a turn's calls changed, summed by path in the order first touched.
-pub fn turn_files(entry: &SessionMessageEntry) -> Vec<TurnFile> {
-    let mut order: Vec<String> = Vec::new();
-    let mut sums: BTreeMap<String, (u64, u64)> = BTreeMap::new();
-    let mut add = |path: &str, additions: u64, deletions: u64| {
-        if path.is_empty() {
-            return;
-        }
-        let sum = sums.entry(path.to_owned()).or_insert_with(|| {
-            order.push(path.to_owned());
-            (0, 0)
-        });
-        sum.0 += additions;
-        sum.1 += deletions;
-    };
-    for part in &entry.parts {
-        let MessagePart::Tool {
-            is_error,
-            diff,
-            diff_stats,
-            ..
-        } = part
-        else {
-            continue;
-        };
-        if *is_error {
-            continue;
-        }
-        if let Some(stats) = diff_stats {
-            for stat in stats {
-                add(&stat.path, stat.additions, stat.deletions);
-            }
-        } else if let Some(diff) = diff {
-            let stat = slopty_view_doc::diff_stat(diff);
-            add(&stat.path, stat.additions, stat.deletions);
-        }
-    }
-    order
-        .into_iter()
-        .map(|path| {
-            let (additions, deletions) = sums[&path];
-            TurnFile {
-                path: path.into(),
-                additions,
-                deletions,
-            }
-        })
-        .collect()
-}
-
-/// slopty: a file's counts as words after its name (" +3 −1"), none when nothing was counted.
-fn counted(additions: u64, deletions: u64) -> String {
-    if additions + deletions == 0 {
-        String::new()
-    } else {
-        format!(" +{additions} −{deletions}")
-    }
-}
-
-/// The words of a turn-changes row: "3 files changed".
-pub fn turn_changes_label(files: &[TurnFile]) -> String {
-    match files.len() {
-        1 => "1 file changed".to_owned(),
-        n => format!("{n} files changed"),
-    }
-}
-
-/// A settled answer that changed files ends with a row saying which.
-pub fn turn_changes_row(entry: &SessionMessageEntry) -> Option<Row> {
-    if entry.role != slopty_view_doc::MessageRole::Assistant {
-        return None;
-    }
-    let files = turn_files(entry);
-    if files.is_empty() {
-        return None;
-    }
-    let mut key = String::new();
-    for file in &files {
-        key.push_str(&format!("{}\0{}\0{}\0", file.path, file.additions, file.deletions));
-    }
-    Some(Row {
-        id: format!("{}#changes", entry.id).into(),
-        version: fnv1a(key.as_bytes()),
-        turn_start: false,
-        kind: RowKind::TurnChanges {
-            files: Arc::new(files),
-        },
-        entry_id: entry.id.clone().into(),
-        timestamp: None,
-        copy_text: None,
-        compact_fold: None,
-    })
-}
-
-/// A path shown under `root` when it lies there, as it is otherwise.
-fn shown_path(path: &str, root: Option<&str>) -> String {
-    root.and_then(|root| path.strip_prefix(root.trim_end_matches('/')))
-        .and_then(|rest| rest.strip_prefix('/'))
-        .filter(|rest| !rest.is_empty())
-        .unwrap_or(path)
-        .to_owned()
-}
-
-/// slopty: a file the card names alone, as a file list names one: its name, then its folder
-/// (under the chat's folder when it lies there, else from the home folder as `~`), so a file
-/// written outside the checkout reads "index.html  /tmp/slopty-viz", never a full path run
-/// together (2026-10-20).
-pub(crate) fn named_file(path: &str, root: Option<&str>) -> (String, Option<String>) {
-    let shown = shown_path(path, root);
-    let name = file_name(&shown).to_owned();
-    let folder = shown.trim_end_matches('/').rsplit_once('/').map(|(dir, _)| dir).filter(|dir| !dir.is_empty());
-    let folder = folder.map(|dir| {
-        let home = ["/Users/", "/home/"].iter().find_map(|base| {
-            let rest = dir.strip_prefix(base)?;
-            let (_, under) = rest.split_once('/').unwrap_or((rest, ""));
-            Some(if under.is_empty() { "~".to_owned() } else { format!("~/{under}") })
-        });
-        home.unwrap_or_else(|| dir.to_owned())
-    });
-    (name, folder)
-}
-
 /// A path's last component.
 fn file_name(path: &str) -> &str {
     path.trim_end_matches('/')
@@ -469,39 +331,7 @@ pub fn working_step(entry: &SessionMessageEntry) -> Option<String> {
     })
 }
 
-type RunFn = dyn Fn(&str, &str, &mut gpui::Window, &mut gpui::App) -> bool;
-
-/// How the shell runs a line in a chat's terminal, once its window is up.
-#[derive(Clone)]
-struct TerminalRuns(std::rc::Rc<RunFn>);
-
-impl gpui::Global for TerminalRuns {}
-
-/// Serve a fence's Run with `run`: chat, then the command line, typed into that chat's
-/// terminal and run; whether the shell took it. Until it is served no fence offers Run.
-pub fn serve_terminal_runs(
-    cx: &mut gpui::App,
-    run: impl Fn(&str, &str, &mut gpui::Window, &mut gpui::App) -> bool + 'static,
-) {
-    cx.set_global(TerminalRuns(std::rc::Rc::new(run)));
-}
-
 impl Transcript {
-    /// A fence's Run for this transcript's chat, when the shell runs lines.
-    pub(super) fn run_ui(
-        &self,
-        cx: &gpui::App,
-    ) -> Option<std::rc::Rc<dyn Fn(String, &mut gpui::Window, &mut gpui::App)>> {
-        if self.doc_override.is_some() {
-            return None;
-        }
-        let chat = self.chat_id.clone()?;
-        let TerminalRuns(run) = cx.try_global::<TerminalRuns>()?.clone();
-        Some(std::rc::Rc::new(move |line, window, cx| {
-            run(&chat, &line, window, cx);
-        }))
-    }
-
     /// Open or close a plan's fold at once (no tween: the rows below move as one).
     fn toggle_plan_fold(&mut self, fold: SharedString, cx: &mut Context<Self>) {
         let entry = self.folds.entry(fold).or_default();
@@ -538,7 +368,6 @@ impl Transcript {
             RowKind::PlanFold { fold, hidden_lines } => {
                 self.render_plan_fold(fold, *hidden_lines, theme, cx)
             }
-            RowKind::TurnChanges { files } => self.render_turn_changes(row, files, theme, cx),
             _ => gpui::Empty.into_any_element(),
         }
     }
@@ -889,227 +718,6 @@ impl Transcript {
             .into_any_element()
     }
 
-    fn render_turn_changes(
-        &mut self,
-        row: &Row,
-        files: &Arc<Vec<TurnFile>>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let root = {
-            let state = self.state.read(cx);
-            self.chat_id
-                .as_deref()
-                .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
-                .and_then(|chat| chat.cwd.clone())
-        };
-        // slopty: one file is named in the card itself, with nothing to open (#12).
-        let single = files.len() == 1;
-        let open = !single && self.extras.changes_open.contains(&row.id);
-        // slopty: the list opens and closes as the one fold does (`motion::fold_frame`;
-        // design-inspiration item 7), the height first and the files fading in after it, its
-        // chevron turning with the height (#12).
-        let reduce_motion = crate::motion::reduced_motion(cx);
-        let now = cx.frame_time();
-        let fold = crate::motion::fold_frame(
-            open,
-            self.extras
-                .changes_toggled
-                .get(&row.id)
-                .map_or(std::time::Duration::MAX, |at| now.saturating_duration_since(*at)),
-            reduce_motion,
-        );
-        let animating = if open { fold.height < 1.0 || fold.opacity < 1.0 } else { fold.height > 0.0 };
-        let openness = fold.height.clamp(0.0, 1.0);
-        let list_height = files.len() as f32 * TURN_FILE_ROW_HEIGHT + 2.0 * TURN_FILES_PAD_Y + 1.0;
-        let (additions, deletions) = files
-            .iter()
-            .fold((0, 0), |(a, d), file| (a + file.additions, d + file.deletions));
-        // slopty: a file whose lines were never counted says nothing, not "+0 −0". After the
-        // counts, 4 px on, five squares say their share in hue (AgentCraft's merge review;
-        // design-inspiration item 5).
-        let counts = |additions: u64, deletions: u64| {
-            let square = |count: u64| u32::try_from(count).unwrap_or(u32::MAX);
-            (additions + deletions > 0).then(|| div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(6.0))
-                        .font_family(theme.font_mono.clone())
-                        .text_size(px(11.5))
-                        .child(
-                            div()
-                                .text_color(theme.diff_add)
-                                .child(SharedString::from(format!("+{additions}"))),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.diff_del)
-                                .child(SharedString::from(format!("−{deletions}"))),
-                        ),
-                )
-                .child(crate::changes::diffstat_blocks(square(additions), square(deletions), theme)))
-        };
-        let (label, folder) = match files.first().filter(|_| single) {
-            Some(file) => named_file(&file.path, root.as_deref()),
-            None => (turn_changes_label(files), None),
-        };
-        let toggle_id = row.id.clone();
-        let header = div()
-            .id(SharedString::from(format!("{}-toggle", row.id)))
-            .aria_label(SharedString::from(match &folder {
-                Some(folder) => format!("{label} in {folder}{}", counted(additions, deletions)),
-                None => format!("{label}{}", counted(additions, deletions)),
-            }))
-            .w_full()
-            // slopty: a finger's row on a touch screen (#23).
-            .h(px(crate::surface_chrome::touch_row_height(32.0)))
-            .px(px(10.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .map(|header| {
-                if single {
-                    return header.role(gpui::Role::Group);
-                }
-                // slopty: a button the keyboard reaches, Enter or Space opening it (#9).
-                crate::surface_chrome::key_stop_inset(header, theme)
-                    .role(gpui::Role::Button)
-                    .aria_expanded(open)
-                    .cursor_pointer()
-                    // slopty: the faded hover, at the row strength.
-                    .bg(crate::motion::hover_blend(
-                        &format!("{}-toggle", row.id),
-                        gpui::transparent_black(),
-                        crate::theme::ink(0.05),
-                    ))
-                    .hover_fade(format!("{}-toggle", row.id))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.extras.changes_open.remove(&toggle_id) {
-                            this.extras.changes_open.insert(toggle_id.clone());
-                        }
-                        this.extras
-                            .changes_toggled
-                            .insert(toggle_id.clone(), crate::clock::now(cx));
-                        cx.notify();
-                    }))
-            })
-            .child(
-                crate::icons::icon(crate::icons::DOCUMENT)
-                    .flex_none()
-                    .size(px(14.0))
-                    .text_color(theme.text_muted),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(320.0))
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.5))
-                    .text_color(theme.text)
-                    .child(SharedString::from(label)),
-            )
-            .children(folder.map(|folder| {
-                div()
-                    .min_w_0()
-                    .flex_shrink_1()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(folder))
-            }))
-            .children(counts(additions, deletions).map(|counts| counts.flex_none()))
-            .child(div().flex_1())
-            .when(!single, |header| {
-                // slopty: the chevron every other disclosure turns (#12).
-                header.child(
-                    crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                        .flex_none()
-                        .size(px(12.0))
-                        .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                            -std::f32::consts::FRAC_PI_2 * (1.0 - openness),
-                        )))
-                        .text_color(theme.text_muted),
-                )
-            });
-        let list = (open || animating).then(|| {
-            div()
-                .w_full()
-                .h(px(list_height * openness))
-                .overflow_hidden()
-                .child(
-                    div()
-                        .w_full()
-                        .when(fold.opacity < 1.0, |list| list.opacity(fold.opacity))
-                        .when(fold.rise > 0.0, |list| list.mt(px(fold.rise)))
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .py(px(TURN_FILES_PAD_Y))
-                        .children(files.iter().map(|file| {
-                            let path = shown_path(&file.path, root.as_deref());
-                            div()
-                                .id(SharedString::from(format!("{}-file-{path}", row.id)))
-                                .role(gpui::Role::ListItem)
-                                .aria_label(SharedString::from(format!(
-                                    "{path}{}",
-                                    counted(file.additions, file.deletions)
-                                )))
-                                .w_full()
-                                .h(px(TURN_FILE_ROW_HEIGHT))
-                                .px(px(10.0))
-                                .pl(px(32.0))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .truncate()
-                                        .text_size(crate::typography::ui_rems(12.0))
-                                        .text_color(theme.text_muted)
-                                        .child(SharedString::from(path)),
-                                )
-                                .children(counts(file.additions, file.deletions))
-                        })),
-                )
-        });
-        let view = cx.entity_id();
-        div()
-            .relative()
-            .py(px(4.0))
-            .w_full()
-            .child(
-                div()
-                    .w_full()
-                    .rounded(px(super::TRANSCRIPT_CARD_RADIUS))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(crate::theme::ink(0.02))
-                    .overflow_hidden()
-                    .child(header)
-                    .children(list),
-            )
-            .when(animating, |card| {
-                card.child(
-                    gpui::canvas(
-                        |_, _, _| (),
-                        move |_, _, window, _| window.on_next_frame(move |_, cx| cx.notify(view)),
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-            })
-            .into_any_element()
-    }
-
     /// `inner` dressed as its segment of a plan's card, with the row's gap moved inside the
     /// card so the card reads as one surface; other rows pass through.
     pub(super) fn plan_card_segment(
@@ -1305,7 +913,6 @@ mod tests {
             }]),
             subagent_ref: None,
             subagent_status: None,
-            subagent_tail: None,
             facts: None,
         }
     }
@@ -1325,7 +932,7 @@ mod tests {
             vec![MessagePart::Error { id: "refused:1".into(), message: start, detail: None }],
             MessageStatus::Complete,
         );
-        let rows = super::super::rows_for_entry(&turn, false, &mut |_, text| {
+        let rows = super::super::rows_for_entry(&turn, &mut |_, text| {
             Arc::new(crate::markdown::parser::parse_full(text))
         });
         assert!(
@@ -1337,55 +944,6 @@ mod tests {
             update_words("studio", "2.1.301", "2.0.14"),
             "Claude Code on studio is 2.0.14. Slopty drives 2.1.301 or later: update it there, then send again."
         );
-    }
-
-    #[test]
-    fn a_turn_sums_its_changes_by_file_in_the_order_touched() {
-        let turn = entry(
-            vec![
-                edit("t1", "/w/src/b.rs", 3, 1, true),
-                edit("t2", "/w/src/a.rs", 1, 0, true),
-                edit("t3", "/w/src/b.rs", 2, 2, true),
-            ],
-            MessageStatus::Complete,
-        );
-        let files = turn_files(&turn);
-        assert_eq!(
-            files,
-            [
-                TurnFile {
-                    path: "/w/src/b.rs".into(),
-                    additions: 5,
-                    deletions: 3
-                },
-                TurnFile {
-                    path: "/w/src/a.rs".into(),
-                    additions: 1,
-                    deletions: 0
-                },
-            ]
-        );
-        assert_eq!(turn_changes_label(&files), "2 files changed");
-        let row = turn_changes_row(&turn).expect("a row");
-        assert_eq!(row.id.as_ref(), "a1#changes");
-        assert_eq!(shown_path("/w/src/a.rs", Some("/w/")), "src/a.rs");
-        assert_eq!(shown_path("/elsewhere/a.rs", Some("/w")), "/elsewhere/a.rs");
-        // slopty: an uncounted file says no "+0 −0".
-        assert_eq!(counted(0, 0), "");
-        assert_eq!(counted(3, 0), " +3 −0");
-    }
-
-    /// slopty: a lone changed file is named by its name, then its folder: under the chat's
-    /// folder when it lies there, from home as `~`, else as it is; never a full path run on.
-    #[test]
-    fn a_lone_file_reads_name_then_folder() {
-        let named = |path: &str| named_file(path, Some("/w/app"));
-        assert_eq!(named("/w/app/notes.md"), ("notes.md".into(), None));
-        assert_eq!(named("/w/app/src/ui/a.rs"), ("a.rs".into(), Some("src/ui".into())));
-        assert_eq!(named("/tmp/slopty-viz/index.html"), ("index.html".into(), Some("/tmp/slopty-viz".into())));
-        assert_eq!(named("/Users/cong/notes/a.md"), ("a.md".into(), Some("~/notes".into())));
-        assert_eq!(named("/home/cong/a.md"), ("a.md".into(), Some("~".into())));
-        assert_eq!(named("a.md"), ("a.md".into(), None));
     }
 
     #[test]

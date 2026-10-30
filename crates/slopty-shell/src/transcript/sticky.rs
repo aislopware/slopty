@@ -251,7 +251,6 @@ mod tests {
                     text: text.to_owned().into(),
                     markdown: None,
                     attachments: Arc::default(),
-                    pending: false,
                     turn: None,
                 },
                 None => RowKind::ErrorChip {
@@ -305,7 +304,6 @@ mod tests {
                             diff_stats: None,
                             subagent_ref: None,
                             subagent_status: None,
-                            subagent_tail: None,
                             facts: None,
                         }],
                         created_at: 0,
@@ -314,7 +312,6 @@ mod tests {
                         continuation_of: None,
                         duration_ms: None,
                     },
-                    false,
                     &mut |_, text| Arc::new(crate::markdown::parser::parse_full(text)),
                 );
                 let Some(RowKind::ToolGroup { tools, .. }) = entry.into_iter().next().map(|row| row.kind) else {

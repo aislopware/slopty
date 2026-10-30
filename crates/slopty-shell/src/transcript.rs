@@ -69,7 +69,7 @@ pub(crate) mod find;
 mod jump; // slopty: the pill that says what waits below and goes back to it.
 mod turns; // slopty: a turn's root row, its figures under its prompt.
 pub(crate) mod trace; // slopty: the trace's one fold depth.
-pub use extras::{claude_too_old, serve_terminal_runs};
+pub use extras::claude_too_old;
 pub(crate) use subagents::Run;
 pub use find::{FindInThread, FindNext, FindPrevious};
 
@@ -89,9 +89,8 @@ const MAX_SAVED_VIEWPORTS: usize = 256;
 const SELECTION_SCROLL_TICK_MS: u64 = 24;
 const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
 // slopty: the working line's words, in its muted ink, read at a glance beside the reply (Claude
-// desktop's status line); its figures (the timer) a step smaller.
+// desktop's status line).
 const WORKING_LEAD_SIZE: f32 = 13.0;
-const WORKING_FIGURES_SIZE: f32 = 12.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
 /// Activity row height / gap — analytic, so fold heights need no measurement.
 /// Ordinary tools place their icon on the rail; subagents retain a 30px card.
@@ -144,15 +143,6 @@ fn tool_group_header_height() -> f32 {
 const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
 /// slopty: a jump's landing flash fading out (Claude's `code-reply-flash`, 1.2 s ease-out, #13).
 const LANDING_FLASH: motion::MotionSpec = motion::MotionSpec::new(1_200, motion::EASE_OUT);
-/// slopty: a bubble not yet taken by the agent is tinted, not faded (Amp): 14 % of the accent
-/// mixed into its fill, as a queued row's; it settles over 200 ms once taken.
-pub(crate) const QUEUED_TINT: f32 = 0.14;
-const QUEUED_SETTLE: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
-
-/// slopty: `fill` with `tint` of the accent mixed in, for what waits to be sent.
-pub(crate) fn queued_fill(fill: gpui::Hsla, accent: gpui::Hsla, tint: f32) -> gpui::Hsla {
-    motion::mix(fill, accent, tint)
-}
 
 /// Each newly appended row reveals quickly enough to read as a continuous log
 /// rather than a stack of discrete pop-ins.
@@ -290,7 +280,7 @@ pub struct ToolItem {
     pub is_error: bool,
     pub resolved: bool,
     /// Expandable detail: a code-block of output lines, or a real diff
-    /// section rendered by the changes pane's component (ACP harnesses).
+    /// section rendered by the changes pane's component.
     /// Precomputed here because rows are cached by fingerprint — diffing and
     /// tokenizing per paint would run on every scroll frame.
     pub detail: Option<Arc<ToolDetail>>,
@@ -312,10 +302,6 @@ pub struct ToolItem {
     /// Subagent lifecycle, distinct from `resolved` (eager-done: the spawn
     /// tool's own result lands while the subagent still runs).
     pub subagent_status: Option<SubagentStatus>,
-    /// One-line live tail — LEGACY docs only (new runs stopped folding it;
-    /// per-delta header rewrites read as noise). Never rendered; still
-    /// fingerprinted so an old doc's chips re-splice correctly.
-    pub subagent_tail: Option<SharedString>,
     /// `Call` is a real doc tool invocation; `Thought` (a reasoning part
     /// riding the tool group — the thought process belongs inside the
     /// combined "Ran N commands" accordion, opening/closing with the same
@@ -697,7 +683,6 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
         diff_ref: None,
         subagent_ref: None,
         subagent_status: None,
-        subagent_tail: None,
         kind: ToolItemKind::Thought,
         images: Arc::new([]),
         facts: None,
@@ -1076,8 +1061,6 @@ pub enum RowKind {
         /// Image refs parsed out of the message text (message-attachments.ts):
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
-        /// Optimistic echo not yet confirmed by a doc frame.
-        pending: bool,
         /// slopty: the figures of the turn this prompt opened, which its row says under it
         /// (`inspector.md`, "The turn is the root row").
         turn: Option<Arc<slopty_view_doc::TurnFacts>>,
@@ -1126,14 +1109,8 @@ pub enum RowKind {
     ErrorChip {
         message: SharedString,
     },
-    /// The fork seam: a labeled divider between copied history and the
-    /// chat's own turns.
-    ForkMarker {
-        source_chat_id: SharedString,
-        source_title: SharedString,
-    },
     // slopty: Slopty's own rows (`transcript/extras.rs`): an error that says what the agent
-    // said and can be tried again, a quiet divider, a plan's card, what a turn changed.
+    // said and can be tried again, a quiet divider, a plan's card.
     /// A Claude Code too old to drive: the machine's version and the least one Slopty drives.
     UpdateNeeded {
         least: SharedString,
@@ -1152,9 +1129,6 @@ pub enum RowKind {
     PlanFold {
         fold: SharedString,
         hidden_lines: usize,
-    },
-    TurnChanges {
-        files: Arc<Vec<extras::TurnFile>>,
     },
     // slopty: a background task's notice and a quiet notice of the agent's (`transcript/work.rs`),
     // and a page shown inline (`crate::page`).
@@ -1364,8 +1338,8 @@ fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
         // Sidecar refs arriving after the resolve tick must re-splice too —
         // they add the fetch affordance without changing the detail payload.
         acc.push(t.output_ref.is_some() as u8 | (t.diff_ref.is_some() as u8) << 1);
-        // Subagent lifecycle mutates the chip in place (status flips, the
-        // live tail grows) — hash it so the row re-splices on every change.
+        // Subagent lifecycle mutates the chip in place (its status flips):
+        // hash it so the row re-splices on every change.
         acc.push(
             t.subagent_ref.is_some() as u8
                 | match t.subagent_status {
@@ -1375,9 +1349,6 @@ fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
                     Some(SubagentStatus::Failed) => 3 << 1,
                 },
         );
-        if let Some(tail) = &t.subagent_tail {
-            acc.extend_from_slice(tail.as_bytes());
-        }
         // slopty: facts change in place (a timer, a step, a result line).
         if let Some(facts) = &t.facts {
             work::hash_into(&mut acc, facts.as_ref());
@@ -1447,7 +1418,6 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// record lands in its place and no row ever changes container, so the turn's end moves nothing.
 pub fn rows_for_entry(
     entry: &SessionMessageEntry,
-    pending: bool,
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
     #[cfg(test)]
@@ -1493,13 +1463,12 @@ pub fn rows_for_entry(
         }
         return vec![Row {
             id: entry.id.clone().into(),
-            version: ((raw.len() as u64) << 1 | pending as u64) ^ fnv1a(&figures).rotate_left(17),
+            version: (raw.len() as u64) ^ fnv1a(&figures).rotate_left(17),
             turn_start: true,
             kind: RowKind::User {
                 text: text.into(),
                 markdown,
                 attachments: Arc::new(attachments),
-                pending,
                 turn,
             },
             entry_id,
@@ -1586,7 +1555,6 @@ pub fn rows_for_entry(
                 diff_stats,
                 subagent_ref,
                 subagent_status,
-                subagent_tail,
                 facts,
                 ..
             } => {
@@ -1606,7 +1574,6 @@ pub fn rows_for_entry(
                     diff_ref: diff_ref.clone().map(SharedString::from),
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
-                    subagent_tail: subagent_tail.clone().map(SharedString::from),
                     kind: ToolItemKind::Call,
                     images: crate::tool_images::image_paths(call, output.as_deref()),
                     facts: facts.as_deref().cloned().map(Arc::new), // slopty: its facts.
@@ -1807,25 +1774,6 @@ pub fn rows_for_entry(
                             compact_fold: None,
                         });
                     }
-                    MessagePart::Fork {
-                        id: part_id,
-                        source_chat_id,
-                        source_title,
-                    } => {
-                        rows.push(Row {
-                            id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(source_title.as_bytes()),
-                            turn_start: false,
-                            kind: RowKind::ForkMarker {
-                                source_chat_id: source_chat_id.clone().into(),
-                                source_title: single_line(source_title).into(),
-                            },
-                            entry_id: entry_id.clone(),
-                            timestamp: None,
-                            copy_text: None,
-                            compact_fold: None,
-                        });
-                    }
                     // slopty: a quiet divider.
                     MessagePart::Marker { id: part_id, text } => {
                         rows.push(extras::marker_row(&entry.id, part_id, text));
@@ -1850,10 +1798,6 @@ pub fn rows_for_entry(
     flush_group(&mut rows, &mut pending_group, group_last_part_ix);
     flush_spawns(&mut rows, &mut pending_spawns);
 
-    // slopty: a settled turn says what it changed (#4).
-    if !streaming && let Some(row) = extras::turn_changes_row(entry) {
-        rows.push(row);
-    }
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
     }
@@ -1861,10 +1805,7 @@ pub fn rows_for_entry(
     // (chat-view.tsx: "No timestamp hover mid-stream"). The version bit keeps
     // the diff key honest for last-row kinds whose own version wouldn't
     // change when streaming flips off (chips).
-    if !streaming
-        && let Some(last) = rows.last_mut()
-        && !matches!(last.kind, RowKind::ForkMarker { .. })
-    {
+    if !streaming && let Some(last) = rows.last_mut() {
         last.timestamp = Some(entry.created_at);
         last.copy_text = assistant_copy_text(entry);
         last.version ^= 1 << 62;
@@ -2872,7 +2813,7 @@ impl TranscriptPreparation {
                 rows.clone()
             } else {
                 let streaming = entry.status == Some(MessageStatus::Streaming);
-                let built = Arc::new(rows_for_entry(entry, false, &mut |key, text| {
+                let built = Arc::new(rows_for_entry(entry, &mut |key, text| {
                     parse_for_row(
                         streaming,
                         key,
@@ -2895,7 +2836,7 @@ impl TranscriptPreparation {
             {
                 historical.insert(
                     entry.id.clone(),
-                    rows_for_entry(&prefix, false, &mut |_, text| {
+                    rows_for_entry(&prefix, &mut |_, text| {
                         Arc::new(parse_full(text))
                     }),
                 );
@@ -3479,12 +3420,11 @@ pub struct Transcript {
     /// zone. Dropping it on mouse-up stops all selection scroll work.
     selection_scroll_task: Option<Task<()>>,
     // slopty: no composer stack over the transcript's bottom, so no clearance under it.
-    /// slopty: the time the working line reads: taken when the transcript's state moves and on
-    /// the working timer's tick, never as a frame is built, so a frame built again (from
+    /// slopty: the time everything that runs reads (a turn's time, a step's lane, the working
+    /// line's word): taken when the transcript's state moves and on the one tick
+    /// ([`Transcript::tick_soon`]), never as a frame is built, so a frame built again (from
     /// scratch, or for a hover) says the second the frame shown says.
     clock: chrono::DateTime<chrono::Utc>,
-    /// slopty: the working timer's next tick, on the turn's next whole second.
-    clock_tick: Option<Task<()>>,
     /// slopty: the list's viewport as this frame began. A page row reads it while the list lays
     /// out, when asking the list itself would borrow it twice.
     page_viewport: gpui::Bounds<Pixels>,
@@ -3500,9 +3440,6 @@ pub struct Transcript {
     strip_focus: HashMap<SharedString, StripFocus>,
     /// slopty: the entries whose strip this frame drew, for pruning [`Self::strip_focus`].
     strip_drawn: HashSet<SharedString>,
-    /// slopty: the bubbles last drawn pending, and when each one sent: it fades up to full (#15).
-    pending_bubbles: HashSet<SharedString>,
-    sent_bubbles: HashMap<SharedString, Instant>,
     /// slopty: the last row's lane (its working line, then its timestamp strip) and the
     /// tallest that lane has drawn while it stayed last: the lane never shrinks under it, so
     /// a Stop or a turn's end swaps the working line for the strip without moving a row.
@@ -3863,13 +3800,10 @@ impl Transcript {
             selection_drag_position: None,
             selection_scroll_task: None,
             clock: crate::clock::utc(cx),
-            clock_tick: None,
             page_viewport: gpui::Bounds::default(),
             hovered_entry: None,
             strip_focus: HashMap::new(),
             strip_drawn: HashSet::new(),
-            pending_bubbles: HashSet::new(),
-            sent_bubbles: HashMap::new(),
             last_lane: None,
             copied_code: None,
             copied_clear: None,
@@ -4172,26 +4106,6 @@ impl Transcript {
         }
     }
 
-
-    /// slopty: the bubble `row` drawn `pending` or not, and whether it is fading up from
-    /// pending to sent (#15).
-    fn bubble_sent(&mut self, row: &SharedString, pending: bool, cx: &Context<Self>) -> bool {
-        let now = crate::clock::now(cx);
-        if pending {
-            self.pending_bubbles.insert(row.clone());
-            self.sent_bubbles.remove(row);
-            return false;
-        }
-        if self.pending_bubbles.remove(row) && !motion::reduced_motion(cx) {
-            self.sent_bubbles.insert(row.clone(), now);
-        }
-        let Some(at) = self.sent_bubbles.get(row) else { return false };
-        if now.saturating_duration_since(*at) < motion::FADE_QUICK.total() {
-            return true;
-        }
-        self.sent_bubbles.remove(row);
-        false
-    }
 
     /// slopty: mark the row at `ix` a jump landed on: it flashes and fades (#13).
     pub(crate) fn flash_landing(&mut self, ix: usize, cx: &Context<Self>) {
@@ -4606,8 +4520,6 @@ impl Transcript {
             // slopty: the row the pointer was on left with its chat, unmounted with no leave, so
             // its strip must not come back lit on the return.
             self.hovered_entry = None;
-            self.pending_bubbles.clear(); // slopty
-            self.sent_bubbles.clear(); // slopty
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
             self.user_hold_task = None;
             self.user_collapse_scroll = None;
@@ -4668,7 +4580,7 @@ impl Transcript {
                     // slopty: a plan's fold hides its rows here too.
                     new_rows.extend(rows.iter().filter(|row| self.fold_shows(row)).cloned());
                 } else {
-                    new_rows.extend(self.rows_for(entry, false));
+                    new_rows.extend(self.rows_for(entry));
                 }
             }
             // slopty: each subagent open in place has its run's steps spliced in under it.
@@ -4737,11 +4649,9 @@ impl Transcript {
                 let Some(historical) = baseline.historical_entry(entry) else {
                     continue;
                 };
-                historical_rows.extend(rows_for_entry(
-                    &historical,
-                    false,
-                    &mut |_, text| Arc::new(parse_full(text)),
-                ));
+                historical_rows.extend(rows_for_entry(&historical, &mut |_, text| {
+                    Arc::new(parse_full(text))
+                }));
             }
             // A normal opening snapshot is entirely historical. Share its
             // parsed trees instead of parsing the whole transcript twice;
@@ -5017,14 +4927,14 @@ impl Transcript {
     }
 
     /// Cached row build for one entry (streaming entries bypass the cache).
-    fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool) -> Vec<Row> {
+    fn rows_for(&mut self, entry: &SessionMessageEntry) -> Vec<Row> {
         let streaming = entry.status == Some(MessageStatus::Streaming);
         // Live entries always rebuild; don't allocate a fingerprint that the
         // streaming path cannot use.
         let fingerprint = if streaming {
             0
         } else {
-            entry_fingerprint(entry, pending)
+            entry_fingerprint(entry)
         };
         let mut rows = if !streaming
             && let Some(cached) = self.row_cache.get(&entry.id)
@@ -5039,7 +4949,7 @@ impl Transcript {
                 // rows whose content hash changed are spliced — the reparsed tail).
                 parse_for_row(streaming, key, text, live_parsers, tree_cache).0
             };
-            rows_for_entry(entry, pending, &mut parse)
+            rows_for_entry(entry, &mut parse)
         };
 
         if !streaming {
@@ -6031,7 +5941,6 @@ impl Transcript {
             link,
             workspace_root: self.workspace_root(cx),
             code: (!code.is_empty()).then_some(code),
-            run: self.run_ui(cx), // slopty: Run in terminal.
             code_menu: Some(self.code_menu_ui(cx)),
             body: (render::MD_TEXT_SIZE, USER_LINE_HEIGHT), // slopty: the bubble's own size
         };
@@ -6564,31 +6473,11 @@ impl Transcript {
     /// The working loader, INSIDE the conversation flow: appended under the
     /// last row while the run is live (moved out of the shell's status strip
     /// — user request), so it reads as part of the streaming reply and
-    /// scrolls away with it. The spinner drives this entity's frames, which
-    /// keeps the elapsed timer ticking through delta-quiet tool runs.
-    /// slopty: take the time again at the next whole second after `start` (ms since the epoch),
-    /// or in a second, and draw again: what the working line says moves on only then.
-    fn tick_clock(&mut self, start: Option<i64>, cx: &mut Context<Self>) {
-        if self.clock_tick.is_some() {
-            return;
-        }
-        let real = crate::clock::utc(cx).timestamp_millis();
-        let wait = start.map_or(1000, |start| 1000 - (real - start).rem_euclid(1000));
-        let wait = Duration::from_millis(u64::try_from(wait).unwrap_or(1000).clamp(1, 1000) + 2);
-        self.clock_tick = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(wait).await;
-            this.update(cx, |this, cx| {
-                this.clock_tick = None;
-                this.clock = crate::clock::utc(cx);
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
+    /// scrolls away with it. slopty: it says no time: the turn's line under
+    /// its prompt does, once.
     fn render_working_trailer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = self.clock;
-        // `turn` (the turn's start, ms) keys the rolling word and timer, so a
+        // `turn` (the turn's start, ms) keys the rolling word, so a
         // new turn's labels appear fresh instead of rolling from the last
         // turn's final values.
         let (elapsed_secs, seed, turn) = if let Some(doc_id) = &self.doc_override {
@@ -6625,9 +6514,8 @@ impl Transcript {
             };
             (elapsed, flavour_seed(&chat_id), turn)
         };
-        // slopty: the clock moves on at the timer's next whole second, so the second a frame
-        // says is the one every frame built after it says.
-        self.tick_clock(Some(turn), cx);
+        // slopty: the flavour word turns on the one tick everything that runs reads.
+        self.tick_soon(cx);
         // slopty: the call under way, or the newest thought, in place of the flavour word.
         let step = {
             let state = self.state.read(cx);
@@ -6657,7 +6545,6 @@ impl Transcript {
                 // slopty: the row lane's anatomy (`ROW_LANE_HEIGHT`).
                 .pt(px(Theme::SPACE_SM))
                 .h(px(ROW_LANE_HEIGHT))
-                .text_size(crate::typography::ui_rems(WORKING_FIGURES_SIZE))
                 .child(crate::loaders::gradient_spinner(
                     "working-indicator",
                     &theme,
@@ -6675,22 +6562,6 @@ impl Transcript {
                         .child(crate::roll_text::roll_text(
                             format!("working-word-{}-{turn}", cx.entity_id()),
                             SharedString::from(format!("{word}…")),
-                            cx.reduce_motion(),
-                            crate::clock::now(cx),
-                        )),
-                )
-                // The timer ticks every second; its digits roll in place (the unit suffix
-                // holds).
-                .child(
-                    div()
-                        .flex_none()
-                        .relative()
-                        .top(px(1.0))
-                        .text_color(theme.text_muted)
-                        .font_features(crate::typography::tabular())
-                        .child(crate::roll_text::roll_text(
-                            format!("working-timer-{}-{turn}", cx.entity_id()),
-                            SharedString::from(ticking_elapsed(elapsed_secs)),
                             cx.reduce_motion(),
                             crate::clock::now(cx),
                         )),
@@ -6892,13 +6763,11 @@ impl Transcript {
                 text,
                 markdown,
                 attachments,
-                pending,
                 turn,
             } => {
                 let attachments = attachments.clone();
                 let text = text.clone();
                 let markdown = markdown.clone();
-                let pending = *pending;
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
                 // HStack); image-only sends show no bubble at all.
@@ -6948,11 +6817,7 @@ impl Transcript {
                                 .aria_label(spoken)
                                 .min_w_0()
                                 .max_w(px(self.content_width * 0.8))
-                                .bg(queued_fill(
-                                    crate::theme::user_bubble_bg(),
-                                    theme.accent,
-                                    if pending { QUEUED_TINT } else { 0.0 },
-                                ))
+                                .bg(crate::theme::user_bubble_bg())
                                 .rounded(px(Theme::BUBBLE_RADIUS))
                                 .px(px(16.0))
                                 .py(px(10.0))
@@ -6965,27 +6830,6 @@ impl Transcript {
                                 .child(self.render_user_body(
                                     &row.id, ix, text, markdown, &theme, window, cx,
                                 ));
-                    // slopty: a send the agent took loses its tint, not in one frame (#15).
-                    let bubble = if self.bubble_sent(&row.id, pending, cx) {
-                        bubble
-                            .with_animation(
-                                SharedString::from(format!("sent-{}", row.id)),
-                                QUEUED_SETTLE.animation(),
-                                {
-                                    let accent = theme.accent;
-                                    move |bubble, t| {
-                                        bubble.bg(queued_fill(
-                                            crate::theme::user_bubble_bg(),
-                                            accent,
-                                            QUEUED_TINT * (1.0 - t),
-                                        ))
-                                    }
-                                },
-                            )
-                            .into_any_element()
-                    } else {
-                        bubble.into_any_element()
-                    };
                     // slopty: the strip waits at the bubble's foot (#1).
                     let foot = div()
                         .relative()
@@ -7021,7 +6865,6 @@ impl Transcript {
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
-                    run: self.run_ui(cx), // slopty: Run in terminal.
                     code_menu: Some(self.code_menu_ui(cx)),
                     body: self.markdown_body(&row.id), // slopty: a run in place reads compact (#24).
                 };
@@ -7095,7 +6938,6 @@ impl Transcript {
                     link,
                     workspace_root: workspace_root.clone(),
                     code,
-                    run: self.run_ui(cx), // slopty: Run in terminal.
                     code_menu: Some(self.code_menu_ui(cx)),
                     body: self.markdown_body(&row.id), // slopty: a run in place reads compact (#24).
                 };
@@ -7169,14 +7011,12 @@ impl Transcript {
             }
             // slopty: a title and one sentence (`extras::render_error_card`).
             RowKind::ErrorChip { message } => self.render_error_card(&row, message, None, &theme, cx),
-            RowKind::ForkMarker { source_title, .. } => fork_marker(source_title.clone(), &theme),
             // slopty: Slopty's own rows.
             RowKind::ErrorCard { .. }
             | RowKind::UpdateNeeded { .. }
             | RowKind::Marker { .. }
             | RowKind::PlanHeader { .. }
-            | RowKind::PlanFold { .. }
-            | RowKind::TurnChanges { .. } => self.render_extra_row(&row, &theme, cx),
+            | RowKind::PlanFold { .. } => self.render_extra_row(&row, &theme, cx),
             RowKind::TaskNote { task } => self.render_task_note(&row, task, &theme, cx),
             RowKind::Notice { note } => {
                 self.render_notice(&row, note, &theme, cx)
@@ -8589,53 +8429,6 @@ fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A quiet fork seam. The source gets its own constrained line so long
-/// titles cannot widen a narrow side-chat pane. No message metadata lane.
-fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
-    // slopty: the hairline the other markers draw (#19).
-    let rule = || div().flex_1().min_w_0().h(px(1.0)).bg(theme.border);
-    div()
-        .py(px(14.0))
-        .w_full()
-        .min_w_0()
-        .overflow_hidden()
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .child(rule())
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted.opacity(0.7))
-                        .child("Forked from"),
-                )
-                .child(rule()),
-        )
-        // Centered by flex, not `text_center()`: gpui registers a text line's
-        // layer at the line origin with the text's own width, so glyphs shifted
-        // by alignment paint outside it and can draw over popovers above them.
-        .child(
-            div().w_full().min_w_0().flex().justify_center().child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text_muted)
-                    .child(source_title),
-            ),
-        )
-        .into_any_element()
-}
-
 /// A passive one-line chip marking a question the agent asked — the
 /// interactive controls live in the composer (chat-view.tsx `InputChip`):
 /// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
@@ -9869,7 +9662,7 @@ fn solo_rail(tool: &ToolItem, row_height: f32, theme: &Theme) -> gpui::Div {
     )
 }
 
-fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
+fn entry_fingerprint(entry: &SessionMessageEntry) -> u64 {
     let mut acc: Vec<u8> = Vec::with_capacity(entry.parts.len() * 8 + 16);
     acc.extend_from_slice(entry.id.as_bytes());
     acc.extend_from_slice(entry.device_id.as_bytes());
@@ -9879,7 +9672,6 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         Some(MessageStatus::Complete) => 2,
         Some(MessageStatus::Aborted) => 3,
     });
-    acc.push(pending as u8);
     acc.extend_from_slice(&entry.duration_ms.unwrap_or(0).to_le_bytes());
     for part in &entry.parts {
         acc.extend_from_slice(part.id().as_bytes());
@@ -9889,7 +9681,6 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
             resolved,
             subagent_ref,
             subagent_status,
-            subagent_tail,
             ..
         } = part
         {
@@ -9897,7 +9688,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
             // Subagent lifecycle mutates a COMPLETED entry in place (eager-
             // done: the spawn resolves while the subagent runs on) and
             // `byte_len` above doesn't cover these fields — hash them or the
-            // cached rows never refresh on status/tail changes.
+            // cached rows never refresh on status changes.
             acc.push(
                 subagent_ref.is_some() as u8
                     | match subagent_status {
@@ -9907,9 +9698,6 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
                         Some(SubagentStatus::Failed) => 3 << 1,
                     },
             );
-            if let Some(tail) = subagent_tail {
-                acc.extend_from_slice(tail.as_bytes());
-            }
         }
         if let MessagePart::Image {
             path,
@@ -11493,8 +11281,8 @@ mod tests {
         let entries: Vec<SessionMessageEntry> =
             serde_json::from_str(include_str!("../tests/fixtures/generated-images.json")).unwrap();
         let entry = &entries[0];
-        let original = entry_fingerprint(entry, false);
-        let row_version = rows_for_entry(entry, false, &mut parse)[0].version;
+        let original = entry_fingerprint(entry);
+        let row_version = rows_for_entry(entry, &mut parse)[0].version;
         for field in 0..4 {
             let mut changed = entry.clone();
             if field == 0 {
@@ -11512,14 +11300,14 @@ mod tests {
                     _ => *mime_type = "image/gif".into(),
                 }
             }
-            assert_ne!(entry_fingerprint(&changed, false), original);
+            assert_ne!(entry_fingerprint(&changed), original);
             assert_ne!(
-                rows_for_entry(&changed, false, &mut parse)[0].version,
+                rows_for_entry(&changed, &mut parse)[0].version,
                 row_version
             );
         }
         for entry in entries {
-            let rows = rows_for_entry(&entry, false, &mut parse);
+            let rows = rows_for_entry(&entry, &mut parse);
             assert_eq!(rows.len(), 1);
             assert!(rows[0].turn_start);
             assert_eq!(
@@ -11889,7 +11677,7 @@ mod tests {
             transcript.update(cx, |this, cx| {
                 this.rows = entries
                     .iter()
-                    .flat_map(|entry| rows_for_entry(entry, false, &mut parse))
+                    .flat_map(|entry| rows_for_entry(entry, &mut parse))
                     .collect();
                 for (ix, expected) in ["loaded", "loading", "error"].into_iter().enumerate() {
                     let RowKind::GeneratedImage {
@@ -11939,7 +11727,7 @@ mod tests {
             mime_type: "image/png".into(),
         };
         let entry = assistant("a", MessageStatus::Complete, vec![image.clone()]);
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].turn_start);
         assert!(rows[0].copy_text.is_none());
@@ -11954,7 +11742,7 @@ mod tests {
                 text_part("t2", "after"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[1].kind, RowKind::ToolGroup { .. }));
         assert!(matches!(rows[2].kind, RowKind::GeneratedImage { .. }));
@@ -11976,7 +11764,7 @@ mod tests {
                 tool_part("t3", "pwd"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         assert_eq!(rows.len(), 1, "one combined accordion row");
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
@@ -12008,7 +11796,7 @@ mod tests {
                 tool_part("t", "cargo test"),
             ],
         );
-        let rows = rows_for_entry(&timed, false, &mut parse);
+        let rows = rows_for_entry(&timed, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -12022,7 +11810,7 @@ mod tests {
                 tool_part("t", "cargo test"),
             ],
         );
-        let rows = rows_for_entry(&brief, false, &mut parse);
+        let rows = rows_for_entry(&brief, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -12035,7 +11823,7 @@ mod tests {
             MessageStatus::Complete,
             vec![reasoning_part("r0", "just thinking")],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
@@ -12048,7 +11836,7 @@ mod tests {
             MessageStatus::Complete,
             vec![reasoning_part("r0", "   ")],
         );
-        assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
+        assert!(rows_for_entry(&entry, &mut parse).is_empty());
     }
 
     #[test]
@@ -12058,7 +11846,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![reasoning_part("r0", "thinking hard")],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -12072,7 +11860,7 @@ mod tests {
                 text_part("t1", "answer"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -12101,18 +11889,18 @@ mod tests {
             text_part("t5", "Fixed it."),
         ];
         let early = assistant("a1", MessageStatus::Streaming, parts[..2].to_vec());
-        assert_eq!(ids(&rows_for_entry(&early, false, &mut parse)), ["a1#t0.0", "a1#g:c1"]);
+        assert_eq!(ids(&rows_for_entry(&early, &mut parse)), ["a1#t0.0", "a1#g:c1"]);
         let grown = assistant("a1", MessageStatus::Streaming, parts[..3].to_vec());
         assert_eq!(
-            ids(&rows_for_entry(&grown, false, &mut parse)),
+            ids(&rows_for_entry(&grown, &mut parse)),
             ["a1#t0.0", "a1#g:c1"],
             "a thought joins its group under the group's own key"
         );
         let want = ["a1#t0.0", "a1#g:c1", "a1#e3", "a1#g:c4", "a1#t5.0"];
         let live = assistant("a1", MessageStatus::Streaming, parts.clone());
-        assert_eq!(ids(&rows_for_entry(&live, false, &mut parse)), want, "live, in record order");
+        assert_eq!(ids(&rows_for_entry(&live, &mut parse)), want, "live, in record order");
         let done = assistant("a1", MessageStatus::Complete, parts);
-        assert_eq!(ids(&rows_for_entry(&done, false, &mut parse)), want, "ended, nothing moved");
+        assert_eq!(ids(&rows_for_entry(&done, &mut parse)), want, "ended, nothing moved");
     }
 
     #[test]
@@ -12142,7 +11930,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_summary_paragraphs_render_as_separate_styled_lines() {
+    fn bold_summary_paragraphs_render_as_separate_styled_lines() {
         let lines = thought_of("**Implementing file badges**\n\n**Preparing fixture screenshots**");
         assert_eq!(
             lines
@@ -12267,7 +12055,6 @@ mod tests {
             diff_stats: None,
             subagent_ref: None,
             subagent_status: None,
-            subagent_tail: None,
             facts: None,
         }
     }
@@ -12279,7 +12066,7 @@ mod tests {
         // Live rows split per block exactly like completed ones (the list
         // virtualizes them — the fading tail is the only per-frame work).
         let live = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", MD)]);
-        let live_rows = rows_for_entry(&live, false, &mut parse);
+        let live_rows = rows_for_entry(&live, &mut parse);
         assert_eq!(live_rows.len(), 3, "one live row per top-level block");
         assert!(
             live_rows
@@ -12290,7 +12077,7 @@ mod tests {
         assert_eq!(live_rows[2].id.as_ref(), "m1#t0.2");
 
         let done = assistant("m1", MessageStatus::Complete, vec![text_part("t0", MD)]);
-        let done_rows = rows_for_entry(&done, false, &mut parse);
+        let done_rows = rows_for_entry(&done, &mut parse);
         assert_eq!(done_rows.len(), 3, "three top-level blocks");
         // Every block row keeps its id across the flip — no flicker on handoff.
         for (live, done) in live_rows.iter().zip(&done_rows) {
@@ -12313,8 +12100,8 @@ mod tests {
         let t2 = "para one\n\npara two\n\npara three grows here";
         let live1 = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", t1)]);
         let live2 = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", t2)]);
-        let r1 = rows_for_entry(&live1, false, &mut parse);
-        let r2 = rows_for_entry(&live2, false, &mut parse);
+        let r1 = rows_for_entry(&live1, &mut parse);
+        let r2 = rows_for_entry(&live2, &mut parse);
         assert_eq!(r1.len(), 3);
         assert_eq!(r2.len(), 3);
         assert_eq!(r1[0].version, r2[0].version, "settled block untouched");
@@ -12337,7 +12124,7 @@ mod tests {
                 text_part("t1", "tail para"),
             ],
         );
-        let rows = rows_for_entry(&done, false, &mut parse);
+        let rows = rows_for_entry(&done, &mut parse);
         // Rows: t0.0, t0.1, t0.2 (three MD blocks), g0, t1.0.
         assert_eq!(rows.len(), 5);
         // Sibling markdown blocks from the same part: md block gap.
@@ -12363,7 +12150,7 @@ mod tests {
                 tool_part("c", "make"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
         assert_eq!(ids, ["m2#t0.0", "m2#g:a", "m2#t1.0", "m2#g:c"]);
         let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
@@ -12390,7 +12177,6 @@ mod tests {
             diff_stats: None,
             subagent_ref: Some(format!("chat--sub--{id}")),
             subagent_status: Some(SubagentStatus::Running),
-            subagent_tail: None,
             facts: None,
         }
     }
@@ -12413,7 +12199,7 @@ mod tests {
                 text_part("t1", "after"),
             ],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
         assert_eq!(
             ids,
@@ -12463,7 +12249,7 @@ mod tests {
             MessageStatus::Complete,
             vec![tool_part("a", "ls"), stray, tool_part("c", "make")],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         assert_eq!(rows.len(), 1, "one folded group, no subagent row");
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("tool group expected")
@@ -12495,7 +12281,7 @@ mod tests {
             MessageStatus::Complete,
             vec![tool_part("a", "ls"), part],
         );
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         assert_eq!(rows.len(), 2);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!()
@@ -12528,24 +12314,6 @@ mod tests {
             assert_eq!(shown(MessageStatus::Streaming, &parts, cx), Some(false), "as a call arrives");
             assert_eq!(shown(MessageStatus::Complete, &parts, cx), Some(false), "at the turn's end");
         });
-    }
-
-    #[test]
-    fn user_rows_and_echo_versions() {
-        let mut entry = assistant("u1", MessageStatus::Complete, vec![]);
-        entry.role = MessageRole::User;
-        entry.status = None;
-        entry.parts = vec![text_part("t0", "hello")];
-        let confirmed = rows_for_entry(&entry, false, &mut parse);
-        let echoed = rows_for_entry(&entry, true, &mut parse);
-        assert_eq!(confirmed.len(), 1);
-        assert_eq!(confirmed[0].id, echoed[0].id);
-        // Pending → confirmed changes the version so the row re-renders.
-        assert_ne!(confirmed[0].version, echoed[0].version);
-        assert!(matches!(
-            &echoed[0].kind,
-            RowKind::User { pending: true, .. }
-        ));
     }
 
     // Exercise the real Transcript handlers with GPUI's Linux headless
@@ -13510,8 +13278,8 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &"a line\n".repeat(40))];
-        let before = rows_for_entry(&entry, false, &mut parse);
-        let after = rows_for_entry(&entry, false, &mut parse);
+        let before = rows_for_entry(&entry, &mut parse);
+        let after = rows_for_entry(&entry, &mut parse);
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].id, after[0].id);
         assert_eq!(before[0].version, after[0].version);
@@ -13523,7 +13291,7 @@ mod tests {
             let mut entry = assistant("u1", MessageStatus::Complete, vec![text_part("t0", text)]);
             entry.role = MessageRole::User; // slopty: a prompt, as the record has it
             entry.status = None;
-            let rows = rows_for_entry(&entry, false, &mut parse);
+            let rows = rows_for_entry(&entry, &mut parse);
             let RowKind::User { markdown, .. } = &rows[0].kind else {
                 panic!("expected a user row");
             };
@@ -13548,7 +13316,7 @@ mod tests {
             let mut entry = assistant("u1", MessageStatus::Complete, vec![text_part("t0", text)]);
             entry.role = MessageRole::User; // slopty: a prompt, as the record has it
             entry.status = None;
-            let rows = rows_for_entry(&entry, false, &mut parse);
+            let rows = rows_for_entry(&entry, &mut parse);
             let RowKind::User { markdown, .. } = &rows[0].kind else {
                 panic!("expected a user row");
             };
@@ -13593,7 +13361,7 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &content)];
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::User {
             text, attachments, ..
@@ -13610,7 +13378,7 @@ mod tests {
         // Image-only send: no bubble text, refs parsed.
         let only = crate::attachments::with_attachments("", &["/a/p.png".to_string()]);
         entry.parts = vec![text_part("t0", &only)];
-        let rows = rows_for_entry(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, &mut parse);
         let RowKind::User {
             text, attachments, ..
         } = &rows[0].kind
@@ -13626,9 +13394,9 @@ mod tests {
     fn diff_rows_appends_and_middle_edits() {
         let entry1 = assistant("m1", MessageStatus::Complete, vec![text_part("t0", "one")]);
         let entry2 = assistant("m2", MessageStatus::Complete, vec![text_part("t0", "two")]);
-        let r1 = rows_for_entry(&entry1, false, &mut parse);
+        let r1 = rows_for_entry(&entry1, &mut parse);
         let mut both = r1.clone();
-        both.extend(rows_for_entry(&entry2, false, &mut parse));
+        both.extend(rows_for_entry(&entry2, &mut parse));
 
         // Identical → None.
         assert!(diff_rows(&r1, &r1.clone()).is_none());
@@ -13643,12 +13411,12 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("t0", "one more")],
         );
-        let mut both_b = rows_for_entry(&entry1b, false, &mut parse);
-        both_b.extend(rows_for_entry(&entry2, false, &mut parse));
+        let mut both_b = rows_for_entry(&entry1b, &mut parse);
+        both_b.extend(rows_for_entry(&entry2, &mut parse));
         assert_eq!(diff_rows(&both, &both_b), Some((0..1, 1)));
 
         // Full reset when everything shifts.
-        let r2 = rows_for_entry(&entry2, false, &mut parse);
+        let r2 = rows_for_entry(&entry2, &mut parse);
         assert_eq!(diff_rows(&r1, &r2), Some((0..1, 1)));
     }
 
@@ -13656,8 +13424,8 @@ mod tests {
     fn diff_handles_live_to_split_growth() {
         let live = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", MD)]);
         let done = assistant("m1", MessageStatus::Complete, vec![text_part("t0", MD)]);
-        let live_rows = rows_for_entry(&live, false, &mut parse);
-        let done_rows = rows_for_entry(&done, false, &mut parse);
+        let live_rows = rows_for_entry(&live, &mut parse);
+        let done_rows = rows_for_entry(&done, &mut parse);
         // Same ids; every version flips its streaming bit → one 3-row splice.
         assert_eq!(diff_rows(&live_rows, &done_rows), Some((0..3, 3)));
     }
@@ -13783,7 +13551,6 @@ mod tests {
             diff_ref: None,
             subagent_ref: None,
             subagent_status: None,
-            subagent_tail: None,
             kind: ToolItemKind::Call,
             images: Arc::new([]),
             facts: None,
@@ -13804,7 +13571,6 @@ mod tests {
             diff_ref: None,
             subagent_ref: None,
             subagent_status: None,
-            subagent_tail: None,
             kind: ToolItemKind::Call,
             images: Arc::new([]),
             facts: None,
@@ -13880,7 +13646,6 @@ mod tests {
                 diff_ref: None,
                 subagent_ref: None,
                 subagent_status: None,
-                subagent_tail: None,
                 kind: ToolItemKind::Call,
                 images: Arc::new([]),
                 facts: None,
@@ -13899,7 +13664,6 @@ mod tests {
                 diff_ref: None,
                 subagent_ref: None,
                 subagent_status: None,
-                subagent_tail: None,
                 kind: ToolItemKind::Call,
                 images: Arc::new([]),
                 facts: None,
@@ -13916,7 +13680,6 @@ mod tests {
                 diff_ref: None,
                 subagent_ref: None,
                 subagent_status: None,
-                subagent_tail: None,
                 kind: ToolItemKind::Call,
                 images: Arc::new([]),
                 facts: None,
@@ -14091,7 +13854,6 @@ mod tests {
             diff_ref: None,
             subagent_ref: None,
             subagent_status: None,
-            subagent_tail: None,
             kind: ToolItemKind::Call,
         };
         // The chip header inside a clickable parent, standing in for the
@@ -14275,7 +14037,7 @@ mod tests {
         assert_eq!(format_timestamp_near(ms, at("2027-01-02T10:00:00Z"), &tz), "Jul 1, 2026");
         assert_eq!(format_full_timestamp(ms, &tz), format!("Wednesday, Jul 1, 2026, {clock}"));
 
-        // User entries carry the strip on their single row (pending too).
+        // User entries carry the strip on their single row.
         let user = SessionMessageEntry {
             id: "u1".into(),
             role: MessageRole::User,
@@ -14286,7 +14048,7 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         };
-        let rows = rows_for_entry(&user, true, &mut parse);
+        let rows = rows_for_entry(&user, &mut parse);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].timestamp, Some(ms));
 
@@ -14296,7 +14058,7 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("p1", "one\n\ntwo")],
         );
-        let rows = rows_for_entry(&done, false, &mut parse);
+        let rows = rows_for_entry(&done, &mut parse);
         assert!(rows.len() >= 2);
         assert_eq!(rows.last().unwrap().timestamp, Some(done.created_at));
         assert_eq!(
@@ -14312,7 +14074,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![text_part("p1", "streaming…")],
         );
-        let rows = rows_for_entry(&live, false, &mut parse);
+        let rows = rows_for_entry(&live, &mut parse);
         assert!(rows.iter().all(|r| r.timestamp.is_none()));
         assert!(rows.iter().all(|r| r.copy_text.is_none()));
         // Every row knows its entry (the hover group).
@@ -14560,7 +14322,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![text_part("t0", ""), text_part("t1", "   ")],
         );
-        assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
+        assert!(rows_for_entry(&entry, &mut parse).is_empty());
     }
 }
 

@@ -121,9 +121,6 @@ pub struct RenderOptions {
     /// scroll state, keyed by the same element discriminator passed to
     /// [`render_block`]. `None` keeps non-chat Markdown surfaces unchanged.
     pub code: Option<HashMap<usize, CodeUi>>,
-    // slopty: a one-line shell fence's Run, which hands the line to the chat's terminal.
-    /// `None` offers no Run (previews, and a window whose shell takes no runs).
-    pub run: Option<Rc<dyn Fn(String, &mut Window, &mut gpui::App)>>,
     // slopty: a code block's right-click menu, its header's actions; `None` offers none.
     pub code_menu: Option<Rc<MenuFn>>,
     /// slopty: the prose's size and line height, in points: paragraphs and list items
@@ -427,7 +424,6 @@ impl RenderOptions {
             link: None,
             workspace_root: None,
             code: None,
-            run: None, // slopty: no Run outside the transcript.
             code_menu: None,
             body: (MD_TEXT_SIZE, MD_LINE_HEIGHT),
         }
@@ -2652,29 +2648,7 @@ fn code_block_header(
     )
 }
 
-// slopty: Run in terminal, and a table's copy.
-/// The command a fence holds when it is one line of a shell language, prompt sign taken off.
-pub fn runnable_line(language: Option<&str>, code: &str) -> Option<String> {
-    let language = language?.trim().to_ascii_lowercase();
-    if !matches!(
-        language.as_str(),
-        "sh" | "bash" | "zsh" | "shell" | "console" | "shellsession" | "fish"
-    ) {
-        return None;
-    }
-    let mut lines = code.lines().filter(|line| !line.trim().is_empty());
-    let line = lines.next()?.trim();
-    if lines.next().is_some() {
-        return None;
-    }
-    let line = line
-        .strip_prefix("$ ")
-        .or_else(|| line.strip_prefix("% "))
-        .unwrap_or(line)
-        .trim();
-    (!line.is_empty()).then(|| line.to_owned())
-}
-
+// slopty: a table's copy.
 fn cell_text(cell: &[InlineRun]) -> String {
     cell.iter().map(|run| run.text.as_str()).collect::<String>().replace('\n', " ")
 }
@@ -2865,7 +2839,7 @@ fn render_code_block_source_with_actions(
     opts: &RenderOptions,
     theme: &Theme,
     highlight: CodeHighlight,
-    mut extra_actions: Vec<AnyElement>,
+    extra_actions: Vec<AnyElement>,
 ) -> AnyElement {
     // slopty: a prompt's powerline and Nerd glyphs draw from the bundled symbol face.
     let mut mono = font(theme.font_mono.clone());
@@ -2930,18 +2904,7 @@ fn render_code_block_source_with_actions(
     let scroll_id: SharedString = format!("{}-code{ix}", opts.row_key).into();
     let sel_wash = selection_wash(theme);
     let code_ui = opts.code.as_ref().and_then(|code| code.get(&ix)).cloned();
-    let mut actions = Vec::new();
-    actions.append(&mut extra_actions);
-    // slopty: a one-line shell command runs in the chat's terminal on the person's click.
-    if let (Some(run), Some(line)) = (opts.run.clone(), runnable_line(language, code)) {
-        actions.push(code_icon_action(
-            format!("{}-run{ix}", opts.row_key).into(),
-            "Run in terminal",
-            crate::icons::ACTION_PLAY,
-            Rc::new(move |window, cx| run(line.clone(), window, cx)),
-            theme,
-        ));
-    }
+    let mut actions = extra_actions;
     actions.extend(code_copy_button(code, ix, opts, theme));
 
     let lines = div()
@@ -3060,13 +3023,6 @@ fn render_code_block_source_with_actions(
                 label: "Copy code".into(),
                 keys: None,
                 act: Rc::new(move |window: &mut Window, cx: &mut gpui::App| handler(ix, text.clone(), window, cx)),
-            });
-        }
-        if let (Some(run), Some(line)) = (opts.run.clone(), runnable_line(language, code)) {
-            choices.push(MenuChoice {
-                label: "Run in terminal".into(),
-                keys: None,
-                act: Rc::new(move |window: &mut Window, cx: &mut gpui::App| run(line.clone(), window, cx)),
             });
         }
         choices

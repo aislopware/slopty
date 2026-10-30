@@ -432,7 +432,7 @@ mod tests {
         row(
             id,
             id,
-            RowKind::User { text: "Do it".into(), markdown: None, attachments: Arc::default(), pending: false, turn: None },
+            RowKind::User { text: "Do it".into(), markdown: None, attachments: Arc::default(), turn: None },
         )
     }
 

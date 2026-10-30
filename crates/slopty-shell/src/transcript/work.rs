@@ -33,6 +33,8 @@ pub(super) struct WorkState {
     open: HashSet<SharedString>,
     /// The redraw of what ticks, while anything drawn ticks.
     tick: Option<Task<()>>,
+    /// When the running turn began (ms since the epoch), whose whole seconds the tick lands on.
+    pub(super) beat: Option<i64>,
 }
 
 /// Fold `value`'s every field into a row's fingerprint: these shapes change in place.
@@ -308,13 +310,24 @@ impl Transcript {
     }
 
     /// Draw again in a second: something drawn runs (a timer, a countdown). Each frame that
-    /// draws it asks again, so the redraws stop with the last of it.
+    /// draws it asks again, so the redraws stop with the last of it. slopty: the one tick, on
+    /// the running turn's next whole second, so every time that runs moves on in one frame
+    /// (`inspector.md`, "One clock").
     pub(super) fn tick_soon(&mut self, cx: &mut Context<Self>) {
         if self.work.tick.is_some() {
             return;
         }
+        let wait = match self.work.beat {
+            Some(beat) => {
+                let real = crate::clock::utc(cx).timestamp_millis();
+                let to_next = 1_000 - (real - beat).rem_euclid(1_000);
+                // Just past the second, never just short of it.
+                Duration::from_millis(u64::try_from(to_next).unwrap_or(1_000) + 2)
+            }
+            None => TICK,
+        };
         self.work.tick = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TICK).await;
+            cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
                 this.work.tick = None;
                 // slopty: what runs reads the time this tick took, in every frame built after it.

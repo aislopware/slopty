@@ -129,6 +129,7 @@ impl Transcript {
             return line.into_any_element();
         };
         if facts.ended.is_none() {
+            self.work.beat = Some(facts.started);
             self.tick_soon(cx);
         }
         let words = turn_words(facts, self.clock.timestamp_millis(), &chrono::Local);

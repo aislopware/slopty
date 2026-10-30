@@ -290,3 +290,15 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
     the wait for permission. A step that ended with nothing to show says "No output". An output
     past its size gate ends on "+ N lines" over "Show full output", and a fetch that fails says
     why ("Couldn't load output: …") beside its Retry.
+- ✅ **How the deletions were made (2026-10-30).** Choices the ruling's "Left out, and why" left
+  open:
+  - **One clock.** Everything that runs (a turn's time, a step's lane, the working line's word)
+    reads one time, taken on one tick that lands on the running turn's next whole second, so
+    every figure moves on in the same frame. The working line keeps its spinner and its word,
+    and says no time: the turn's line under its prompt says it, once.
+  - **The deleted rows leave the doc too.** The fork part and a subagent's live tail leave
+    the doc's schema, since nothing writes them. "Run in terminal" leaves the Markdown renderer
+    as well, since the transcript was the only surface that used it, so no code fence anywhere
+    can type into a terminal.
+  - **What a turn changed is said once.** The turn's line says its lines added and removed, and
+    Changes names the files.

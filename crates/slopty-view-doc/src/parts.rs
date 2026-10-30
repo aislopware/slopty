@@ -200,10 +200,6 @@ pub enum MessagePart {
         /// `failed` → frozen (blob first, doc as fallback).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_status: Option<SubagentStatus>,
-        /// One-line live tail of the subagent's latest output, folded from
-        /// its tagged text deltas (capped; display-only).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        subagent_tail: Option<String>,
         // slopty: what the call says beyond zeron's chip, in the TUI's words.
         /// The call's facts: its line in the TUI's words, what came of it, its timer, the tray
         /// row of the task it became, and a subagent's progress on its spawn card.
@@ -259,15 +255,6 @@ pub enum MessagePart {
         id: String,
         note: Box<crate::part_kinds::NoteRow>,
     },
-    #[serde(rename_all = "camelCase")]
-    Fork {
-        id: String,
-        source_chat_id: String,
-        /// The source's title as of the fork — the transcript reads it
-        /// without a registry lookup, and a later rename or delete of the
-        /// source does not rewrite history.
-        source_title: String,
-    },
 }
 
 impl MessagePart {
@@ -283,8 +270,7 @@ impl MessagePart {
             | MessagePart::Marker { id, .. } // slopty: dividers.
             | MessagePart::Task { id, .. }
             | MessagePart::Page { id, .. }
-            | MessagePart::Note { id, .. }
-            | MessagePart::Fork { id, .. } => id,
+            | MessagePart::Note { id, .. } => id,
         }
     }
 
@@ -328,11 +314,6 @@ impl MessagePart {
             MessagePart::Note { note, .. } => {
                 note.text.len() + note.detail.as_ref().map_or(0, String::len)
             }
-            MessagePart::Fork {
-                source_chat_id,
-                source_title,
-                ..
-            } => source_chat_id.len() + source_title.len(),
         }
     }
 }
@@ -435,7 +416,6 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     diff_stats: None,
                     subagent_ref: None,
                     subagent_status: None,
-                    subagent_tail: None,
                     facts: None,
                 });
             }
@@ -526,8 +506,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // which these events refresh in place: LIFECYCLE ONLY. A live tail
         // was tried and rejected: rewriting the chip per delta batch grew
         // the parent doc's oplog for the whole subagent run and rendered as
-        // distracting mid-stream fragments (user call, 2026-08-18). The
-        // `subagent_tail` field stays in the schema for docs that carry it.
+        // distracting mid-stream fragments (user call, 2026-08-18).
         AgentEvent::Subagent {
             parent_tool_use_id,
             event,
@@ -1072,7 +1051,6 @@ mod tests {
                 diff_stats: None,
                 subagent_ref: None,
                 subagent_status: None,
-                subagent_tail: None,
                 facts: None,
             },
         ];
@@ -1273,8 +1251,9 @@ mod tests {
                 },
             },
         );
-        // Tagged traffic marks the chip running — and ONLY that: the tail
-        // stays untouched (per-delta chip rewrites polluted the parent doc).
+        // Tagged traffic marks the chip running — and ONLY that: no text of
+        // the subagent's reaches the chip (per-delta chip rewrites polluted
+        // the parent doc).
         fold_event_into_parts(
             &mut parts,
             &AgentEvent::Subagent {
@@ -1287,11 +1266,11 @@ mod tests {
         match &parts[0] {
             MessagePart::Tool {
                 subagent_status,
-                subagent_tail,
+                output,
                 ..
             } => {
                 assert_eq!(*subagent_status, Some(SubagentStatus::Running));
-                assert_eq!(*subagent_tail, None);
+                assert_eq!(*output, None);
             }
             other => panic!("{other:?}"),
         }

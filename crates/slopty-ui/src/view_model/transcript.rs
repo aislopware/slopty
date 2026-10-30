@@ -692,8 +692,8 @@ fn signed_out(raw: &str) -> bool {
     .any(|said| lower.contains(said))
 }
 
-/// The agent's task list where no call of its wrote it (Codex's plan, an ACP agent's): a list
-/// at the end of its last answer, which the shell's checklist reads.
+/// The agent's task list where no call in its transcript wrote it, as its task store holds it: a
+/// list at the end of its last answer, which the shell's checklist reads.
 fn plan_part(state: &ThreadState, written: bool, device: &str, out: &mut Vec<SessionMessageEntry>) {
     let Some(plan) = state.plan.as_ref().filter(|plan| !plan.steps.is_empty()) else { return };
     if written {
@@ -712,7 +712,6 @@ fn plan_part(state: &ThreadState, written: bool, device: &str, out: &mut Vec<Ses
         diff_stats: None,
         subagent_ref: None,
         subagent_status: None,
-        subagent_tail: None,
         facts: None,
     };
     let at = state.items.last().map_or(0, |item| at(item.at_ms));
@@ -1087,7 +1086,6 @@ fn tool(
         diff_stats,
         subagent_ref: child.map(|child| child.to_string()),
         subagent_status,
-        subagent_tail: None,
         facts: None,
     }
 }
@@ -1224,7 +1222,6 @@ fn shell_edits(thread: ThreadId, item: &str, call: &ToolCall) -> Vec<MessagePart
                 output_bytes: None,
                 subagent_ref: None,
                 subagent_status: None,
-                subagent_tail: None,
                 facts: None,
             }
         })
