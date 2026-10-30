@@ -108,9 +108,11 @@ pub(crate) fn icon_button_frame(
         .map(|el| key_stop(el, theme))
 }
 
+/// A view's header band: [`HEADER_HEIGHT`], and on a touch screen tall enough that its buttons'
+/// finger presses ([`TOUCH_TARGET`]) fit between its two 1 pt hairlines.
 pub(crate) fn toolbar(theme: &Theme) -> Div {
     div()
-        .h(px(HEADER_HEIGHT))
+        .h(px(if crate::shell::touch_screen() { TOUCH_TARGET + 2.0 } else { HEADER_HEIGHT }))
         .w_full()
         .flex_none()
         .px(px(EDGE_INSET))
