@@ -2813,12 +2813,22 @@ fn overrides(term: &Terminal<'_, '_>) -> Result<ColorOverrides, EngineError> {
 }
 
 /// Whether `bytes` may change the colours or the pointer shape: OSC sequences set them (the
-/// colours 4, 10-12, 104, 110-112 and 21, the pointer 22) and RIS (`ESC c`) resets the colours.
-/// An escape that ends the bytes may begin either in the next write.
-fn may_touch_osc_state(bytes: &[u8]) -> bool {
-    memchr::memchr_iter(0x1b, bytes)
-        .any(|at| matches!(bytes.get(at.saturating_add(1)), None | Some(b']' | b'c')))
+/// colours 4, 10-12, 104, 110-112 and 21, the pointer 22), RIS (`ESC c`) resets the colours, and
+/// so does DECSTR (`CSI ! p`), whose soft reset returns the palette to the default as xterm's
+/// does. A write that ends inside an escape or a DECSTR may finish either in the next write.
+fn may_touch_colours(bytes: &[u8]) -> bool {
+    memchr::memchr_iter(0x1b, bytes).any(|at| {
+        let after = bytes.get(at.saturating_add(1)..).unwrap_or_default();
+        match after.first() {
+            None | Some(b']' | b'c') => true,
+            Some(b'[') => DECSTR.starts_with(after.get(..DECSTR.len()).unwrap_or(after)),
+            Some(_) => false,
+        }
+    })
 }
+
+/// DECSTR after its escape. A parameter or another intermediate makes it another sequence.
+const DECSTR: &[u8] = b"[!p";
 
 impl GhosttyEngine {
     /// What ⌘K feeds through the output path to erase the history, ahead of the ⌃L that the
@@ -2851,7 +2861,7 @@ impl GhosttyEngine {
         // are looked at only after a write that could have changed them, and after each write
         // that follows it until the parser is out of the sequence it was in: a read splits a
         // sequence anywhere, right after its escape too, and across any number of writes.
-        if !self.colours_touched && !may_touch_osc_state(bytes) {
+        if !self.colours_touched && !may_touch_colours(bytes) {
             return;
         }
         self.colours_touched = self.term.is_vt_ground().is_ok_and(|ground| !ground);
@@ -3878,9 +3888,33 @@ mod tests {
             _ => None,
         });
         assert_eq!(colours.and_then(|c| c.bg), Some([0x12, 0x34, 0x56]));
-        assert!(may_touch_osc_state(b"x\x1bc"));
-        assert!(may_touch_osc_state(b"x\x1b"), "an escape the next write may go on from");
-        assert!(!may_touch_osc_state(b"plain \x1b[31m text"));
+        assert!(may_touch_colours(b"x\x1bc"));
+        assert!(may_touch_colours(b"x\x1b"), "an escape the next write may go on from");
+        assert!(!may_touch_colours(b"plain \x1b[31m text"));
+        assert!(may_touch_colours(b"x\x1b[!p"), "a soft reset");
+        assert!(may_touch_colours(b"x\x1b["), "a CSI the next write may make a soft reset");
+        assert!(may_touch_colours(b"x\x1b[!"), "a soft reset the next write may end");
+        assert!(!may_touch_colours(b"\x1b[1!p"), "with a parameter, no soft reset");
+    }
+
+    /// A soft reset (DECSTR) returns the palette to the default, as RIS does, and says so,
+    /// whole or split across writes: a palette a program set and then reset by DECSTR in one
+    /// write was reported as set until the next OSC (found by the terminal fuzz target's byte
+    /// chunking relation, `fuzz/regressions/terminal`).
+    #[test]
+    fn a_soft_reset_returns_the_palette_to_the_default_whole_or_split() {
+        let red = ColorOverrides { palette: vec![(1, [0xff, 0, 0])], ..ColorOverrides::default() };
+        let cases: [&[&[u8]]; 3] = [&[b"\x1b[!p"], &[b"\x1b[", b"!p"], &[b"\x1b[!", b"p"]];
+        for writes in cases {
+            let mut e = engine(10, 3);
+            e.write(b"\x1b]4;1;rgb:ff/00/00\x07");
+            assert!(e.drain_events().contains(&EngineEvent::Colors(red.clone())));
+            for write in writes {
+                e.write(write);
+            }
+            let reset = EngineEvent::Colors(ColorOverrides::default());
+            assert!(e.drain_events().contains(&reset), "a soft reset written as {writes:?}");
+        }
     }
 
     /// `OSC 22` is reported when the shape changes, split across writes too, and an unknown
