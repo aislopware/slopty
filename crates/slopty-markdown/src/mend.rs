@@ -25,15 +25,15 @@
 //!   opened before it (closing across it would fold the formula inline). A lone `$` before a digit
 //!   is a price and one before a shell variable (`$HOME/bin`) is prose, not openers, and an
 //!   unclosed inline formula with no closer ahead shields only its own line;
-//! - links/images: the URL never renders — `[text](partial` and a bare `[text` both mend to
-//!   `[text](`[`PENDING_LINK_URL`]`)`, so the link text shows styled immediately and the settling
-//!   URL can't collapse the line;
+//! - links/images: the URL never renders — `[text](partial` and a bare `[text` both mend to a link
+//!   to [`PENDING_LINK_URL`], so the link text shows styled immediately and the settling URL can't
+//!   collapse the line;
 //! - a last line of just `-`/`--`/`=`/`==` after text gets a zero-width space so a streaming list
 //!   item is never misread as a setext underline (the paragraph-flashes-to-heading flicker).
 //!
 //! The scanner is deliberately approximate (streamdown ships the same
 //! trade-off): it prefers "stable and close to the final parse" over exact
-//! CommonMark delimiter resolution, because any mid-stream misjudgment is
+//! `CommonMark` delimiter resolution, because any mid-stream misjudgment is
 //! repaired by the very next append or by the settle. Known accepted quirks:
 //! intraword `**` closes (`2**3` briefly bolds the `3`), and whitespace-only
 //! or marker-only content after an opener leaves the opener literal for a
@@ -56,30 +56,42 @@ pub const PENDING_LINK_URL: &str = "slopty:pending-link";
 #[derive(Default)]
 struct Delims {
     list: Vec<OpenDelim>,
-    by: [Vec<usize>; 3],
+    /// Indices into `list` of the `*` runs, the `_` runs and the `~` runs.
+    stars: Vec<usize>,
+    underscores: Vec<usize>,
+    tildes: Vec<usize>,
 }
 
 impl Delims {
-    fn slot(c: char) -> usize {
+    const fn by(&self, c: char) -> &Vec<usize> {
         match c {
-            '*' => 0,
-            '_' => 1,
-            _ => 2,
+            '*' => &self.stars,
+            '_' => &self.underscores,
+            _ => &self.tildes,
+        }
+    }
+
+    const fn by_mut(&mut self, c: char) -> &mut Vec<usize> {
+        match c {
+            '*' => &mut self.stars,
+            '_' => &mut self.underscores,
+            _ => &mut self.tildes,
         }
     }
 
     fn push(&mut self, delim: OpenDelim) {
-        self.by[Self::slot(delim.ch)].push(self.list.len());
+        let index = self.list.len();
+        self.by_mut(delim.ch).push(index);
         self.list.push(delim);
     }
 
     fn last_of(&self, c: char) -> Option<usize> {
-        self.by[Self::slot(c)].last().copied()
+        self.by(c).last().copied()
     }
 
     fn truncate(&mut self, len: usize) {
         self.list.truncate(len);
-        for by in &mut self.by {
+        for by in [&mut self.stars, &mut self.underscores, &mut self.tildes] {
             while by.last().is_some_and(|&i| i >= len) {
                 by.pop();
             }
@@ -112,8 +124,9 @@ pub fn close_hanging(text: &str) -> Option<String> {
     mend(text, false).0
 }
 
-/// [`close_hanging`] that also keeps a trailing lone `$` literal: `None`
-/// unless the text ends in one that closes no formula this scan opened
+/// [`close_hanging`] that also keeps a trailing lone `$` literal.
+///
+/// `None` unless the text ends in one that closes no formula this scan opened
 /// (`$5 to $`, `**$5** to **$`, `$HOME and $`) — the parse could still pair
 /// it with an earlier dollar and flash the prose between as a formula until
 /// the next character shows it's a price. The caller keeps it only where
@@ -134,6 +147,8 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     let cs: Vec<(usize, char)> = text.char_indices().collect();
     let n = cs.len();
     let at = |i: usize| cs.get(i).map(|&(_, c)| c);
+    // Whether the char before `i` is glued to `i`: anything but whitespace.
+    let glued_before = |i: usize| i.checked_sub(1).and_then(at).is_some_and(|p| !p.is_whitespace());
 
     let mut delims = Delims::default();
     // Char indices of unmatched `[`.
@@ -158,18 +173,22 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     let mut inline_closed: Option<usize> = None;
     // The last places an inline formula could still close: an unclosed one
     // with no closer ahead shields only its own line.
-    let last_dollar = cs
+    let last_dollar = cs.iter().enumerate().rposition(|(j, &(_, c))| c == '$' && glued_before(j));
+    let last_paren = cs.windows(2).rposition(|w| matches!(w, [(_, '\\'), (_, ')')]));
+    let last_bracket = cs.windows(2).rposition(|w| matches!(w, [(_, '\\'), (_, ']')]));
+    // Whether TeX syntax follows each char (and none past the end): an
+    // unclosed `\[` streams a display formula only if what follows reads as one.
+    let mut tex = false;
+    let mut tex_after: Vec<bool> = cs
         .iter()
-        .enumerate()
-        .rposition(|(j, &(_, c))| c == '$' && j > 0 && !cs[j - 1].1.is_whitespace());
-    let last_paren = cs.windows(2).rposition(|w| w[0].1 == '\\' && w[1].1 == ')');
-    let last_bracket = cs.windows(2).rposition(|w| w[0].1 == '\\' && w[1].1 == ']');
-    // Whether TeX syntax follows each char: an unclosed `\[` streams a
-    // display formula only if what follows reads as one.
-    let mut tex_after = vec![false; n + 1];
-    for j in (0..n).rev() {
-        tex_after[j] = tex_after[j + 1] || matches!(cs[j].1, '\\' | '^' | '_' | '{' | '}' | '=');
-    }
+        .rev()
+        .map(|&(_, c)| {
+            tex = tex || matches!(c, '\\' | '^' | '_' | '{' | '}' | '=');
+            tex
+        })
+        .collect();
+    tex_after.reverse();
+    tex_after.push(false);
     // Whether the word (since the last whitespace) up to each char holds a
     // `/`: the parser reads an opener inside a URL or path as an escape.
     let mut slash = false;
@@ -184,25 +203,28 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
             slash
         })
         .collect();
+    let glued_to_word_at = |p: usize| match (at(p), word_slash.get(p)) {
+        (Some(c), Some(&in_path)) => glued_to_word(c, in_path),
+        _ => false,
+    };
 
     let mut i = 0;
-    while i < n {
-        let c = cs[i].1;
+    while let Some(&(_, c)) = cs.get(i) {
         if code.is_none() && c == '\\' {
-            let next = at(i + 1);
+            let next = at(i.saturating_add(1));
             if let Some(closer) = latex {
                 if next == Some(closer) {
                     latex = None;
                 }
             } else if math.is_none()
                 && matches!(next, Some('(' | '['))
-                && !i.checked_sub(1).is_some_and(|p| glued_to_word(cs[p].1, word_slash[p]))
+                && !i.checked_sub(1).is_some_and(glued_to_word_at)
                 // A `\[` with no `\]` ahead and no TeX after it is an
                 // escape (`Escape \[ in regex`), not a formula still
                 // streaming.
                 && (next == Some('(')
                     || last_bracket.is_some_and(|last| last > i)
-                    || tex_after[(i + 2).min(n)])
+                    || tex_after.get(i.saturating_add(2)).copied().unwrap_or(false))
             {
                 // The parser reads `\(…\)` / `\[…\]` as math (and a
                 // display formula ends emphasis opened before it, like `$$`).
@@ -213,11 +235,12 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
                 latex = Some(if next == Some('(') { ')' } else { ']' });
             }
             // Escaped char: both literal; the escapee still counts as content.
-            if i + 1 < n {
-                last_content = Some(i + 1);
+            let escapee = i.saturating_add(1);
+            if escapee < n {
+                last_content = Some(escapee);
             }
             half_closer = None;
-            i += 2;
+            i = i.saturating_add(2);
             continue;
         }
         if let Some(closer) = latex {
@@ -226,21 +249,21 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
             } else if !c.is_whitespace() {
                 last_content = Some(i);
             }
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
         if let Some((open, _)) = math {
             if c == '\n' && open == 1 && last_dollar.is_none_or(|last| last < i) {
                 math = None;
-                i += 1;
+                i = i.saturating_add(1);
                 continue;
             }
             if c == '$' {
                 let run = run_len(&cs, i);
+                let end = i.saturating_add(run);
                 // Inline math closes on a `$` glued to its content; display
                 // math on `$$` wherever it falls.
-                let glued = i > 0 && !cs[i - 1].1.is_whitespace();
-                if run >= open && (open == 2 || glued) {
+                if run >= open && (open == 2 || glued_before(i)) {
                     math = None;
                     if open == 1 {
                         inline_closed = Some(i);
@@ -248,59 +271,60 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
                 } else if open == 2 && run == 1 {
                     half_closer = Some(i);
                 }
-                last_content = Some(i + run - 1);
-                i += run;
+                last_content = Some(end.saturating_sub(1));
+                i = end;
                 continue;
             }
             if !c.is_whitespace() {
                 half_closer = None;
                 last_content = Some(i);
             }
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
         if c == '`' {
             let run = run_len(&cs, i);
+            let end = i.saturating_add(run);
             match code {
                 // A span closes only on a run of the opening length.
                 Some((open, _)) if run == open => code = None,
-                Some(_) => last_content = Some(i + run - 1),
-                None => code = Some((run, i + run)),
+                Some(_) => last_content = Some(end.saturating_sub(1)),
+                None => code = Some((run, end)),
             }
-            i += run;
+            i = end;
             continue;
         }
         if code.is_some() {
             last_content = Some(i);
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
         match c {
             '$' => {
                 let run = run_len(&cs, i);
-                let next = at(i + run);
+                let end = i.saturating_add(run);
                 if run >= 2 {
                     // Emphasis and link text opened before a display formula
                     // don't reach past it.
                     delims.clear();
                     brackets.clear();
-                    math = Some((2, i + run));
-                } else if next.is_some_and(|c| !c.is_whitespace() && !c.is_ascii_digit())
-                    && !shell_variable(&cs[i + 1..])
+                    math = Some((2, end));
+                } else if at(end).is_some_and(|c| !c.is_whitespace() && !c.is_ascii_digit())
+                    && !shell_variable(cs.get(i.saturating_add(1)..).unwrap_or_default())
                 {
-                    math = Some((1, i + run));
+                    math = Some((1, end));
                 }
-                last_content = Some(i + run - 1);
-                i += run;
+                last_content = Some(end.saturating_sub(1));
+                i = end;
             }
             '*' | '_' | '~' => {
                 let run = run_len(&cs, i);
                 delim(&mut delims, &cs, c, run, i, &mut last_content);
-                i += run;
+                i = i.saturating_add(run);
             }
             '[' => {
                 brackets.push(i);
-                i += 1;
+                i = i.saturating_add(1);
             }
             ']' => {
                 if let Some(open) = brackets.pop() {
@@ -308,46 +332,47 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
                     // closed there stays literal — as the final parse will
                     // decide too.
                     delims.retain_before(open);
-                    if at(i + 1) == Some('(') {
+                    if at(i.saturating_add(1)) == Some('(') {
                         // Consume the URL through its balanced `)`.
-                        let mut j = i + 2;
-                        let mut depth = 0usize;
+                        let mut j = i.saturating_add(2);
+                        let mut depth = 0_usize;
                         loop {
                             match at(j) {
-                                Some('(') => depth += 1,
+                                Some('(') => depth = depth.saturating_add(1),
                                 Some(')') if depth == 0 => break,
-                                Some(')') => depth -= 1,
+                                Some(')') => depth = depth.saturating_sub(1),
                                 Some(_) => {}
                                 None => {
                                     pending_url = Some(i);
                                     break;
                                 }
                             }
-                            j += 1;
+                            j = j.saturating_add(1);
                         }
                         if pending_url.is_some() {
                             break;
                         }
                         last_content = Some(j);
-                        i = j + 1;
+                        i = j.saturating_add(1);
                         continue;
                     }
                 }
                 last_content = Some(i);
-                i += 1;
+                i = i.saturating_add(1);
             }
-            c if c.is_whitespace() => i += 1,
+            c if c.is_whitespace() => i = i.saturating_add(1),
             _ => {
                 last_content = Some(i);
-                i += 1;
+                i = i.saturating_add(1);
             }
         }
     }
 
     // Text ends inside a link/image URL: drop the partial URL, keep the text.
     if let Some(close) = pending_url {
-        let byte = cs[close].0;
-        return (Some(format!("{}]({PENDING_LINK_URL})", &text[..byte])), false);
+        let byte = cs.get(close).map_or(text.len(), |&(byte, _)| byte);
+        let kept = text.get(..byte).unwrap_or(text);
+        return (Some(format!("{kept}]({PENDING_LINK_URL})")), false);
     }
 
     // Collect closers innermost-first (descending open position). A `[` open
@@ -378,18 +403,21 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     // A lone `$` ending the stream that closes no formula this scan opened
     // (see [`close_hanging_dollar`]). A formula that does close there (`$x$`)
     // renders at once.
-    let trailing_dollar = n > 0
-        && cs[n - 1].1 == '$'
-        && (n < 2 || cs[n - 2].1 != '$')
-        && cs[..n - 1].iter().rev().take_while(|&&(_, c)| c == '\\').count() % 2 == 0
-        && code.is_none()
-        && math.is_none()
-        && latex.is_none()
-        && inline_closed != Some(n - 1);
+    let trailing_dollar = match cs.split_last() {
+        Some((&(_, '$'), before)) => {
+            before.last().is_none_or(|&(_, c)| c != '$')
+                && before.iter().rev().take_while(|&&(_, c)| c == '\\').count().is_multiple_of(2)
+                && code.is_none()
+                && math.is_none()
+                && latex.is_none()
+                && inline_closed != Some(before.len())
+        }
+        _ => false,
+    };
     let escape = trailing_dollar && escape_dollar;
     let text: std::borrow::Cow<str> = if escape {
-        let at = cs[n - 1].0;
-        format!("{}\\$", &text[..at]).into()
+        let dollar = cs.last().map_or(text.len(), |&(byte, _)| byte);
+        format!("{}\\$", text.get(..dollar).unwrap_or(text)).into()
     } else {
         text.into()
     };
@@ -407,10 +435,8 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     if setext {
         // Closers belong to the paragraph content above the underline line.
         let nl = text.rfind('\n');
-        let mended = match (nl, closers.is_empty()) {
-            (Some(nl), false) => {
-                format!("{}{closers}{}\u{200B}", &text[..nl], &text[nl..])
-            }
+        let mended = match (nl.and_then(|nl| text.split_at_checked(nl)), closers.is_empty()) {
+            (Some((above, underline)), false) => format!("{above}{closers}{underline}\u{200B}"),
             _ => format!("{text}\u{200B}"),
         };
         return (Some(mended), trailing_dollar);
@@ -418,8 +444,8 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     // Insert before trailing whitespace: a closer after a trailing space is
     // not right-flanking and would not close (remend trims the space for the
     // same reason).
-    let end = text.trim_end().len();
-    (Some(format!("{}{closers}{}", &text[..end], &text[end..])), trailing_dollar)
+    let (body, trailing) = text.split_at_checked(text.trim_end().len()).unwrap_or((text, ""));
+    (Some(format!("{body}{closers}{trailing}")), trailing_dollar)
 }
 
 /// Whether the text after a `$` spells a shell variable rather than a
@@ -431,7 +457,7 @@ fn shell_variable(after: &[(usize, char)]) -> bool {
         .take_while(|&&(_, c)| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
         .count();
     name > 0
-        && !after[0].1.is_ascii_digit()
+        && after.first().is_some_and(|&(_, c)| !c.is_ascii_digit())
         && after.get(name).is_none_or(|&(_, c)| {
             c.is_whitespace() || matches!(c, '/' | ':' | '@' | '.' | ',' | ';' | '\'' | '"' | ')')
         })
@@ -441,13 +467,14 @@ fn shell_variable(after: &[(usize, char)]) -> bool {
 /// math (mirrors the parser's rewrite).
 /// Whether a `\(` after `c` is glued to it, as the parser decides: after a
 /// word character, or any non-space inside a URL or path (`in_path`).
-fn glued_to_word(c: char, in_path: bool) -> bool {
+const fn glued_to_word(c: char, in_path: bool) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || (in_path && !c.is_whitespace())
 }
 
+/// How many of the same char run from char index `i` (0 past the end).
 fn run_len(cs: &[(usize, char)], i: usize) -> usize {
-    let c = cs[i].1;
-    cs[i..].iter().take_while(|&&(_, x)| x == c).count()
+    let rest = cs.get(i..).unwrap_or_default();
+    rest.first().map_or(0, |&(_, c)| rest.iter().take_while(|&&(_, x)| x == c).count())
 }
 
 /// Match or open one delimiter run. Closes against the innermost same-char
@@ -462,31 +489,34 @@ fn delim(
     i: usize,
     last_content: &mut Option<usize>,
 ) {
-    let end = i + run;
+    let end = i.saturating_add(run);
     // GFM strikethrough is `~~` only; longer tilde runs are literal. A run of
     // one may still be the half-streamed first tilde of a closing `~~`, so it
     // proceeds to the matcher (but never opens).
     if c == '~' && run > 2 {
-        *last_content = Some(end - 1);
+        *last_content = Some(end.saturating_sub(1));
         return;
     }
-    let prev = i.checked_sub(1).map(|p| cs[p].1);
+    let prev = i.checked_sub(1).and_then(|p| cs.get(p)).map(|&(_, c)| c);
     let next = cs.get(end).map(|&(_, c)| c);
     let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
     // Intraword `_` never delimits (CommonMark); intraword single `*` is
     // treated the same, conservatively — `2*3` must not flash italic.
     if word(prev) && word(next) && (c == '_' || (c == '*' && run == 1)) {
-        *last_content = Some(end - 1);
+        *last_content = Some(end.saturating_sub(1));
         return;
     }
     let can_close = prev.is_some_and(|c| !c.is_whitespace());
     let can_open = next.is_some_and(|c| !c.is_whitespace());
     let mut rest = run;
-    if can_close && let Some(k) = delims.last_of(c) {
-        let take = rest.min(delims.list[k].len);
-        delims.list[k].len -= take;
-        rest -= take;
-        let keep = if delims.list[k].len == 0 { k } else { k + 1 };
+    if can_close
+        && let Some(k) = delims.last_of(c)
+        && let Some(open) = delims.list.get_mut(k)
+    {
+        let take = rest.min(open.len);
+        open.len = open.len.saturating_sub(take);
+        rest = rest.saturating_sub(take);
+        let keep = if open.len == 0 { k } else { k.saturating_add(1) };
         delims.truncate(keep);
     }
     if rest > 0 {
@@ -495,7 +525,7 @@ fn delim(
         if can_open && (c != '~' || rest == 2) {
             delims.push(OpenDelim { ch: c, len: rest, pos: end });
         } else {
-            *last_content = Some(end - 1);
+            *last_content = Some(end.saturating_sub(1));
         }
     }
 }
@@ -503,15 +533,13 @@ fn delim(
 /// Last line is only 1–2 `-` or `=` (no trailing whitespace) under a
 /// non-empty line — the incomplete-setext ambiguity.
 fn setext_partial(text: &str) -> bool {
-    let Some(nl) = text.rfind('\n') else {
+    let Some((above, last)) = text.rsplit_once('\n') else {
         return false;
     };
-    let last = &text[nl + 1..];
     let trimmed = last.trim_start();
     let underline =
         |c: char| !trimmed.is_empty() && trimmed.len() <= 2 && trimmed.chars().all(|x| x == c);
-    (underline('-') || underline('='))
-        && text[..nl].lines().last().is_some_and(|l| !l.trim().is_empty())
+    (underline('-') || underline('=')) && above.lines().last().is_some_and(|l| !l.trim().is_empty())
 }
 
 #[cfg(test)]

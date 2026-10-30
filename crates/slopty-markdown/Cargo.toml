@@ -2,14 +2,13 @@
 name = "slopty-markdown"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Block-level markdown over pulldown-cmark with an append-incremental reparse, UI-free so every frontend shares it"
 
-# Block-level markdown model + append-incremental reparse. Shared by the gpui
-# desktop transcript and the mobile layout core, so it stays UI-free.
-# Clippy lints this code trips, allowed by name.
-[lints.clippy]
-enum_variant_names = "allow"
+[lints]
+workspace = true
 
 [dependencies]
 pulldown-cmark = "0.13"

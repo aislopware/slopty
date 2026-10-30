@@ -7,6 +7,13 @@
 //! - [`mend`] auto-closes hanging inline markers in the streaming *display* parse only; the
 //!   canonical tree settles honestly on completion.
 
+#![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 pub mod mend;
 pub mod parser;
 
