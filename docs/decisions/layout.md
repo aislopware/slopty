@@ -477,3 +477,54 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     `app::past_sessions` (`a_tui_session_is_found_opened_and_continued`,
     `the_picker_says_why_it_found_no_past_session`,
     `a_session_running_elsewhere_is_shown_not_taken`).
+
+- ✅ **The iPhone as built (2026-10-30).** `shell::compact` builds it; an iPad narrower than
+  700 pt takes it too.
+  - Sessions is the session list, the Mac's rows grouped by project, under one band at the title
+    row's height: its heading, then the inbox's eye, the palette, Settings and new session, which
+    before any project offers the step the Mac's canvas offers. The capsule, the tab bar and the
+    frosted navigation bar are deleted; Settings and the palette are the band's.
+  - A session is its terminal edge to edge under one band that stands on the terminal's ground
+    and is inked for it: back to Sessions (a close over the new-session canvas), the session's
+    mark, its title over machine and branch, and, while other sessions need the person, "N need
+    you", whose press opens the next. A press on the title puts the inspector up as a read-only
+    sheet and away. The band holds nothing else: Files, Changes and the other views come by their
+    keys and the palette, each a page over the session that leads back to it.
+  - The key row (`shell::compact::key_row`; its modifiers in `live::key_row`) takes Blink's
+    measure: 44 pt upright with 33 pt keys (34 on the 6.7-inch phones), 38 pt in landscape with
+    keys sized by the screen's width. Esc, ⌃ and ⌥ stand fixed at the left (Esc wide in
+    landscape); the arrows as one joystick steered by the way a finger leans, hide keyboard and
+    ⌘ at the right; the middle scrolls under a sideways finger and sends nothing then. A modifier
+    tapped arms the next key and a second tap puts it off; held, it goes with every key until it
+    lifts. The terminal spends the armed modifiers, so they go with the system keyboard's
+    characters as with the row's keys. A two-symbol key gives its second on a flick down. ⌘ is a
+    layer: F1 to F12 on the middle and Home, End, Page Up and Page Down on the joystick, sent
+    without the ⌘. Esc, Tab and the arrows repeat while held.
+  - The middle follows the chat's harness, from Slopty's records: Claude Code's ⇧⇥ ⌃C / @ ↑,
+    another agent's the same less ⇧⇥, a shell's Tab ⌃R ⌃C ↑, then the symbols a phone keyboard
+    hides. Esc is left out of it because it already stands at the left. Every key goes into the
+    window as a key down and up, so the terminal takes it as it takes a hardware key, and only
+    what the person pressed is sent.
+  - The row stands only while the soft keyboard is up over the session's terminal and no
+    hardware keyboard is attached (GameController's keyboard notifications, read again on each
+    return to the front); what it armed goes off when it goes.
+  - An iPad laid out as the Mac fills the keyboard's own shortcut bar instead (the assistant item
+    of `gpui_ios`'s text input view, from `slopty-ios`'s `keyboard`): Esc ⌃ ⌥ ⌘ leading, the
+    keys of what runs that are one act and the four arrows trailing. The bar takes taps only, so
+    its modifiers arm and never hold, lit while armed; the symbols stay on the iPad's keyboard,
+    which shows them. It is empty while a hardware keyboard is attached or the keyboard is
+    elsewhere.
+  - Tests: `shell::compact::key_row::tests::{the_row_takes_blinks_measure,
+    the_sides_stand_fixed_around_a_scrolling_strip, the_strip_follows_what_runs,
+    a_finger_finds_its_key_as_the_strip_scrolls, the_joystick_steers_by_the_way_it_leans,
+    a_tap_sends_its_key_and_a_tapped_modifier_goes_with_the_next,
+    a_held_modifier_chords_until_it_lifts, a_flick_down_gives_the_second_symbol,
+    a_sideways_finger_scrolls_the_strip_and_sends_nothing, held_keys_repeat_and_the_joystick_steers,
+    the_command_layer_holds_the_function_keys, an_ipads_shortcut_bar_holds_the_rows_keys_as_taps,
+    the_row_goes_with_a_hardware_keyboard_or_the_terminals_focus}`, `live::key_row::tests`,
+    `shell::compact::tests::{a_phones_list_stands_under_one_band,
+    a_phones_session_band_jumps_to_the_next_session_that_needs_you,
+    before_any_project_the_bands_new_session_offers_the_step_a_session_needs,
+    a_phones_session_puts_its_inspector_up_as_a_sheet, a_phones_chat_page_reads_no_hidden_rows}`,
+    and e2e `ios::compact::a_phone_opens_on_its_chats_and_one_takes_the_screen` and
+    `ios::screens::a_session_is_its_terminal_and_shows_its_inspector`.
