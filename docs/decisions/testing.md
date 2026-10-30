@@ -1644,3 +1644,13 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     stale, so it moved to Rust (`deep cargo-cache`). The GPUI seeds failed on four shell tests
     that keep a process's state from one seed to the next (a selection drag, two hover fades,
     the attachment cache), which reset now.
+  - **Mutation in the diff** (rank 3; `docs/TESTING.md`, "Mutation in the diff"). Mutation
+    testing ran four crates weekly, and a missed mutant never failed anything. Now mutants are
+    made of the code a change touches, by the research's tiers. Tier A (the pure kernels) must
+    have every mutant of a change caught; tier B (the daemons and links) has its missed mutants
+    listed until it has a baseline under the simulated world. Each push the gate takes runs
+    tier A's diff in a workflow of its own (`mutants.yml`), capped at an even sample of 30 and
+    with the baseline skipped, since the gate tests the same commit. Its own workflow keeps the
+    gate's one-run-at-a-time queue from waiting on it. Every missed mutant becomes a line of
+    `lane-work.md`, a test for a lane to write; equivalent ones go to `.cargo/mutants.toml` with
+    a reason, and `Debug`/`Display` bodies are excluded there.

@@ -9,6 +9,9 @@ experimental = [ "setup-scripts" ]
 [scripts.setup.spawned-bins]
 command = [ "sh", "-c", "exec ${SLOPTY_XTASK:-cargo xtask} spawned-bins" ]
 
+[scripts.setup.mutant-bins]
+command = [ "sh", "-c", "exec ${SLOPTY_XTASK:-cargo xtask} deep mutant-bins" ]
+
 [profile.default]
 retries = 0
 # A test that fails and then passes on a retry fails the run: a pass on retry is a flake, which
@@ -308,6 +311,21 @@ not (
         | test(=process_state::spawns_hold_up_in_a_process_in_a_bad_state)))
 )
 '''
+
+# `cargo xtask deep mutants` (`.cargo/mutants.toml`): a runner's profile, as the gate's tests run
+# there (its hardware skips, its timeouts and its named retries, so a test's flake under load is
+# neither a failed baseline nor a mutant caught), stopping at a mutant's first failing test,
+# since one is enough to call it caught. Its setup script builds, in each mutant's tree, the
+# binaries the mutated packages' tests spawn (`xtask deep mutant-bins`), so a daemon a test
+# starts carries the mutant too; the run sets `SLOPTY_BINS_FRESH`, so the default's script,
+# which would build the whole workspace, returns at once.
+[profile.mutants]
+inherits = "ci"
+fail-fast = true
+
+[[profile.mutants.scripts]]
+filter = "rdeps(=slopty-testkit)"
+setup = "mutant-bins"
 
 # The gate's encoder probe (`xtask` gate, `Probe`): one test, in a profile of its own so its
 # report goes to a directory of its own. Under the lane's profile, the probe after a failed

@@ -1,0 +1,16 @@
+# cargo-mutants, as `cargo xtask deep mutants` runs it (docs/TESTING.md, "Mutation in the diff").
+
+# The tests run under nextest's `mutants` profile (.config/nextest.toml): the gate's own test
+# config, stopping at a mutant's first failure, with a setup script that builds the binaries the
+# mutated packages' tests spawn in each mutant's tree.
+test_tool = "nextest"
+additional_cargo_test_args = [ "--profile", "mutants" ]
+
+# A mutant that only trips a lint is still built and tested, not set aside as unviable.
+cap_lints = true
+
+# Mutants no test can tell from the code they replace (equivalent mutants), by the name
+# cargo-mutants gives them: how a value prints for a person reading a log or a debugger (`Debug`,
+# `Display`). A function whose mutants are equivalent for its own reason takes
+# `#[mutants::skip]` with that reason beside it instead.
+exclude_re = [ '<impl (\w+::)*(Debug|Display) for ' ]

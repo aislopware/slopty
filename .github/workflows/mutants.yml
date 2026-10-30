@@ -1,0 +1,111 @@
+name: Mutants
+
+# Tier A's mutants in each change (`cargo xtask deep mutants --in-diff`, docs/TESTING.md
+# "Mutation in the diff"): every mutant cargo-mutants makes of the lines a change touches in the
+# pure kernels must be caught by a test, or the change has code no test reads. On each push the
+# gate takes, beside it on a free Linux runner and outside it: `promote` waits for none of this,
+# and a workflow of its own keeps the gate's queue (`ci.yml`'s concurrency) from waiting on it
+# too. A newer push cancels the older run, whose changes the newer one's diff from main holds.
+# The unmutated tree is not tested first: the gate tests the same commit. Past the cap, an even
+# sample runs here and the night's run (`deep.yml`, "mutants-day") takes every one.
+on:
+  push:
+    branches: [ gate ]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# `bash` named, so `… | tee` fails with what it pipes (deep.yml's note).
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The pinned toolchain by name (ci.yml's note).
+  RUSTUP_TOOLCHAIN: 1.99.1
+
+jobs:
+  tier-a:
+    name: mutants (tier A, the change)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: pipefail
+        run: if (false | tee /dev/null); then echo "::error::a failed pipeline passed"; exit 1; fi
+      # The whole history, so the change's merge base with main is here.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
+        with:
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+          # As the gate's Linux lane: Linux units stay off the Actions cache the Mac lanes fill.
+          actions-cache: "false"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      # The cargo cache the gate's tools lane saves, read only (ci.yml).
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
+      - uses: cargo-bins/cargo-binstall@main
+      # Every proc-macro dependency unoptimised, as in the gate (ci.yml): each mutant's tree
+      # builds them again.
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      # The gate's Linux lane's xtask, by the same key (ci.yml), or built and kept for it.
+      - id: xtask
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/slopty-xtask
+          key: >-
+            xtask-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('xtask/**',
+            'crates/slopty-crash/**', 'crates/slopty-testkit/**', 'Cargo.toml', 'Cargo.lock',
+            'rust-toolchain.toml', '.cargo/*.toml') }}
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        run: |
+          CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --locked --quiet --target-dir target/xtask \
+            --package xtask
+          mkdir -p ~/.cache/slopty-xtask
+          cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/slopty-xtask
+          key: ${{ steps.xtask.outputs.cache-primary-key }}
+      - run: echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
+      - run: xtask setup --tool cargo-mutants --tool cargo-nextest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: mutants of the change
+        env:
+          BASE: origin/${{ github.base_ref || 'main' }}
+        run: |
+          mkdir -p target/deep
+          xtask deep mutants --in-diff "$BASE" --baseline skip --cap 30 --jobs 2 --timeout 120 \
+            2>&1 | tee target/deep/report.log
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-change
+          path: |
+            target/deep/report.log
+            target/deep/mutants/lane-work.md
+            target/deep/mutants/*/git.diff
+            target/deep/mutants/*/mutants.out/*.txt
+            target/deep/mutants/*/mutants.out/outcomes.json
+          if-no-files-found: ignore

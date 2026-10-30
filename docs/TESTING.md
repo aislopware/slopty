@@ -237,9 +237,9 @@ pure crates (undefined behaviour under the interpreter), ThreadSanitizer/Address
 of every crate with a share of the workspace's `unsafe` (the daemons, the codec, capture,
 platform, the virtual display, input, drag and drop, the crash reporter, the testkit and the
 tailnet reader), `cargo hack --each-feature` (every feature alone and together), `cargo
-llvm-cov` line coverage per crate, and `cargo mutants` on one crate to find the lines no test
-would notice changing. A finding there becomes a test in the layer that can hold it.
-`docs/DEV.md` has the commands.
+llvm-cov` line coverage per crate, and `cargo mutants` on the code a change touches, to find the
+lines no test would notice changing (below, "Mutation in the diff"). A finding there becomes a
+test in the layer that can hold it. `docs/DEV.md` has the commands.
 
 They run on GitHub Actions, not on this Mac, where someone works over Parsec while other
 sessions gate (`docs/decisions/testing.md`, "The deep checks run on GitHub Actions"). The `Deep`
@@ -327,6 +327,34 @@ and nightly on Deep's arm runner (`deep fuzz --ziggy`): libFuzzer, then AFL++ fr
 committed corpus, each for a minute a target on four cores, with what AFL++ queued added to the
 corpus libFuzzer grows from night to night. The fix for a crash still gets its unit test in the
 crate it fixes.
+
+## Mutation in the diff
+Line coverage says a test ran a line; a mutant says whether any test would notice it changing.
+`cargo xtask deep mutants` runs `cargo mutants` (configured by `.cargo/mutants.toml`, nextest's
+`mutants` profile) on the code a diff touches, by tier:
+- **Tier A, the pure kernels** (core, grid, predict, proto, media, math, settings, theme,
+  markdown, syntax, the view crates, tools, and the pure modules of net, client, pty and the
+  agent's conversation): every mutant of a change must be caught, or the change ships code no
+  test reads. A missed one fails the run.
+- **Tier B, the daemons and their links** (worker, workerd, server, serverd, the client's link,
+  cli, ptyd, deploy, tailnet): missed mutants are listed as work and fail nothing, until the
+  tier has its baseline from a run under the simulated world.
+
+Each missed mutant is a line of `target/deep/mutants/lane-work.md` (and of the job's summary), a
+task a lane takes: write the test that fails on that change, or, for a change no test could tell
+apart (an equivalent mutant), add it to `.cargo/mutants.toml` or mark the function
+`#[mutants::skip]` with the reason. `Debug` and `Display` bodies are never mutated.
+
+It runs beside the gate and not in its way, on each push the gate takes
+(`.github/workflows/mutants.yml`): tier A's mutants in the diff from main, the unmutated tree
+untested (the gate tests the same commit), at most 30 of them. A change that makes more runs an
+even sample, every k-th.
+
+```sh
+cargo xtask deep mutants --in-diff origin/main            # tier A in this branch's change
+cargo xtask deep mutants --since "24 hours ago" --tier a --tier b
+cargo xtask deep mutants -p slopty-grid --shard 0/4       # a crate, a quarter of it
+```
 
 ## Budgets: allocations, instructions, footprint
 Wall time is not a pass or fail on a machine other sessions load, so the budgets are counts:

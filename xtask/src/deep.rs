@@ -17,6 +17,8 @@ use xshell::{PushEnv, Shell, cmd};
 
 use crate::tools::{TRIPLES, quiet_step, step};
 
+mod mutants;
+
 /// Crates with no framework, FFI or GPUI in their tree: Miri can interpret their tests.
 const PURE: &[&str] = &[
     "slopty-core",
@@ -173,25 +175,16 @@ pub enum DeepCmd {
         #[arg(long)]
         no_build: bool,
     },
-    /// Mutation testing of one crate (`cargo mutants`): which changed lines no test catches.
-    Mutants {
-        /// The crate to mutate.
-        #[arg(short, long)]
-        package: String,
-        /// Seconds a mutant may run before it counts as a timeout.
-        #[arg(long, default_value_t = 120)]
-        timeout: u64,
-        /// Only this share of the mutants, `k/n` counting from 0 (`cargo mutants --shard`), for a
-        /// crate split over several runners.
-        #[arg(long)]
-        shard: Option<String>,
-        /// Mutants built and tested at once, each in its own copy of the tree.
-        #[arg(long, default_value_t = 1)]
-        jobs: u32,
-    },
+    /// Mutation testing (`cargo mutants`): which changed lines no test catches, in one crate
+    /// (`-p`) or in the code a diff touches (`--in-diff`, `--since`), by tier.
+    Mutants(mutants::Opts),
     /// Fetch every package `Cargo.lock` names, for every platform, and drop from the registry's
     /// cache each `.crate` it no longer names: what the features job saves as main's cargo cache.
     CargoCache,
+    /// The `mutants` nextest profile's setup script: build, in a mutant's tree, the binaries its
+    /// tests spawn.
+    #[command(hide = true)]
+    MutantBins,
 }
 
 pub fn run(sh: &Shell, cmd: &DeepCmd) -> Result<()> {
@@ -200,10 +193,9 @@ pub fn run(sh: &Shell, cmd: &DeepCmd) -> Result<()> {
         DeepCmd::Sanitize { which, package } => sanitize(sh, *which, package),
         DeepCmd::Features => features(sh),
         DeepCmd::Coverage { html } => coverage(sh, *html),
-        DeepCmd::Mutants { package, timeout, shard, jobs } => {
-            mutants(sh, package, *timeout, shard.as_deref(), *jobs)
-        }
+        DeepCmd::Mutants(opts) => mutants::run(sh, opts),
         DeepCmd::CargoCache => cargo_cache(sh),
+        DeepCmd::MutantBins => mutants::spawned(sh),
         DeepCmd::Metal { filter, no_build } => metal(sh, filter.as_deref(), *no_build),
         DeepCmd::Loom => loom(sh),
         DeepCmd::Noq => noq(sh),
@@ -831,36 +823,6 @@ fn locked_crates(lock: &str) -> Result<std::collections::BTreeSet<String>> {
         .collect())
 }
 
-/// One crate at a time: mutants rebuilds per mutation, so the whole workspace would be hours.
-/// `cargo mutants` on `package` (one `shard` of it), its report under
-/// `target/deep/mutants/<package>[-<k>of<n>]/mutants.out`: `missed.txt` lists the changes no
-/// test caught, `caught.txt`, `timeout.txt` and `unviable.txt` the rest.
-fn mutants(sh: &Shell, package: &str, timeout: u64, shard: Option<&str>, jobs: u32) -> Result<()> {
-    let timeout = timeout.to_string();
-    let jobs = jobs.max(1).to_string();
-    let _env = sh.push_env("AWS_LC_SYS_CMAKE_BUILDER", "1");
-    let out = mutants_dir(package, shard);
-    // cargo-mutants makes the report's own directory but not the one above it, and ended every
-    // shard of the weekly run at once without it (run 38055397887).
-    std::fs::create_dir_all(sh.current_dir().join(&out))
-        .with_context(|| format!("create {out}"))?;
-    let shard: Vec<&str> = shard.map(|s| vec!["--shard", s]).unwrap_or_default();
-    step(
-        &format!("cargo mutants: {package}"),
-        &cmd!(
-            sh,
-            "cargo mutants --package {package} --timeout {timeout} --jobs {jobs} {shard...} --output {out}"
-        ),
-    )
-}
-
-/// Where [`mutants`] writes for `package` and `shard`.
-fn mutants_dir(package: &str, shard: Option<&str>) -> String {
-    let name =
-        shard.map_or_else(|| package.to_owned(), |s| format!("{package}-{}", s.replace('/', "of")));
-    format!("target/deep/mutants/{name}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,15 +872,6 @@ mod tests {
             }
         }
         assert!(named > 0, "no named retries: drop this test's allowance with them");
-    }
-
-    #[test]
-    fn a_shard_of_mutants_writes_its_own_report() {
-        assert_eq!(mutants_dir("slopty-proto", None), "target/deep/mutants/slopty-proto");
-        assert_eq!(
-            mutants_dir("slopty-proto", Some("2/4")),
-            "target/deep/mutants/slopty-proto-2of4"
-        );
     }
 
     #[test]

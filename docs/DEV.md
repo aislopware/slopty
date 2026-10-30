@@ -505,9 +505,12 @@ under `target/deep/`:
 - `coverage [--html]` — line coverage per crate (the live e2e crate left out), every build in
   `cargo llvm-cov show-env`'s environment, the binaries tests spawn built first; the report is
   `target/deep/cov/lcov.info`.
-- `mutants -p <crate> [--timeout s] [--shard k/n] [--jobs n]` — `cargo mutants` on one crate,
-  or its `k`th of `n` shares counting from 0, into `target/deep/mutants/<crate>[-<k>of<n>]`; the
-  missed mutants (`mutants.out/missed.txt`) are the lines no test would notice changing.
+- `mutants --in-diff <base> | --since <time> [--tier a|b]… [--cap n]` — `cargo mutants` on the
+  code a diff touches (`docs/TESTING.md`, "Mutation in the diff"): tier A's missed mutants fail
+  the run, tier B's are listed; past `--cap`, an even sample. `mutants -p <crate> | --rotate`
+  takes a whole crate, or this week's tier A crate. `--timeout s`, `--shard k/n` (counting from
+  0), `--jobs n` and `--baseline run|skip` go to cargo-mutants. Every run writes its missed
+  mutants to `target/deep/mutants/lane-work.md`, one line a test to write.
 - `fuzz [--time s] [--jobs n] [--ziggy]` — every fuzz target for 30 s, or `--time`, on `n`
   processes, and with `--ziggy` under AFL++ for as long again (`cargo xtask fuzz` below).
 - `noq` — the vendored QUIC stack's own suites, `vendor/noq-proto`'s and `vendor/noq-udp`'s,
