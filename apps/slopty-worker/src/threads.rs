@@ -31,6 +31,7 @@ use slopty_worker::ItemStore;
 use slopty_worker::manager::Worker;
 use slopty_worker::orchestrate::{self, Failure};
 use slopty_worker::repo::worktrees;
+use slopty_worker::restore::Started;
 use slopty_worker::thread::claude::{self, Claude, Place};
 use slopty_worker::thread::history::{self, History};
 use slopty_worker::thread::host::UnderWay;
@@ -110,9 +111,10 @@ impl Terminals for Opener {
         &self,
         id: SessionId,
         req: OpenSession,
+        started: Started,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async move {
-            self.worker.open_as(id, &req).await.map_err(|e| e.to_string())?;
+            self.worker.open_for(id, &req, Some(started)).await.map_err(|e| e.to_string())?;
             if let Some(summary) = self.worker.summary(id).await {
                 let _nobody = self.events.send(WorkerMsg::SessionChanged(summary));
             }
@@ -120,6 +122,18 @@ impl Terminals for Opener {
                 let _nobody = self.events.send(WorkerMsg::Items(delta));
             }
             Ok(())
+        })
+    }
+
+    fn again(
+        &self,
+        id: SessionId,
+        req: OpenSession,
+        started: Started,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
+        // The daemon holds the session for its restart, and tells everyone how it stands after.
+        Box::pin(async move {
+            self.worker.restart(id, &req, Some(started)).await.map_err(|e| e.to_string())
         })
     }
 
@@ -770,6 +784,12 @@ impl Threads {
             }
             Some(_) | None => Expanded::Gone,
         }
+    }
+
+    /// Start the agent `started` again in its terminal `terminal`, whose program ended and
+    /// which the daemon holds for it: its thread taken up again ([`Starter::again`]).
+    pub(crate) async fn again(&self, terminal: SessionId, started: Started) -> Result<(), String> {
+        self.starter.again(terminal, started).await
     }
 }
 

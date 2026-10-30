@@ -13,6 +13,12 @@
 //!
 //! The thread names its terminal ([`ThreadMeta::TERMINAL_FACT`]); the answer is
 //! `Outcome::Started` with it. A start is acted on once per intent ([`Host::start`]'s record).
+//!
+//! The terminal keeps what started it ([`Started`]). When its agent has ended and the person
+//! starts the terminal again ([`Starter::again`]), the agent takes its thread up again in its own
+//! words, with the choices the start made and at the same seat, and is told nothing: what it was
+//! first told is in its conversation. A Codex thread Slopty began names no Codex session it
+//! knows, so Codex's own list of the folder's sessions opens, for the person to pick.
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -30,15 +36,26 @@ use slopty_proto::thread::{
 
 use super::claude::{Claude, Place};
 use super::{Host, Seated};
+use crate::restore::Started;
 
 /// What a start opens its terminal through: the worker's sessions, announced to every client as
 /// any terminal is.
 pub trait Terminals: Send + Sync + std::fmt::Debug {
-    /// Open terminal `id` as `req` says, and tell every client of it.
+    /// Open terminal `id` as `req` says for the agent `started`, and tell every client of it.
     fn open(
         &self,
         id: SessionId,
         req: OpenSession,
+        started: Started,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
+
+    /// Run `req` again in terminal `id`, whose program ended and which is held for its restart
+    /// (`Worker::restarting`), for the agent `started`.
+    fn again(
+        &self,
+        id: SessionId,
+        req: OpenSession,
+        started: Started,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>>;
 
     /// The variables terminal `id` runs with besides the request's: its session, its token, the
@@ -59,6 +76,15 @@ pub struct Starter {
 /// Why a start that names more than a session to take up again is refused.
 const ONLY_RESUME: &str = "a start takes no arguments here but the session it takes up again";
 
+/// Where a start's agent runs.
+#[derive(Clone, Copy, Debug)]
+enum Opening {
+    /// In a new terminal, for this intent.
+    New(IntentId),
+    /// Again in its thread's terminal, whose program ended.
+    Again(ThreadId, SessionId),
+}
+
 impl Starter {
     /// Starts on `host`, observed by `claude`, their terminals opened through `terminals`, on
     /// the machine named `machine`.
@@ -78,14 +104,48 @@ impl Starter {
         if let Some(outcome) = self.host.started(id) {
             return outcome;
         }
-        let outcome = match Self::checked(start) {
-            Err(why) => refused(why),
+        let started = match Self::checked(start) {
+            Err(why) => Err(why),
             Ok(()) if start.agent.is(AgentId::CLAUDE_CODE) => {
-                self.claude_code(id, start, seated).await
+                self.claude_code(Opening::New(id), start, seated).await
             }
-            Ok(()) => self.other(id, start, seated).await,
+            Ok(()) => self.other(Opening::New(id), start, seated).await,
+        };
+        let outcome = match started {
+            Ok(thread) => Outcome::Started { thread },
+            Err(reason) => Outcome::Refused { reason },
         };
         self.host.record_start(id, outcome)
+    }
+
+    /// Start the agent `started` opened terminal `terminal` for again, its program having ended
+    /// and the terminal held for it: its thread taken up again in its own words (Claude Code's
+    /// `--resume`, Codex's `resume`, pi's `--session`), with the choices its start made, at its
+    /// seat when it had one, told nothing.
+    pub async fn again(&self, terminal: SessionId, started: Started) -> Result<(), String> {
+        let Started { thread, start } = started;
+        let Some((meta, _status)) = self.host.meta(thread) else {
+            return Err("its thread is gone".to_owned());
+        };
+        let args = if start.agent.is(AgentId::CLAUDE_CODE) {
+            vec![agent::RESUME_FLAG.to_owned(), meta.native.clone()]
+        } else if start.agent.is(AgentId::CODEX) {
+            // Only a start that took a Codex thread up names one Codex knows.
+            slopty_agent::codex::resumed(&start.args)
+                .map(slopty_agent::codex::resume_args)
+                .unwrap_or_default()
+        } else {
+            slopty_agent::pi::sessions::resume_args(&meta.native)
+        };
+        let start = Start { cwd: meta.cwd, args, prompt: None, worktree: None, ..start };
+        let seated = self.host.seat_of(thread);
+        let opening = Opening::Again(thread, terminal);
+        let again = if start.agent.is(AgentId::CLAUDE_CODE) {
+            self.claude_code(opening, &start, seated.as_ref()).await
+        } else {
+            self.other(opening, &start, seated.as_ref()).await
+        };
+        again.map(|_thread| ())
     }
 
     fn checked(start: &Start) -> Result<(), String> {
@@ -116,15 +176,21 @@ impl Starter {
         }
     }
 
-    async fn claude_code(&self, id: IntentId, start: &Start, seated: Option<&Seated>) -> Outcome {
+    async fn claude_code(
+        &self,
+        opening: Opening,
+        start: &Start,
+        seated: Option<&Seated>,
+    ) -> Result<ThreadId, String> {
         let resumed = Self::resumed(start).map(str::to_owned);
         if let Some(native) = &resumed {
             let thread = agent::thread_of(native);
             let running = self.host.meta(thread).filter(|(meta, status)| {
                 meta.terminal().is_some() && status.liveness == Liveness::Live
             });
-            if running.is_some() {
-                return Outcome::Started { thread };
+            // Its own terminal, ended, may not have said so yet.
+            if running.is_some() && matches!(opening, Opening::New(_)) {
+                return Ok(thread);
             }
             let (home, session) = (self.place.home.clone(), native.clone());
             let holder =
@@ -133,15 +199,25 @@ impl Starter {
                     .ok()
                     .flatten();
             if let Some(holder) = holder {
-                return refused(holder.words(&self.machine));
+                return Err(holder.words(&self.machine));
             }
         }
         let Some(installed) = crate::facts::installed("claude", self.place.path.clone()).await
         else {
-            return refused("Claude Code is not installed on this machine".to_owned());
+            return Err("Claude Code is not installed on this machine".to_owned());
         };
-        let native = resumed.clone().unwrap_or_else(|| id.to_string());
-        let terminal = seated.map_or_else(|| SessionId::from_uuid(*id.as_uuid()), |s| s.seat);
+        let (native, terminal) = match opening {
+            Opening::New(id) => (
+                resumed.clone().unwrap_or_else(|| id.to_string()),
+                seated.map_or_else(|| SessionId::from_uuid(*id.as_uuid()), |s| s.seat),
+            ),
+            Opening::Again(thread, terminal) => {
+                let Some(native) = resumed.clone() else {
+                    return Err(format!("{thread} names no session to take up again"));
+                };
+                (native, terminal)
+            }
+        };
         let tui = Tui {
             session: resumed.map_or_else(|| Begin::New(native.clone()), Begin::Resume),
             model: start.model.clone(),
@@ -173,28 +249,41 @@ impl Starter {
         drop(history.drain());
         let made = self.made(thread, meta, start, terminal, seated);
         let command = std::iter::once(installed.program.to_string_lossy().into_owned()).chain(args);
-        let opened =
-            self.open(terminal, start, command.collect(), &installed.path, Vec::new()).await;
-        if let Err(why) = opened {
+        let (to, path) = ((opening, thread, terminal), &installed.path);
+        if let Err(why) = self.open(to, start, command.collect(), path, Vec::new()).await {
             self.unmade(thread, made);
-            return refused(why);
+            return Err(why);
         }
         self.claude.begun(terminal, native, start.cwd.clone(), version);
-        Outcome::Started { thread }
+        Ok(thread)
     }
 
     /// A Codex or pi TUI, whose thread is a row: its title and its terminal.
-    async fn other(&self, id: IntentId, start: &Start, seated: Option<&Seated>) -> Outcome {
+    async fn other(
+        &self,
+        opening: Opening,
+        start: &Start,
+        seated: Option<&Seated>,
+    ) -> Result<ThreadId, String> {
         let codex = start.agent.is(AgentId::CODEX);
         let program = if codex { "codex" } else { "pi" };
         let Some(installed) = crate::facts::installed(program, self.place.path.clone()).await
         else {
-            return refused(format!("{program} is not installed on this machine"));
+            return Err(format!("{program} is not installed on this machine"));
         };
-        let terminal = seated.map_or_else(|| SessionId::from_uuid(*id.as_uuid()), |s| s.seat);
-        let prompt = match seated {
-            Some(seated) => seated.ahead(start.prompt.as_deref()),
-            None => start.prompt.clone(),
+        let (thread, terminal, session) = match opening {
+            Opening::New(id) => (
+                ThreadId::from_uuid(*id.as_uuid()),
+                seated.map_or_else(|| SessionId::from_uuid(*id.as_uuid()), |s| s.seat),
+                id.to_string(),
+            ),
+            Opening::Again(thread, terminal) => (thread, terminal, String::new()),
+        };
+        // Taken up again, it is told nothing: the system text went ahead of its first message.
+        let prompt = match (opening, seated) {
+            (Opening::Again(..), _) => None,
+            (Opening::New(_), Some(seated)) => seated.ahead(start.prompt.as_deref()),
+            (Opening::New(_), None) => start.prompt.clone(),
         };
         let resumed = Self::resumed(start).map(str::to_owned);
         let tools = self.host.tools_cli();
@@ -206,8 +295,12 @@ impl Starter {
                 effort: start.effort.as_deref(),
             };
             let tools = tools.as_deref().map(|cli| (cli, env.as_slice()));
-            let args =
+            let mut args =
                 slopty_agent::codex::tui(resumed.as_deref(), &choices, tools, prompt.as_deref());
+            if resumed.is_none() && matches!(opening, Opening::Again(..)) {
+                // No Codex thread known to take up: Codex's own list of the folder's.
+                args.insert(0, slopty_agent::codex::RESUME.to_owned());
+            }
             (args, Vec::new())
         } else {
             let tools = tools.as_deref().and_then(|cli| {
@@ -217,15 +310,13 @@ impl Starter {
                 Some((file, slopty_agent::pi::tools(cli, &env).to_string()))
             });
             let file = tools.as_ref().map(|(file, _)| file.as_path());
-            let session = id.to_string();
             let model = start.model.as_deref();
             let args =
                 slopty_agent::pi::tui(resumed.as_deref(), &session, model, file, prompt.as_deref());
             let extra = tools.map(|(_, json)| (slopty_agent::pi::TOOLS_ENV.to_owned(), json));
             (args, extra.into_iter().collect())
         };
-        let native = resumed.unwrap_or_else(|| id.to_string());
-        let thread = ThreadId::from_uuid(*id.as_uuid());
+        let native = resumed.unwrap_or_else(|| session.clone());
         let meta = ThreadMeta {
             id: thread,
             agent: start.agent.clone(),
@@ -241,11 +332,10 @@ impl Starter {
         };
         let made = self.made(thread, meta, start, terminal, seated);
         let command = std::iter::once(installed.program.to_string_lossy().into_owned()).chain(args);
-        if let Err(why) =
-            self.open(terminal, start, command.collect(), &installed.path, extra).await
-        {
+        let (to, path) = ((opening, thread, terminal), &installed.path);
+        if let Err(why) = self.open(to, start, command.collect(), path, extra).await {
             self.unmade(thread, made);
-            return refused(why);
+            return Err(why);
         }
         let live = Status {
             phase: Phase::Idle,
@@ -255,7 +345,7 @@ impl Starter {
         };
         self.host.apply(thread, vec![Action::Status(live)]);
         self.claude.row(terminal, thread);
-        Outcome::Started { thread }
+        Ok(thread)
     }
 
     /// Hold thread `thread` as `meta` says, naming `terminal`, seated at `seated`: a new one, or
@@ -306,10 +396,11 @@ impl Starter {
         });
     }
 
-    /// Open terminal `terminal` for `start`, running `command` on `path`, with `extra` beside.
+    /// Open terminal `terminal` for `start` of `thread` as `opening` says, running `command` on
+    /// `path`, with `extra` beside.
     async fn open(
         &self,
-        terminal: SessionId,
+        (opening, thread, terminal): (Opening, ThreadId, SessionId),
         start: &Start,
         command: Vec<String>,
         path: &OsString,
@@ -330,13 +421,18 @@ impl Starter {
             title: Some(title.to_owned()),
             attach: false,
         };
-        tracing::info!(%terminal, agent = %start.agent.0, cwd = start.cwd, "an agent starts in a terminal");
-        self.terminals.open(terminal, req).await
+        let started = Started::of(thread, start);
+        match opening {
+            Opening::New(_) => {
+                tracing::info!(%terminal, agent = %start.agent.0, cwd = start.cwd, "an agent starts in a terminal");
+                self.terminals.open(terminal, req, started).await
+            }
+            Opening::Again(..) => {
+                tracing::info!(%terminal, agent = %start.agent.0, cwd = start.cwd, "an agent starts again in its terminal");
+                self.terminals.again(terminal, req, started).await
+            }
+        }
     }
-}
-
-const fn refused(reason: String) -> Outcome {
-    Outcome::Refused { reason }
 }
 
 #[cfg(test)]

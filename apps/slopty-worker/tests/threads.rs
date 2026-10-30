@@ -25,7 +25,7 @@ mod threads {
     use slopty_net::client::{bind_client, connect_addr};
     use slopty_net::{ClientMsg, WorkerMsg};
     use slopty_proto::handshake::Hello;
-    use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
+    use slopty_proto::terminal::{OpenSession, SessionState, TermRequest, TermSize};
     use slopty_proto::thread::wire::{
         Expanded, IntentDone, NewWorktree, Outcome, PastSessions, Start, ThreadFrame,
         ThreadRequest, ThreadRow,
@@ -622,6 +622,53 @@ mod threads {
         a.typed(terminal, "Now the logout").await;
         a.until(turns_done(1)).await;
         assert_eq!(said(a.state()), ["Now the logout", "Done: Now the logout"]);
+    }
+
+    /// A Claude Code Slopty started that ended starts again in its terminal at the person's
+    /// word: its session taken up again (`--resume`) with the start's choices and Slopty's tools,
+    /// told nothing, since its first prompt is in the conversation. The thread names the
+    /// terminal again, live, and what is typed next is a turn of the same conversation.
+    #[tokio::test]
+    async fn a_claude_code_that_ended_takes_its_conversation_up_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let daemons = with_claude(&root, &[]).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let start = Start { model: Some("opus".to_owned()), ..claude_in(&root, Some("Fix it")) };
+        let (thread, terminal) = started(&mut a, start).await;
+        a.follow(thread).await;
+        a.until(turns_done(1)).await;
+        let native = a.state().meta.native.clone();
+
+        a.typed(terminal, "/exit").await;
+        a.heard(|msg| match msg {
+            WorkerMsg::SessionChanged(summary)
+                if summary.id == terminal
+                    && matches!(summary.state, SessionState::Exited { .. }) =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+        .await;
+        a.term(terminal, TermRequest::Restart).await;
+        let resumed = |r: &serde_json::Value| listed(r, "args").iter().any(|a| *a == "--resume");
+        let seen = record_of(&root, terminal, resumed).await;
+        let args: Vec<&str> = listed(&seen, "args").iter().filter_map(|a| a.as_str()).collect();
+        let own = args.windows(2).any(|pair| pair == ["--resume", native.as_str()]);
+        assert!(own, "its own session: {args:?}");
+        assert!(args.contains(&"--model=opus"), "the start's choice: {args:?}");
+        assert!(!args.contains(&"--") && !args.contains(&"Fix it"), "told nothing: {args:?}");
+        assert!(args.iter().any(|a| a.starts_with("--mcp-config")), "Slopty's tools: {args:?}");
+        assert_eq!(seen["seat"], terminal.to_string(), "in its own terminal");
+        a.row_until(thread, |row| {
+            row.terminal() == Some(terminal) && row.status.liveness == Liveness::Live
+        })
+        .await;
+
+        a.typed(terminal, "Second").await;
+        a.until(turns_done(2)).await;
+        assert_eq!(prompts(a.state()), ["Fix it", "Second"], "the same conversation");
     }
 
     /// A Claude Code typed by hand into a terminal runs with none of Slopty's hooks, and its

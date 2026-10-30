@@ -502,6 +502,12 @@ impl Host {
         self.inner.lock().tools_cli.clone()
     }
 
+    /// The seat `thread` was started at, all of it, when it was ([`Self::seated`]).
+    #[must_use]
+    pub fn seat_of(&self, thread: ThreadId) -> Option<Seated> {
+        self.inner.lock().hosted(thread)?.own.seated.clone()
+    }
+
     /// The thread started at `seat`, if one is.
     #[must_use]
     pub fn seated_at(&self, seat: SessionId) -> Option<ThreadId> {
