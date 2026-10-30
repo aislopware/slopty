@@ -30,11 +30,7 @@ pub fn builtin_registry() -> &'static ThemeRegistry {
 }
 
 fn family(id: &str, name: &str, variants: Vec<ThemeVariant>) -> ThemeFamily {
-    ThemeFamily {
-        id: id.into(),
-        name: name.into(),
-        variants,
-    }
+    ThemeFamily { id: id.into(), name: name.into(), variants }
 }
 
 struct Seeds<'a> {
@@ -75,11 +71,7 @@ fn variant(seed: Seeds<'_>) -> ThemeVariant {
     let accent = AccentRoles::derive(c(seed.accent), seed.appearance, background);
     let dark = seed.appearance.is_dark();
     let border_tone = if dark { Color::WHITE } else { Color::BLACK };
-    let solid = if dark {
-        Color::rgb(235, 235, 239)
-    } else {
-        Color::rgb(35, 35, 40)
-    };
+    let solid = if dark { Color::rgb(235, 235, 239) } else { Color::rgb(35, 35, 40) };
     let colors = ThemeColors {
         background,
         shell,
@@ -136,7 +128,8 @@ fn variant(seed: Seeds<'_>) -> ThemeVariant {
 fn seal(variant: &mut ThemeVariant) {
     variant.source.asset_hash.clear();
     let encoded = serde_json::to_vec(&variant).expect("built-in theme serializes");
-    variant.source.asset_hash = format!("sha256:{}", data_encoding::HEXLOWER.encode(&Sha256::digest(encoded)));
+    variant.source.asset_hash =
+        format!("sha256:{}", data_encoding::HEXLOWER.encode(&Sha256::digest(encoded)));
 }
 
 fn syntax(colors: [&str; 12]) -> BTreeMap<String, Color> {

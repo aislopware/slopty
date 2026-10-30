@@ -11,9 +11,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 pub use builtins::builtin_registry;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,10 +83,7 @@ impl Color {
     }
 
     pub fn with_alpha(self, alpha: f32) -> Self {
-        Self {
-            a: (alpha.clamp(0.0, 1.0) * 255.0).round() as u8,
-            ..self
-        }
+        Self { a: (alpha.clamp(0.0, 1.0) * 255.0).round() as u8, ..self }
     }
 
     pub fn blend_over(self, background: Self) -> Self {
@@ -114,11 +110,7 @@ impl Color {
     }
 
     pub fn contrast(self, background: Self) -> f32 {
-        let foreground = if self.a == 255 {
-            self
-        } else {
-            self.blend_over(background)
-        };
+        let foreground = if self.a == 255 { self } else { self.blend_over(background) };
         let (a, b) = (foreground.luminance(), background.luminance());
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
@@ -153,11 +145,7 @@ impl Color {
     fn luminance(self) -> f32 {
         let linear = |channel: u8| {
             let value = channel as f32 / 255.0;
-            if value <= 0.04045 {
-                value / 12.92
-            } else {
-                ((value + 0.055) / 1.055).powf(2.4)
-            }
+            if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
         };
         0.2126 * linear(self.r) + 0.7152 * linear(self.g) + 0.0722 * linear(self.b)
     }
@@ -174,11 +162,7 @@ impl fmt::Display for Color {
         if self.a == 255 {
             write!(f, "#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
         } else {
-            write!(
-                f,
-                "#{:02x}{:02x}{:02x}{:02x}",
-                self.r, self.g, self.b, self.a
-            )
+            write!(f, "#{:02x}{:02x}{:02x}{:02x}", self.r, self.g, self.b, self.a)
         }
     }
 }
@@ -211,11 +195,7 @@ impl FromStr for Color {
                 expand(nibble(bytes[2])?),
                 expand(nibble(bytes[3])?),
             )),
-            6 => Ok(Self::rgb(
-                pair(&bytes[0..2])?,
-                pair(&bytes[2..4])?,
-                pair(&bytes[4..6])?,
-            )),
+            6 => Ok(Self::rgb(pair(&bytes[0..2])?, pair(&bytes[2..4])?, pair(&bytes[4..6])?)),
             8 => Ok(Self::rgba(
                 pair(&bytes[0..2])?,
                 pair(&bytes[2..4])?,
@@ -241,9 +221,7 @@ impl<'de> Deserialize<'de> for Color {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
+        String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -265,15 +243,8 @@ pub enum AccentPreset {
 }
 
 impl AccentPreset {
-    pub const ALL: [Self; 7] = [
-        Self::Slopty,
-        Self::Orange,
-        Self::Amber,
-        Self::Green,
-        Self::Cyan,
-        Self::Blue,
-        Self::Pink,
-    ];
+    pub const ALL: [Self; 7] =
+        [Self::Slopty, Self::Orange, Self::Amber, Self::Green, Self::Cyan, Self::Blue, Self::Pink];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -341,19 +312,11 @@ impl AccentRoles {
             strong = strong.ensure_contrast(on, 4.5);
         }
         let light = primary.mix(
-            if appearance.is_dark() {
-                Color::WHITE
-            } else {
-                background
-            },
+            if appearance.is_dark() { Color::WHITE } else { background },
             if appearance.is_dark() { 0.28 } else { 0.18 },
         );
         let deep = primary.mix(
-            if appearance.is_dark() {
-                Color::BLACK
-            } else {
-                Color::BLACK
-            },
+            if appearance.is_dark() { Color::BLACK } else { Color::BLACK },
             if appearance.is_dark() { 0.18 } else { 0.26 },
         );
         Self {
@@ -378,20 +341,13 @@ pub struct ThemeSelection {
 
 impl Default for ThemeSelection {
     fn default() -> Self {
-        Self {
-            light: "slopty-light".into(),
-            dark: "slopty-dark".into(),
-        }
+        Self { light: "slopty-light".into(), dark: "slopty-dark".into() }
     }
 }
 
 impl ThemeSelection {
     pub fn variant_id(&self, appearance: Appearance) -> &str {
-        if appearance.is_dark() {
-            &self.dark
-        } else {
-            &self.light
-        }
+        if appearance.is_dark() { &self.dark } else { &self.light }
     }
 
     pub fn set_variant(&mut self, appearance: Appearance, id: impl Into<String>) {
@@ -505,10 +461,7 @@ impl ThemeRegistry {
     }
 
     pub fn variant(&self, id: &str) -> Option<&ThemeVariant> {
-        self.families
-            .iter()
-            .flat_map(|family| &family.variants)
-            .find(|variant| variant.id == id)
+        self.families.iter().flat_map(|family| &family.variants).find(|variant| variant.id == id)
     }
 
     pub fn variants_for(&self, appearance: Appearance) -> impl Iterator<Item = &ThemeVariant> {
@@ -521,11 +474,7 @@ impl ThemeRegistry {
     pub fn resolve(&self, selection: &ThemeSelection, appearance: Appearance) -> &ThemeVariant {
         self.variant(selection.variant_id(appearance))
             .or_else(|| {
-                self.variant(if appearance.is_dark() {
-                    "slopty-dark"
-                } else {
-                    "slopty-light"
-                })
+                self.variant(if appearance.is_dark() { "slopty-dark" } else { "slopty-light" })
             })
             .expect("the built-in registry always contains both Slopty variants")
     }
@@ -735,21 +684,11 @@ mod tests {
     #[test]
     fn accent_overlay_meets_interaction_contrast() {
         for appearance in Appearance::ALL {
-            let background = if appearance.is_dark() {
-                Color::rgb(6, 6, 6)
-            } else {
-                Color::WHITE
-            };
+            let background = if appearance.is_dark() { Color::rgb(6, 6, 6) } else { Color::WHITE };
             for preset in AccentPreset::ALL {
                 let roles = AccentRoles::derive(preset.color(appearance), appearance, background);
-                assert!(
-                    roles.primary.contrast(background) >= 3.0,
-                    "{appearance:?} {preset:?}"
-                );
-                assert!(
-                    roles.on.contrast(roles.strong) >= 4.5,
-                    "{appearance:?} {preset:?}"
-                );
+                assert!(roles.primary.contrast(background) >= 3.0, "{appearance:?} {preset:?}");
+                assert!(roles.on.contrast(roles.strong) >= 4.5, "{appearance:?} {preset:?}");
             }
         }
     }
@@ -765,14 +704,8 @@ mod tests {
             SurfaceTreatment::Opaque
         );
         for recommended in [SurfaceTreatment::Frosted, SurfaceTreatment::Opaque] {
-            assert_eq!(
-                SurfacePreference::Frosted.resolve(recommended),
-                SurfaceTreatment::Frosted
-            );
-            assert_eq!(
-                SurfacePreference::Opaque.resolve(recommended),
-                SurfaceTreatment::Opaque
-            );
+            assert_eq!(SurfacePreference::Frosted.resolve(recommended), SurfaceTreatment::Frosted);
+            assert_eq!(SurfacePreference::Opaque.resolve(recommended), SurfaceTreatment::Opaque);
         }
     }
 
@@ -793,11 +726,7 @@ mod tests {
     #[test]
     fn visual_fixture_matrix_covers_every_variant_and_scene() {
         let registry = ThemeRegistry::builtin();
-        let variants = registry
-            .families
-            .iter()
-            .map(|family| family.variants.len())
-            .sum::<usize>();
+        let variants = registry.families.iter().map(|family| family.variants.len()).sum::<usize>();
         assert_eq!(variants, 9);
         assert_eq!(variants * VisualFixture::ALL.len(), 90);
     }
