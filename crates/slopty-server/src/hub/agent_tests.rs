@@ -225,3 +225,83 @@ async fn an_ended_session_does_not_hide_the_agent_at_its_terminal() {
     assert!(fleet.hub.types_into_shell(term).is_err(), "an agent's TUI takes no agent's keys");
     assert_eq!(fleet.hub.inner.state.lock().board.thread_at(term), Some(fleet.parent.id));
 }
+
+/// A branch brought from one clone to another goes as a git bundle made where it is, read
+/// there in parts of at most four MiB through the server, each part written where it goes at
+/// its own offset, then the whole checked and fetched into the clone it lands in.
+#[tokio::test]
+async fn a_branch_is_brought_as_a_bundle_read_in_parts() {
+    use slopty_proto::orchestration::{BUNDLES, BranchBundle, UploadPart};
+
+    let mut fleet = Fleet::new();
+    // Two whole parts and five bytes over.
+    let size: u64 = (8 << 20) + 5;
+    let digest = [7; 32];
+    let bring = Verb::BranchBring {
+        from: fleet.worker,
+        repo: "/src/app".to_owned(),
+        branch: "login".to_owned(),
+        to: fleet.worker,
+        into: Some("/src/other".to_owned()),
+        name: None,
+    };
+    let brought = tokio::spawn({
+        let hub = fleet.hub.clone();
+        async move { hub.dispatch(bring).await }
+    });
+    let (id, _, verb) = fleet.request().await;
+    let Verb::BundleBranch { repo, branch, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!((repo.as_str(), branch.as_str()), ("/src/app", "login"));
+    let made = BranchBundle {
+        path: "/tmp/login.bundle".to_owned(),
+        name: "login.bundle".to_owned(),
+        size,
+        digest,
+        head: "4f2a9c1".to_owned(),
+        base: None,
+    };
+    fleet.lease.handle(ToServer::Reply { id, outcome: Outcome::Bundle(Box::new(made)) });
+
+    let mut read = Vec::new();
+    let mut written = Vec::new();
+    let fetched = loop {
+        let (id, _, verb) = fleet.request().await;
+        let outcome = match verb {
+            Verb::ReadFile { path, offset, length, .. } => {
+                assert_eq!(path, "/tmp/login.bundle");
+                let length = length.expect("a part has a length");
+                read.push((offset, length));
+                let bytes = vec![1; usize::try_from(length).unwrap()];
+                Outcome::File { bytes, offset, size }
+            }
+            Verb::Upload { part: UploadPart::Bytes { offset, bytes }, path, .. } => {
+                assert_eq!(path, format!("{BUNDLES}/login.bundle"));
+                written.push((offset, u64::try_from(bytes.len()).unwrap()));
+                Outcome::Done
+            }
+            Verb::Upload { part: UploadPart::Finish { size: whole, digest: said, .. }, .. } => {
+                assert_eq!((whole, said), (size, digest), "the whole, checked");
+                Outcome::Done
+            }
+            Verb::FetchBundle { repo, bundle, branch, into, head, .. } => {
+                fleet.lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
+                break (repo, bundle, branch, into, head);
+            }
+            other => panic!("{other:?}"),
+        };
+        fleet.lease.handle(ToServer::Reply { id, outcome });
+    };
+    let part: u64 = 4 << 20;
+    assert_eq!(read, [(0, part), (part, part), (part.saturating_mul(2), 5)], "in parts");
+    assert_eq!(written, read, "each written where it was read");
+    let landed = ("/src/other", "login.bundle", "login", "login", "4f2a9c1");
+    let fetched = (
+        fetched.0.as_str(),
+        fetched.1.as_str(),
+        fetched.2.as_str(),
+        fetched.3.as_str(),
+        fetched.4.as_str(),
+    );
+    assert_eq!(fetched, landed, "fetched into the clone it lands in, under its own name");
+    assert_eq!(brought.await.unwrap(), Outcome::Done);
+}

@@ -788,3 +788,74 @@ fn depth_below(state: &State, thread: ThreadId, above: ThreadId) -> usize {
     }
     depth
 }
+
+#[cfg(test)]
+mod tests {
+    use slopty_core::WallMs;
+    use slopty_proto::thread::wire::TurnEnded;
+    use slopty_proto::thread::{Liveness, TurnId};
+
+    use super::super::ladder::tests::{asking, row};
+    use super::*;
+
+    fn exited(mut row: ThreadRow) -> ThreadRow {
+        row.status.liveness = Liveness::Exited { resumable: true };
+        row
+    }
+
+    /// An agent rests, for a parent waiting on it, once its program ended, while it asks the
+    /// person, and once a turn of its ended; at work, waiting on a tool, or idle before its
+    /// first turn ended, it does not.
+    #[test]
+    fn an_agent_rests_once_it_ended_asks_or_ended_a_turn() {
+        let at = |phase| row(phase, 1_000, None);
+        for phase in [Phase::Done, Phase::Failed, Phase::Stopped, Phase::NeedsYou] {
+            assert!(rests(&at(phase)), "{phase:?}");
+        }
+        for phase in [Phase::Working, Phase::Waiting, Phase::Idle] {
+            assert!(!rests(&at(phase)), "{phase:?} and there");
+            assert!(rests(&exited(at(phase))), "{phase:?} and ended");
+        }
+        let mut turned = at(Phase::Idle);
+        turned.ended = Some(TurnEnded {
+            turn: TurnId::BEFORE,
+            at_ms: WallMs::from_millis(1_000),
+            ran_ms: 5_000,
+            answered: true,
+        });
+        assert!(rests(&turned), "idle after a turn");
+    }
+
+    /// An Esc stops only a turn at work that asks nobody.
+    #[test]
+    fn only_a_turn_at_work_that_asks_nobody_is_stopped() {
+        assert!(at_work(&row(Phase::Working, 1_000, None)));
+        assert!(!at_work(&asking(row(Phase::Working, 1_000, None), "Run it?")));
+        assert!(!at_work(&row(Phase::Idle, 1_000, None)));
+        assert!(!at_work(&row(Phase::NeedsYou, 1_000, None)));
+    }
+
+    /// An agent is read by its title, trimmed, and by its id when it has none; its entry says
+    /// whether its program ended, and its last line only when there is one to read.
+    #[test]
+    fn an_entry_names_the_agent_and_says_what_it_came_to() {
+        let mut titled = row(Phase::Working, 1_000, None);
+        titled.title = "  Make the ladder ".to_owned();
+        assert_eq!(name_of(&titled), "Make the ladder");
+        let mut untitled = row(Phase::Working, 1_000, None);
+        untitled.title = " ".to_owned();
+        assert_eq!(name_of(&untitled), untitled.id.to_string());
+
+        let worker = WorkerId::new();
+        let live = entry_of(worker, &titled);
+        assert!(!live.ended, "its program runs");
+        assert_eq!(live.last.as_deref(), Some("Done."));
+        assert!(!live.rests);
+        let mut blank = exited(titled);
+        blank.last_line = Some("  ".to_owned());
+        let gone = entry_of(worker, &blank);
+        assert!(gone.ended, "its program ended");
+        assert_eq!(gone.last, None, "a blank line is no last line");
+        assert!(gone.rests);
+    }
+}

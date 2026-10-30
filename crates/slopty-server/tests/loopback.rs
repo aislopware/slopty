@@ -114,6 +114,22 @@ mod tests {
         }
     }
 
+    /// A server that stops closes every link at once and says why, so a worker dials the next
+    /// server rather than waiting out its link.
+    #[tokio::test]
+    async fn a_server_that_stops_closes_its_links_saying_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = start(dir.path()).await;
+        let worker = dial(&server, worker_role(WorkerId::new())).await.unwrap();
+        let client = dial(&server, client_role()).await.unwrap();
+        server.shutdown().await;
+        for link in [worker, client] {
+            let why = tokio::time::timeout(PATIENCE, link.conn.closed()).await.unwrap();
+            let said = format!("{why:?}");
+            assert!(said.contains("server stopping"), "{said}");
+        }
+    }
+
     #[tokio::test]
     async fn a_verb_goes_to_the_worker_and_its_drop_reaches_the_client() {
         let dir = tempfile::tempdir().unwrap();

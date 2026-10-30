@@ -1767,6 +1767,16 @@ pub(crate) mod tests {
         drop(persisted.borrow_and_update());
         drop(lease);
         assert!(persisted.has_changed().unwrap(), "so is the end of a lease (its last-seen time)");
+
+        drop(persisted.borrow_and_update());
+        let (tx, _rx) = mpsc::channel(8);
+        let back = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+        assert!(persisted.has_changed().unwrap(), "back with its first capabilities is a change");
+        drop(back);
+        drop(persisted.borrow_and_update());
+        let (tx, _rx) = mpsc::channel(8);
+        let _again = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
+        assert!(!persisted.has_changed().unwrap(), "back as it was is not");
     }
 
     #[test]
