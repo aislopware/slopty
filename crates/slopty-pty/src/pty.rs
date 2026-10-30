@@ -618,7 +618,7 @@ fn system_locale() -> Option<String> {
 /// No system setting names a locale outside a login session there: a Linux daemon without
 /// `LANG` runs where none is configured, and gets the C library's own.
 #[cfg(not(target_os = "macos"))]
-fn system_locale() -> Option<String> {
+const fn system_locale() -> Option<String> {
     None
 }
 
