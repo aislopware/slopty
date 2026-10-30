@@ -192,11 +192,8 @@ icon_assets![
     // Hand-drawn glyphs.
     (TERMINAL, "terminal"),
     (CLOSE, "close"),
-    // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
-    // restore stacked squares) in the same style as `close` — drawn for the
-    // client-side-decoration window controls; no system glyph font exists on
-    // Linux the way Segoe Fluent Icons does on Windows.
-    (WINDOW_MINIMIZE, "window-minimize"),
+    // Hand-drawn window glyphs (maximize square, restore stacked squares) in
+    // the same style as `close`.
     (WINDOW_MAXIMIZE, "window-maximize"),
     (WINDOW_RESTORE, "window-restore"),
     // Hand-drawn hard-drive + home glyphs in the Solar Linear style (like the

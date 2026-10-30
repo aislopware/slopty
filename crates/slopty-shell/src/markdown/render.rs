@@ -2065,8 +2065,6 @@ fn register_selection_listeners(
             }
             if let Some(_text) = super::selection::end_drag(&key) {
                 // X11 middle-click paste parity (Zed does the same).
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                _cx.write_to_primary(gpui::ClipboardItem::new_string(_text));
             }
         });
     }

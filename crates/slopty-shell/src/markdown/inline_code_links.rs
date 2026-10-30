@@ -438,8 +438,6 @@ mod tests {
         out
     }
 
-    // File links are POSIX paths; Windows spans keep their code look.
-    #[cfg(unix)]
     #[test]
     fn a_context_directory_resolves_bare_names_that_follow_it() {
         let fixture = Fixture::new();
@@ -496,7 +494,6 @@ mod tests {
         assert_eq!(fixture.target(&linked, "SOURCES.md"), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn absolute_and_root_relative_and_location_spans_link() {
         let fixture = Fixture::new();
@@ -546,7 +543,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_linked_span_flattens_exactly_like_the_markdown_link_it_stands_for() {
         use crate::markdown::render::flatten_runs;
@@ -567,7 +563,6 @@ mod tests {
         assert_eq!(from_code.runs, from_link.runs);
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_nested_path_span_shows_its_file_name_and_keeps_the_path_for_copy() {
         use crate::markdown::render::flatten_runs;
@@ -601,7 +596,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn paths_sharing_a_file_name_show_enough_of_the_path_to_differ() {
         use crate::markdown::render::flatten_runs;
@@ -694,100 +688,4 @@ mod tests {
         assert!(cache.parts.len() <= CACHED_PARTS);
     }
 
-    /// The linked span reaches the same hit testing a Markdown file link
-    /// does: a left click activates it, a right click opens the file menu.
-    #[cfg(target_os = "linux")]
-    mod rendered {
-        use super::*;
-        use crate::markdown::render::{self, LinkActivation, LinkOutcome, LinkUi};
-        use crate::theme::Theme;
-        use gpui::{
-            Context, MouseButton, Render, TestAppContext, Window, div, point, prelude::*, px,
-        };
-        use std::rc::Rc;
-
-        struct Scene {
-            tree: Arc<BlockTree>,
-            roots: Rc<Vec<FileLinkRoot>>,
-            activated: Rc<std::cell::RefCell<Vec<LinkActivation>>>,
-        }
-
-        impl Render for Scene {
-            fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                let mut opts = render::RenderOptions::settled("inline-code-fixture".into(), std::time::Instant::now());
-                let activated = self.activated.clone();
-                opts.link = Some(LinkUi {
-                    source_session: Some("chat".into()),
-                    source_local: true,
-                    file_roots: Some(self.roots.clone()),
-                    handler: Rc::new(move |activation, _, _| {
-                        activated.borrow_mut().push(activation.clone());
-                        LinkOutcome::Internal
-                    }),
-                });
-                div()
-                    .w(px(320.))
-                    .child(render::selection_frame_reset())
-                    .child(render::render_tree(
-                        &self.tree,
-                        &opts,
-                        &Theme::of(cx).clone(),
-                        window,
-                        &|_| None,
-                    ))
-            }
-        }
-
-        #[gpui::test]
-        fn a_linked_code_span_clicks_and_menus_like_a_file_link(cx: &mut TestAppContext) {
-            let fixture = Fixture::new();
-            cx.update(|cx| {
-                cx.set_global(Theme::dark());
-                crate::settings::init(
-                    crate::settings::UiSettings::default(),
-                    fixture._dir.path(),
-                    cx,
-                );
-            });
-            let roots = Rc::new(fixture.roots(true));
-            let source = Arc::new(fixture.tree("`top.md`"));
-            let mut cache = InlineCodeLinkCache::default();
-            cache.set_revision(1);
-            let tree = cache.linked_tree(&source, &roots, true);
-            let activated = Rc::<std::cell::RefCell<Vec<LinkActivation>>>::default();
-            let (_view, cx) = cx.add_window_view(|_, _| Scene {
-                tree,
-                roots,
-                activated: activated.clone(),
-            });
-            let position = cx.update(|_, _| {
-                let (_, layout, _) = render::selection_test_snapshot("inline-code-fixture:0");
-                layout.position_for_index(2).unwrap() + point(px(2.), px(8.))
-            });
-            let target = fixture.file_target("top.md");
-            cx.simulate_click(position, gpui::Modifiers::default());
-            let activated = activated.borrow();
-            let last = activated.last().expect("the file link activates");
-            assert_eq!(last.action, crate::markdown::render::LinkAction::Primary);
-            assert_eq!(last.target.original, target);
-            drop(activated);
-            cx.simulate_mouse_down(position, MouseButton::Right, gpui::Modifiers::default());
-            cx.simulate_mouse_up(position, MouseButton::Right, gpui::Modifiers::default());
-            for selector in [
-                "link-menu-open-slopty",
-                "link-menu-open-default",
-                "link-menu-show-in-folder",
-                "link-menu-copy-path",
-            ] {
-                assert!(
-                    cx.debug_bounds(selector).is_some(),
-                    "a linked code span gets the file menu: {selector}"
-                );
-            }
-            assert!(
-                cx.debug_bounds("link-menu-open-external").is_none(),
-                "the web rows never mount for a file"
-            );
-        }
-    }
 }

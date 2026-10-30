@@ -163,9 +163,7 @@ impl Shell {
         let row_left = self.titlebar_row_left();
         let row_gap = 8.0;
         // Room at the edge for the outermost control's press on a touch screen (#23).
-        let right_pad = self
-            .titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)
-            .max(crate::surface_chrome::touch_reach(24.0));
+        let right_pad = TITLEBAR_ACTION_EDGE_INSET.max(crate::surface_chrome::touch_reach(24.0));
         // Inked for the ground under it: the terminal's over the session, the window's own over
         // the canvas.
         let ink = if on_canvas { theme.clone() } else { ink_for(self.shown_ground(cx), &theme) };

@@ -896,7 +896,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn inline_code_spans_probe_only_paths_that_exist() {
         let dir = tempfile::tempdir().unwrap();

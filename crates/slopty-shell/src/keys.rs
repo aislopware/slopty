@@ -16,14 +16,8 @@ pub const MOD_IS_COMMAND: bool = cfg!(target_vendor = "apple");
 
 /// The system whose keyboard GPUI parses and spells Slopty's keys for: "cmd-" on the Mac and on
 /// an iPad's or iPhone's hardware keyboard alike.
-pub const OS: gpui::OperatingSystem = std::cfg_select! {
-    target_os = "macos" => { gpui::OperatingSystem::Mac }
-    target_os = "ios" => { gpui::OperatingSystem::Ios }
-    target_os = "windows" => { gpui::OperatingSystem::Windows }
-    target_os = "linux" => { gpui::OperatingSystem::Linux }
-    target_os = "freebsd" => { gpui::OperatingSystem::FreeBsd }
-    _ => { gpui::OperatingSystem::Unknown }
-};
+pub const OS: gpui::OperatingSystem =
+    if cfg!(target_os = "macos") { gpui::OperatingSystem::Mac } else { gpui::OperatingSystem::Ios };
 
 /// A binding at a chord made at run time ([`crate::settings::platform_combo`], a setting): GPUI's
 /// `KeyBinding::new` takes a literal, and this parses the chord as GPUI's own keymap loading does.

@@ -277,7 +277,7 @@ const JUMP_TITLES: [&str; crate::settings::JUMP_SLOTS] = [
 ];
 
 /// The slopty menu bar. macOS renders this natively; mac-only entries are gated
-/// at runtime (`cfg!`) so the whole module compiles and tests on Linux.
+/// at runtime (`cfg!`) so the whole module compiles and tests on every target.
 pub fn app_menus() -> Vec<Menu> {
     let macos = cfg!(target_os = "macos");
 

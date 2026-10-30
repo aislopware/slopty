@@ -786,15 +786,14 @@ impl TerminalColors {
 
 impl Theme {
     // ---- numbers drive layout (px) ----
-    /// Frost translucency over the blurred window background (macOS vibrancy
-    /// or Windows Acrylic). Linux stays opaque because compositor blur is not
-    /// guaranteed; a merely transparent window would expose the raw desktop.
+    /// Frost translucency over the blurred window background (macOS
+    /// vibrancy); elsewhere the frost stays opaque.
     /// Darkness matched by eye to a reference Electron app's dark glass. That
     /// scrim is 0.76 over `hsl(0 0% 3%)`, but it sits on Electron's
     /// `under-window` vibrancy MATERIAL, which pre-darkens the blur; our bare
     /// backdrop blur has no material layer, so the scrim runs heavier to land
     /// on the same perceived tone (see [`Theme::glass`]).
-    pub const GLASS_ALPHA: f32 = if cfg!(any(target_os = "macos", target_os = "windows")) {
+    pub const GLASS_ALPHA: f32 = if cfg!(target_os = "macos") {
         0.80
     } else {
         1.0
@@ -808,7 +807,7 @@ impl Theme {
     /// vibrancy material is mostly white). Floating cards compensate further:
     /// see [`Self::glass_overlay`], where light coverage steps up to keep menu
     /// text legible over an unknown backdrop.
-    pub const GLASS_ALPHA_LIGHT: f32 = if cfg!(any(target_os = "macos", target_os = "windows")) {
+    pub const GLASS_ALPHA_LIGHT: f32 = if cfg!(target_os = "macos") {
         0.80
     } else {
         1.0
@@ -934,16 +933,9 @@ impl Theme {
     /// backdrop blur and translucent tints. Unlike [`Self::is_glass`] this is
     /// scene-level: the blur runs on in-app content inside the window, not on
     /// the desktop behind it, so it needs no compositor vibrancy — macOS
-    /// rasterizes it in Metal, Linux in wgpu, and Windows in Direct3D.
-    /// Windows window chrome uses native Acrylic independently of these
-    /// scene-level blurs.
+    /// rasterizes it in Metal.
     pub fn is_frost(&self) -> bool {
-        self.surface_treatment == SurfaceTreatment::Frosted
-            && cfg!(any(
-                target_os = "macos",
-                target_os = "linux",
-                target_os = "windows"
-            ))
+        self.surface_treatment == SurfaceTreatment::Frosted && cfg!(target_os = "macos")
     }
 
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
@@ -1192,16 +1184,8 @@ impl Theme {
     /// the re-apply in `appearance::apply` is what restores vibrancy when the
     /// user switches back to dark. See zed's `crates/zed/src/main.rs`, which
     /// runs the same loop on every settings change.
-    ///
-    /// Linux composites with alpha instead: the shell draws CSD chrome, and
-    /// rounded window corners (when floating) need the corner cutouts to be
-    /// genuinely transparent. The frost itself is opaque off macOS
-    /// ([`Self::GLASS_ALPHA`]), so nothing else shows through — only the
-    /// corners.
     pub fn window_background_appearance(&self) -> gpui::WindowBackgroundAppearance {
-        if cfg!(target_os = "linux") {
-            gpui::WindowBackgroundAppearance::Transparent
-        } else if self.is_glass() {
+        if self.is_glass() {
             gpui::WindowBackgroundAppearance::Blurred
         } else {
             gpui::WindowBackgroundAppearance::Opaque
@@ -1705,8 +1689,6 @@ impl Global for Theme {}
 fn system_sans() -> &'static str {
     if cfg!(target_os = "macos") {
         "Helvetica"
-    } else if cfg!(target_os = "windows") {
-        "Segoe UI"
     } else {
         "DejaVu Sans"
     }
@@ -1715,8 +1697,6 @@ fn system_sans() -> &'static str {
 fn system_mono() -> &'static str {
     if cfg!(target_os = "macos") {
         "Menlo"
-    } else if cfg!(target_os = "windows") {
-        "Consolas"
     } else {
         "DejaVu Sans Mono"
     }
@@ -2319,15 +2299,6 @@ mod tests {
         assert_eq!(frosted.glass().h, frosted.surface.h);
         assert_eq!(frosted.glass().s, frosted.surface.s);
         assert_eq!(frosted.glass().l, frosted.surface.l);
-        #[cfg(target_os = "windows")]
-        {
-            assert!(frosted.is_glass());
-            assert_eq!(
-                frosted.window_background_appearance(),
-                gpui::WindowBackgroundAppearance::Blurred
-            );
-            assert!(frosted.is_frost());
-        }
 
         let opaque_slopty = Theme::for_selection(
             Appearance::Dark,

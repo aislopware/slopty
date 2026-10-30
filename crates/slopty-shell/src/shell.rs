@@ -236,11 +236,6 @@ pub(super) use crate::motion::DisclosureMotion as SidebarDisclosureMotion;
 /// relying on paint order when chrome crosses an animated pane boundary.
 const PANE_RESIZE_HITBOX_HALF_WIDTH: f32 = 10.0;
 const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
-/// Corner radius of the floating Linux CSD window (macOS gets its native
-/// curve from the platform; maximized/tiled Linux windows go square).
-/// Chrome layers that paint full-bleed at a window edge round their own
-/// backgrounds with it — see [`Shell::window_corner_radius`].
-pub(crate) const LINUX_WINDOW_CORNER_RADIUS: f32 = 10.0;
 
 /// The chat's working directory as the host device spells it — the folder the
 /// harness runs in (a worktree chat's worktree). Projectless `~` chats have
@@ -305,27 +300,9 @@ pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0;
 /// unchanged.
 const TITLEBAR_CLUSTER_PAD: f32 = 10.0;
 
-/// Width of a row of `count` Linux caption buttons, drawn at the cluster's
-/// own 24px-button / 2px-gap rhythm.
-pub fn caption_buttons_width(count: usize) -> f32 {
-    if count == 0 {
-        return 0.0;
-    }
-    count as f32 * 24.0 + (count as f32 - 1.0) * 2.0
-}
-
 /// Where the cluster's first button starts, from the window's left edge.
-/// `linux_left_captions` is the number of caption buttons Slopty draws at the
-/// top-left on Linux (GNOME `close:…` layouts) — the app cluster follows them
-/// at the shared 2px rhythm.
-pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool, linux_left_captions: usize) -> f32 {
-    if is_macos {
-        titlebar_cluster_start(fullscreen)
-    } else if linux_left_captions > 0 {
-        10.0 + caption_buttons_width(linux_left_captions) + 2.0
-    } else {
-        10.0
-    }
+pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
+    if is_macos { titlebar_cluster_start(fullscreen) } else { 10.0 }
 }
 
 /// (Re-)apply the whole app keymap: clears every binding, restores the text fields'
@@ -1204,15 +1181,6 @@ pub struct Shell {
     /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
     /// drag to the compositor (zed's platform-titlebar pattern).
     titlebar_should_move: bool,
-    /// The caption buttons Slopty itself draws on Linux under client-side
-    /// decorations, per side, already filtered to what the compositor
-    /// supports — `None` off Linux or under server decorations (where the WM
-    /// draws real buttons). Re-resolved every frame at the top of `render`.
-    linux_captions: Option<gpui::WindowButtonLayout>,
-    /// Re-renders when the desktop's button layout changes (GNOME
-    /// `button-layout` gsetting). Registered on first paint — [`Shell::new`]
-    /// has no window.
-    button_layout_sub: Option<Subscription>,
     /// `motion::reduced_motion` snapshot, refreshed at the top of each render
     /// pass so [`Shell::eval_tween`] (called from `&self` render helpers) can
     /// snap without a `cx`. Only the global flag makes one.
@@ -1462,8 +1430,6 @@ impl Shell {
             fullscreen: None,
             titlebar_tween: None,
             titlebar_should_move: false,
-            linux_captions: None,
-            button_layout_sub: None,
             reduced_motion: motion::ReducedMotion::default(),
             motion_active: std::cell::Cell::new(false),
             render_time: None,
@@ -1865,7 +1831,7 @@ impl Shell {
                 LinkAction::External
             };
         }
-        let outcome = resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux", windows)));
+        let outcome = resolved.web_outcome(cfg!(target_os = "macos"));
         if outcome == LinkOutcome::Internal {
             self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
         }
@@ -3447,7 +3413,7 @@ impl Shell {
         let is_macos = cfg!(target_os = "macos");
         let cluster = self.eval_tween(
             self.titlebar_tween,
-            cluster_buttons_start(is_macos, fullscreen, self.linux_left_caption_count()),
+            cluster_buttons_start(is_macos, fullscreen),
         );
         cluster + CLUSTER_BUTTONS_WIDTH + TITLEBAR_IDENTITY_GAP
     }
@@ -3528,15 +3494,6 @@ impl Shell {
             .pt(px(titlebar_top_pad())) // a finger's presses inside the window
             .px(px(TITLEBAR_CLUSTER_PAD))
             .children(self.titlebar_spacer(TITLEBAR_CLUSTER_PAD))
-            // Left-side Linux captions (GNOME `close:…` layouts): the
-            // root-level caption overlay owns the buttons; the cluster row
-            // just starts past them, at the shared 2px rhythm.
-            .children((self.linux_left_caption_count() > 0).then(|| {
-                div()
-                    .flex_none()
-                    .h_full()
-                    .w(px(caption_buttons_width(self.linux_left_caption_count())))
-            }))
             .child(window_control_button_with(
                 "toggle-sidebar",
                 icons::sidebar_glyph(
@@ -3563,368 +3520,16 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Native Windows caption controls integrated into Slopty's unified
-    /// titlebar. `WindowControlArea` maps these hit targets to HTMINBUTTON,
-    /// HTMAXBUTTON, and HTCLOSE, so Windows owns their behavior (including
-    /// Snap Layouts) while GPUI renders the system Segoe caption glyphs.
-    fn render_windows_caption_controls(&self, window: &Window, cx: &App) -> Option<AnyElement> {
-        if !cfg!(target_os = "windows") {
-            return None;
-        }
-
-        let theme = Theme::of(cx);
-        let (maximize_id, maximize_glyph) = if window.is_maximized() {
-            ("window-restore", "\u{e923}")
-        } else {
-            ("window-maximize", "\u{e922}")
-        };
-        Some(
-            div()
-                .id("windows-window-controls")
-                .absolute()
-                .top_0()
-                .right_0()
-                .h(px(Theme::TITLEBAR_HEIGHT))
-                .flex()
-                .flex_row()
-                .font_family("Segoe Fluent Icons")
-                .child(windows_caption_button(
-                    "window-minimize",
-                    "\u{e921}",
-                    WindowControlArea::Min,
-                    theme,
-                    false,
-                ))
-                .child(windows_caption_button(
-                    maximize_id,
-                    maximize_glyph,
-                    WindowControlArea::Max,
-                    theme,
-                    false,
-                ))
-                .child(windows_caption_button(
-                    "window-close",
-                    "\u{e8bb}",
-                    WindowControlArea::Close,
-                    theme,
-                    true,
-                ))
-                .into_any_element(),
-        )
-    }
-
-    /// Which caption buttons Slopty itself must draw on Linux: under
-    /// client-side decorations (the Wayland default) nobody else will —
-    /// without these the window has NO minimize/maximize/close at all.
-    /// Server-side decorations (X11 WMs, KDE with SSD) already draw real
-    /// buttons, so `None` there. The desktop's layout (GNOME's
-    /// `button-layout` gsetting via `cx.button_layout()`) decides side and
-    /// order — min/max/close on the right by default; controls the
-    /// compositor can't do (e.g. minimize on some Wayland compositors) drop
-    /// out, close always stays.
-    #[cfg(target_os = "linux")]
-    fn resolve_linux_captions(window: &Window, cx: &App) -> Option<gpui::WindowButtonLayout> {
-        use gpui::{MAX_BUTTONS_PER_SIDE, WindowButton, WindowButtonLayout};
-        if !matches!(
-            window.window_decorations(),
-            gpui::Decorations::Client { .. }
-        ) {
-            return None;
-        }
-        let layout = cx
-            .button_layout()
-            .unwrap_or_else(WindowButtonLayout::linux_default);
-        let supported = window.window_controls();
-        let filter_side = |side: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE]| {
-            let mut out = [None; MAX_BUTTONS_PER_SIDE];
-            let mut i = 0;
-            for button in side.into_iter().flatten() {
-                let keep = match button {
-                    WindowButton::Minimize => supported.minimize,
-                    WindowButton::Maximize => supported.maximize,
-                    WindowButton::Close => true,
-                };
-                if keep {
-                    out[i] = Some(button);
-                    i += 1;
-                }
-            }
-            out
-        };
-        let layout = WindowButtonLayout {
-            left: filter_side(layout.left),
-            right: filter_side(layout.right),
-        };
-        (layout.left[0].is_some() || layout.right[0].is_some()).then_some(layout)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn resolve_linux_captions(_window: &Window, _cx: &App) -> Option<gpui::WindowButtonLayout> {
-        None
-    }
-
-    pub(super) fn linux_left_caption_count(&self) -> usize {
-        self.linux_captions
-            .map_or(0, |l| l.left.iter().flatten().count())
-    }
-
-    pub(super) fn linux_right_caption_count(&self) -> usize {
-        self.linux_captions
-            .map_or(0, |l| l.right.iter().flatten().count())
-    }
-
-    /// Right padding titlebar content needs to clear the platform's caption
-    /// controls (native Windows cluster / Slopty-drawn Linux buttons).
-    pub(super) fn titlebar_right_pad(&self, base: f32) -> f32 {
-        titlebar_right_padding(
-            cfg!(target_os = "windows"),
-            self.linux_right_caption_count(),
-            base,
-        )
-    }
-
-    /// Slopty-drawn Linux caption controls, one overlay per populated side.
-    /// Shell-level chrome like the Windows cluster: mounted at the root so
-    /// they stay above the splash and the connection's error page.
-    fn render_linux_caption_controls(&self, window: &Window, cx: &App) -> Vec<AnyElement> {
-        let Some(layout) = self.linux_captions else {
-            return Vec::new();
-        };
-        let theme = Theme::of(cx);
-        let is_maximized = window.is_maximized();
-        // Ids can be per-button (not per-side): the layout parser dedups, so
-        // a button never appears on both sides at once.
-        let strip = |buttons: &[Option<gpui::WindowButton>]| {
-            div()
-                .absolute()
-                .top_0()
-                .h(px(Theme::TITLEBAR_HEIGHT))
-                .flex()
-                .flex_row()
-                .items_center()
-                .pt(px(Theme::TITLEBAR_TOP_PAD))
-                .gap(px(2.0))
-                .px(px(10.0))
-                .children(buttons.iter().flatten().map(|button| {
-                    match button {
-                        gpui::WindowButton::Minimize => linux_caption_button(
-                            "window-minimize",
-                            "Minimize",
-                            icons::WINDOW_MINIMIZE,
-                            false,
-                            theme,
-                            |_, window, _| window.minimize_window(),
-                        )
-                        .into_any_element(),
-                        gpui::WindowButton::Maximize => {
-                            let (id, label, icon_path) = if is_maximized {
-                                ("window-restore", "Restore", icons::WINDOW_RESTORE)
-                            } else {
-                                ("window-maximize", "Maximize", icons::WINDOW_MAXIMIZE)
-                            };
-                            linux_caption_button(
-                                id,
-                                label,
-                                icon_path,
-                                false,
-                                theme,
-                                |_, window, _| window.zoom_window(),
-                            )
-                            .into_any_element()
-                        }
-                        gpui::WindowButton::Close => linux_caption_button(
-                            "window-close",
-                            "Close",
-                            icons::CLOSE,
-                            true,
-                            theme,
-                            |_, window, _| window.remove_window(),
-                        )
-                        .into_any_element(),
-                    }
-                }))
-        };
-        let mut out = Vec::new();
-        if layout.left[0].is_some() {
-            out.push(strip(&layout.left).left_0().into_any_element());
-        }
-        if layout.right[0].is_some() {
-            out.push(strip(&layout.right).right_0().into_any_element());
-        }
-        out
-    }
-
-    /// Linux CSD chrome state: which edges the compositor has taken (tiled or
-    /// maximized). A free edge can carry a resize strip; a fully floating
-    /// window (nothing tiled) also gets rounded corners. Server decorations
-    /// (e.g. KDE SSD) hand the frame back to the compositor — no CSD chrome.
-    #[cfg(target_os = "linux")]
-    fn linux_csd_edges(window: &Window) -> (bool, bool, bool, bool) {
-        match window.window_decorations() {
-            gpui::Decorations::Client { tiling } => {
-                (!tiling.top, !tiling.bottom, !tiling.left, !tiling.right)
-            }
-            gpui::Decorations::Server => (false, false, false, false),
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn linux_csd_edges(_window: &Window) -> (bool, bool, bool, bool) {
-        (false, false, false, false)
-    }
-
-    /// True when the Linux window floats (CSD, nothing tiled or maximized) —
-    /// the state that gets macOS-style rounded corners.
-    fn linux_window_floating(window: &Window) -> bool {
-        let (top, bottom, left, right) = Self::linux_csd_edges(window);
-        top && bottom && left && right && cfg!(target_os = "linux")
-    }
-
-    /// The corner radius chrome layers must PAINT for this frame. gpui's
-    /// content masks are rectangles — `.rounded()` never clips children, so
-    /// every full-bleed layer that can occupy a window corner rounds its own
-    /// background with this radius (the layer beneath shows through the
-    /// curve, down to the transparent window corners). Zero everywhere the
-    /// window must be square: macOS rounds via the window server, and a
-    /// tiled/maximized Linux window sits flush with the screen.
-    pub(crate) fn window_corner_radius(window: &Window) -> f32 {
-        if Self::linux_window_floating(window) {
-            LINUX_WINDOW_CORNER_RADIUS
-        } else {
-            0.0
-        }
-    }
-
-    /// Invisible edge strips that turn pointer presses into compositor
-    /// resizes — the CSD contract on X11 and Wayland, where the platform
-    /// draws no frame for us. Each strip mounts only along a free edge (a
-    /// maximized or snapped window exposes just its untiled edges, like
-    /// GTK). The strips paint last so they sit above all content chrome.
-    fn render_linux_resize_borders(window: &Window) -> Vec<AnyElement> {
-        let (top, bottom, left, right) = Self::linux_csd_edges(window);
-        const EDGE: f32 = 6.0;
-        const CORNER: f32 = 14.0;
-        let mut out = Vec::new();
-        macro_rules! strip {
-            ($position:expr, $cursor:ident, $edge:expr) => {
-                out.push(
-                    $position
-                        .$cursor()
-                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                            cx.stop_propagation();
-                            window.start_window_resize($edge);
-                        })
-                        .into_any_element(),
-                );
-            };
-        }
-        // Cardinal edges: full-length strips inset by the corner squares.
-        if top {
-            strip!(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(px(CORNER))
-                    .right(px(CORNER))
-                    .h(px(EDGE)),
-                cursor_ns_resize,
-                gpui::ResizeEdge::Top
-            );
-        }
-        if bottom {
-            strip!(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left(px(CORNER))
-                    .right(px(CORNER))
-                    .h(px(EDGE)),
-                cursor_ns_resize,
-                gpui::ResizeEdge::Bottom
-            );
-        }
-        if left {
-            strip!(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(CORNER))
-                    .bottom(px(CORNER))
-                    .w(px(EDGE)),
-                cursor_ew_resize,
-                gpui::ResizeEdge::Left
-            );
-        }
-        if right {
-            strip!(
-                div()
-                    .absolute()
-                    .right_0()
-                    .top(px(CORNER))
-                    .bottom(px(CORNER))
-                    .w(px(EDGE)),
-                cursor_ew_resize,
-                gpui::ResizeEdge::Right
-            );
-        }
-        // Corners: squares over both adjacent edges, diagonal cursors.
-        if top && left {
-            strip!(
-                div().absolute().top_0().left_0().size(px(CORNER)),
-                cursor_nwse_resize,
-                gpui::ResizeEdge::TopLeft
-            );
-        }
-        if top && right {
-            strip!(
-                div().absolute().top_0().right_0().size(px(CORNER)),
-                cursor_nesw_resize,
-                gpui::ResizeEdge::TopRight
-            );
-        }
-        if bottom && left {
-            strip!(
-                div().absolute().bottom_0().left_0().size(px(CORNER)),
-                cursor_nesw_resize,
-                gpui::ResizeEdge::BottomLeft
-            );
-        }
-        if bottom && right {
-            strip!(
-                div().absolute().bottom_0().right_0().size(px(CORNER)),
-                cursor_nwse_resize,
-                gpui::ResizeEdge::BottomRight
-            );
-        }
-        out
-    }
-
     /// The sidebar column's tone, spanning the FULL window height (under the
     /// traffic lights, through the titlebar, down to the bottom edge), with a
     /// hairline on its right edge so the column reads as its own surface.
-    /// The tone carries the window's left corners when the CSD window floats
-    /// — with one caveat: a corner radius is clamped to the element's own
-    /// size, and the COLLAPSED sidebar is a ~1px border sliver (the grab
-    /// affordance). macOS trims that hairline with the window server's native
-    /// corner clip; we reproduce the same trim by insetting the sliver
-    /// vertically to where the curve begins, so its tips never float over the
-    /// transparent corner cutouts.
-    fn sidebar_tone(width: f32, border_color: gpui::Hsla, window: &Window) -> gpui::Div {
-        let window_corner = Self::window_corner_radius(window);
+    fn sidebar_tone(width: f32, border_color: gpui::Hsla) -> gpui::Div {
         div()
             .absolute()
             .top_0()
             .bottom_0()
             .left_0()
             .w(px(width))
-            .when(window_corner > 0.0, |el| {
-                if width >= 2.0 * window_corner {
-                    el.rounded_tl(px(window_corner))
-                        .rounded_bl(px(window_corner))
-                } else {
-                    el.top(px(window_corner)).bottom(px(window_corner))
-                }
-            })
             .bg(crate::theme::wash(0.05))
             .border_r_1()
             .border_color(border_color)
@@ -5033,11 +4638,10 @@ fn window_control_button_with(
         // mouse-down that arms the drag, the mouse-move that hands AppKit a
         // native drag session (`performWindowDragWithEvent:`, whose second
         // quick click zooms NATIVELY on macOS), and the `click_count == 2`
-        // zoom handler — never fires with the pointer over a button. It also
-        // removes the button's rect from the native Drag control-area
-        // hit-test on Windows/Linux. The click-level stop_propagation is
-        // zed's ButtonLike belt on top. Double-click on EMPTY strip space
-        // still zooms — nothing occludes it there.
+        // zoom handler — never fires with the pointer over a button. The
+        // click-level stop_propagation is zed's ButtonLike belt on top.
+        // Double-click on EMPTY strip space still zooms — nothing occludes it
+        // there.
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |event, window, cx| {
@@ -5055,116 +4659,6 @@ fn window_control_button_with(
 // What a pressed chrome button shows under the pointer (Zed's `active_background`).
 fn theme_pressed() -> gpui::Hsla {
     crate::theme::wash(0.16)
-}
-
-const WINDOWS_CAPTION_BUTTON_WIDTH: f32 = 36.0;
-const WINDOWS_CAPTION_WIDTH: f32 = WINDOWS_CAPTION_BUTTON_WIDTH * 3.0;
-
-/// Right padding for titlebar content: past the native Windows caption
-/// cluster, or past Slopty's own Linux caption buttons (10px edge inset +
-/// the button row) when the layout puts any on the right.
-fn titlebar_right_padding(is_windows: bool, linux_right_captions: usize, base: f32) -> f32 {
-    base + if is_windows {
-        WINDOWS_CAPTION_WIDTH
-    } else if linux_right_captions > 0 {
-        10.0 + caption_buttons_width(linux_right_captions)
-    } else {
-        0.0
-    }
-}
-
-/// A Windows-owned caption target using the same system glyphs and native
-/// non-client hit-test areas as GPUI/Zed's platform titlebar.
-fn windows_caption_button(
-    id: &'static str,
-    glyph: &'static str,
-    area: WindowControlArea,
-    theme: &Theme,
-    close: bool,
-) -> impl IntoElement {
-    let (hover_bg, hover_fg, active_bg, active_fg) = if close {
-        let red: gpui::Hsla = gpui::rgb(0xe81123).into();
-        (
-            red,
-            gpui::white(),
-            red.opacity(0.8),
-            gpui::white().opacity(0.8),
-        )
-    } else {
-        (
-            theme.glass_hover(),
-            theme.text,
-            theme.glass_hover().opacity(0.7),
-            theme.text,
-        )
-    };
-    div()
-        .id(id)
-        .w(px(WINDOWS_CAPTION_BUTTON_WIDTH))
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(crate::typography::ui_rems(10.0))
-        .text_color(theme.text)
-        .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
-        .active(move |style| style.bg(active_bg).text_color(active_fg))
-        .occlude()
-        .window_control_area(area)
-        .child(glyph)
-}
-
-/// A Linux caption button in Slopty's own cluster style (24px, rounded-6,
-/// 16px linear icon). gpui's `WindowControlArea` hit-testing is inert on
-/// Linux, so unlike the Windows cluster these carry explicit click handlers
-/// (`minimize_window` / `zoom_window` / `remove_window`), the same calls
-/// zed's Linux titlebar makes. `occlude` + `prevent_default` keep them out
-/// of the drag strip's event surface (see [`window_control_button`]).
-fn linux_caption_button(
-    id: &'static str,
-    label: &'static str,
-    icon_path: &'static str,
-    close: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let (muted, hover_bg, hover_fg) = if close {
-        let red: gpui::Hsla = gpui::rgb(0xe81123).into();
-        (theme.text_muted, red, gpui::white())
-    } else {
-        (theme.text_muted, theme.glass_hover(), theme.text)
-    };
-    div()
-        .id(id)
-        // gpui svgs don't inherit the div's text color — recolor the glyph
-        // on hover through the group instead (zed's WindowControl idiom).
-        .group("linux-caption-button")
-        .size(px(24.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover_bg))
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .tooltip(crate::settings::widgets::text_tooltip(label))
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            on_click(event, window, cx)
-        })
-        .child(
-            icon(icon_path)
-                .size(px(16.0))
-                .text_color(muted)
-                .group_hover("linux-caption-button", move |style| {
-                    style.text_color(hover_fg)
-                }),
-        )
 }
 
 impl Render for Shell {
@@ -5231,7 +4725,7 @@ impl Render for Shell {
         self.settings.surface = crate::appearance::surface(cx);
         self.pull_settings(cx);
         let theme = Theme::of(cx);
-        // The shell frost sits over native desktop blur on macOS and Windows.
+        // The shell frost sits over native desktop blur on macOS.
         // Content surfaces add their own backgrounds over this shared tint.
         let (frost, text, font) = (theme.glass(), theme.text, theme.font_sans.clone());
         let gate = self
@@ -5293,14 +4787,6 @@ impl Render for Shell {
             }
             self.fullscreen = Some(fullscreen);
         }
-        // Linux CSD: (re-)resolve which caption buttons we draw and on which
-        // side — decorations can flip server↔client at runtime and the
-        // desktop's button layout is user configuration.
-        self.linux_captions = Self::resolve_linux_captions(window, cx);
-        if cfg!(target_os = "linux") && self.button_layout_sub.is_none() {
-            self.button_layout_sub =
-                Some(cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()));
-        }
         agent_ui::serve(window, cx); // this window takes agents' asks (`agent_ui`)
 
         if self.activation_sub.is_none() {
@@ -5361,14 +4847,6 @@ impl Render for Shell {
             .flex_row()
             .size_full()
             .bg(frost)
-            // Linux CSD: a floating window rounds its corners against the
-            // desktop (the window composites with alpha — see
-            // `Theme::window_background_appearance`); tiled/maximized keeps
-            // square edges flush with the screen. Everything, including the
-            // splash and caption chrome, clips to the curve.
-            .when(Self::linux_window_floating(window), |el| {
-                el.rounded(px(LINUX_WINDOW_CORNER_RADIUS)).overflow_hidden()
-            })
             .text_color(text)
             .font_family(font)
             // Every text under the window draws a prompt's symbols (`symbol_fallbacks`).
@@ -5508,7 +4986,7 @@ impl Render for Shell {
                     let overlays = self.render_overlays(window.viewport_size(), window, cx);
                     let border_color = Theme::of(cx).border;
                     let sidebar_tone =
-                        Self::sidebar_tone(self.settings.sidebar_width, border_color, window);
+                        Self::sidebar_tone(self.settings.sidebar_width, border_color);
                     let drag = self.titlebar_drag_region(
                         "settings-titlebar",
                         div()
@@ -5589,7 +5067,7 @@ impl Render for Shell {
                 // Its width rides the same tween as the sidebar, so the tone
                 // melts away with the collapse instead of vanishing in a frame.
                 let sidebar_now = self.sidebar_now();
-                let sidebar_tone = Self::sidebar_tone(sidebar_now, border_color, window);
+                let sidebar_tone = Self::sidebar_tone(sidebar_now, border_color);
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -5684,13 +5162,8 @@ impl Render for Shell {
             SplashPhase::Gone => root,
         };
 
-        // Caption controls are shell-level chrome, not Ready-page content:
-        // keep them above the splash and the connection's error page as well as
-        // the full application. Gate pages also need a drag surface because
-        // they do not render the unified tabs/settings titlebar — on Windows
-        // the native `Drag` control area, on Linux the explicit
-        // `start_window_move` strip (the control-area hit-test is inert
-        // there); macOS drags gate windows natively.
+        // Gate pages do not render the unified tabs/settings titlebar, so they
+        // get a drag surface of their own; macOS drags gate windows natively.
         let root = if matches!(gate, GatePhase::Ready)
             || cfg!(target_os = "macos")
         {
@@ -5709,12 +5182,6 @@ impl Render for Shell {
                 ),
             )
         };
-        let root = root
-            .children(self.render_windows_caption_controls(window, cx))
-            .children(self.render_linux_caption_controls(window, cx))
-            // Last so the invisible CSD resize strips sit above every other
-            // element at the window edges.
-            .children(Self::render_linux_resize_borders(window));
         self.render_time = None;
         // Wheel notches anywhere in the window glide (Appearance → Motion).
         crate::smooth_scroll::smooth_scroll(root)
@@ -5809,7 +5276,7 @@ mod tests {
     #[test]
     fn narrowest_sidebar_keeps_its_options_button_beside_the_titlebar_controls() {
         for is_macos in [true, false] {
-            let cluster_end = cluster_buttons_start(is_macos, false, 0) + CLUSTER_BUTTONS_WIDTH;
+            let cluster_end = cluster_buttons_start(is_macos, false) + CLUSTER_BUTTONS_WIDTH;
             let options_right = cluster_end + TITLEBAR_GROUP_GAP + 24.0;
             assert!(
                 options_right + Theme::SPACE_SM <= SIDEBAR_MIN,
@@ -6078,31 +5545,6 @@ mod tests {
         assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 6.0);
     }
 
-    #[test]
-    fn windows_caption_controls_reserve_titlebar_space() {
-        assert_eq!(titlebar_right_padding(true, 0, 16.0), 124.0);
-        assert_eq!(titlebar_right_padding(false, 0, 16.0), 16.0);
-    }
-
-    #[test]
-    fn linux_caption_controls_reserve_titlebar_space() {
-        // 24px buttons on the cluster's 2px rhythm.
-        assert_eq!(caption_buttons_width(0), 0.0);
-        assert_eq!(caption_buttons_width(1), 24.0);
-        assert_eq!(caption_buttons_width(3), 76.0);
-        // Right-side captions (the Linux default: minimize,maximize,close):
-        // content pads past the 10px edge inset + the button row.
-        assert_eq!(titlebar_right_padding(false, 3, 16.0), 16.0 + 10.0 + 76.0);
-        // GNOME-vanilla ":close" — a single right button.
-        assert_eq!(titlebar_right_padding(false, 1, 16.0), 16.0 + 10.0 + 24.0);
-        // Left-side captions ("close:…" layouts) shift the app cluster right
-        // by the button row + one 2px gap.
-        assert_eq!(cluster_buttons_start(false, false, 0), 10.0);
-        assert_eq!(cluster_buttons_start(false, false, 1), 10.0 + 24.0 + 2.0);
-        assert_eq!(cluster_buttons_start(false, false, 3), 10.0 + 76.0 + 2.0);
-        // macOS ignores the Linux caption count entirely.
-        assert_eq!(cluster_buttons_start(true, false, 3), 88.0);
-    }
 
     #[test]
     fn a_files_view_is_titled_by_its_name() {
@@ -6754,7 +6196,7 @@ mod exit_regressions {
             .unwrap();
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     #[gpui::test]
     fn transcript_links_open_new_tabs_and_reject_stale_sessions(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -6862,7 +6304,6 @@ mod exit_regressions {
     /// Encoded destinations open the decoded path, and an absolute
     /// destination no root owns opens through the linking chat's own file
     /// context with its absolute path intact.
-    #[cfg(unix)]
     #[gpui::test]
     fn encoded_and_outside_file_links_open_in_the_linking_chats_context(cx: &mut TestAppContext) {
         use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
@@ -6986,7 +6427,7 @@ mod exit_regressions {
             .unwrap();
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     #[gpui::test]
     fn markdown_preview_events_open_browser_from_files_and_a_file(cx: &mut TestAppContext) {
         use crate::markdown::render::{LinkAction, LinkActivation, LinkTarget};

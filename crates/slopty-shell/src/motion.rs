@@ -294,32 +294,8 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
         // The clock's first tick is now.
         clock.ticked_at = Some(now);
         cx.spawn(async move |cx| {
-            #[cfg(windows)]
-            let mut precise_clock = if cx
-                .background_executor()
-                .scheduler_executor()
-                .scheduler()
-                .as_test()
-                .is_none()
-            {
-                windows_pulse::Clock::new(PULSE_TICK)
-            } else {
-                // A deterministic scheduler must own its timers and wakeups;
-                // an OS thread cannot schedule its thread-local tasks safely.
-                None
-            };
             loop {
-                #[cfg(windows)]
-                let precise_tick = if let Some(clock) = precise_clock.as_mut() {
-                    clock.tick().await
-                } else {
-                    false
-                };
-                #[cfg(not(windows))]
-                let precise_tick = false;
-                if !precise_tick {
-                    cx.background_executor().timer(PULSE_TICK).await;
-                }
+                cx.background_executor().timer(PULSE_TICK).await;
                 let parked = cx.update(|cx| {
                     let now = cx.background_executor().now();
                     let clock = cx.default_global::<PulseClock>();
@@ -1522,7 +1498,6 @@ const fn resolve(system: bool, pause_in_background: bool, active: bool) -> bool 
 pub fn init(pause_in_background: bool, cx: &mut App) {
     let system = cx.has_global::<HeardSystem>() && cx.remove_global::<HeardSystem>().0;
     cx.set_global(MotionState { pause_in_background, system, active: true, held: None });
-    refresh_system(cx);
     apply(cx);
 }
 
@@ -1558,24 +1533,9 @@ pub fn hold(reduced: bool, cx: &mut App) {
     }
 }
 
-/// Main-window focus moved. Regaining focus also re-reads the OS setting where no watch hears it
-/// (Windows, Linux): changing it means visiting the system's settings, so coming back is the
-/// moment it can have moved. A Mac, iPhone and iPad say each change through the app's watch
-/// ([`set_system`]).
+/// Main-window focus moved. A Mac, iPhone and iPad say each change of the OS setting through
+/// the app's watch ([`set_system`]), so focus only weighs in for a paused background.
 pub fn window_activation_changed(active: bool, cx: &mut App) {
-    // Only the app installs motion state. Test windows activate too, and the
-    // Linux portal read would wake the deterministic scheduler from a D-Bus
-    // thread.
-    if !cx.has_global::<MotionState>() {
-        return;
-    }
-    if active {
-        refresh_system(cx);
-    }
-    set_window_active(active, cx);
-}
-
-fn set_window_active(active: bool, cx: &mut App) {
     let Some(state) = state_mut(cx) else {
         return;
     };
@@ -1607,43 +1567,6 @@ fn apply(cx: &mut App) {
     // gpui refreshes every window only when the flag actually flips.
     set_reduced_motion(cx, reduced);
 }
-
-/// "Show animations in Windows" (Settings → Accessibility → Visual effects).
-#[cfg(windows)]
-fn refresh_system(cx: &mut App) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
-    };
-    let mut enabled: windows_sys::core::BOOL = 1;
-    let read = unsafe {
-        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut enabled).cast(), 0)
-    };
-    set_system(read != 0 && enabled == 0, cx);
-}
-
-/// The desktop portal's `reduced-motion` key, which GNOME and KDE map from
-/// their own animation settings. A D-Bus round trip, so it stays off the
-/// foreground; portals without the key read as no preference.
-#[cfg(target_os = "linux")]
-fn refresh_system(cx: &mut App) {
-    use ashpd::desktop::settings::{ReducedMotion, Settings};
-    use gpui::AppContext as _;
-    let read = cx.background_spawn(async {
-        let settings = Settings::new().await.ok()?;
-        let motion = settings.reduced_motion().await.ok()?;
-        Some(motion == ReducedMotion::ReducedMotion)
-    });
-    cx.spawn(async move |cx| {
-        let reduce = read.await.unwrap_or(false);
-        cx.update(|cx| set_system(reduce, cx));
-    })
-    .detach();
-}
-
-/// A Mac, iPhone and iPad have nothing to read here: the app's watch hears Reduce Motion as it
-/// changes and says it with [`set_system`].
-#[cfg(not(any(windows, target_os = "linux")))]
-fn refresh_system(_cx: &mut App) {}
 
 // A line of text that is alive while its work runs (opencode's `text-shimmer`): a band of
 // strong ink sweeps across faint glyphs. Its values are opencode's: 45 ms per glyph, a 1200 ms
@@ -1944,13 +1867,13 @@ mod tests {
             assert!(!reduced_motion(cx));
             hold(true, cx);
             assert!(reduced_motion(cx));
-            set_window_active(false, cx);
-            set_window_active(true, cx);
+            window_activation_changed(false, cx);
+            window_activation_changed(true, cx);
             assert!(reduced_motion(cx), "activation keeps the held flag");
             set_system(true, cx);
             set_system(false, cx);
             assert!(reduced_motion(cx), "the OS's setting keeps it too");
-            set_window_active(false, cx);
+            window_activation_changed(false, cx);
             hold(false, cx);
             assert!(!reduced_motion(cx), "the hold wins over a paused background");
         });
@@ -2451,11 +2374,11 @@ mod tests {
             apply(cx);
             assert!(!reduced_motion(cx));
 
-            set_window_active(false, cx);
+            window_activation_changed(false, cx);
             assert!(!reduced_motion(cx), "pause is opt-in");
             set_pause_in_background(true, cx);
             assert!(reduced_motion(cx), "unfocused window pauses");
-            set_window_active(true, cx);
+            window_activation_changed(true, cx);
             assert!(!reduced_motion(cx), "refocus resumes");
 
             set_system(true, cx);
@@ -2550,10 +2473,6 @@ mod tests {
         assert_eq!(paced_phase(period, now, None), locked_phase(period, now));
     }
 }
-
-#[cfg(windows)]
-#[path = "motion/windows_pulse.rs"]
-mod windows_pulse;
 
 // The copy span and the growing section every surface shares.
 mod reveal;

@@ -409,12 +409,9 @@ fn open_main_window(
                 // from window kind/level, and `appears_transparent` only affects
                 // the titlebar, not the menu bar.
                 // macOS: frameless-inset chrome, the traffic lights at 14,15. The strip is
-                // custom-drawn. Windows
-                // still needs a native title for taskbar previews and Alt+Tab. On
-                // Linux/Windows `appears_transparent` hides the system titlebar
-                // for our custom-drawn chrome; harmless where unsupported.
+                // custom-drawn.
                 titlebar: Some(TitlebarOptions {
-                    title: cfg!(target_os = "windows").then(|| "Slopty".into()),
+                    title: None,
                     appears_transparent: true,
                     // Native lights are 14px tall: top 14 → center 21, matching
                     // the 38px titlebar row with 4px top-only content padding.
@@ -424,27 +421,13 @@ fn open_main_window(
                 // Drag + start_window_move) — mark the content view app-owned
                 // so AppKit neither dead-zones the strip nor delays clicks.
                 app_owns_titlebar_drag: true,
-                // Linux: request client-side decorations — Slopty draws its own
-                // unified titlebar and (under CSD) its own caption buttons
-                // (shell.rs `render_linux_caption_controls`). Leaving this unset
-                // requests SERVER decorations, which stacked a compositor
-                // titlebar on top of the app's chrome under sway/KDE, while
-                // compositors without SSD support (GNOME) went client-side
-                // anyway — frameless, and before the shell drew caption buttons,
-                // with no window controls at all. The compositor can still
-                // override via xdg-decoration negotiation; the shell re-resolves
-                // what to draw every frame.
-                window_decorations: cfg!(target_os = "linux")
-                    .then_some(gpui::WindowDecorations::Client),
                 // Frosted shell (macOS): blur the desktop behind the window; the
                 // shell paints its frost surface translucent so the sidebar reads
-                // as glass (shell.rs root). Elsewhere blur support is compositor
-                // roulette — stay opaque.
+                // as glass (shell.rs root). Elsewhere the window stays opaque.
                 // One source of truth with the re-apply loop in `appearance::apply`
                 // — if these two ever disagree, vibrancy dies on the first theme
                 // change and never comes back.
                 window_background: theme::Theme::of(cx).window_background_appearance(),
-                app_id: Some("slopty".into()),
                 ..Default::default()
             },
             move |window, cx| {
