@@ -160,6 +160,36 @@ mod history {
         assert!(history.search(&ask).absent.is_some_and(|why| why.contains("gemini")));
     }
 
+    /// A Codex session found by its prompts is taken up again by its id while its rollout, Codex's
+    /// own record of it, is here: one whose rollout went is found with no start to give.
+    #[test]
+    fn a_codex_session_is_taken_up_again_only_while_its_rollout_is_here() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().join(".codex");
+        let kept = "01a1009b-ce5e-7d91-b77c-80127c630fd6";
+        let gone = "01a1009b-ce5e-7d91-b77c-80127c630fd7";
+        let day = codex.join("sessions").join("2026").join("10").join("03");
+        fs::create_dir_all(&day).unwrap();
+        let meta = serde_json::json!({"timestamp": "2026-10-03T10:00:00.000Z",
+            "type": "session_meta", "payload": {"id": kept, "cwd": "/w/api", "source": "cli"}});
+        let rollout = day.join(format!("rollout-2026-10-03T14-12-53-{kept}.jsonl"));
+        fs::write(rollout, format!("{meta}\n")).unwrap();
+        let said = |session: &str, text: &str| {
+            let line =
+                serde_json::json!({"session_id": session, "ts": 1_780_559_712, "text": text});
+            format!("{line}\n")
+        };
+        let prompts = [said(kept, "add a retry"), said(gone, "add a retry too")];
+        fs::write(codex.join("history.jsonl"), prompts.concat()).unwrap();
+        let stores = Stores { claude: None, codex: Some(codex), pi: None };
+        let found = search(&History::new(stores, Limits::default()), "retry");
+        let resume = |native: &str| {
+            found.sessions.iter().find(|s| s.native == native).map(|s| s.resume.clone())
+        };
+        assert_eq!(resume(kept), Some(slopty_agent::codex::resume_args(kept)));
+        assert_eq!(resume(gone), Some(Vec::new()), "found, with nothing to take up");
+    }
+
     /// A session found by its prompts says when it was last active as its folder's listing and
     /// its open thread do: its transcript's last record's time, not its last prompt's; one with
     /// no transcript here says its last prompt's.
