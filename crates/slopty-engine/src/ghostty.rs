@@ -134,6 +134,9 @@ pub struct GhosttyEngine {
     /// The primary screen as VT bytes, taken just before the program switched to the alternate
     /// screen, so a checkpoint made on the alternate screen can carry both.
     primary_snapshot: Option<Vec<u8>>,
+    /// How the program entered the alternate screen it is on, when [`Self::feed`] saw the
+    /// switch: a checkpoint's replay enters it the same way ([`AltEntry`]).
+    alt_entry: Option<AltEntry>,
     /// Counts the writes, resizes and colour changes, so work over the whole terminal (the
     /// primary snapshot, search's plain text) is redone only when something changed.
     generation: u64,
@@ -515,6 +518,7 @@ impl GhosttyEngine {
             base: 0,
             on_alt: false,
             primary_snapshot: None,
+            alt_entry: None,
             generation: 0,
             primary_at: u64::MAX,
             checkpoint_max: usize::MAX,
@@ -672,10 +676,17 @@ impl GhosttyEngine {
         // had on and the program turned off on the alternate screen would stay on: put every
         // mode the primary set back to its default before the alternate screen sets its own.
         out.extend_from_slice(&mode_resets(primary));
-        // Enter the alternate screen here, saving the primary cursor the snapshot just placed,
-        // and home: the formatter writes content from wherever the cursor is, and it is where
-        // the primary left it. Its own `?1049h` (in the modes it emits) is then a no-op.
-        out.extend_from_slice(b"\x1b[?1049h");
+        // Enter the alternate screen here the way the program did, so the primary's saved
+        // cursor is the program's: `?1049h` saves the cursor the snapshot just placed, where
+        // the program's own switch saved it, and `?47h` or `?1047h` leave the one the
+        // snapshot set, or none. Then home: the formatter writes content from wherever the
+        // cursor is, and it is where the primary left it. The switch among the modes the
+        // alternate screen's blob emits finds it already there.
+        let entry = match self.alt_entry {
+            Some(entry) => entry,
+            None => self.alt_entry_of_modes()?,
+        };
+        out.extend_from_slice(entry.sequence());
         // The cursor's shape is the terminal's, and the primary's blob set the one it had then:
         // give the alternate screen the default back for its own blob to set its shape over.
         out.extend_from_slice(b"\x1b[0 q");
@@ -704,6 +715,21 @@ impl GhosttyEngine {
             self.primary_at = self.generation;
         }
         Ok(self.primary_snapshot.as_deref().unwrap_or_default())
+    }
+
+    /// How the program entered the alternate screen, read from the modes it holds, when
+    /// [`Self::feed`] did not see the switch (split past what it keeps, or set among other
+    /// modes): by the mode that saves the cursor when that one is on, as most programs do.
+    fn alt_entry_of_modes(&self) -> Result<AltEntry, EngineError> {
+        Ok(if self.term.mode(Mode::ALT_SCREEN_SAVE)? {
+            AltEntry::SavingTheCursor
+        } else if self.term.mode(Mode::ALT_SCREEN)? {
+            AltEntry::Plain
+        } else if self.term.mode(Mode::ALT_SCREEN_LEGACY)? {
+            AltEntry::Legacy
+        } else {
+            AltEntry::SavingTheCursor
+        })
     }
 
     /// The active screen and the terminal state around it, as VT bytes.
@@ -931,13 +957,14 @@ impl GhosttyEngine {
             // terminal is still on the primary (the sequence is not finished), so snapshot now.
             let mut probe = std::mem::take(&mut self.alt_prefix);
             probe.extend(chunk.iter().take(8));
-            if alt_enter_at(&probe) == Some(0) {
+            if let Some((0, entry)) = alt_enter_at(&probe) {
+                self.alt_entry = Some(entry);
                 self.snapshot_primary();
             }
         }
         let switch_at = if self.on_alt { None } else { alt_enter_at(chunk) };
         let rest = match switch_at {
-            Some(at) => {
+            Some((at, entry)) => {
                 let (before, from_switch) = chunk.split_at(at);
                 if !before.is_empty() {
                     self.generation = self.generation.wrapping_add(1);
@@ -945,6 +972,7 @@ impl GhosttyEngine {
                     self.settle_or_bump();
                 }
                 if !self.on_alt {
+                    self.alt_entry = Some(entry);
                     self.snapshot_primary();
                 }
                 from_switch
@@ -1221,6 +1249,7 @@ impl GhosttyEngine {
             // Back on the primary: its numbering, marks and blocks come back with the parked
             // anchor, so the clients take back the lines they held; a new numbering if the
             // anchor did not survive (checked below).
+            self.alt_entry = None;
             self.anchor = self.primary_anchor.take();
             self.commands = std::mem::take(&mut self.primary_commands);
             self.forced_rows.clear();
@@ -2194,23 +2223,51 @@ fn mode_resets(blob: &[u8]) -> Vec<u8> {
 fn alt_prefix_of(chunk: &[u8]) -> &[u8] {
     let Some(esc) = memchr::memrchr(0x1b, chunk) else { return &[] };
     let tail = chunk.get(esc..).unwrap_or_default();
-    let unfinished = [&b"\x1b[?1049h"[..], b"\x1b[?1047h", b"\x1b[?47h"]
+    let unfinished = AltEntry::ALL
         .iter()
+        .map(|entry| entry.sequence())
         .any(|seq| seq.len() > tail.len() && seq.starts_with(tail));
     if unfinished { tail } else { &[] }
 }
 
+/// How a program enters the alternate screen. Only `?1049h` saves the primary's cursor (where
+/// it is, in its pen), which leaving by `?1049l` puts back; `?47h` and `?1047h` leave the one
+/// the primary saved before, or none, and leaving by `?1049l` then puts the cursor home in the
+/// default pen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AltEntry {
+    /// `CSI ? 47 h`.
+    Legacy,
+    /// `CSI ? 1047 h`.
+    Plain,
+    /// `CSI ? 1049 h`.
+    SavingTheCursor,
+}
+
+impl AltEntry {
+    const ALL: [Self; 3] = [Self::SavingTheCursor, Self::Plain, Self::Legacy];
+
+    const fn sequence(self) -> &'static [u8] {
+        match self {
+            Self::Legacy => b"\x1b[?47h",
+            Self::Plain => b"\x1b[?1047h",
+            Self::SavingTheCursor => b"\x1b[?1049h",
+        }
+    }
+}
+
 /// Byte offset of the first sequence that enters the alternate screen (`CSI ? 1049 h`,
-/// `CSI ? 1047 h`, `CSI ? 47 h`), if the chunk holds one. A split sequence (the `ESC [ ?` at the
-/// end of one read and the digits in the next) is not found; the primary snapshot is then the
-/// one from the last checkpoint, which is only staler by the output between them.
-fn alt_enter_at(chunk: &[u8]) -> Option<usize> {
+/// `CSI ? 1047 h`, `CSI ? 47 h`), and which, if the chunk holds one. A split sequence (the
+/// `ESC [ ?` at the end of one read and the digits in the next) is not found; the primary
+/// snapshot is then the one from the last checkpoint, which is only staler by the output
+/// between them.
+fn alt_enter_at(chunk: &[u8]) -> Option<(usize, AltEntry)> {
     let mut from = 0;
     while let Some(rel) = memchr::memmem::find(chunk.get(from..)?, b"\x1b[?") {
         let at = from.saturating_add(rel);
-        let params = chunk.get(at.saturating_add(3)..).unwrap_or_default();
-        if [&b"1049h"[..], b"1047h", b"47h"].iter().any(|p| params.starts_with(p)) {
-            return Some(at);
+        let rest = chunk.get(at..).unwrap_or_default();
+        if let Some(entry) = AltEntry::ALL.into_iter().find(|e| rest.starts_with(e.sequence())) {
+            return Some((at, entry));
         }
         from = at.saturating_add(3);
     }
@@ -5776,6 +5833,35 @@ mod checkpoint_tests {
         }
     }
 
+    /// A checkpoint taken on the alternate screen enters it the way the program did, so the
+    /// primary's saved cursor comes back as the program's: none after `?47h` or `?1047h`, the
+    /// cursor and pen where it switched after `?1049h`, and one saved before a switch that
+    /// saves none still there. The replay entered by `?1049h` whatever the program had used,
+    /// so leaving by `?1049l` put the cursor back where the primary had been, in its pen
+    /// (fuzz `regressions/terminal/checkpoint-alt-screen-entered-without-saving-the-cursor`).
+    #[test]
+    fn a_checkpoint_on_the_alternate_screen_enters_it_the_way_the_program_did() {
+        for input in [
+            &b"\x1b[32mab\x1b[?47hon the alternate"[..],
+            b"\x1b[32mab\x1b[?1047hon the alternate",
+            b"\x1b[32mab\x1b[?1049hon the alternate",
+            b"\x1b[2;3H\x1b[31m\x1b7\x1b[32m\x1b[Hab\x1b[?47hon the alternate",
+        ] {
+            for leave in [&b"\x1b[?1049lxy"[..], b"\x1b[?47l\x1b8xy"] {
+                let mut a = engine(16, 4, 100);
+                a.write(input);
+                let mut b = replayed(&mut a);
+                a.write(leave);
+                b.write(leave);
+                let what = format!("{} then {}", input.escape_ascii(), leave.escape_ascii());
+                assert_eq!(screen_lines(&mut b), screen_lines(&mut a), "{what}");
+                let (fa, fb) = (a.full_frame(0).unwrap(), b.full_frame(0).unwrap());
+                let (got, want) = ((fb.cursor.row, fb.cursor.col), (fa.cursor.row, fa.cursor.col));
+                assert_eq!(got, want, "{what}");
+            }
+        }
+    }
+
     /// What a checkpoint of `a` replays into a fresh engine of its size.
     fn replayed(a: &mut GhosttyEngine) -> GhosttyEngine {
         let mut state = Vec::new();
@@ -6697,8 +6783,9 @@ mod checkpoint_tests {
 
     #[test]
     fn the_alternate_screen_switch_is_found_mid_chunk() {
-        assert_eq!(alt_enter_at(b"abc\x1b[?1049hxyz"), Some(3));
-        assert_eq!(alt_enter_at(b"\x1b[?25l\x1b[?47h"), Some(6));
+        assert_eq!(alt_enter_at(b"abc\x1b[?1049hxyz"), Some((3, AltEntry::SavingTheCursor)));
+        assert_eq!(alt_enter_at(b"\x1b[?25l\x1b[?47h"), Some((6, AltEntry::Legacy)));
+        assert_eq!(alt_enter_at(b"\x1b[?1047h"), Some((0, AltEntry::Plain)));
         assert_eq!(alt_enter_at(b"\x1b[?1049l\x1b[?2004h"), None);
         assert_eq!(alt_enter_at(b"plain"), None);
     }

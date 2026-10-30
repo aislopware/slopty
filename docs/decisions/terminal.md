@@ -3167,6 +3167,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     to its place with `CUU`, `CUD`, `CUF` and `CUB`. Tests: the fork's formatter tests,
     `a_checkpoint_keeps_a_cursor_saved_outside_the_margins_under_origin_mode` in slopty-engine
     (red on the old pin), and `regressions/terminal/checkpoint-saved-cursor-outside-the-margins`.
+  - **The alternate screen is entered the way the program did** (2026-10-30). A checkpoint
+    taken on the alternate screen writes the primary as it was at the switch, then enters the
+    alternate screen. It entered by `?1049h` whatever the program had used, and `?1049h` saves
+    the primary's cursor. A program that had entered by `?47h` or `?1047h` saved none (or kept
+    an older one), so after a replay, leaving by `?1049l` put the cursor back where the primary
+    had been, in its pen, instead of home in the default pen. The engine now keeps which of the
+    three the program entered by, as it splits the read at the switch, and the replay enters
+    the same way. A switch it did not see (split past what it keeps, or set among other modes)
+    is read from the modes the terminal holds. Tests:
+    `a_checkpoint_on_the_alternate_screen_enters_it_the_way_the_program_did` in slopty-engine
+    and `regressions/terminal/checkpoint-alt-screen-entered-without-saving-the-cursor`, found
+    by the terminal fuzz target.
   - **Kitty graphics are left open.** The formatter writes no image. Upstream's PR #12182
     (open since April) adds a `kitty_graphics` extra. Taking it means re-sending each image's
     pixels in every checkpoint, so it comes with a decision on checkpoint size and cadence
