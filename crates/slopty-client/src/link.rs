@@ -1190,7 +1190,6 @@ mod tests {
 
     /// A QUIC connection over loopback, each end on a runtime of its own: `sender` is the
     /// worker's end, `conn` the client's.
-    #[cfg(target_vendor = "apple")]
     struct Loopback {
         sender_rt: tokio::runtime::Runtime,
         client_rt: tokio::runtime::Runtime,
@@ -1198,7 +1197,6 @@ mod tests {
         conn: slopty_net::Connection,
     }
 
-    #[cfg(target_vendor = "apple")]
     impl Loopback {
         fn open() -> Self {
             use std::net::SocketAddr;
@@ -1236,6 +1234,39 @@ mod tests {
             });
             Self { sender_rt, client_rt, sender, conn }
         }
+    }
+
+    /// A terminal frame's copy the worker sends as a datagram reaches its session's pump, on
+    /// every platform; one for a session nobody opened is dropped and the reader goes on.
+    #[test]
+    fn a_frame_copy_sent_as_a_datagram_reaches_its_session() {
+        use std::time::Duration;
+
+        use slopty_proto::datagram::term_datagram;
+
+        // The sender's runtime is held to the end: it drives the worker's end.
+        let Loopback { sender_rt: _sender_rt, client_rt, sender, conn } = Loopback::open();
+        let echoes = Echoes::default();
+        let session = SessionId::new();
+        let (mut copies, _order) = echoes.open(session);
+        #[cfg(target_vendor = "apple")]
+        let reader = read_datagrams(conn, echoes, ScreenRouter::with_loss(0));
+        #[cfg(not(target_vendor = "apple"))]
+        let reader = read_datagrams(conn, echoes);
+        let _reader = client_rt.spawn(reader);
+
+        let copy = |seq| {
+            let body = slopty_proto::codec::encode_body(&TermEvent::Frame(frame(seq, false)));
+            body.unwrap()
+        };
+        let stray = term_datagram(SessionId::new(), &copy(4)).unwrap();
+        sender.send_datagram(stray).unwrap();
+        sender.send_datagram(term_datagram(session, &copy(5)).unwrap()).unwrap();
+        let within = Duration::from_secs(5);
+        let copied = client_rt.block_on(async {
+            tokio::time::timeout(within, copies.recv()).await.unwrap().unwrap()
+        });
+        assert_eq!(copied.seq, 5, "the copy reached its session");
     }
 
     /// One read can bring a terminal frame's copy among a screen stream's datagrams: the copy
