@@ -533,8 +533,11 @@ impl Beat {
         if self.stopped.load(Ordering::Acquire) {
             return;
         }
-        // The picture exists from here on, as a display time does for ScreenCaptureKit's.
-        let shown_us = host_now_us();
+        // Stamped with its beat, the refresh it stands for, as ScreenCaptureKit stamps a frame
+        // with the display time it was composed for: a beat run late draws that refresh's
+        // picture, and is that much older when it arrives. Every canvas at one rate then
+        // stamps the same instants, however late each queue runs.
+        let shown_us = due_us;
         let inputs = inputs_taken();
         let unchanged = STILL.load(Ordering::Acquire)
             && self.delivered_inputs.load(Ordering::Acquire) == inputs;
@@ -1041,7 +1044,10 @@ mod tests {
     }
 
     /// Two canvases at one rate, started half a period apart, deliver on the same instants, as
-    /// the windows of one display are captured on its one refresh.
+    /// the windows of one display are captured on its one refresh: every picture of either is
+    /// stamped with a beat of the one grid, however late its queue ran it. (The distance between
+    /// their stamps as delivered was held to 2 ms, and under `ThreadSanitizer` was 2.7 ms: Deep run
+    /// 40989163091.)
     #[test]
     #[expect(
         clippy::disallowed_methods,
@@ -1080,12 +1086,10 @@ mod tests {
             Canvas::stop(stream, |_stopped| {});
         }
         assert!(a.len() >= 20 && b.len() >= 20, "{} and {} beats", a.len(), b.len());
-        // The median distance to the other canvas's nearest beat: a timer's lateness moves one
-        // beat, a phase moves them all.
-        let mut apart: Vec<u64> =
-            b.iter().map(|&t| a.iter().map(|&s| t.abs_diff(s)).min().unwrap()).collect();
-        apart.sort_unstable();
-        let median = apart[apart.len() / 2];
-        assert!(median < 2_000, "the canvases beat {median} µs apart: {apart:?}");
+        let period = first.beat.period_us;
+        assert_eq!(second.beat.period_us, period, "one rate, one period");
+        let off: Vec<u64> =
+            a.iter().chain(&b).copied().filter(|t| t.checked_rem(period) != Some(0)).collect();
+        assert!(off.is_empty(), "stamped off the {period} µs grid: {off:?}");
     }
 }
