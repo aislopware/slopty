@@ -1,10 +1,12 @@
 //! The phone's anatomy on the simulator (`cargo xtask e2e ios --sim iphone|ipad`): a phone
-//! opens on its Sessions page (the large title, the chat list, the capsule and the tab bar, with no
-//! sidebar foot). Before any project the capsule adds one, and the phone lands on the project's
-//! page under a navigation bar (a close, none of the desktop's sidebar and history cluster),
-//! whose close goes back. After it, "New session" puts the picker of projects and agents over
-//! Sessions, and a tap outside it puts it away. An iPad keeps the shell's columns, the sidebar
-//! beside the chat. Each state is a golden in light and in dark, `ios-<device>-compact-*`.
+//! opens on its Sessions page, the session list under one band (its heading, the palette,
+//! Settings and a new session, with no sidebar foot). Before any project the band's last control
+//! adds one, and the phone lands on the project's new session under the session's band (a close,
+//! none of the desktop's sidebar and history cluster), whose close goes back. After it, "New
+//! session" puts the picker of projects and agents over Sessions, and a tap outside it puts it
+//! away; the band's Settings opens their page, whose back returns. An iPad keeps the Mac's
+//! layout, the sidebar beside the session. Each state is a golden in light and in dark,
+//! `ios-<device>-compact-*`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -141,10 +143,10 @@ fn inspector_bands(a11y: &[A11yNode], window: WindowInfo) -> Vec<[f32; 4]> {
         .collect()
 }
 
-/// The Sessions page is up.
+/// The Sessions page is up, under its band.
 pub fn chats_page(d: &Dump) -> bool {
     d.a11y_node("Group", Some("Sessions")).is_some()
-        && d.a11y_node("TabList", Some("Tabs")).is_some()
+        && d.a11y_node("Heading", Some("Sessions")).is_some()
 }
 
 #[tokio::test]
@@ -168,17 +170,20 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
     }
 
     let dump = drv.wait_for("the Sessions page", STEP, chats_page).await.unwrap();
-    // The page keeps clear of the status bar and the home indicator.
-    let tabs = dump.a11y_node("TabList", Some("Tabs")).map(|n| n.bounds).unwrap();
-    assert!(tabs[1] + tabs[3] <= dump.window.height + 0.5, "{tabs:?} in {:?}", dump.window);
-    for tab in ["Sessions", "Settings", "Search"] {
-        assert!(dump.a11y_node("Tab", Some(tab)).is_some(), "{tab}: {:#?}", dump.a11y);
+    // The band keeps clear of the status bar, and holds the page's controls.
+    let heading = dump.a11y_node("Heading", Some("Sessions")).map(|n| n.bounds).unwrap();
+    assert!(heading[1] >= 20.0, "under the status bar: {heading:?} in {:?}", dump.window);
+    for control in ["Command palette", "Settings"] {
+        assert!(dump.a11y_node("Button", Some(control)).is_some(), "{control}: {:#?}", dump.a11y);
     }
-    // Settings is a tab, so the desktop's sidebar foot (the server pill, the gear) is gone.
-    assert!(dump.a11y_node("Button", Some("Settings")).is_none(), "{:#?}", dump.a11y);
-    // Before any project the capsule offers the desktop canvas's step, never a new chat that
+    // Settings is the band's, so the desktop's sidebar foot (the server pill, its gear) is gone.
+    let gears =
+        dump.a11y.iter().filter(|n| n.role == "Button" && n.label.as_deref() == Some("Settings"));
+    assert_eq!(gears.count(), 1, "the band's Settings alone: {:#?}", dump.a11y);
+    // Before any project the band offers the desktop canvas's step, never a new session that
     // has nowhere to go.
     assert!(dump.a11y_node("Button", Some("New session")).is_none(), "{:#?}", dump.a11y);
+    assert!(dump.a11y_node("Button", Some("Add a project")).is_some(), "{:#?}", dump.a11y);
     goldens(drv, &dir, device, "chats").await;
 
     // It opens the project picker: the worker, its Home, and ⌘⏎ adds the folder open there.
@@ -223,8 +228,8 @@ async fn a_phone_opens_on_its_chats_and_one_takes_the_screen() {
     drv.ui_tap(page.window.width / 2.0, field[1] / 2.0).await.unwrap();
     drv.wait_for("the Sessions page again", STEP, |d| chats_page(d) && !picker(d)).await.unwrap();
 
-    // Settings from the tab bar, and back from its page to Sessions.
-    tap(drv, "Tab", "Settings").await;
+    // Settings from the band, and back from its page to Sessions.
+    tap(drv, "Button", "Settings").await;
     drv.wait_for("the settings", STEP, |d| d.a11y_node("Group", Some("Settings")).is_some())
         .await
         .unwrap();

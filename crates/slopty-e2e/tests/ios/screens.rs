@@ -1,8 +1,8 @@
 //! A session on the simulator (`cargo xtask e2e ios --sim iphone|ipad`), each state a golden in
 //! light and in dark, `ios-<device>-compact-<state>-*`: the session is its terminal, the stand-in
-//! Claude Code's TUI, which takes what a finger types; its inspector reads the turn, a sheet over
-//! the session on a phone and a pane beside it on an iPad; and a shell of the session's worker
-//! and the files of its folder open from it.
+//! Claude Code's TUI, which takes what a finger types, over a phone's key row; its inspector reads
+//! the turn, a sheet over the session on a phone and a pane beside it on an iPad; and a shell of
+//! the session's worker and the files of its folder open from it.
 
 use std::time::Duration;
 
@@ -117,10 +117,11 @@ fn inspector_says(dump: &Dump, words: &str) -> bool {
 }
 
 /// A session on the device is its terminal, the stand-in's TUI, with nothing over, under or
-/// beside it: a finger taps it and types the next prompt into the TUI, which answers. The
-/// inspector reads the turn once a finger opens it: on a phone a sheet the navigation bar's
-/// Inspector puts up over the session and its close puts away, on an iPad the pane beside it
-/// that the titlebar's Inspector opens.
+/// beside it: a finger taps it and types the next prompt into the TUI, which answers. On a
+/// phone the key row stands over the soft keyboard: Esc ⌃ ⌥ at its left, the arrows, hide
+/// keyboard and ⌘ at its right, and Claude Code's keys leading its middle. The inspector reads
+/// the turn once a finger opens it: on a phone a sheet a press on the band's title puts up over
+/// the session and its close puts away, on an iPad the pane beside it that ⌘I summons.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e ios"]
 async fn a_session_is_its_terminal_and_shows_its_inspector() {
@@ -156,14 +157,28 @@ async fn a_session_is_its_terminal_and_shows_its_inspector() {
         session.a11y.iter().find(|n| n.role == "Terminal").map(|n| n.bounds).unwrap();
     drv.ui_tap(left + width / 2.0, top + height / 2.0).await.unwrap();
     shown(drv, "the terminal holding the keyboard", |d| d.focused.starts_with("terminal:")).await;
+    if phone {
+        let keys = ["Escape", "Control", "Option", "Hide keyboard", "Command", "Shift Tab"];
+        let row = shown(drv, "the key row over the soft keyboard", |d| {
+            d.a11y_node("Toolbar", Some("Keys")).is_some()
+                && keys.iter().all(|key| d.a11y_node("Button", Some(key)).is_some())
+        })
+        .await;
+        // The row stands between the terminal and the keyboard, never over the terminal.
+        let [_, row_top, ..] = row.a11y_node("Toolbar", Some("Keys")).map(|n| n.bounds).unwrap();
+        let [_, top, _, height] =
+            row.a11y.iter().find(|n| n.role == "Terminal").map(|n| n.bounds).unwrap();
+        assert!(top + height <= row_top + 0.5, "the terminal ends where the row starts");
+    }
     drv.ui_insert_text(NEXT).await.unwrap();
     drv.keys("enter").await.unwrap();
     read_until(&stack, &agent, "the typed words never reached the TUI", said(NEXT)).await;
 
     let drv = &mut stack.driver;
-    // On a phone a sheet a finger opens; on an iPad a pane ⌘I summons beside the session.
+    // On a phone a sheet a finger opens from the band's title; on an iPad a pane ⌘I summons
+    // beside the session.
     if phone {
-        tap(drv, "Button", "Show inspector").await;
+        tap(drv, "Button", FIRST).await;
     } else {
         drv.keys("cmd-i").await.unwrap();
     }
@@ -178,7 +193,7 @@ async fn a_session_is_its_terminal_and_shows_its_inspector() {
         tap(drv, "Button", "Close inspector").await;
         shown(drv, "the session again", |d| {
             d.a11y_node("Dialog", Some("Inspector")).is_none()
-                && d.a11y_node("Button", Some("Show inspector")).is_some()
+                && d.a11y_node("Button", Some(FIRST)).is_some()
         })
         .await;
     }
@@ -187,9 +202,9 @@ async fn a_session_is_its_terminal_and_shows_its_inspector() {
 
 /// A shell of the session's worker and the files of its folder open from the session on the
 /// device: on an iPad the shell split beside the session (⌘D), which a phone, one session at a
-/// time, never splits; the files on a phone from the navigation bar's "Show files", a page over
-/// the session that leads back to it, and on an iPad summoned beside the session (⌘E) and closed
-/// by a finger on their pane's ✕. The shell runs what is typed; the files list the folder's own.
+/// time, never splits; the files summoned by their key (⌘E), on a phone a page over the session
+/// that leads back to it, and on an iPad beside the session, closed by a finger on their pane's
+/// ✕. The shell runs what is typed; the files list the folder's own.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e ios"]
 async fn a_chats_shell_and_its_files_open_on_the_device() {
@@ -238,11 +253,7 @@ async fn a_chats_shell_and_its_files_open_on_the_device() {
         .await;
     }
 
-    if phone {
-        tap(drv, "Button", "Show files").await;
-    } else {
-        drv.keys("cmd-e").await.unwrap();
-    }
+    drv.keys("cmd-e").await.unwrap();
     shown(drv, "the folder's files", |d| {
         (!phone || d.a11y_node("Heading", Some("Files")).is_some())
             && saying(d, "README.md").is_some()

@@ -251,10 +251,11 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     drv.wait_for("the session's terminal", STEP, |d| d.a11y.iter().any(|n| n.role == "Terminal"))
         .await
         .unwrap();
-    // The turn's pages are in its inspector: on a phone a sheet a finger opens over the session,
-    // taken to the whole screen; on an iPad a pane ⌘I summons beside the session.
+    // The turn's pages are in its inspector: on a phone a sheet a finger opens over the session
+    // from the band's title, taken to the whole screen; on an iPad a pane ⌘I summons beside the
+    // session.
     if phone {
-        crate::compact::tap(drv, "Button", "Show inspector").await;
+        crate::compact::tap(drv, "Button", prompt).await;
         crate::compact::tap(drv, "Button", "Expand inspector").await;
     } else {
         drv.keys("cmd-i").await.unwrap();
