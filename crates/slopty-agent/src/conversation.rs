@@ -1118,19 +1118,22 @@ impl Conversation {
             record: ctx.uuid.to_owned(),
             part: Part::Result { tool_use_id: id.to_owned() },
         });
+        // A list the TUI draws under the call stands for the text the model read, and a line
+        // drawn alone (a refusal by auto mode) for all of it. A list too long to show whole
+        // gives way to that text, which opens whole where the list has nowhere to open.
+        let long_list = !text.trim().is_empty()
+            && said.body.as_deref().is_some_and(|body| !OUTPUT.holds(body.trim()));
+        let body = said.body.filter(|_| !long_list);
+        let kept = body.is_none() && (long_list || !shown || status != ResultStatus::Ok);
         // What the model read, where the call shows something else in its place.
-        let kept = said.body.is_none() && (!shown || status != ResultStatus::Ok);
         let seen =
             (!kept && !text.trim().is_empty() && shows_otherwise(&call.detail, &text, structured))
                 .then(|| Clipped::head_trimmed(&text, SEEN, full.clone()));
-        // A list the TUI draws under the call stands for the text the model read, and a line
-        // drawn alone (a refusal by auto mode) for all of it.
-        let text = match said.body {
+        let text = match body {
             Some(body) => {
-                (!body.trim().is_empty()).then(|| Clipped::head(body.trim(), OUTPUT, full))
+                (!body.trim().is_empty()).then(|| Clipped::head(body.trim(), OUTPUT, None))
             }
-            None => (!shown || status != ResultStatus::Ok)
-                .then(|| Clipped::head_trimmed(&text, OUTPUT, full)),
+            None => kept.then(|| Clipped::head_trimmed(&text, OUTPUT, full)),
         };
         let text = text.filter(|t| !t.text.is_empty() || images.is_empty());
         call.result = Some(ToolResult {

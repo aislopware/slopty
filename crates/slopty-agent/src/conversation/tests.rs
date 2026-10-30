@@ -374,6 +374,40 @@ fn a_clipped_result_is_as_long_as_the_text_it_opens() {
     opens(report, &reported);
 }
 
+/// A list the TUI draws in place of the text the model read shows when it fits; a longer one
+/// gives way to that text, cut where it opens whole, so what is shown is a head of what opens.
+#[test]
+fn a_list_too_long_to_show_gives_way_to_the_text_the_model_read() {
+    let long = |word: &str| (0..500).map(|n| format!("{word} {n}")).collect::<Vec<_>>().join("\n");
+    let handback = |text: &str| {
+        json!({"inlineHandback": {"displayName": "scout",
+            "content": [{"type": "text", "text": text}]}})
+    };
+    let told = |message: &str| json!({"to": "scout", "message": message});
+    let read = long("read");
+    let jsonl = [
+        line(&call("a1", None, "t1", "SendMessage", &told("go"))),
+        line(&result("u1", Some("a1"), "t1", "Found 3.\nagentId: x1", &handback("Found 3."))),
+        line(&call("a2", Some("u1"), "t2", "SendMessage", &told("more"))),
+        line(&result("u2", Some("a2"), "t2", &read, &handback(&long("report")))),
+    ]
+    .concat();
+    let mut c = Conversation::default();
+    c.ingest_jsonl(&MAIN, &jsonl);
+    let result_of = |id: &str| tool(&c, &MAIN, id).result.clone().expect("a result");
+
+    let list = result_of("t1").text.expect("the list");
+    assert_eq!((list.text.as_str(), list.full), ("Result:\nFound 3.", None));
+    let long_one = result_of("t2");
+    assert_eq!(long_one.seen, None, "what is shown is what the model read");
+    let shown = long_one.text.expect("the text the model read");
+    assert!(shown.text.starts_with("read 0\n"), "{}", shown.text);
+    let full = shown.full.as_ref().expect("cut, so it says where its whole is");
+    assert_eq!(full_text(&jsonl, full).as_deref(), Some(read.as_str()));
+    let counted = (shown.lines as usize, shown.chars as usize);
+    assert_eq!(counted, (read.lines().count(), read.chars().count()));
+}
+
 /// A diff longer than the cap keeps its first lines and still counts every change.
 #[test]
 fn a_long_diff_keeps_its_counts() {

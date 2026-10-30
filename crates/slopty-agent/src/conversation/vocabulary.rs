@@ -40,6 +40,14 @@ pub struct Cap {
     pub chars: usize,
 }
 
+impl Cap {
+    /// Whether `text` is within it whole.
+    #[must_use]
+    pub fn holds(self, text: &str) -> bool {
+        text.lines().count() <= self.lines && text.chars().count() <= self.chars
+    }
+}
+
 /// Which conversation an entry belongs to.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ThreadId {

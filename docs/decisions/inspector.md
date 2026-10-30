@@ -337,3 +337,5 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
     model read, so it has none. A subagent's card reads its report, so it has none either. Nor
     does a step that draws what it did (an edit, the task list, the answers to a question, a
     plan) where the model read only the line confirming it, or a command that printed nothing.
+    A list longer than a result's cap gives way to the text it stands for, cut there, since
+    only that text opens whole; that step has none either.
