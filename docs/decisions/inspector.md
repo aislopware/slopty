@@ -264,7 +264,8 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
     under the turn's last reply is deleted: it said the same time a second time.
   - **A step's time is a lane.** Each step and each group's line end in a 56 pt lane: what the
     step took once it ended, ticking while it runs, a group's span from its first start to its
-    last end. ⌥ held turns every lane into the time of day it began, to the second. Its tooltip
+    last end. The lanes stand in one column at the trailing edge, whatever the result before
+    each says. ⌥ held turns every lane into the time of day it began, to the second. Its tooltip
     says when it began and how far into the turn, when it ended, and its run apart from the wait
     for permission. A group's line wears the failed mark only when every call in it failed; a
     failed step wears its own.
@@ -290,6 +291,17 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
     the wait for permission. A step that ended with nothing to show says "No output". An output
     past its size gate ends on "+ N lines" over "Show full output", and a fetch that fails says
     why ("Couldn't load output: …") beside its Retry.
+- ✅ **A turn ends at the model's final answer (2026-10-31).** A turn ended only where Claude
+  Code closed it (a Stop hook's summary, an interrupt, a command's output) or at the next
+  prompt. A session Claude Code ran outside Slopty writes no Stop hook record, so its last turn
+  ran on to now, ticking as if it still ran, and each earlier turn took in the wait until the
+  next prompt. The transcript says where a turn's work ends: the model's final answer, an
+  assistant record whose request stopped with nothing more to do (`end_turn`, a stop sequence,
+  as Claude Code's own error records stop, or a refusal). The turn ends there. Each later end in
+  the same turn moves its end on to itself, as a hook's summary after the answer does, or a
+  later answer when the model is woken again (a task's notice, a blocking Stop hook). A turn
+  whose last request called a tool, paused or ran out of tokens still runs, and its time ticks.
+  A subagent's turn ends at its own final answer, not when its parent hears its report.
 - ✅ **How the deletions were made (2026-10-30).** Choices the ruling's "Left out, and why" left
   open:
   - **One clock.** Everything that runs (a turn's time, a step's lane, the working line's word)

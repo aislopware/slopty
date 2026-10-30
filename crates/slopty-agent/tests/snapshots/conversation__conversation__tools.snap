@@ -594,7 +594,7 @@ expression: "decode(\"tools\").snapshot()"
       prompt_ids:
         - 00000000-0000-4000-8000-000000000002
       started_ms: 1793354928715
-      ended_ms: ~
+      ended_ms: 1793354933622
       models:
         - claude-haiku-5-5
       usage:

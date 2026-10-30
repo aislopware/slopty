@@ -818,8 +818,9 @@ pub struct Turn {
     pub prompt_ids: Vec<String>,
     /// When the prompt was sent.
     pub started_ms: WallMs,
-    /// When Claude Code closed the turn (its end-of-turn record, or the output of a command it
-    /// ran itself); `None` while it runs, or when the transcript never says.
+    /// When the turn ended, at the latest record that ended it: the model's final answer, Claude
+    /// Code's end-of-turn record (a Stop hook's summary), an interrupt, the output of a command
+    /// it ran itself, or else the next prompt; `None` while it runs.
     pub ended_ms: Option<WallMs>,
     /// The models that answered in it, in the order they first did (`claude-opus-5-5`).
     pub models: Vec<String>,

@@ -843,6 +843,77 @@ fn a_prompt_ends_the_turn_still_open_before_it() {
     assert_eq!(next.ended_ms, None, "the new turn runs");
 }
 
+/// A session Claude Code ran with no Stop hook writes no end-of-turn record: each turn ends at
+/// the model's final answer, as its request's stop reason says, not at the next prompt a minute
+/// later, and the last not at now. A Stop hook's summary after the answer moves the end on to
+/// itself; Claude Code's own error record ends its turn by its stop sequence; a turn whose last
+/// answer called a tool still runs.
+#[test]
+fn a_turn_ends_at_the_models_final_answer() {
+    let at = |stamp: &str, mut record: Value| {
+        record["timestamp"] = json!(format!("2026-09-27T03:{stamp}.000Z"));
+        record
+    };
+    let stopped = |mut record: Value, stop: &str| {
+        record["message"]["stop_reason"] = json!(stop);
+        record
+    };
+    let says = |uuid: &str, parent: &str, words: &str| {
+        assistant(uuid, Some(parent), &json!([{"type": "text", "text": words}]))
+    };
+    let ends = |c: &Conversation| -> Vec<(String, Option<WallMs>)> {
+        c.turns(&MAIN).iter().map(|t| (t.prompt.clone(), t.ended_ms)).collect()
+    };
+    let ms = |stamp: &str| parse_ms(&format!("2026-09-27T03:{stamp}.000Z"));
+    let mut c = Conversation::default();
+
+    c.ingest(&MAIN, &at("00:00", user("p1", None, &json!("Read the plot"))));
+    let told =
+        c.ingest(&MAIN, &at("00:01", stopped(says("a1", "p1", "A rising line."), "end_turn")));
+    assert!(
+        told.iter().any(|ch| matches!(ch, Change::Turn { turn, .. }
+            if turn.prompt == "p1" && turn.ended_ms == ms("00:01"))),
+        "the end is told: {told:?}"
+    );
+    assert_eq!(ends(&c), [("p1".to_owned(), ms("00:01"))], "ended, not running on to now");
+
+    c.ingest(&MAIN, &at("01:00", user("p2", Some("a1"), &json!("Sum it up for the PR"))));
+    let mut thought =
+        assistant("a2", Some("p2"), &json!([{"type": "thinking", "thinking": "Check first."}]));
+    thought["message"]["stop_reason"] = json!(null);
+    c.ingest(&MAIN, &at("01:01", thought));
+    let ls = call("a3", Some("a2"), "t1", "Bash", &json!({"command": "git log"}));
+    c.ingest(&MAIN, &at("01:01", stopped(ls, "tool_use")));
+    c.ingest(&MAIN, &at("01:03", result("r1", Some("a3"), "t1", "a1b2c3", &json!({}))));
+    assert_eq!(ends(&c)[1], ("p2".to_owned(), None), "a call goes on");
+    c.ingest(&MAIN, &at("01:04", stopped(says("a4", "r1", "One commit."), "end_turn")));
+    let hook = json!({"type": "system", "subtype": "stop_hook_summary", "uuid": "s1",
+        "parentUuid": "a4", "hookErrors": [], "preventedContinuation": false});
+    c.ingest(&MAIN, &at("01:05", hook));
+
+    c.ingest(&MAIN, &at("02:00", user("p3", Some("s1"), &json!("Push it"))));
+    let gave_up = json!({"type": "assistant", "uuid": "e1", "parentUuid": "p3",
+        "isApiErrorMessage": true, "error": "rate_limit",
+        "message": {"role": "assistant", "model": "<synthetic>", "stop_reason": "stop_sequence",
+            "content": [{"type": "text", "text": "You've hit your limit"}]}});
+    c.ingest(&MAIN, &at("02:02", gave_up));
+
+    c.ingest(&MAIN, &at("03:00", user("p4", Some("e1"), &json!("Try again"))));
+    let push = call("a5", Some("p4"), "t2", "Bash", &json!({"command": "git push"}));
+    c.ingest(&MAIN, &at("03:01", stopped(push, "tool_use")));
+
+    assert_eq!(
+        ends(&c),
+        [
+            ("p1".to_owned(), ms("00:01")),
+            ("p2".to_owned(), ms("01:05")),
+            ("p3".to_owned(), ms("02:02")),
+            ("p4".to_owned(), None),
+        ],
+        "each turn's own end; the last one runs"
+    );
+}
+
 /// A command Claude Code runs itself ends its turn with what it printed, as a line
 /// (`<local-command-stdout>`), a record of its own (`local_command`, empty or not) or a shell
 /// line's output; a command's printing in a turn a prompt opened leaves that turn running.
@@ -948,7 +1019,7 @@ fn answered(uuid: &str, message: &str, blocks: &Value, usage: &Value, stop: Opti
 
 /// A turn counts each request once, however many records it wrote, and adds up its tokens; it
 /// knows its model, the mode its prompt was sent in, the context its latest request carried,
-/// and when Claude Code closed it.
+/// and when it ended: at its final answer, then at Claude Code's end-of-turn record after it.
 #[test]
 fn a_turn_adds_up_its_requests() {
     let mut c = Conversation::default();
@@ -993,7 +1064,7 @@ fn a_turn_adds_up_its_requests() {
     );
     assert_eq!(turn.models, ["claude-opus-5-5"]);
     assert_eq!(turn.context, Some(1_305), "what its latest request read");
-    assert_eq!(turn.ended_ms, None);
+    assert_eq!(turn.ended_ms, parse_ms("2026-09-27T03:15:26.000Z"), "its final answer");
     let mut end = json!({
         "type": "system", "subtype": "stop_hook_summary", "uuid": "s1",
         "timestamp": "2026-09-27T03:15:40.000Z", "hookErrors": [], "preventedContinuation": false,

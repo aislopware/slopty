@@ -817,8 +817,20 @@ impl Conversation {
         batch.turn(ctx.thread, turn);
     }
 
+    /// An assistant record: its blocks, its request's usage, and the end of its turn when it is
+    /// the model's final answer ([`answers_last`]). That end is the turn's own, and the only one
+    /// a session Claude Code ran with no Stop hook writes: without it, the turn would run on to
+    /// the next prompt, or to now. A hook's summary after it, or a later final answer (the model
+    /// woken again by a notice or a blocking hook), moves it on, as each end does.
     fn assistant(&mut self, ctx: &Ctx<'_>, record: &Value, batch: &mut Batch) {
         let Some(message) = record.get("message") else { return };
+        self.answer(ctx, record, message, batch);
+        if answers_last(message) {
+            self.end_turn(ctx, batch);
+        }
+    }
+
+    fn answer(&mut self, ctx: &Ctx<'_>, record: &Value, message: &Value, batch: &mut Batch) {
         let Some(content) = message.get("content") else { return };
         if bool_at(record, "isApiErrorMessage") {
             let text = content_text(content);
@@ -2281,6 +2293,13 @@ fn has_tool_result(record: &Value) -> bool {
         .and_then(|m| m.get("content"))
         .and_then(Value::as_array)
         .is_some_and(|blocks| blocks.iter().any(|b| str_at(b, "type") == Some("tool_result")))
+}
+
+/// Whether an assistant record's `message` is the model's final answer: its request stopped
+/// with nothing more to do (`end_turn`, a stop sequence, as Claude Code's own error records do,
+/// or a refusal). A request that stopped to call a tool, to pause or at its token limit goes on.
+fn answers_last(message: &Value) -> bool {
+    matches!(str_at(message, "stop_reason"), Some("end_turn" | "stop_sequence" | "refusal"))
 }
 
 /// Whether a record is something the person typed: a user record with words of theirs, not a
