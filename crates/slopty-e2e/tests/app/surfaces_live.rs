@@ -26,9 +26,7 @@ async fn goldens(drv: &mut Driver, renders: &Path, name: &str) {
         let golden = format!("{name}-{appearance}");
         let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
         println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-        // The thread's turn under the surface says how long it worked, which the run decides.
-        let moving = crate::served::always_moving(&frame.a11y, frame.scale);
-        assert_matches_masked(&golden, &frame, TOLERANCE, &artifacts_dir(), &moving).unwrap();
+        assert_matches_masked(&golden, &frame, TOLERANCE, &artifacts_dir(), &[]).unwrap();
     }
     drv.ok(&Command::Appearance { dark: false }).await.unwrap();
 }
@@ -329,9 +327,8 @@ mod stream {
     /// asserted before each golden, and a stalled one fails it.
     const STRAINED: [&str; 2] = ["Frames late", "Low bandwidth"];
 
-    /// [`goldens`] with the pixels and the words inside `masks` left out, and those of the chat's
-    /// divider, whose time says how long the run's turn worked, and of a strained stream's health
-    /// mark ([`STRAINED`]).
+    /// [`goldens`] with the pixels and the words inside `masks` left out, and those of a strained
+    /// stream's health mark ([`STRAINED`]).
     async fn goldens_masked(drv: &mut Driver, renders: &Path, name: &str, masks: &[PixelRect]) {
         for (dark, appearance) in [(false, "light"), (true, "dark")] {
             drv.ok(&Command::Appearance { dark }).await.unwrap();
@@ -339,16 +336,12 @@ mod stream {
             let golden = format!("{name}-{appearance}");
             let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
             println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-            // The chat's turn says how long it worked, which the run decides: its divider's
-            // pixels and words are left out with the stream's.
-            let moving = crate::served::always_moving(&frame.a11y, frame.scale);
             let strained = frame
                 .a11y
                 .iter()
                 .filter(|n| n.label.as_deref().is_some_and(|l| STRAINED.contains(&l)))
                 .map(|n| crate::served::mask_of(n, frame.scale));
-            let left_out: Vec<PixelRect> =
-                masks.iter().copied().chain(moving).chain(strained).collect();
+            let left_out: Vec<PixelRect> = masks.iter().copied().chain(strained).collect();
             let masks = (left_out.as_slice(), left_out.as_slice());
             assert_matches_apart(&golden, &frame, TOLERANCE, &artifacts_dir(), masks).unwrap();
         }

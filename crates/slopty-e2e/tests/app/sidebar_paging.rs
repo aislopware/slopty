@@ -105,7 +105,7 @@ async fn every_state_reads_at_a_glance() {
         d.a11y_node("Button", Some("Archive")).is_none()
     })
     .await;
-    // Light and dark, the open turn's end left out.
+    // Light and dark.
     let renders = slopty_e2e::harness::artifacts_dir();
     for (dark, appearance) in [(false, "light"), (true, "dark")] {
         drv.ok(&slopty_e2e::Command::Appearance { dark }).await.unwrap();
@@ -113,13 +113,12 @@ async fn every_state_reads_at_a_glance() {
         let golden = format!("sidebar-states-{appearance}");
         let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
         println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-        let masks = crate::served::always_moving(&frame.a11y, frame.scale);
         slopty_e2e::snapshot::assert_matches_masked(
             &golden,
             &frame,
             slopty_e2e::snapshot::MAC_TOLERANCE,
             &renders,
-            &masks,
+            &[],
         )
         .unwrap();
     }

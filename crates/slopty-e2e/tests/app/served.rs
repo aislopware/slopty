@@ -110,8 +110,8 @@ pub async fn hover(drv: &mut Driver, node: &A11yNode) {
 }
 
 /// Render the window in light and in dark and hold each against `golden/<name>-<appearance>.png`;
-/// the window is light again after. A node whose label holds one of `moving` says a moment of the
-/// run (a time since, a turn's end in the person's time), so its pixels and its words are left out.
+/// the window is light again after. A node whose label holds one of `moving` says something the
+/// run decides, so its pixels and its words are left out.
 /// The frame's words, as the light render said them.
 pub async fn goldens(drv: &mut Driver, renders: &Path, name: &str, moving: &[&str]) -> String {
     goldens_with(drv, renders, name, moving, &[]).await
@@ -142,8 +142,7 @@ pub async fn goldens_with(
         let labelled = |n: &&A11yNode, of: &[&str]| {
             n.label.as_deref().is_some_and(|l| of.iter().any(|m| l.contains(m)))
         };
-        let moving_nodes =
-            frame.a11y.iter().filter(|n| labelled(n, &ALWAYS_MOVING) || labelled(n, moving));
+        let moving_nodes = frame.a11y.iter().filter(|n| labelled(n, moving));
         let row_nodes = frame.a11y.iter().filter(|n| labelled(n, rows)).map(|n| {
             let [x, y, w, h] = n.bounds;
             let left = TRANSCRIPT_LEFT.min(x);
@@ -160,20 +159,6 @@ pub async fn goldens_with(
 /// Where the transcript's column starts at the window's size, in points: its messages' left
 /// edge with the sidebar shown.
 const TRANSCRIPT_LEFT: f32 = 400.0;
-
-/// What moves in every frame of a thread: a finished turn's done line names the time it ended in
-/// the person's clock ("Worked for 2s · done 3:42 PM"), a fact of the run, not of the clock the
-/// test pins.
-const ALWAYS_MOVING: [&str; 1] = ["Worked for "];
-
-/// The rectangles of `a11y`'s nodes that move in every frame of a thread ([`ALWAYS_MOVING`]),
-/// at the window's `scale`: a golden of any surface over a thread leaves them out.
-pub fn always_moving(a11y: &[A11yNode], scale: f32) -> Vec<PixelRect> {
-    a11y.iter()
-        .filter(|n| n.label.as_deref().is_some_and(|l| ALWAYS_MOVING.iter().any(|m| l.contains(m))))
-        .map(|n| mask_of(n, scale))
-        .collect()
-}
 
 /// The pixel rectangle of `node` at the window's `scale`, a few points wider each way.
 pub fn mask_of(node: &A11yNode, scale: f32) -> PixelRect {
