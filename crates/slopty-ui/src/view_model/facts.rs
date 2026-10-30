@@ -9,13 +9,13 @@
 
 use slopty_proto::thread::detail::{Clipped, ExecStatus};
 use slopty_proto::thread::{
-    BackgroundTask, ItemBody, Notice, Phase, TaskNote, ThreadId, ThreadState, ToolCall, ToolDetail,
-    ToolState, TurnId, TurnState, kind,
+    BackgroundTask, CallNote, ItemBody, ItemId, Notice, Phase, TaskNote, ThreadId, ThreadState,
+    ToolCall, ToolDetail, ToolState, TurnId, TurnState, kind,
 };
 use slopty_proto::visual::{PageDetail, PageSource};
 use slopty_view_doc::{
-    LinkRow, NoteLine, NoteRow, PageCard, RetryLine, SubagentProgress, TaskRow, ToolFacts,
-    ToolTimer, bytes_short, duration_words, tokens_short,
+    LinkRow, NoteLine, NoteRow, PageCard, RetryLine, StepTime, SubagentProgress, TaskRow,
+    ToolFacts, ToolTimer, bytes_short, duration_words, tokens_short,
 };
 
 use super::transcript::at;
@@ -560,17 +560,18 @@ fn stderr_words(exec: &slopty_proto::thread::detail::ExecDetail) -> Option<Strin
     Some(words.trim_end().to_owned()).filter(|w| !w.trim().is_empty())
 }
 
-/// What `call` (item `item` of `state`) says beyond zeron's chip; `child` its subagent's run,
-/// where it started one. `None` when it says nothing more.
+/// What `call` (item `item` of `state`, written at `started`) says beyond zeron's chip; `child`
+/// its subagent's run, where it started one. `None` when it says nothing more.
 #[must_use]
 pub fn tool_facts(
     item: &str,
+    started: slopty_core::WallMs,
     call: &ToolCall,
     state: &ThreadState,
     child: Option<&ChildRun>,
 ) -> Option<ToolFacts> {
     let input: Option<serde_json::Value> = serde_json::from_str(&call.input.text).ok();
-    let note = state.calls.iter().find_map(|(id, note)| (id.0 == item).then_some(note));
+    let note = state.calls.get(&ItemId(item.to_owned()));
     let task_id = note.and_then(|n| n.task.clone()).or_else(|| match &call.detail {
         Some(ToolDetail::Exec(exec)) => exec.task.clone(),
         _ => None,
@@ -644,8 +645,24 @@ pub fn tool_facts(
             _ => None,
         },
         thought_ms: None,
+        time: step_time(started, call, note),
     };
     (facts != ToolFacts::default()).then_some(facts)
+}
+
+/// When call `call` ran: from its record, written at `started`, to its result's, and its run
+/// alone where its agent said it (`note`); `None` when its agent never said when it began.
+fn step_time(
+    started: slopty_core::WallMs,
+    call: &ToolCall,
+    note: Option<&CallNote>,
+) -> Option<StepTime> {
+    let started = at(started);
+    (started != 0).then(|| StepTime {
+        started,
+        ended: call.ended_ms.map(at).filter(|ended| *ended != 0),
+        ran_ms: note.and_then(|n| n.ran_ms),
+    })
 }
 
 /// What `command` landed by what it printed (`output`), as the TUI's group line says it.

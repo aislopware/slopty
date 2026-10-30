@@ -1152,6 +1152,9 @@ mod tests {
                 tokens: None,
                 tool_uses: None,
                 duration_ms: None,
+                model: None,
+                tally: std::collections::BTreeMap::new(),
+                changed: slopty_proto::thread::Changed::default(),
             }));
             call.child = Some(child.meta.id);
         }

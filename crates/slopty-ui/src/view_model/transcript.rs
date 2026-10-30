@@ -337,7 +337,8 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                     let child = call.child.and_then(|child| (look.child_run)(child));
                     let mut part = tool(thread, id.clone(), call, plan, &named, child.as_ref());
                     if let MessagePart::Tool { facts, .. } = &mut part {
-                        *facts = tool_facts(&id, call, state, child.as_ref()).map(Box::new);
+                        *facts =
+                            tool_facts(&id, item.at_ms, call, state, child.as_ref()).map(Box::new);
                     }
                     parts.push(part);
                     // slopty: the files it changed, as the TUI lists them under a command.

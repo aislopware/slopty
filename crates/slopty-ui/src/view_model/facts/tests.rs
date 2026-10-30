@@ -37,7 +37,7 @@ fn call(name: &str, kind: &str, detail: Option<ToolDetail>, state: ToolState) ->
 
 /// The result line of `call` in an empty thread.
 fn result_of(call: &ToolCall) -> Option<String> {
-    tool_facts("t1", call, &fixtures::empty(), None).and_then(|facts| facts.result)
+    tool_facts("t1", WallMs::ZERO, call, &fixtures::empty(), None).and_then(|facts| facts.result)
 }
 
 /// The facts the TUI's `⎿` line reads are kept: lines read, files and lines found, what a
@@ -102,7 +102,7 @@ fn a_calls_result_reads_as_the_tuis() {
         Some(ToolDetail::Exec(exec(Some(2), ExecStatus::Failed, false))),
         ToolState::Failed,
     );
-    let facts = tool_facts("t1", &failed, &fixtures::empty(), None).expect("facts");
+    let facts = tool_facts("t1", WallMs::ZERO, &failed, &fixtures::empty(), None).expect("facts");
     assert_eq!(facts.result.as_deref(), Some("exit code 2"));
     assert!(facts.failed);
     let bg = call(
@@ -111,7 +111,7 @@ fn a_calls_result_reads_as_the_tuis() {
         Some(ToolDetail::Exec(exec(None, ExecStatus::Running, true))),
         done.clone(),
     );
-    let facts = tool_facts("t1", &bg, &fixtures::empty(), None).expect("facts");
+    let facts = tool_facts("t1", WallMs::ZERO, &bg, &fixtures::empty(), None).expect("facts");
     assert_eq!(facts.result.as_deref(), Some("Running in the background · task bx7"));
     assert_eq!(facts.task_row.as_deref(), Some("task:bx7"));
     let quiet = call(
@@ -122,11 +122,18 @@ fn a_calls_result_reads_as_the_tuis() {
     );
     assert_eq!(result_of(&quiet).as_deref(), Some("(No output)"));
     assert!(
-        tool_facts("t1", &call("Glob", "other", None, done), &fixtures::empty(), None).is_none()
+        tool_facts(
+            "t1",
+            WallMs::ZERO,
+            &call("Glob", "other", None, done),
+            &fixtures::empty(),
+            None
+        )
+        .is_none()
     );
     let mut no = call("Edit", "edit", None, ToolState::Rejected);
     no.input = Clipped::whole(r#"{"file_path":"/w/src/main.rs"}"#);
-    let facts = tool_facts("t1", &no, &fixtures::empty(), None).expect("facts");
+    let facts = tool_facts("t1", WallMs::ZERO, &no, &fixtures::empty(), None).expect("facts");
     assert_eq!(facts.result.as_deref(), Some("User rejected update to main.rs"));
     assert!(!facts.failed, "the person's own no reads quiet");
     assert!(facts.rejected, "it says it was turned down, for the chip's quiet header");
@@ -146,7 +153,7 @@ fn a_calls_result_reads_as_the_tuis() {
         state.status.phase = Phase::NeedsYou;
         state.status.wait =
             Some(slopty_proto::thread::Wait { kind: kind.to_owned(), text: String::new() });
-        tool_facts("t1", &call("Bash", "exec", None, asking.clone()), &state, None)
+        tool_facts("t1", WallMs::ZERO, &call("Bash", "exec", None, asking.clone()), &state, None)
             .and_then(|facts| facts.result)
     };
     assert_eq!(held("question").as_deref(), Some("Waiting for your answer"));
@@ -154,12 +161,14 @@ fn a_calls_result_reads_as_the_tuis() {
     assert_eq!(held("plan").as_deref(), Some("Plan ready for review"));
     let mut ask = call("AskUserQuestion", "other", None, ToolState::Completed);
     ask.input = Clipped::whole(r#"{"questions":[{"header":"Color","question":"Which color?"}]}"#);
-    let title = tool_facts("t1", &ask, &fixtures::empty(), None).and_then(|facts| facts.title);
+    let title = tool_facts("t1", WallMs::ZERO, &ask, &fixtures::empty(), None)
+        .and_then(|facts| facts.title);
     assert_eq!(title.as_deref(), Some("Asked about Color"), "a human name");
     let mut grep = exec(Some(0), ExecStatus::Done, false);
     grep.interpretation = Some("No matches found".to_owned());
     let facts = tool_facts(
         "t1",
+        WallMs::ZERO,
         &call("Bash", "exec", Some(ToolDetail::Exec(grep)), ToolState::Completed),
         &fixtures::empty(),
         None,
@@ -211,13 +220,13 @@ fn a_running_call_has_its_timer_and_task() {
         ItemId("t1".into()),
         CallNote { elapsed_ms: Some(12_000), at_ms: ms(5), ..CallNote::default() },
     )]);
-    let facts = tool_facts("t1", &running, &state, None).expect("facts");
+    let facts = tool_facts("t1", WallMs::ZERO, &running, &state, None).expect("facts");
     let timer = facts.timer.expect("a timer");
     assert_eq!((timer.elapsed_ms, timer.timeout_ms), (12_000, Some(120_000)));
     state.calls.get_mut(&ItemId("t1".into())).expect("its note").said =
         Some("Denied by auto mode classifier · rm is destructive".into());
     running.state = ToolState::Failed;
-    let facts = tool_facts("t1", &running, &state, None).expect("facts");
+    let facts = tool_facts("t1", WallMs::ZERO, &running, &state, None).expect("facts");
     assert_eq!(facts.result.as_deref(), Some("Denied by auto mode classifier · rm is destructive"));
     assert!(facts.failed && facts.timer.is_none());
 
@@ -227,9 +236,34 @@ fn a_running_call_has_its_timer_and_task() {
     task.item = Some(ItemId("m1".into()));
     task.timeout_ms = Some(1_800_000);
     state.tasks = vec![task];
-    let facts = tool_facts("m1", &monitor, &state, None).expect("facts");
+    let facts = tool_facts("m1", WallMs::ZERO, &monitor, &state, None).expect("facts");
     assert_eq!(facts.title.as_deref(), Some("Monitor(lane stall watch)"));
     assert_eq!(facts.result.as_deref(), Some("Monitor started · task bcui · timeout 30m"));
+}
+
+/// A call's row knows when it ran: from its record to its result's, and, once its hook said how
+/// long the run alone took, the wait for the person's permission apart; a running call has no
+/// end yet, and one whose agent never said when it began has no time at all.
+#[test]
+fn a_calls_time_is_its_records_and_its_run_apart() {
+    let mut state = fixtures::empty();
+    let mut ran = call("Bash", "exec", None, ToolState::Completed);
+    ran.ended_ms = Some(ms(9_500));
+    let time = |state: &ThreadState, call: &ToolCall, started| {
+        tool_facts("t1", started, call, state, None).and_then(|facts| facts.time)
+    };
+    let walled = time(&state, &ran, ms(1_000)).expect("a time");
+    assert_eq!((walled.wall_ms(), walled.ran_ms, walled.waited_ms()), (Some(8_500), None, None));
+    state.calls = BTreeMap::from([(
+        ItemId("t1".into()),
+        CallNote { ran_ms: Some(541), at_ms: ms(9_500), ..CallNote::default() },
+    )]);
+    let split = time(&state, &ran, ms(1_000)).expect("a time");
+    assert_eq!((split.ran_ms, split.waited_ms()), (Some(541), Some(7_959)), "its wait apart");
+    let running = call("Bash", "exec", None, ToolState::Running);
+    let open = time(&state, &running, ms(1_000)).expect("a start");
+    assert_eq!((open.ended, open.wall_ms()), (None, None), "no end while it runs");
+    assert_eq!(time(&fixtures::empty(), &ran, WallMs::ZERO), None, "no time it never said");
 }
 
 /// A subagent's card reads its step and figures while it runs, says when it waits on the
@@ -246,6 +280,9 @@ fn a_subagent_card_follows_its_run() {
         tokens: None,
         tool_uses: None,
         duration_ms: None,
+        model: None,
+        tally: BTreeMap::new(),
+        changed: slopty_proto::thread::Changed::default(),
     };
     let spawn =
         call("Agent", "agent", Some(ToolDetail::Agent(agent.clone())), ToolState::Completed);
@@ -255,7 +292,9 @@ fn a_subagent_card_follows_its_run() {
     task.usage = Some(TaskUsage { tokens: 41_000, tool_uses: 12, duration_ms: 1_000 });
     state.tasks = vec![task];
     let progress = |state: &ThreadState, child: Option<&ChildRun>, call: &ToolCall| {
-        tool_facts("t1", call, state, child).and_then(|f| f.subagent_progress).expect("progress")
+        tool_facts("t1", WallMs::ZERO, call, state, child)
+            .and_then(|f| f.subagent_progress)
+            .expect("progress")
     };
     let running = progress(&state, None, &spawn);
     assert_eq!(running.state, SubagentProgress::RUNNING);
@@ -375,6 +414,8 @@ fn a_retry_reads_trying_again_then_recovered() {
         usage: Usage::default(),
         models: Vec::new(),
         changed: slopty_proto::thread::Changed::default(),
+        mode: None,
+        context: None,
     };
     state.turns = vec![turn(TurnState::Active)];
     let mut notice = Notice::new(Notice::API_ERROR, Clipped::whole("API Error: 500"));
