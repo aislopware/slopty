@@ -1113,7 +1113,7 @@ impl Conversation {
             },
         );
         let shown =
-            apply_result(&mut call.detail, status, &text, structured, (ctx.thread, ctx.uuid), id);
+            apply_result(&mut call.detail, status, &text, structured, (ctx.thread, ctx.uuid));
         let full = Some(TextRef {
             record: ctx.uuid.to_owned(),
             part: Part::Result { tool_use_id: id.to_owned() },
@@ -1122,7 +1122,7 @@ impl Conversation {
         let kept = said.body.is_none() && (!shown || status != ResultStatus::Ok);
         let seen =
             (!kept && !text.trim().is_empty() && shows_otherwise(&call.detail, &text, structured))
-                .then(|| Clipped::head(text.trim(), SEEN, full.clone()));
+                .then(|| Clipped::head_trimmed(&text, SEEN, full.clone()));
         // A list the TUI draws under the call stands for the text the model read, and a line
         // drawn alone (a refusal by auto mode) for all of it.
         let text = match said.body {
@@ -1130,7 +1130,7 @@ impl Conversation {
                 (!body.trim().is_empty()).then(|| Clipped::head(body.trim(), OUTPUT, full))
             }
             None => (!shown || status != ResultStatus::Ok)
-                .then(|| Clipped::head(text.trim(), OUTPUT, full)),
+                .then(|| Clipped::head_trimmed(&text, OUTPUT, full)),
         };
         let text = text.filter(|t| !t.text.is_empty() || images.is_empty());
         call.result = Some(ToolResult {
@@ -1781,7 +1781,6 @@ fn apply_result(
     text: &str,
     result: Option<&Value>,
     (thread, uuid): (&ThreadId, &str),
-    id: &str,
 ) -> bool {
     let field = |key: &str| result.and_then(|r| r.get(key));
     let patch = || result.map(|r| patch(r, thread, uuid)).unwrap_or_default();
@@ -1918,13 +1917,10 @@ fn apply_result(
             };
             let report = r.get("content").map(content_text).filter(|t| !t.trim().is_empty());
             agent.report = report.map(|t| {
-                Clipped::head(
-                    t.trim(),
+                Clipped::head_trimmed(
+                    &t,
                     PROSE,
-                    Some(TextRef {
-                        record: uuid.to_owned(),
-                        part: Part::Result { tool_use_id: id.to_owned() },
-                    }),
+                    Some(TextRef { record: uuid.to_owned(), part: Part::Report }),
                 )
             });
             true
@@ -2675,16 +2671,11 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
             .iter()
             .find(|b| str_at(b, "id") == Some(tool_use_id.as_str()))
             .and_then(|b| string_at(b.get("input")?, field)),
-        Part::Result { tool_use_id } => {
-            let block =
-                blocks().iter().find(|b| str_at(b, "tool_use_id") == Some(tool_use_id.as_str()))?;
-            let from_result =
-                result.and_then(|r| r.get("content")).map(content_text).filter(|t| !t.is_empty());
-            Some(
-                from_result
-                    .unwrap_or_else(|| content_text(block.get("content").unwrap_or(&Value::Null))),
-            )
-        }
+        Part::Result { tool_use_id } => blocks()
+            .iter()
+            .find(|b| str_at(b, "tool_use_id") == Some(tool_use_id.as_str()))
+            .map(|b| content_text(b.get("content").unwrap_or(&Value::Null))),
+        Part::Report => result?.get("content").map(content_text),
         // Not text of the transcript: a picture's bytes, a file the worker tails.
         Part::Image { .. } | Part::Output { .. } => None,
         Part::Record => serde_json::to_string_pretty(record).ok(),

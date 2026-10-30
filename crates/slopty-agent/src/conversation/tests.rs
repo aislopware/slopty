@@ -329,6 +329,51 @@ fn what_the_model_read_and_the_raw_records_are_where_they_were_written() {
     assert_eq!(answered["toolUseResult"], patched, "the result's record, whole");
 }
 
+/// A clip of a result counts as many characters as the text its reference opens, the blank
+/// space around it included, and that text is the one the model read, never a copy the tool
+/// kept beside it; a subagent's report opens as the person got it. The first call is a fuzz
+/// corpus input's: a file whose last line is empty reads as a listing ending in a tab.
+#[test]
+fn a_clipped_result_is_as_long_as_the_text_it_opens() {
+    let long = |word: &str| (0..500).map(|n| format!("{word} {n}")).collect::<Vec<_>>().join("\n");
+    let listed = "1\talpha\n2\tbeta\n3\tgamma\n4\t";
+    let file = json!({"type": "text", "file": {"content": "alpha\nbeta\ngamma\n",
+        "filePath": "/work/notes.txt", "numLines": 4, "startLine": 1, "totalLines": 4}});
+    let page = format!("\n{}\n\n", long("page"));
+    let copy = json!({"content": [{"type": "text", "text": "a copy of the page"}]});
+    let reported = format!("{}\n", long("report"));
+    let report = json!({"agentId": "x1", "status": "completed",
+        "content": [{"type": "text", "text": reported}]});
+    let jsonl = [
+        line(&call("a1", None, "t1", "Read", &json!({"file_path": "/work/notes.txt"}))),
+        line(&result("u1", Some("a1"), "t1", listed, &file)),
+        line(&call("a2", Some("u1"), "t2", "mcp__docs__fetch", &json!({"url": "x"}))),
+        line(&result("u2", Some("a2"), "t2", &page, &copy)),
+        line(&call("a3", Some("u2"), "t3", "Agent", &json!({"description": "Survey"}))),
+        line(&result("u3", Some("a3"), "t3", "done\nagentId: x1", &report)),
+    ]
+    .concat();
+    let mut c = Conversation::default();
+    c.ingest_jsonl(&MAIN, &jsonl);
+    let opens = |clip: &Clipped, whole: &str| {
+        let full = clip.full.as_ref().expect("cut, so it says where its whole is");
+        assert_eq!(full_text(&jsonl, full).as_deref(), Some(whole), "{full:?}");
+        let counted = (clip.lines as usize, clip.chars as usize);
+        assert_eq!(counted, (whole.lines().count(), whole.chars().count()), "{full:?}");
+    };
+
+    let result = tool(&c, &MAIN, "t1").result.clone().expect("a result");
+    opens(&result.seen.expect("a file read shows its size, not the listing"), listed);
+    let result = tool(&c, &MAIN, "t2").result.clone().expect("a result");
+    let shown = result.text.expect("the page the model read");
+    opens(&shown, &page);
+    assert!(shown.text.starts_with("page 0\n"), "shown without the blank space around it");
+    let ToolDetail::Agent(agent) = &tool(&c, &MAIN, "t3").detail else { panic!("an agent") };
+    let report = agent.report.as_ref().expect("the report");
+    assert_eq!(report.full.as_ref().map(|f| &f.part), Some(&Part::Report));
+    opens(report, &reported);
+}
+
 /// A diff longer than the cap keeps its first lines and still counts every change.
 #[test]
 fn a_long_diff_keeps_its_counts() {

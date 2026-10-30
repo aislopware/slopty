@@ -120,7 +120,7 @@ expression: "decode(\"permission\").snapshot()"
             seen:
               text: ""
               lines: 3
-              chars: 16
+              chars: 17
               full:
                 record: 00000000-0000-4000-8000-000000000030
                 part:

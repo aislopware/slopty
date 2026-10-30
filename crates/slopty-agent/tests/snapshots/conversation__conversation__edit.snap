@@ -44,7 +44,7 @@ expression: "decode(\"edit\").snapshot()"
             seen:
               text: ""
               lines: 4
-              chars: 24
+              chars: 25
               full:
                 record: 00000000-0000-4000-8000-000000000018
                 part:

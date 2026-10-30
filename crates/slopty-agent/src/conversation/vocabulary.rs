@@ -79,11 +79,14 @@ pub enum Part {
         /// The input field.
         field: String,
     },
-    /// The text of a tool result the model saw.
+    /// The text of a tool result as the model read it: its `tool_result` block, whole.
     Result {
         /// The call.
         tool_use_id: String,
     },
+    /// What a subagent reported, as its call returned it to the person (`toolUseResult.content`,
+    /// without the trailer the model read after it).
+    Report,
     /// A Bash call's standard output (`toolUseResult.stdout`).
     Stdout,
     /// A Bash call's standard error.
@@ -129,6 +132,18 @@ impl Clipped {
         Self::cut(text, cap, full, false)
     }
 
+    /// The first lines of `text` within `cap`, the blank space around it left out of what is
+    /// shown but not of what is counted: a cut clip measures the whole its `full` opens.
+    #[must_use]
+    pub fn head_trimmed(text: &str, cap: Cap, full: Option<TextRef>) -> Self {
+        let mut clip = Self::head(text.trim(), cap, full);
+        if clip.is_clipped() {
+            clip.lines = count(text.lines().count());
+            clip.chars = count(text.chars().count());
+        }
+        clip
+    }
+
     /// The last lines of `text` within `cap`: what a log ended with.
     #[must_use]
     pub fn tail(text: &str, cap: Cap, full: Option<TextRef>) -> Self {
@@ -144,7 +159,6 @@ impl Clipped {
     fn cut(text: &str, cap: Cap, full: Option<TextRef>, from_end: bool) -> Self {
         let lines = text.lines().count();
         let chars = text.chars().count();
-        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
         if lines <= cap.lines && chars <= cap.chars {
             return Self {
                 text: text.to_owned(),
@@ -156,6 +170,10 @@ impl Clipped {
         let kept = if from_end { keep_tail(text, cap) } else { keep_head(text, cap) };
         Self { text: kept, lines: count(lines), chars: count(chars), full }
     }
+}
+
+fn count(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
 }
 
 fn keep_head(text: &str, cap: Cap) -> String {
