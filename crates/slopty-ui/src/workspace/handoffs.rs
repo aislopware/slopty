@@ -21,7 +21,7 @@
 //! machine, and a page on the worker's loopback at the port that forwards it here. The shell
 //! does it, and its answer goes back to the worker.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::Context;
 use slopty_client::WorkerKey;
@@ -32,6 +32,7 @@ use slopty_proto::handoff::{
     UiRegion, UiTab, UiTarget, UiWindow, Wary,
 };
 use slopty_shell::shell::agent_ui;
+use tokio::time::Instant;
 
 use super::{WorkspaceEvent, WorkspaceView};
 
@@ -443,7 +444,6 @@ fn escaped(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::time::Instant;
 
     use gpui::{AppContext as _, TestAppContext};
     use slopty_client::tunnel::Forward;
@@ -456,6 +456,7 @@ mod tests {
     use slopty_proto::orchestration::Port;
     use slopty_shell::THIS_DEVICE;
     use slopty_theme::Theme;
+    use tokio::time::Instant;
 
     use super::{absolute, escaped, loopback_offer, on_loopback};
     use crate::workspace::WorkspaceView;
