@@ -32,10 +32,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
-
 pub use assets::Assets;
 pub use draw::{DrawCmd, DrawText, Pointer};
+use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 pub use node::{
     Axis, Canvas, Chart, ChartKind, Column, HandlerId, Node, NodeKind, NumberFormat, SceneNode,
     Series, ShaderNode, Span, Stack, Table_ as TableNode, Text,
@@ -63,9 +62,7 @@ pub struct VisualError {
 
 impl VisualError {
     pub fn script(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+        Self { message: message.into() }
     }
 }
 
@@ -185,10 +182,7 @@ impl Visual {
                 Ok(())
             })?,
         )?;
-        let ui: Table = lua
-            .load(include_str!("prelude.luau"))
-            .set_name("=ui")
-            .eval()?;
+        let ui: Table = lua.load(include_str!("prelude.luau")).set_name("=ui").eval()?;
         ui.set(
             "fmt",
             lua.create_function(|_, (value, options): (f64, Option<Table>)| {
@@ -196,9 +190,8 @@ impl Visual {
                 if let Some(o) = options {
                     format.prefix = o.get::<Option<String>>("prefix")?.unwrap_or_default();
                     format.unit = o.get::<Option<String>>("unit")?.unwrap_or_default();
-                    format.decimals = o
-                        .get::<Option<f64>>("decimals")?
-                        .map(|d| d.clamp(0.0, 6.0) as u8);
+                    format.decimals =
+                        o.get::<Option<f64>>("decimals")?.map(|d| d.clamp(0.0, 6.0) as u8);
                 }
                 Ok(format.format(value))
             })?,
@@ -297,9 +290,7 @@ impl Visual {
     }
 
     fn handler(&self, id: HandlerId) -> Result<&Function, VisualError> {
-        self.handlers
-            .get(id.0 as usize)
-            .ok_or_else(|| VisualError::script("stale handler"))
+        self.handlers.get(id.0 as usize).ok_or_else(|| VisualError::script("stale handler"))
     }
 
     /// Call an event handler. The caller renders again afterwards.
@@ -323,9 +314,7 @@ impl Visual {
         time: f64,
         pointer: Option<Pointer>,
     ) -> Result<Vec<DrawCmd>, VisualError> {
-        Ok(self
-            .draw_canvas_traced(id, width, height, time, pointer)?
-            .commands)
+        Ok(self.draw_canvas_traced(id, width, height, time, pointer)?.commands)
     }
 
     /// [`Visual::draw_canvas`], also reporting whether the drawing read the
@@ -339,12 +328,9 @@ impl Visual {
         pointer: Option<Pointer>,
     ) -> Result<CanvasDrawing, VisualError> {
         let draw = self.handler(id)?.clone();
-        let graphics = self
-            .lua
-            .create_userdata(draw::Graphics::new(width, height, time, pointer))?;
-        self.budgeted(DRAW_BUDGET, || {
-            draw.call::<()>((&graphics, width, height, time))
-        })?;
+        let graphics =
+            self.lua.create_userdata(draw::Graphics::new(width, height, time, pointer))?;
+        self.budgeted(DRAW_BUDGET, || draw.call::<()>((&graphics, width, height, time)))?;
         let graphics = graphics.take::<draw::Graphics>()?;
         Ok(CanvasDrawing {
             reads_pointer: graphics.read_pointer.get(),
@@ -355,9 +341,7 @@ impl Visual {
     /// Run a scene's draw function.
     pub fn draw_scene(&mut self, id: HandlerId, time: f64) -> Result<Scene, VisualError> {
         let draw = self.handler(id)?.clone();
-        let scene = self
-            .lua
-            .create_userdata(Scene::with_assets(time, self.assets.clone()))?;
+        let scene = self.lua.create_userdata(Scene::with_assets(time, self.assets.clone()))?;
         self.budgeted(DRAW_BUDGET, || draw.call::<()>((&scene, time)))?;
         Ok(scene.take::<Scene>()?)
     }
@@ -461,11 +445,7 @@ fn exercise_draws(
                         640.0,
                         canvas.height,
                         *time,
-                        Some(Pointer {
-                            x: 320.0,
-                            y: canvas.height / 2.0,
-                            down: false,
-                        }),
+                        Some(Pointer { x: 320.0, y: canvas.height / 2.0, down: false }),
                     )
                     .map_err(|e| VisualError::script(format!("in a canvas draw: {}", e.message)))?;
             }
@@ -476,11 +456,7 @@ fn exercise_draws(
                 .map_err(|e| VisualError::script(format!("in a scene draw: {}", e.message)))?;
             if drawn
                 .project(
-                    Camera {
-                        yaw: scene.yaw,
-                        pitch: scene.pitch,
-                        zoom: scene.zoom,
-                    },
+                    Camera { yaw: scene.yaw, pitch: scene.pitch, zoom: scene.zoom },
                     640.0,
                     scene.height,
                 )
@@ -559,15 +535,9 @@ fn collect_interactions(node: &Node, out: &mut Vec<Interaction>) {
                 ));
             }
             NodeKind::Toggle { label, value, .. } => {
-                out.push((
-                    format!("switching '{label}'"),
-                    path.clone(),
-                    HandlerArg::Bool(!value),
-                ));
+                out.push((format!("switching '{label}'"), path.clone(), HandlerArg::Bool(!value)));
             }
-            NodeKind::Slider {
-                label, min, max, ..
-            } => {
+            NodeKind::Slider { label, min, max, .. } => {
                 let name = label.as_deref().unwrap_or("a slider");
                 out.push((
                     format!("moving {name} to its maximum"),
@@ -581,15 +551,9 @@ fn collect_interactions(node: &Node, out: &mut Vec<Interaction>) {
                 ));
             }
             NodeKind::Button { label, .. } => {
-                out.push((
-                    format!("pressing '{label}'"),
-                    path.clone(),
-                    HandlerArg::None,
-                ));
+                out.push((format!("pressing '{label}'"), path.clone(), HandlerArg::None));
             }
-            NodeKind::Stack(Stack {
-                on_click: Some(_), ..
-            }) => {
+            NodeKind::Stack(Stack { on_click: Some(_), .. }) => {
                 out.push(("clicking a row".into(), path.clone(), HandlerArg::None));
             }
             _ => {}

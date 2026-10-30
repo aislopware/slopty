@@ -37,10 +37,7 @@ impl PartialEq for Assets {
 
 impl Assets {
     pub fn new(files: HashMap<String, Arc<[u8]>>) -> Self {
-        Self {
-            files: Arc::new(files),
-            models: Arc::default(),
-        }
+        Self { files: Arc::new(files), models: Arc::default() }
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<[u8]>> {
@@ -63,10 +60,7 @@ impl Assets {
             if known.is_empty() {
                 format!("no asset named '{name}' (pass files in show_visual's assets)")
             } else {
-                format!(
-                    "no asset named '{name}' (this visual has {})",
-                    known.join(", ")
-                )
+                format!("no asset named '{name}' (this visual has {})", known.join(", "))
             }
         })
     }
@@ -77,7 +71,5 @@ pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('.')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }

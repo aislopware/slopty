@@ -39,9 +39,7 @@ pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
         return Err("not a PNG, JPEG, WebP, or Radiance HDR image".into());
     }
     let hdr = reader.format() == Some(image::ImageFormat::Hdr);
-    let (width, height) = reader
-        .into_dimensions()
-        .map_err(|e| format!("unreadable image: {e}"))?;
+    let (width, height) = reader.into_dimensions().map_err(|e| format!("unreadable image: {e}"))?;
     check_size(width, height, hdr)?;
     Ok((width, height))
 }
@@ -49,15 +47,9 @@ pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
 /// Sides within 1..=MAX_IMAGE_SIDE and pixels within the decode budget.
 fn check_size(width: u32, height: u32, hdr: bool) -> Result<(), String> {
     if width == 0 || height == 0 || width.max(height) > MAX_IMAGE_SIDE {
-        return Err(format!(
-            "a {width}x{height} image; sides run 1 to {MAX_IMAGE_SIDE} pixels"
-        ));
+        return Err(format!("a {width}x{height} image; sides run 1 to {MAX_IMAGE_SIDE} pixels"));
     }
-    let budget = if hdr {
-        MAX_HDR_PIXELS
-    } else {
-        MAX_IMAGE_PIXELS
-    };
+    let budget = if hdr { MAX_HDR_PIXELS } else { MAX_IMAGE_PIXELS };
     if u64::from(width) * u64::from(height) > budget {
         return Err(format!(
             "a {width}x{height} image; at most {budget} pixels{}",
@@ -72,40 +64,26 @@ pub fn decode(bytes: &[u8]) -> Result<Image, String> {
     dimensions(bytes)?;
     let reader = reader(bytes)?;
     let hdr = reader.format() == Some(image::ImageFormat::Hdr);
-    let image = reader
-        .decode()
-        .map_err(|e| format!("unreadable image: {e}"))?;
+    let image = reader.decode().map_err(|e| format!("unreadable image: {e}"))?;
     let (width, height) = (image.width(), image.height());
     let pixels = if hdr {
         Pixels::RgbaF32(image.into_rgba32f().into_raw())
     } else {
         Pixels::Rgba8(image.into_rgba8().into_raw())
     };
-    Ok(Image {
-        width,
-        height,
-        pixels,
-    })
+    Ok(Image { width, height, pixels })
 }
 
 /// Decode any texture a scene uses.
 pub fn decode_texture(data: &TextureData) -> Result<Image, String> {
     match data {
         TextureData::Encoded(bytes) => decode(bytes),
-        TextureData::Rgba {
-            width,
-            height,
-            pixels,
-        } => {
+        TextureData::Rgba { width, height, pixels } => {
             check_size(*width, *height, false)?;
             if pixels.len() != *width as usize * *height as usize * 4 {
                 return Err("image pixels don't match its size".into());
             }
-            Ok(Image {
-                width: *width,
-                height: *height,
-                pixels: Pixels::Rgba8(pixels.to_vec()),
-            })
+            Ok(Image { width: *width, height: *height, pixels: Pixels::Rgba8(pixels.to_vec()) })
         }
     }
 }

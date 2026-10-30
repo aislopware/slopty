@@ -66,10 +66,7 @@ impl Token {
             "warning" => Token::Warning,
             "danger" => Token::Danger,
             "border" => Token::Border,
-            other => match other
-                .strip_prefix("chart")
-                .and_then(|n| n.parse::<u8>().ok())
-            {
+            other => match other.strip_prefix("chart").and_then(|n| n.parse::<u8>().ok()) {
                 Some(n @ 1..=CHART_SERIES) => Token::Chart(n - 1),
                 _ => {
                     return Err(VisualError::script(format!(
@@ -99,18 +96,11 @@ pub struct Color {
 
 impl Color {
     pub const fn token(token: Token) -> Self {
-        Self {
-            token,
-            mix: None,
-            alpha: 1.0,
-        }
+        Self { token, mix: None, alpha: 1.0 }
     }
 
     pub fn with_alpha(self, alpha: f32) -> Self {
-        Self {
-            alpha: self.alpha * alpha.clamp(0.0, 1.0),
-            ..self
-        }
+        Self { alpha: self.alpha * alpha.clamp(0.0, 1.0), ..self }
     }
 }
 
@@ -247,14 +237,7 @@ mod tests {
     fn colors_are_theme_tokens_only() {
         assert_eq!(Token::parse("chart1").unwrap(), Token::Chart(0));
         assert_eq!(Token::parse("chart6").unwrap(), Token::Chart(5));
-        for bad in [
-            "chart0",
-            "chart7",
-            "#ff0000",
-            "red",
-            "rgb(0,0,0)",
-            "background",
-        ] {
+        for bad in ["chart0", "chart7", "#ff0000", "red", "rgb(0,0,0)", "background"] {
             let err = Token::parse(bad).unwrap_err().to_string();
             assert!(err.contains("theme tokens"), "{bad}: {err}");
         }

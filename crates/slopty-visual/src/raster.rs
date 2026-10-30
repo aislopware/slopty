@@ -118,11 +118,7 @@ impl Scene {
             Quality::Final if (device_w * device_h * 4) as f32 <= SAMPLE_BUDGET => 2,
             Quality::Final => 1,
         };
-        let grid = Grid {
-            width: device_w * ss,
-            height: device_h * ss,
-            k: pixel_scale * ss as f32,
-        };
+        let grid = Grid { width: device_w * ss, height: device_h * ss, k: pixel_scale * ss as f32 };
 
         // Everything in sample space first (cheap, single-threaded); the
         // per-sample work after splits across cores.
@@ -148,15 +144,7 @@ impl Scene {
         let bias = view.radius * 2e-3;
         let mut lines: Vec<[Sample; 3]> = Vec::new();
         for line in &self.lines {
-            line_tris(
-                &grid,
-                &view,
-                line.a,
-                line.b,
-                line.width,
-                rgba(line.color),
-                &mut lines,
-            );
+            line_tris(&grid, &view, line.a, line.b, line.width, rgba(line.color), &mut lines);
         }
         let (hints, labels) = self.annotations(camera, width, height);
         let mut dots = Vec::new();
@@ -247,10 +235,7 @@ impl Scene {
 
 /// How many threads share a render.
 fn threads() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .clamp(1, 16)
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 16)
 }
 
 /// Run `work` on horizontal bands of the grid, one per thread. Bands start on
@@ -277,13 +262,7 @@ fn for_bands(
             let (band_depth, rest_depth) = depth.split_at_mut((y1 - y0) * width);
             color = rest_color;
             depth = rest_depth;
-            let mut band = Band {
-                y0,
-                y1,
-                width,
-                color: band_color,
-                depth: band_depth,
-            };
+            let mut band = Band { y0, y1, width, color: band_color, depth: band_depth };
             scope.spawn(move || work(&mut band));
             y0 = y1;
         }
@@ -298,10 +277,8 @@ fn shade_face(
     rgba: &dyn Fn(Color) -> [f32; 4],
 ) -> Option<Vec<Vertex>> {
     let corners = &face.v[..face.n as usize];
-    let centroid = scale(
-        corners.iter().fold([0.0; 3], |acc, v| add(acc, *v)),
-        1.0 / corners.len() as f32,
-    );
+    let centroid =
+        scale(corners.iter().fold([0.0; 3], |acc, v| add(acc, *v)), 1.0 / corners.len() as f32);
     let toward_eye = dot(face.normal, sub(view.eye, centroid));
     if !face.two_sided && toward_eye < 0.0 {
         return None;
@@ -320,10 +297,7 @@ fn shade_face(
                 Some(normals) => normals[i],
                 None => face.normal,
             };
-            Vertex {
-                p: view.view(*corner),
-                c: lit(base, scale(normal, flip), view.light, glow),
-            }
+            Vertex { p: view.view(*corner), c: lit(base, scale(normal, flip), view.light, glow) }
         })
         .collect();
     let clipped = clip_near(&polygon, view.near);
@@ -347,19 +321,11 @@ fn lit(base: [f32; 4], normal: V3, key: V3, glow: f32) -> [f32; 4] {
 }
 
 fn to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
 fn to_srgb(c: f32) -> f32 {
-    if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
+    if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
 /// Sutherland–Hodgman against `z = near`: keep what is in front.
@@ -377,10 +343,7 @@ fn clip_near(polygon: &[Vertex], near: f32) -> Vec<Vertex> {
         }
         if a_in != b_in {
             let t = (near - a.p[2]) / (b.p[2] - a.p[2]);
-            out.push(Vertex {
-                p: add(a.p, scale(sub(b.p, a.p), t)),
-                c: lerp4(a.c, b.c, t),
-            });
+            out.push(Vertex { p: add(a.p, scale(sub(b.p, a.p), t)), c: lerp4(a.c, b.c, t) });
         }
     }
     out
@@ -406,12 +369,7 @@ struct Sample {
 
 fn to_sample(grid: &Grid, view: &View, v: &Vertex) -> Sample {
     let [x, y] = view.screen(v.p);
-    Sample {
-        x: x * grid.k,
-        y: y * grid.k,
-        z: v.p[2],
-        c: v.c,
-    }
+    Sample { x: x * grid.k, y: y * grid.k, z: v.p[2], c: v.c }
 }
 
 /// Rasterize one triangle into a band with perspective-correct depth and
@@ -638,11 +596,7 @@ mod tests {
     use crate::style::Token;
 
     fn camera() -> Camera {
-        Camera {
-            yaw: 0.0,
-            pitch: 0.0,
-            zoom: 1.0,
-        }
+        Camera { yaw: 0.0, pitch: 0.0, zoom: 1.0 }
     }
 
     fn colors(color: Color) -> [f32; 4] {
@@ -665,44 +619,19 @@ mod tests {
     fn nearer_surfaces_hide_farther_ones_whatever_their_order() {
         for near_first in [true, false] {
             let mut s = Scene::default();
-            let far = [
-                [-2., -2., -1.],
-                [2., -2., -1.],
-                [2., 2., -1.],
-                [-2., 2., -1.],
-            ];
-            let near = [
-                [-0.5, -0.5, 1.],
-                [0.5, -0.5, 1.],
-                [0.5, 0.5, 1.],
-                [-0.5, 0.5, 1.],
-            ];
+            let far = [[-2., -2., -1.], [2., -2., -1.], [2., 2., -1.], [-2., 2., -1.]];
+            let near = [[-0.5, -0.5, 1.], [0.5, -0.5, 1.], [0.5, 0.5, 1.], [-0.5, 0.5, 1.]];
             let faces = [(near, 0), (far, 1)];
-            let order: Vec<_> = if near_first {
-                faces.to_vec()
-            } else {
-                faces.iter().rev().copied().collect()
-            };
+            let order: Vec<_> =
+                if near_first { faces.to_vec() } else { faces.iter().rev().copied().collect() };
             for (quad, chart) in order {
-                s.face(
-                    &quad,
-                    Color::token(Token::Chart(chart)),
-                    Some([0., 0., 1.]),
-                    true,
-                )
-                .unwrap();
+                s.face(&quad, Color::token(Token::Chart(chart)), Some([0., 0., 1.]), true).unwrap();
             }
             let raster = s.render(camera(), 200.0, 200.0, 1.0, Quality::Draft, &colors);
             let center = pixel(&raster, 100, 100);
-            assert!(
-                center[0] > 100 && center[2] < 60,
-                "near red wins: {center:?}"
-            );
+            assert!(center[0] > 100 && center[2] < 60, "near red wins: {center:?}");
             let corner = pixel(&raster, 100, 30);
-            assert!(
-                corner[2] > 100 && corner[0] < 60,
-                "far blue shows around it: {corner:?}"
-            );
+            assert!(corner[2] > 100 && corner[0] < 60, "far blue shows around it: {corner:?}");
             // Nothing outside the geometry: transparent.
             assert_eq!(pixel(&raster, 1, 1)[3], 0);
         }
@@ -712,19 +641,8 @@ mod tests {
     fn faces_crossing_the_camera_are_clipped_not_dropped() {
         let mut s = Scene::default();
         // A long floor that runs from far away to behind the camera.
-        let floor = [
-            [-1., -1., -40.],
-            [1., -1., -40.],
-            [1., -1., 40.],
-            [-1., -1., 40.],
-        ];
-        s.face(
-            &floor,
-            Color::token(Token::Chart(0)),
-            Some([0., 1., 0.]),
-            true,
-        )
-        .unwrap();
+        let floor = [[-1., -1., -40.], [1., -1., -40.], [1., -1., 40.], [-1., -1., 40.]];
+        s.face(&floor, Color::token(Token::Chart(0)), Some([0., 1., 0.]), true).unwrap();
         // A marker the camera frames itself on, near the middle.
         s.face(
             &[[-0.2, 0., 0.], [0.2, 0., 0.], [0., 0.3, 0.]],
@@ -733,10 +651,7 @@ mod tests {
             true,
         )
         .unwrap();
-        let zoomed = Camera {
-            zoom: 6.0,
-            ..camera()
-        };
+        let zoomed = Camera { zoom: 6.0, ..camera() };
         let raster = s.render(zoomed, 200.0, 200.0, 1.0, Quality::Draft, &colors);
         let drawn = raster.bgra.chunks_exact(4).filter(|p| p[3] > 0).count();
         assert!(drawn > 0, "the floor still shows");
@@ -774,24 +689,11 @@ mod timing {
     fn timing_a_furnished_room() {
         let mut s = Scene::default();
         let quad = |s: &mut Scene, q: [V3; 4], c: u8| {
-            s.face(&q, Color::token(Token::Chart(c)), None, true)
-                .unwrap();
+            s.face(&q, Color::token(Token::Chart(c)), None, true).unwrap();
         };
-        quad(
-            &mut s,
-            [[-4., 0., -3.], [4., 0., -3.], [4., 0., 3.], [-4., 0., 3.]],
-            0,
-        );
-        quad(
-            &mut s,
-            [[-4., 0., -3.], [4., 0., -3.], [4., 3., -3.], [-4., 3., -3.]],
-            1,
-        );
-        quad(
-            &mut s,
-            [[-4., 0., -3.], [-4., 0., 3.], [-4., 3., 3.], [-4., 3., -3.]],
-            2,
-        );
+        quad(&mut s, [[-4., 0., -3.], [4., 0., -3.], [4., 0., 3.], [-4., 0., 3.]], 0);
+        quad(&mut s, [[-4., 0., -3.], [4., 0., -3.], [4., 3., -3.], [-4., 3., -3.]], 1);
+        quad(&mut s, [[-4., 0., -3.], [-4., 0., 3.], [-4., 3., 3.], [-4., 3., -3.]], 2);
         // Spheres stand in for plants and lamps: smooth, many faces.
         for k in 0..8 {
             let at = [-3.0 + k as f32 * 0.8, 0.6, 1.0];
@@ -809,17 +711,12 @@ mod timing {
                     };
                     let q = [p(i, j), p(i + 1, j), p(i + 1, j + 1), p(i, j + 1)];
                     let n: Vec<V3> = q.iter().map(|c| sub(*c, at)).collect();
-                    s.smooth_face(&q, &n, Color::token(Token::Chart(3)))
-                        .unwrap();
+                    s.smooth_face(&q, &n, Color::token(Token::Chart(3))).unwrap();
                 }
             }
         }
         let colors = |_: Color| [0.6, 0.6, 0.6, 1.0];
-        let camera = Camera {
-            yaw: 0.7,
-            pitch: 0.4,
-            zoom: 1.0,
-        };
+        let camera = Camera { yaw: 0.7, pitch: 0.4, zoom: 1.0 };
         for quality in [Quality::Draft, Quality::Final] {
             let start = std::time::Instant::now();
             let raster = s.render(camera, 736.0, 420.0, 2.0, quality, &colors);

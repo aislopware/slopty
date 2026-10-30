@@ -171,16 +171,8 @@ impl NumberFormat {
             }
             grouped.push(ch);
         }
-        let frac = if frac.is_empty() {
-            String::new()
-        } else {
-            format!(".{frac}")
-        };
-        let space = if self.unit.is_empty() || self.unit.starts_with('%') {
-            ""
-        } else {
-            " "
-        };
+        let frac = if frac.is_empty() { String::new() } else { format!(".{frac}") };
+        let space = if self.unit.is_empty() || self.unit.starts_with('%') { "" } else { " " };
         format!("{sign}{}{grouped}{frac}{space}{}", self.prefix, self.unit)
     }
 }
@@ -302,10 +294,7 @@ fn forbidden(prop: &str) -> Option<&'static str> {
 
 impl Parser {
     pub fn new() -> Self {
-        Self {
-            handlers: Vec::new(),
-            nodes: 0,
-        }
+        Self { handlers: Vec::new(), nodes: 0 }
     }
 
     fn handler(&mut self, function: Function) -> HandlerId {
@@ -319,11 +308,7 @@ impl Parser {
         Ok(match children.len() {
             1 => children.pop().unwrap(),
             _ => Node {
-                kind: NodeKind::Stack(Stack {
-                    gap: 16.0,
-                    children,
-                    ..Default::default()
-                }),
+                kind: NodeKind::Stack(Stack { gap: 16.0, children, ..Default::default() }),
                 width: None,
                 grow: false,
                 key: None,
@@ -379,10 +364,7 @@ impl Parser {
         self.count()?;
         Ok(Node {
             kind: NodeKind::Text(Text {
-                spans: vec![Span {
-                    text: clip(text),
-                    ..Default::default()
-                }],
+                spans: vec![Span { text: clip(text), ..Default::default() }],
                 ..Default::default()
             }),
             width: None,
@@ -403,11 +385,7 @@ impl Parser {
                     self.children_into(child?, &mut children, depth + 1)?;
                 }
                 NodeKind::Stack(Stack {
-                    axis: if kind == "row" {
-                        Axis::Horizontal
-                    } else {
-                        Axis::Vertical
-                    },
+                    axis: if kind == "row" { Axis::Horizontal } else { Axis::Vertical },
                     gap: props
                         .number("gap")?
                         .unwrap_or(if kind == "row" { 12.0 } else { 8.0 })
@@ -517,10 +495,8 @@ impl Parser {
                     }
                 }
                 if buffers.len() > crate::shader::MAX_BUFFERS {
-                    return Err(props.error(&format!(
-                        "takes at most {} buffers",
-                        crate::shader::MAX_BUFFERS
-                    )));
+                    return Err(props
+                        .error(&format!("takes at most {} buffers", crate::shader::MAX_BUFFERS)));
                 }
                 let mut textures = Vec::new();
                 if let Some(table) = props.get::<Option<Table>>("textures")? {
@@ -559,10 +535,9 @@ impl Parser {
                     }
                 }
                 if inputs.len() > crate::shader::MAX_INPUTS {
-                    return Err(props.error(&format!(
-                        "takes at most {} inputs",
-                        crate::shader::MAX_INPUTS
-                    )));
+                    return Err(
+                        props.error(&format!("takes at most {} inputs", crate::shader::MAX_INPUTS))
+                    );
                 }
                 // Slots follow the names, so a shader compiled for one set of
                 // values serves every other.
@@ -609,9 +584,7 @@ impl Parser {
                 if options.is_empty() {
                     return Err(props.error("needs options = { ... }"));
                 }
-                let value = props
-                    .text_value("value")?
-                    .unwrap_or_else(|| options[0].clone());
+                let value = props.text_value("value")?.unwrap_or_else(|| options[0].clone());
                 NodeKind::Tabs {
                     options,
                     value,
@@ -656,10 +629,7 @@ impl Parser {
                 if !(url.starts_with("https://") || url.starts_with("http://")) {
                     return Err(props.error("url must be http(s)"));
                 }
-                NodeKind::Link {
-                    label: props.string("label")?.unwrap_or_else(|| url.clone()),
-                    url,
-                }
+                NodeKind::Link { label: props.string("label")?.unwrap_or_else(|| url.clone()), url }
             }
             "span" => {
                 return Err(VisualError::script(
@@ -684,9 +654,7 @@ impl Parser {
     }
 
     fn text(&mut self, props: &Props) -> Result<Text, VisualError> {
-        props.allow(&[
-            "size", "weight", "color", "mono", "italic", "align", "truncate",
-        ])?;
+        props.allow(&["size", "weight", "color", "mono", "italic", "align", "truncate"])?;
         let mut spans = Vec::new();
         let mut len = 0usize;
         for child in props.table.sequence_values::<Value>() {
@@ -694,10 +662,7 @@ impl Parser {
                 Value::Table(table)
                     if table.raw_get::<Option<String>>("__kind")?.as_deref() == Some("span") =>
                 {
-                    let span_props = Props {
-                        table: &table,
-                        kind: "span",
-                    };
+                    let span_props = Props { table: &table, kind: "span" };
                     span_props.allow(&["weight", "color", "mono", "italic"])?;
                     let text: String = table
                         .sequence_values::<Value>()
@@ -716,10 +681,7 @@ impl Parser {
                     return Err(props.error("children must be strings or ui.span { ... }"));
                 }
                 Value::Nil | Value::Boolean(false) => continue,
-                value => Span {
-                    text: value_text(&value),
-                    ..Default::default()
-                },
+                value => Span { text: value_text(&value), ..Default::default() },
             };
             len += span.text.len();
             spans.push(span);
@@ -742,10 +704,7 @@ impl Parser {
     fn table(&mut self, props: &Props, depth: usize) -> Result<Table_, VisualError> {
         props.allow(&["columns", "rows", "hover"])?;
         let mut columns = Vec::new();
-        for column in props
-            .get::<Option<Vec<Value>>>("columns")?
-            .unwrap_or_default()
-        {
+        for column in props.get::<Option<Vec<Value>>>("columns")?.unwrap_or_default() {
             columns.push(match column {
                 Value::Table(t) => Column {
                     label: t.get::<Option<String>>("label")?.unwrap_or_default(),
@@ -755,10 +714,7 @@ impl Parser {
                     },
                     width: t.get::<Option<f64>>("width")?.map(|w| w as f32),
                 },
-                other => Column {
-                    label: value_text(&other),
-                    ..Default::default()
-                },
+                other => Column { label: value_text(&other), ..Default::default() },
             });
         }
         let mut rows = Vec::new();
@@ -798,11 +754,7 @@ impl Parser {
         if rows.len() > 500 {
             return Err(props.error("has more than 500 rows; summarize or paginate"));
         }
-        Ok(Table_ {
-            columns,
-            rows,
-            hover: props.bool("hover")?.unwrap_or(true),
-        })
+        Ok(Table_ { columns, rows, hover: props.bool("hover")?.unwrap_or(true) })
     }
 }
 
@@ -835,23 +787,13 @@ fn chart(props: &Props) -> Result<Chart, VisualError> {
             )));
         }
     };
-    let x: Vec<String> = props
-        .get::<Option<Vec<Value>>>("x")?
-        .unwrap_or_default()
-        .iter()
-        .map(value_text)
-        .collect();
+    let x: Vec<String> =
+        props.get::<Option<Vec<Value>>>("x")?.unwrap_or_default().iter().map(value_text).collect();
     let mut series = Vec::new();
-    for (ix, s) in props
-        .get::<Option<Vec<Table>>>("series")?
-        .unwrap_or_default()
-        .into_iter()
-        .enumerate()
+    for (ix, s) in
+        props.get::<Option<Vec<Table>>>("series")?.unwrap_or_default().into_iter().enumerate()
     {
-        let s_props = Props {
-            table: &s,
-            kind: "chart series",
-        };
+        let s_props = Props { table: &s, kind: "chart series" };
         s_props.allow(&["name", "values", "points", "color"])?;
         let values = match s.get::<Option<Table>>("values")? {
             Some(values) => {
@@ -873,9 +815,7 @@ fn chart(props: &Props) -> Result<Chart, VisualError> {
         }
         series.push(Series {
             name: s_props.string("name")?.unwrap_or_default(),
-            color: s_props
-                .color("color")?
-                .unwrap_or(Color::token(Token::series(ix))),
+            color: s_props.color("color")?.unwrap_or(Color::token(Token::series(ix))),
             values,
             points,
         });
@@ -935,24 +875,20 @@ impl Props<'_> {
             if COMMON.contains(&key.as_str()) || known.contains(&key.as_str()) {
                 continue;
             }
-            let reason = forbidden(&key)
-                .map(|r| format!(": {r}"))
-                .unwrap_or_else(|| {
-                    if known.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" (it takes {})", known.join(", "))
-                    }
-                });
+            let reason = forbidden(&key).map(|r| format!(": {r}")).unwrap_or_else(|| {
+                if known.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (it takes {})", known.join(", "))
+                }
+            });
             return Err(self.error(&format!("has no '{key}'{reason}")));
         }
         Ok(())
     }
 
     fn get<T: mlua::FromLua>(&self, name: &str) -> Result<T, VisualError> {
-        self.table
-            .raw_get(name)
-            .map_err(|e| self.error(&format!("'{name}': {}", short_error(&e))))
+        self.table.raw_get(name).map_err(|e| self.error(&format!("'{name}': {}", short_error(&e))))
     }
 
     fn number(&self, name: &str) -> Result<Option<f64>, VisualError> {
@@ -978,8 +914,7 @@ impl Props<'_> {
     }
 
     fn required_string(&self, name: &str) -> Result<String, VisualError> {
-        self.string(name)?
-            .ok_or_else(|| self.error(&format!("needs {name}")))
+        self.string(name)?.ok_or_else(|| self.error(&format!("needs {name}")))
     }
 
     /// A string or a number (formatted as Lua prints it).
@@ -1046,19 +981,14 @@ pub(crate) fn parse_color(value: Value) -> Result<Option<Color>, VisualError> {
             let mix = match t.raw_get::<Option<String>>("mix")? {
                 Some(other) => Some((
                     Token::parse(&other)?,
-                    t.raw_get::<Option<f64>>("t")?
-                        .unwrap_or(0.5)
-                        .clamp(0.0, 1.0) as f32,
+                    t.raw_get::<Option<f64>>("t")?.unwrap_or(0.5).clamp(0.0, 1.0) as f32,
                 )),
                 None => None,
             };
             Some(Color {
                 token,
                 mix,
-                alpha: t
-                    .raw_get::<Option<f64>>("alpha")?
-                    .unwrap_or(1.0)
-                    .clamp(0.0, 1.0) as f32,
+                alpha: t.raw_get::<Option<f64>>("alpha")?.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
             })
         }
         other => {
@@ -1118,22 +1048,12 @@ mod tests {
 
     #[test]
     fn numbers_format_with_grouping_and_units() {
-        let f = NumberFormat {
-            unit: "ms".into(),
-            ..Default::default()
-        };
+        let f = NumberFormat { unit: "ms".into(), ..Default::default() };
         assert_eq!(f.format(1234.0), "1,234 ms");
         assert_eq!(f.format(-12.5), "-12.5 ms");
-        let money = NumberFormat {
-            prefix: "$".into(),
-            decimals: Some(2),
-            ..Default::default()
-        };
+        let money = NumberFormat { prefix: "$".into(), decimals: Some(2), ..Default::default() };
         assert_eq!(money.format(1234567.891), "$1,234,567.89");
-        let pct = NumberFormat {
-            unit: "%".into(),
-            ..Default::default()
-        };
+        let pct = NumberFormat { unit: "%".into(), ..Default::default() };
         assert_eq!(pct.format(4.256), "4.26%");
     }
 }

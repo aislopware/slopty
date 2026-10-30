@@ -131,23 +131,14 @@ pub fn program(code: &str, inputs: &[String]) -> (String, usize) {
     );
     for (i, name) in inputs.iter().enumerate().take(MAX_INPUTS) {
         let lane = ["x", "y", "z", "w"][i % 4];
-        header.push_str(&format!(
-            "#define {name} (slopty_inputs[{}].{lane})\n",
-            i / 4
-        ));
+        header.push_str(&format!("#define {name} (slopty_inputs[{}].{lane})\n", i / 4));
     }
     let lines = header.lines().count();
     // Shadertoy sources often carry an ES precision statement; GLSL 4.50
     // has no use for it.
     let body: String = code
         .lines()
-        .map(|line| {
-            if line.trim_start().starts_with("precision ") {
-                ""
-            } else {
-                line
-            }
-        })
+        .map(|line| if line.trim_start().starts_with("precision ") { "" } else { line })
         .collect::<Vec<_>>()
         .join("\n");
     let program = format!(
@@ -165,9 +156,7 @@ pub fn program(code: &str, inputs: &[String]) -> (String, usize) {
 /// shadow the built-in inputs.
 pub fn valid_input_name(name: &str) -> bool {
     let mut chars = name.chars();
-    let starts = chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    let starts = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
     starts
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !name.starts_with("gl_")
@@ -201,16 +190,11 @@ pub fn validate(code: &str, inputs: &[String]) -> Result<(), String> {
         return Err(format!("a shader is at most {MAX_SHADER_BYTES} bytes"));
     }
     if !code.contains("mainImage") {
-        return Err(
-            "a shader defines void mainImage(out vec4 fragColor, in vec2 fragCoord)".into(),
-        );
+        return Err("a shader defines void mainImage(out vec4 fragColor, in vec2 fragCoord)".into());
     }
     let (source, offset) = program(code, inputs);
     let module = naga::front::glsl::Frontend::default()
-        .parse(
-            &naga::front::glsl::Options::from(naga::ShaderStage::Fragment),
-            &source,
-        )
+        .parse(&naga::front::glsl::Options::from(naga::ShaderStage::Fragment), &source)
         .map_err(|errors| describe(&errors.errors, &source, offset))?;
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),

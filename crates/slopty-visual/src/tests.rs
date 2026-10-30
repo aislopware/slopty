@@ -33,12 +33,8 @@ fn a_view_renders_and_handlers_change_state() {
     let tree = visual.render().unwrap();
     assert_eq!(text_of(&tree), "Latency p95|");
     let tabs = find(&tree, &|n| matches!(n.kind, NodeKind::Tabs { .. })).unwrap();
-    let NodeKind::Tabs { on_change, .. } = tabs.kind else {
-        unreachable!()
-    };
-    visual
-        .call(on_change, HandlerArg::Text("p99".into()))
-        .unwrap();
+    let NodeKind::Tabs { on_change, .. } = tabs.kind else { unreachable!() };
+    visual.call(on_change, HandlerArg::Text("p99".into())).unwrap();
     assert_eq!(text_of(&visual.render().unwrap()), "Latency p99|");
 }
 
@@ -51,43 +47,24 @@ fn a_script_may_return_a_static_node() {
 #[test]
 fn style_rules_are_enforced_with_reasons() {
     for (script, needle) in [
-        (
-            r##"return ui.text { "x", color = "#ff0000" }"##,
-            "theme tokens",
-        ),
-        (
-            r#"return ui.column { background = "accent" }"#,
-            "no containers",
-        ),
-        (
-            r#"return ui.text { "x", font = "Comic Sans" }"#,
-            "interface font",
-        ),
+        (r##"return ui.text { "x", color = "#ff0000" }"##, "theme tokens"),
+        (r#"return ui.column { background = "accent" }"#, "no containers"),
+        (r#"return ui.text { "x", font = "Comic Sans" }"#, "interface font"),
         (r#"return ui.text { "x", size = "40px" }"#, "type scale"),
         (r#"return ui.row { colour = "x" }"#, "has no 'colour'"),
-        (
-            r#"return ui.chart { type = "pie", series = {} }"#,
-            "ui.canvas",
-        ),
-        (
-            r#"return ui.canvas { draw = function() end }"#,
-            "needs height",
-        ),
+        (r#"return ui.chart { type = "pie", series = {} }"#, "ui.canvas"),
+        (r#"return ui.canvas { draw = function() end }"#, "needs height"),
     ] {
-        let err = Visual::load(script, 1)
-            .and_then(|mut v| v.render())
-            .unwrap_err();
+        let err = Visual::load(script, 1).and_then(|mut v| v.render()).unwrap_err();
         assert!(err.message.contains(needle), "{script}: {}", err.message);
     }
 }
 
 #[test]
 fn the_sandbox_has_no_io_and_bounds_time_and_memory() {
-    for script in [
-        "return os.execute('true')",
-        "return io.open('/etc/passwd')",
-        "return require('x')",
-    ] {
+    for script in
+        ["return os.execute('true')", "return io.open('/etc/passwd')", "return require('x')"]
+    {
         assert!(Visual::load(script, 1).is_err(), "{script}");
     }
     let started = Instant::now();
@@ -95,17 +72,11 @@ fn the_sandbox_has_no_io_and_bounds_time_and_memory() {
     assert!(err.message.contains("time budget"), "{}", err.message);
     assert!(started.elapsed() < Duration::from_secs(2));
 
-    let err = Visual::load(
-        "local t = {} for i = 1, 1e9 do t[i] = string.rep('x', 1024) .. i end",
-        1,
-    )
-    .err()
-    .unwrap();
-    assert!(
-        err.message.contains("MB") || err.message.contains("time budget"),
-        "{}",
-        err.message
-    );
+    let err =
+        Visual::load("local t = {} for i = 1, 1e9 do t[i] = string.rep('x', 1024) .. i end", 1)
+            .err()
+            .unwrap();
+    assert!(err.message.contains("MB") || err.message.contains("time budget"), "{}", err.message);
     // The ui library can't be replaced by a script.
     assert!(Visual::load("ui.text = nil return ui.text 'x'", 1).is_err());
 }
@@ -148,19 +119,13 @@ fn canvases_record_theme_colored_commands() {
     )
     .unwrap();
     let tree = visual.render().unwrap();
-    let NodeKind::Canvas(canvas) = &tree.kind else {
-        panic!()
-    };
+    let NodeKind::Canvas(canvas) = &tree.kind else { panic!() };
     assert_eq!(canvas.height, 120.0);
-    let commands = visual
-        .draw_canvas(canvas.draw, 300.0, 120.0, 0.0, None)
-        .unwrap();
+    let commands = visual.draw_canvas(canvas.draw, 300.0, 120.0, 0.0, None).unwrap();
     assert_eq!(commands.len(), 5);
     assert!(matches!(&commands[0], DrawCmd::Stroke { color, .. } if color.token == Token::Border));
     assert!(matches!(&commands[2], DrawCmd::Fill { color, .. } if color.alpha == 0.5));
-    let DrawCmd::Text(text) = &commands[4] else {
-        panic!()
-    };
+    let DrawCmd::Text(text) = &commands[4] else { panic!() };
     assert_eq!((text.x, text.align), (300.0, Align::End));
 }
 
@@ -183,20 +148,11 @@ fn scenes_project_lit_depth_sorted_geometry() {
     )
     .unwrap();
     let tree = visual.render().unwrap();
-    let NodeKind::Scene(node) = &tree.kind else {
-        panic!()
-    };
+    let NodeKind::Scene(node) = &tree.kind else { panic!() };
     let scene = visual.draw_scene(node.draw, 0.0).unwrap();
     assert_eq!(scene.face_count(), 12 * 12 + 6);
-    let projection = scene.project(
-        Camera {
-            yaw: node.yaw,
-            pitch: node.pitch,
-            zoom: node.zoom,
-        },
-        640.0,
-        300.0,
-    );
+    let projection =
+        scene.project(Camera { yaw: node.yaw, pitch: node.pitch, zoom: node.zoom }, 640.0, 300.0);
     assert!(matches!(projection.prims.last(), Some(Prim::Label { .. })));
     assert_eq!(projection.hints.len(), 1);
     // A closed box shows at most three faces.
@@ -224,15 +180,11 @@ fn charts_and_tables_parse() {
     .unwrap();
     let tree = visual.render().unwrap();
     let chart = find(&tree, &|n| matches!(n.kind, NodeKind::Chart(_))).unwrap();
-    let NodeKind::Chart(chart) = &chart.kind else {
-        unreachable!()
-    };
+    let NodeKind::Chart(chart) = &chart.kind else { unreachable!() };
     assert_eq!(chart.series[1].values, [Some(200.0), None, Some(260.0)]);
     assert_eq!(chart.series[1].color, Color::token(Token::Chart(1)));
     let table = find(&tree, &|n| matches!(n.kind, NodeKind::Table(_))).unwrap();
-    let NodeKind::Table(table) = &table.kind else {
-        unreachable!()
-    };
+    let NodeKind::Table(table) = &table.kind else { unreachable!() };
     // Numeric columns right-align.
     assert_eq!(table.columns[1].align, Align::End);
 }
@@ -270,20 +222,13 @@ fn check_exercises_every_control_and_reports_where_it_broke() {
         1,
     )
     .unwrap_err();
-    assert!(
-        err.message.starts_with("after selecting tab 'b':"),
-        "{}",
-        err.message
-    );
+    assert!(err.message.starts_with("after selecting tab 'b':"), "{}", err.message);
     assert!(err.message.contains("visual:4"), "{}", err.message);
 }
 
 #[test]
 fn ticks_are_round() {
-    assert_eq!(
-        nice_ticks(0.0, 100.0, 5),
-        [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]
-    );
+    assert_eq!(nice_ticks(0.0, 100.0, 5), [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]);
     assert_eq!(nice_ticks(0.0, 0.9, 4), [0.0, 0.2, 0.4, 0.6, 0.8]);
     assert_eq!(nice_ticks(5.0, 5.0, 4), [5.0]);
 }
@@ -354,10 +299,7 @@ fn png(width: u32, height: u32) -> Vec<u8> {
     ::image::RgbaImage::from_fn(width, height, |x, y| {
         ::image::Rgba([(x * 30) as u8, (y * 30) as u8, 200, 255])
     })
-    .write_to(
-        &mut std::io::Cursor::new(&mut out),
-        ::image::ImageFormat::Png,
-    )
+    .write_to(&mut std::io::Cursor::new(&mut out), ::image::ImageFormat::Png)
     .unwrap();
     out
 }
@@ -366,10 +308,7 @@ fn png(width: u32, height: u32) -> Vec<u8> {
 fn scenes_place_models_textures_environments_and_sprites_from_assets() {
     let assets = Assets::new(
         [
-            (
-                "tri.glb".to_owned(),
-                crate::model::tests::triangle_glb().into(),
-            ),
+            ("tri.glb".to_owned(), crate::model::tests::triangle_glb().into()),
             ("wood.png".to_owned(), png(4, 4).into()),
             ("sky.png".to_owned(), png(8, 4).into()),
         ]
@@ -387,9 +326,7 @@ fn scenes_place_models_textures_environments_and_sprites_from_assets() {
     "##;
     let mut visual = Visual::load(source, 1).unwrap().with_assets(assets.clone());
     let tree = visual.render().unwrap();
-    let NodeKind::Scene(node) = &tree.kind else {
-        panic!()
-    };
+    let NodeKind::Scene(node) = &tree.kind else { panic!() };
     let scene = visual.draw_scene(node.draw, 0.0).unwrap();
     assert_eq!(scene.face_count(), 2 + 6);
     assert_eq!(scene.textures().len(), 2);
@@ -422,11 +359,7 @@ fn missing_and_broken_assets_fail_the_check_with_their_names() {
     let script =
         |body: &str| format!("return ui.scene {{ height = 200, draw = function(s) {body} end }}");
     let error = check(&script(r#"s:model { asset = "prism.glb" }"#), 1).unwrap_err();
-    assert!(
-        error.message.contains("no asset named 'prism.glb'"),
-        "{}",
-        error.message
-    );
+    assert!(error.message.contains("no asset named 'prism.glb'"), "{}", error.message);
     let assets = Assets::new(
         [
             ("bad.png".to_owned(), b"nope".to_vec().into()),
@@ -444,9 +377,5 @@ fn missing_and_broken_assets_fail_the_check_with_their_names() {
     assert!(error.message.contains("bad.png"), "{}", error.message);
     let error =
         check_with_assets(&script(r#"s:model { asset = "bad.glb" }"#), 1, assets).unwrap_err();
-    assert!(
-        error.message.contains("model 'bad.glb'"),
-        "{}",
-        error.message
-    );
+    assert!(error.message.contains("model 'bad.glb'"), "{}", error.message);
 }

@@ -45,11 +45,7 @@ pub(crate) struct Face {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TextureData {
     Encoded(Arc<[u8]>),
-    Rgba {
-        width: u32,
-        height: u32,
-        pixels: Arc<[u8]>,
-    },
+    Rgba { width: u32, height: u32, pixels: Arc<[u8]> },
 }
 
 /// One texture a scene uses; `key` names it stably across frames (so a
@@ -124,14 +120,7 @@ pub struct Material {
 
 impl Default for Material {
     fn default() -> Self {
-        Self {
-            roughness: 0.55,
-            metalness: 0.0,
-            glow: 0.0,
-            glass: 0.0,
-            ior: 1.5,
-            dispersion: 0.0,
-        }
+        Self { roughness: 0.55, metalness: 0.0, glow: 0.0, glass: 0.0, ior: 1.5, dispersion: 0.0 }
     }
 }
 
@@ -232,10 +221,7 @@ impl View {
 
     /// View space to canvas pixels.
     pub(crate) fn screen(&self, v: V3) -> [f32; 2] {
-        [
-            self.cx + self.focal * v[0] / v[2],
-            self.cy - self.focal * v[1] / v[2],
-        ]
+        [self.cx + self.focal * v[0] / v[2], self.cy - self.focal * v[1] / v[2]]
     }
 }
 
@@ -296,36 +282,21 @@ pub(crate) fn dot(a: V3, b: V3) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 pub(crate) fn normalize(a: V3) -> V3 {
     let len = dot(a, a).sqrt();
-    if len < 1e-9 {
-        [0.0, 1.0, 0.0]
-    } else {
-        scale(a, 1.0 / len)
-    }
+    if len < 1e-9 { [0.0, 1.0, 0.0] } else { scale(a, 1.0 / len) }
 }
 
 impl Scene {
     pub fn new(time: f64) -> Self {
-        Self {
-            time,
-            ..Default::default()
-        }
+        Self { time, ..Default::default() }
     }
 
     /// A scene whose draw may use `assets` (textures, models).
     pub fn with_assets(time: f64, assets: crate::assets::Assets) -> Self {
-        Self {
-            time,
-            assets,
-            ..Default::default()
-        }
+        Self { time, assets, ..Default::default() }
     }
 
     /// The texture keyed `key`, registered once; its index.
@@ -346,11 +317,7 @@ impl Scene {
     /// The asset `name` parsed as a glTF model, once per visual.
     fn model(&self, name: &str) -> mlua::Result<Arc<crate::model::Model>> {
         let bytes = self.assets.require(name).map_err(lua_error)?;
-        let mut models = self
-            .assets
-            .models
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut models = self.assets.models.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(model) = models.get(name) {
             return Ok(model.clone());
         }
@@ -389,9 +356,7 @@ impl Scene {
         two_sided: bool,
     ) -> mlua::Result<()> {
         if self.faces.len() >= MAX_FACES {
-            return Err(lua_error(format!(
-                "a scene draws at most {MAX_FACES} faces"
-            )));
+            return Err(lua_error(format!("a scene draws at most {MAX_FACES} faces")));
         }
         if corners.iter().flatten().any(|c| !c.is_finite()) {
             return Err(lua_error("a scene vertex is NaN or infinite"));
@@ -402,10 +367,7 @@ impl Scene {
         ));
         if corners.len() == 4 {
             // A non-planar quad: average both diagonals' normals.
-            normal = normalize(cross(
-                sub(corners[2], corners[0]),
-                sub(corners[3], corners[1]),
-            ));
+            normal = normalize(cross(sub(corners[2], corners[0]), sub(corners[3], corners[1])));
         }
         if let Some(outward) = outward
             && dot(normal, outward) < 0.0
@@ -533,11 +495,7 @@ impl Scene {
         let eye = add(
             target,
             scale(
-                [
-                    pitch.cos() * camera.yaw.sin(),
-                    pitch.sin(),
-                    pitch.cos() * camera.yaw.cos(),
-                ],
+                [pitch.cos() * camera.yaw.sin(), pitch.sin(), pitch.cos() * camera.yaw.cos()],
                 distance,
             ),
         );
@@ -549,10 +507,7 @@ impl Scene {
             * distance
             * camera.zoom.max(0.05);
         // A soft key light from the upper left, in front of the geometry.
-        let light = normalize(add(
-            add(scale(right, -0.45), scale(up, 0.8)),
-            scale(forward, -0.55),
-        ));
+        let light = normalize(add(add(scale(right, -0.45), scale(up, 0.8)), scale(forward, -0.55)));
         Some(View {
             eye,
             right,
@@ -652,12 +607,7 @@ impl Scene {
             }
             sorted.push((
                 (a[2] + b[2]) / 2.0 - radius * 1e-3,
-                Prim::Line {
-                    a: screen(a),
-                    b: screen(b),
-                    color: line.color,
-                    width: line.width,
-                },
+                Prim::Line { a: screen(a), b: screen(b), color: line.color, width: line.width },
             ));
         }
         let mut hints = Vec::new();
@@ -672,11 +622,7 @@ impl Scene {
             }
             sorted.push((
                 v[2] - radius * 2e-3,
-                Prim::Dot {
-                    at,
-                    radius: point.radius,
-                    color: point.color,
-                },
+                Prim::Dot { at, radius: point.radius, color: point.color },
             ));
         }
         sorted.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -834,58 +780,19 @@ impl UserData for Scene {
                 [at[0] + sx * h[0], at[1] + sy * h[1], at[2] + sz * h[2]]
             };
             let quads = [
+                ([c(-1., -1., 1.), c(1., -1., 1.), c(1., 1., 1.), c(-1., 1., 1.)], [0., 0., 1.]),
                 (
-                    [
-                        c(-1., -1., 1.),
-                        c(1., -1., 1.),
-                        c(1., 1., 1.),
-                        c(-1., 1., 1.),
-                    ],
-                    [0., 0., 1.],
-                ),
-                (
-                    [
-                        c(1., -1., -1.),
-                        c(-1., -1., -1.),
-                        c(-1., 1., -1.),
-                        c(1., 1., -1.),
-                    ],
+                    [c(1., -1., -1.), c(-1., -1., -1.), c(-1., 1., -1.), c(1., 1., -1.)],
                     [0., 0., -1.],
                 ),
+                ([c(1., -1., 1.), c(1., -1., -1.), c(1., 1., -1.), c(1., 1., 1.)], [1., 0., 0.]),
                 (
-                    [
-                        c(1., -1., 1.),
-                        c(1., -1., -1.),
-                        c(1., 1., -1.),
-                        c(1., 1., 1.),
-                    ],
-                    [1., 0., 0.],
-                ),
-                (
-                    [
-                        c(-1., -1., -1.),
-                        c(-1., -1., 1.),
-                        c(-1., 1., 1.),
-                        c(-1., 1., -1.),
-                    ],
+                    [c(-1., -1., -1.), c(-1., -1., 1.), c(-1., 1., 1.), c(-1., 1., -1.)],
                     [-1., 0., 0.],
                 ),
+                ([c(-1., 1., 1.), c(1., 1., 1.), c(1., 1., -1.), c(-1., 1., -1.)], [0., 1., 0.]),
                 (
-                    [
-                        c(-1., 1., 1.),
-                        c(1., 1., 1.),
-                        c(1., 1., -1.),
-                        c(-1., 1., -1.),
-                    ],
-                    [0., 1., 0.],
-                ),
-                (
-                    [
-                        c(-1., -1., -1.),
-                        c(1., -1., -1.),
-                        c(1., -1., 1.),
-                        c(-1., -1., 1.),
-                    ],
+                    [c(-1., -1., -1.), c(1., -1., -1.), c(1., -1., 1.), c(-1., -1., 1.)],
                     [0., -1., 0.],
                 ),
             ];
@@ -901,10 +808,7 @@ impl UserData for Scene {
             let at = v3(o.raw_get("at")?, "sphere at")?;
             let r = o.raw_get::<Option<f32>>("radius")?.unwrap_or(0.5).abs();
             let color = color_of(&o, Token::Accent)?;
-            let detail = o
-                .raw_get::<Option<u32>>("detail")?
-                .unwrap_or(18)
-                .clamp(6, 48);
+            let detail = o.raw_get::<Option<u32>>("detail")?.unwrap_or(18).clamp(6, 48);
             let (lon, lat) = (detail * 2, detail);
             let p = |i: u32, j: u32| {
                 let theta = std::f32::consts::TAU * i as f32 / lon as f32;
@@ -947,20 +851,15 @@ impl UserData for Scene {
             let r = o.raw_get::<Option<f32>>("radius")?.unwrap_or(0.5).abs();
             let h = o.raw_get::<Option<f32>>("height")?.unwrap_or(1.0);
             let color = color_of(&o, Token::Accent)?;
-            let n = o
-                .raw_get::<Option<u32>>("detail")?
-                .unwrap_or(24)
-                .clamp(6, 64);
+            let n = o.raw_get::<Option<u32>>("detail")?.unwrap_or(24).clamp(6, 64);
             let ring = |i: u32, y: f32| {
                 let a = std::f32::consts::TAU * i as f32 / n as f32;
                 [at[0] + r * a.cos(), at[1] + y, at[2] + r * a.sin()]
             };
             for i in 0..n {
                 let quad = [ring(i, 0.0), ring(i + 1, 0.0), ring(i + 1, h), ring(i, h)];
-                let normals: Vec<V3> = quad
-                    .iter()
-                    .map(|c| [c[0] - at[0], 0.0, c[2] - at[2]])
-                    .collect();
+                let normals: Vec<V3> =
+                    quad.iter().map(|c| [c[0] - at[0], 0.0, c[2] - at[2]]).collect();
                 s.smooth_face(&quad, &normals, color)?;
                 let (u0, u1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
                 s.uv_last(&[[u0, 1.0], [u1, 1.0], [u1, 0.0], [u0, 0.0]]);
@@ -994,10 +893,7 @@ impl UserData for Scene {
                 let f: Function = o
                     .raw_get::<Option<Function>>("f")?
                     .ok_or_else(|| lua_error("scene:surface needs f = function(x, z) or values"))?;
-                let n = o
-                    .raw_get::<Option<u32>>("detail")?
-                    .unwrap_or(32)
-                    .clamp(2, 120) as usize;
+                let n = o.raw_get::<Option<u32>>("detail")?.unwrap_or(32).clamp(2, 120) as usize;
                 for j in 0..=n {
                     let z = z0 + (z1 - z0) * j as f32 / n as f32;
                     let mut row = Vec::with_capacity(n + 1);
@@ -1016,9 +912,7 @@ impl UserData for Scene {
             let (lo, hi) = grid
                 .iter()
                 .flatten()
-                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| {
-                    (lo.min(*v), hi.max(*v))
-                });
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
             let span = (hi - lo).max(1e-6);
             let point = |i: usize, j: usize| {
                 [
@@ -1029,34 +923,20 @@ impl UserData for Scene {
             };
             for j in 0..rows - 1 {
                 for i in 0..cols - 1 {
-                    let quad = [
-                        point(i, j),
-                        point(i + 1, j),
-                        point(i + 1, j + 1),
-                        point(i, j + 1),
-                    ];
+                    let quad = [point(i, j), point(i + 1, j), point(i + 1, j + 1), point(i, j + 1)];
                     let mean = quad.iter().map(|v| v[1]).sum::<f32>() / 4.0;
                     let color = ramp(&colors, (mean - lo) / span);
                     if wire {
                         s.check_items()?;
                         for (a, b) in [(quad[0], quad[1]), (quad[0], quad[3])] {
-                            s.lines.push(Line3 {
-                                a,
-                                b,
-                                color,
-                                width: 1.0,
-                            });
+                            s.lines.push(Line3 { a, b, color, width: 1.0 });
                         }
                     } else {
                         s.face(&quad, color, Some([0.0, 1.0, 0.0]), true)?;
-                        let (u0, u1) = (
-                            i as f32 / (cols - 1) as f32,
-                            (i + 1) as f32 / (cols - 1) as f32,
-                        );
-                        let (v0, v1) = (
-                            j as f32 / (rows - 1) as f32,
-                            (j + 1) as f32 / (rows - 1) as f32,
-                        );
+                        let (u0, u1) =
+                            (i as f32 / (cols - 1) as f32, (i + 1) as f32 / (cols - 1) as f32);
+                        let (v0, v1) =
+                            (j as f32 / (rows - 1) as f32, (j + 1) as f32 / (rows - 1) as f32);
                         s.uv_last(&[[u0, v0], [u1, v0], [u1, v1], [u0, v1]]);
                     }
                 }
@@ -1084,9 +964,8 @@ impl UserData for Scene {
                 None => None,
             };
             for face in o.raw_get::<Table>("faces")?.sequence_values::<Table>() {
-                let indices: Vec<usize> = face?
-                    .sequence_values::<usize>()
-                    .collect::<mlua::Result<_>>()?;
+                let indices: Vec<usize> =
+                    face?.sequence_values::<usize>().collect::<mlua::Result<_>>()?;
                 let corners: Vec<V3> = indices
                     .iter()
                     .map(|&i| {
@@ -1098,9 +977,7 @@ impl UserData for Scene {
                 match &uvs {
                     Some(uvs) if corners.len() >= 3 => {
                         let uv = |i: usize| {
-                            uvs.get(indices[i].wrapping_sub(1))
-                                .copied()
-                                .unwrap_or([0.0; 2])
+                            uvs.get(indices[i].wrapping_sub(1)).copied().unwrap_or([0.0; 2])
                         };
                         // Fan it, so every triangle keeps its own coordinates.
                         for k in 1..corners.len() - 1 {
@@ -1124,12 +1001,7 @@ impl UserData for Scene {
                 _ => (a, b, o),
             };
             let (color, width) = line_style(o)?;
-            s.lines.push(Line3 {
-                a: v3(a, "line start")?,
-                b: v3(b, "line end")?,
-                color,
-                width,
-            });
+            s.lines.push(Line3 { a: v3(a, "line start")?, b: v3(b, "line end")?, color, width });
             Ok(())
         });
         methods.add_method_mut("path", |_, s, (points, o): (Table, Option<Table>)| {
@@ -1140,12 +1012,7 @@ impl UserData for Scene {
                 .collect::<mlua::Result<_>>()?;
             for pair in pts.windows(2) {
                 s.check_items()?;
-                s.lines.push(Line3 {
-                    a: pair[0],
-                    b: pair[1],
-                    color,
-                    width,
-                });
+                s.lines.push(Line3 { a: pair[0], b: pair[1], color, width });
             }
             Ok(())
         });
@@ -1155,55 +1022,39 @@ impl UserData for Scene {
             let (color, radius, hint) = match o {
                 Some(o) => (
                     color_of(&o, Token::Accent)?,
-                    o.raw_get::<Option<f32>>("radius")?
-                        .unwrap_or(3.0)
-                        .clamp(0.5, 24.0),
-                    o.raw_get::<Value>("hint")
-                        .map(|v| (!v.is_nil()).then(|| value_text(&v)))?,
+                    o.raw_get::<Option<f32>>("radius")?.unwrap_or(3.0).clamp(0.5, 24.0),
+                    o.raw_get::<Value>("hint").map(|v| (!v.is_nil()).then(|| value_text(&v)))?,
                 ),
                 None => (Color::token(Token::Accent), 3.0, None),
             };
-            s.points.push(Point3 {
-                at: v3(at, "point")?,
-                radius,
-                color,
-                hint,
-            });
+            s.points.push(Point3 { at: v3(at, "point")?, radius, color, hint });
             Ok(())
         });
-        methods.add_method_mut(
-            "label",
-            |_, s, (at, text, o): (Value, Value, Option<Table>)| {
-                s.check_items()?;
-                let (at, text, o) = match (&at, &text) {
-                    (Value::Table(t), Value::Nil)
-                        if t.raw_get::<Value>("at").is_ok_and(|v| !v.is_nil()) =>
-                    {
-                        (t.raw_get("at")?, t.raw_get("text")?, Some(t.clone()))
-                    }
-                    _ => (at, text, o),
-                };
-                let (color, size) = match o {
-                    Some(o) => (
-                        color_of(&o, Token::Muted)?,
-                        match o.raw_get::<Option<String>>("size")? {
-                            Some(size) => {
-                                TextSize::parse(&size).map_err(|e| lua_error(e.to_string()))?
-                            }
-                            None => TextSize::Xs,
-                        },
-                    ),
-                    None => (Color::token(Token::Muted), TextSize::Xs),
-                };
-                s.labels.push(Label3 {
-                    at: v3(at, "label")?,
-                    text: value_text(&text),
-                    color,
-                    size,
-                });
-                Ok(())
-            },
-        );
+        methods.add_method_mut("label", |_, s, (at, text, o): (Value, Value, Option<Table>)| {
+            s.check_items()?;
+            let (at, text, o) = match (&at, &text) {
+                (Value::Table(t), Value::Nil)
+                    if t.raw_get::<Value>("at").is_ok_and(|v| !v.is_nil()) =>
+                {
+                    (t.raw_get("at")?, t.raw_get("text")?, Some(t.clone()))
+                }
+                _ => (at, text, o),
+            };
+            let (color, size) = match o {
+                Some(o) => (
+                    color_of(&o, Token::Muted)?,
+                    match o.raw_get::<Option<String>>("size")? {
+                        Some(size) => {
+                            TextSize::parse(&size).map_err(|e| lua_error(e.to_string()))?
+                        }
+                        None => TextSize::Xs,
+                    },
+                ),
+                None => (Color::token(Token::Muted), TextSize::Xs),
+            };
+            s.labels.push(Label3 { at: v3(at, "label")?, text: value_text(&text), color, size });
+            Ok(())
+        });
         // A glTF model from the visual's assets: placed at `at`, turned by
         // `rotate` (degrees), scaled by `scale`, or centered and sized so its
         // longest side is `fit`. Its own materials and textures apply; any
@@ -1235,18 +1086,11 @@ impl UserData for Scene {
             let texture = texture_of(s, &o)?;
             let place = |p: V3| {
                 let p = sub(p, origin);
-                add(
-                    at,
-                    rotate(&turn, [p[0] * size[0], p[1] * size[1], p[2] * size[2]]),
-                )
+                add(at, rotate(&turn, [p[0] * size[0], p[1] * size[1], p[2] * size[2]]))
             };
             // Normals scale inversely, so a squashed model still shades right.
-            let orient = |n: V3| {
-                rotate(
-                    &turn,
-                    normalize([n[0] / size[0], n[1] / size[1], n[2] / size[2]]),
-                )
-            };
+            let orient =
+                |n: V3| rotate(&turn, normalize([n[0] / size[0], n[1] / size[1], n[2] / size[2]]));
             let mut images: Vec<Option<u32>> = vec![None; model.images.len()];
             for tri in &model.triangles {
                 let source = &model.materials[tri.material];
@@ -1290,10 +1134,7 @@ impl UserData for Scene {
             let texture = s.asset_texture(&name)?;
             s.environment = Some(Environment {
                 texture,
-                intensity: o
-                    .raw_get::<Option<f32>>("intensity")?
-                    .unwrap_or(1.0)
-                    .clamp(0.0, 16.0),
+                intensity: o.raw_get::<Option<f32>>("intensity")?.unwrap_or(1.0).clamp(0.0, 16.0),
                 background: o.raw_get::<Option<bool>>("background")?.unwrap_or(false),
             });
             Ok(())
@@ -1307,19 +1148,13 @@ impl UserData for Scene {
             let sprite = match o {
                 Some(o) => Sprite {
                     at,
-                    size: o
-                        .raw_get::<Option<f32>>("size")?
-                        .unwrap_or(48.0)
-                        .clamp(1.0, 2048.0),
+                    size: o.raw_get::<Option<f32>>("size")?.unwrap_or(48.0).clamp(1.0, 2048.0),
                     texture: texture_of(s, &o)?.or(match o.raw_get::<Option<String>>("asset")? {
                         Some(name) => Some(s.asset_texture(&name)?),
                         None => None,
                     }),
                     color: color_of(&o, Token::Accent)?,
-                    glow: o
-                        .raw_get::<Option<f32>>("glow")?
-                        .unwrap_or(1.0)
-                        .clamp(0.0, 16.0),
+                    glow: o.raw_get::<Option<f32>>("glow")?.unwrap_or(1.0).clamp(0.0, 16.0),
                 },
                 None => Sprite {
                     at,
@@ -1336,14 +1171,8 @@ impl UserData for Scene {
         methods.add_method_mut("grid", |_, s, o: Option<Table>| {
             let (size, step, y) = match &o {
                 Some(o) => (
-                    o.raw_get::<Option<f32>>("size")?
-                        .unwrap_or(10.0)
-                        .abs()
-                        .max(0.1),
-                    o.raw_get::<Option<f32>>("step")?
-                        .unwrap_or(1.0)
-                        .abs()
-                        .max(0.01),
+                    o.raw_get::<Option<f32>>("size")?.unwrap_or(10.0).abs().max(0.1),
+                    o.raw_get::<Option<f32>>("step")?.unwrap_or(1.0).abs().max(0.01),
                     o.raw_get::<Option<f32>>("y")?.unwrap_or(0.0),
                 ),
                 None => (10.0, 1.0, 0.0),
@@ -1354,18 +1183,8 @@ impl UserData for Scene {
                 s.check_items()?;
                 let t = -half + size * i as f32 / n as f32;
                 let color = Color::token(Token::Border);
-                s.lines.push(Line3 {
-                    a: [t, y, -half],
-                    b: [t, y, half],
-                    color,
-                    width: 1.0,
-                });
-                s.lines.push(Line3 {
-                    a: [-half, y, t],
-                    b: [half, y, t],
-                    color,
-                    width: 1.0,
-                });
+                s.lines.push(Line3 { a: [t, y, -half], b: [t, y, half], color, width: 1.0 });
+                s.lines.push(Line3 { a: [-half, y, t], b: [half, y, t], color, width: 1.0 });
             }
             Ok(())
         });
@@ -1426,9 +1245,7 @@ fn line_style(o: Option<Table>) -> mlua::Result<(Color, f32)> {
     match o {
         Some(o) => Ok((
             color_of(&o, Token::Muted)?,
-            o.raw_get::<Option<f32>>("width")?
-                .unwrap_or(1.0)
-                .clamp(0.25, 12.0),
+            o.raw_get::<Option<f32>>("width")?.unwrap_or(1.0).clamp(0.25, 12.0),
         )),
         None => Ok((Color::token(Token::Muted), 1.0)),
     }
@@ -1443,24 +1260,14 @@ mod tests {
         let h = 0.5;
         let c = |x: f32, y: f32, z: f32| [x * h, y * h, z * h];
         s.face(
-            &[
-                c(-1., -1., 1.),
-                c(1., -1., 1.),
-                c(1., 1., 1.),
-                c(-1., 1., 1.),
-            ],
+            &[c(-1., -1., 1.), c(1., -1., 1.), c(1., 1., 1.), c(-1., 1., 1.)],
             Color::token(Token::Accent),
             Some([0., 0., 1.]),
             false,
         )
         .unwrap();
         s.face(
-            &[
-                c(1., -1., -1.),
-                c(-1., -1., -1.),
-                c(-1., 1., -1.),
-                c(1., 1., -1.),
-            ],
+            &[c(1., -1., -1.), c(-1., -1., -1.), c(-1., 1., -1.), c(1., 1., -1.)],
             Color::token(Token::Accent),
             Some([0., 0., -1.]),
             false,
@@ -1471,34 +1278,17 @@ mod tests {
 
     #[test]
     fn the_camera_frames_the_geometry_and_culls_back_faces() {
-        let projection = cube().project(
-            Camera {
-                yaw: 0.0,
-                pitch: 0.0,
-                zoom: 1.0,
-            },
-            400.0,
-            300.0,
-        );
+        let projection = cube().project(Camera { yaw: 0.0, pitch: 0.0, zoom: 1.0 }, 400.0, 300.0);
         // Looking down -z from +z: only the +z face is drawn.
         assert_eq!(projection.prims.len(), 1);
-        let Prim::Face { points, shade, .. } = &projection.prims[0] else {
-            panic!()
-        };
+        let Prim::Face { points, shade, .. } = &projection.prims[0] else { panic!() };
         for [x, y] in points {
-            assert!(
-                (0.0..=400.0).contains(x) && (0.0..=300.0).contains(y),
-                "{x},{y}"
-            );
+            assert!((0.0..=400.0).contains(x) && (0.0..=300.0).contains(y), "{x},{y}");
         }
         assert!(*shade > 0.35);
         // From behind, the other face.
         let behind = cube().project(
-            Camera {
-                yaw: std::f32::consts::PI,
-                pitch: 0.0,
-                zoom: 1.0,
-            },
+            Camera { yaw: std::f32::consts::PI, pitch: 0.0, zoom: 1.0 },
             400.0,
             300.0,
         );
@@ -1510,19 +1300,9 @@ mod tests {
         let mut s = Scene::default();
         let near = [[0., 0., 1.], [1., 0., 1.], [1., 1., 1.]];
         let far = [[0., 0., -1.], [1., 0., -1.], [1., 1., -1.]];
-        s.face(&near, Color::token(Token::Chart(0)), None, true)
-            .unwrap();
-        s.face(&far, Color::token(Token::Chart(1)), None, true)
-            .unwrap();
-        let p = s.project(
-            Camera {
-                yaw: 0.0,
-                pitch: 0.0,
-                zoom: 1.0,
-            },
-            200.0,
-            200.0,
-        );
+        s.face(&near, Color::token(Token::Chart(0)), None, true).unwrap();
+        s.face(&far, Color::token(Token::Chart(1)), None, true).unwrap();
+        let p = s.project(Camera { yaw: 0.0, pitch: 0.0, zoom: 1.0 }, 200.0, 200.0);
         let colors: Vec<Token> = p
             .prims
             .iter()

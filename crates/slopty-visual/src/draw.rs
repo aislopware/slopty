@@ -88,9 +88,7 @@ impl Graphics {
             DrawCmd::Text(_) => 1,
         };
         if self.points > MAX_POINTS {
-            return Err(lua_error(format!(
-                "a canvas draws at most {MAX_POINTS} points per frame"
-            )));
+            return Err(lua_error(format!("a canvas draws at most {MAX_POINTS} points per frame")));
         }
         self.commands.push(command);
         Ok(())
@@ -119,10 +117,7 @@ impl Paint {
     /// `default_fill` decides what a bare `color` means: a fill for shapes,
     /// a stroke for lines.
     pub fn parse(options: Option<Table>, default_fill: bool) -> mlua::Result<Self> {
-        let mut paint = Paint {
-            width: 1.0,
-            ..Default::default()
-        };
+        let mut paint = Paint { width: 1.0, ..Default::default() };
         let Some(options) = options else {
             let color = Color::token(Token::Text);
             if default_fill {
@@ -154,13 +149,9 @@ impl Paint {
             paint.fill = paint.fill.map(|c| c.with_alpha(alpha as f32));
             paint.stroke = paint.stroke.map(|c| c.with_alpha(alpha as f32));
         }
-        paint.width = options
-            .raw_get::<Option<f64>>("width")?
-            .unwrap_or(1.0)
-            .clamp(0.25, 32.0) as f32;
-        paint.dash = options
-            .raw_get::<Option<f64>>("dash")?
-            .map(|d| d.clamp(1.0, 64.0) as f32);
+        paint.width =
+            options.raw_get::<Option<f64>>("width")?.unwrap_or(1.0).clamp(0.25, 32.0) as f32;
+        paint.dash = options.raw_get::<Option<f64>>("dash")?.map(|d| d.clamp(1.0, 64.0) as f32);
         Ok(paint)
     }
 }
@@ -173,18 +164,12 @@ pub(crate) fn points(table: &Table) -> mlua::Result<Vec<[f32; 2]>> {
         Value::Table(_) => {
             for pair in table.sequence_values::<Table>() {
                 let pair = pair?;
-                out.push([
-                    pair.raw_get::<f64>(1)? as f32,
-                    pair.raw_get::<f64>(2)? as f32,
-                ]);
+                out.push([pair.raw_get::<f64>(1)? as f32, pair.raw_get::<f64>(2)? as f32]);
             }
         }
         _ => {
             for ix in (1..len).step_by(2) {
-                out.push([
-                    table.raw_get::<f64>(ix)? as f32,
-                    table.raw_get::<f64>(ix + 1)? as f32,
-                ]);
+                out.push([table.raw_get::<f64>(ix)? as f32, table.raw_get::<f64>(ix + 1)? as f32]);
             }
         }
     }
@@ -210,10 +195,7 @@ pub(crate) fn arc_points(cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> Vec<[f32
 impl Graphics {
     fn shape(&mut self, points: Vec<[f32; 2]>, paint: &Paint) -> mlua::Result<()> {
         if let Some(fill) = paint.fill {
-            self.push(DrawCmd::Fill {
-                points: points.clone(),
-                color: fill,
-            })?;
+            self.push(DrawCmd::Fill { points: points.clone(), color: fill })?;
         }
         if let Some(stroke) = paint.stroke {
             self.push(DrawCmd::Stroke {
@@ -278,23 +260,20 @@ impl UserData for Graphics {
                 })
             },
         );
-        methods.add_method_mut(
-            "polyline",
-            |_, g, (pts, options): (Table, Option<Table>)| {
-                let paint = Paint::parse(options, false)?;
-                let points = points(&pts)?;
-                if points.len() < 2 {
-                    return Ok(());
-                }
-                g.push(DrawCmd::Stroke {
-                    points,
-                    closed: false,
-                    color: paint.stroke.or(paint.fill).unwrap(),
-                    width: paint.width,
-                    dash: paint.dash,
-                })
-            },
-        );
+        methods.add_method_mut("polyline", |_, g, (pts, options): (Table, Option<Table>)| {
+            let paint = Paint::parse(options, false)?;
+            let points = points(&pts)?;
+            if points.len() < 2 {
+                return Ok(());
+            }
+            g.push(DrawCmd::Stroke {
+                points,
+                closed: false,
+                color: paint.stroke.or(paint.fill).unwrap(),
+                width: paint.width,
+                dash: paint.dash,
+            })
+        });
         methods.add_method_mut("polygon", |_, g, (pts, options): (Table, Option<Table>)| {
             let paint = Paint::parse(options, true)?;
             let points = points(&pts)?;
@@ -419,9 +398,7 @@ mod tests {
         let rounded = rect_points(0.0, 0.0, 10.0, 4.0, 2.0);
         assert!(rounded.len() > 8);
         assert!(
-            rounded
-                .iter()
-                .all(|[x, y]| *x >= -0.01 && *x <= 10.01 && *y >= -0.01 && *y <= 4.01)
+            rounded.iter().all(|[x, y]| *x >= -0.01 && *x <= 10.01 && *y >= -0.01 && *y <= 4.01)
         );
         let negative = rect_points(10.0, 4.0, -10.0, -4.0, 0.0);
         assert_eq!(negative[0], [0.0, 0.0]);

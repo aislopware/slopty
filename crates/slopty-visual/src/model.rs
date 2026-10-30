@@ -44,11 +44,7 @@ const MAX_NODE_VISITS: usize = 100_000;
 
 fn to_srgb(c: f32) -> f32 {
     let c = c.clamp(0.0, 1.0);
-    if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
+    if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
 fn rgb_of(linear: [f32; 3]) -> u32 {
@@ -95,10 +91,8 @@ impl Model {
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         // The glTF reader asserts on some malformed files rather than
         // erroring; a model is untrusted, so that's an error here too.
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::parse_unguarded(bytes)
-        }))
-        .unwrap_or_else(|_| Err("not a usable glTF model: malformed accessors".into()))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Self::parse_unguarded(bytes)))
+            .unwrap_or_else(|_| Err("not a usable glTF model: malformed accessors".into()))
     }
 
     fn parse_unguarded(bytes: &[u8]) -> Result<Self, String> {
@@ -116,8 +110,7 @@ impl Model {
                     gltf::image::Source::View { view, .. } => buffers
                         .get(view.buffer().index())
                         .and_then(|data| {
-                            data.0
-                                .get(view.offset()..view.offset().checked_add(view.length())?)
+                            data.0.get(view.offset()..view.offset().checked_add(view.length())?)
                         })
                         .map(<[u8]>::to_vec)
                         .unwrap_or_default(),
@@ -146,10 +139,7 @@ impl Model {
                 if glow > 0.0 && base[0].max(base[1]).max(base[2]) < 0.05 {
                     rgb = rgb_of(emissive);
                 }
-                let glass = m
-                    .transmission()
-                    .map(|t| t.transmission_factor())
-                    .unwrap_or(0.0);
+                let glass = m.transmission().map(|t| t.transmission_factor()).unwrap_or(0.0);
                 // OPAQUE ignores alpha, and MASK cuts rather than blends:
                 // only BLEND materials are see-through.
                 let alpha = match m.alpha_mode() {
@@ -159,9 +149,7 @@ impl Model {
                 ModelMaterial {
                     rgb,
                     alpha,
-                    texture: pbr
-                        .base_color_texture()
-                        .map(|info| info.texture().source().index()),
+                    texture: pbr.base_color_texture().map(|info| info.texture().source().index()),
                     material: Material {
                         roughness: pbr.roughness_factor().clamp(0.02, 1.0),
                         metalness: pbr.metallic_factor().clamp(0.0, 1.0),
@@ -375,10 +363,7 @@ pub(crate) mod tests {
     #[test]
     fn attributes_shorter_than_the_positions_are_dropped() {
         // POSITION has 3 vertices, NORMAL only 1.
-        let normal: Vec<u8> = [0.0f32, 0.0, 1.0]
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let normal: Vec<u8> = [0.0f32, 0.0, 1.0].iter().flat_map(|f| f.to_le_bytes()).collect();
         let model = Model::parse(&triangle_with(
             &normal,
             r#""nodes":[{"mesh":0}],
@@ -410,10 +395,7 @@ pub(crate) mod tests {
         // A tiny PNG declaring an image wider than any texture may be.
         let mut png = Vec::new();
         ::image::RgbaImage::new(20_000, 1)
-            .write_to(
-                &mut std::io::Cursor::new(&mut png),
-                ::image::ImageFormat::Png,
-            )
+            .write_to(&mut std::io::Cursor::new(&mut png), ::image::ImageFormat::Png)
             .unwrap();
         let rest = format!(
             r#""nodes":[{{"mesh":0}}],
@@ -426,9 +408,7 @@ pub(crate) mod tests {
             len = png.len()
         );
         let model = Model::parse(&triangle_with(&png, &rest)).unwrap();
-        let TextureData::Encoded(bytes) = &model.images[0] else {
-            panic!("decoded eagerly")
-        };
+        let TextureData::Encoded(bytes) = &model.images[0] else { panic!("decoded eagerly") };
         assert_eq!(bytes.len(), png.len());
         let error = crate::image::decode_texture(&model.images[0]).unwrap_err();
         assert!(error.contains("20000x1"), "{error}");
@@ -439,10 +419,7 @@ pub(crate) mod tests {
         let model = Model::parse(&triangle_glb()).unwrap();
         assert_eq!(model.triangles.len(), 1);
         let tri = model.triangles[0];
-        assert_eq!(
-            tri.positions,
-            [[0.0, 2.0, 0.0], [2.0, 2.0, 0.0], [0.0, 4.0, 0.0]]
-        );
+        assert_eq!(tri.positions, [[0.0, 2.0, 0.0], [2.0, 2.0, 0.0], [0.0, 4.0, 0.0]]);
         assert_eq!(model.bounds, ([0.0, 2.0, 0.0], [2.0, 4.0, 0.0]));
         let material = &model.materials[tri.material];
         assert_eq!(material.rgb, 0xff0000);
