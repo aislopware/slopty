@@ -411,23 +411,17 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
         "pages-main-thread {device}: hangs {hangs:?}; {dropped} words to the window dropped \
          while the app was borrowed"
     ));
-    // When WebKit started, and each web view was made after its card first asked for it.
-    let started: Vec<String> = log
-        .lines()
-        .filter(|line| line.contains("WebKit started ahead"))
-        .filter_map(|line| field(line, "took_ms="))
-        .collect();
-    let made: Vec<String> = log
-        .lines()
-        .filter(|line| {
-            line.contains("a page's web view was made")
-                || line.contains("a page's document went to its web view")
-        })
-        .filter_map(|line| field(line, "after_ms="))
-        .collect();
+    // When each web view was made after its card first asked for it, and how long it took.
+    let logged = |key: &str| -> Vec<String> {
+        log.lines()
+            .filter(|line| line.contains("a page's web view was made"))
+            .filter_map(|line| field(line, key))
+            .collect()
+    };
+    let (made, took) = (logged("after_ms="), logged("took_ms="));
     measure(&format!(
-        "pages-web-views {device}: WebKit started ahead in {started:?} ms; web views made \
-         {made:?} ms after their cards opened"
+        "pages-web-views {device}: web views made {made:?} ms after their cards opened, in \
+         {took:?} ms each"
     ));
     if dropped > 0 {
         missing.push(format!("nothing the platform tells the window is dropped: {dropped} were"));

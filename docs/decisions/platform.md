@@ -1771,3 +1771,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   loads a page, and that file is still the one at its path; the ended process's store goes at
   the next compile. Under the shared store it fails at once, the file replaced by a test running
   beside it.
+- ✅ **A page's web view is made after a frame, one at a time and never under a touch**
+  (2026-10-30, the iPhone pages e2e's hangs). A page's document went to its web view as it came,
+  and the host made the view there and then, inside whatever the main thread was doing. The first
+  web view a process makes pays `WebKit`'s own start on the main thread, its process pool and its
+  first page: 360 to 730 ms in the iPhone simulator, where later views take about 10 ms. So a page
+  opening under a finger froze the scroll it was part of, and pages whose documents came together
+  made their views in one stall. Now a document that comes marks its page due, and the frames
+  after make the views: one page a frame, the one opened first of those due, and none while a
+  touch is in flight, a finger down or the fling it threw still coasting (gpui-fast's
+  `Window::touch_in_flight`, aislopware/gpui-fast#68, `e6d22255`); a turn that finds one waits
+  for the next frame. Each turn runs as a task spawned after its frame, not in the frame's
+  callback: GPUI's hang monitor names the task a stall happened in and times none of a frame's
+  callbacks, so a making inside one was a 450 ms stall the monitor never saw. The first making's
+  cost stays, once a process and under no finger. We considered making the view off the main
+  thread, which UIKit and `WebKit` forbid, and starting `WebKit` ahead with a view made and let
+  go while the first document was on its way: documents came about 10 ms after their cards
+  opened, so it never ran first, and it was deleted. Measured in `docs/MEASUREMENTS.md`
+  ("a finger over the iPhone's pages"). Tests: the e2e
+  `a_finger_over_a_live_page_scrolls_the_chat_or_the_page` says when each view was made after its
+  card opened, how long it took, and every hang; gpui-fast's `fast::tests::touch_in_flight`.

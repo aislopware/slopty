@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use gpui::{App, Context, Subscription, Task, Window, WindowId};
+use gpui::{App, Context, Subscription, Task, WeakEntity, Window, WindowId};
 use slopty_client::WorkerKey;
 use slopty_platform::web::page::{
     Ask, Declined, Device, HostConfig, Network, Notice, PageEvent, PageHost, PageId, PageSpec,
@@ -213,6 +213,9 @@ struct Page {
     opened: Instant,
     /// Whether a picture of it came yet.
     pictured: bool,
+    /// Whether its document came and its web view is still to be made
+    /// ([`WorkspaceView::pages_mount`]).
+    mount_due: bool,
 }
 
 /// The card's watches of each page, by its key, each with its number.
@@ -241,6 +244,8 @@ pub(super) struct Pages {
     refreshing: bool,
     /// The pages a card asked for that could not open yet, each logged once with why.
     unopened: HashMap<String, &'static str>,
+    /// The windows whose next frame makes a page's web view ([`WorkspaceView::pages_mount`]).
+    mounting: HashSet<WindowId>,
 }
 
 impl Pages {
@@ -417,6 +422,7 @@ impl Page {
             document: None,
             opened: Instant::now(),
             pictured: false,
+            mount_due: false,
         }
     }
 }
@@ -1237,15 +1243,89 @@ impl WorkspaceView {
         if let Some(width) = page.width {
             host.resize(id, f64::from(width));
         }
-        let moved = host.mount(id);
+        page.mount_due = true;
         tracing::info!(
             page = key,
             bytes = page.document.as_ref().map_or(0, |(_, html)| html.len()),
             after_ms = page.opened.elapsed().as_millis(),
-            ?moved,
-            "a page's document went to its web view"
+            "a page's document came"
         );
         self.page_changed(key, cx);
+        self.pages_mount_soon(window, cx);
+    }
+
+    /// Have the frames of `window_id` from the next make the web views of its pages whose
+    /// documents came ([`Self::pages_mount`]).
+    fn pages_mount_soon(&mut self, window_id: WindowId, cx: &mut Context<Self>) {
+        if !self.view_model.pages.mounting.insert(window_id) {
+            return;
+        }
+        let Some(handle) = cx.windows().into_iter().find(|w| w.window_id() == window_id) else {
+            self.view_model.pages.mounting.remove(&window_id);
+            return;
+        };
+        let this = cx.weak_entity();
+        // Deferred: a chart fence's page loads as its card is drawn, while its window draws.
+        cx.defer(move |cx| {
+            let _gone = handle.update(cx, |_, window, _| Self::pages_mount_next(this, window));
+        });
+    }
+
+    /// [`Self::pages_mount`] once `window`'s next frame is drawn, as a task of its own: the frame
+    /// is not held back for it, and the hang monitor times a task's work where it times none of
+    /// a frame's callbacks.
+    fn pages_mount_next(this: WeakEntity<Self>, window: &Window) {
+        let handle = window.window_handle();
+        window.on_next_frame(move |_, cx| {
+            cx.spawn(async move |cx| {
+                let _gone = handle.update(cx, |_, window, cx| {
+                    let _gone = this.update(cx, |view, cx| view.pages_mount(window, cx));
+                });
+            })
+            .detach();
+        });
+    }
+
+    /// One frame's turn at `window`'s pages: make the web view of the page opened first of those
+    /// whose documents came; the next frame takes the next, so pages whose documents came
+    /// together take a frame each. Not while a touch is in flight: a web view made under a
+    /// finger stalls the scroll or the fling it is part of, and the first a process makes takes
+    /// `WebKit`'s own start (360 to 730 ms in the iPhone simulator, its process pool and first
+    /// page), which no thread but the main one may make.
+    fn pages_mount(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let window_id = window.window_handle().window_id();
+        if window.touch_in_flight() {
+            Self::pages_mount_next(cx.weak_entity(), window);
+            return;
+        }
+        let pages = &mut self.view_model.pages;
+        pages.mounting.remove(&window_id);
+        let Some(host) = pages.hosts.get(&window_id).cloned() else { return };
+        let ours = |page: &Page| page.window == window_id;
+        let due = pages
+            .shown
+            .iter_mut()
+            .filter(|(_, page)| ours(page) && page.mount_due)
+            .min_by_key(|(_, page)| page.opened);
+        let Some((key, page)) = due else { return };
+        page.mount_due = false;
+        let key = key.clone();
+        if let Some(id) = page.id {
+            let started = Instant::now();
+            let moved = host.mount(id);
+            tracing::info!(
+                page = key,
+                after_ms = page.opened.elapsed().as_millis(),
+                took_ms = started.elapsed().as_millis(),
+                ?moved,
+                "a page's web view was made"
+            );
+        }
+        self.page_changed(&key, cx);
+        if self.view_model.pages.shown.values().any(|page| ours(page) && page.mount_due) {
+            self.view_model.pages.mounting.insert(window_id);
+            Self::pages_mount_next(cx.weak_entity(), window);
+        }
     }
 
     /// The page `id` of `window`, by its key.
