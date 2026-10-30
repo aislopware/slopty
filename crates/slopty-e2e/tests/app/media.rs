@@ -306,8 +306,14 @@ async fn a_page_card_is_sandboxed_and_acts_for_the_person() {
     // Sent again, the inspector's card is one line while the page is in the pane: its Bring back.
     hover(drv, &group).await;
     click(drv, "Button", "Open in pane").await;
-    seen(drv, "the page in the pane", STEP, in_pane).await;
-    click(drv, "Button", "Inspector").await;
+    let paned = seen(drv, "the page in the pane", STEP, in_pane).await;
+    // The page's pane stands under the inspector, which keeps the row the press let go at: the
+    // wheel, low in the inspector's pane under its fixed lines, brings the card's line up from
+    // the trace's end.
+    let [x, y, w, h] = node(&paned, "Group", "Inspector").map(|n| n.bounds).unwrap_or_default();
+    for _ in 0..10 {
+        drv.scroll(w.mul_add(0.5, x), h.mul_add(0.8, y), 0.0, -400.0).await.unwrap();
+    }
     seen(drv, "the card's line", STEP, |d| {
         node(d, "Group", "Shown in the pane").is_some() && node(d, "Button", "Bring back").is_some()
     })

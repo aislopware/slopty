@@ -57,15 +57,26 @@ pub fn unread(dump: &Dump, title: &str) -> bool {
 /// How tall the titlebar row stands at the window's top (`Theme::TITLEBAR_HEIGHT`).
 pub const TITLEBAR: f32 = 38.0;
 
-/// The titlebar's identity: the button in the row at the window's top named as a session of the
-/// sidebar's list is, which the row names while that session is shown.
+/// The titlebar's identity: the button in the row at the window's top named as the session
+/// shown is, by its row in the sidebar's list or, with the sidebar hidden, by its pane (the group
+/// under the titlebar that holds its terminal), which the row names while that session is shown.
 pub fn identity(dump: &Dump) -> Option<&A11yNode> {
-    let named = |n: &A11yNode| n.role == "Button" && n.label.is_some();
-    dump.a11y.iter().filter(|n| named(n) && n.bounds[1] < TITLEBAR).find(|top| {
-        dump.a11y
-            .iter()
-            .any(|row| named(row) && row.bounds[1] >= TITLEBAR && row.label == top.label)
-    })
+    let named = |n: &A11yNode| n.label.is_some() && n.bounds[1] >= TITLEBAR;
+    let holds = |outer: &A11yNode, inner: &A11yNode| {
+        let ([left, top, width, height], [x, y, w, h]) = (outer.bounds, inner.bounds);
+        x >= left && y >= top && x + w <= left + width && y + h <= top + height
+    };
+    let session_pane = |n: &A11yNode| {
+        n.role == "Group" && dump.a11y.iter().any(|t| t.role == "Terminal" && holds(n, t))
+    };
+    dump.a11y
+        .iter()
+        .filter(|n| n.role == "Button" && n.label.is_some() && n.bounds[1] < TITLEBAR)
+        .find(|top| {
+            dump.a11y.iter().any(|row| {
+                named(row) && row.label == top.label && (row.role == "Button" || session_pane(row))
+            })
+        })
 }
 
 /// The middle of `node`, in window points.
@@ -97,15 +108,22 @@ pub async fn seen(
     }
 }
 
-/// The nodes from the agent's first reply on (the `Claude Code` article and what follows it): the
-/// person's own message, the `You` article above, holds the words they typed.
+/// The nodes from the agent's first reply on (the `Claude Code` article and what follows it) up
+/// to the titlebar's row, which reads after the window's body: the person's own message, the
+/// `You` article above, holds the words they typed, and so does the titlebar's identity, the
+/// session named by its first prompt.
 pub fn replies(dump: &Dump) -> &[A11yNode] {
-    let from = dump
-        .a11y
+    let nodes = dump.a11y.as_slice();
+    let from = nodes
         .iter()
         .position(|n| n.role == "Article" && n.label.as_deref() == Some("Claude Code"))
-        .unwrap_or(dump.a11y.len());
-    dump.a11y.get(from..).unwrap_or_default()
+        .unwrap_or(nodes.len());
+    let to = nodes
+        .iter()
+        .skip(from)
+        .position(|n| n.bounds[1] < TITLEBAR)
+        .map_or(nodes.len(), |past| from.saturating_add(past));
+    nodes.get(from..to).unwrap_or_default()
 }
 
 /// Click the middle of the node `role` named `label` once it is drawn; the frame it was found in.

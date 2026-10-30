@@ -85,6 +85,9 @@ async fn a_session_is_its_terminal_and_its_inspector_opens_a_call_whole() {
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
     show_inspector(drv).await;
+    // Summoned, the inspector took the keyboard; its key again gives it back to the session's
+    // terminal (`docs/decisions/layout.md`, "The panes as built").
+    drv.keys("cmd-i").await.unwrap();
     // The terminal shows the TUI's own answer and holds the keyboard; the inspector beside it
     // reads the same turn from the transcript.
     let shown = seen(drv, "the session's terminal and its inspector", STEP, |d| {

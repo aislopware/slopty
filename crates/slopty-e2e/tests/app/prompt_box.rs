@@ -82,6 +82,12 @@ async fn the_inspector_mirrors_the_tuis_prompt_box() {
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
     crate::served::show_inspector(drv).await;
+    // Summoned, the inspector took the keyboard, where an Esc would give it back rather than
+    // reach the TUI: its key again gives it to the session's terminal first
+    // (`docs/decisions/layout.md`, "The panes as built").
+    drv.keys("cmd-i").await.unwrap();
+    seen(drv, "the terminal holding the keyboard", STEP, |d| d.focused.starts_with("terminal:"))
+        .await;
 
     // Stopped, the turn says so and no more: the frame holds nothing that moves or tells the
     // time, and the box nothing yet.
