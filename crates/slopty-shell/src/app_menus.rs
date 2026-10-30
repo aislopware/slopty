@@ -9,11 +9,14 @@
 //! pinned rev (f14fea9bf3c9).
 //!
 //! Wiring: [`init`] registers the global action handlers (run once at boot),
-//! [`bind_keys`] installs the fixed application shortcuts (re-run by
-//! `shell::apply_keymap`, which clears every binding first), and
-//! [`app_menus`] builds the menu bar handed to `cx.set_menus` in `run_app`.
+//! `window_actions` the window verbs on each shell window's root, [`bind_keys`] installs the
+//! fixed application shortcuts (re-run by `shell::apply_keymap`, which clears every binding
+//! first), and [`app_menus`] builds the menu bar handed to `cx.set_menus` in `run_app`.
 
-use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window};
+use gpui::{
+    Action, App, Context, InteractiveElement, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType,
+    Window,
+};
 
 use crate::appearance::{self, AppearanceMode};
 use crate::{composer, shell};
@@ -77,9 +80,8 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-    // Window verbs route to the active window. slopty is single-window, so a
-    // global handler suffices where zed registers these per-workspace
-    // (crates/zed/src/zed.rs `register_action(Minimize/Zoom)`).
+    // A shell window takes its window verbs itself (`window_actions`); these are for a verb no
+    // window took, chosen in the menu bar over a window that is not a shell's, or over none.
     cx.on_action(|_: &Minimize, cx| with_active_window(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx| with_active_window(cx, |window| window.zoom_window()));
     cx.on_action(close_window);
@@ -142,20 +144,42 @@ fn close_active_window(pane_first: bool, cx: &mut App) {
     if let Some(window) = cx.active_window() {
         if let Some(window) = window.downcast::<shell::Shell>() {
             // A window closed meanwhile has nothing left to close.
-            let _gone = window.update(cx, |shell, window, cx| {
-                // ⌘W closes the focused pane first; the session's own pane falls through
-                // to the window close, unsaved-file gate and all.
-                if pane_first && shell.close_focused_pane(cx) {
-                    return;
-                }
-                if shell.prepare_window_close(cx) {
-                    window.remove_window();
-                }
-            });
+            let _gone = window.update(cx, |shell, window, cx| close(shell, pane_first, window, cx));
         } else {
             let _gone = window.update(cx, |_, window, _| window.remove_window());
         }
     }
+}
+
+/// Close `shell`'s focused pane with `pane_first` when it is not the session's, else its window,
+/// the unsaved-file gate and all.
+fn close(
+    shell: &mut shell::Shell,
+    pane_first: bool,
+    window: &mut Window,
+    cx: &mut Context<shell::Shell>,
+) {
+    if pane_first && shell.close_focused_pane(cx) {
+        return;
+    }
+    if shell.prepare_window_close(cx) {
+        window.remove_window();
+    }
+}
+
+/// `root`, a shell window's, taking the window verbs for the window they were pressed in.
+///
+/// A key reaches the window that has the keyboard whether or not the app is the key app, so
+/// the window is not looked up: the active window is the key app's key window, none while the
+/// app is in the background (as the e2e guest's always is), and ⌘W there would close nothing.
+/// The global handlers ([`init`]) stay for the menu bar with no window to take it.
+pub(crate) fn window_actions<E: InteractiveElement>(root: E, cx: &Context<shell::Shell>) -> E {
+    root.on_action(cx.listener(|shell, _: &CloseTab, window, cx| close(shell, true, window, cx)))
+        .on_action(
+            cx.listener(|shell, _: &CloseWindow, window, cx| close(shell, false, window, cx)),
+        )
+        .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
+        .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
 }
 
 /// Fixed app-level shortcuts backing the menu key equivalents.
@@ -527,7 +551,7 @@ mod tests {
     #[test]
     fn the_menu_bar_names_the_palette_commands_in_title_case() {
         assert_eq!(title_case("Reopen closed view"), "Reopen Closed View");
-        assert_eq!(title_case("Next session or side pane tab"), "Next Session or Side Pane Tab");
+        assert_eq!(title_case("Go to directory\u{2026}"), "Go to Directory\u{2026}");
         let menus = app_menus();
         let view = menus.iter().find(|m| m.name.as_ref() == "View").expect("View menu");
         let names: Vec<&str> = view

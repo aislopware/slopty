@@ -59,6 +59,8 @@ use crate::transcript::{self, Transcript};
 
 #[cfg(test)]
 mod chat_rename_tests;
+#[cfg(test)]
+mod close_tests; // ⌘W through the keymap, in the window it was pressed in
 mod command_palette;
 mod file_mutations;
 mod files_panel;
@@ -4872,6 +4874,8 @@ impl Render for Shell {
             }));
         let root = Self::chrome_actions(root, cx);
         let root = Self::picker_actions(root, cx);
+        // ⌘W and the other window verbs act on this window, the one they were pressed in.
+        let root = crate::app_menus::window_actions(root, cx);
 
         // The ground the window shows, a session's, for the window to wear its appearance.
         let mut shown_ground = None;
