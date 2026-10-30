@@ -1390,6 +1390,25 @@ mod actor {
         let _killed = child.kill().await;
     }
 
+    /// Another agent's words go into the program as one message each: the words, then an Enter
+    /// of their own that ends the line. What is sent meanwhile, a second message or a viewer's
+    /// keys, waits behind that Enter rather than joins the line.
+    #[tokio::test]
+    async fn a_submit_is_its_words_then_their_own_enter() {
+        let script = "read a; read b; read c; printf 'got:%s:%s:%s:\\n' \"$a\" \"$b\" \"$c\"; \
+                      sleep 30";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(64);
+        session.attach(me, size(60, 8), tx).unwrap();
+        session.submit(me, "two words".to_owned()).unwrap();
+        session.submit(me, "then".to_owned()).unwrap();
+        session.request(me, TermRequest::Raw(b"keys\r".to_vec())).unwrap();
+        let _got = wait_for(&mut rx, |_, s| text(s).contains("got:two words:then:keys:")).await;
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// The branches a viewer was told, in order.
     fn branches(events: &[TermEvent]) -> Vec<Option<&str>> {
         events
