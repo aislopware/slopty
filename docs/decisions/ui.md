@@ -11869,7 +11869,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - The branch picker lists the clone's branches, the one checked out first, and switches with
     the worker's new `GitOp::Switch` (`git switch`, refused in git's words when changes are in
     the way).
-  - A project's actions are its repository's run scripts (`GitOp::Scripts`), each by its name
+  - *Superseded 2026-10-31 by "Project actions and the run scripts go", below.* A project's
+    actions are its repository's run scripts (`GitOp::Scripts`), each by its name
     with an icon from what it does, then the person's own; running one opens it in a terminal
     of its own. The person adds, changes and removes them as zeron keeps them, on this app and
     never in the repository (see "A project's actions are the person's to change").
@@ -11924,7 +11925,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Raycast's File Search reads Spotlight's index or, in its beta engine, an index of its own
     kept in the background, as this one is. Its documentation offers no way for another program
     to ask that index, so Slopty keeps its own.
-- ✅ **The panes a chat has open are kept across launches (2026-10-14).** zeron keeps which
+- ❌ **The panes a chat has open are kept across launches (2026-10-14).** *Superseded 2026-10-30 by `layout.md`'s ruling that a session's panes are kept across launches, Files among them: since the pane split each view is a pane, and `shell/kept_tabs.rs` keeps and restores them through `sessionTabs` (next entry; test `panel_interaction_tests::a_subagent_shows_its_agents_panes_and_the_panes_come_back`). Nothing read `sessionPanels` after that, and it went from `ui-settings.json` on 2026-10-31 with the other settings nothing read (the files pane's width, the open tabs, the last project action).* zeron keeps which
   panes each chat has open (files, terminal, changes, the right pane taken over) for the app's
   run only, so every launch started with them all closed. The person wants them back as they
   left them. The shell now saves each chat's open panes in `ui-settings.json`
@@ -12052,7 +12053,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   its time has no place in the queue and is refused. Tests: `slopty-agent`
   `queue::tests::a_message_moves_before_the_one_named_or_last`, `slopty-ui`
   `workspace::view_model::tests::a_queued_message_moved_to_the_top_goes_before_the_first`.
-- ✅ **A project's actions are the person's to change (2026-10-15).** Adding, changing or removing
+- ❌ **A project's actions are the person's to change (2026-10-15).** *Superseded 2026-10-31 by "Project actions and the run scripts go", below.* Adding, changing or removing
   an action failed and then marked the project's actions unavailable. As zeron keeps them, the
   person's actions live on this app beside the project (`interface/project-actions.json`, by
   machine and folder), never in the repository. A change to one of the repository's run scripts
@@ -14674,3 +14675,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `chrome_tests::session_card::a_session_opens_on_its_terminal_and_cmd_i_opens_its_inspector`.
   Goldens: the sidebar, past-sessions, tooltip and iPad cases show the terminal alone, and the
   surface cases' strips lose the Inspector tab nobody opened.
+- ✅ **Project actions and the run scripts go (2026-10-31).** Supersedes "A project's actions are
+  the person's to change", the bullet that made a project's actions its run scripts, and the run
+  scripts of `projects.md`'s "The repository's run and archive scripts". Project actions lived
+  in the session-info overlay and ran a worktree's setup action from the composer, and TUI-first
+  deleted both (`agents.md`): nothing reached the actions since, and a person runs a command in
+  the session's terminal or a shell beside it. They went end to end: the shell's menu, editor and
+  overlay, the view model's four calls and `interface/project-actions.json`, the view protocol's
+  `ProjectAction*` types, and the wire's `GitOp::Scripts` with `GitDone::Scripts` and
+  `RunScripts`, whose only asker the actions were. The worker still reads a repository's archive
+  script before a worktree goes; `RunScript` stays as what opens an agent's installer.

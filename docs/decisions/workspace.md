@@ -2335,7 +2335,7 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     any machine that has not said it has none is still answering.
   - Test: `workspace::tests::past_sessions::a_past_session_is_found_on_every_machine`.
 
-- ✅ **Run opens the repository's own run scripts** (2026-10-10, readiness rank 15, the UI half;
+- ❌ **Run opens the repository's own run scripts** (2026-10-10, readiness rank 15, the UI half; *superseded 2026-10-31 by "Project actions and the run scripts go" in `ui.md`*;
   the wire is `projects.md`'s run and archive scripts entry).
   - **Where.** "Run" is offered in the palette where the focus works in a folder: a folder or
     changes tile's folder, a terminal's directory, or where a thread's agent works. It asks

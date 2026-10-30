@@ -164,13 +164,6 @@ async fn applied(programs: &Programs, repo: &str, op: GitOp, terminals: &[PathBu
             .await
             .map(|_| GitDone::Switched { branch }),
         GitOp::PullComments { number } => super::pull::comments(programs, &root, number).await,
-        GitOp::Scripts => {
-            let at = root.clone();
-            tokio::task::spawn_blocking(move || super::run::scripts(&at))
-                .await
-                .map(|s| GitDone::Scripts(Box::new(s)))
-                .map_err(|e| GitOutcome::Failed { said: e.to_string() })
-        }
         GitOp::Worktrees => match super::worktrees::list(git, programs, &root, terminals).await {
             Ok(listed) => Ok(GitDone::Worktrees(Box::new(listed))),
             Err(super::worktrees::Failed::Other(said)) => Err(GitOutcome::Failed { said }),

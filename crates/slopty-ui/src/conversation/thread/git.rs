@@ -13,8 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use slopty_proto::git::{
-    Branches, GitDone, GitOp, GitOutcome, GitStatus, PullComments, PullStatus, RunScripts,
-    Worktrees,
+    Branches, GitDone, GitOp, GitOutcome, GitStatus, PullComments, PullStatus, Worktrees,
 };
 use slopty_proto::thread::Patch;
 use slopty_proto::thread::wire::{Against, Review, ReviewScope};
@@ -131,8 +130,6 @@ pub struct Repo {
     pub comments: Option<Arc<PullComments>>,
     /// The agents' worktrees of its clone, each as it stands, as last read.
     pub worktrees: Option<Arc<Worktrees>>,
-    /// Its own run scripts, as last read; why they could not be is said where they were asked.
-    pub scripts: Option<Arc<RunScripts>>,
     /// Files of a review asked whole past the review's budget, by the blobs of their two
     /// sides ([`GitOp::FileDiff`]).
     pub whole: HashMap<Sides, Whole>,
@@ -361,7 +358,6 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
         // Another branch checked out: what the clone holds is read again.
         GitDone::Switched { .. } => then.push(Then::Status),
         GitDone::Worktrees(listed) => repo.worktrees = Some(Arc::from(listed)),
-        GitDone::Scripts(scripts) => repo.scripts = Some(Arc::from(scripts)),
         GitDone::FileDiff { from, to, patch } => {
             repo.whole.insert((from, to), Whole::Came(Arc::from(patch)));
         }
@@ -442,10 +438,6 @@ fn missed(
             repo.worktrees = None;
             repo.said = Some((request, said(words)));
         }
-        GitOp::Scripts => {
-            repo.scripts = None;
-            repo.said = Some((request, said(words)));
-        }
         // A file that could not be read whole says why where it was asked, as a picture's side
         // does.
         GitOp::FileDiff { from, to, .. } => {
@@ -474,7 +466,6 @@ const fn changes(op: &GitOp) -> bool {
             | GitOp::Show { .. }
             | GitOp::Branches
             | GitOp::Worktrees
-            | GitOp::Scripts
             | GitOp::FileDiff { .. }
             | GitOp::Blob { .. }
     )

@@ -347,8 +347,9 @@ tools and its own judgement. Slopty adds reach and hearing, not a workflow.
     goldens `client_clone_repo`, `worker_repo_cloning`, `worker_repo_cloned`,
     `worker_repo_clone_refused` and `worker_repo_clone_failed`.
 
-- ✅ **The repository's run and archive scripts** (2026-10-09, readiness rank 15, R12). The
-  scripts a project kept were Slopty's own, typed in once more per project, while the
+- ✅ **The repository's run and archive scripts** (2026-10-09, readiness rank 15, R12). *Its
+  run scripts and their wire are superseded 2026-10-31 by "Project actions and the run scripts
+  go" (`ui.md`): only the archive script is read now.* The scripts a project kept were Slopty's own, typed in once more per project, while the
   repository usually holds them already in another tool's file. Conductor, the Codex app,
   Superset and T3 Code each have a Run action for a dev server or a test watch, and Conductor
   and Superset an archive (teardown) script that stops what a worktree left going before it

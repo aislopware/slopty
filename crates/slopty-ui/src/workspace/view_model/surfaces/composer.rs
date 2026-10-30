@@ -1,7 +1,7 @@
 //! The shell's calls about a session's files and settings: a picture a message shows, read back
-//! from its machine; the project's actions; the calls of features Slopty leaves to the agents or
-//! does not have; and a chat's config as its thread runs it. slopty: no prompt box, so no
-//! commands, skills, `@` files or uploads are offered to one.
+//! from its machine; the calls of features Slopty leaves to the agents or does not have; and a
+//! chat's config as its thread runs it. With no prompt box, no commands, skills, `@` files or
+//! uploads are offered to one.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -64,10 +64,6 @@ impl WorkspaceView {
         Some(match method {
             methods::READ_ATTACHMENT_CHUNK => self.read_attachment(params, cx),
             methods::RELEASE_HOME_FOLDER_SEARCH => Task::ready(value(&serde_json::json!({}))),
-            methods::LIST_PROJECT_ACTIONS => self.list_project_actions(params, cx),
-            methods::RUN_PROJECT_ACTION => self.run_project_action(params, cx),
-            methods::UPSERT_PROJECT_ACTION => self.upsert_project_action(params, cx),
-            methods::DELETE_PROJECT_ACTION => self.delete_project_action(params, cx),
             _ => return None,
         })
     }

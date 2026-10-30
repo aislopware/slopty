@@ -2,7 +2,7 @@
 //! The entities the view model serves the shell.
 //!
 //! Devices, projects (spaces), chats and their sessions, the links to the server, and the
-//! requests and answers of a machine's files, git, project actions and terminals.
+//! requests and answers of a machine's files, git and terminals.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -1116,81 +1116,6 @@ pub enum AuthState {
         /// Their organization.
         org_id: Option<String>,
     },
-}
-
-/// The icon a project action shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProjectActionIcon {
-    /// Run.
-    Play,
-    /// Test.
-    Test,
-    /// Lint.
-    Lint,
-    /// Configure.
-    Configure,
-    /// Build.
-    Build,
-    /// Debug.
-    Debug,
-}
-
-/// A command a project offers in one press.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectAction {
-    /// Its id.
-    pub id: String,
-    /// Its name.
-    pub name: String,
-    /// The command it runs.
-    pub command: String,
-    /// Its icon.
-    pub icon: ProjectActionIcon,
-    /// Whether it runs on its own when a worktree is made.
-    pub run_on_worktree_create: bool,
-}
-
-/// A project action before it is saved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectActionDraft {
-    /// Its name.
-    pub name: String,
-    /// The command it runs.
-    pub command: String,
-    /// Its icon.
-    pub icon: ProjectActionIcon,
-    /// Whether it runs on its own when a worktree is made.
-    #[serde(default)]
-    pub run_on_worktree_create: bool,
-}
-
-/// A project's actions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectActionsSnapshot {
-    /// The project.
-    pub space_id: String,
-    /// Its actions.
-    pub actions: Vec<ProjectAction>,
-    /// Actions its files offer to import.
-    pub importable_actions: Vec<ProjectActionDraft>,
-    /// What is wrong with its actions file, when something is.
-    pub project_file_issue: Option<String>,
-}
-
-/// A project action, started.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectActionRun {
-    /// The action.
-    pub action_id: String,
-    /// Its name.
-    pub action_name: String,
-    /// The terminal it runs in.
-    pub terminal: TerminalSession,
 }
 
 /// An open PTY session on the owning device (`OpenTerminal` reply).

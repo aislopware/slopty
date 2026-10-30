@@ -2,8 +2,8 @@
 //! answer, once the shell's view is attached, is the session's id; the panel then shows that
 //! view. A shell opened for a chat and still running when it is asked again (the app came back,
 //! the session lived on in its worker) is found by its `chat` fact and shown again instead of a
-//! new one. A project's run script opens in a terminal of its own. `CloseTerminal` ends the
-//! shell. A tab the app showed when it last ran asks for its terminal again by
+//! new one. A script (an agent's installer) opens in a terminal of its own. `CloseTerminal`
+//! ends the shell. A tab the app showed when it last ran asks for its terminal again by
 //! its id (`terminalId`): shown once its machine says it still runs, refused once it ended or
 //! [`AGAIN_GRACE`] passed with its machine silent of it.
 //!

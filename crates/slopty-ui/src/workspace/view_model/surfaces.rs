@@ -19,7 +19,6 @@
 //! whole and sent again when it changes or the link comes back
 //! ([`WorkspaceView::surfaces_relinked`]), when what the link missed is asked again once.
 
-mod actions;
 mod adding;
 mod changes;
 mod clone;
@@ -103,8 +102,6 @@ pub(super) struct Surfaces {
     adding: adding::Adding,
     /// The projects the person added.
     projects: projects::Projects,
-    /// The person's own project actions, and the worktree actions waiting for their chats.
-    actions: actions::Actions,
     /// The attached files read back, while they are read.
     read_back: composer::ReadBack,
     /// The last number given a watch.

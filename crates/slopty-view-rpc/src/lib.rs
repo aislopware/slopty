@@ -95,14 +95,6 @@ pub mod methods {
     pub const WRITE_WORKSPACE_FILE: &str = "WriteWorkspaceFile";
     /// A workspace's file changes as they happen, the one stream among its file calls.
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
-    /// A project's actions, private state on the device that owns the project.
-    pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
-    /// Add a project action, or change one.
-    pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
-    /// Delete a project action.
-    pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
-    /// Run a project action.
-    pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
     /// Open a terminal on a device.
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     /// Close a terminal.

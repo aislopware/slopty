@@ -131,10 +131,6 @@ pub enum GitOp {
     /// is fetched or moved; a pull request is asked of the forge only for a branch whose commits
     /// alone do not say it landed.
     Worktrees,
-    /// The repository's own run scripts, read from the files its other tools keep, ready to
-    /// open in a terminal ([`GitDone::Scripts`]): a dev server, a test watch, what a tool's Run
-    /// button starts.
-    Scripts,
     /// One file of a review whole, by the blobs the review named on its two sides
     /// ([`FileDiff::from`](crate::thread::wire::FileDiff::from) and
     /// [`FileDiff::to`](crate::thread::wire::FileDiff::to)), for a file the review's own budget
@@ -286,8 +282,6 @@ pub enum GitDone {
     PullComments(Box<PullComments>),
     /// The agents' worktrees of a clone.
     Worktrees(Box<Worktrees>),
-    /// The repository's run scripts.
-    Scripts(Box<RunScripts>),
     /// One file of a review whole, by the blobs asked: its hunks, or none when a side is not
     /// text the worker cuts (binary, or larger than it cuts into hunks).
     FileDiff {
@@ -386,28 +380,19 @@ pub struct AgentWorktree {
     pub made_by: Option<crate::thread::AgentId>,
 }
 
-/// A repository's run scripts, as the checkout a folder is in keeps them.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct RunScripts {
-    /// The file they were read from (`.conductor/settings.toml`); none when it keeps none.
-    pub from: Option<String>,
-    /// Each, the one marked default first.
-    pub list: Vec<RunScript>,
-}
-
-/// One run script, ready to open in a terminal with `ClientMsg::OpenSession`: through the
-/// person's login shell, which takes the terminal over once it ends.
+/// A script to run in a terminal of its own with `ClientMsg::OpenSession`, through the person's
+/// login shell (an agent's installer).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct RunScript {
-    /// Its name, as its file names it; the terminal's title.
+    /// Its name: the terminal's title.
     pub name: String,
-    /// The script, as its file has it, for the person to read.
+    /// The script, for the person to read.
     pub line: String,
     /// The program and arguments that run it.
     pub command: Vec<String>,
-    /// Where it runs, absolute.
+    /// Where it runs.
     pub cwd: String,
-    /// The places in its environment, under Slopty's names and its own tool's.
+    /// What its environment adds.
     pub env: Vec<(String, String)>,
 }
 

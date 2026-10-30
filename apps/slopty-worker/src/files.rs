@@ -301,7 +301,6 @@ pub async fn git_op(
         GitOp::Branches => "branches",
         GitOp::PullComments { .. } => "pull request comments",
         GitOp::Worktrees => "worktrees",
-        GitOp::Scripts => "run scripts",
         GitOp::FileDiff { .. } => "file diff",
         GitOp::Blob { .. } => "blob",
         GitOp::PullReview { .. } => "pull request review",
@@ -320,7 +319,6 @@ pub async fn git_op(
             | GitOp::Worktrees
             | GitOp::PullStatus
             | GitOp::PullComments { .. }
-            | GitOp::Scripts
     );
     let terminals = if matches!(op, GitOp::RemoveWorktree | GitOp::Worktrees) {
         terminal_dirs(worker).await
