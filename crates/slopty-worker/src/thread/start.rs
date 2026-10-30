@@ -13,6 +13,9 @@
 //!
 //! The thread names its terminal ([`ThreadMeta::TERMINAL_FACT`]); the answer is
 //! `Outcome::Started` with it. A start is acted on once per intent ([`Host::start`]'s record).
+//! One whose terminal does not open takes back what it did, and only that: a thread it made is
+//! gone, and one held already names again what it named before, unless its observer named the
+//! terminal its session runs in meanwhile.
 //!
 //! The terminal keeps what started it ([`Started`]). When its agent has ended and the person
 //! starts the terminal again ([`Starter::again`]), the agent takes its thread up again in its own
@@ -75,6 +78,16 @@ pub struct Starter {
 
 /// Why a start that names more than a session to take up again is refused.
 const ONLY_RESUME: &str = "a start takes no arguments here but the session it takes up again";
+
+/// What [`Starter::made`] did to a start's thread, for [`Starter::unmade`] to take back.
+#[derive(Debug)]
+enum Made {
+    /// It made the thread.
+    New,
+    /// It named the start's terminal and folder on the thread held already, which named the
+    /// terminal `had` and ran in `cwd` before.
+    Held { had: Option<String>, cwd: String },
+}
 
 /// Where a start's agent runs.
 #[derive(Clone, Copy, Debug)]
@@ -251,7 +264,7 @@ impl Starter {
         let command = std::iter::once(installed.program.to_string_lossy().into_owned()).chain(args);
         let (to, path) = ((opening, thread, terminal), &installed.path);
         if let Err(why) = self.open(to, start, command.collect(), path, Vec::new()).await {
-            self.unmade(thread, made);
+            self.unmade(thread, terminal, start, made);
             return Err(why);
         }
         self.claude.begun(terminal, native, start.cwd.clone(), version);
@@ -334,7 +347,7 @@ impl Starter {
         let command = std::iter::once(installed.program.to_string_lossy().into_owned()).chain(args);
         let (to, path) = ((opening, thread, terminal), &installed.path);
         if let Err(why) = self.open(to, start, command.collect(), path, extra).await {
-            self.unmade(thread, made);
+            self.unmade(thread, terminal, start, made);
             return Err(why);
         }
         let live = Status {
@@ -349,7 +362,8 @@ impl Starter {
     }
 
     /// Hold thread `thread` as `meta` says, naming `terminal`, seated at `seated`: a new one, or
-    /// the one held of the session taken up again. Whether it was made here.
+    /// the one held of the session taken up again, whose terminal and folder change in one step
+    /// with the look at what they were. What it did, for [`Self::unmade`].
     fn made(
         &self,
         thread: ThreadId,
@@ -357,15 +371,18 @@ impl Starter {
         start: &Start,
         terminal: SessionId,
         seated: Option<&Seated>,
-    ) -> bool {
-        let fact = (ThreadMeta::TERMINAL_FACT.to_owned(), terminal.to_string());
-        let made = if let Some((mut held, _)) = self.host.meta(thread) {
-            held.facts.insert(fact.0, fact.1);
-            held.cwd.clone_from(&start.cwd);
-            self.host.apply(thread, vec![Action::Meta(Box::new(held))]);
-            false
-        } else {
-            meta.facts.insert(fact.0, fact.1);
+    ) -> Made {
+        let named = terminal.to_string();
+        let held = self.host.update(thread, |state| {
+            let mut held = state.meta.clone();
+            let had = held.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), named.clone());
+            let cwd = std::mem::replace(&mut held.cwd, start.cwd.clone());
+            let changed = held != state.meta;
+            let actions = if changed { vec![Action::Meta(Box::new(held))] } else { Vec::new() };
+            (actions, Made::Held { had, cwd })
+        });
+        let made = held.unwrap_or_else(|| {
+            meta.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), named);
             if let Some(seated) = seated {
                 ThreadMeta::ORCHESTRATED.clone_into(&mut meta.origin);
                 meta.facts.extend(seated.facts.iter().cloned());
@@ -373,26 +390,41 @@ impl Starter {
             if let Err(e) = self.host.create(meta) {
                 tracing::warn!(%thread, "a started agent's thread could not be made: {e}");
             }
-            true
-        };
+            Made::New
+        });
         if let Some(seated) = seated {
             self.host.seated(thread, seated);
         }
         made
     }
 
-    /// Take back what [`Self::made`] did for a start whose terminal did not open.
-    fn unmade(&self, thread: ThreadId, made: bool) {
-        if made {
+    /// Take back what [`Self::made`] did for `start`, whose terminal `terminal` did not open, in
+    /// one step with the look at the thread: a thread it made is gone, and one held already names
+    /// again the terminal it named before, in its folder before. A terminal named since stays:
+    /// the session's observer named the one it was found running in (a start of it just before
+    /// this one).
+    fn unmade(&self, thread: ThreadId, terminal: SessionId, start: &Start, made: Made) {
+        let Made::Held { had, cwd } = made else {
             if let Err(e) = self.host.remove(thread) {
                 tracing::warn!(%thread, "a failed start's thread stayed: {e}");
             }
             return;
-        }
+        };
+        let named = terminal.to_string();
         self.host.update(thread, |state| {
             let mut meta = state.meta.clone();
-            meta.facts.remove(ThreadMeta::TERMINAL_FACT);
-            (vec![Action::Meta(Box::new(meta))], ())
+            if meta.facts.get(ThreadMeta::TERMINAL_FACT) != Some(&named) {
+                return (Vec::new(), ());
+            }
+            match had {
+                Some(had) => drop(meta.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), had)),
+                None => drop(meta.facts.remove(ThreadMeta::TERMINAL_FACT)),
+            }
+            if meta.cwd == start.cwd {
+                meta.cwd = cwd;
+            }
+            let changed = meta != state.meta;
+            (if changed { vec![Action::Meta(Box::new(meta))] } else { Vec::new() }, ())
         });
     }
 
