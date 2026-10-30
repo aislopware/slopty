@@ -142,12 +142,17 @@ jobs:
       # by the ghostty revision and the binding's, which a new entry needs. The build checks
       # every other input itself, so an entry for another zig or SDK is never used. The Apple
       # lints on Linux skip that build (`DOCS_RS`, `tools::apple_cargo`): they never link it.
-      - if: matrix.lane == 'clippy-linux' || matrix.lane == 'tests'
+      # clippy-host's fuzz replay does build it, once the lint's environment is gone, so that
+      # lane keeps its build and its packages too (a codeberg.org fetch inside its build script
+      # failed run 41037072359).
+      - if: >-
+          matrix.lane == 'clippy-linux' || matrix.lane == 'tests' || matrix.lane == 'clippy-host'
         id: ghostty
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      - if: matrix.lane == 'clippy-linux' || matrix.lane == 'tests'
+      - if: >-
+          matrix.lane == 'clippy-linux' || matrix.lane == 'tests' || matrix.lane == 'clippy-host'
         id: prebuilt
         uses: actions/cache@v6
         with:
@@ -161,14 +166,14 @@ jobs:
       # (run 37080698786). Only a lane that builds libghostty-vt needs them: one whose build of
       # it came from the cache does not.
       - if: >-
-          (matrix.lane == 'clippy-linux' || matrix.lane == 'tests')
+          (matrix.lane == 'clippy-linux' || matrix.lane == 'tests' || matrix.lane == 'clippy-host')
           && steps.prebuilt.outputs.cache-hit != 'true'
         uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
       - if: >-
-          (matrix.lane == 'clippy-linux' || matrix.lane == 'tests')
+          (matrix.lane == 'clippy-linux' || matrix.lane == 'tests' || matrix.lane == 'clippy-host')
           && steps.prebuilt.outputs.cache-hit != 'true'
         working-directory: vendor/ghostty
         timeout-minutes: 15
