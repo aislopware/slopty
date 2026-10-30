@@ -77,7 +77,7 @@ impl Shell {
                     changes.update(cx, Changes::ensure_content);
                 }
             }
-            RightSurface::Screen(id) => self.focus_screen_surface(id, cx),
+            RightSurface::Screen(id) => Self::focus_screen_surface(id, cx),
             RightSurface::Files => {
                 if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
                     files.update(cx, FilesSurface::ensure_loaded);
@@ -228,7 +228,7 @@ impl Shell {
                 self.diffs.remove(&id);
                 self.diff_subs.remove(&id);
             }
-            RightSurface::Screen(id) => self.close_screen_surface(id, cx),
+            RightSurface::Screen(id) => Self::close_screen_surface(id, cx),
             RightSurface::Page(id) => Self::close_page_pane(id, cx),
             RightSurface::Files => {
                 if let Some(files) = self.files.get(key).cloned() {
@@ -269,7 +269,7 @@ impl Shell {
 
     /// What `view`'s pane shows. Files keeps its git state live only while it is laid out.
     pub(super) fn view_content(
-        &mut self,
+        &self,
         view: RightSurface,
         window: &Window,
         cx: &mut Context<Self>,
@@ -305,7 +305,7 @@ impl Shell {
                 .cloned()
                 .map_or_else(|| Empty.into_any_element(), IntoElement::into_any_element),
             RightSurface::Inspector => self.inspector.clone().into_any_element(),
-            RightSurface::Screen(id) => self.render_screen_surface(id, cx),
+            RightSurface::Screen(id) => Self::render_screen_surface(id, cx),
             RightSurface::Page(id) => Self::render_page_pane(id, cx),
             RightSurface::Files => {
                 if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
@@ -361,7 +361,7 @@ impl Shell {
                     changes.update(cx, Changes::take_keyboard);
                 }
             }
-            RightSurface::Screen(id) => self.focus_screen_surface(id, cx),
+            RightSurface::Screen(id) => Self::focus_screen_surface(id, cx),
             RightSurface::Inspector | RightSurface::Page(_) => {}
         }
         let handle = self.view_handle(view, cx);
@@ -407,9 +407,9 @@ impl Shell {
                     .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title()),
             ),
             RightSurface::Screen(id) => {
-                let chosen = self.screen_surface_chosen(id, cx).map(|(screen, _)| screen);
+                let chosen = Self::screen_surface_chosen(id, cx).map(|(screen, _)| screen);
                 let title =
-                    self.screen_surface_title(id, cx).unwrap_or_else(|| "Remote window".into());
+                    Self::screen_surface_title(id, cx).unwrap_or_else(|| "Remote window".into());
                 (screen_chip_glyph(chosen.as_deref()), title)
             }
             RightSurface::Page(id) => {

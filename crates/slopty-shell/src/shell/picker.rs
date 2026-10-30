@@ -15,20 +15,6 @@
 //!   ⏎ opens a terminal there, or the agent ⇥ picks; ⌘[ and ⌘] step the machine.
 //!
 //! It works from the keyboard alone and answers nothing for the person.
-#![allow(
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::derive_partial_eq_without_eq,
-    clippy::indexing_slicing,
-    clippy::large_enum_variant,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::suboptimal_flops,
-    clippy::too_many_arguments,
-    clippy::unused_self,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -38,7 +24,7 @@ use chrono::{DateTime, Utc};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Bounds, Context, Entity, FocusHandle, Focusable as _, Pixels, Point, SharedString,
-    Subscription, Task, Window, WindowId, actions, div, px,
+    Subscription, Task, Window, WindowId, div, px,
 };
 use slopty_view_proto::{HarnessId, HomeFolderMatch, HomeFolderSearchResult};
 
@@ -54,15 +40,24 @@ use crate::popover;
 use crate::state::AppState;
 use crate::theme::{Theme, hairline};
 
-actions!(
-    shell,
-    [
-        // The session picker, ⌘K.
-        OpenPicker,
-        // Go to Directory, ⇧⌘G while no find field is open (`docs/decisions/layout.md`).
-        GoToDirectory
-    ]
-);
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    use gpui::actions;
+
+    actions!(
+        shell,
+        [
+            /// The session picker, ⌘K.
+            OpenPicker,
+            /// Go to Directory, ⇧⌘G while no find field is open (`docs/decisions/layout.md`).
+            GoToDirectory
+        ]
+    );
+}
+pub use actions::{GoToDirectory, OpenPicker};
 
 /// What the card lists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +82,7 @@ pub(super) enum Row {
     },
     /// A Claude Code session its machine keeps that is no session here yet, and its project.
     Past {
-        past: PastRow,
+        past: Box<PastRow>,
         project: Option<SharedString>,
     },
     /// Start a session titled as typed.
@@ -234,6 +229,13 @@ pub(super) struct Picker {
     _events: Subscription,
 }
 
+impl Picker {
+    /// The agent a start takes; its index always stands in [`AGENTS`].
+    fn agent(&self) -> Agent {
+        AGENTS.get(self.agent).copied().unwrap_or(AGENTS[0])
+    }
+}
+
 /// A machine's folders as its home index answers.
 #[derive(Default)]
 struct FolderSearch {
@@ -327,7 +329,7 @@ pub(super) fn session_rows(state: &AppState, typed: &str, now: DateTime<Utc>) ->
         });
     }
     for (ix, row) in rows.iter_mut().enumerate() {
-        row.digit = u8::try_from(ix + 1).ok().filter(|digit| *digit <= 9);
+        row.digit = u8::try_from(ix.saturating_add(1)).ok().filter(|digit| *digit <= 9);
         if spans && !terms.is_empty() {
             let machine = machine_name(state, &device_of(state, &row.chat_id));
             row.place = Some(match row.place.take() {
@@ -336,7 +338,7 @@ pub(super) fn session_rows(state: &AppState, typed: &str, now: DateTime<Utc>) ->
             });
         }
     }
-    let mut out = Vec::with_capacity(rows.len() + machines.len());
+    let mut out = Vec::with_capacity(rows.len().saturating_add(machines.len()));
     let mut under: Option<String> = None;
     for row in rows {
         let device = device_of(state, &row.chat_id);
@@ -465,11 +467,7 @@ fn in_a_find_field(window: &Window) -> bool {
 impl Shell {
     /// `root` taking the picker's actions. Over another overlay that holds the keyboard a key
     /// waits; the card's own keys shut it or turn it to the other list.
-    pub(super) fn picker_actions<E: InteractiveElement>(
-        &self,
-        root: E,
-        cx: &mut Context<Self>,
-    ) -> E {
+    pub(super) fn picker_actions<E: InteractiveElement>(root: E, cx: &Context<Self>) -> E {
         root.on_action(cx.listener(|this, _: &OpenPicker, window, cx| {
             if this.overlay_owns_keyboard() && !this.picker_open() {
                 return;
@@ -527,7 +525,7 @@ impl Shell {
                 .or_else(|| state.devices.first().map(|device| device.id.clone()));
             // A start takes the agent on screen; Go to Directory a terminal, as Rex's.
             let agent = match mode {
-                Mode::Directories => AGENTS.len() - 1,
+                Mode::Directories => AGENTS.len().saturating_sub(1),
                 Mode::Sessions => shown
                     .and_then(|chat| chat.config.as_ref())
                     .and_then(|config| {
@@ -586,7 +584,7 @@ impl Shell {
             Mode::Sessions => {
                 picker.said.search(
                     engine,
-                    typed,
+                    &typed,
                     |shell| shell.picker.as_mut().map(|picker| &mut picker.said),
                     cx,
                 );
@@ -623,7 +621,7 @@ impl Shell {
                 }
                 let said = picker
                     .said
-                    .results
+                    .results()
                     .iter()
                     .filter(|found| !listed.contains(&found.chat_id))
                     .filter_map(|found| {
@@ -644,7 +642,7 @@ impl Shell {
                                 state.representative_space(space).display_name().to_owned(),
                             )
                         });
-                    Row::Past { past: past.clone(), project }
+                    Row::Past { past: Box::new(past.clone()), project }
                 }));
                 // A machine that could not look says why when nothing was listed, and a search
                 // that read only part of what there is says so either way.
@@ -671,13 +669,13 @@ impl Shell {
     }
 
     /// Keep the cursor off a header.
-    fn picker_land_cursor(&mut self, cx: &mut Context<Self>) {
+    fn picker_land_cursor(&mut self, cx: &Context<Self>) {
         let rows = self.picker_rows(cx);
         let Some(picker) = self.picker.as_mut() else { return };
         if rows.get(picker.active).is_some_and(|row| !row.pickable())
             && let Some(next) = rows.iter().skip(picker.active).position(Row::pickable)
         {
-            picker.active += next;
+            picker.active = picker.active.saturating_add(next);
         }
     }
 
@@ -689,10 +687,13 @@ impl Shell {
         if !rows.iter().any(Row::pickable) {
             return;
         }
-        let mut at = picker.active.min(count - 1);
+        let mut at = picker.active.min(count.saturating_sub(1));
         loop {
-            at = if down { (at + 1) % count } else { (at + count - 1) % count };
-            if rows[at].pickable() {
+            let Some(next) = popover::menu_step(Some(at), count, if down { 1 } else { -1 }) else {
+                return;
+            };
+            at = next;
+            if rows.get(at).is_some_and(Row::pickable) {
                 break;
             }
         }
@@ -704,9 +705,9 @@ impl Shell {
     /// The agent a start takes, stepped.
     fn step_picker_agent(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(picker) = self.picker.as_mut() else { return };
-        let count = AGENTS.len();
         picker.agent =
-            if forward { (picker.agent + 1) % count } else { (picker.agent + count - 1) % count };
+            popover::menu_step(Some(picker.agent), AGENTS.len(), if forward { 1 } else { -1 })
+                .unwrap_or(0);
         picker.refused = None;
         cx.notify();
     }
@@ -727,15 +728,16 @@ impl Shell {
             .as_ref()
             .and_then(|device| devices.iter().position(|d| d == device))
             .unwrap_or(0);
-        let next = if forward {
-            (at + 1) % devices.len()
-        } else {
-            (at + devices.len() - 1) % devices.len()
+        let Some(device) =
+            popover::menu_step(Some(at), devices.len(), if forward { 1 } else { -1 })
+                .and_then(|next| devices.get(next).cloned())
+        else {
+            return;
         };
         let Some(old) = self.picker.take() else { return };
         self.release_folders(&old, cx);
         self.picker = Some(Picker {
-            device: Some(devices[next].clone()),
+            device: Some(device),
             folders: FolderSearch::default(),
             active: 0,
             refused: None,
@@ -772,7 +774,7 @@ impl Shell {
                     return;
                 }
                 self.close_picker(None, cx);
-                self.open_past_session(past, cx);
+                self.open_past_session(*past, cx);
             }
             Row::Create(title) => {
                 let Some((device_id, cwd)) = self.create_target(cx) else {
@@ -814,7 +816,7 @@ impl Shell {
     }
 
     fn picker_agent(&self) -> Agent {
-        AGENTS[self.picker.as_ref().map_or(0, |picker| picker.agent)]
+        self.picker.as_ref().map_or(AGENTS[0], Picker::agent)
     }
 
     /// Where words that name no session start one: the project on screen, else the folder of
@@ -864,7 +866,7 @@ impl Shell {
 
     /// Ask every project's machine for its Claude Code sessions the words find, after a pause in
     /// typing; nothing while nothing is typed.
-    fn ask_past(&mut self, cx: &mut Context<Self>) {
+    fn ask_past(&mut self, cx: &Context<Self>) {
         let (engine, spaces) = {
             let state = self.state.read(cx);
             (
@@ -922,7 +924,7 @@ impl Shell {
 
     /// Ask the machine's home index for the folders the words find; `warm` first asks for the
     /// folders gone to most, while nothing is typed.
-    fn ask_folders(&mut self, warm: bool, cx: &mut Context<Self>) {
+    fn ask_folders(&mut self, warm: bool, cx: &Context<Self>) {
         let (engine, local) = {
             let state = self.state.read(cx);
             (state.engine().cloned(), state.local_device_id.clone())
@@ -932,7 +934,7 @@ impl Shell {
         let device = picker.device.clone();
         let typed = picker.search.read(cx).text().trim().to_owned();
         let search = &mut picker.folders;
-        search.generation += 1;
+        search.generation = search.generation.wrapping_add(1);
         search.found.clear();
         search.task = None;
         if search.unsupported {
@@ -942,8 +944,8 @@ impl Shell {
             search.started = true;
             search.warm_task = Some(ask_home_folders(
                 engine.clone(),
-                device.clone(),
-                local.clone(),
+                device.as_deref(),
+                local.as_deref(),
                 String::new(),
                 None,
                 cx,
@@ -954,11 +956,18 @@ impl Shell {
         }
         search.started = true;
         let generation = Some(search.generation);
-        search.task = Some(ask_home_folders(engine, device, local, typed, generation, cx));
+        search.task = Some(ask_home_folders(
+            engine,
+            device.as_deref(),
+            local.as_deref(),
+            typed,
+            generation,
+            cx,
+        ));
     }
 
     /// Tell the machine the card is done with its home index.
-    fn release_folders(&self, picker: &Picker, cx: &mut Context<Self>) {
+    fn release_folders(&self, picker: &Picker, cx: &Context<Self>) {
         if !picker.folders.started {
             return;
         }
@@ -1014,7 +1023,7 @@ impl Shell {
         let search = picker.search.clone();
         let scroll = picker.scroll.clone();
         let active = picker.active.min(rows.len().saturating_sub(1));
-        let agent = AGENTS[picker.agent];
+        let agent = picker.agent();
         let starting = picker.starting.is_some();
         let refused = picker.refused.clone();
         let device = picker.device.clone();
@@ -1022,16 +1031,15 @@ impl Shell {
         let words = (!typed.is_empty()).then_some(typed.as_str());
         let mut children: Vec<AnyElement> = Vec::with_capacity(rows.len());
         for (ix, row) in rows.iter().enumerate() {
-            let Some(drawn) = picker_row(
-                row,
-                ix == active,
+            let card = Card {
                 words,
                 agent,
-                create_place.as_deref(),
+                create_place: create_place.as_deref(),
                 starting,
                 now,
-                &theme,
-            ) else {
+                theme: &theme,
+            };
+            let Some(drawn) = picker_row(row, ix == active, card) else {
                 match row {
                     Row::Header(name) => {
                         children.push(header(name.clone(), &theme).into_any_element());
@@ -1068,7 +1076,7 @@ impl Shell {
         });
         let body = div()
             .id("picker-rows")
-            .max_h(px(ROW_HEIGHT * ROWS_SHOWN + 12.0))
+            .max_h(px(ROW_HEIGHT.mul_add(ROWS_SHOWN, 12.0)))
             .overflow_y_scroll()
             .track_scroll(&scroll)
             .flex()
@@ -1196,15 +1204,17 @@ fn target(device: Option<&str>, local: Option<&str>) -> serde_json::Value {
 /// `generation`, the warming ask, whose answer is the folders gone to most.
 fn ask_home_folders(
     engine: crate::state::EngineHandle,
-    device: Option<String>,
-    local: Option<String>,
+    device: Option<&str>,
+    local: Option<&str>,
     query: String,
     generation: Option<u64>,
-    cx: &mut Context<Shell>,
+    cx: &Context<Shell>,
 ) -> Task<()> {
-    let mut params = target(device.as_deref(), local.as_deref());
-    params["query"] = serde_json::Value::String(query);
-    params["limit"] = serde_json::Value::from(FOLDER_LIMIT);
+    let mut params = target(device, local);
+    if let Some(ask) = params.as_object_mut() {
+        ask.insert("query".into(), serde_json::Value::String(query));
+        ask.insert("limit".into(), serde_json::Value::from(FOLDER_LIMIT));
+    }
     cx.spawn(async move |this, cx| {
         let mut delay = FOLDER_RETRY;
         loop {
@@ -1245,7 +1255,7 @@ fn ask_home_folders(
                 break;
             }
             cx.background_executor().timer(delay).await;
-            delay = (delay * 2).min(FOLDER_RETRY_MAX);
+            delay = delay.saturating_mul(2).min(FOLDER_RETRY_MAX);
         }
     })
 }
@@ -1289,18 +1299,22 @@ fn note(why: SharedString, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .child(why)
 }
 
-/// One row: its glyph, its words, and what trails them; `None` for a header or a note, each
-/// drawn as one.
-fn picker_row(
-    row: &Row,
-    active: bool,
-    words: Option<&str>,
+/// What every row of the card draws with: the words typed, the agent a start takes, where a
+/// start goes, whether one is on its way, the moment and the theme.
+#[derive(Clone, Copy)]
+struct Card<'a> {
+    words: Option<&'a str>,
     agent: Agent,
-    create_place: Option<&str>,
+    create_place: Option<&'a str>,
     starting: bool,
     now: DateTime<Utc>,
-    theme: &Theme,
-) -> Option<gpui::Stateful<gpui::Div>> {
+    theme: &'a Theme,
+}
+
+/// One row: its glyph, its words, and what trails them; `None` for a header or a note, each
+/// drawn as one.
+fn picker_row(row: &Row, active: bool, card: Card<'_>) -> Option<gpui::Stateful<gpui::Div>> {
+    let Card { words, agent, create_place, starting, now, theme } = card;
     let small = crate::typography::ui_rems(12.0);
     let quiet = |text: SharedString| {
         div().flex_none().text_size(small).text_color(theme.text_faint).child(text)
@@ -1487,7 +1501,7 @@ fn picker_row(
     };
     let Parts { key, glyph, tint, title, second, trailing, said } = parts;
     Some(
-        row_frame(key, active, theme, said, second.is_some())
+        row_frame(&key, active, theme, said, second.is_some())
             .child(
                 icon(glyph).size(px(14.0)).flex_none().text_color(tint.unwrap_or(theme.text_muted)),
             )
@@ -1507,7 +1521,7 @@ fn picker_row(
 
 /// A row's frame: the menu's row, a button a screen reader hears by `said`.
 fn row_frame(
-    key: String,
+    key: &str,
     active: bool,
     theme: &Theme,
     said: String,
@@ -1532,8 +1546,8 @@ fn picker_foot(
     agent: Agent,
     refused: Option<String>,
     theme: &Theme,
-    window: &mut Window,
-    cx: &mut Context<Shell>,
+    window: &Window,
+    cx: &Context<Shell>,
 ) -> Option<AnyElement> {
     use super::command_palette::{command_key_hint, palette_footer};
     if let Some(why) = refused {
@@ -1593,15 +1607,19 @@ mod tests {
         .unwrap()
     }
 
+    fn minutes_before(now: DateTime<Utc>, minutes: i64) -> DateTime<Utc> {
+        now.checked_sub_signed(TimeDelta::minutes(minutes)).unwrap()
+    }
+
     fn state(now: DateTime<Utc>) -> AppState {
         let mut state = AppState::default();
         state.local_device_id = Some("mac".into());
         state.devices = vec![device("mac", "studio", now), device("box", "box", now)];
         state.spaces = vec![space("app", "mac", "/work/app"), space("api", "box", "/srv/api")];
         state.chats = vec![
-            chat("a", "box", "api", "Fix the lexer", now - TimeDelta::minutes(3)),
-            chat("b", "mac", "app", "Write the docs", now - TimeDelta::minutes(2)),
-            chat("c", "mac", "app", "Tidy the tests", now - TimeDelta::minutes(1)),
+            chat("a", "box", "api", "Fix the lexer", minutes_before(now, 3)),
+            chat("b", "mac", "app", "Write the docs", minutes_before(now, 2)),
+            chat("c", "mac", "app", "Tidy the tests", minutes_before(now, 1)),
         ];
         state.selected_chat = Some("b".into());
         state
@@ -1664,7 +1682,7 @@ mod tests {
         assert_eq!(titles(&by_machine), vec!["Fix the lexer"], "by machine");
         let Row::Session(row) = &by_machine[0] else { panic!("a session") };
         assert_eq!(row.place.as_deref(), Some("api \u{b7} box"), "typed rows say their machine");
-        assert!(session_rows(&state, "nothing like it", now).is_empty());
+        assert_eq!(session_rows(&state, "nothing like it", now), []);
     }
 
     /// Go to Directory lists the machine's projects, then the folders gone to most; typed words

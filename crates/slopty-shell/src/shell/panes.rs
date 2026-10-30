@@ -9,14 +9,6 @@
 //! direction (⌥⌘ arrows) and the panes in reading order (⌘] ⌘[); a pane can fill the view
 //! (zoom) while the tree keeps its shape. The session's pane never closes: closing every other
 //! pane brings the view back to it.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::indexing_slicing,
-    clippy::match_same_arms,
-    clippy::suboptimal_flops,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::{Bounds, Pixels, Size, point, px, size};
 
@@ -85,8 +77,10 @@ const RATIO: (f32, f32) = (0.1, 0.9);
 /// each axis (its padding, and a pane header's height while the view holds more than one).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Grid {
-    pub(crate) cell: Size<Pixels>,
-    pub(crate) frame: Size<Pixels>,
+    /// Its cell.
+    pub cell: Size<Pixels>,
+    /// What its pane takes besides whole cells, along each axis.
+    pub frame: Size<Pixels>,
 }
 
 impl Grid {
@@ -180,7 +174,14 @@ impl Node {
         }
     }
 
-    fn layout(&self, at: Bounds<Pixels>, grid: Option<Grid>, into: &mut Laid) {
+    /// Lay the node out in `at` into `into`; `path` is its place in the tree.
+    fn layout(
+        &self,
+        at: Bounds<Pixels>,
+        grid: Option<Grid>,
+        path: &mut Vec<bool>,
+        into: &mut Laid,
+    ) {
         match self {
             Self::Leaf(pane) => into.panes.push((*pane, at)),
             Self::Split { axis, ratio, first, second } => {
@@ -194,7 +195,8 @@ impl Node {
                 // edge: the first child's when it is one grid across this axis, else the
                 // second's.
                 if let Some((step, frame)) = grid.and_then(|grid| grid.along(*axis)) {
-                    let whole = |extent: f32| frame + ((extent - frame) / step).round() * step;
+                    let whole =
+                        |extent: f32| ((extent - frame) / step).round().mul_add(step, frame);
                     if first.one_grid(*axis) {
                         share = whole(share);
                     } else if second.one_grid(*axis) {
@@ -208,7 +210,7 @@ impl Node {
                     axis: *axis,
                     at: px(divider),
                     span: at,
-                    path: into.path.clone(),
+                    path: path.clone(),
                 });
                 let (a, b) = match axis {
                     Axis::Row => (
@@ -226,12 +228,12 @@ impl Node {
                         ),
                     ),
                 };
-                into.path.push(false);
-                first.layout(a, grid, into);
-                into.path.pop();
-                into.path.push(true);
-                second.layout(b, grid, into);
-                into.path.pop();
+                path.push(false);
+                first.layout(a, grid, path, into);
+                path.pop();
+                path.push(true);
+                second.layout(b, grid, path, into);
+                path.pop();
             }
         }
     }
@@ -280,10 +282,14 @@ impl Node {
 /// split's place in the tree (`false` first, `true` second, from the root).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Divider {
-    pub(crate) axis: Axis,
-    pub(crate) at: Pixels,
-    pub(crate) span: Bounds<Pixels>,
-    pub(crate) path: Vec<bool>,
+    /// The split's axis.
+    pub axis: Axis,
+    /// Where it stands across `axis`.
+    pub at: Pixels,
+    /// The split's whole rectangle.
+    pub span: Bounds<Pixels>,
+    /// The split's place in the tree: `false` first, `true` second, from the root.
+    pub path: Vec<bool>,
 }
 
 impl Divider {
@@ -306,9 +312,10 @@ impl Divider {
 /// The tree laid out: each pane's rectangle in reading order, and each divider.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Laid {
-    pub(crate) panes: Vec<(Pane, Bounds<Pixels>)>,
-    pub(crate) dividers: Vec<Divider>,
-    path: Vec<bool>,
+    /// Each pane's rectangle, in reading order.
+    pub panes: Vec<(Pane, Bounds<Pixels>)>,
+    /// Each divider.
+    pub dividers: Vec<Divider>,
 }
 
 impl Laid {
@@ -479,9 +486,8 @@ impl Panes {
     /// Fill the view with the focused pane, or put the view back (⇧⌘⏎). Nothing with one pane.
     pub(crate) fn toggle_zoom(&mut self) {
         self.zoomed = match self.zoomed {
-            Some(_) => None,
             None if self.len() > 1 => Some(self.focused),
-            None => None,
+            _ => None,
         };
     }
 
@@ -504,7 +510,7 @@ impl Panes {
         let mut laid = Laid::default();
         match self.zoomed {
             Some(pane) => laid.panes.push((pane, at)),
-            None => self.root.layout(at, grid, &mut laid),
+            None => self.root.layout(at, grid, &mut Vec::new(), &mut laid),
         }
         laid
     }
@@ -547,9 +553,9 @@ impl Panes {
     pub(crate) fn cycle(&self, forward: bool) -> Pane {
         let panes = self.panes();
         let at = panes.iter().position(|pane| *pane == self.focused).unwrap_or(0);
-        let next =
-            if forward { (at + 1) % panes.len() } else { (at + panes.len() - 1) % panes.len() };
-        panes[next]
+        crate::popover::menu_step(Some(at), panes.len(), if forward { 1 } else { -1 })
+            .and_then(|next| panes.get(next).copied())
+            .unwrap_or(self.focused)
     }
 }
 
@@ -725,7 +731,10 @@ mod tests {
         assert!(divider.grab().contains(&point(divider.at, px(300.0))));
         panes.set_ratio(&divider.path, 0.99);
         let left = panes.layout(view(), CELL).of(Pane::Session).unwrap();
-        assert!(f32::from(left.size.width) <= 0.9 * 1000.0 + 8.0, "held at 90 %: {left:?}");
+        assert!(
+            f32::from(left.size.width) <= 0.9_f32.mul_add(1000.0, 8.0),
+            "held at 90 %: {left:?}"
+        );
         panes.equalize();
         let left = panes.layout(view(), CELL).of(Pane::Session).unwrap();
         assert!((f32::from(left.size.width) - 500.0).abs() <= 4.0, "even: {left:?}");

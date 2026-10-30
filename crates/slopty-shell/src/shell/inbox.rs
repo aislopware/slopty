@@ -6,14 +6,6 @@
 //! line, the state's mark and its age. It works from the keyboard alone: typing filters, ↑ ↓
 //! walk, ⏎ lands on the session, Esc puts it away. It answers nothing: Slopty never answers for
 //! the person (`docs/decisions/agents.md`, "TUI-first").
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::cell::Cell;
 
@@ -245,13 +237,14 @@ impl Shell {
 
     fn move_inbox(&mut self, down: bool, cx: &mut Context<Self>) {
         let rows = self.inbox_rows(cx);
-        if rows.is_empty() {
-            return;
-        }
         let at = self.inbox_active(&rows);
-        let next = if down { (at + 1) % rows.len() } else { (at + rows.len() - 1) % rows.len() };
-        if let Some(open) = self.inbox.open.as_mut() {
-            open.active = Some(rows[next].chat_id.clone());
+        let Some(next) = popover::menu_step(Some(at), rows.len(), if down { 1 } else { -1 }) else {
+            return;
+        };
+        if let Some(open) = self.inbox.open.as_mut()
+            && let Some(row) = rows.get(next)
+        {
+            open.active = Some(row.chat_id.clone());
             open.scroll.scroll_to_item(next);
         }
         cx.notify();
@@ -268,11 +261,7 @@ impl Shell {
     /// The titlebar's eye: the inbox's door, with a dot in the loudest calling row's hue while
     /// anything calls. `ink` is the titlebar's theme, inked for the ground under the row; H's
     /// row places it at its trailing end.
-    pub(super) fn render_inbox_button(
-        &mut self,
-        ink: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn render_inbox_button(&self, ink: &Theme, cx: &Context<Self>) -> AnyElement {
         let calls = entries(self.state.read(cx), crate::clock::utc(cx));
         let calling = |entry: &&Entry| entry.mark.urgency() > Mark::AtWork.urgency();
         let loudest =
@@ -362,7 +351,7 @@ impl Shell {
         });
         let body = div()
             .id("inbox-rows")
-            .max_h(px(INBOX_ROW_HEIGHT * INBOX_ROWS_SHOWN + 16.0))
+            .max_h(px(INBOX_ROW_HEIGHT.mul_add(INBOX_ROWS_SHOWN, 16.0)))
             .overflow_y_scroll()
             .track_scroll(&scroll)
             .flex()
@@ -504,11 +493,12 @@ mod tests {
     use super::*;
 
     fn chat(id: &str, device: &str, touched: i64, seen: bool, now: DateTime<Utc>) -> Chat {
-        let last = now - TimeDelta::minutes(touched);
+        let ago = |delta: TimeDelta, from: DateTime<Utc>| from.checked_sub_signed(delta).unwrap();
+        let last = ago(TimeDelta::minutes(touched), now);
         serde_json::from_value(serde_json::json!({
             "id": id, "title": format!("Chat {id}"), "deviceId": device, "archived": false,
-            "createdAt": now - TimeDelta::hours(1), "lastMessageAt": last,
-            "lastSeenAt": if seen { last } else { last - TimeDelta::seconds(1) },
+            "createdAt": ago(TimeDelta::hours(1), now), "lastMessageAt": last,
+            "lastSeenAt": if seen { last } else { ago(TimeDelta::seconds(1), last) },
             "lastMessagePreview": format!("{id} said this"),
         }))
         .unwrap()
@@ -520,10 +510,10 @@ mod tests {
             chat_id: chat.into(),
             device_id: "local".into(),
             status,
-            started_at: Some(now - TimeDelta::minutes(30)),
+            started_at: now.checked_sub_signed(TimeDelta::minutes(30)),
             updated_at: now,
             running_subagents: 0,
-            status_since: Some(now - TimeDelta::minutes(since)),
+            status_since: now.checked_sub_signed(TimeDelta::minutes(since)),
             waiting_on: None,
         }
     }
@@ -580,6 +570,6 @@ mod tests {
         assert_eq!(ids("").len(), 4);
         assert_eq!(ids("CARGO"), ["ask-old"], "by the need's words");
         assert_eq!(ids("chat done"), ["done"], "every word");
-        assert!(ids("nothing here").is_empty());
+        assert_eq!(ids("nothing here"), Vec::<String>::new());
     }
 }

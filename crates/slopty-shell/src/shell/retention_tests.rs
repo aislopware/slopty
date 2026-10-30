@@ -4,14 +4,8 @@
 //! on every frame of them too (`Window::set_check_retained`). It also holds the shell window, the
 //! fixtures and the reading of the accessibility tree that the chrome's and the sidebar's tests
 //! share.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::format_push_string,
-    clippy::mem_forget,
-    reason = "shell lint migration: slice A"
-)]
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use chrono::TimeDelta;
 use gpui::accesskit::{NodeId, Role};
@@ -180,8 +174,10 @@ pub(super) fn chat_row(
 ) -> slopty_view_proto::Chat {
     let mut chat = serde_json::json!({
         "id": id, "title": format!("Chat {id}"), "deviceId": "local", "archived": false,
-        "createdAt": now - TimeDelta::minutes(ago), "cwd": "/work/app",
-        "lastMessageAt": now - TimeDelta::seconds(30), "lastSeenAt": now,
+        "createdAt": now.checked_sub_signed(TimeDelta::minutes(ago)).unwrap(),
+        "cwd": "/work/app",
+        "lastMessageAt": now.checked_sub_signed(TimeDelta::seconds(30)).unwrap(),
+        "lastSeenAt": now,
     });
     if let Some((parent, in_parent)) = parent {
         chat["parentChatId"] = parent.into();
@@ -198,10 +194,10 @@ pub(super) fn session_row(id: &str, status: SessionStatus, now: DateTime<Utc>) -
         chat_id: id.into(),
         device_id: "local".into(),
         status,
-        started_at: Some(now - TimeDelta::minutes(1)),
+        started_at: now.checked_sub_signed(TimeDelta::minutes(1)),
         updated_at: now,
         running_subagents: 0,
-        status_since: Some(now - TimeDelta::seconds(20)),
+        status_since: now.checked_sub_signed(TimeDelta::seconds(20)),
         waiting_on: None,
     }
 }
@@ -219,26 +215,23 @@ pub(super) fn launch(
     screen: Screen,
 ) -> (Entity<Shell>, &mut VisualTestContext) {
     motion::forget_for_test(); // no hover from the last seed
-    let dir = tempfile::tempdir().unwrap();
+    // The settings live in it for as long as the test runs, so it is kept, not removed.
+    let dir = tempfile::tempdir().unwrap().keep();
     force_touch(screen.touch);
     cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
-        settings::init(UiSettings::default(), dir.path(), cx);
+        settings::init(UiSettings::default(), dir.as_path(), cx);
         crate::composer::init(cx);
         apply_keymap(cx, &KeymapConfig::default());
         cx.set_reduce_motion(screen.reduced);
     });
-    let path = dir.path().to_path_buf();
     let (shell, cx) = cx.add_window_view(move |_, cx| {
         let state = cx.new(|_| AppState::new());
         let mut shell = Shell::new(
             state,
-            EngineBootConfig {
-                data_dir: path,
-                default_harness: slopty_view_proto::HarnessId::MOCK,
-            },
+            EngineBootConfig { data_dir: dir, default_harness: slopty_view_proto::HarnessId::MOCK },
             cx,
         );
         shell.debug_gate = Some(GatePhase::Ready);
@@ -256,7 +249,6 @@ pub(super) fn launch(
         });
         shell
     });
-    std::mem::forget(dir);
     // GPUI checks every frame that draws a view again against one drawn from scratch at
     // its moment, and panics naming the view a frame drew stale.
     cx.update(|window, _| window.set_check_retained(Some(gpui::RetainedCheck::Panic)));
@@ -276,6 +268,7 @@ pub(super) struct Node {
     pub bounds: gpui::Bounds<Pixels>,
 }
 
+#[expect(clippy::cast_possible_truncation, reason = "a window's coordinates fit an f32")]
 pub(super) fn tree(cx: &mut VisualTestContext) -> HashMap<NodeId, Node> {
     cx.run_until_parked();
     cx.update(|window, cx| {
@@ -391,9 +384,10 @@ fn a_chat_opened_with_cmd_1_paints_as_from_scratch(cx: &mut TestAppContext) {
                     entries.last_mut().and_then(|e| e.parts.first_mut())
                 {
                     for n in 0..=step {
-                        text.push_str(&format!(
+                        let _infallible = write!(
+                            text,
                             "\n\nStreaming paragraph {n}, which says a little more each frame."
-                        ));
+                        );
                     }
                 }
                 state.apply_transcript(entries);
@@ -429,7 +423,7 @@ fn chats_switched_after_a_stream_paint_as_from_scratch(cx: &mut TestAppContext) 
                     entries.last_mut().and_then(|e| e.parts.first_mut())
                 {
                     for n in 0..=step {
-                        text.push_str(&format!("\n\nStreaming paragraph {n}."));
+                        let _infallible = write!(text, "\n\nStreaming paragraph {n}.");
                     }
                 }
                 state.apply_transcript(entries);

@@ -60,7 +60,7 @@ impl Shell {
                 SavedSurface::Diff
             }
             Pane::View(RightSurface::Screen(id)) => {
-                let (screen, title) = self.screen_surface_chosen(id, cx)?;
+                let (screen, title) = Self::screen_surface_chosen(id, cx)?;
                 SavedSurface::Screen { screen, title }
             }
             Pane::View(RightSurface::Inspector) => SavedSurface::Inspector,

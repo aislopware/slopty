@@ -11,13 +11,6 @@
 //!
 //! The view model answers both calls (`slopty_ui`'s `view_model::past`) from the session's own
 //! machine, so a remote project reads as a local one.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::or_fun_call,
-    clippy::string_slice,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::time::Duration;
 
@@ -47,10 +40,14 @@ const CHAT_POLL: Duration = Duration::from_millis(40);
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(super) struct PromptLine {
-    pub(super) text: String,
-    pub(super) spans: Vec<[u32; 2]>,
-    pub(super) cut_before: bool,
-    pub(super) cut_after: bool,
+    /// Its words.
+    pub text: String,
+    /// Where the asked words are in `text`: each a start and an end, in bytes.
+    pub spans: Vec<[u32; 2]>,
+    /// Words before it were cut.
+    pub cut_before: bool,
+    /// Words after it were cut.
+    pub cut_after: bool,
 }
 
 /// One past session, as the view model lists it.
@@ -58,25 +55,31 @@ pub(super) struct PromptLine {
 #[serde(rename_all = "camelCase", default)]
 pub(super) struct PastRow {
     /// Its machine and id, unique across machines.
-    pub(super) key: String,
-    pub(super) device_id: String,
-    pub(super) device: Option<String>,
-    pub(super) native: String,
+    pub key: String,
+    /// Its machine's id.
+    pub device_id: String,
+    /// Its machine's name, where known.
+    pub device: Option<String>,
+    /// Its id as Claude Code names it.
+    pub native: String,
     /// Its first prompt, when the person typed one.
-    pub(super) title: Option<String>,
+    pub title: Option<String>,
     /// The prompt that matched the words, else its last prompt.
-    pub(super) prompt: Option<PromptLine>,
-    pub(super) cwd: Option<String>,
-    pub(super) space_id: Option<String>,
+    pub prompt: Option<PromptLine>,
+    /// The folder it ran in.
+    pub cwd: Option<String>,
+    /// The project that folder is, where one is.
+    pub space_id: Option<String>,
     /// When it last changed, in ms since the epoch.
-    pub(super) updated_at: Option<i64>,
-    pub(super) branch: Option<String>,
+    pub updated_at: Option<i64>,
+    /// The branch it ran on.
+    pub branch: Option<String>,
     /// How a live Claude Code elsewhere holds it, when one does.
-    pub(super) running: Option<String>,
+    pub running: Option<String>,
     /// The chat it already is here.
-    pub(super) chat_id: Option<String>,
+    pub chat_id: Option<String>,
     /// The words that take it up again.
-    pub(super) resume: Vec<String>,
+    pub resume: Vec<String>,
 }
 
 impl PastRow {
@@ -85,7 +88,7 @@ impl PastRow {
         let said = self
             .title
             .as_deref()
-            .or(self.prompt.as_ref().map(|p| p.text.as_str()))
+            .or_else(|| self.prompt.as_ref().map(|p| p.text.as_str()))
             .map(crate::transcript::single_line)
             .filter(|t| !t.trim().is_empty());
         said.unwrap_or_else(|| {
@@ -121,17 +124,22 @@ impl PastRow {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(super) struct Failure {
-    pub(super) device: Option<String>,
-    pub(super) words: String,
+    /// The machine's name, where known.
+    pub device: Option<String>,
+    /// Why, in its words.
+    pub words: String,
 }
 
 /// What the view model answered.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(super) struct Listed {
-    pub(super) sessions: Vec<PastRow>,
-    pub(super) failures: Vec<Failure>,
-    pub(super) cut: Option<String>,
+    /// The sessions found.
+    pub sessions: Vec<PastRow>,
+    /// The machines that could not answer.
+    pub failures: Vec<Failure>,
+    /// Why the list stops short, when it does.
+    pub cut: Option<String>,
 }
 
 /// The past sessions' state, one per shell.
@@ -268,7 +276,9 @@ pub(super) fn prompt_text(prompt: &PromptLine, theme: &Theme) -> AnyElement {
 pub(super) fn prompt_line(prompt: &PromptLine) -> (String, Vec<std::ops::Range<usize>>) {
     const ELLIPSIS: &str = "\u{2026}";
     let lead = if prompt.cut_before { ELLIPSIS.len() } else { 0 };
-    let mut line = String::with_capacity(prompt.text.len() + 2 * ELLIPSIS.len());
+    let trail = if prompt.cut_after { ELLIPSIS.len() } else { 0 };
+    let mut line =
+        String::with_capacity(prompt.text.len().saturating_add(lead).saturating_add(trail));
     if prompt.cut_before {
         line.push_str(ELLIPSIS);
     }
@@ -281,11 +291,14 @@ pub(super) fn prompt_line(prompt: &PromptLine) -> (String, Vec<std::ops::Range<u
         .iter()
         .filter_map(|[start, end]| {
             let (start, end) = (usize::try_from(*start).ok()?, usize::try_from(*end).ok()?);
-            (start < end
+            let lands = start < end
                 && end <= prompt.text.len()
                 && prompt.text.is_char_boundary(start)
-                && prompt.text.is_char_boundary(end))
-            .then(|| start + lead..end + lead)
+                && prompt.text.is_char_boundary(end);
+            if !lands {
+                return None;
+            }
+            Some(start.checked_add(lead)?..end.checked_add(lead)?)
         })
         .collect();
     (line, ranges)
@@ -350,7 +363,7 @@ mod tests {
         let (line, ranges) = prompt_line(&prompt);
         assert_eq!(line, "\u{2026}fix the é build\u{2026}");
         assert_eq!(ranges.len(), 1, "{ranges:?}");
-        assert_eq!(&line[ranges[0].clone()], "the");
+        assert_eq!(line.get(ranges[0].clone()), Some("the"));
     }
 
     /// A session held by a live Claude Code elsewhere says so, naming its machine.

@@ -6,17 +6,6 @@
 //! recently opened and changed files before anything is typed; and, as the query asks,
 //! sessions by their titles and by what was said in them (`session_search`) and the workspace's
 //! files by name and by content. Results are grouped in sections.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::too_many_arguments,
-    clippy::unreachable,
-    reason = "shell lint migration: slice A"
-)]
 use slopty_view_proto::{
     SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest, WorkspaceContentMatch,
     WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState, WorkspaceTarget,
@@ -98,13 +87,13 @@ struct WorkspaceQuery<T> {
 impl<T: Default> WorkspaceQuery<T> {
     /// Forget everything, cancelling any request in flight.
     fn clear(&mut self) {
-        self.generation += 1;
-        *self = Self { generation: self.generation, ..Self::default() };
+        let generation = self.generation.wrapping_add(1);
+        *self = Self { generation, ..Self::default() };
     }
 
     /// Start a request; the returned generation identifies its answer.
     const fn begin(&mut self) -> u64 {
-        self.generation += 1;
+        self.generation = self.generation.wrapping_add(1);
         self.loading = true;
         self.generation
     }
@@ -353,6 +342,13 @@ struct PaletteSection {
     status: Option<SharedString>,
 }
 
+/// What every row of the palette draws with: the query its words are lit by, and the theme.
+#[derive(Clone, Copy)]
+struct RowLook<'a> {
+    query: &'a str,
+    theme: &'a Theme,
+}
+
 impl PaletteSection {
     fn new(section: Section, kinds: impl IntoIterator<Item = RowKind>) -> Self {
         Self {
@@ -433,26 +429,29 @@ fn split_path(path: &str) -> (&str, &str) {
 /// The scroll container's child index of flat row `row_ix`: each section
 /// mounts a header before its rows.
 fn child_index(sections: &[PaletteSection], row_ix: usize) -> usize {
-    let mut rows_before = 0;
+    let mut rows_before = 0_usize;
     for (section_ix, section) in sections.iter().enumerate() {
-        if row_ix < rows_before + section.rows.len() {
-            return row_ix + section_ix + 1;
+        let rows_through = rows_before.saturating_add(section.rows.len());
+        if row_ix < rows_through {
+            return row_ix.saturating_add(section_ix).saturating_add(1);
         }
-        rows_before += section.rows.len();
+        rows_before = rows_through;
     }
-    row_ix + sections.len()
+    row_ix.saturating_add(sections.len())
 }
 
 /// The child to scroll into view for row `row_ix`: its section header when
 /// it is the section's first row, so the header stays visible with it.
 fn scroll_child_index(sections: &[PaletteSection], row_ix: usize) -> usize {
-    let mut rows_before = 0;
+    let mut rows_before = 0_usize;
     for (section_ix, section) in sections.iter().enumerate() {
-        if row_ix < rows_before + section.rows.len() {
-            let child = row_ix + section_ix + 1;
-            return if row_ix == rows_before { child - 1 } else { child };
+        let rows_through = rows_before.saturating_add(section.rows.len());
+        if row_ix < rows_through {
+            // The section's header stands one child before its first row.
+            let header = row_ix.saturating_add(section_ix);
+            return if row_ix == rows_before { header } else { header.saturating_add(1) };
         }
-        rows_before += section.rows.len();
+        rows_before = rows_through;
     }
     child_index(sections, row_ix)
 }
@@ -547,7 +546,7 @@ impl Shell {
 
     /// Look the query up in the focused workspace: file names at once,
     /// contents once typing pauses.
-    fn search_palette_workspace(&mut self, cx: &mut Context<Self>) {
+    fn search_palette_workspace(&mut self, cx: &Context<Self>) {
         let workspace = palette_workspace(self, cx);
         let Some(palette) = self.command_palette.as_mut() else {
             return;
@@ -568,7 +567,7 @@ impl Shell {
             target: client.target().clone(),
             query: query.clone(),
             include_ignored: false,
-            limit: Some(FILES_SHOWN as u16),
+            limit: Some(u16::try_from(FILES_SHOWN).unwrap_or(u16::MAX)),
         };
         let names = client.clone();
         let target = client.target().clone();
@@ -632,8 +631,8 @@ impl Shell {
         let request = SearchWorkspaceContentRequest {
             target: client.target().clone(),
             query,
-            limit: Some(CONTENT_SHOWN as u16),
-            per_file_limit: Some(CONTENT_MATCHES_PER_FILE as u16),
+            limit: Some(u16::try_from(CONTENT_SHOWN).unwrap_or(u16::MAX)),
+            per_file_limit: Some(u16::try_from(CONTENT_MATCHES_PER_FILE).unwrap_or(u16::MAX)),
         };
         palette.content.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(CONTENT_DEBOUNCE).await;
@@ -662,7 +661,7 @@ impl Shell {
                 // query or closing the palette drops this task, cancelling the
                 // wait as well as any in-flight request.
                 cx.background_executor().timer(delay).await;
-                delay = (delay * 2).min(CONTENT_INDEX_RETRY_MAX);
+                delay = delay.saturating_mul(2).min(CONTENT_INDEX_RETRY_MAX);
             }
         }));
     }
@@ -671,7 +670,7 @@ impl Shell {
     // short to send clears the matches.
     /// Look the query up in every chat's words.
     /// Look the query up in what the chats said, once typing pauses (`session_search`).
-    fn search_palette_chat_words(&mut self, cx: &mut Context<Self>) {
+    fn search_palette_chat_words(&mut self, cx: &Context<Self>) {
         let engine = self.state.read(cx).engine().cloned();
         let Some(palette) = self.command_palette.as_mut() else {
             return;
@@ -679,7 +678,7 @@ impl Shell {
         let query = palette.search.read(cx).text().trim().to_owned();
         palette.chat_words.search(
             engine,
-            query,
+            &query,
             |shell| shell.command_palette.as_mut().map(|palette| &mut palette.chat_words),
             cx,
         );
@@ -750,7 +749,7 @@ impl Shell {
                 Section::InThreads,
                 palette
                     .chat_words
-                    .results
+                    .results()
                     .iter()
                     .filter(|found| !titled.contains(&found.chat_id))
                     .filter(|found| {
@@ -764,7 +763,7 @@ impl Shell {
                     .map(RowKind::ChatWords),
             )
             .with_status(
-                (palette.chat_words.loading && palette.chat_words.results.is_empty())
+                (palette.chat_words.loading() && palette.chat_words.results().is_empty())
                     .then(|| "Searching…".into()),
             )
         };
@@ -808,11 +807,10 @@ impl Shell {
         let Some(palette) = self.command_palette.as_mut() else {
             return;
         };
-        if count == 0 {
-            return;
-        }
         let current = palette.active_position(&rows);
-        let next = if down { (current + 1) % count } else { (current + count - 1) % count };
+        let Some(next) = popover::menu_step(Some(current), count, if down { 1 } else { -1 }) else {
+            return;
+        };
         palette.set_active(&rows, next);
         // A section's first row brings its header along, and the very first
         // row returns to the top, so a header never hides above the edge.
@@ -847,18 +845,18 @@ impl Shell {
         if let RowKind::Command(command) = &row.kind {
             self.record_palette_use(command, cx);
         }
-        if let RowKind::Command(Command::Theme(mode)) = row.kind {
-            // Keep the palette open, so the ✓ moves to the mode chosen.
-            crate::appearance::set_mode(mode, cx);
-            cx.notify();
-            return;
+        // A theme keeps the palette open, so the ✓ moves to the mode chosen.
+        if !matches!(row.kind, RowKind::Command(Command::Theme(_))) {
+            self.close_command_palette(window, cx);
         }
-        self.close_command_palette(window, cx);
         match row.kind {
+            RowKind::Command(Command::Theme(mode)) => {
+                crate::appearance::set_mode(mode, cx);
+                cx.notify();
+            }
             RowKind::Command(Command::NewChat) => self.open_new_session(None, cx),
             RowKind::Command(Command::NewProject) => self.open_add_space(cx),
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
-            RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
             // After the palette closed, so the key's handler sees the window as it is.
             RowKind::Command(Command::Window(command)) => {
@@ -969,14 +967,14 @@ impl Shell {
     }
 
     fn render_palette_row(
-        &mut self,
+        &self,
         row: &PaletteRow,
         ix: usize,
         active: bool,
-        query: &str,
-        theme: &Theme,
+        look: RowLook<'_>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let RowLook { query, theme } = look;
         Some(match &row.kind {
             RowKind::Command(command) => {
                 let label = command.label();
@@ -1252,9 +1250,10 @@ impl Shell {
             );
             for row in &section.rows {
                 let key = row.key();
-                let content = self.render_palette_row(row, ix, ix == active, &query, &theme, cx);
+                let look = RowLook { query: &query, theme: &theme };
+                let content = self.render_palette_row(row, ix, ix == active, look, cx);
                 let Some(content) = content else {
-                    ix += 1;
+                    ix = ix.saturating_add(1);
                     continue;
                 };
                 children.push(
@@ -1264,11 +1263,11 @@ impl Shell {
                         .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
                             this.hover_command(key.clone(), ix, cx);
                         }))
-                        .when(ix + 1 == row_count, |row| row.pb(px(8.0)))
+                        .when(ix.saturating_add(1) == row_count, |row| row.pb(px(8.0)))
                         .child(div().px(px(8.0)).child(content))
                         .into_any_element(),
                 );
-                ix += 1;
+                ix = ix.saturating_add(1);
             }
         }
         let body = div()
@@ -1535,7 +1534,7 @@ pub(super) fn command_key_hint(
     theme: &Theme,
     keys: &str,
     label: &'static str,
-    window: &mut Window,
+    window: &Window,
     cx: &App,
 ) -> gpui::Div {
     let glyph = |path: &'static str| icon(path).size(px(12.5)).text_color(theme.text_muted);
@@ -1593,7 +1592,7 @@ mod tests {
             "id": id, "title": id, "deviceId": "local", "archived": archived,
             "parentChatId": parent,
             // Recent, so a chat stays out of the sidebar's shut Inactive group.
-            "createdAt": Utc::now() - chrono::Duration::minutes(age),
+            "createdAt": Utc::now().checked_sub_signed(chrono::Duration::minutes(age)).unwrap(),
         }))
         .unwrap()
     }
@@ -1690,7 +1689,7 @@ mod tests {
                 });
                 shell.toggle_command_palette(window, cx);
                 // Sessions are found by typing; nothing lists them before.
-                assert!(search_chats(shell, "", cx).is_empty());
+                assert_eq!(search_chats(shell, "", cx), Vec::<String>::new());
                 for query in
                     ["manual-sidechat", "mcp-worker", "archived-sidechat", "orphan-sidechat"]
                 {
@@ -1712,10 +1711,16 @@ mod tests {
             .update(cx, |shell, window, cx| {
                 shell.state.update(cx, |state, _| {
                     let children = (0..SESSIONS_SHOWN).map(|ix| {
-                        chat(&format!("task-child-{ix}"), Some("task-0"), false, ix as i64)
+                        chat(
+                            &format!("task-child-{ix}"),
+                            Some("task-0"),
+                            false,
+                            i64::try_from(ix).unwrap(),
+                        )
                     });
                     let sessions = (0..=SESSIONS_SHOWN).map(|ix| {
-                        chat(&format!("task-{ix}"), None, false, (SESSIONS_SHOWN + ix) as i64)
+                        let age = i64::try_from(SESSIONS_SHOWN.saturating_add(ix)).unwrap();
+                        chat(&format!("task-{ix}"), None, false, age)
                     });
                     state.apply_chats(children.chain(sessions).collect());
                 });
@@ -1891,7 +1896,7 @@ mod tests {
     impl FakeEngine {
         /// Every request sent so far for `method`; other methods are
         /// answered with an empty object (or a ready search index).
-        fn take(&mut self, method: &str, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
+        fn take(&mut self, method: &str, cx: &TestAppContext) -> Vec<serde_json::Value> {
             self.take_after(method, CONTENT_DEBOUNCE, cx)
         }
 
@@ -1901,7 +1906,7 @@ mod tests {
             &mut self,
             method: &str,
             step: Duration,
-            cx: &mut TestAppContext,
+            cx: &TestAppContext,
         ) -> Vec<serde_json::Value> {
             let mut found = Vec::new();
             loop {
@@ -1914,22 +1919,22 @@ mod tests {
                 if request["method"] == method {
                     found.push(request);
                 } else if request["method"] == methods::WARM_WORKSPACE_SEARCH {
-                    self.reply(&request, serde_json::json!({ "state": "ready" }));
+                    self.reply(&request, &serde_json::json!({ "state": "ready" }));
                 } else {
-                    self.reply(&request, serde_json::json!({}));
+                    self.reply(&request, &serde_json::json!({}));
                 }
             }
         }
 
-        fn reply(&self, request: &serde_json::Value, ok: serde_json::Value) {
-            self.send(serde_json::json!({ "id": request["id"], "ok": ok }));
+        fn reply(&self, request: &serde_json::Value, ok: &serde_json::Value) {
+            self.send(&serde_json::json!({ "id": request["id"], "ok": ok }));
         }
 
         fn fail(&self, request: &serde_json::Value, err: &str) {
-            self.send(serde_json::json!({ "id": request["id"], "err": err }));
+            self.send(&serde_json::json!({ "id": request["id"], "err": err }));
         }
 
-        fn send(&self, reply: serde_json::Value) {
+        fn send(&self, reply: &serde_json::Value) {
             // The client's reader task runs on this runtime: let it drain.
             self.runtime.block_on(async {
                 self.replies.send(reply.to_string()).await.unwrap();
@@ -1995,7 +2000,7 @@ mod tests {
     fn palette_section(
         window: gpui::WindowHandle<Shell>,
         section: Section,
-        cx: &mut TestAppContext,
+        cx: &TestAppContext,
     ) -> Option<PaletteSection> {
         window
             .read_with(cx, |shell, cx| {
@@ -2014,7 +2019,7 @@ mod tests {
     ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine) {
         let (window, dir, mut engine) = engine_palette(cx, true);
         for warm in engine.take(methods::WARM_WORKSPACE_SEARCH, cx) {
-            engine.reply(&warm, serde_json::json!({ "state": "ready" }));
+            engine.reply(&warm, &serde_json::json!({ "state": "ready" }));
         }
         cx.run_until_parked();
         (window, dir, engine)
@@ -2023,12 +2028,12 @@ mod tests {
     fn answer_file_index(
         engine: &mut FakeEngine,
         state: &str,
-        cx: &mut TestAppContext,
+        cx: &TestAppContext,
     ) -> serde_json::Value {
         let warm = engine.take(methods::WARM_WORKSPACE_SEARCH, cx);
         assert_eq!(warm.len(), 1);
         assert_eq!(warm[0]["params"]["chatId"], "focused");
-        engine.reply(&warm[0], serde_json::json!({ "state": state }));
+        engine.reply(&warm[0], &serde_json::json!({ "state": state }));
         let search = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
         assert_eq!(search.len(), 1);
         search.into_iter().next().unwrap()
@@ -2036,7 +2041,7 @@ mod tests {
 
     /// Every request sent so far, each answered: warm-ups as `warm`, name
     /// searches with no matches. Returns the methods in order.
-    fn answer_all(engine: &mut FakeEngine, warm: &str, cx: &mut TestAppContext) -> Vec<String> {
+    fn answer_all(engine: &mut FakeEngine, warm: &str, cx: &TestAppContext) -> Vec<String> {
         let mut methods_seen = Vec::new();
         loop {
             cx.executor().advance_clock(CONTENT_DEBOUNCE);
@@ -2050,15 +2055,15 @@ mod tests {
                 methods::WARM_WORKSPACE_SEARCH if warm == "unsupported" => engine
                     .fail(&request, &format!("unknown method: {}", methods::WARM_WORKSPACE_SEARCH)),
                 methods::WARM_WORKSPACE_SEARCH => {
-                    engine.reply(&request, serde_json::json!({ "state": warm }));
+                    engine.reply(&request, &serde_json::json!({ "state": warm }));
                 }
-                methods::SEARCH_WORKSPACE_FILES => engine.reply(&request, serde_json::json!([])),
+                methods::SEARCH_WORKSPACE_FILES => engine.reply(&request, &serde_json::json!([])),
                 // The chats' words search is not the workspace's.
                 methods::SEARCH_CHATS => {
-                    engine.reply(&request, serde_json::json!([]));
+                    engine.reply(&request, &serde_json::json!([]));
                     continue;
                 }
-                _ => engine.reply(&request, content_answer(Vec::new(), false)),
+                _ => engine.reply(&request, &content_answer(&[], false)),
             }
             if method != methods::SEARCH_WORKSPACE_CONTENT {
                 methods_seen.push(method);
@@ -2067,10 +2072,7 @@ mod tests {
     }
 
     /// The `SearchChats` requests sent once typing paused.
-    fn chat_word_requests(
-        engine: &mut FakeEngine,
-        cx: &mut TestAppContext,
-    ) -> Vec<serde_json::Value> {
+    fn chat_word_requests(engine: &mut FakeEngine, cx: &TestAppContext) -> Vec<serde_json::Value> {
         cx.executor().advance_clock(CHAT_WORDS_DEBOUNCE);
         engine.take(methods::SEARCH_CHATS, cx)
     }
@@ -2108,7 +2110,7 @@ mod tests {
         assert_eq!(searching.status.as_deref(), Some("Searching…"));
         engine.reply(
             &asked[0],
-            serde_json::json!([
+            &serde_json::json!([
                 words("deploy-thread", "agent", "deploy it", 0, 6),
                 words("quiet", "agent", "then deploy to staging", 5, 11),
                 words("side", "agent", "deploy the side", 0, 6),
@@ -2162,7 +2164,7 @@ mod tests {
         type_query(window, "new words", cx);
         let new = chat_word_requests(&mut engine, cx);
         assert_eq!((old.len(), new.len()), (1, 1));
-        engine.reply(&old[0], serde_json::json!([words("quiet", "agent", "old", 0, 3)]));
+        engine.reply(&old[0], &serde_json::json!([words("quiet", "agent", "old", 0, 3)]));
         cx.run_until_parked();
         let section = palette_section(window, Section::InThreads, cx);
         assert!(
@@ -2182,7 +2184,7 @@ mod tests {
         assert_eq!(listed[0]["params"]["query"], "");
         engine.reply(
             &listed[0],
-            serde_json::json!([
+            &serde_json::json!([
                 name_match("src/recent.rs", "file"),
                 name_match("src", "directory"),
                 name_match("README.md", "file"),
@@ -2200,7 +2202,10 @@ mod tests {
             .collect();
         // Files only; no content search runs without a query.
         assert_eq!(paths, ["src/recent.rs", "README.md"]);
-        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -2257,17 +2262,20 @@ mod tests {
         let (window, _dir, mut engine) = file_search_palette(cx);
         type_query(window, "needle", cx);
         let first = answer_file_index(&mut engine, "building", cx);
-        engine.reply(&first, serde_json::json!([]));
+        engine.reply(&first, &serde_json::json!([]));
         cx.run_until_parked();
         let empty = palette_section(window, Section::Files, cx).unwrap();
-        assert!(empty.rows.is_empty());
+        assert_eq!(empty.rows, []);
         assert_eq!(empty.status.as_deref(), Some("Indexing…"));
-        assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::WARM_WORKSPACE_SEARCH, cx),
+            Vec::<serde_json::Value>::new()
+        );
 
         cx.executor().advance_clock(FILE_INDEX_RETRY);
         let second = answer_file_index(&mut engine, "building", cx);
         assert_eq!(second["params"], first["params"]);
-        engine.reply(&second, serde_json::json!([name_match("needle.rs", "file")]));
+        engine.reply(&second, &serde_json::json!([name_match("needle.rs", "file")]));
         cx.run_until_parked();
         let partial = palette_section(window, Section::Files, cx).unwrap();
         assert_eq!(partial.rows.len(), 1);
@@ -2287,7 +2295,7 @@ mod tests {
         assert_eq!(palette_section(window, Section::Files, cx), Some(partial));
         engine.reply(
             &third,
-            serde_json::json!([
+            &serde_json::json!([
                 name_match("another-needle.rs", "file"),
                 name_match("needle.rs", "file")
             ]),
@@ -2305,8 +2313,14 @@ mod tests {
             })
             .unwrap();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::WARM_WORKSPACE_SEARCH, cx),
+            Vec::<serde_json::Value>::new()
+        );
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_FILES, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -2314,17 +2328,23 @@ mod tests {
         let (window, _dir, mut engine) = file_search_palette(cx);
         type_query(window, "needle", cx);
         let first = answer_file_index(&mut engine, "building", cx);
-        engine.reply(&first, serde_json::json!([]));
+        engine.reply(&first, &serde_json::json!([]));
         cx.run_until_parked();
         type_query(window, "updated", cx);
         cx.executor().advance_clock(FILE_INDEX_RETRY);
         let updated = answer_file_index(&mut engine, "ready", cx);
         assert_eq!(updated["params"]["query"], "updated");
-        engine.reply(&updated, serde_json::json!([name_match("updated.rs", "file")]));
+        engine.reply(&updated, &serde_json::json!([name_match("updated.rs", "file")]));
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::WARM_WORKSPACE_SEARCH, cx),
+            Vec::<serde_json::Value>::new()
+        );
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_FILES, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -2333,7 +2353,7 @@ mod tests {
             let (window, _dir, mut engine) = file_search_palette(cx);
             type_query(window, "needle", cx);
             let first = answer_file_index(&mut engine, "building", cx);
-            engine.reply(&first, serde_json::json!([]));
+            engine.reply(&first, &serde_json::json!([]));
             cx.run_until_parked();
             if close {
                 window
@@ -2345,8 +2365,14 @@ mod tests {
                 type_query(window, "", cx);
             }
             cx.executor().advance_clock(Duration::from_secs(10));
-            assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-            assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
+            assert_eq!(
+                engine.take(methods::WARM_WORKSPACE_SEARCH, cx),
+                Vec::<serde_json::Value>::new()
+            );
+            assert_eq!(
+                engine.take(methods::SEARCH_WORKSPACE_FILES, cx),
+                Vec::<serde_json::Value>::new()
+            );
         }
     }
 
@@ -2359,14 +2385,20 @@ mod tests {
         engine.fail(&warm[0], "unknown method: WarmWorkspaceSearch");
         let search = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
         assert_eq!(search.len(), 1);
-        engine.reply(&search[0], serde_json::json!([name_match("needle.rs", "file")]));
+        engine.reply(&search[0], &serde_json::json!([name_match("needle.rs", "file")]));
         cx.run_until_parked();
         let files = palette_section(window, Section::Files, cx).unwrap();
         assert_eq!(files.rows.len(), 1);
         assert_eq!(files.status, None);
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::WARM_WORKSPACE_SEARCH, cx),
+            Vec::<serde_json::Value>::new()
+        );
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_FILES, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -2375,7 +2407,7 @@ mod tests {
             let (window, _dir, mut engine) = file_search_palette(cx);
             type_query(window, "needle", cx);
             let first = answer_file_index(&mut engine, "building", cx);
-            engine.reply(&first, serde_json::json!([name_match("needle.rs", "file")]));
+            engine.reply(&first, &serde_json::json!([name_match("needle.rs", "file")]));
             cx.run_until_parked();
             cx.executor().advance_clock(FILE_INDEX_RETRY);
             let request = if fail_warm {
@@ -2388,11 +2420,17 @@ mod tests {
             engine.fail(&request, "search failed");
             cx.run_until_parked();
             let files = palette_section(window, Section::Files, cx).unwrap();
-            assert!(files.rows.is_empty());
+            assert_eq!(files.rows, []);
             assert_eq!(files.status.as_deref(), Some("Couldn\u{2019}t search. Try again."));
             cx.executor().advance_clock(Duration::from_secs(10));
-            assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
-            assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
+            assert_eq!(
+                engine.take(methods::WARM_WORKSPACE_SEARCH, cx),
+                Vec::<serde_json::Value>::new()
+            );
+            assert_eq!(
+                engine.take(methods::SEARCH_WORKSPACE_FILES, cx),
+                Vec::<serde_json::Value>::new()
+            );
         }
     }
 
@@ -2400,24 +2438,30 @@ mod tests {
     fn file_names_need_a_focused_chat_and_two_characters(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = engine_palette(cx, false);
         type_query(window, "co", cx);
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_FILES, cx),
+            Vec::<serde_json::Value>::new()
+        );
         assert!(palette_section(window, Section::Files, cx).is_none());
 
         let (window, _dir, mut engine) = engine_palette(cx, true);
         type_query(window, "c", cx);
-        assert!(engine.take(methods::SEARCH_WORKSPACE_FILES, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_FILES, cx),
+            Vec::<serde_json::Value>::new()
+        );
         type_query(window, "co", cx);
         let requests = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["params"]["chatId"], "focused");
         assert_eq!(requests[0]["params"]["query"], "co");
         let searching = palette_section(window, Section::Files, cx).unwrap();
-        assert!(searching.rows.is_empty());
+        assert_eq!(searching.rows, []);
         assert_eq!(searching.status.as_deref(), Some("Searching…"));
 
         engine.reply(
             &requests[0],
-            serde_json::json!([
+            &serde_json::json!([
                 name_match("src/composer.rs", "file"),
                 name_match("src", "directory")
             ]),
@@ -2441,9 +2485,9 @@ mod tests {
         let first = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
         type_query(window, "abc", cx);
         let second = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
-        engine.reply(&second[0], serde_json::json!([name_match("abc.rs", "file")]));
+        engine.reply(&second[0], &serde_json::json!([name_match("abc.rs", "file")]));
         cx.run_until_parked();
-        engine.reply(&first[0], serde_json::json!([name_match("ab.rs", "file")]));
+        engine.reply(&first[0], &serde_json::json!([name_match("ab.rs", "file")]));
         cx.run_until_parked();
         let files = palette_section(window, Section::Files, cx).unwrap();
         assert_eq!(
@@ -2465,7 +2509,7 @@ mod tests {
                 .unwrap()
         };
         let before = selected(cx);
-        engine.reply(&requests[0], serde_json::json!([name_match("deploy.md", "file")]));
+        engine.reply(&requests[0], &serde_json::json!([name_match("deploy.md", "file")]));
         cx.run_until_parked();
         assert_eq!(selected(cx), before);
         assert!(before.is_some());
@@ -2498,7 +2542,7 @@ mod tests {
         })
     }
 
-    fn content_answer(matches: Vec<serde_json::Value>, indexing: bool) -> serde_json::Value {
+    fn content_answer(matches: &[serde_json::Value], indexing: bool) -> serde_json::Value {
         serde_json::json!({ "matches": matches, "truncated": false, "indexing": indexing })
     }
 
@@ -2514,8 +2558,8 @@ mod tests {
         assert_eq!(params["limit"], CONTENT_SHOWN);
         assert_eq!(params["perFileLimit"], CONTENT_MATCHES_PER_FILE);
 
-        let matches = (1..=8).map(|line| content_match("src/lib.rs", line)).collect();
-        engine.reply(&requests[0], content_answer(matches, false));
+        let matches: Vec<_> = (1..=8).map(|line| content_match("src/lib.rs", line)).collect();
+        engine.reply(&requests[0], &content_answer(&matches, false));
         cx.run_until_parked();
         let in_files = palette_section(window, Section::InFiles, cx).unwrap();
         assert_eq!(in_files.status, None);
@@ -2531,7 +2575,7 @@ mod tests {
         let (window, _dir, mut engine) = engine_palette(cx, true);
         type_query(window, "needle", cx);
         let requests = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&requests[0], content_answer(Vec::new(), true));
+        engine.reply(&requests[0], &content_answer(&[], true));
         cx.run_until_parked();
         assert_eq!(
             palette_section(window, Section::InFiles, cx).unwrap().status.as_deref(),
@@ -2540,7 +2584,7 @@ mod tests {
 
         type_query(window, "needles", cx);
         let requests = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&requests[0], content_answer(Vec::new(), false));
+        engine.reply(&requests[0], &content_answer(&[], false));
         cx.run_until_parked();
         assert!(palette_section(window, Section::InFiles, cx).is_none());
     }
@@ -2550,15 +2594,18 @@ mod tests {
         let (window, _dir, mut engine) = engine_palette(cx, true);
         type_query(window, "needle", cx);
         let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&first[0], content_answer(Vec::new(), true));
+        engine.reply(&first[0], &content_answer(&[], true));
         cx.run_until_parked();
-        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx),
+            Vec::<serde_json::Value>::new()
+        );
 
         cx.executor().advance_clock(CONTENT_INDEX_RETRY);
         let second = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0]["params"], first[0]["params"]);
-        engine.reply(&second[0], content_answer(vec![content_match("src/lib.rs", 2)], true));
+        engine.reply(&second[0], &content_answer(&[content_match("src/lib.rs", 2)], true));
         cx.run_until_parked();
         let partial = palette_section(window, Section::InFiles, cx).unwrap();
         assert_eq!(partial.rows.len(), 1);
@@ -2570,15 +2617,15 @@ mod tests {
             })
             .unwrap();
 
-        cx.executor().advance_clock(CONTENT_INDEX_RETRY * 2);
+        cx.executor().advance_clock(CONTENT_INDEX_RETRY.saturating_mul(2));
         let third = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
         assert_eq!(third.len(), 1);
         assert_eq!(third[0]["params"], first[0]["params"]);
         assert_eq!(palette_section(window, Section::InFiles, cx), Some(partial));
         engine.reply(
             &third[0],
-            content_answer(
-                vec![content_match("src/lib.rs", 1), content_match("src/lib.rs", 2)],
+            &content_answer(
+                &[content_match("src/lib.rs", 1), content_match("src/lib.rs", 2)],
                 false,
             ),
         );
@@ -2595,7 +2642,10 @@ mod tests {
             })
             .unwrap();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -2605,7 +2655,7 @@ mod tests {
         let mut pending = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
         let early = Duration::from_millis(100);
         for wait in [500, 1000, 2000, 2000].map(Duration::from_millis) {
-            engine.reply(&pending[0], content_answer(Vec::new(), true));
+            engine.reply(&pending[0], &content_answer(&[], true));
             cx.run_until_parked();
             // `take` itself advances the clock by the debounce; stay short of
             // the wait, then cross it.
@@ -2618,10 +2668,13 @@ mod tests {
             pending = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
             assert_eq!(pending.len(), 1, "no refresh after {wait:?}");
         }
-        engine.reply(&pending[0], content_answer(Vec::new(), false));
+        engine.reply(&pending[0], &content_answer(&[], false));
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -2629,7 +2682,7 @@ mod tests {
         let (window, _dir, mut engine) = engine_palette(cx, true);
         type_query(window, "needle", cx);
         let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&first[0], content_answer(Vec::new(), true));
+        engine.reply(&first[0], &content_answer(&[], true));
         cx.run_until_parked();
 
         type_query(window, "updated", cx);
@@ -2638,10 +2691,13 @@ mod tests {
         let updated = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0]["params"]["query"], "updated");
-        engine.reply(&updated[0], content_answer(Vec::new(), false));
+        engine.reply(&updated[0], &content_answer(&[], false));
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -2649,11 +2705,14 @@ mod tests {
         let (window, _dir, mut engine) = engine_palette(cx, true);
         type_query(window, "needle", cx);
         let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&first[0], content_answer(Vec::new(), true));
+        engine.reply(&first[0], &content_answer(&[], true));
         cx.run_until_parked();
         window.update(cx, Shell::close_command_palette).unwrap();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -2661,7 +2720,7 @@ mod tests {
         let (window, _dir, mut engine) = engine_palette(cx, true);
         type_query(window, "needle", cx);
         let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
-        engine.reply(&first[0], content_answer(Vec::new(), true));
+        engine.reply(&first[0], &content_answer(&[], true));
         cx.run_until_parked();
         cx.executor().advance_clock(CONTENT_INDEX_RETRY);
         let retry = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
@@ -2671,7 +2730,10 @@ mod tests {
         let section = palette_section(window, Section::InFiles, cx).unwrap();
         assert_eq!(section.status.as_deref(), Some("Couldn\u{2019}t search. Try again."));
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -2682,7 +2744,7 @@ mod tests {
         engine.fail(&requests[0], "unknown method: SearchWorkspaceContent");
         cx.run_until_parked();
         let in_files = palette_section(window, Section::InFiles, cx).unwrap();
-        assert!(in_files.rows.is_empty());
+        assert_eq!(in_files.rows, []);
         assert!(
             in_files
                 .status
@@ -2735,12 +2797,12 @@ mod tests {
         (window, dir)
     }
 
-    fn palette_open(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> bool {
+    fn palette_open(window: gpui::WindowHandle<Shell>, cx: &TestAppContext) -> bool {
         window.read_with(cx, |shell, _| shell.command_palette.is_some()).unwrap()
     }
 
     /// Where the palette's highlight stands among its rows.
-    fn highlighted(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> usize {
+    fn highlighted(window: gpui::WindowHandle<Shell>, cx: &TestAppContext) -> usize {
         window
             .read_with(cx, |shell, cx| {
                 let sections = shell.palette_sections(cx);
@@ -2750,7 +2812,7 @@ mod tests {
             .unwrap()
     }
 
-    fn selected_chat(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Option<String> {
+    fn selected_chat(window: gpui::WindowHandle<Shell>, cx: &TestAppContext) -> Option<String> {
         window.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone()).unwrap()
     }
 
@@ -2867,7 +2929,7 @@ mod tests {
         assert!(all.contains(&"Reopen closed view"), "the menu bar's commands: {all:?}");
         assert_eq!(labels("new", &none), ["New session", "New project\u{2026}"]);
         assert_eq!(labels("appearance dark", &none), ["Appearance: Dark"]);
-        assert!(labels("deployment", &none).is_empty());
+        assert_eq!(labels("deployment", &none), Vec::<&str>::new());
     }
 
     /// `WezTerm`'s frecency: a command run often and lately leads, one run as often a month ago

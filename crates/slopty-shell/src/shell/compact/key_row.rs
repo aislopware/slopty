@@ -13,15 +13,6 @@
 //! up: the terminal holding the keyboard takes it as it takes a hardware key, and only what the
 //! person pressed is sent. The row stands only while the soft keyboard is up over the session's
 //! terminal and no hardware keyboard is attached.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::needless_pass_by_ref_mut,
-    clippy::or_fun_call,
-    clippy::suboptimal_flops,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -70,11 +61,11 @@ const FASTEST: Duration = Duration::from_millis(50);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Measure {
     /// 44 pt in portrait, 38 in landscape.
-    pub(crate) height: f32,
+    pub height: f32,
     /// A key's column.
-    pub(crate) key: f32,
+    pub key: f32,
     /// A wide key's column: the joystick, ⌘, and Esc in landscape.
-    pub(crate) wide: f32,
+    pub wide: f32,
 }
 
 impl Measure {
@@ -331,22 +322,28 @@ fn sides(measure: Measure) -> ([Key; 3], [Key; 3]) {
 /// A key laid out: which, and its column's left edge and width.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placed {
-    pub(crate) key: Key,
-    pub(crate) x: f32,
-    pub(crate) width: f32,
+    /// Which key.
+    pub key: Key,
+    /// Its column's left edge.
+    pub x: f32,
+    /// Its column's width.
+    pub width: f32,
 }
 
 /// The row laid out in its width: the keys at the sides from the row's left edge, the strip
 /// between them, and the strip's keys from its own left edge.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Laid {
-    pub(crate) left: Vec<Placed>,
-    pub(crate) right: Vec<Placed>,
+    /// The keys standing at the left, from the row's left edge.
+    pub left: Vec<Placed>,
+    /// The keys standing at the right, from the row's left edge.
+    pub right: Vec<Placed>,
     /// The strip's left edge and width.
-    pub(crate) strip: (f32, f32),
-    pub(crate) keys: Vec<Placed>,
+    pub strip: (f32, f32),
+    /// The strip's keys, from its own left edge.
+    pub keys: Vec<Placed>,
     /// How far the strip scrolls: its keys' width past its own.
-    pub(crate) overflow: f32,
+    pub overflow: f32,
 }
 
 /// Lay the row out across `width` (Blink's `KBView.layoutSubviews`): the left keys from the left
@@ -639,12 +636,7 @@ impl KeyRow {
 
     /// One step of a finger on the row (gpui's touch drag, claimed as it comes down): whether it
     /// was the row's.
-    fn touched(
-        &mut self,
-        event: &TouchDragEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn touched(&mut self, event: &TouchDragEvent, window: &Window, cx: &mut Context<Self>) -> bool {
         let ours = match event.phase {
             TouchPhase::Started => self.finger_down(event, window, cx),
             TouchPhase::Moved => {
@@ -663,7 +655,7 @@ impl KeyRow {
     fn finger_down(
         &mut self,
         event: &TouchDragEvent,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let (Some(bounds), Some(measure)) = (self.bounds.get(), self.shown) else { return false };
@@ -706,12 +698,7 @@ impl KeyRow {
         true
     }
 
-    fn finger_moved(
-        &mut self,
-        event: &TouchDragEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn finger_moved(&mut self, event: &TouchDragEvent, window: &Window, cx: &Context<Self>) {
         let (Some(mut touch), Some(bounds), Some(measure)) =
             (self.touch, self.bounds.get(), self.shown)
         else {
@@ -780,7 +767,7 @@ impl KeyRow {
 
     /// The joystick under a finger at `position`: the way it points now, its repeat started
     /// afresh when the way changes (Blink's), stopped in the dead zone.
-    fn steer_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    fn steer_at(&mut self, position: Point<Pixels>, window: &Window, cx: &Context<Self>) {
         let (Some(mut touch), Some(bounds), Some(measure)) =
             (self.touch, self.bounds.get(), self.shown)
         else {
@@ -788,7 +775,7 @@ impl KeyRow {
         };
         let Doing::Steering(was) = touch.doing else { return };
         let width = touch.key.width(measure);
-        let plate = (width - 2.0 * PLATE_SIDE, measure.height - PLATE_TOP - PLATE_BOTTOM);
+        let plate = (PLATE_SIDE.mul_add(-2.0, width), measure.height - PLATE_TOP - PLATE_BOTTOM);
         let centre = Point {
             x: f32::from(bounds.origin.x) + touch.column + width / 2.0,
             y: f32::from(bounds.origin.y) + PLATE_TOP + plate.1 / 2.0,
@@ -809,7 +796,7 @@ impl KeyRow {
 
     /// After `wait`, send what the finger holds, then again at the pace it asks for, until it
     /// lifts or lets go of it.
-    fn repeat_after(&mut self, wait: Duration, window: &mut Window, cx: &mut Context<Self>) {
+    fn repeat_after(&mut self, wait: Duration, window: &Window, cx: &Context<Self>) {
         self.repeat = Some(cx.spawn_in(window, async move |row, cx| {
             let mut wait = wait;
             loop {
@@ -860,7 +847,7 @@ impl Render for KeyRow {
         let width = self
             .bounds
             .get()
-            .map_or(f32::from(viewport.width), |bounds| f32::from(bounds.size.width));
+            .map_or_else(|| f32::from(viewport.width), |bounds| f32::from(bounds.size.width));
         let laid = self.laid(width, measure, cx);
         self.scroll = self.scroll.clamp(0.0, laid.overflow);
         let now = armed::armed(cx);
@@ -956,7 +943,7 @@ impl Render for KeyRow {
             .when(scroll > 0.5, |strip| strip.child(hairline(div().left_0())))
             .when(scroll < laid.overflow - 0.5, |strip| strip.child(hairline(div().right_0())));
         let row = cx.weak_entity();
-        let bounds = self.bounds.clone();
+        let bounds = Rc::clone(&self.bounds);
         let fingers = canvas(
             move |_, _, _| {},
             move |painted, (), window, _| {
@@ -1167,7 +1154,7 @@ fn joystick(look: &Look, glyph: Hsla) -> AnyElement {
 /// The joystick's ways as presses of their own, for a pointer and a screen reader: the left and
 /// right thirds, and the middle's top and bottom halves. A finger steers the whole key instead
 /// (the row claims its touch, so these take none of it).
-fn arrow_presses(layer: bool, cx: &mut Context<KeyRow>) -> AnyElement {
+fn arrow_presses(layer: bool, cx: &Context<KeyRow>) -> AnyElement {
     let mut ways = Vec::with_capacity(Arrow::ALL.len());
     for arrow in Arrow::ALL {
         let name = arrow.name(layer);
@@ -1318,7 +1305,7 @@ mod tests {
 
     impl Render for Host {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let sent = self.sent.clone();
+            let sent = Rc::clone(&self.sent);
             div()
                 .size_full()
                 .flex()
@@ -1353,7 +1340,7 @@ mod tests {
         FORCE_KEYBOARD.with(|force| force.set(true));
         cx.update(|cx| cx.set_global(Theme::default()));
         let sent = Rc::new(RefCell::new(Vec::new()));
-        let kept = sent.clone();
+        let kept = Rc::clone(&sent);
         let (host, cx) = cx.add_window_view(move |_, cx| Host {
             row: cx.new(KeyRow::new),
             terminal: cx.focus_handle(),
@@ -1541,10 +1528,11 @@ mod tests {
         );
         let shell = names(&bar(None).trailing);
         assert_eq!(shell.get(..3), Some(&["Tab", "Control R", "Control C"][..]), "a shell's");
-        let heard = Rc::new(Cell::new(0));
-        let counted = heard.clone();
-        let _watch =
-            cx.update(|_, cx| armed::observe_bar(cx, move |_| counted.set(counted.get() + 1)));
+        let heard = Rc::new(Cell::new(0_u32));
+        let counted = Rc::clone(&heard);
+        let _watch = cx.update(|_, cx| {
+            armed::observe_bar(cx, move |_| counted.set(counted.get().saturating_add(1)))
+        });
         cx.update(|_, cx| {
             armed::set_bar(claude.clone(), cx);
             armed::set_bar(claude.clone(), cx);

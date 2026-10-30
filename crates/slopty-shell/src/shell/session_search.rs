@@ -1,16 +1,6 @@
 //! Finding sessions: by their titles, projects, branches and machines
 //! ([`Shell::thread_matches`]), and by what was said in them (`SearchChats`, [`ChatWordsQuery`]).
 //! The palette lists both today; the session picker is to take them up.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::string_slice,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice A"
-)]
 
 use super::*;
 use crate::state::EngineHandle;
@@ -29,13 +19,14 @@ pub(super) const CHAT_WORDS_LIMIT: usize = 50;
 /// A chat whose words match the query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ChatWordsMatch {
-    pub(super) chat_id: String,
+    /// The chat.
+    pub chat_id: String,
     /// The agent said it; else the person did.
-    pub(super) agent: bool,
+    pub agent: bool,
     /// The words around the match, on one line.
-    pub(super) excerpt: String,
+    pub excerpt: String,
     /// The match's byte range in `excerpt`; empty when the answer's range did not fit it.
-    pub(super) range: std::ops::Range<usize>,
+    pub range: std::ops::Range<usize>,
 }
 
 impl ChatWordsMatch {
@@ -88,15 +79,27 @@ impl ChatWordsMatch {
 pub(super) struct ChatWordsQuery {
     /// Bumped per request; an answer to an older one is dropped.
     generation: u64,
-    pub(super) loading: bool,
-    pub(super) results: Vec<ChatWordsMatch>,
+    /// A request is on its way.
+    loading: bool,
+    /// The last answer's matches.
+    results: Vec<ChatWordsMatch>,
     task: Option<Task<()>>,
 }
 
 impl ChatWordsQuery {
+    /// Whether a request is on its way.
+    pub(super) const fn loading(&self) -> bool {
+        self.loading
+    }
+
+    /// The last answer's matches.
+    pub(super) const fn results(&self) -> &[ChatWordsMatch] {
+        self.results.as_slice()
+    }
+
     /// Forget the results, cancelling any request in flight.
     pub(super) fn clear(&mut self) {
-        self.generation += 1;
+        self.generation = self.generation.wrapping_add(1);
         self.loading = false;
         self.results.clear();
         self.task = None;
@@ -108,9 +111,9 @@ impl ChatWordsQuery {
     pub(super) fn search(
         &mut self,
         engine: Option<EngineHandle>,
-        query: String,
+        query: &str,
         query_of: fn(&mut Shell) -> Option<&mut Self>,
-        cx: &mut Context<Shell>,
+        cx: &Context<Shell>,
     ) {
         let Some(engine) = engine.filter(|_| query.chars().count() >= MIN_CHAT_WORDS_CHARS) else {
             self.clear();
@@ -121,19 +124,19 @@ impl ChatWordsQuery {
         self.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(CHAT_WORDS_DEBOUNCE).await;
             let answer = engine.client().call(methods::SEARCH_CHATS, params).await;
-            this.update(cx, |shell, cx| {
+            // A shell gone meanwhile has no query to settle.
+            let _gone = this.update(cx, |shell, cx| {
                 if query_of(shell).is_some_and(|query| query.finish(generation, answer)) {
                     cx.notify();
                 }
-            })
-            .ok();
+            });
         }));
     }
 
     /// Start a request; the returned generation identifies its answer. Rows from the last
     /// answer stay up meanwhile.
     const fn begin(&mut self) -> u64 {
-        self.generation += 1;
+        self.generation = self.generation.wrapping_add(1);
         self.loading = true;
         self.generation
     }
@@ -167,7 +170,7 @@ pub(super) fn chat_words_line(
     found: &ChatWordsMatch,
     theme: &Theme,
 ) -> gpui::Div {
-    let lead = who.len() + 1;
+    let lead = who.len().saturating_add(1);
     let line: SharedString = format!("{who} {}", found.excerpt).into();
     let mut highlights = vec![(
         0..who.len(),
@@ -175,7 +178,7 @@ pub(super) fn chat_words_line(
     )];
     if !found.range.is_empty() {
         highlights.push((
-            found.range.start + lead..found.range.end + lead,
+            found.range.start.saturating_add(lead)..found.range.end.saturating_add(lead),
             gpui::HighlightStyle {
                 color: Some(theme.text),
                 font_weight: Some(gpui::FontWeight::MEDIUM),
@@ -253,7 +256,7 @@ pub(super) mod tests {
         assert_eq!(found.len(), 3, "one per chat, none without a chat: {found:?}");
         assert!(found[0].agent);
         assert_eq!(found[0].excerpt, "both tests pass now", "one line");
-        assert_eq!(&found[0].excerpt[found[0].range.clone()], "pass");
+        assert_eq!(found[0].excerpt.get(found[0].range.clone()), Some("pass"));
         assert!(!found[1].agent);
         assert!(found[1].range.is_empty(), "inside a character: no highlight, still a match");
         assert!(found[2].range.is_empty(), "past the excerpt");
@@ -261,6 +264,6 @@ pub(super) mod tests {
             &serde_json::json!({ "matches": [words("d", "agent", "x", 0, 1)] }),
         );
         assert_eq!(wrapped.len(), 1);
-        assert!(ChatWordsMatch::parse_all(&serde_json::json!({})).is_empty());
+        assert_eq!(ChatWordsMatch::parse_all(&serde_json::json!({})), []);
     }
 }

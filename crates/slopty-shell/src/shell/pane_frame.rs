@@ -2,13 +2,6 @@
 //! view, splits on demand" and "No permanent right column"): the tree each view holds
 //! ([`super::panes`]), the shells opened beside a session, the keys that split, zoom, walk and
 //! close, the views summoned beside the terminal, and each pane drawn with its header.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::{Hsla, size};
 
@@ -86,7 +79,7 @@ impl Shell {
         toward: Direction,
         cx: &mut Context<Self>,
     ) {
-        self.pane_seq += 1;
+        self.pane_seq = self.pane_seq.saturating_add(1);
         let pane = Pane::Shell(self.pane_seq);
         self.pane_shells.insert(self.pane_seq, shell);
         self.panes_mut(cx).split(toward, pane);
@@ -109,7 +102,7 @@ impl Shell {
         } else {
             Direction::Right
         };
-        self.pane_seq += 1;
+        self.pane_seq = self.pane_seq.saturating_add(1);
         self.pane_shells.insert(self.pane_seq, shell);
         let panes = self.panes.entry(key.to_owned()).or_default();
         let had = panes.focused();
@@ -237,7 +230,7 @@ impl Shell {
     /// The pane under a press becomes the focused one, the press itself going on to what it
     /// landed on; once it has, the keyboard follows into the pane unless what the press landed
     /// on took it (a header, a view's margin).
-    fn note_pane_press(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+    fn note_pane_press(&mut self, pane: Pane, window: &Window, cx: &mut Context<Self>) {
         let panes = self.panes_mut(cx);
         if panes.focused() != pane && panes.focus(pane) {
             cx.notify();
@@ -268,7 +261,7 @@ impl Shell {
     /// switch, a summon, a close) hands it to the pane focused, once this frame lays it out. On
     /// a phone the keyboard never moves the views: a tap on the terminal over the inspector's
     /// sheet leaves the sheet up.
-    pub(super) fn settle_pane_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn settle_pane_keyboard(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.pane_keyboard_pending {
             self.pane_keyboard_pending = false;
             let focused = self.panes_now(cx).focused();
@@ -310,21 +303,25 @@ impl Shell {
         let ground = self.shown_ground(cx);
         let shell = cx.weak_entity();
         let equalize = cx.weak_entity();
-        let mut area =
-            PaneArea::new("panes", panes.clone(), self.pane_grid, self.pane_area_at.clone())
-                .divider(divider_over(ground))
-                .on_ratio(move |path, ratio, _, cx| {
-                    let _gone = shell.update(cx, |this, cx| {
-                        this.panes_mut(cx).set_ratio(path, ratio);
-                        cx.notify();
-                    });
-                })
-                .on_equalize(move |_, cx| {
-                    let _gone = equalize.update(cx, |this, cx| {
-                        this.panes_mut(cx).equalize();
-                        cx.notify();
-                    });
-                });
+        let mut area = PaneArea::new(
+            "panes",
+            panes.clone(),
+            self.pane_grid,
+            std::rc::Rc::clone(&self.pane_area_at),
+        )
+        .divider(divider_over(ground))
+        .on_ratio(move |path, ratio, _, cx| {
+            let _gone = shell.update(cx, |this, cx| {
+                this.panes_mut(cx).set_ratio(path, ratio);
+                cx.notify();
+            });
+        })
+        .on_equalize(move |_, cx| {
+            let _gone = equalize.update(cx, |this, cx| {
+                this.panes_mut(cx).equalize();
+                cx.notify();
+            });
+        });
         // A glide of the sidebar beside the panes reflows each terminal in them once
         // (`glide_hold`).
         let (session_terminal, pane_shells) =
@@ -386,11 +383,11 @@ impl Shell {
     /// A pane's header: its program's icon, its title, and where it runs, quiet; zoom and close
     /// on the focused pane and the one under the pointer.
     fn render_pane_header(
-        &mut self,
+        &self,
         pane: Pane,
         focused: bool,
         ground: Hsla,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let ink = tabs::ink_for(ground, Theme::of(cx));
         let (glyph, tint, title, place) = self.pane_identity(pane, cx);
@@ -422,7 +419,7 @@ impl Shell {
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(2.0 + 2.0 * reach))
+            .gap(px(reach.mul_add(2.0, 2.0)))
             .when(!focused, |el| el.invisible().group_hover(group.clone(), Styled::visible))
             .child(zoom)
             // Named by what it closes, so a screen reader tells one pane's from another's.

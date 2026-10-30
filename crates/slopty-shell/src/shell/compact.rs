@@ -518,7 +518,7 @@ impl Shell {
     /// inbox's eye, the palette, Settings and a new session. Before the first session can start,
     /// the last offers the step it needs, as the Mac's canvas does, never a session with nowhere
     /// to go.
-    fn render_sessions_band(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_sessions_band(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         type OnClick = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
         let step = self.first_step(cx);
         let new_words = step.map_or("New session", super::spaces::FirstStep::action);

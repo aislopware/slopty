@@ -1,19 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Repository artwork is fetched once per project/connection, off the render thread.
-#![allow(
-    let_underscore_drop,
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::create_dir,
-    clippy::indexing_slicing,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::match_wildcard_for_single_variants,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::unreadable_literal,
-    reason = "shell lint migration: slice A"
-)]
 use super::*;
 use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
 use crate::image_media::{MediaImage, decode_project_icon, release_media};
@@ -51,9 +37,10 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
         let bytes = std::fs::File::open(&path).ok().and_then(|file| {
             use std::io::Read as _;
             let mut bytes = Vec::new();
-            file.take(slopty_view_proto::MAX_WORKSPACE_IMAGE_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .ok()?;
+            // One byte past the cap, so an image over it reads as too big rather than cut.
+            let cap = u64::try_from(slopty_view_proto::MAX_WORKSPACE_IMAGE_BYTES)
+                .map_or(u64::MAX, |max| max.saturating_add(1));
+            file.take(cap).read_to_end(&mut bytes).ok()?;
             Some(bytes)
         })?;
         let mime = if path.extension().is_some_and(|e| e == "svg") {
@@ -70,23 +57,26 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
 // stable so projects retain their assigned color. These are explicit colors,
 // independent of the selected theme accent; only their appearance variant changes.
 const MONOGRAM_PALETTE: [(u32, u32); 8] = [
-    (0x94a3b8, 0x475569), // slate
-    (0x93c5fd, 0x2563eb), // blue
-    (0xc4b5fd, 0x7c3aed), // violet
-    (0xfda4af, 0xbe123c), // rose
-    (0xfcd34d, 0xa16207), // amber
-    (0x6ee7b7, 0x047857), // emerald
-    (0x5eead4, 0x0f766e), // teal
-    (0xfdba74, 0xc2410c), // orange
+    (0x94_a3_b8, 0x47_55_69), // slate
+    (0x93_c5_fd, 0x25_63_eb), // blue
+    (0xc4_b5_fd, 0x7c_3a_ed), // violet
+    (0xfd_a4_af, 0xbe_12_3c), // rose
+    (0xfc_d3_4d, 0xa1_62_07), // amber
+    (0x6e_e7_b7, 0x04_78_57), // emerald
+    (0x5e_ea_d4, 0x0f_76_6e), // teal
+    (0xfd_ba_74, 0xc2_41_0c), // orange
 ];
 
 fn monogram(name: &str, seed: &str, selected: bool, theme: &Theme) -> AnyElement {
     // FNV-1a selects a stable entry from the curated palette.
     let hash = seed
         .bytes()
-        .fold(2166136261_u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(16777619));
+        .fold(2_166_136_261_u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(16_777_619));
     let letter = name.trim().chars().next().unwrap_or('?').to_uppercase().to_string();
-    let (dark, light) = MONOGRAM_PALETTE[hash as usize % MONOGRAM_PALETTE.len()];
+    let (dark, light) = (hash as usize)
+        .checked_rem(MONOGRAM_PALETTE.len())
+        .and_then(|ix| MONOGRAM_PALETTE.get(ix).copied())
+        .unwrap_or(MONOGRAM_PALETTE[0]);
     let tone = gpui::Hsla::from(gpui::rgb(if theme.appearance.is_dark() { dark } else { light }));
     let mut hover_text = tone;
     hover_text.l = if theme.appearance.is_dark() {
@@ -126,7 +116,7 @@ impl ProjectIcon {
         seed: String,
         context: FilesRequestContext,
         engine: Option<crate::state::EngineHandle>,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Self {
         cx.on_release(|this, cx| release_media(this.media.take(), cx)).detach();
         let task = cx.spawn(async move |this, cx| {
@@ -167,9 +157,10 @@ impl ProjectIcon {
                 futures::future::Either::Left((media, _)) => {
                     media.map(|media| media.for_view((16.0, 16.0), 2.0, 4096))
                 }
-                _ => None,
+                futures::future::Either::Right(_) => None,
             };
-            let _ = this.update(cx, |this, cx| {
+            // An icon let go meanwhile has nowhere to show its artwork.
+            let _gone = this.update(cx, |this, cx| {
                 this.media = media;
                 cx.notify();
             });
@@ -181,7 +172,7 @@ impl ProjectIcon {
 impl Render for ProjectIcon {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         match &self.media {
-            Some(media) => gpui::img(media.image.clone())
+            Some(media) => gpui::img(std::sync::Arc::clone(&media.image))
                 .size_full()
                 .object_fit(gpui::ObjectFit::Contain)
                 .into_any_element(),
@@ -313,6 +304,10 @@ pub struct ProjectIcons {
 }
 
 impl ProjectIcons {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "shell lint migration: seam, callers in slice C"
+    )]
     pub(crate) fn render<V: 'static>(
         &self,
         state: &Entity<AppState>,
@@ -391,7 +386,7 @@ mod tests {
         assert!(load_local_icon(temp.path()).is_none());
         png(&temp.path().join("favicon.png"), 3);
         assert_eq!(load_local_icon(temp.path()).unwrap().width, 3.0);
-        std::fs::create_dir(temp.path().join("public")).unwrap();
+        std::fs::create_dir_all(temp.path().join("public")).unwrap();
         png(&temp.path().join("public/apple-touch-icon.png"), 7);
         assert_eq!(load_local_icon(temp.path()).unwrap().width, 7.0);
         std::fs::write(temp.path().join(".git"), "gitdir: /unused-test-checkout").unwrap();

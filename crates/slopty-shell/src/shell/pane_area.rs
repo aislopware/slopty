@@ -2,12 +2,6 @@
 //! given, in the frame it is given them (so a pane never trails the window by a frame), draws each
 //! pane at its rectangle, and draws and drags the dividers between them (Ghostty's craft:
 //! `docs/decisions/layout.md`, "One session per view, splits on demand").
-#![allow(
-    clippy::clone_on_ref_ptr,
-    clippy::expect_used,
-    clippy::renamed_function_params,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -177,13 +171,13 @@ impl Element for PaneArea {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepainted {
-        let dragging = window.with_element_state::<Dragging, _>(
-            id.expect("the pane area has an id"),
-            |state, _| {
+        // The area always names itself (`id`); without a name a drag would last one frame.
+        let dragging = id.map_or_else(Dragging::default, |id| {
+            window.with_element_state::<Dragging, _>(id, |state, _| {
                 let state = state.unwrap_or_default();
-                (state.clone(), state)
-            },
-        );
+                (Rc::clone(&state), state)
+            })
+        });
         self.laid_at.set(Some(bounds));
         let laid = self.panes.layout(bounds, self.grid);
         // The panes as the narrower end of a glide lays them out, snapped to the same cells.
@@ -228,15 +222,15 @@ impl Element for PaneArea {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         (): &mut (),
-        prepainted: &mut Prepainted,
+        prepaint: &mut Prepainted,
         window: &mut Window,
         cx: &mut App,
     ) {
-        for (_, element) in &mut prepainted.children {
+        for (_, element) in &mut prepaint.children {
             element.paint(window, cx);
         }
         for (pane, hue) in &self.rings {
-            if let Some(at) = prepainted.laid.of(*pane) {
+            if let Some(at) = prepaint.laid.of(*pane) {
                 window.paint_quad(gpui::quad(
                     at,
                     0.0,
@@ -247,8 +241,8 @@ impl Element for PaneArea {
                 ));
             }
         }
-        let dragged = prepainted.dragging.borrow().as_ref().map(|(path, ..)| path.clone());
-        for (divider, grab) in &prepainted.grabs {
+        let dragged = prepaint.dragging.borrow().as_ref().map(|(path, ..)| path.clone());
+        for (divider, grab) in &prepaint.grabs {
             let line = match divider.axis {
                 Axis::Row => Bounds::new(
                     gpui::point(divider.at, divider.span.origin.y),
@@ -272,8 +266,8 @@ impl Element for PaneArea {
             let (grab, divider, dragging, equalize) = (
                 grab.clone(),
                 divider.clone(),
-                prepainted.dragging.clone(),
-                self.on_equalize.clone(),
+                Rc::clone(&prepaint.dragging),
+                Rc::clone(&self.on_equalize),
             );
             window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble || !grab.is_hovered(window) {
@@ -288,7 +282,7 @@ impl Element for PaneArea {
                 cx.stop_propagation();
             });
         }
-        let (dragging, on_ratio) = (prepainted.dragging.clone(), self.on_ratio.clone());
+        let (dragging, on_ratio) = (Rc::clone(&prepaint.dragging), Rc::clone(&self.on_ratio));
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble {
                 return;
@@ -301,7 +295,7 @@ impl Element for PaneArea {
             on_ratio(&path, ratio_at(axis, span, event.position), window, cx);
             cx.stop_propagation();
         });
-        let dragging = prepainted.dragging.clone();
+        let dragging = Rc::clone(&prepaint.dragging);
         window.on_mouse_event(move |_: &MouseUpEvent, phase, window, _| {
             if phase == DispatchPhase::Bubble && dragging.borrow_mut().take().is_some() {
                 window.refresh();

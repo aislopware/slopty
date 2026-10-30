@@ -6,12 +6,6 @@
 //! The view model starts it on the project's machine (`slopty.StartSession`); the session opens
 //! as soon as the sidebar lists it, its terminal a moment after. A start its machine refuses
 //! says why on its row. Nothing is said to the agent: the person types to it in its terminal.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::indexing_slicing,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::time::Duration;
 
@@ -35,8 +29,10 @@ use crate::theme::Theme;
 /// An agent a session can start: its id as the view model names it, and its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Agent {
-    pub(super) id: &'static str,
-    pub(super) name: &'static str,
+    /// Its id as the view model names it.
+    pub id: &'static str,
+    /// Its name as the picker shows it.
+    pub name: &'static str,
 }
 
 /// The agents a session starts with, in the order the picker offers them; a plain terminal last.
@@ -88,6 +84,13 @@ pub(super) struct NewSessionPicker {
     /// The start that failed: its project and why.
     refused: Option<(String, String)>,
     _events: Subscription,
+}
+
+impl NewSessionPicker {
+    /// The agent it starts; its index always stands in [`AGENTS`].
+    fn agent(&self) -> Agent {
+        AGENTS.get(self.agent).copied().unwrap_or(AGENTS[0])
+    }
 }
 
 impl Shell {
@@ -179,16 +182,16 @@ impl Shell {
             return;
         }
         picker.active =
-            if down { (picker.active + 1) % count } else { (picker.active + count - 1) % count };
+            popover::menu_step(Some(picker.active), count, if down { 1 } else { -1 }).unwrap_or(0);
         picker.scroll.scroll_to_item(picker.active);
         cx.notify();
     }
 
     fn step_new_session_agent(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(picker) = self.new_session.as_mut() else { return };
-        let count = AGENTS.len();
         picker.agent =
-            if forward { (picker.agent + 1) % count } else { (picker.agent + count - 1) % count };
+            popover::menu_step(Some(picker.agent), AGENTS.len(), if forward { 1 } else { -1 })
+                .unwrap_or(0);
         picker.refused = None;
         cx.notify();
     }
@@ -197,7 +200,7 @@ impl Shell {
         let rows = self.new_session_rows(cx);
         let Some(picker) = self.new_session.as_ref() else { return };
         let Some(space) = rows.get(picker.active).cloned() else { return };
-        let agent = AGENTS[picker.agent];
+        let agent = picker.agent();
         self.start_session(space, agent, cx);
     }
 
@@ -323,20 +326,20 @@ impl Shell {
         let focus = picker.focus.clone();
         let scroll = picker.scroll.clone();
         let active = picker.active.min(rows.len().saturating_sub(1));
-        let agent = AGENTS[picker.agent];
+        let agent = picker.agent();
         let picked = picker.agent;
         let starting = picker.starting.as_ref().map(|(project, _)| project.clone());
         let refused = picker.refused.clone();
         let (mark, tint) = agent_mark(agent);
         let mut children: Vec<AnyElement> = Vec::new();
-        for (ix, space) in rows.iter().enumerate() {
+        for (ix, (space, machine)) in rows.iter().zip(&machines).enumerate() {
             let opening = starting.as_deref() == Some(space.id.as_str());
             let why = refused
                 .as_ref()
                 .filter(|(project, _)| *project == space.id)
                 .map(|(_, why)| why.clone());
             let name: SharedString = space.display_name().to_owned().into();
-            let place = match &machines[ix] {
+            let place = match machine {
                 Some(machine) => format!("{machine} \u{00B7} {}", space.path),
                 None => space.path.clone(),
             };

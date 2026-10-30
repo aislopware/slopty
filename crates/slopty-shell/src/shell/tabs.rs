@@ -2,13 +2,6 @@
 //! Session navigation: the sidebar is the session list, and the titlebar row names the session
 //! shown (its program's icon, its title, its machine and branch, its mark), with the palette and a
 //! new session at its trailing end.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::unreadable_literal,
-    reason = "shell lint migration: slice A"
-)]
 
 use super::*;
 
@@ -24,17 +17,9 @@ pub(super) fn cycle_target(
     selected: Option<&str>,
     forward: bool,
 ) -> Option<String> {
-    if order.is_empty() {
-        return None;
-    }
     let at = selected.and_then(|id| order.iter().position(|c| c == id));
-    let next = match (at, forward) {
-        (Some(at), true) => (at + 1) % order.len(),
-        (Some(at), false) => (at + order.len() - 1) % order.len(),
-        (None, true) => 0,
-        (None, false) => order.len() - 1,
-    };
-    Some(order[next].clone())
+    let next = popover::menu_step(at, order.len(), if forward { 1 } else { -1 })?;
+    order.get(next).cloned()
 }
 
 impl Shell {
@@ -60,13 +45,13 @@ impl Shell {
     }
 
     /// Navigation gives the session's terminal the keyboard once it renders.
-    pub(super) fn focus_composer(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn focus_composer(&self, cx: &mut Context<Self>) {
         self.session_terminal.update(cx, TerminalPanel::request_focus);
     }
 
     /// The session's terminal takes the keyboard now (Esc from a view, a pane closing),
     /// and keeps it once its view renders.
-    pub(super) fn focus_session_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_session_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.session_terminal.read(cx).focus_handle(), cx);
         self.focus_composer(cx);
     }
@@ -75,7 +60,7 @@ impl Shell {
     /// its terminal the keyboard, but not on a touch screen, where it would raise the software
     /// keyboard over the session: there it comes when the person taps it
     /// ([`super::touch_screen`]).
-    pub(super) fn focus_composer_on_landing(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn focus_composer_on_landing(&self, cx: &mut Context<Self>) {
         if !touch_screen() {
             self.focus_composer(cx);
         }
@@ -108,7 +93,7 @@ impl Shell {
     /// new-session canvas shows).
     // Once, at the first synced frame, chat or no chat: a chat arriving later (from the
     // CLI or another device) never opens by itself.
-    pub(super) fn boot_select_chat(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn boot_select_chat(&self, cx: &mut Context<Self>) {
         let first = {
             let state = self.state.read(cx);
             if !state.chats_synced || state.auto_selected {
@@ -161,9 +146,9 @@ impl Shell {
     /// secondary while the window is not the key one. Over the new-session canvas it names
     /// nothing; it keeps its height, drag region and buttons.
     pub(super) fn render_session_title_bar(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let on_canvas = self.state.read(cx).selected_chat_row().is_none();
@@ -233,12 +218,7 @@ impl Shell {
     /// list. `ink` is the theme inked for the ground under the row; the title dims to secondary
     /// while the window is not `key`. A press opens the session picker under it, as ⌘K does
     /// (Rex's); a right-click opens the session's menu under the row.
-    fn render_titlebar_identity(
-        &mut self,
-        ink: &Theme,
-        key: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_titlebar_identity(&self, ink: &Theme, key: bool, cx: &Context<Self>) -> AnyElement {
         let now = crate::clock::utc(cx);
         let (chat_id, title, harness, machine_branch, mark) = {
             let state = self.state.read(cx);
@@ -408,7 +388,7 @@ mod titlebar_tests {
             Theme::for_appearance(crate::theme::Appearance::Dark),
         );
         // Solarized's two backgrounds: base03 #002b36 and base3 #fdf6e3.
-        let (base03, base3) = (gpui::rgb(0x002b36).into(), gpui::rgb(0xfdf6e3).into());
+        let (base03, base3) = (gpui::rgb(0x00_2b_36).into(), gpui::rgb(0xfd_f6_e3).into());
         assert!(ink_for(base03, &light).appearance.is_dark(), "dark ink on a dark program");
         assert!(!ink_for(base3, &dark).appearance.is_dark(), "light ink on a light program");
         assert_eq!(ink_for(base3, &light).text, light.text, "the window's own");

@@ -4848,7 +4848,7 @@ impl Render for Shell {
                 }
             }));
         let root = Self::chrome_actions(root, cx);
-        let root = self.picker_actions(root, cx);
+        let root = Self::picker_actions(root, cx);
 
         // The ground the window shows, a session's, for the window to wear its appearance.
         let mut shown_ground = None;

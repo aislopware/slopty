@@ -1,12 +1,6 @@
 //! The remote window and desktop views ([`RightSurface::Screen`]), summoned beside a
 //! session as the browser is: the palette's command, the title, the body and the close, each a
 //! call from the shell's own match on the view.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::needless_pass_by_ref_mut,
-    clippy::unused_self,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::collections::HashMap;
 
@@ -34,7 +28,7 @@ impl Shell {
         let state = self.state.clone();
         let surface = cx.new(|cx| ScreenSurface::new(state, cx));
         let screens = cx.default_global::<Screens>();
-        screens.seq += 1;
+        screens.seq = screens.seq.saturating_add(1);
         let id = screens.seq;
         screens.tabs.insert(id, surface);
         self.open_view(RightSurface::Screen(id), cx);
@@ -51,7 +45,7 @@ impl Shell {
         let state = self.state.clone();
         let surface = cx.new(|cx| ScreenSurface::reopen(state, screen, title, cx));
         let screens = cx.default_global::<Screens>();
-        screens.seq += 1;
+        screens.seq = screens.seq.saturating_add(1);
         let id = screens.seq;
         screens.tabs.insert(id, surface);
         self.open_view(RightSurface::Screen(id), cx);
@@ -59,17 +53,17 @@ impl Shell {
     }
 
     /// What the surface was chosen to show, its id and title, to show it again.
-    pub(super) fn screen_surface_chosen(&self, id: u64, cx: &App) -> Option<(String, String)> {
+    pub(super) fn screen_surface_chosen(id: u64, cx: &App) -> Option<(String, String)> {
         cx.try_global::<Screens>()?.tabs.get(&id)?.read(cx).chosen()
     }
 
     /// The view's title: its window's.
-    pub(super) fn screen_surface_title(&self, id: u64, cx: &App) -> Option<SharedString> {
+    pub(super) fn screen_surface_title(id: u64, cx: &App) -> Option<SharedString> {
         Some(cx.try_global::<Screens>()?.tabs.get(&id)?.read(cx).title())
     }
 
     /// The view's body, nothing once it is gone.
-    pub(super) fn render_screen_surface(&mut self, id: u64, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_screen_surface(id: u64, cx: &App) -> AnyElement {
         match cx.try_global::<Screens>().and_then(|s| s.tabs.get(&id)).cloned() {
             Some(surface) => surface.into_any_element(),
             None => Empty.into_any_element(),
@@ -77,14 +71,14 @@ impl Shell {
     }
 
     /// The view came forward: it takes the keyboard.
-    pub(super) fn focus_screen_surface(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(super) fn focus_screen_surface(id: u64, cx: &mut App) {
         if let Some(surface) = cx.try_global::<Screens>().and_then(|s| s.tabs.get(&id)).cloned() {
             surface.update(cx, ScreenSurface::focus);
         }
     }
 
     /// The view closed: its machine stops showing it.
-    pub(super) fn close_screen_surface(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(super) fn close_screen_surface(id: u64, cx: &mut App) {
         let surface = cx
             .try_global::<Screens>()
             .is_some()
