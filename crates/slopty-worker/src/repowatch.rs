@@ -41,12 +41,13 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use parking_lot::Mutex;
 use tokio::sync::{Notify, mpsc, watch};
+use tokio::time::Instant;
 
 #[cfg(target_os = "macos")]
 #[path = "repowatch/fsevents.rs"]
@@ -149,25 +150,9 @@ pub fn follow(lists: watch::Receiver<Vec<String>>) -> Moves {
 /// [`follow`], within `limits`.
 #[must_use]
 pub fn follow_within(lists: watch::Receiver<Vec<String>>, limits: Limits) -> Moves {
-    let ready = Arc::new(Mutex::new(BTreeSet::new()));
-    let (ring, bell) = mpsc::channel(1);
-    let (told, status) = watch::channel(Status::default());
-    let (outside, outside_rx) = watch::channel(Vec::new());
-    let follower = Follower {
-        lists,
-        ready: Arc::clone(&ready),
-        ring,
-        told,
-        heard: Arc::default(),
-        repos: HashMap::new(),
-        named: BTreeMap::new(),
-        outside,
-        made: crate::fswatch::follow_folders(outside_rx, crate::fswatch::Limits::default()),
-        taken: 0,
-        limits,
-    };
+    let (follower, moves) = Follower::new(lists, limits, Arc::default());
     tokio::spawn(tracing::Instrument::in_current_span(follower.run()));
-    Moves { ready, bell, status }
+    moves
 }
 
 /// Where a repository is: its worktree's top, its git directory, and the directory a linked
@@ -591,6 +576,33 @@ struct Follower {
 }
 
 impl Follower {
+    /// A follower of `lists` within `limits`, told what the repositories' events say through
+    /// `heard`, and the [`Moves`] it reports to.
+    fn new(
+        lists: watch::Receiver<Vec<String>>,
+        limits: Limits,
+        heard: Arc<Heard>,
+    ) -> (Self, Moves) {
+        let ready = Arc::new(Mutex::new(BTreeSet::new()));
+        let (ring, bell) = mpsc::channel(1);
+        let (told, status) = watch::channel(Status::default());
+        let (outside, outside_rx) = watch::channel(Vec::new());
+        let follower = Self {
+            lists,
+            ready: Arc::clone(&ready),
+            ring,
+            told,
+            heard,
+            repos: HashMap::new(),
+            named: BTreeMap::new(),
+            outside,
+            made: crate::fswatch::follow_folders(outside_rx, crate::fswatch::Limits::default()),
+            taken: 0,
+            limits,
+        };
+        (follower, Moves { ready, bell, status })
+    }
+
     async fn run(mut self) {
         let mut poll = tokio::time::interval(self.limits.poll);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -849,7 +861,7 @@ async fn print(top: &Path) -> Option<u64> {
 
 async fn sleep_until(due: Option<Instant>) {
     if let Some(due) = due {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
+        tokio::time::sleep_until(due).await;
     }
 }
 
@@ -925,6 +937,59 @@ mod tests {
             assert_eq!(said(nothing), Said::Nothing, "{nothing}");
         }
         assert_eq!(said(".gitignore"), Said::Rules);
+    }
+
+    /// A build or a checkout touching a repository for a second on end is a report once the
+    /// burst is [`HOLD`] old, then one each [`HOLD`] at most, the last soon after it ends: on
+    /// tokio's paused clock, a touch each millisecond as the repository's events would give it.
+    /// (`tests/repowatch.rs` makes such a burst on the real file system.)
+    #[tokio::test(start_paused = true)]
+    async fn a_second_of_steady_changes_is_a_report_each_hold() {
+        let root = tempfile::tempdir().unwrap();
+        let top = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir_all(top.join(".git")).unwrap();
+        let name = top.to_string_lossy().into_owned();
+        let heard: Arc<Heard> = Arc::default();
+        let (lists_tx, lists) = watch::channel(vec![name.clone()]);
+        // Looked at an hour apart, so only the touches below bring reports.
+        let limits = Limits { watches: 0, poll: Duration::from_secs(3_600) };
+        let (mut follower, mut moves) = Follower::new(lists, limits, Arc::clone(&heard));
+        // Its real place: a made-up one does not stand, so the first report would follow it
+        // afresh, as one moved, and the next come a quiet after.
+        let place = place_of(&name).expect("the folder is a repository");
+        let repo = Arc::new(Repo::new(place, Arc::clone(&heard)));
+        let followed = Followed { repo, source: Source::Polled(Some(0)), reported: None, up: true };
+        follower.repos.insert(top.clone(), followed);
+        follower.named.insert(name, Some(top.clone()));
+        tokio::spawn(follower.run());
+
+        let start = Instant::now();
+        let reports = tokio::spawn(async move {
+            let mut at = Vec::new();
+            while moves.next().await.is_some() {
+                at.push(start.elapsed());
+            }
+            at
+        });
+        for _ in 0..1_000 {
+            heard.touch(&top, false);
+            // A sleep, not an advance: the clock moves only once every task is idle, so each
+            // report is heard at its time.
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        tokio::time::sleep(HOLD.saturating_mul(3)).await;
+        drop(lists_tx);
+        let at = reports.await.unwrap();
+
+        assert_eq!(at.first(), Some(&HOLD), "the first once the burst is a hold old: {at:?}");
+        let gaps: Vec<Duration> =
+            at.windows(2).filter_map(|w| w.get(1)?.checked_sub(*w.first()?)).collect();
+        assert!(gaps.iter().all(|gap| *gap >= HOLD), "a hold apart at least: {at:?}");
+        // A second is five holds: a report each, and the last after the burst ends.
+        assert!((5..=6).contains(&at.len()), "{} reports: {at:?}", at.len());
+        let last = at.last().copied().unwrap_or_default();
+        let ended = Duration::from_secs(1);
+        assert!(last <= ended.saturating_add(HOLD), "the last {last:?} soon after the burst");
     }
 
     #[test]

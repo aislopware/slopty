@@ -892,22 +892,46 @@ mod tests {
     }
 
     /// A command that runs over is none at its time, and what it started dies with it.
-    #[tokio::test]
+    ///
+    /// On tokio's paused clock, which a blocking task holds still: it stands while the shell
+    /// starts its `sleep` (however long a loaded machine takes), then the budget runs out at
+    /// once, at exactly its time. On the wall clock a 500 ms budget once ran out before the shell
+    /// had written the pid.
+    #[tokio::test(start_paused = true)]
     async fn a_command_past_its_time_is_none_and_leaves_nothing_running() {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("pid");
-        let line = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
-        let start = Instant::now();
-        assert!(sh(&line, Duration::from_millis(500), 64).await.is_none());
-        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        let at = pid_file.display();
+        let line = format!("sleep 30 & echo $! > '{at}.part'; mv '{at}.part' '{at}'; wait");
+        let started = tokio::task::spawn_blocking({
+            let pid_file = pid_file.clone();
+            move || real_wait(|| pid_file.exists())
+        });
+        let budget = Duration::from_millis(500);
+        let start = tokio::time::Instant::now();
+        let (ran, started) = tokio::join!(sh(&line, budget, 64), started);
+        assert!(started.unwrap(), "the shell started its sleep");
+        assert!(ran.is_none(), "past its time");
+        let took = start.elapsed();
+        let tick = Duration::from_millis(1);
+        assert!(took >= budget && took <= budget.saturating_add(tick), "at its time: {took:?}");
         let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
         let pid = rustix::process::Pid::from_raw(pid).unwrap();
-        let gone = async {
-            while rustix::process::test_kill_process(pid).is_ok() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let gone = move || rustix::process::test_kill_process(pid).is_err();
+        assert!(tokio::task::spawn_blocking(move || real_wait(gone)).await.unwrap(), "killed");
+    }
+
+    /// Whether `done` holds within ten seconds of the wall clock, asked every 10 ms: for what
+    /// a real process does, which tokio's clock does not see.
+    #[expect(clippy::disallowed_methods, reason = "waits on a real process, off the runtime")]
+    fn real_wait(mut done: impl FnMut() -> bool) -> bool {
+        (0..1_000).any(|_| {
+            let now = done();
+            if !now {
+                std::thread::sleep(Duration::from_millis(10));
             }
-        };
-        tokio::time::timeout(Duration::from_secs(5), gone).await.expect("the sleep was killed");
+            now
+        })
     }
 
     /// A command's output is cut at the cap, and the rest is drained so it still finishes.
