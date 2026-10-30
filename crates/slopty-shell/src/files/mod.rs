@@ -164,19 +164,60 @@ pub(super) fn toolbar_button(
     toolbar_button_frame(id, None, theme).hint(label)
 }
 
-// slopty: the pane's one icon button (`surface_chrome::icon_button_frame`): a faded hover, a
-// deeper press, a latched toggle that still answers hover; a keyboard stop whose press leaves the
-// keyboard where it was (M8). `toggled` is a toggle's state, `None` for a plain button.
+// slopty: the pane's one icon button (`surface_chrome::icon_button_frame`'s look): a faded
+// hover, a deeper press, a latched toggle that still answers hover; a keyboard stop whose press
+// leaves the keyboard where it was (M8). `toggled` is a toggle's state, `None` for a plain button.
+/// On a touch screen the button takes a finger's [`TOUCH_TARGET`] around the 24 it draws, as
+/// the pane header's controls do, and is laid out at that size, so the buttons a toolbar holds
+/// side by side take presses side by side, never over each other or the field beside them.
+///
+/// [`TOUCH_TARGET`]: crate::surface_chrome::TOUCH_TARGET
 fn toolbar_button_frame(
     id: &'static str,
     toggled: Option<bool>,
     theme: &crate::theme::Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    crate::surface_chrome::icon_button_frame(id, toggled == Some(true), theme)
+    use crate::surface_chrome::{CONTROL_RADIUS, CONTROL_SIZE};
+    let reach = crate::surface_chrome::touch_reach(CONTROL_SIZE);
+    let fade = format!("{id}-fade");
+    let press = SharedString::from(format!("{id}-press"));
+    let (rest, hover) = if toggled == Some(true) {
+        (crate::theme::selected_wash(), crate::theme::selected_hover_wash())
+    } else {
+        (crate::theme::wash(0.0), crate::theme::control_hover())
+    };
+    // What it draws: the wash behind its glyph, at the size it draws under a pointer.
+    let drawn = div()
+        .id(SharedString::from(format!("{id}-drawn")))
+        .absolute()
+        .top(px(reach))
+        .left(px(reach))
+        .size(px(CONTROL_SIZE))
+        .rounded(px(CONTROL_RADIUS))
+        .bg(crate::motion::hover_blend(&fade, rest, hover))
+        .group_active(press.clone(), |style| style.bg(crate::theme::pressed_wash()));
+    let frame = div()
+        .id(id)
+        .group(press)
+        .relative()
+        .size(px(CONTROL_SIZE + 2.0 * reach))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(CONTROL_RADIUS + reach))
+        .cursor_pointer()
+        .role(gpui::Role::Button)
+        .hover_fade(fade)
         .occlude()
+        .tab_index(0)
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
         .when_some(toggled, |el, on| {
             el.aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
         })
+        .child(drawn);
+    // The ring stands around what it draws, not around the press.
+    crate::surface_chrome::focus_ring_within(frame, theme, reach)
 }
 
 // slopty: a failure says what failed in the person's words, then the way on: "Try again" and the
@@ -225,7 +266,8 @@ pub(crate) fn failure_state(
                 .mt(px(6.0))
                 .flex()
                 .flex_row()
-                .gap(px(6.0))
+                // On a touch screen the two presses side by side, not over each other.
+                .gap(px(6.0 + 2.0 * crate::surface_chrome::touch_reach(STATE_BUTTON_HEIGHT)))
                 .child(
                     state_button(SharedString::from(format!("{id}-retry")), "Try again", theme)
                         .on_click(on_retry),
@@ -253,22 +295,34 @@ pub(crate) fn failure_state(
         .into_any_element()
 }
 
-/// A bordered text button on a files state ("Try again").
+/// The height a files state's text button draws.
+const STATE_BUTTON_HEIGHT: f32 = 28.0;
+
+/// A bordered text button on a files state ("Try again"). On a touch screen it takes a finger's
+/// [`TOUCH_TARGET`] around the box it draws, as the pane header's controls do, its margins giving
+/// the extra back so it lays out at the size it draws; buttons side by side stand apart by the
+/// reach ([`failure_state`]).
+///
+/// [`TOUCH_TARGET`]: crate::surface_chrome::TOUCH_TARGET
 pub(super) fn state_button(
     id: SharedString,
     label: &'static str,
     theme: &crate::theme::Theme,
 ) -> gpui::Stateful<gpui::Div> {
+    use crate::surface_chrome::CONTROL_RADIUS;
+    let reach = crate::surface_chrome::touch_reach(STATE_BUTTON_HEIGHT);
     // slopty: on the ladder (r 6, 12 pt), its hover faded in and its press a step deeper.
     let fade = format!("{id}-fade");
-    div()
-        .id(id)
-        .role(gpui::Role::Button)
-        .aria_label(label)
-        .h(px(28.0))
-        .px(px(12.0))
-        .gap(px(6.0))
-        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+    let press = SharedString::from(format!("{id}-press"));
+    // What it draws: the bordered box behind its words.
+    let drawn = div()
+        .id(SharedString::from(format!("{id}-drawn")))
+        .absolute()
+        .top(px(reach))
+        .bottom(px(reach))
+        .left(px(reach))
+        .right(px(reach))
+        .rounded(px(CONTROL_RADIUS))
         .border_1()
         .border_color(theme.border)
         .bg(crate::motion::hover_blend(
@@ -276,17 +330,34 @@ pub(super) fn state_button(
             crate::theme::wash(0.04),
             crate::theme::control_hover(),
         ))
+        .group_active(press.clone(), |style| style.bg(crate::theme::pressed_wash()));
+    let selector = id.to_string();
+    let button = div()
+        .id(id)
+        .debug_selector(move || selector)
+        .group(press)
+        .relative()
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .h(px(STATE_BUTTON_HEIGHT + 2.0 * reach))
+        .m(px(-reach))
+        // The words 12 pt inside the box's 1 pt border.
+        .px(px(13.0 + reach))
+        .gap(px(6.0))
+        .rounded(px(CONTROL_RADIUS + reach))
         .hover_fade(fade)
-        .active(|style| style.bg(crate::theme::pressed_wash()))
         .cursor_pointer()
-        // slopty: a keyboard stop with the shell's ring (M8).
-        .map(|el| crate::surface_chrome::key_stop(el, theme))
+        // slopty: a keyboard stop (M8), its ring around the box rather than the press.
+        .tab_index(0)
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
         .flex()
         .flex_row()
         .items_center()
         .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.text)
-        .child(label)
+        .child(drawn)
+        .child(label);
+    crate::surface_chrome::focus_ring_within(button, theme, reach)
 }
 
 /// A workspace-relative file or directory dragged out of a Files surface.
@@ -1431,6 +1502,10 @@ impl FilesSurface {
         let include_ignored = self.tree.include_ignored();
         let search_focus = self.search.focus_handle(cx);
         toolbar(theme)
+            // On a touch screen its button's press fits between its two 1 pt hairlines.
+            .when(crate::shell::touch_screen(), |el| {
+                el.h(px(crate::surface_chrome::TOUCH_TARGET + 2.0))
+            })
             .id("files-explorer-header")
             .debug_selector(|| "files-explorer-header".into())
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
@@ -1570,6 +1645,134 @@ mod explorer_tests {
         cx.update(|window, cx| {
             assert!(files.read(cx).tree_focus.is_focused(window));
         });
+    }
+
+    /// A failure on its own, as a view shows it: `tries` counts its "Try again" presses.
+    struct Failure {
+        tries: Rc<std::cell::Cell<u32>>,
+    }
+
+    impl Render for Failure {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let tries = self.tries.clone();
+            div().size_full().flex().child(failure_state(
+                "files-failure",
+                "Couldn't open this file",
+                "Permission denied".into(),
+                crate::theme::Theme::of(cx),
+                move |_, _, _| tries.set(tries.get().saturating_add(1)),
+                cx,
+            ))
+        }
+    }
+
+    /// An explorer with nothing listed yet, drawn under a pointer or (`touch`) a finger.
+    fn bare_explorer(cx: &mut TestAppContext, touch: bool) -> (Entity<FilesSurface>, &mut gpui::VisualTestContext) {
+        crate::shell::force_touch(touch);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let (files, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            FilesSurface::new_explorer(state, "chat".into(), false, cx)
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            window.draw(cx).clear(cx);
+        });
+        (files, cx)
+    }
+
+    /// The explorer failing to list its folder, drawn.
+    fn fail_listing(files: &Entity<FilesSurface>, cx: &mut gpui::VisualTestContext) {
+        files.update(cx, |files, cx| {
+            files.error = Some("Couldn't list this folder.".into());
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    // slopty: on a touch screen the explorer's eye and its failure's "Try again" take a finger's
+    // 44 pt press around what they draw, as the pane header's controls do: the eye inside the
+    // header, which grows to the press, and clear of the search field. A press past what each
+    // draws, inside its reach, still acts.
+    #[gpui::test]
+    fn on_touch_the_explorers_controls_take_a_fingers_press(cx: &mut TestAppContext) {
+        use crate::surface_chrome::TOUCH_TARGET;
+        use gpui::{Modifiers, point};
+
+        let (files, cx) = bare_explorer(cx, true);
+        let shown = Rc::new(RefCell::new(None));
+        let emitted = shown.clone();
+        let _events = cx.update(|_, cx| {
+            cx.subscribe(&files, move |_, event, _| {
+                if let FilesEvent::ShowAllFilesChanged(value) = event {
+                    *emitted.borrow_mut() = Some(*value);
+                }
+            })
+        });
+        let header = cx.debug_bounds("files-explorer-header").unwrap();
+        let eye = cx.debug_bounds("files-toggle-ignored").unwrap();
+        let search = cx.debug_bounds("files-search").unwrap();
+        assert_eq!(header.size.height, px(TOUCH_TARGET + 2.0), "a finger's press inside its hairlines");
+        assert_eq!((eye.size.width, eye.size.height), (px(TOUCH_TARGET), px(TOUCH_TARGET)));
+        assert!(eye.top() >= header.top() && eye.bottom() <= header.bottom(), "{eye:?} in {header:?}");
+        assert!(search.right() <= eye.left(), "the eye's press clear of the field");
+        // 3 pt in from the press's corner: 7 pt outside the 24 the eye draws.
+        cx.simulate_click(eye.origin + point(px(3.0), px(3.0)), Modifiers::default());
+        assert_eq!(*shown.borrow(), Some(true), "the press past the glyph shows hidden files");
+
+        fail_listing(&files, cx);
+        let retry = cx.debug_bounds("files-retry-root").unwrap();
+        assert_eq!(retry.size.height, px(TOUCH_TARGET), "Try again: a finger's press");
+        assert!(retry.size.width >= px(TOUCH_TARGET));
+        // 2 pt under the press's top: 6 pt above the 28 the button draws.
+        cx.simulate_click(point(retry.center().x, retry.top() + px(2.0)), Modifiers::default());
+        // Asked again with no folder to ask, it says so in place of the old failure.
+        files.read_with(cx, |files, _| assert_eq!(files.error.as_deref(), Some(NO_FOLDER)));
+        crate::shell::force_touch(false);
+    }
+
+    // slopty: a failure's "Try again" and "Copy error" take a finger's press each, side by side.
+    #[gpui::test]
+    fn on_touch_a_failures_buttons_take_presses_side_by_side(cx: &mut TestAppContext) {
+        use crate::surface_chrome::TOUCH_TARGET;
+        use gpui::{Modifiers, point};
+
+        crate::shell::force_touch(true);
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let tries = Rc::new(std::cell::Cell::new(0));
+        let counted = tries.clone();
+        let (_failure, cx) = cx.add_window_view(move |_, _| Failure { tries: counted });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let retry = cx.debug_bounds("files-failure-retry").unwrap();
+        let copy = cx.debug_bounds("files-failure-copy").unwrap();
+        for (name, bounds) in [("Try again", retry), ("Copy error", copy)] {
+            assert_eq!(bounds.size.height, px(TOUCH_TARGET), "{name}: a finger's press");
+        }
+        assert!(retry.right() <= copy.left(), "{retry:?} and {copy:?} side by side, not over each other");
+        // 2 pt in from the press's lower right: outside the box "Try again" draws.
+        cx.simulate_click(point(retry.right() - px(2.0), retry.bottom() - px(2.0)), Modifiers::default());
+        assert_eq!(tries.get(), 1, "a press in the reach tries again");
+        crate::shell::force_touch(false);
+    }
+
+    // slopty: under a pointer the controls are the size they draw, and the header the band it was.
+    #[gpui::test]
+    fn under_a_pointer_the_explorers_controls_keep_the_size_they_draw(cx: &mut TestAppContext) {
+        let (files, cx) = bare_explorer(cx, false);
+        let header = cx.debug_bounds("files-explorer-header").unwrap();
+        let eye = cx.debug_bounds("files-toggle-ignored").unwrap();
+        assert_eq!(header.size.height, px(crate::surface_chrome::HEADER_HEIGHT));
+        let size = px(crate::surface_chrome::CONTROL_SIZE);
+        assert_eq!((eye.size.width, eye.size.height), (size, size));
+        fail_listing(&files, cx);
+        let retry = cx.debug_bounds("files-retry-root").unwrap();
+        assert_eq!(retry.size.height, px(STATE_BUTTON_HEIGHT));
     }
 
     // slopty: Finder's ⇧⌘. shows hidden files, and the eye's tooltip names it.
