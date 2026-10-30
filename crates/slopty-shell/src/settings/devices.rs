@@ -1,7 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Settings → Devices (feature-inventory §1.5): the device registry — name,
-//! platform, last-seen, an Online/Offline badge, a "This device" badge, click-to-copy id,
-//! and an Add device dialog (AddDevice).
+//! Settings → Devices: the device registry — name, platform, last-seen, an Online/Offline badge,
+//! a "This device" badge, click-to-copy id, and an Add device dialog (AddDevice).
 // A machine is named by its own name. Add device is Slopty's own dialog (`add_device`): this
 // Mac, a machine over ssh, or the server. The page shows the server this app follows, with a way
 // to change it.
@@ -268,7 +267,7 @@ impl popover::ScrollRailHost for DevicesPage {
     }
 }
 
-/// Human platform label (slopty settings.devices.tsx `platformLabel`).
+/// Human platform label.
 pub fn platform_label(platform: &str) -> &str {
     match platform {
         "macos" | "darwin" => "macOS",

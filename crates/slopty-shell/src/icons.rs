@@ -1,17 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Embedded icon assets + the gpui [`AssetSource`] that serves them.
 //!
-//! The set mirrors the original slopty's icon usage exactly:
-//! - Most glyphs come from the **Solar Icons** set (Linear weight) by 480 Design,
-//!   the same set the Electron app used via `@solar-icons/react`. Solar Icons is
-//!   licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/);
+//! - Most glyphs come from the **Solar Icons** set (Linear weight) by 480 Design.
+//!   Solar Icons is licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/);
 //!   attribution: "Solar Icons by 480 Design".
-//! - The terminal tab glyphs (`terminal`, `plus`, `close`) and the stop square
-//!   are ports of the hand-drawn inline SVGs in slopty's `terminal-panel.tsx` /
-//!   `composer-actions.tsx`.
-//! - The harness brand marks (`claude-mark`, `openai-mark`, `cursor-mark`) are
-//!   ports of slopty's `icons.tsx`. gpui tints SVGs with the text color, so the
-//!   Claude mark's brand orange is applied at the call site ([`CLAUDE_BRAND`]).
+//! - The terminal tab glyphs (`terminal`, `plus`, `close`) and the stop square are hand-drawn
+//!   in the same style.
+//! - The harness brand marks (`claude-mark`, `openai-mark`, `cursor-mark`): gpui tints SVGs
+//!   with the text color, so the Claude mark's brand orange is applied at the call site
+//!   ([`CLAUDE_BRAND`]).
 //!
 //! Icons render via [`icon`]: `icon(icons::PAPERCLIP).size(px(16.)).text_color(…)`.
 
@@ -192,8 +189,7 @@ icon_assets![
     (MICROPHONE, "microphone"),
     (MICROPHONE_OFF, "microphone-off"),
     (PHONE_HANG_UP, "phone-hang-up"),
-    // Hand-drawn slopty glyphs (terminal-panel.tsx / composer-actions.tsx /
-    // menu-check.tsx / logo.tsx).
+    // Hand-drawn glyphs.
     (TERMINAL, "terminal"),
     (CLOSE, "close"),
     // Hand-drawn Linux caption glyphs (minimize dash, maximize square,
@@ -226,7 +222,7 @@ icon_assets![
     (STAR, "star"),
     (STAR_BOLD, "star-bold"),
     (SLOPTY_LOGO, "slopty-logo"),
-    // Harness brand marks (icons.tsx).
+    // Harness brand marks.
     (CLAUDE_MARK, "claude-mark"),
     (OPENAI_MARK, "openai-mark"),
     (CURSOR_MARK, "cursor-mark"),

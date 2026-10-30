@@ -29,11 +29,10 @@ pub use slopty_view_proto::motion::{
     MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, SLOPTY_CELLS, mark_cell_stagger,
 };
 
-/// The animated slopty mark (slopty-loader.tsx `SloptyLoader`): the full logo
-/// pixel grid with a light wave sweeping tail→head. Each cell rests dim
-/// (opacity 0.08, scale 0.9) and flares to full as the crest passes; per-cell
-/// stagger follows the flight axis. `height_px` sets the mark's height (width
-/// follows the 820:940 canvas).
+/// The animated Slopty mark: the full logo pixel grid with a light wave sweeping tail→head. Each
+/// cell rests dim (opacity 0.08, scale 0.9) and flares to full as the crest passes; per-cell
+/// stagger follows the flight axis. `height_px` sets the mark's height (width follows the 820:940
+/// canvas).
 pub fn slopty_mark_loader(
     _id: &'static str,
     theme: &Theme,
@@ -62,8 +61,7 @@ pub fn slopty_mark_loader(
                 .items_center()
                 .justify_center()
                 .child({
-                    // Negative CSS delay ⇒ the cell starts mid-cycle:
-                    // the stagger ADDS phase (slopty-loader.tsx delayFor).
+                    // The stagger adds phase, so each cell starts mid-cycle.
                     let phase = (delta + stagger).rem_euclid(1.0);
                     div()
                         .rounded(px(16.0 * scale))
@@ -115,12 +113,10 @@ pub fn slopty_loader(
 
 pub use slopty_view_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
 
-/// The gradient matrix spinner (WorkingIndicator), ported from slopty's
-/// gradient-spin.tsx: a 3×3 grid of round cells tinted per row from the
-/// sunrise gradient. Each cell pulses opacity once per 750ms period; the
-/// per-cell phase follows the "arrow-up" pattern (the pulse enters at the
-/// bottom edge and converges toward the top-center cell), so the wave reads
-/// as travelling upward.
+/// The gradient matrix spinner (WorkingIndicator): a 3×3 grid of round cells tinted per row from
+/// the sunrise gradient. Each cell pulses opacity once per 750ms period; the per-cell phase
+/// follows the "arrow-up" pattern (the pulse enters at the bottom edge and converges toward the
+/// top-center cell), so the wave reads as travelling upward.
 pub fn gradient_spinner(
     _id: &'static str,
     theme: &Theme,
