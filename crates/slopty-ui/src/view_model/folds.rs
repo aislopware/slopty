@@ -1,4 +1,4 @@
-//! slopty: the rows Claude Code's TUI folds or adds around a turn, which the transcript's own
+//! The rows Claude Code's TUI folds or adds around a turn, which the transcript's own
 //! items do not make (`.research/tui-strings-2026-10-16.md` §2.Queue, §3.Done, §5.Stop):
 //!
 //! - **Task notices together.** Three or more background tasks that completed one after another

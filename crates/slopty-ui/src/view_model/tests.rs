@@ -149,7 +149,7 @@ async fn a_transcript_watch_follows_and_lets_go() {
     assert_eq!(feed.followed(), Vec::<String>::new());
 }
 
-/// slopty: a chat's tray is watched as its transcript is: the watch follows the chat, says the
+/// A chat's tray is watched as its transcript is: the watch follows the chat, says the
 /// tray once it is published and again only when it changed, and lets the chat go when it closes;
 /// a watch with no chat is refused.
 #[tokio::test]
@@ -1325,6 +1325,6 @@ fn a_subagents_end_in_its_own_turn_is_said_by_its_card() {
             _ => None,
         })
         .collect();
-    // slopty: a subagent's bare notice says who, and what became of it, as the TUI does.
+    // A subagent's bare notice says who, and what became of it, as the TUI does.
     assert_eq!(said, ["finished 2", "Agent \"Look\" finished"]);
 }

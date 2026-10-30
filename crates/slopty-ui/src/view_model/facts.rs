@@ -298,7 +298,7 @@ fn title(call: &ToolCall, input: Option<&serde_json::Value>) -> Option<String> {
         "EnterWorktree" => format!("EnterWorktree({})", arg(&["name", "path"])?),
         "ExitWorktree" => "ExitWorktree".to_owned(),
         "EnterPlanMode" => "Entered plan mode".to_owned(),
-        // slopty: Claude Code's question to the person, named as the person reads it (#9).
+        // Claude Code's question to the person, named as the person reads it (#9).
         "AskUserQuestion" => {
             let header = input
                 .and_then(|i| i.get("questions"))
@@ -584,7 +584,7 @@ pub fn tool_facts(
             || task.item.as_ref().is_some_and(|i| i.0 == item)
     });
     let (mut result_line, mut failed) = result(call, task).unzip();
-    // slopty: a call held for the person says what it waits for in its thread's wait's words,
+    // A call held for the person says what it waits for in its thread's wait's words,
     // as the wait's own chip does: a question is never called a permission (#9).
     if let ToolState::Pending { .. } = &call.state
         && let Some(wait) =
@@ -913,14 +913,14 @@ pub fn task_part(
 ) -> TaskRow {
     let usage = note.usage;
     let duration = usage.map(|u| u.duration_ms).filter(|ms| *ms > 0);
-    // slopty: a teammate that ended reads as the TUI's row names it.
+    // A teammate that ended reads as the TUI's row names it.
     let summary = match (note.kind.as_str(), note.status.as_str()) {
         (BackgroundTask::TEAMMATE, TaskNote::COMPLETED) if !note.title.trim().is_empty() => {
             format!("Teammate @{} shut down gracefully", note.title.trim().trim_start_matches('@'))
         }
         _ => agent_words(note).unwrap_or_else(|| note.summary.clone()),
     };
-    // slopty: an agent's own words, when its notice carried them in place of the TUI's line,
+    // An agent's own words, when its notice carried them in place of the TUI's line,
     // open under the row instead of standing for it.
     let said = Some(note.summary.trim())
         .filter(|said| {
@@ -928,7 +928,7 @@ pub fn task_part(
         })
         .map(str::to_owned);
     let text = match duration {
-        // slopty: in the tray's words, "<1s" for a run under a second (#16).
+        // In the tray's words, "<1s" for a run under a second (#16).
         Some(ms) if !summary.contains(" · ") => {
             format!("{summary} · {}", slopty_view_doc::work::ran_for_words(ms))
         }
@@ -969,9 +969,9 @@ pub fn task_part(
     }
 }
 
-/// slopty: a subagent's notice in the TUI's words (`● Agent "{task}" finished`), when Claude
+/// A subagent's notice in the TUI's words (`● Agent "{task}" finished`), when Claude
 /// Code's notice carried only the task or the agent's own words: a bare "Read the schema" beside a
-/// green dot said neither who nor what became of it (2026-10-20).
+/// green dot says neither who nor what became of it.
 fn agent_words(note: &TaskNote) -> Option<String> {
     if note.kind != BackgroundTask::AGENT || note.summary.trim_start().starts_with("Agent ") {
         return None;
@@ -1065,7 +1065,7 @@ pub fn note_row(
             row(NoteLine::INFO, text)
         }
         Notice::FALLBACK => row(NoteLine::WARNING, text),
-        // slopty: a hook's word, as the TUI keeps it in the turn: what it printed reads quiet,
+        // A hook's word, as the TUI keeps it in the turn: what it printed reads quiet,
         // one that failed, blocked a call or stopped the turn warns. Its first line is the row;
         // more of it (a stop hook's feedback) opens under it.
         Notice::HOOK => {
@@ -1075,13 +1075,13 @@ pub fn note_row(
                 .any(|word| lower.contains(word));
             split(row(if wrong { NoteLine::WARNING } else { NoteLine::INFO }, text))
         }
-        // slopty: a prompt's origin, an MCP server's update, a message from another session.
+        // A prompt's origin, an MCP server's update, a message from another session.
         Notice::NOTE => split(row(NoteLine::INFO, text)),
-        // slopty: what a command printed as its errors, in red as the TUI's, and an agent's own
+        // What a command printed as its errors, in red as the TUI's, and an agent's own
         // error and warning, each its title the row and the rest under it.
         Notice::COMMAND_ERROR | Notice::ERROR => split(row(NoteLine::ERROR, text)),
         Notice::WARNING => split(row(NoteLine::WARNING, text)),
-        // slopty: the goal's check, its first line the row and the rest ("Goal: …", "Reason:
+        // The goal's check, its first line the row and the rest ("Goal: …", "Reason:
         // …") opening under it, as the TUI's verbose view adds them.
         Notice::GOAL => {
             let (line, more) = text.split_once('\n').unwrap_or((text.as_str(), ""));

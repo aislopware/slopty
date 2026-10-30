@@ -64,7 +64,7 @@ impl WorkspaceView {
         let Some((key, thread)) = self.chat_thread(chat, cx) else {
             return Task::ready(Err(missing()));
         };
-        // slopty: what the model read of a call's result, and the call's own records.
+        // What the model read of a call's result, and the call's own records.
         if let Some(item) = item.strip_suffix(transcript::SEEN_BLOB) {
             let Some(seen) = self.view_tool_call(key, thread, item, cx).and_then(|call| call.seen)
             else {
@@ -97,7 +97,7 @@ impl WorkspaceView {
             });
         }
         let (item, diff) = item.strip_suffix(".diff").map_or((item, false), |item| (item, true));
-        // slopty: a file a command changed, drawn as an edit's chip under the command's.
+        // A file a command changed, drawn as an edit's chip under the command's.
         if diff && let Some((item, n)) = transcript::shell_edit_of(item) {
             let Some(edit) =
                 self.view_tool_call(key, thread, item, cx).and_then(|call| match call.detail {

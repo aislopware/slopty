@@ -148,7 +148,7 @@ fn a_calls_result_reads_as_the_tuis() {
         result_of(&call("Bash", "exec", None, asking.clone())).as_deref(),
         Some("Waiting for permission…")
     );
-    // slopty: held while its thread waits on the person, it says what the wait is for, in the
+    // Held while its thread waits on the person, it says what the wait is for, in the
     // words of the wait's chip (#9).
     let held = |kind: &str| {
         let mut state = fixtures::empty();
@@ -364,7 +364,7 @@ fn a_task_notification_is_a_row_linking_its_call() {
     assert_eq!(row.call_part_id.as_deref(), Some("t1"));
     assert_eq!(row.figures, "4 tool uses");
     assert_eq!(row.kind, "subagent");
-    // slopty: a run under a second says so as its tray row does, never "0s" (#16).
+    // A run under a second says so as its tray row does, never "0s" (#16).
     let quick = TaskNote {
         kind: BackgroundTask::MONITOR.into(),
         summary: "Monitor \"Watch the build log\" stream ended".into(),
@@ -375,7 +375,7 @@ fn a_task_notification_is_a_row_linking_its_call() {
     assert_eq!(row.text, "Monitor \"Watch the build log\" stream ended · <1s");
 }
 
-/// slopty: a subagent's notice that carried only its task, or the agent's own words, reads as
+/// A subagent's notice that carried only its task, or the agent's own words, reads as
 /// the TUI says it: who, and what became of it; the agent's words open under it.
 #[test]
 fn a_subagents_bare_notice_says_who_and_what_became_of_it() {

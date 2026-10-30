@@ -124,7 +124,7 @@ pub fn image_path(thread: ThreadId, item: &str, index: usize, image: &Image) -> 
     format!("{IMAGE_SCHEME}{thread}/{item}/{index}/{digest}.{ext}")
 }
 
-/// slopty: the file a call read, by its last name (its read's path, else `file_path` or `path`
+/// The file a call read, by its last name (its read's path, else `file_path` or `path`
 /// in its input): what a picture it returned is called in the chat.
 fn image_file_name(call: &ToolCall) -> Option<String> {
     let input: Option<serde_json::Value> = serde_json::from_str(&call.input.text).ok();
@@ -257,7 +257,7 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                 // The person's words as the agent was given them, and its pictures.
                 let words = marked(message.command.as_deref(), look.words(&message.text));
                 let text = with_images(words, thread, &id, &message.images);
-                // slopty: a plan sent to be implemented reads as the plan's own card under the
+                // A plan sent to be implemented reads as the plan's own card under the
                 // message, as the TUI boxes it ("Plan to implement").
                 let plan = text
                     .strip_prefix(IMPLEMENT_PLAN)
@@ -292,7 +292,7 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                 }
             }
             ItemBody::Compaction(compaction) => {
-                // slopty: a quiet row whose summary opens under it.
+                // A quiet row whose summary opens under it.
                 let note = slopty_view_doc::NoteRow {
                     kind: "compaction".to_owned(),
                     text: compacted(compaction),
@@ -318,7 +318,7 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                         }
                     }
                 }
-                // slopty: a message the agent sends the person (Claude Code's brief tools) is
+                // A message the agent sends the person (Claude Code's brief tools) is
                 // its words, as the TUI draws it with no call around it.
                 let brief = match body {
                     ItemBody::Tool(call) => brief_words(call),
@@ -339,11 +339,11 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                     if let MessagePart::Tool { facts, .. } = &mut part {
                         *facts =
                             tool_facts(&id, item.at_ms, call, state, child.as_ref()).map(Box::new);
-                        // slopty: its start is said from its turn's, which its row's tooltip says.
+                        // Its start is said from its turn's, which its row's tooltip says.
                         if let Some(time) = facts.as_mut().and_then(|facts| facts.time.as_mut()) {
                             time.turn_started = turn_start(state, item.turn);
                         }
-                        // slopty: what the model read where the step shows something else, and its
+                        // What the model read where the step shows something else, and its
                         // raw record, each fetched when the person opens it.
                         let seen = call.seen.as_ref().map(|seen| slopty_view_doc::BlobLink {
                             blob: format!("{thread}/{id}{SEEN_BLOB}"),
@@ -358,9 +358,9 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                         }
                     }
                     parts.push(part);
-                    // slopty: the files it changed, as the TUI lists them under a command.
+                    // The files it changed, as the TUI lists them under a command.
                     parts.extend(shell_edits(thread, &id, call));
-                    // slopty: a picture of a file read is named by the file; any other by its
+                    // A picture of a file read is named by the file; any other by its
                     // place among the call's pictures.
                     let file = image_file_name(call);
                     parts.extend(call.images.iter().enumerate().map(|(n, image)| {
@@ -422,7 +422,7 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
     }
     made.flush();
     let Made { mut out, turns, .. } = made;
-    // slopty: what the TUI folds of task notices, and each turn's figures on its prompt. Subagents
+    // What the TUI folds of task notices, and each turn's figures on its prompt. Subagents
     // started together are the shell's to head with one line, live (`transcript/subagents.rs`).
     for entry in &mut out {
         if entry.role == MessageRole::Assistant {
@@ -435,7 +435,7 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
     out
 }
 
-/// slopty: the person's words as the TUI's row says them: a slash command (a skill run as one
+/// The person's words as the TUI's row says them: a slash command (a skill run as one
 /// too) as `/name args`, a shell command as `! command`.
 fn marked(command: Option<&str>, words: String) -> String {
     let Some(command) = command.map(str::trim).filter(|c| !c.is_empty()) else { return words };
@@ -601,7 +601,7 @@ pub fn error_words(
     if slopty_shell::transcript::claude_too_old(raw).is_some() {
         return (raw.trim().to_owned(), None);
     }
-    // slopty: where the agent's own first line says what happened and what to do, in the TUI's
+    // Where the agent's own first line says what happened and what to do, in the TUI's
     // words (a spend limit, a sign-in its organization refuses, a start it refused, a context
     // that no longer fits), that line leads, its machine after it.
     if let Some(head) = agent_headline(raw).filter(|_| retrying.is_none()) {
@@ -621,7 +621,7 @@ pub fn error_words(
                     retry.attempt
                 )
             }
-            // slopty: a sign-in Claude Code lacks is the person's to fix where it runs; Slopty
+            // A sign-in Claude Code lacks is the person's to fix where it runs; Slopty
             // never signs in for them.
             None if signed_out(raw) => {
                 format!("The agent is not signed in{on}. Sign it in there, then try again.")
@@ -639,7 +639,7 @@ pub fn error_words(
         }
         Notice::HOOK => format!("A hook stopped this step{on}. Fix the hook, then try again."),
         TURN_FAILED => format!("The turn failed{on}. Try again."),
-        // slopty: an end of Claude Code's is said whole by the worker, what happened then what
+        // An end of Claude Code's is said whole by the worker, what happened then what
         // to do; its machine goes after what happened, which "that machine" then names.
         Notice::ENDED => {
             let raw = raw.trim();
@@ -1078,7 +1078,7 @@ fn tool(
         _ if call.state == ToolState::Failed => slopty_view_doc::SubagentStatus::Failed,
         _ => slopty_view_doc::SubagentStatus::Done,
     });
-    // slopty: the output as the thread holds it, its head (a running command's tail), so an open
+    // The output as the thread holds it, its head (a running command's tail), so an open
     // step shows its lines and "+ N lines" before anything is fetched; the whole is fetched where
     // the thread cut it or the step shows less of it (`inspector.md`, "Any step opens to its
     // whole detail").
@@ -1152,7 +1152,7 @@ pub fn tool_diff(call: &ToolCall, whole: Option<&str>) -> Option<slopty_view_pro
     Some(sides(path, &lines))
 }
 
-/// slopty: the part id of file `n` a command changed, under its call `item`'s part: drawn as an
+/// The part id of file `n` a command changed, under its call `item`'s part: drawn as an
 /// edit's chip, its diff fetched by `{thread}/{id}.diff` ([`shell_edit_of`]).
 fn shell_edit_id(item: &str, n: usize) -> String {
     format!("{item}{SHELL_EDIT}{n}")
@@ -1176,7 +1176,7 @@ pub fn shell_edit_of(id: &str) -> Option<(&str, usize)> {
     Some((item, n.parse().ok()?)).filter(|(item, _)| !item.is_empty())
 }
 
-/// slopty: the diff of a file a command changed, as an edit's is drawn; `whole` as for
+/// The diff of a file a command changed, as an edit's is drawn; `whole` as for
 /// [`tool_diff`]. `None` when it has no lines to show.
 #[must_use]
 pub fn shell_edit_diff(
@@ -1212,7 +1212,7 @@ fn sides(path: String, lines: &[String]) -> slopty_view_proto::ToolDiff {
     }
 }
 
-/// slopty: the files a command changed, each as an edit's chip after the command's own, and
+/// The files a command changed, each as an edit's chip after the command's own, and
 /// what the agent says of the list (more files, a diff it could not take) as a quiet row: the
 /// TUI's `bashEditDiff`, drawn by the parts the shell already draws for edits.
 fn shell_edits(thread: ThreadId, item: &str, call: &ToolCall) -> Vec<MessagePart> {
