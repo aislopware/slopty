@@ -266,7 +266,8 @@ impl WorkspaceView {
     /// How the tailnet carries the link to `key`, as its worker last said; the link that
     /// brings it is the one it describes, so it goes with the link.
     pub fn set_link_path(&mut self, key: WorkerKey, path: LinkPath, cx: &mut Context<Self>) {
-        let now = cx.background_executor().now();
+        // The relay counts on tokio's clock; the UI's is GPUI's executor's, which tests drive.
+        let now = tokio::time::Instant::from_std(cx.background_executor().now());
         let Some(w) = self.workers.get_mut(&key).filter(|w| w.link.is_some()) else { return };
         let changed = w.relay.path() != Some(&path);
         w.relay.observe(path, now);
@@ -287,7 +288,7 @@ impl WorkspaceView {
     /// Say, once per stay, that the link to `key` has stayed on a Tailscale DERP relay, with
     /// the fix (`docs/decisions/transport.md`, "A link that stays on DERP says so").
     fn say_relay(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
-        let now = cx.background_executor().now();
+        let now = tokio::time::Instant::from_std(cx.background_executor().now());
         let Some(notice) = self.workers.get_mut(&key).and_then(|w| w.relay.take_notice(now)) else {
             return;
         };

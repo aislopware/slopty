@@ -294,7 +294,7 @@ impl WorkspaceView {
         let moved = self
             .clip
             .as_ref()
-            .is_some_and(|clip| clip.borrow_mut().tick(std::time::Instant::now()));
+            .is_some_and(|clip| clip.borrow_mut().tick(tokio::time::Instant::now()));
         let Some(key) = wanted else { return };
         let fresh = self.watching.insert(key);
         if fresh {
