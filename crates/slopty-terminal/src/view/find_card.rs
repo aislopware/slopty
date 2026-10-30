@@ -138,26 +138,48 @@ impl TerminalView {
 
     /// The find pasteboard's query, when it holds one: what a card opens with, and what it
     /// takes up when the person comes back from finding in another app.
-    pub(super) fn shared_needle(cx: &gpui::App) -> Option<String> {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::missing_const_for_fn, reason = "only a Mac has a find pasteboard")
+    )]
+    pub(super) fn shared_needle(
+        #[cfg_attr(
+            not(target_os = "macos"),
+            expect(unused_variables, reason = "only a Mac has a find pasteboard")
+        )]
+        cx: &gpui::App,
+    ) -> Option<String> {
         #[cfg(target_os = "macos")]
         {
             cx.read_from_find_pasteboard().and_then(|item| item.text()).filter(|t| !t.is_empty())
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = cx;
             None
         }
     }
 
     /// Share `needle` with every other app's find.
-    pub(super) fn share_needle(needle: &str, cx: &gpui::App) {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(clippy::missing_const_for_fn, reason = "only a Mac has a find pasteboard")
+    )]
+    pub(super) fn share_needle(
+        #[cfg_attr(
+            not(target_os = "macos"),
+            expect(unused_variables, reason = "only a Mac has a find pasteboard")
+        )]
+        needle: &str,
+        #[cfg_attr(
+            not(target_os = "macos"),
+            expect(unused_variables, reason = "only a Mac has a find pasteboard")
+        )]
+        cx: &gpui::App,
+    ) {
         #[cfg(target_os = "macos")]
         if !needle.is_empty() {
             cx.write_to_find_pasteboard(gpui::ClipboardItem::new_string(needle.to_owned()));
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = (needle, cx);
     }
 
     /// The window came to the front: a query changed in another app's find meanwhile is the
