@@ -20,10 +20,10 @@
 //! repeating ones to their start state, and no frames are scheduled. The
 //! [`set_reduced_motion`]/[`reduced_motion`] wrappers make it a single global
 //! switch; pure helpers take the flag explicitly where they run outside elements.
-//! [`ReduceMotion`] drives that switch from the OS accessibility setting or the
-//! user's override, and optionally from main-window focus.
+//! The switch follows the OS accessibility setting ([`set_system`]) and, when the
+//! person asks, main-window focus ([`set_pause_in_background`]).
 //! Activity grids use [`ActivityPulse`] to retain a gentle brightness cue under
-//! system reduced motion; explicit On and background pause keep them still.
+//! system reduced motion; a paused background keeps them still.
 //!
 //! translateY is implemented as a relative-position `top` inset: taffy applies
 //! relative insets after layout, so — like a CSS transform — siblings never move.
@@ -39,7 +39,6 @@ use gpui::{
     Animation, AnimationElement, App, ElementId, EntityId, Global, Hsla, IntoElement,
     ParentElement, Rgba, SharedString, StatefulInteractiveElement, Styled, Window, px,
 };
-use serde::{Deserialize, Serialize};
 
 pub use gpui::AnimationExt;
 
@@ -222,7 +221,7 @@ pub fn pulse_moment(view: EntityId, cx: &mut App) -> Instant {
 }
 
 /// Activity feedback uses a slow, uniform brightness pulse when the system
-/// reduces motion. Explicit On and background pause still stop all animation.
+/// reduces motion. A paused background still stops all animation.
 /// Decorative animation continues to use the reduced-motion-gated helpers.
 #[derive(Clone, Copy)]
 pub struct ActivityPulse {
@@ -253,9 +252,7 @@ fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPu
     let subtle = cx.reduce_motion();
     let animate = !subtle
         || cx.try_global::<MotionState>().is_some_and(|state| {
-            state.preference == ReduceMotion::System
-                && state.system
-                && !(state.pause_in_background && !state.active)
+            state.system && !(state.pause_in_background && !state.active)
         });
     let phase = if animate {
         let stride = if subtle { 2 } else { stride };
@@ -1491,38 +1488,13 @@ impl ReducedMotion {
     }
 }
 
-/// The user's reduced-motion preference. Persisted in `ui-settings.json`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ReduceMotion {
-    /// Follow the OS accessibility setting.
-    #[default]
-    System,
-    On,
-    Off,
-}
-
-impl ReduceMotion {
-    pub const ALL: [Self; 3] = [Self::System, Self::On, Self::Off];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::System => "System",
-            Self::On => "On",
-            Self::Off => "Off",
-        }
-    }
-}
-
-/// Inputs to the global flag: the persisted choices, plus what the OS and the
-/// main window last reported. Kept apart so a system change while the user has
-/// pinned On/Off still lands, and takes effect when they return to System.
+/// Inputs to the global flag: the person's choice to pause in the background, plus what the
+/// OS and the main window last reported.
 struct MotionState {
-    preference: ReduceMotion,
     pause_in_background: bool,
     system: bool,
     active: bool,
-    /// The flag as a holder fixed it ([`hold`]), over the person's setting, the OS's
+    /// The flag as a holder fixed it ([`hold`]), over the OS's setting, a paused background
     /// and the window's activation.
     held: Option<bool>,
 }
@@ -1540,56 +1512,23 @@ fn state_mut(cx: &mut App) -> Option<&mut MotionState> {
         .then(|| cx.global_mut::<MotionState>())
 }
 
-/// Combine the preference with the OS setting and window focus.
-pub fn resolve(
-    preference: ReduceMotion,
-    system: bool,
-    pause_in_background: bool,
-    active: bool,
-) -> bool {
-    let reduced = match preference {
-        ReduceMotion::System => system,
-        ReduceMotion::On => true,
-        ReduceMotion::Off => false,
-    };
-    reduced || (pause_in_background && !active)
+/// Combine the OS setting with a paused background and window focus.
+const fn resolve(system: bool, pause_in_background: bool, active: bool) -> bool {
+    system || (pause_in_background && !active)
 }
 
 /// Install the motion state and set the flag before the first window opens,
 /// so boot animations already honor it.
-pub fn init(preference: ReduceMotion, pause_in_background: bool, cx: &mut App) {
+pub fn init(pause_in_background: bool, cx: &mut App) {
     let system = cx.has_global::<HeardSystem>() && cx.remove_global::<HeardSystem>().0;
-    cx.set_global(MotionState { preference, pause_in_background, system, active: true, held: None });
+    cx.set_global(MotionState { pause_in_background, system, active: true, held: None });
     refresh_system(cx);
     apply(cx);
-}
-
-pub fn preference(cx: &App) -> ReduceMotion {
-    cx.try_global::<MotionState>()
-        .map(|state| state.preference)
-        .unwrap_or_default()
 }
 
 pub fn pause_in_background(cx: &App) -> bool {
     cx.try_global::<MotionState>()
         .is_some_and(|state| state.pause_in_background)
-}
-
-/// The OS setting as last read; drives the Settings helper text.
-pub fn system_reduces_motion(cx: &App) -> bool {
-    cx.try_global::<MotionState>()
-        .is_some_and(|state| state.system)
-}
-
-pub fn set_preference(preference: ReduceMotion, cx: &mut App) {
-    let Some(state) = state_mut(cx) else {
-        return;
-    };
-    if state.preference == preference {
-        return;
-    }
-    state.preference = preference;
-    apply(cx);
 }
 
 pub fn set_pause_in_background(enabled: bool, cx: &mut App) {
@@ -1607,8 +1546,8 @@ pub fn set_pause_in_background(enabled: bool, cx: &mut App) {
 }
 
 /// Fix the flag at `reduced` for good: the e2e socket asks for Reduce Motion so every
-/// dump's frame can be judged, and neither the person's setting, the OS's nor the window
-/// becoming active (which reads the OS's again) may undo it.
+/// dump's frame can be judged, and neither the OS's setting, a paused background nor the
+/// window becoming active (which reads the OS's again) may undo it.
 pub fn hold(reduced: bool, cx: &mut App) {
     match state_mut(cx) {
         Some(state) => {
@@ -1662,9 +1601,9 @@ fn apply(cx: &mut App) {
     let Some(state) = cx.try_global::<MotionState>() else {
         return;
     };
-    let reduced = state.held.unwrap_or_else(|| {
-        resolve(state.preference, state.system, state.pause_in_background, state.active)
-    });
+    let reduced = state
+        .held
+        .unwrap_or_else(|| resolve(state.system, state.pause_in_background, state.active));
     // gpui refreshes every window only when the flag actually flips.
     set_reduced_motion(cx, reduced);
 }
@@ -1946,26 +1885,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn activity_pulse_honors_explicit_on_and_background_pause(cx: &mut gpui::TestAppContext) {
+    fn activity_pulse_honors_a_paused_background_and_a_hold(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
 
         cx.update(|cx| {
-            for (preference, system, pause_in_background, active, animates) in [
-                (ReduceMotion::On, false, false, true, false),
-                (ReduceMotion::On, true, false, true, false),
-                (ReduceMotion::System, true, true, false, false),
-                (ReduceMotion::Off, true, true, false, false),
-                (ReduceMotion::System, true, true, true, true),
-                (ReduceMotion::System, true, false, false, true),
-                (ReduceMotion::System, false, false, true, true),
-                (ReduceMotion::Off, true, false, true, true),
+            for (system, pause_in_background, active, held, animates) in [
+                (false, false, true, None, true),
+                (true, false, true, None, true),
+                (true, false, false, None, true),
+                (true, true, true, None, true),
+                (true, true, false, None, false),
+                (false, true, false, None, false),
+                (false, false, true, Some(true), false),
             ] {
                 cx.set_global(MotionState {
-                    preference,
                     pause_in_background,
                     system,
                     active,
-                    held: None,
+                    held,
                 });
                 apply(cx);
                 let view = cx.new(|_| ());
@@ -1975,7 +1912,7 @@ mod tests {
                     .is_some_and(|clock| clock.leases.contains_key(&view.entity_id()));
                 assert_eq!(
                     leased, animates,
-                    "{preference:?}, system={system}, pause={pause_in_background}, active={active}"
+                    "system={system}, pause={pause_in_background}, active={active}, held={held:?}"
                 );
                 if reduced_motion(cx) {
                     assert!(pulse.subtle);
@@ -1993,13 +1930,12 @@ mod tests {
     }
 
     /// A held flag (the e2e socket's Reduce Motion) outlasts the window becoming active,
-    /// which re-reads the OS's setting, and the person's own.
+    /// which re-reads the OS's setting, the OS's setting changing, and a paused background.
     #[gpui::test]
     fn a_held_reduce_motion_outlasts_activation_and_the_setting(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             cx.set_global(MotionState {
-                preference: ReduceMotion::Off,
-                pause_in_background: false,
+                pause_in_background: true,
                 system: false,
                 active: true,
                 held: None,
@@ -2011,12 +1947,12 @@ mod tests {
             set_window_active(false, cx);
             set_window_active(true, cx);
             assert!(reduced_motion(cx), "activation keeps the held flag");
-            if let Some(state) = state_mut(cx) {
-                state.preference = ReduceMotion::On;
-            }
-            apply(cx);
+            set_system(true, cx);
+            set_system(false, cx);
+            assert!(reduced_motion(cx), "the OS's setting keeps it too");
+            set_window_active(false, cx);
             hold(false, cx);
-            assert!(!reduced_motion(cx), "the hold wins over the person's setting too");
+            assert!(!reduced_motion(cx), "the hold wins over a paused background");
         });
     }
 
@@ -2050,7 +1986,6 @@ mod tests {
 
         cx.update(|cx| {
             cx.set_global(MotionState {
-                preference: ReduceMotion::System,
                 pause_in_background: false,
                 system: true,
                 active: true,
@@ -2089,7 +2024,6 @@ mod tests {
 
         cx.update(|cx| {
             cx.set_global(MotionState {
-                preference: ReduceMotion::System,
                 pause_in_background: false,
                 system: true,
                 active: true,
@@ -2498,35 +2432,24 @@ mod tests {
     }
 
     #[test]
-    fn reduce_motion_follows_system_unless_pinned() {
-        use ReduceMotion::*;
-        assert!(resolve(System, true, false, true));
-        assert!(!resolve(System, false, false, true));
-        assert!(resolve(On, false, false, true));
-        assert!(!resolve(Off, true, false, true), "Off overrides the system");
-    }
-
-    #[test]
     fn background_pause_only_applies_when_enabled_and_unfocused() {
-        use ReduceMotion::*;
-        assert!(resolve(Off, false, true, false));
-        assert!(!resolve(Off, false, true, true), "focused window animates");
-        assert!(!resolve(Off, false, false, false), "opt-in only");
-        assert!(resolve(On, false, false, false));
+        assert!(resolve(false, true, false));
+        assert!(!resolve(false, true, true), "focused window animates");
+        assert!(!resolve(false, false, false), "opt-in only");
+        assert!(resolve(true, false, true), "the system's word stands either way");
     }
 
     #[gpui::test]
-    fn focus_and_preference_drive_the_global_flag(cx: &mut gpui::TestAppContext) {
+    fn focus_and_the_system_drive_the_global_flag(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             cx.set_global(MotionState {
-                preference: ReduceMotion::Off,
                 pause_in_background: false,
-                system: true,
+                system: false,
                 active: true,
                 held: None,
             });
             apply(cx);
-            assert!(!reduced_motion(cx), "Off ignores the system");
+            assert!(!reduced_motion(cx));
 
             set_window_active(false, cx);
             assert!(!reduced_motion(cx), "pause is opt-in");
@@ -2535,8 +2458,8 @@ mod tests {
             set_window_active(true, cx);
             assert!(!reduced_motion(cx), "refocus resumes");
 
-            set_preference(ReduceMotion::System, cx);
-            assert!(reduced_motion(cx), "System follows the recorded OS value");
+            set_system(true, cx);
+            assert!(reduced_motion(cx), "the flag follows the OS");
             set_system(false, cx);
             assert!(!reduced_motion(cx));
         });

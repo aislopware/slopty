@@ -1650,10 +1650,10 @@ mod tests {
     /// paused background and the self-test's hold stand as the system turns it off.
     #[gpui::test]
     fn a_paused_background_and_a_hold_stand_as_the_system_changes(cx: &TestAppContext) {
-        use slopty_shell::motion::{self, ReduceMotion};
+        use slopty_shell::motion;
         cx.update(|cx| {
             system_motion_heard(true, cx);
-            motion::init(ReduceMotion::System, true, cx);
+            motion::init(true, cx);
             assert!(cx.reduce_motion(), "the shell starts from what was heard");
             motion::window_activation_changed(false, cx);
             system_motion_heard(false, cx);

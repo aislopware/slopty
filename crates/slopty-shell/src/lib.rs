@@ -204,12 +204,7 @@ pub fn start(
             ui_settings.surface,
             cx,
         );
-        motion::init(
-            // The OS's reduced motion alone (P12).
-            motion::ReduceMotion::System,
-            ui_settings.pause_animations_in_background,
-            cx,
-        );
+        motion::init(ui_settings.pause_animations_in_background, cx);
         composer::init(cx);
         app_menus::init(cx);
         cx.register_url_scheme("slopty").detach();
