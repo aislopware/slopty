@@ -102,8 +102,9 @@ pub fn check(root: &Utf8Path, lane: &str, sha: &str, crates: &[String]) -> Resul
 /// used last. A new lane's cold dir rebuilt every dependency: sccache cannot keep a proc-macro
 /// or a binary, so 729 units compiled again and a three-crate check took 8.5 min, 37 s of it
 /// testing (2026-10-19). The dependencies' units are keyed by the registry's paths, the same in
-/// every lane, so cargo keeps them and rebuilds only the workspace's own crates. A failed clone
-/// leaves the lane cold, as before.
+/// every lane, so cargo keeps them; the workspace's own crates are keyed by their paths within
+/// the tree, also the same in every lane, so their units are dropped ([`forget_tree_units`]) and
+/// rebuilt from this lane's tree. A failed clone leaves the lane cold, as before.
 pub fn seed(dir: &Utf8Path, sub: &str) {
     let target = dir.join(sub);
     if target.exists() {
@@ -125,16 +126,63 @@ pub fn seed(dir: &Utf8Path, sub: &str) {
         .arg(target.as_std_path())
         .status();
     match cloned {
-        Ok(status) if status.success() => println!(
-            "  {sub} seeded from {} by a clone ({:.1}s)",
-            from.display(),
-            started.elapsed().as_secs_f64()
-        ),
+        Ok(status) if status.success() => {
+            let forgot = forget_tree_units(&target, &dir.join("tree"));
+            println!(
+                "  {sub} seeded from {} by a clone, {forgot} of its tree's units dropped ({:.1}s)",
+                from.display(),
+                started.elapsed().as_secs_f64()
+            );
+        }
         outcome => {
             println!("  {sub} not seeded from {} ({outcome:?}): built cold", from.display());
             let _gone = std::fs::remove_dir_all(target.as_std_path());
         }
     }
+}
+
+/// Drop from `target`, cloned from another lane, every unit of a package in `tree` (the
+/// workspace's crates and the vendored ones), and say how many went. The other lane built them
+/// from its own tree, and cargo takes a unit newer than its sources as fresh: one built there
+/// after this lane's tree was written stood in for this tree's (lane F's `slopty-platform`, with
+/// its unfinished edits, in lane P's iOS build, 2026-10-30). The registry's and git's units, the
+/// same in every lane, stay warm.
+fn forget_tree_units(target: &Utf8Path, tree: &Utf8Path) -> usize {
+    let mut manifests = ["xtask", "workspace-hack", "fuzz"]
+        .map(|member| tree.join(member).join("Cargo.toml"))
+        .to_vec();
+    for group in ["crates", "apps", "vendor"] {
+        let Ok(entries) = std::fs::read_dir(tree.join(group)) else { continue };
+        manifests.extend(
+            entries.filter_map(Result::ok).filter_map(|entry| {
+                Utf8PathBuf::from_path_buf(entry.path().join("Cargo.toml")).ok()
+            }),
+        );
+    }
+    let names: Vec<String> = manifests
+        .iter()
+        .filter_map(|manifest| std::fs::read_to_string(manifest).ok())
+        .filter_map(|text| text.parse::<toml::Table>().ok())
+        .filter_map(|table| Some(table.get("package")?.get("name")?.as_str()?.to_owned()))
+        .collect();
+    // `<target>/<profile>/.fingerprint` and `<target>/<triple>/<profile>/.fingerprint`.
+    let profiles =
+        std::fs::read_dir(target).into_iter().flatten().filter_map(Result::ok).flat_map(|entry| {
+            let path = entry.path();
+            let nested = std::fs::read_dir(&path).into_iter().flatten().filter_map(Result::ok);
+            std::iter::once(path).chain(nested.map(|inner| inner.path())).collect::<Vec<_>>()
+        });
+    let ours = |name: &str| {
+        name.rsplit_once('-').is_some_and(|(package, hash)| {
+            names.iter().any(|n| n == package) && hash.chars().all(|c| c.is_ascii_hexdigit())
+        })
+    };
+    profiles
+        .filter_map(|profile| std::fs::read_dir(profile.join(".fingerprint")).ok())
+        .flat_map(|units| units.filter_map(Result::ok))
+        .filter(|unit| unit.file_name().to_str().is_some_and(ours))
+        .filter(|unit| std::fs::remove_dir_all(unit.path()).is_ok())
+        .count()
 }
 
 /// Whether `target` holds a build for a target triple (`<triple>/debug`).
@@ -214,4 +262,50 @@ pub fn load_average() -> Option<f64> {
         .next()?
         .parse()
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unit of the tree's own crate goes, in every profile and triple; a dependency's, a name
+    /// that only starts like one of the tree's, and a file that is not a unit stay.
+    #[test]
+    fn a_clone_forgets_the_trees_units_and_keeps_the_dependencies() {
+        let dir = std::env::temp_dir().join(format!("xtask-seed-forget-{}", std::process::id()));
+        let _fresh = std::fs::remove_dir_all(&dir);
+        let root = Utf8PathBuf::from_path_buf(dir).expect("a UTF-8 temp dir");
+        let tree = root.join("tree");
+        for (manifest, name) in [
+            ("crates/slopty-platform", "slopty-platform"),
+            ("xtask", "xtask"),
+            ("fuzz", "slopty-fuzz"),
+        ] {
+            std::fs::create_dir_all(tree.join(manifest)).expect("a crate dir");
+            let text = format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n");
+            std::fs::write(tree.join(manifest).join("Cargo.toml"), text).expect("a manifest");
+        }
+        let target = root.join("target");
+        let host = target.join("debug/.fingerprint");
+        let sim = target.join("aarch64-apple-ios-sim/debug/.fingerprint");
+        let units = [
+            (host.join("slopty-platform-0a1b2c3d4e5f6a7b"), false),
+            (host.join("xtask-00ff00ff00ff00ff"), false),
+            (host.join("slopty-fuzz-1234abcd1234abcd"), false),
+            (sim.join("slopty-platform-a7b6c5d4e3f2a1b0"), false),
+            (host.join("serde-0a1b2c3d4e5f6a7b"), true),
+            (host.join("slopty-platform-macros-0a1b2c3d4e5f6a7b"), true),
+            (sim.join("libc-a7b6c5d4e3f2a1b0"), true),
+        ];
+        for (unit, _) in &units {
+            std::fs::create_dir_all(unit).expect("a unit dir");
+        }
+        std::fs::write(host.join("slopty-platform-notes"), "").expect("a stray file");
+        assert_eq!(forget_tree_units(&target, &tree), 4);
+        for (unit, stays) in units {
+            assert_eq!(unit.exists(), stays, "{unit}");
+        }
+        assert!(host.join("slopty-platform-notes").exists());
+        let _gone = std::fs::remove_dir_all(&root);
+    }
 }
