@@ -234,7 +234,7 @@ fn claude_mod_in(sh: &Shell, scratch: &camino::Utf8Path) -> Result<String> {
     std::os::unix::fs::symlink(root.join("target"), scratch.join("target"))?;
     let xtask = std::env::current_exe().context("the xtask binary")?;
     let _root = sh.push_env(crate::tools::REPO_ROOT, scratch);
-    fails(cmd!(sh, "{xtask} claude-mod check --deep --force"), &["schedule "])
+    fails(cmd!(sh, "{xtask} claude-mod check --deep --force"), &["(fail) schedule "])
 }
 
 /// `package` selected as `cargo xtask nightly` selects its packages: with the workspace hack on a
@@ -271,7 +271,10 @@ fn signed(text: &str, signatures: &[&str]) -> Result<String> {
 }
 
 /// Run `command` as a step, its output captured and then printed under the step's title; whether
-/// it passed, and the output.
+/// it passed, and the output without its escape sequences. A runner's tools print in colour
+/// (`CARGO_TERM_COLOR=always`), and nextest's `1 passed` came as `1`, a colour code, and
+/// `passed`, so the realtime canary found no `1 passed` in a run that passed (Deep run
+/// 40989163091).
 fn shown(command: Cmd<'_>) -> Result<(bool, String)> {
     let title = command.to_string();
     println!("▶ canary: {title}");
@@ -280,7 +283,7 @@ fn shown(command: Cmd<'_>) -> Result<(bool, String)> {
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     println!("{text}");
     println!("  canary run {}: {title}", if out.status.success() { "passed" } else { "failed" });
-    Ok((out.status.success(), text))
+    Ok((out.status.success(), crate::claude_mod::strip_escapes(&text)))
 }
 
 /// The coverage canary: the fixture's tests under the coverage run's environment, then its report,
@@ -457,6 +460,9 @@ mod tests {
         signed("x\nThreadSanitizer: data race (pid 1)\n", &["data race"]).unwrap();
         let wrong = signed("thread panicked: a timeout\n", &["ThreadSanitizer: data race"]);
         assert!(wrong.unwrap_err().to_string().contains("not for the planted reason"));
+        // nextest's summary on a runner, which prints in colour.
+        let coloured = "1 test run: \u{1b}[1m1\u{1b}[0m \u{1b}[32;1mpassed\u{1b}[0m";
+        signed(&crate::claude_mod::strip_escapes(coloured), &["1 passed"]).unwrap();
         assert_eq!(
             signed(
                 "a\n  minimal failing input: n = 1000\n",

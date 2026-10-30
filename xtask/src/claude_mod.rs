@@ -792,7 +792,7 @@ pub fn pause(period: Duration) {
 }
 
 /// `text` without CSI, OSC and charset escape sequences.
-fn strip_escapes(text: &str) -> String {
+pub fn strip_escapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
