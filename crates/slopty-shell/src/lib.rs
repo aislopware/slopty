@@ -143,16 +143,7 @@ pub fn start(config: UiConfig, cx: &mut App) -> gpui::WindowHandle<shell::Shell>
         let font_availability = typography::register_fonts(cx);
         // Typography first: theme installation reads the effective family, so
         // the first frame has the final font and palette without a flash.
-        typography::init(
-            ui_settings.ui_font_family.clone(),
-            ui_settings.ui_font_size,
-            ui_settings.terminal_font_family.clone(),
-            ui_settings.terminal_font_size,
-            ui_settings.code_font_family.clone(),
-            ui_settings.code_font_size,
-            font_availability,
-            cx,
-        );
+        typography::init(&ui_settings, font_availability, cx);
         appearance::init(
             ui_settings.appearance,
             ui_settings.theme_selection,

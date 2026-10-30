@@ -1938,16 +1938,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            typography::init(
-                UiFontFamily::Geist,
-                UiFontSize::default(),
-                UiFontFamily::GeistMono,
-                typography::TERMINAL_FONT_SIZE_DEFAULT,
-                UiFontFamily::GeistMono,
-                typography::CODE_FONT_SIZE_DEFAULT,
-                FontAvailability::all(),
-                cx,
-            );
+            typography::init(&crate::settings::UiSettings::default(), FontAvailability::all(), cx);
         });
         let window = cx.add_window(|_, cx| AppearancePage::new(cx));
         window
@@ -1990,12 +1981,11 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
             typography::init(
-                UiFontFamily::Geist,
-                UiFontSize::default(),
-                UiFontFamily::Installed("Arial".into()),
-                typography::TERMINAL_FONT_SIZE_DEFAULT,
-                UiFontFamily::Installed("Arial".into()),
-                typography::CODE_FONT_SIZE_DEFAULT,
+                &crate::settings::UiSettings {
+                    terminal_font_family: UiFontFamily::Installed("Arial".into()),
+                    code_font_family: UiFontFamily::Installed("Arial".into()),
+                    ..crate::settings::UiSettings::default()
+                },
                 FontAvailability::all(),
                 cx,
             );

@@ -27,29 +27,9 @@
 //!
 //! Text tones are chosen so each light token lands within ~0.5 of its dark
 //! counterpart's contrast ratio against its own background — the pairing is
-//! verified in [`tests::text_contrast_is_paired_across_appearances`], not eyeballed.
+//! verified by the test `text_contrast_is_paired_across_appearances`, not eyeballed.
 //!
 //! Installed as a gpui [`Global`] at boot; read with [`Theme::of`].
-#![allow(
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    clippy::assert_is_empty,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::default_trait_access,
-    clippy::expect_used,
-    clippy::float_cmp_const,
-    clippy::indexing_slicing,
-    clippy::manual_midpoint,
-    clippy::many_single_char_names,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::return_self_not_must_use,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
@@ -71,19 +51,27 @@ pub enum AccentColor {
     #[default]
     #[serde(alias = "violet", alias = "indigo", alias = "red", alias = "purple")]
     Slopty,
+    /// Orange.
     Orange,
+    /// Amber.
     Amber,
+    /// Green.
     Green,
+    /// Cyan.
     #[serde(alias = "teal")]
     Cyan,
+    /// Blue.
     Blue,
+    /// Pink.
     Pink,
 }
 
 impl AccentColor {
+    /// Every accent, in the picker's order.
     pub const ALL: [Self; 7] =
         [Self::Slopty, Self::Orange, Self::Amber, Self::Green, Self::Cyan, Self::Blue, Self::Pink];
 
+    /// The accent's name in the picker.
     pub const fn label(self) -> &'static str {
         match self {
             Self::Slopty => "Slopty",
@@ -170,13 +158,17 @@ impl From<AccentPreset> for AccentColor {
     }
 }
 
-/// The three authored rows of the animated 2×3 pixel glyph. Keeping this as a
-/// palette entity preserves the mark's light→mid→deep personality while letting
+/// The three authored rows of the animated 2×3 pixel glyph.
+///
+/// Keeping this as a palette entity preserves the mark's light→mid→deep personality while letting
 /// every accent preset own it as one coherent family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlyphPalette {
+    /// The top row, the lightest.
     pub light: Hsla,
+    /// The middle row, the accent itself.
     pub mid: Hsla,
+    /// The bottom row, the deepest.
     pub deep: Hsla,
 }
 
@@ -198,6 +190,7 @@ impl GlyphPalette {
         Self { light, mid: primary, deep }
     }
 
+    /// The three rows, top to bottom.
     pub const fn rows(self) -> [Hsla; 3] {
         [self.light, self.mid, self.deep]
     }
@@ -219,16 +212,20 @@ struct AccentTokens {
 /// Which appearance the app is painting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Appearance {
+    /// Light text on dark surfaces.
     #[default]
     Dark,
+    /// Dark text on light surfaces.
     Light,
 }
 
 impl Appearance {
+    /// Whether this is the dark appearance.
     pub const fn is_dark(self) -> bool {
         matches!(self, Self::Dark)
     }
 
+    /// Whether this is the light appearance.
     pub const fn is_light(self) -> bool {
         matches!(self, Self::Light)
     }
@@ -320,8 +317,8 @@ fn harden_model_foreground(
     let mut best = color;
     let mut best_contrast = minimum_contrast(color);
     for target in targets {
-        for step in 1..=100 {
-            let candidate = color.mix(target, step as f32 / 100.0);
+        for step in 1..=100_u8 {
+            let candidate = color.mix(target, f32::from(step) / 100.0);
             let contrast = minimum_contrast(candidate);
             if contrast > best_contrast {
                 best = candidate;
@@ -382,44 +379,76 @@ pub const INK_FILL_SCALE: f32 = 1.0;
 /// keeps separators legible instead of dissolving into the panel.
 pub const INK_HAIRLINE_SCALE: f32 = 1.35;
 
-/// Paint-only syntax colors. The hues follow the Git history graph's lane
-/// palette (indigo, pink, emerald, amber, red, neutral), while light-mode
-/// variants are darkened enough to remain readable as text on white.
+/// Paint-only syntax colors.
+///
+/// The hues follow the Git history graph's lane palette (indigo, pink, emerald, amber, red,
+/// neutral), while light-mode variants are darkened enough to remain readable as text on white.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxPalette {
+    /// Comments.
     pub comment: Hsla,
+    /// Keywords.
     pub keyword: Hsla,
+    /// String literals.
     pub string: Hsla,
+    /// Special strings: regular expressions, symbols, interpolations.
     pub string_special: Hsla,
+    /// Escape sequences inside strings.
     pub escape: Hsla,
+    /// Number literals.
     pub number: Hsla,
+    /// Boolean literals.
     pub boolean: Hsla,
+    /// Type names.
     pub type_name: Hsla,
+    /// Built-in types.
     pub type_builtin: Hsla,
+    /// Constructors and enum variants.
     pub constructor: Hsla,
+    /// Function names.
     pub function: Hsla,
+    /// Built-in functions.
     pub function_builtin: Hsla,
+    /// Macros.
     pub macro_name: Hsla,
+    /// Properties and fields.
     pub property: Hsla,
+    /// Constants.
     pub constant: Hsla,
+    /// Variables.
     pub variable: Hsla,
+    /// Special variables (`self`, `this`, `super`).
     pub variable_special: Hsla,
+    /// Parameters.
     pub parameter: Hsla,
+    /// Operators.
     pub operator: Hsla,
+    /// Punctuation, and the delimiters of embedded code.
     pub punctuation: Hsla,
+    /// Markup tags.
     pub tag: Hsla,
+    /// Attributes.
     pub attribute: Hsla,
+    /// Labels.
     pub label: Hsla,
+    /// Markup headings.
     pub markup_heading: Hsla,
+    /// Raw (code) spans in markup.
     pub markup_raw: Hsla,
+    /// Links in markup.
     pub markup_link: Hsla,
+    /// References in markup.
     pub markup_reference: Hsla,
+    /// Emphasis in markup.
     pub markup_emphasis: Hsla,
+    /// Strong emphasis in markup.
     pub markup_strong: Hsla,
+    /// Invalid tokens.
     pub invalid: Hsla,
 }
 
 impl SyntaxPalette {
+    /// The colour of a highlight of `kind`.
     pub const fn color(&self, kind: HighlightKind) -> Hsla {
         match kind {
             HighlightKind::Comment => self.comment,
@@ -455,7 +484,7 @@ impl SyntaxPalette {
         }
     }
 
-    fn from_variant(variant: &ThemeVariant, fallback: Self) -> Self {
+    fn from_variant(variant: &ThemeVariant, fallback: &Self) -> Self {
         let color = |key: &str, fallback: Hsla| {
             variant.syntax.get(key).copied().map_or(fallback, model_color)
         };
@@ -748,17 +777,20 @@ pub struct Theme {
     /// Absolute pixel sizes for those two surfaces. They live on the theme
     /// because every render site that needs them already holds a `Theme`.
     pub code_font_size: f32,
+    /// The terminal's text size, in pixels.
     pub terminal_font_size: f32,
-    /// Explicit system fallbacks, for callers that want to skip the lookup.
-    pub font_sans_fallback: SharedString,
-    pub font_mono_fallback: SharedString,
 }
 
-#[derive(Debug, Clone)]
+/// A terminal's palette.
+#[derive(Debug, Clone, Default)]
 pub struct TerminalColors {
+    /// Its background.
     pub background: Hsla,
+    /// Its default text.
     pub foreground: Hsla,
+    /// Its selection.
     pub selection: Hsla,
+    /// The sixteen ANSI colours, the eight normal ones then the eight bright.
     pub ansi: [Hsla; 16],
 }
 
@@ -782,8 +814,8 @@ impl TerminalColors {
             Appearance::Dark => "slopty-dark",
             Appearance::Light => "slopty-light",
         };
-        let registry = ThemeRegistry::builtin();
-        Self::from_variant(registry.variant(id).expect("Slopty terminal palette exists"))
+        // The built-in registry carries both; a palette it lacked would paint transparent.
+        ThemeRegistry::builtin().variant(id).map_or_else(Self::default, Self::from_variant)
     }
 }
 
@@ -821,10 +853,15 @@ impl Theme {
     /// Base spacing steps. slopty: 2 and 6 are steps too, so a hairline nudge and the most used
     /// gap stay on the ladder: 2 / 4 / 6 / 8 / 12 / 16.
     pub const SPACE_2XS: f32 = 2.0;
+    /// The large step, 16 px.
     pub const SPACE_LG: f32 = 16.0;
+    /// The middle step, 12 px.
     pub const SPACE_MD: f32 = 12.0;
+    /// The small step, 8 px.
     pub const SPACE_SM: f32 = 8.0;
+    /// The snug step, 6 px: the most used gap.
     pub const SPACE_SNUG: f32 = 6.0;
+    /// The extra-small step, 4 px.
     pub const SPACE_XS: f32 = 4.0;
     /// Reserved status strip under the content outlet (slopty `h-6`) — the
     /// `WorkingIndicator` row; reserving it keeps the composer from shifting.
@@ -875,8 +912,8 @@ impl Theme {
     /// whose blurred content can otherwise invalidate an imported palette's
     /// original solid-background assumptions.
     fn contrast_checked_tint_alpha(&self, tint: Hsla, base: f32, backdrop: Hsla) -> f32 {
-        for step in 0..=20 {
-            let alpha = base + (1.0 - base) * step as f32 / 20.0;
+        for step in 0..=20_u8 {
+            let alpha = base + (1.0 - base) * f32::from(step) / 20.0;
             let composite = flatten(tint.opacity(alpha), backdrop);
             if painted_contrast(self.text, composite) >= 4.5
                 && painted_contrast(self.text_muted, composite) >= 3.0
@@ -942,6 +979,7 @@ impl Theme {
     /// Preserve the theme's text hierarchy on floating surfaces. Small labels
     /// need readable contrast after both their alpha and the glass are painted;
     /// replacing authored colors with fixed foreground opacities loses that.
+    #[must_use]
     pub fn for_popup(&self) -> Self {
         let mut popup = self.clone();
         if self.is_frost() {
@@ -964,8 +1002,8 @@ impl Theme {
             if matches!(self.appearance, Appearance::Light)
                 && painted_contrast(popup.text, background) < 4.5
             {
-                for step in 1..=100 {
-                    popup.text = mix(self.text, grey(0), step as f32 / 100.0);
+                for step in 1..=100_u8 {
+                    popup.text = mix(self.text, grey(0), f32::from(step) / 100.0);
                     if painted_contrast(popup.text, background) >= 4.5 {
                         break;
                     }
@@ -976,8 +1014,8 @@ impl Theme {
                 if painted_contrast(original, background) >= 4.5 {
                     continue;
                 }
-                for step in 1..=100 {
-                    *color = mix(original, popup.text, step as f32 / 100.0);
+                for step in 1..=100_u8 {
+                    *color = mix(original, popup.text, f32::from(step) / 100.0);
                     if painted_contrast(*color, background) >= 4.5 {
                         break;
                     }
@@ -989,6 +1027,7 @@ impl Theme {
 
     /// Settings pages used the authored dark theme before the shared frost
     /// change. Keep that foreground palette while light pages use popup text.
+    #[must_use]
     pub fn for_settings_surface(&self) -> Self {
         if matches!(self.appearance, Appearance::Dark) { self.clone() } else { self.for_popup() }
     }
@@ -1090,6 +1129,8 @@ impl Theme {
         layers
     }
 
+    /// The tint dark floating cards and the composer's sidebar lay over their blur: the colour
+    /// that, laid over the window's glass, lands on the page's own tone, painted at 15 %.
     pub fn composer_sidebar_tint(&self) -> Hsla {
         let target = if self.is_glass() {
             flatten(self.bg.opacity(0.4), flatten(self.glass(), self.bg))
@@ -1108,11 +1149,17 @@ impl Theme {
             };
             alpha = alpha.max(needed);
         }
-        let rgb = std::array::from_fn::<_, 3, _>(|i| {
-            ((target[i] - canvas[i] * (1.0 - alpha)) / alpha).clamp(0.0, 1.0)
-        });
-        let (h, s, l) = rgb_to_hsl(rgb[0], rgb[1], rgb[2]);
-        hsla(h, s, l, 0.15)
+        // The channel that, laid over `canvas` at `alpha`, lands on `target`.
+        let unblend = |canvas: f32, target: f32| {
+            ((alpha - 1.0).mul_add(canvas, target) / alpha).clamp(0.0, 1.0)
+        };
+        let ([canvas_r, canvas_g, canvas_b], [target_r, target_g, target_b]) = (canvas, target);
+        let (hue, saturation, lightness) = rgb_to_hsl(
+            unblend(canvas_r, target_r),
+            unblend(canvas_g, target_g),
+            unblend(canvas_b, target_b),
+        );
+        hsla(hue, saturation, lightness, 0.15)
     }
 
     /// Shared fill for the composer, queue tray, and input panels. Without
@@ -1181,6 +1228,7 @@ impl Theme {
         Self::dark_with_accent(AccentColor::default())
     }
 
+    /// [`Self::dark`] in `accent_color`.
     pub fn dark_with_accent(accent_color: AccentColor) -> Self {
         let accent = accent_color.tokens(Appearance::Dark);
         Self {
@@ -1243,8 +1291,6 @@ impl Theme {
             font_terminal: "Geist Mono".into(),
             code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
-            font_sans_fallback: system_sans().into(),
-            font_mono_fallback: system_mono().into(),
         }
     }
 
@@ -1260,6 +1306,7 @@ impl Theme {
         Self::light_with_accent(AccentColor::default())
     }
 
+    /// [`Self::light`] in `accent_color`.
     pub fn light_with_accent(accent_color: AccentColor) -> Self {
         let accent = accent_color.tokens(Appearance::Light);
         Self {
@@ -1341,8 +1388,6 @@ impl Theme {
             font_terminal: "Geist Mono".into(),
             code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
             terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
-            font_sans_fallback: system_sans().into(),
-            font_mono_fallback: system_mono().into(),
         }
     }
 
@@ -1351,6 +1396,7 @@ impl Theme {
         Self::for_preferences(appearance, AccentColor::default())
     }
 
+    /// The theme for `appearance` in `accent`.
     pub fn for_preferences(appearance: Appearance, accent: AccentColor) -> Self {
         match appearance {
             Appearance::Dark => Self::dark_with_accent(accent),
@@ -1400,9 +1446,12 @@ impl Theme {
         let variant = registry
             .variant(variant_id)
             .filter(|variant| model_appearance(variant.appearance) == appearance)
-            .or_else(|| registry.variant(fallback_id))
-            .expect("the built-in registry contains both Slopty appearances");
-        Self::from_variant(variant, accent_selection, surface_preference)
+            .or_else(|| registry.variant(fallback_id));
+        match variant {
+            Some(variant) => Self::from_variant(variant, accent_selection, surface_preference),
+            // The built-in registry carries both Slopty appearances; the authored ones stand in.
+            None => Self::for_preferences(appearance, accent_color_of(accent_selection)),
+        }
     }
 
     pub(crate) fn from_variant(
@@ -1411,10 +1460,7 @@ impl Theme {
         surface_preference: SurfacePreference,
     ) -> Self {
         let appearance = model_appearance(variant.appearance);
-        let accent_color = match accent_selection {
-            AccentSelection::ThemeDefault => AccentColor::Slopty,
-            AccentSelection::Preset(preset) => preset.into(),
-        };
+        let accent_color = accent_color_of(accent_selection);
         let mut theme = Self::for_preferences(appearance, accent_color);
         let colors = &variant.colors;
         let accent = variant.accent_for(accent_selection);
@@ -1489,7 +1535,7 @@ impl Theme {
         theme.danger_strong = model_color(colors.danger);
         theme.code_text = model_color(accent.primary);
         theme.code_wash = model_color(accent.wash);
-        theme.syntax = SyntaxPalette::from_variant(variant, theme.syntax);
+        theme.syntax = SyntaxPalette::from_variant(variant, &theme.syntax);
         theme.diff_add = model_color(colors.diff_add);
         theme.diff_del = model_color(colors.diff_delete);
         theme.terminal = TerminalColors::from_variant(variant);
@@ -1516,6 +1562,7 @@ impl Theme {
         Self::install_preferences(appearance, AccentColor::default(), cx);
     }
 
+    /// [`Self::install`] in `accent`.
     pub fn install_preferences(appearance: Appearance, accent: AccentColor, cx: &mut App) {
         let accent_changed =
             cx.try_global::<Self>().is_some_and(|theme| theme.accent_color != accent);
@@ -1536,6 +1583,8 @@ impl Theme {
         }
     }
 
+    /// Install a registered variant with its accent and surface choices
+    /// ([`Self::for_selection`]), as [`Self::install`] does.
     pub fn install_selection(
         appearance: Appearance,
         variant_id: &str,
@@ -1663,12 +1712,12 @@ impl Default for Theme {
 
 impl Global for Theme {}
 
-const fn system_sans() -> &'static str {
-    if cfg!(target_os = "macos") { "Helvetica" } else { "DejaVu Sans" }
-}
-
-const fn system_mono() -> &'static str {
-    if cfg!(target_os = "macos") { "Menlo" } else { "DejaVu Sans Mono" }
+/// The accent a selection paints in: the theme's own is Slopty's.
+fn accent_color_of(selection: AccentSelection) -> AccentColor {
+    match selection {
+        AccentSelection::ThemeDefault => AccentColor::Slopty,
+        AccentSelection::Preset(preset) => preset.into(),
+    }
 }
 
 /// A neutral (chroma 0) oklch tone as Hsla. Chroma 0 means r == g == b exactly,
@@ -1810,14 +1859,14 @@ const fn band_for(appearance: Appearance) -> Hsla {
     }
 }
 
-/// Selected-state glass treatment (tabs, session rows, space rows): a
-/// TRANSLUCENT wash the vibrancy reads through — heavier flat washes blocked
-/// the glass (user request). Dark: the 11% [`wash`]. Light: the tone-flipped
-/// wash at 6% — 11% black read too dark over the bright frost (user report;
-/// light also previously ran a near-opaque white chip, rejected the same
-/// way). Same fill as [`Theme::glass_hover`] — the ring in
-/// [`glass_selected_shadows`] is what distinguishes selection. Selection
-/// *inside floating cards* is different — see [`card_selected_bg`].
+/// Selected-state glass treatment (tabs, session rows, space rows).
+///
+/// A TRANSLUCENT wash the vibrancy reads through — heavier flat washes blocked the glass (user
+/// request). Dark: the 11% [`wash`]. Light: the tone-flipped wash at 6% — 11% black read too dark
+/// over the bright frost (user report; light also previously ran a near-opaque white chip, rejected
+/// the same way). Same fill as [`Theme::glass_hover`] — the ring in [`glass_selected_shadows`] is
+/// what distinguishes selection. Selection *inside floating cards* is different — see
+/// [`card_selected_bg`].
 pub fn glass_selected_bg() -> Hsla {
     match current_appearance() {
         Appearance::Dark => wash(0.11),
@@ -1825,10 +1874,11 @@ pub fn glass_selected_bg() -> Hsla {
     }
 }
 
-/// The user message bubble's plate: the same translucent wash family as
-/// [`glass_selected_bg`], one step softer — at the selection weight the
-/// bubble read too strong for settled content (user report), and an opaque
-/// plate before that read as a solid slab over glass.
+/// The user message bubble's plate.
+///
+/// The same translucent wash family as [`glass_selected_bg`], one step softer — at the selection
+/// weight the bubble read too strong for settled content (user report), and an opaque plate before
+/// that read as a solid slab over glass.
 pub fn user_bubble_bg() -> Hsla {
     match current_appearance() {
         Appearance::Dark => wash(0.08),
@@ -1836,11 +1886,12 @@ pub fn user_bubble_bg() -> Hsla {
     }
 }
 
-/// Selected/keyboard-active treatment for rows and chips INSIDE a floating
-/// card (menu rows, the picker rail, segmented chips). The card is already the
-/// bright plane in light mode, so a white lift can't read there — selection is
-/// the tone-flipped grey wash, at 6% (dark's 11% read too dark on the bright
-/// plane, user report).
+/// Selected/keyboard-active treatment for rows and chips INSIDE a floating card (menu rows, the
+/// picker rail, segmented chips).
+///
+/// The card is already the bright plane in light mode, so a white lift can't read there — selection
+/// is the tone-flipped grey wash, at 6% (dark's 11% read too dark on the bright plane, user
+/// report).
 pub fn card_selected_bg() -> Hsla {
     match current_appearance() {
         Appearance::Dark => wash(0.11),
@@ -1848,11 +1899,12 @@ pub fn card_selected_bg() -> Hsla {
     }
 }
 
-/// The selected chip's bright outline, as an INSET shadow: gpui paints inset
-/// shadows ON TOP of the background, edges only — a border with zero layout
-/// cost. Drop shadows are filled rects painted BEHIND the element, and behind
-/// a 5% fill they showed straight through as an opaque dark plate with a
-/// greyed ring (user report) — nothing may paint behind a glass chip.
+/// The selected chip's bright outline, as an INSET shadow.
+///
+/// GPUI paints inset shadows ON TOP of the background, edges only — a border with zero layout cost.
+/// Drop shadows are filled rects painted BEHIND the element, and behind a 5% fill they showed
+/// straight through as an opaque dark plate with a greyed ring (user report) — nothing may paint
+/// behind a glass chip.
 ///
 /// Light pins the ring at a flat 7% black rather than the scaled hairline:
 /// heavier rings (the [`INK_HAIRLINE_SCALE`]d value, then 12%) outlined every
@@ -1871,14 +1923,14 @@ pub fn glass_selected_shadows() -> Vec<gpui::BoxShadow> {
     card_selected_shadows()
 }
 
-/// Selection outline for rows and chips INSIDE a floating card (menu rows,
-/// the picker rail, segmented chips): the inset ring alone, in both
-/// appearances. Card rows fill with a translucent wash
-/// ([`card_selected_bg`]), and a drop shadow — a filled rect painted BEHIND
-/// the element — shows straight through a translucent fill as a grey plate
-/// (the same lesson [`glass_selected_shadows`] records for dark glass). The
-/// card already carries the elevation shadow; selection inside it only needs
-/// the edge.
+/// Selection outline for rows and chips INSIDE a floating card (menu rows, the picker rail,
+/// segmented chips).
+///
+/// The inset ring alone, in both appearances. Card rows fill with a translucent wash
+/// ([`card_selected_bg`]), and a drop shadow — a filled rect painted BEHIND the element — shows
+/// straight through a translucent fill as a grey plate (the same lesson [`glass_selected_shadows`]
+/// records for dark glass). The card already carries the elevation shadow; selection inside it only
+/// needs the edge.
 pub fn card_selected_shadows() -> Vec<gpui::BoxShadow> {
     let color = match current_appearance() {
         Appearance::Dark => hairline(0.09),
@@ -1901,55 +1953,62 @@ pub fn grey(value: u8) -> Hsla {
 
 /// Convert an oklch color (CSS notation: L 0..1, C, H in degrees) to gpui Hsla.
 pub fn oklch(l: f32, c: f32, h_deg: f32) -> Hsla {
-    let [r, g, b] = oklch_to_srgb(l, c, h_deg);
-    let (h, s, l) = rgb_to_hsl(r, g, b);
-    hsla(h, s, l, 1.0)
+    let [red, green, blue] = oklch_to_srgb(l, c, h_deg);
+    let (hue, saturation, lightness) = rgb_to_hsl(red, green, blue);
+    hsla(hue, saturation, lightness, 1.0)
+}
+
+/// `OKLab` → LMS, cube roots undone (Björn Ottosson's matrix, as CSS Color 4 has it).
+const OKLAB_TO_LMS: [[f32; 3]; 3] = [
+    [1.0, 0.396_337_78, 0.215_803_76],
+    [1.0, -0.105_561_346, -0.063_854_17],
+    [1.0, -0.089_484_18, -1.291_485_5],
+];
+
+/// LMS → linear sRGB.
+const LMS_TO_SRGB: [[f32; 3]; 3] = [
+    [4.076_741_7, -3.307_711_6, 0.230_969_93],
+    [-1.268_438, 2.609_757_4, -0.341_319_4],
+    [-0.004_196_086_3, -0.703_418_6, 1.707_614_7],
+];
+
+/// One row of a colour matrix applied to a vector, the products summed left to right.
+fn dot([row0, row1, row2]: [f32; 3], [v0, v1, v2]: [f32; 3]) -> f32 {
+    row2.mul_add(v2, row1.mul_add(v1, row0 * v0))
 }
 
 /// oklch → sRGB (each 0..1, clamped/gamut-clipped per channel).
 /// Reference: Björn Ottosson's `OKLab` definition (the same matrices CSS Color 4 uses).
 pub(crate) fn oklch_to_srgb(l: f32, c: f32, h_deg: f32) -> [f32; 3] {
-    let h = h_deg.to_radians();
-    let a = c * h.cos();
-    let b = c * h.sin();
-
-    // OKLab → LMS (cube roots undone)
-    let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
-    let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
-    let s_ = l - 0.089_484_18 * a - 1.291_485_5 * b;
-    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
-
-    // LMS → linear sRGB
-    let r = 4.076_741_7 * l3 - 3.307_711_6 * m3 + 0.230_969_93 * s3;
-    let g = -1.268_438 * l3 + 2.609_757_4 * m3 - 0.341_319_4 * s3;
-    let b = -0.004_196_086_3 * l3 - 0.703_418_6 * m3 + 1.707_614_7 * s3;
-
-    [gamma_encode(r), gamma_encode(g), gamma_encode(b)]
+    let hue = h_deg.to_radians();
+    let lab = [l, c * hue.cos(), c * hue.sin()];
+    let lms = OKLAB_TO_LMS.map(|row| dot(row, lab)).map(|cone| cone * cone * cone);
+    LMS_TO_SRGB.map(|row| gamma_encode(dot(row, lms)))
 }
 
 fn gamma_encode(x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
-    if x <= 0.003_130_8 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
+    if x <= 0.003_130_8 { 12.92 * x } else { x.powf(1.0 / 2.4).mul_add(1.055, -0.055) }
 }
 
 /// sRGB (0..1 components) → HSL, all components 0..1 (gpui's Hsla convention).
 pub(crate) fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     let max = r.max(g).max(b);
     let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
+    let lightness = f32::midpoint(max, min);
     let delta = max - min;
     if delta < f32::EPSILON {
-        return (0.0, 0.0, l);
+        return (0.0, 0.0, lightness);
     }
-    let s = if l > 0.5 { delta / (2.0 - max - min) } else { delta / (max + min) };
-    let h = if (max - r).abs() < f32::EPSILON {
+    let saturation = if lightness > 0.5 { delta / (2.0 - max - min) } else { delta / (max + min) };
+    let hue = if (max - r).abs() < f32::EPSILON {
         ((g - b) / delta).rem_euclid(6.0)
     } else if (max - g).abs() < f32::EPSILON {
         (b - r) / delta + 2.0
     } else {
         (r - g) / delta + 4.0
     } / 6.0;
-    (h, s, l)
+    (hue, saturation, lightness)
 }
 
 /// HSL (gpui convention, all 0..1) → sRGB components 0..1.
@@ -1957,18 +2016,18 @@ pub(crate) fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
     if s <= f32::EPSILON {
         return [l, l, l];
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
-    let p = 2.0 * l - q;
+    let hi = if l < 0.5 { l * (1.0 + s) } else { l.mul_add(-s, l + s) };
+    let lo = l.mul_add(2.0, -hi);
     let hue = |mut t: f32| {
         t = t.rem_euclid(1.0);
         if t < 1.0 / 6.0 {
-            p + (q - p) * 6.0 * t
+            ((hi - lo) * 6.0).mul_add(t, lo)
         } else if t < 0.5 {
-            q
+            hi
         } else if t < 2.0 / 3.0 {
-            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+            ((hi - lo) * (2.0 / 3.0 - t)).mul_add(6.0, lo)
         } else {
-            p
+            lo
         }
     };
     [hue(h + 1.0 / 3.0), hue(h), hue(h - 1.0 / 3.0)]
@@ -1979,8 +2038,7 @@ pub fn relative_luminance(color: Hsla) -> f32 {
     let lin = |c: f32| {
         if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
     };
-    let [r, g, b] = hsl_to_rgb(color.h, color.s, color.l);
-    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    dot([0.2126, 0.7152, 0.0722], hsl_to_rgb(color.h, color.s, color.l).map(lin))
 }
 
 /// WCAG 2.1 contrast ratio between two opaque colors (1.0 … 21.0).
@@ -2000,19 +2058,18 @@ fn painted_contrast(foreground: Hsla, background: Hsla) -> f32 {
 /// Composite `fg` (which may be translucent) over an opaque `bg`, returning the
 /// opaque result — the color the eye actually receives.
 pub fn flatten(fg: Hsla, bg: Hsla) -> Hsla {
-    let a = fg.a.clamp(0.0, 1.0);
+    let alpha = fg.a.clamp(0.0, 1.0);
+    let over = |top: f32, under: f32| top.mul_add(alpha, under * (1.0 - alpha));
     let [fr, fg_, fb] = hsl_to_rgb(fg.h, fg.s, fg.l);
     let [br, bg_, bb] = hsl_to_rgb(bg.h, bg.s, bg.l);
-    let (h, s, l) =
-        rgb_to_hsl(fr * a + br * (1.0 - a), fg_ * a + bg_ * (1.0 - a), fb * a + bb * (1.0 - a));
-    hsla(h, s, l, 1.0)
+    let (hue, saturation, lightness) = rgb_to_hsl(over(fr, br), over(fg_, bg_), over(fb, bb));
+    hsla(hue, saturation, lightness, 1.0)
 }
 
 // A spinner on a light surface must read at a glance. Pale tints (the sunrise rows, an
 // accent's light glyph row, `text_muted`) take a deeper tone of their own hue, as the light theme
 // already does for its other roles, until they clear 3:1, WCAG's bar for non-text UI.
 
-/// The minimum contrast a spinner's lit cell keeps against the surface under it.
 /// How high a surface floats over the window ([`Theme::elevation`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Elevation {
@@ -2025,6 +2082,7 @@ pub enum Elevation {
 /// The ring a floating surface draws inside its edge: one device pixel at 2×.
 pub const ELEVATION_RING: f32 = 0.5;
 
+/// The minimum contrast a spinner's lit cell keeps against the surface under it.
 pub const SPINNER_CONTRAST: f32 = 3.0;
 
 /// WCAG contrast of `fg` drawn over the opaque `bg` (a translucent `fg` is composited first).
@@ -2061,8 +2119,12 @@ impl Theme {
         match self.appearance {
             Appearance::Dark => tint,
             Appearance::Light => {
-                let [a, b, c, d, e] = self.spinner_surfaces();
-                legible_on(tint, &[self.bg, a, b, c, d, e], SPINNER_CONTRAST)
+                let [surface, raised, card, dialog, overlay] = self.spinner_surfaces();
+                legible_on(
+                    tint,
+                    &[self.bg, surface, raised, card, dialog, overlay],
+                    SPINNER_CONTRAST,
+                )
             }
         }
     }
@@ -2095,7 +2157,7 @@ pub fn composer_surface_border(theme: &Theme) -> Hsla {
 /// Linear per-component mix of two colors (paint helper for the gradient spinner).
 pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let t = t.clamp(0.0, 1.0);
-    let lerp = |x: f32, y: f32| x + (y - x) * t;
+    let lerp = |x: f32, y: f32| (y - x).mul_add(t, x);
     // Mix through hue naively — both spinner endpoints sit close enough on the
     // wheel that shortest-arc handling isn't needed for our palette.
     hsla(lerp(a.h, b.h), lerp(a.s, b.s), lerp(a.l, b.l), lerp(a.a, b.a))
@@ -2105,6 +2167,11 @@ pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a channel in 0..1 times 255, rounded, is a u8"
+    )]
     fn srgb_u8(c: [f32; 3]) -> [u8; 3] {
         [(c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8]
     }
@@ -2119,12 +2186,13 @@ mod tests {
     // Dark sets text at its own weight; light keeps the platform's smoothing, and an
     // appearance switch carries the policy with it.
     #[gpui::test]
-    fn dark_text_is_set_at_its_own_weight(cx: &mut gpui::TestAppContext) {
+    fn dark_text_is_set_at_its_own_weight(cx: &gpui::TestAppContext) {
         assert_eq!(text_smoothing_for(Appearance::Dark), gpui::TextSmoothing::Antialiased);
         assert_eq!(text_smoothing_for(Appearance::Light), gpui::TextSmoothing::Native);
         cx.update(|cx| {
             gpui_base::init(cx);
-            crate::settings::init(Default::default(), tempfile::tempdir().unwrap().path(), cx);
+            let settings = crate::settings::UiSettings::default();
+            crate::settings::init(settings, tempfile::tempdir().unwrap().path(), cx);
             Theme::install(Appearance::Dark, cx);
             assert_eq!(cx.text_smoothing(), gpui::TextSmoothing::Antialiased);
             Theme::install(Appearance::Light, cx);
@@ -2160,12 +2228,12 @@ mod tests {
             Theme::light().danger,
             neutral(0.556),
         ] {
-            let [r, g, b] = hsl_to_rgb(c.h, c.s, c.l);
-            let (h, s, l) = rgb_to_hsl(r, g, b);
-            assert!((l - c.l).abs() < 1e-3, "lightness drift for {c:?}");
-            assert!((s - c.s).abs() < 1e-3, "saturation drift for {c:?}");
+            let [red, green, blue] = hsl_to_rgb(c.h, c.s, c.l);
+            let (hue, saturation, lightness) = rgb_to_hsl(red, green, blue);
+            assert!((lightness - c.l).abs() < 1e-3, "lightness drift for {c:?}");
+            assert!((saturation - c.s).abs() < 1e-3, "saturation drift for {c:?}");
             if c.s > 1e-3 {
-                assert!((h - c.h).abs() < 1e-3, "hue drift for {c:?}");
+                assert!((hue - c.h).abs() < 1e-3, "hue drift for {c:?}");
             }
         }
     }
@@ -3003,6 +3071,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the numbers are the reference's exactly")]
     fn layout_numbers_match_slopty() {
         assert_eq!(Theme::HEADER_HEIGHT, 44.0); // h-11
         assert_eq!(Theme::STATUS_STRIP_HEIGHT, 24.0); // h-6
@@ -3035,7 +3104,7 @@ mod tests {
             if theme.is_frost() {
                 let glass = theme.elevation(Elevation::Floating);
                 assert!(glass.iter().all(|s| s.inset), "nothing painted behind glass");
-                assert!(!glass.is_empty());
+                assert!(!glass.is_empty(), "glass still rings its edge");
             }
         }
     }
@@ -3064,6 +3133,7 @@ mod tests {
     /// rows and the muted grey all clear 3:1 against the canvas and each surface, keep their hue,
     /// and rest higher than on dark; dark keeps its colours and floor as they were.
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "dark keeps the floor it is given, exactly")]
     fn light_spinners_clear_three_to_one_on_every_surface() {
         let light = Theme::light();
         let mut tints: Vec<Hsla> =

@@ -1,19 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Device-local interface typography: bundled font registration, the persisted
 //! catalog choice, and the effective family installed into [`crate::theme::Theme`].
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::allow_attributes_without_reason,
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::float_cmp,
-    clippy::partial_pub_fields,
-    clippy::return_self_not_must_use,
-    clippy::string_slice,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,14 +13,19 @@ use crate::settings::{self, SavePolicy};
 /// A bundled, virtual, or device-local interface font choice.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum UiFontFamily {
+    /// The bundled Geist sans.
     #[default]
     Geist,
+    /// The bundled Geist Mono.
     GeistMono,
+    /// The platform's own interface face (SF on Apple platforms).
     System,
+    /// A family installed on this device, by its family name.
     Installed(String),
 }
 
 impl UiFontFamily {
+    /// The name a picker shows for the family.
     pub fn label(&self) -> &str {
         match self {
             Self::Geist => "Geist",
@@ -43,6 +35,7 @@ impl UiFontFamily {
         }
     }
 
+    /// The family name handed to the text system.
     pub fn family_name(&self) -> &str {
         match self {
             Self::Geist => "Geist",
@@ -81,10 +74,10 @@ impl<'de> Deserialize<'de> for UiFontFamily {
             // now resolve only when the family is installed on this device.
             "inter" => Self::Installed("Inter".into()),
             "atkinsonHyperlegibleNext" => Self::Installed("Atkinson Hyperlegible Next".into()),
-            value if value.starts_with("installed:") && value.len() > "installed:".len() => {
-                Self::Installed(value["installed:".len()..].to_owned())
-            }
-            _ => Self::Geist,
+            value => match value.strip_prefix("installed:") {
+                Some(name) if !name.is_empty() => Self::Installed(name.to_owned()),
+                _ => Self::Geist,
+            },
         })
     }
 }
@@ -96,17 +89,22 @@ impl<'de> Deserialize<'de> for UiFontFamily {
 pub struct UiFontSize(u8);
 
 impl UiFontSize {
+    /// The sizes the interface offers, smallest first.
     pub const ALL: [Self; 7] =
         [Self(12), Self(13), Self(14), Self(15), Self(16), Self(18), Self(20)];
 
+    /// The size in pixels.
     pub const fn pixels(self) -> f32 {
         self.0 as f32
     }
 
+    /// The name a picker shows for the size.
     pub fn label(self) -> SharedString {
         format!("{} px", self.0).into()
     }
 
+    /// The offered size nearest this one, so a hand-edited setting lands on the ladder.
+    #[must_use]
     pub fn normalized(self) -> Self {
         Self::ALL
             .into_iter()
@@ -127,9 +125,10 @@ pub const fn ui_rems(pixels_at_default: f32) -> Rems {
     rems(pixels_at_default / 16.0)
 }
 
-/// The interface's type ladder, each size at the 16 px baseline for [`ui_rems`]
-/// (Claude desktop's compact scale: caption 11, footnote 12, body 13, heading 14, title 20).
-/// Chrome takes its sizes from here; code, diffs and the terminal keep their own settings.
+/// The interface's type ladder, each size at the 16 px baseline for [`ui_rems`].
+///
+/// It follows Claude desktop's compact scale (caption 11, footnote 12, body 13, heading 14, title
+/// 20). Chrome takes its sizes from here; code, diffs and the terminal keep their own settings.
 pub mod ladder {
     /// Counts, badges, key hints, notices.
     pub const CAPTION: f32 = 11.0;
@@ -145,10 +144,12 @@ pub mod ladder {
     pub const DISPLAY: f32 = 20.0;
 }
 
-/// The faces text falls back to before the platform's own cascade: the bundled symbol
-/// face (`slopty_kit::fonts::SYMBOLS_FAMILY`, registered at launch), so a prompt's powerline,
-/// devicon and box-drawing glyphs draw wherever the shell sets text, not as empty boxes. It
-/// holds only those code points, so it never takes a letter from the text's own face.
+/// The faces text falls back to before the platform's own cascade.
+///
+/// That is the bundled symbol face (`slopty_kit::fonts::SYMBOLS_FAMILY`, registered at launch),
+/// so a prompt's powerline, devicon and box-drawing glyphs draw wherever the shell sets text, not
+/// as empty boxes. It holds only those code points, so it never takes a letter from the text's
+/// own face.
 pub fn symbol_fallbacks() -> gpui::FontFallbacks {
     gpui::FontFallbacks::from_fonts(vec![SYMBOLS_FAMILY.to_owned()])
 }
@@ -184,9 +185,13 @@ pub fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_owned(), 1)]))
 }
 
+/// The code and diff text size, in pixels, until the person picks one.
 pub const CODE_FONT_SIZE_DEFAULT: f32 = 12.5;
+/// The terminal text size, in pixels, until the person picks one.
 pub const TERMINAL_FONT_SIZE_DEFAULT: f32 = 13.0;
+/// The smallest code or terminal size, in pixels.
 pub const FONT_SIZE_MIN: f32 = 8.0;
+/// The largest code or terminal size, in pixels.
 pub const FONT_SIZE_MAX: f32 = 32.0;
 
 /// Clamp an absolute code/terminal pixel size into the supported range.
@@ -204,6 +209,7 @@ pub struct FontAvailability {
 }
 
 impl FontAvailability {
+    /// Every bundled family registered, plus Arial and Menlo installed.
     #[cfg(test)]
     pub fn all() -> Self {
         Self {
@@ -220,6 +226,7 @@ impl FontAvailability {
         }
     }
 
+    /// Families the interface and code pickers offer.
     pub fn choices(&self) -> &[UiFontFamily] {
         &self.choices
     }
@@ -229,6 +236,7 @@ impl FontAvailability {
         &self.fixed_width
     }
 
+    /// Whether `family` can be set on this device.
     pub fn is_available(&self, family: &UiFontFamily) -> bool {
         match family {
             UiFontFamily::Geist => self.geist,
@@ -238,6 +246,7 @@ impl FontAvailability {
         }
     }
 
+    /// Whether `family` can be set on this device and fills the terminal's cell grid.
     pub fn is_fixed_width_available(&self, family: &UiFontFamily) -> bool {
         self.is_available(family) && self.fixed_width.contains(family)
     }
@@ -282,17 +291,17 @@ impl Default for FontAvailability {
 /// Interface and code/diff pick from the whole catalog — they lay text out
 /// naturally, so proportional faces are legal. The terminal paints into a cell
 /// grid sized by the `m` advance, so it picks from the fixed-width subset only.
-pub struct TypographyState {
-    pub requested: UiFontFamily,
-    pub effective: UiFontFamily,
-    pub size: UiFontSize,
-    pub terminal_requested: UiFontFamily,
-    pub terminal_effective: UiFontFamily,
-    pub terminal_font_size: f32,
-    pub code_requested: UiFontFamily,
-    pub code_effective: UiFontFamily,
-    pub code_font_size: f32,
-    pub availability: FontAvailability,
+struct TypographyState {
+    requested: UiFontFamily,
+    effective: UiFontFamily,
+    size: UiFontSize,
+    terminal_requested: UiFontFamily,
+    terminal_effective: UiFontFamily,
+    terminal_font_size: f32,
+    code_requested: UiFontFamily,
+    code_effective: UiFontFamily,
+    code_font_size: f32,
+    availability: FontAvailability,
     /// Monotonic signal for layout caches whose measurements depend on
     /// typography. Kept separate from the theme style generation so palette
     /// changes do not force expensive list remeasurement.
@@ -376,7 +385,7 @@ fn face_is_fixed_width(font: &ttf_parser::Face) -> bool {
     };
     let (min, max) =
         (advances.iter().copied().min().unwrap_or(0), advances.iter().copied().max().unwrap_or(0));
-    min > 0 && f32::from(max - min) <= FIXED_WIDTH_TOLERANCE * f32::from(min)
+    min > 0 && f32::from(max.abs_diff(min)) <= FIXED_WIDTH_TOLERANCE * f32::from(min)
 }
 
 /// Families that contain the Latin glyph GPUI relies on for text metrics,
@@ -460,89 +469,96 @@ fn resolve_effective_mono(
     if usable { requested.clone() } else { availability.fallback_mono() }
 }
 
-/// Install typography state before appearance builds the first [`crate::theme::Theme`].
-#[expect(clippy::too_many_arguments)]
-pub fn init(
-    requested: UiFontFamily,
-    size: UiFontSize,
-    terminal_requested: UiFontFamily,
-    terminal_font_size: f32,
-    code_requested: UiFontFamily,
-    code_font_size: f32,
-    availability: FontAvailability,
-    cx: &mut App,
-) {
+/// Install typography state from the persisted `settings`, before appearance builds the first
+/// [`crate::theme::Theme`].
+pub fn init(settings: &settings::UiSettings, availability: FontAvailability, cx: &mut App) {
+    let requested = settings.ui_font_family.clone();
+    let terminal_requested = settings.terminal_font_family.clone();
+    let code_requested = settings.code_font_family.clone();
     let effective = resolve_effective(&requested, &availability);
     let terminal_effective = resolve_effective_mono(&terminal_requested, &availability, true);
     let code_effective = resolve_effective_mono(&code_requested, &availability, false);
     cx.set_global(TypographyState {
         requested,
         effective,
-        size: size.normalized(),
+        size: settings.ui_font_size.normalized(),
         terminal_requested,
         terminal_effective,
-        terminal_font_size: clamp_font_size(terminal_font_size),
+        terminal_font_size: clamp_font_size(settings.terminal_font_size),
         code_requested,
         code_effective,
-        code_font_size: clamp_font_size(code_font_size),
+        code_font_size: clamp_font_size(settings.code_font_size),
         availability,
         generation: 0,
     });
 }
 
+/// The interface family the person picked.
 pub fn requested(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>().map(|state| state.requested.clone()).unwrap_or_default()
 }
 
+/// The interface family in use: the pick, or its fallback when this device lacks it.
 pub fn effective(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>().map(|state| state.effective.clone()).unwrap_or_default()
 }
 
+/// The text system's name for [`effective`].
 pub fn effective_family_name(cx: &App) -> SharedString {
     effective(cx).family_name().into()
 }
 
+/// The terminal family the person picked.
 pub fn terminal_requested(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
         .map_or(UiFontFamily::GeistMono, |state| state.terminal_requested.clone())
 }
 
+/// The terminal family in use: the pick, or Geist Mono when it is missing or not fixed width.
 pub fn terminal_effective(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
         .map_or(UiFontFamily::GeistMono, |state| state.terminal_effective.clone())
 }
 
+/// The text system's name for [`terminal_effective`].
 pub fn terminal_effective_family_name(cx: &App) -> SharedString {
     terminal_effective(cx).family_name().into()
 }
 
+/// The terminal text size, in pixels.
 pub fn terminal_font_size(cx: &App) -> f32 {
     cx.try_global::<TypographyState>()
         .map_or(TERMINAL_FONT_SIZE_DEFAULT, |state| state.terminal_font_size)
 }
 
+/// The code and diff family the person picked.
 pub fn code_requested(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
         .map_or(UiFontFamily::GeistMono, |state| state.code_requested.clone())
 }
 
+/// The code and diff family in use: the pick, or Geist Mono when this device lacks it.
 pub fn code_effective(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
         .map_or(UiFontFamily::GeistMono, |state| state.code_effective.clone())
 }
 
+/// The text system's name for [`code_effective`].
 pub fn code_effective_family_name(cx: &App) -> SharedString {
     code_effective(cx).family_name().into()
 }
 
+/// The code and diff text size, in pixels.
 pub fn code_font_size(cx: &App) -> f32 {
     cx.try_global::<TypographyState>().map_or(CODE_FONT_SIZE_DEFAULT, |state| state.code_font_size)
 }
 
+/// The interface's base size, which sets the rem.
 pub fn font_size(cx: &App) -> UiFontSize {
     cx.try_global::<TypographyState>().map(|state| state.size).unwrap_or_default()
 }
 
+/// The families this device can set.
 pub fn availability(cx: &App) -> FontAvailability {
     cx.try_global::<TypographyState>().map(|state| state.availability.clone()).unwrap_or_default()
 }
@@ -676,6 +692,10 @@ pub fn set_code_font_size(size: f32, cx: &mut App) -> bool {
     set_category_font_size(size, Category::Code, cx)
 }
 
+#[expect(
+    clippy::float_cmp,
+    reason = "change detection: any other clamped size is a change, however close"
+)]
 fn set_category_font_size(size: f32, category: Category, cx: &mut App) -> bool {
     let size = clamp_font_size(size);
     let Some(state) = cx.try_global::<TypographyState>() else {
@@ -745,7 +765,7 @@ mod tests {
             _window: &mut Window,
             _cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
-            let seen = self.0.clone();
+            let seen = std::rc::Rc::clone(&self.0);
             tracked_caps("Turns", 10.0, 0.1)
                 .on_children_prepainted(move |bounds, _, _| *seen.borrow_mut() = bounds)
         }
