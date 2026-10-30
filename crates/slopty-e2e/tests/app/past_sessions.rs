@@ -1,11 +1,11 @@
 //! Claude Code's past sessions on a real stack: sessions a TUI left in Claude Code's own store on
 //! the worker (a transcript under `~/.claude/projects/<folder>/` and the prompts in
-//! `~/.claude/history.jsonl`, as Claude Code writes them) are listed under the project's History,
-//! found by what was asked in them from "Resume a Claude Code session…", and taken up again: the
-//! stand-in Claude Code TUI (`slopty-stub-claude`) starts on the same session (`--resume <id>`)
-//! in a terminal that is the session's main column, and hears what is typed there. Each case is
-//! judged by the accessibility tree and by what the stand-ins heard (`STUB_RECORD`, one file per
-//! stand-in), and the worker's words in a thread by its read.
+//! `~/.claude/history.jsonl`, as Claude Code writes them) are found by what was asked in them,
+//! typed in the session picker (⌘K), and taken up again: the stand-in Claude Code TUI
+//! (`slopty-stub-claude`) starts on the same session (`--resume <id>`) in a terminal that is the
+//! session's main column, and hears what is typed there. Each case is judged by the accessibility
+//! tree and by what the stand-ins heard (`STUB_RECORD`, one file per stand-in), and the worker's
+//! words in a thread by its read.
 
 use std::path::{Path, PathBuf};
 
@@ -13,8 +13,8 @@ use slopty_e2e::Dump;
 use slopty_e2e::harness::ServedApp;
 
 use crate::served::{
-    STEP, TURN, all_holding, click, escaped, goldens, heard, holding, middle, rfc3339, says, seen,
-    start, thread_until,
+    STEP, TURN, all_holding, click, escaped, goldens, heard, holding, rfc3339, says, seen, start,
+    thread_until,
 };
 
 /// The worker's name, as the CLI names the machine.
@@ -26,10 +26,11 @@ const PARSER_ASKED: [&str; 2] = ["Explain the parser", "Now add tests for it"];
 const PARSER_SAID: [&str; 2] =
     ["The parser reads tokens one by one.", "Tests added for the parser."];
 
-/// Another, found by the words asked in it.
+/// Another, found by a word asked in its second prompt, not its first.
 const LEXER: &str = "0b7d4e19-8c2a-4f6b-b3d1-7e9a5c0f2b68";
-const LEXER_ASKED: [&str; 1] = ["Rename the lexer module to scanner"];
-const LEXER_SAID: [&str; 1] = ["Renamed lexer.rs to scanner.rs."];
+const LEXER_ASKED: [&str; 2] = ["Rename the lexer module", "Then point every import at scanner"];
+const LEXER_SAID: [&str; 2] =
+    ["Renamed lexer.rs to scanner.rs.", "Every import points at scanner."];
 
 /// A session a Claude Code still runs in a terminal of the worker's machine.
 const HELD: &str = "9d2e7a10-5c4b-4e8f-a1b2-c3d4e5f60718";
@@ -40,7 +41,7 @@ const HELD_SAID: [&str; 1] = ["Startup spends most of its time loading fonts."];
 const LIVE: &str = "Say hello";
 
 /// When the TUI's sessions were first asked, in ms since the epoch: a day and an hour before the
-/// moment the stack pins the app's clock to ([`slopty_e2e::harness::PINNED_MS`]), so History
+/// moment the stack pins the app's clock to ([`slopty_e2e::harness::PINNED_MS`]), so the picker
 /// says "1d" of them, at the same times of day, in every run.
 const fn asked_at() -> u64 {
     slopty_e2e::harness::PINNED_MS.saturating_sub(25 * 3_600_000)
@@ -144,7 +145,7 @@ async fn live_chat(stack: &ServedApp, folder: &Path, prompt: &str) {
     thread_until(stack, &agent, "answered", |read| read.to_string().contains("Done:")).await;
 }
 
-/// History's row of the session first asked `title`.
+/// The picker's row of the past session first asked `title`.
 fn past<'a>(dump: &'a Dump, title: &str) -> Option<&'a slopty_e2e::A11yNode> {
     holding(dump, "Button", &format!("Past session: {title}"))
 }
@@ -154,33 +155,21 @@ fn words(dump: &Dump) -> String {
     slopty_e2e::frame_text(&dump.a11y)
 }
 
-/// Open the first closed History in the sidebar, once drawn; the window once it is open.
-async fn open_history(drv: &mut slopty_e2e::Driver) -> Dump {
-    let (closed, open) = ("History: past Claude Code sessions", "History, open");
-    let dump = seen(drv, "History", STEP, |d| holding(d, "Button", closed).is_some()).await;
-    let was = all_holding(&dump, "Button", open).len();
-    let (x, y) = middle(holding(&dump, "Button", closed).unwrap());
-    drv.click(x, y).await.unwrap();
-    seen(drv, "History open", STEP, |d| all_holding(d, "Button", open).len() > was).await
-}
-
-/// The sidebar's row of the chat titled `title`, exactly: not History's row of a past session
-/// nor a picker's row that holds the same words.
+/// The sidebar's row of the chat titled `title`, exactly: not the picker's row of a past session
+/// or of a live one, which hold the same words and more.
 fn chat<'a>(dump: &'a Dump, title: &str) -> Option<&'a slopty_e2e::A11yNode> {
     dump.a11y.iter().find(|n| n.role == "Button" && n.label.as_deref() == Some(title))
 }
 
-/// The picker's row of the session titled `title`: its title, then the prompt that matched.
-fn picked<'a>(dump: &'a Dump, title: &str) -> Option<&'a slopty_e2e::A11yNode> {
-    let start = format!("{title}, ");
-    dump.a11y
-        .iter()
-        .find(|n| n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with(&start)))
+/// Open the session picker (⌘K) and type `typed` into it.
+async fn pick(drv: &mut slopty_e2e::Driver, typed: &str) {
+    drv.keys("cmd-k").await.unwrap();
+    seen(drv, "the session picker", STEP, |d| holding(d, "Dialog", "Sessions").is_some()).await;
+    drv.type_text(typed).await.unwrap();
 }
 
-/// The pointer away from what the goldens draw, on the empty top edge of the conversation, clear
-/// of every message's row: no tooltip or hover over a render (a message's hover line says when it
-/// was sent, a moment of the run).
+/// The pointer away from what the goldens draw, on the terminal's top right, clear of the
+/// picker's card and the chrome: no tooltip or hover over a render.
 async fn rest(drv: &mut slopty_e2e::Driver) {
     drv.ok(&slopty_e2e::Command::Move { x: 1300.0, y: 60.0 }).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -226,15 +215,15 @@ fn resumed(root: &Path, id: &str) -> Option<serde_json::Value> {
     })
 }
 
-/// A session the person ran in Claude Code's TUI is in its project's History, titled by its
-/// first prompt; opened, Claude Code takes it up again in a terminal in its folder (`--resume
-/// <id>`), that terminal the session's main column, its whole conversation the thread's, and a
-/// message typed there goes on with it. "Resume a Claude Code session…" (⇧⌘O) finds another
-/// by a word asked in it, the word lit in the prompt that matched, and opens it the same way. A
-/// session that became a chat leaves History.
+/// A session the person ran in Claude Code's TUI is found in the session picker (⌘K) by a word
+/// asked in it, titled by its first prompt, beside where and when it ran, and not the live chat's
+/// own; picked, Claude Code takes it up again in a terminal in its folder (`--resume <id>`), that
+/// terminal the session's main column, its whole conversation the thread's, and a message typed
+/// there goes on with it. A word asked only in a later prompt finds another, that prompt shown
+/// under its title with the word lit, and ↓ ⏎ takes it up past the row that would start one.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn a_tui_session_is_listed_opened_and_continued() {
+async fn a_tui_session_is_found_opened_and_continued() {
     let (mut stack, repo, _home) = stack().await;
     live_chat(&stack, &repo, LIVE).await;
     let root = stack.path("");
@@ -242,27 +231,30 @@ async fn a_tui_session_is_listed_opened_and_continued() {
     let drv = &mut stack.driver;
     drv.ok(&slopty_e2e::Command::Resize { width: 1320.0, height: 880.0 }).await.unwrap();
 
-    // History lists the TUI's sessions, not the live chat's own, each by its first prompt.
-    open_history(drv).await;
-    let listed = seen(drv, "the TUI's sessions in History", STEP, |d| {
-        past(d, PARSER_ASKED[0]).is_some() && past(d, LEXER_ASKED[0]).is_some()
-    })
-    .await;
+    // Typed, the picker finds the TUI's session by its first prompt, not the others.
+    pick(drv, "parser").await;
+    let found =
+        seen(drv, "the session the word finds", STEP, |d| past(d, PARSER_ASKED[0]).is_some()).await;
     assert_eq!(
-        all_holding(&listed, "Button", "Past session: ").len(),
-        3,
-        "the TUI's three sessions, not the live chat's own:\n{}",
-        words(&listed)
+        all_holding(&found, "Button", "Past session: ").len(),
+        1,
+        "only the session the word finds:\n{}",
+        words(&found)
+    );
+    let row = past(&found, PARSER_ASKED[0]).unwrap().label.clone().unwrap_or_default();
+    assert!(
+        row.contains(MACHINE) && row.contains("main") && row.contains("1d"),
+        "where and when: {row}"
     );
     rest(drv).await;
-    goldens(drv, &renders, "past-sessions-history", &[]).await;
+    goldens(drv, &renders, "picker-past", &[]).await;
 
-    // Opened, it is a session of the project: Claude Code taken up on it in a terminal, in its
-    // folder (`--resume <id>`), that terminal the main column, and it leaves History.
-    click(drv, "Button", &past(&listed, PARSER_ASKED[0]).unwrap().label.clone().unwrap()).await;
+    // Picked, it is a session of the project: Claude Code taken up on it in a terminal, in its
+    // folder (`--resume <id>`), that terminal the main column, the card gone.
+    click(drv, "Button", &row).await;
     seen(drv, "the session open in its terminal", STEP, |d| {
         chat(d, PARSER_ASKED[0]).is_some()
-            && past(d, PARSER_ASKED[0]).is_none()
+            && holding(d, "Dialog", "Sessions").is_none()
             && d.a11y.iter().any(|n| n.role == "Terminal")
     })
     .await;
@@ -292,57 +284,44 @@ async fn a_tui_session_is_listed_opened_and_continued() {
     })
     .await;
 
-    // Resume a Claude Code session…: found by a word asked in it, the word lit, opened.
-    drv.keys("cmd-shift-o").await.unwrap();
-    seen(drv, "the picker", STEP, |d| holding(d, "Tab", "Every folder").is_some()).await;
-    drv.type_text("scanner").await.unwrap();
-    let found = seen(drv, "the session the word finds", STEP, |d| {
-        picked(d, LEXER_ASKED[0]).is_some() && picked(d, PARSER_ASKED[0]).is_none()
+    // A word asked only in a later prompt: that prompt under the title, the row past the one
+    // that starts a session named so, reached by ↓ and taken up by ⏎.
+    pick(drv, "scanner").await;
+    let found = seen(drv, "the session its later prompt finds", STEP, |d| {
+        past(d, LEXER_ASKED[0]).is_some() && past(d, PARSER_ASKED[0]).is_none()
     })
     .await;
-    let row = picked(&found, LEXER_ASKED[0]).unwrap().label.clone().unwrap_or_default();
-    assert!(row.contains("scanner"), "the matched prompt is the row's: {row}");
+    let row = past(&found, LEXER_ASKED[0]).unwrap().label.clone().unwrap_or_default();
+    assert!(row.contains(LEXER_ASKED[1]), "the prompt that matched is the row's: {row}");
+    assert!(
+        holding(&found, "Button", "\u{201c}scanner\u{201d}").is_some(),
+        "the row that starts one comes first:\n{}",
+        words(&found)
+    );
     rest(drv).await;
-    goldens(drv, &renders, "past-sessions-picker", &[]).await;
+    goldens(drv, &renders, "picker-past-prompt", &[]).await;
+    drv.keys("down").await.unwrap();
     drv.keys("enter").await.unwrap();
-    seen(drv, "the found session open as a chat", STEP, |d| {
-        chat(d, LEXER_ASKED[0]).is_some() && holding(d, "Tab", "Every folder").is_none()
+    let opened = seen(drv, "the found session open", STEP, |d| {
+        chat(d, LEXER_ASKED[0]).is_some() && holding(d, "Dialog", "Sessions").is_none()
     })
     .await;
+    assert!(chat(&opened, "scanner").is_none(), "no session started named by the word");
+    resumed_on(&root, LEXER, None).await;
     thread_until(&stack, &thread_of(LEXER), "held the found conversation", |read| {
-        says(read, LEXER_SAID[0])
+        LEXER_SAID.iter().all(|w| says(read, w))
     })
     .await;
 
     stack.shutdown().await;
 }
 
-/// History says why it has nothing: with only a project whose folder Claude Code never ran in,
-/// there are no past sessions, and a store Claude Code's sessions cannot be read from says so in
-/// the machine's words, with Try again, which lists them once they can be read.
+/// A machine whose Claude Code store cannot be read says so in the picker, in its words, where
+/// the sessions would be; once readable, the next keystroke finds them.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn history_says_why_it_has_nothing() {
+async fn the_picker_says_why_it_found_no_past_session() {
     let (mut stack, repo, home) = stack().await;
-    let empty = stack.path("empty");
-    std::fs::create_dir_all(&empty).unwrap();
-    let empty = std::fs::canonicalize(&empty).unwrap();
-    live_chat(&stack, &empty, LIVE).await;
-    stack.driver.ok(&slopty_e2e::Command::Resize { width: 1320.0, height: 880.0 }).await.unwrap();
-    open_history(&mut stack.driver).await;
-    seen(&mut stack.driver, "History with nothing", STEP, |d| {
-        holding(d, "Status", "No past Claude Code sessions here").is_some()
-    })
-    .await;
-    // Shut, so opened again it asks again.
-    let dump = seen(&mut stack.driver, "History open", STEP, |d| {
-        holding(d, "Button", "History, open").is_some()
-    })
-    .await;
-    let (x, y) = middle(holding(&dump, "Button", "History, open").unwrap());
-    stack.driver.click(x, y).await.unwrap();
-
-    // The project whose store cannot be read.
     live_chat(&stack, &repo, LIVE).await;
     let store = home.join(".claude").join("projects").join(escaped(&repo));
     let locked = |mode: u32| {
@@ -352,26 +331,27 @@ async fn history_says_why_it_has_nothing() {
     locked(0o000);
 
     let drv = &mut stack.driver;
-    open_history(drv).await;
-    let said = seen(drv, "why History has nothing", STEP, |d| {
-        holding(d, "Status", "Claude Code's sessions: Permission denied").is_some()
+    drv.ok(&slopty_e2e::Command::Resize { width: 1320.0, height: 880.0 }).await.unwrap();
+    pick(drv, "parser").await;
+    let said = seen(drv, "why it found nothing", STEP, |d| {
+        holding(d, "Status", "Permission denied").is_some()
     })
     .await;
     assert!(past(&said, PARSER_ASKED[0]).is_none(), "{}", words(&said));
 
-    // Readable again, Try again lists the sessions.
+    // Readable again, one more keystroke asks again and finds the session.
     locked(0o755);
-    let failed = holding(&said, "Status", "ermission denied").unwrap().clone();
-    let (x, y) = middle(&failed);
-    drv.click(x, y).await.unwrap();
-    seen(drv, "the sessions once readable", STEP, |d| past(d, PARSER_ASKED[0]).is_some()).await;
+    drv.type_text(" ").await.unwrap();
+    let found =
+        seen(drv, "the session once readable", STEP, |d| past(d, PARSER_ASKED[0]).is_some()).await;
+    assert!(holding(&found, "Status", "Permission denied").is_none(), "{}", words(&found));
 
     stack.shutdown().await;
 }
 
-/// A session a Claude Code still runs in a terminal of its machine is marked so in History, and
-/// is not taken up a second time: opening it says why it did not open, and no second Claude Code
-/// starts on it. Once that Claude Code ends, the same row takes it up.
+/// A session a Claude Code still runs in a terminal of its machine says so in the picker, and is
+/// not taken up a second time: picking it says why in the card, and no second Claude Code starts
+/// on it. Once that Claude Code ends, the next keystroke finds it free, and picking it takes it up.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_session_running_elsewhere_is_shown_not_taken() {
@@ -383,7 +363,7 @@ async fn a_session_running_elsewhere_is_shown_not_taken() {
     let drv = &mut stack.driver;
     drv.ok(&slopty_e2e::Command::Resize { width: 1320.0, height: 880.0 }).await.unwrap();
 
-    open_history(drv).await;
+    pick(drv, "startup").await;
     let listed = seen(drv, "the held session marked", STEP, |d| {
         past(d, HELD_ASKED[0])
             .is_some_and(|n| n.label.as_deref().is_some_and(|l| l.contains("In a terminal")))
@@ -391,11 +371,9 @@ async fn a_session_running_elsewhere_is_shown_not_taken() {
     .await;
     let label = past(&listed, HELD_ASKED[0]).unwrap().label.clone().unwrap();
     click(drv, "Button", &label).await;
-    let refused = "Couldn\u{2019}t open the Claude Code session";
     seen(drv, "why it did not open", STEP, |d| {
-        d.a11y
-            .iter()
-            .any(|n| [&n.label, &n.value].into_iter().flatten().any(|text| text.contains(refused)))
+        holding(d, "Status", "Close it there to continue it here").is_some()
+            && holding(d, "Dialog", "Sessions").is_some()
     })
     .await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -405,8 +383,12 @@ async fn a_session_running_elsewhere_is_shown_not_taken() {
     let _killed = terminal.kill();
     let _reaped = terminal.wait();
     let drv = &mut stack.driver;
-    let free =
-        seen(drv, "the held session's row", STEP, |d| past(d, HELD_ASKED[0]).is_some()).await;
+    drv.type_text(" ").await.unwrap();
+    let free = seen(drv, "the session free", STEP, |d| {
+        past(d, HELD_ASKED[0])
+            .is_some_and(|n| n.label.as_deref().is_some_and(|l| !l.contains("In a terminal")))
+    })
+    .await;
     let label = past(&free, HELD_ASKED[0]).unwrap().label.clone().unwrap();
     click(drv, "Button", &label).await;
     let record = resumed_on(&root, HELD, None).await;

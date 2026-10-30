@@ -11,6 +11,9 @@ const PROJECT: u32 = 40;
 const BRANCH: u32 = 30;
 const DEVICE: u32 = 20;
 const PULL_REQUEST: u32 = 20;
+/// slopty: a session's state in a word ("needs you", "working", "failed", "done"), the picker's
+/// filter by state.
+const STATE: u32 = 30;
 
 /// The searchable text of one thread.
 #[derive(Debug, Default, Clone, Copy)]
@@ -31,6 +34,11 @@ pub(super) fn search_terms(query: &str) -> Vec<String> {
 
 /// `None` when some term matches no field (or there are no terms).
 pub(super) fn score_thread(fields: &ThreadFields, terms: &[String]) -> Option<u32> {
+    score_session(fields, "", terms)
+}
+
+/// slopty: [`score_thread`], the session's state in a word (its mark's) one more field.
+pub(super) fn score_session(fields: &ThreadFields, state: &str, terms: &[String]) -> Option<u32> {
     if terms.is_empty() {
         return None;
     }
@@ -40,6 +48,7 @@ pub(super) fn score_thread(fields: &ThreadFields, terms: &[String]) -> Option<u3
         (fields.branch.to_lowercase(), BRANCH),
         (fields.device.to_lowercase(), DEVICE),
         (fields.pull_request.to_lowercase(), PULL_REQUEST),
+        (state.to_lowercase(), STATE),
     ];
     let mut total = 0;
     for term in terms {
@@ -163,5 +172,18 @@ mod tests {
             2,
         );
         assert_eq!(ranked, vec!["best", "new"]);
+    }
+
+    /// slopty: a session's state is a field of its own: "needs" finds the one that needs the
+    /// person, below any title that says it.
+    #[test]
+    fn a_state_word_finds_the_sessions_in_that_state() {
+        let terms = search_terms("needs");
+        assert!(score_session(&title("Fix the lexer"), "Needs you", &terms).is_some());
+        assert!(score_session(&title("Fix the lexer"), "Working", &terms).is_none());
+        assert!(score_thread(&title("Fix the lexer"), &terms).is_none(), "no state, no match");
+        let by_title = score_session(&title("needs a review"), "", &terms).unwrap();
+        let by_state = score_session(&title("Fix the lexer"), "Needs you", &terms).unwrap();
+        assert!(by_title > by_state, "a title outranks a state");
     }
 }

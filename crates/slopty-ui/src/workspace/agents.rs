@@ -153,7 +153,7 @@ impl WorkspaceView {
     }
 
     /// A shell command ended in `session`. Long enough, and with the app away, it is kept as
-    /// unseen. Neither the bell nor a note says it: they speak for agents.
+    /// unseen. No note says it: notes speak for agents.
     pub fn command_finished(&mut self, session: SessionId, done: Finished, cx: &mut Context<Self>) {
         let slow = done.elapsed >= self.slow_command;
         tracing::info!(%session, slow, elapsed = ?done.elapsed, "command finished");

@@ -51,13 +51,22 @@ const LISTED_WITHIN: Duration = Duration::from_secs(10);
 const LISTED_POLL: Duration = Duration::from_millis(40);
 
 /// An agent's mark, and the tint its brand wears.
-fn agent_mark(agent: Agent) -> (&'static str, Option<Hsla>) {
+pub(super) fn agent_mark(agent: Agent) -> (&'static str, Option<Hsla>) {
     match agent.id {
         "claude-code" => (icons::CLAUDE_MARK, Some(icons::claude_brand())),
         "codex" => (icons::OPENAI_MARK, None),
         "pi" => (icons::PI_MARK, None),
         _ => (icons::TERMINAL, None),
     }
+}
+
+/// What a new session starts as: an agent (or a shell) in a folder on a machine, and the title
+/// the person gave it, if any.
+pub(super) struct Start {
+    pub device_id: String,
+    pub cwd: String,
+    pub agent: Agent,
+    pub title: Option<String>,
 }
 
 /// The "New session…" picker.
@@ -187,34 +196,58 @@ impl Shell {
 
     /// Start `agent` in project `space` on its machine; its session opens once listed.
     fn start_session(&mut self, space: slopty_view_proto::Space, agent: Agent, cx: &mut Context<Self>) {
-        let Some(picker) = self.new_session.as_mut() else { return };
-        if picker.starting.is_some() {
+        if self.new_session.as_ref().is_none_or(|picker| picker.starting.is_some()) {
             return;
         }
+        let project = space.id.clone();
+        let start = Start { device_id: space.device_id, cwd: space.path, agent, title: None };
+        let refused_in = project.clone();
+        let task = self.begin_session(
+            start,
+            |this, _| this.new_session = None,
+            move |this, why, cx| this.new_session_refused(&refused_in, why, cx),
+            cx,
+        );
+        if let (Some(picker), Some(task)) = (self.new_session.as_mut(), task) {
+            picker.starting = Some((project, task));
+            picker.refused = None;
+        }
+        cx.notify();
+    }
+
+    /// Start a session on its machine (`slopty.StartSession`). Once the sidebar lists it,
+    /// `opened` runs (the picker that asked shuts), the session takes its `title` if one was
+    /// given, and it opens; a start its machine refuses comes to `refused` in its words, at once
+    /// with no engine to ask (and no task).
+    pub(super) fn begin_session(
+        &mut self,
+        start: Start,
+        opened: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        refused: impl FnOnce(&mut Self, String, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<()>> {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            picker.refused = Some((space.id, "Not connected to Slopty yet".to_owned()));
-            cx.notify();
-            return;
+            refused(self, "Not connected to Slopty yet".to_owned(), cx);
+            return None;
         };
         let params = serde_json::json!({
-            "deviceId": space.device_id,
-            "cwd": space.path,
-            "agent": agent.id,
+            "deviceId": start.device_id,
+            "cwd": start.cwd,
+            "agent": start.agent.id,
         });
-        let project = space.id.clone();
-        let task = cx.spawn(async move |this, cx| {
+        let title = start.title.filter(|title| !title.trim().is_empty());
+        Some(cx.spawn(async move |this, cx| {
             let started = engine.client().call(calls::START_SESSION, params).await;
             let chat = match started {
                 Ok(answer) => answer.get("chatId").and_then(|c| c.as_str()).map(str::to_owned),
                 Err(error) => {
-                    let why = error.to_string();
-                    let _gone = this.update(cx, |this, cx| this.new_session_refused(&space.id, why, cx));
+                    let _gone = this.update(cx, |this, cx| refused(this, error.to_string(), cx));
                     return;
                 }
             };
             let Some(chat) = chat else {
                 let why = "Its machine did not say the session".to_owned();
-                let _gone = this.update(cx, |this, cx| this.new_session_refused(&space.id, why, cx));
+                let _gone = this.update(cx, |this, cx| refused(this, why, cx));
                 return;
             };
             // The session opens once the sidebar's list has it.
@@ -229,14 +262,15 @@ impl Shell {
                 cx.background_executor().timer(LISTED_POLL).await;
             }
             let _gone = this.update(cx, |this, cx| {
-                this.new_session = None;
+                opened(this, cx);
+                // The title is Slopty's, as a rename would set it: nothing is typed to the agent.
+                if let Some(title) = title {
+                    this.mutate(serde_json::json!({ "op": "renameChat", "chatId": chat, "title": title.trim() }), cx);
+                }
                 this.mark_starting(chat.clone(), cx);
                 this.open_chat(chat, cx);
             });
-        });
-        picker.starting = Some((project, task));
-        picker.refused = None;
-        cx.notify();
+        }))
     }
 
     fn new_session_refused(&mut self, project: &str, why: String, cx: &mut Context<Self>) {

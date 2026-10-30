@@ -403,7 +403,7 @@ pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Opt
 // slopty: the keys used most lead; the one-key groups fold into one "Other" card at the foot.
 const GROUP_ORDER: [&str; 4] = [ // slopty: dictation and appshots removed.
     "Sessions", // slopty: one word for them, as everywhere
-    "Panels",
+    "Views",
     "Jump to session",
     "Other",
 ];
@@ -416,14 +416,13 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
         | ShortcutId::ToggleFiles
-        | ShortcutId::ReopenClosedTab => "Panels", // slopty: the right pane's last closed tab
+        | ShortcutId::ReopenClosedTab => "Views", // slopty: the sidebar and the views beside a session
         // slopty: dictation removed; a new project is how a session starts somewhere new.
         ShortcutId::NewProject
         | ShortcutId::NewSession
         | ShortcutId::NextSession
         | ShortcutId::PrevSession
         | ShortcutId::ArchiveSession
-        | ShortcutId::ResumeSession // slopty: a past Claude Code session
         | ShortcutId::NextNeedsYou // slopty: the next one waiting on the person
         | ShortcutId::Inbox => "Sessions", // slopty: everything waiting, behind the eye
         ShortcutId::JumpSession(_) => "Jump to session",

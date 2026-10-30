@@ -29,7 +29,7 @@ const VIEW_SHARE: (f32, f32) = (0.25, 0.5);
 /// The divider's colour over `ground`: the terminal's background darkened 8 % on a light one and
 /// 40 % on a dark one, as Ghostty derives it, so the line never fights the program's theme.
 pub(super) fn divider_over(ground: Hsla) -> Hsla {
-    let by = if tabs::ground_is_light(ground) { 0.08 } else { 0.4 };
+    let by = if crate::window_appearance::of_ground(ground).is_light() { 0.08 } else { 0.4 };
     Hsla { l: ground.l * (1.0 - by), ..ground }
 }
 

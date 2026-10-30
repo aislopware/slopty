@@ -1284,7 +1284,6 @@ impl Shell {
 
         // t3code's archived accordion, below the active list.
         let archived_section = self.render_archived_section(theme, cx);
-        let history_section = self.render_sidebar_history(theme, cx); // slopty: past_sessions
 
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
@@ -1363,7 +1362,6 @@ impl Shell {
                     // is the whole column; a little air stands in.
                     .pt(px(SIDEBAR_LIST_PAD_TOP))
                     .child(active_list)
-                    .children(history_section) // slopty
                     .children(archived_section),
             )),
         )
@@ -2080,6 +2078,31 @@ mod tests {
         shell.update_in(cx, |shell, window, cx| shell.open_spaces_menu(window, cx));
         let retries = tree(cx).into_values().filter(|node| node.role == Role::Button && node.label == "Retry");
         assert_eq!(retries.count(), 2, "its filter entry wears it too");
+    }
+
+    /// slopty: put away, the sidebar leaves its rail: an entry per project wearing its loudest
+    /// row's mark and saying it, no rows; a press opens that row.
+    #[gpui::test]
+    fn the_put_away_sidebar_leaves_a_rail_of_marks(cx: &mut TestAppContext) {
+        let (shell, cx) = launch(cx, DESKTOP);
+        shell.update(cx, |shell, cx| {
+            shell.settings.sidebar_collapsed = true;
+            shell.sidebar_tween = None;
+            cx.notify();
+        });
+        draw(cx);
+        let rail = cx.debug_bounds("sidebar-rail").expect("the rail");
+        assert_eq!(f32::from(rail.size.width), SIDEBAR_RAIL_WIDTH, "its width");
+        assert!(cx.debug_bounds("chat-a").is_none(), "no rows on the rail");
+        let nodes = tree(cx);
+        let entry = find(&nodes, Role::Button, "app, 2, Working").expect("the project, its count and its state");
+        assert!(cx.debug_bounds("sidebar-rail-mark-folder:/work/app").is_some(), "its loudest mark");
+        cx.simulate_click(entry.bounds.center(), gpui::Modifiers::default());
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone()).as_deref(),
+            Some("a"),
+            "a press opens the row its mark is"
+        );
     }
 
     fn init_settings_test(

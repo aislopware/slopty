@@ -633,14 +633,13 @@ pub enum ShortcutId {
     ArchiveSession,
     // slopty: the right pane's last closed tab.
     ReopenClosedTab,
-    ResumeSession, // slopty: Claude Code's past sessions (`shell::past_sessions`)
     NextNeedsYou, // slopty: the next chat waiting on the person (`shell::sidebar_status`)
     Inbox, // slopty: what needs the person, across sessions and machines (`shell::inbox`)
     JumpSession(usize),
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 14 + JUMP_SLOTS] = [ // slopty: dictation, appshots and the composer's pickers removed.
+    pub const ALL: [ShortcutId; 13 + JUMP_SLOTS] = [ // slopty: dictation, appshots and the composer's pickers removed.
         ShortcutId::SaveFile,
         ShortcutId::BrowserReload,
         ShortcutId::ToggleSidebar,
@@ -652,7 +651,6 @@ impl ShortcutId {
         ShortcutId::PrevSession,
         ShortcutId::ArchiveSession,
         ShortcutId::ReopenClosedTab, // slopty
-        ShortcutId::ResumeSession, // slopty
         ShortcutId::NextNeedsYou, // slopty
         ShortcutId::Inbox, // slopty
         ShortcutId::JumpSession(0),
@@ -677,15 +675,15 @@ impl ShortcutId {
             // slopty: each name is the one its button, menu and palette row use.
             ShortcutId::BrowserReload => "Reload page",
             ShortcutId::ToggleSidebar => "Toggle sidebar",
-            ShortcutId::ToggleChanges => "Toggle side pane",
-            ShortcutId::ToggleFiles => "Toggle files panel",
+            // slopty: the views a key summons beside the session, by the View menu's names.
+            ShortcutId::ToggleChanges => "Changes",
+            ShortcutId::ToggleFiles => "Files",
             ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New project",
-            ShortcutId::NextSession => "Next session or side pane tab",
-            ShortcutId::PrevSession => "Previous session or side pane tab",
+            ShortcutId::NextSession => "Next session",
+            ShortcutId::PrevSession => "Previous session",
             ShortcutId::ArchiveSession => "Archive session",
-            ShortcutId::ReopenClosedTab => "Reopen closed tab", // slopty
-            ShortcutId::ResumeSession => "Resume a Claude Code session", // slopty
+            ShortcutId::ReopenClosedTab => "Reopen closed view", // slopty
             ShortcutId::NextNeedsYou => "Next session that needs you", // slopty
             ShortcutId::Inbox => "Inbox", // slopty: the titlebar eye's name
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
@@ -729,7 +727,6 @@ impl ShortcutId {
             // shifted combo.
             ShortcutId::ArchiveSession => "mod-shift-a",
             ShortcutId::ReopenClosedTab => "mod-shift-t", // slopty
-            ShortcutId::ResumeSession => "mod-shift-o", // slopty
             // slopty: ⌘J is the jump, in the bottom panel's toggle's place, and the inbox it
             // walks sits beside it on ⇧⌘J (`docs/decisions/layout.md`).
             ShortcutId::NextNeedsYou => "mod-j",
@@ -761,7 +758,6 @@ impl ShortcutId {
             ShortcutId::PrevSession => "prevSession",
             ShortcutId::ArchiveSession => "archiveSession",
             ShortcutId::ReopenClosedTab => "reopenClosedTab",
-            ShortcutId::ResumeSession => "resumeSession",
             ShortcutId::NextNeedsYou => "nextNeedsYou",
             ShortcutId::Inbox => "inbox",
             ShortcutId::JumpSession(slot) => return format!("jumpSession{}", slot + 1).into(),
@@ -789,7 +785,6 @@ pub struct KeymapConfig {
     pub archive_session: String,
     // slopty: the right pane's last closed tab.
     pub reopen_closed_tab: String,
-    pub resume_session: String, // slopty: Claude Code's past sessions
     pub next_needs_you: String, // slopty: the next chat waiting on the person
     pub inbox: String, // slopty: what needs the person
     /// One combo per jump slot, in slot order; [`Self::heal_jump_slots`] keeps its length.
@@ -899,7 +894,6 @@ impl Default for KeymapConfig {
             prev_session: ShortcutId::PrevSession.default_combo().into(),
             archive_session: ShortcutId::ArchiveSession.default_combo().into(),
             reopen_closed_tab: ShortcutId::ReopenClosedTab.default_combo().into(), // slopty
-            resume_session: ShortcutId::ResumeSession.default_combo().into(), // slopty
             next_needs_you: ShortcutId::NextNeedsYou.default_combo().into(), // slopty
             inbox: ShortcutId::Inbox.default_combo().into(), // slopty
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
@@ -922,7 +916,6 @@ impl KeymapConfig {
             ShortcutId::PrevSession => &self.prev_session,
             ShortcutId::ArchiveSession => &self.archive_session,
             ShortcutId::ReopenClosedTab => &self.reopen_closed_tab, // slopty
-            ShortcutId::ResumeSession => &self.resume_session, // slopty
             ShortcutId::NextNeedsYou => &self.next_needs_you, // slopty
             ShortcutId::Inbox => &self.inbox, // slopty
             ShortcutId::JumpSession(slot) => self
@@ -947,7 +940,6 @@ impl KeymapConfig {
             ShortcutId::PrevSession => self.prev_session = combo,
             ShortcutId::ArchiveSession => self.archive_session = combo,
             ShortcutId::ReopenClosedTab => self.reopen_closed_tab = combo, // slopty
-            ShortcutId::ResumeSession => self.resume_session = combo, // slopty
             ShortcutId::NextNeedsYou => self.next_needs_you = combo, // slopty
             ShortcutId::Inbox => self.inbox = combo, // slopty
             ShortcutId::JumpSession(slot) => {

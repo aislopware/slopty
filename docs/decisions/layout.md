@@ -437,3 +437,43 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     `terminal::panel::tests::a_running_programs_progress_and_ground_reach_its_tab`, and e2e
     `app::walk::{split_shells_keep_up_with_a_person, the_files_and_changes_keep_up_with_a_person}`
     and `app::interface::a_closed_view_comes_back_with_cmd_shift_t`.
+
+- ✅ **The picker as built (2026-10-30).** `shell::picker` builds it: ⌘K, or a press on the
+  titlebar's identity, hangs a 440 pt card under the identity (centred under the titlebar over
+  the new-session canvas), its field "Filter or create…".
+  - Untyped, it lists every session the list does but the Inactive fold, under a header per
+    machine (this Mac first) once they span more than one, the one on screen ticked, ⌘1-9 on
+    the first nine: while the card is up the jump's keys pick its rows.
+  - Typed, the sessions rank by title, project, branch, machine, pull request and state word
+    (`thread_search::score_session`), each saying its project and machine. Words that name no
+    session put "Start “…”" first, so ⏎ starts one by that name, in the project on screen,
+    with the agent on screen; Tab steps the agent. Under them come up to 5 sessions whose
+    conversation holds the words, then up to 8 of Claude Code's past sessions on every
+    project's machine, asked 150 ms after typing pauses, each with the prompt that matched,
+    its words lit, and where and when it ran. A past session a live Claude Code holds
+    elsewhere says "In a terminal"; picked, the card says why it stays there and nothing
+    starts. A machine that could not look says why in the machine's words where the sessions
+    would be, and a search that read only part of the store says so.
+  - Go to Directory (⇧⌘G) is the same card over one machine's folders: a typed path first,
+    then the machine's projects, then the home index's folders gone to most, or what typing
+    finds; ⌘[ and ⌘], or a press on a machine's tab, step the machine. ⏎ starts a terminal
+    there, or the agent Tab picks.
+  - ⇧⌘G is Find Previous only where a find is open: a terminal's own binding, or a Changes
+    pane's, takes it while that pane's find is up and passes it on otherwise, then the window's
+    Find Previous takes it while the inspector's find is open; otherwise it is Go to Directory,
+    which the Go menu names with its key, beside "Go to session…" (⌘K). A key bound with no
+    context outranks a pane's own once the keyboard is in the pane's find field, so from a
+    terminal's or a Changes pane's find field Go to Directory passes the key on.
+  - The card has no focus of its own, so a press on a row the machine refuses, or on a
+    machine's tab, leaves the keyboard in the field. Esc gives the keyboard back where it was.
+  - The sidebar's History and "Resume a Claude Code session…" (⇧⌘O, and its palette row) are
+    deleted: typing in the picker finds the same sessions across every machine.
+  - Tests: `shell::picker::tests::{untyped_the_picker_lists_every_session_under_its_machine,
+    typing_filters_the_sessions_by_title_project_and_machine,
+    go_to_directory_lists_projects_then_folders_and_a_typed_path,
+    shift_cmd_g_is_go_to_directory_unless_a_find_is_open}`,
+    `shell::thread_search::tests::a_state_word_finds_the_sessions_in_that_state`, `slopty_terminal`
+    `view::tests::cmd_shift_g_goes_on_while_find_is_shut`, and e2e
+    `app::past_sessions` (`a_tui_session_is_found_opened_and_continued`,
+    `the_picker_says_why_it_found_no_past_session`,
+    `a_session_running_elsewhere_is_shown_not_taken`).

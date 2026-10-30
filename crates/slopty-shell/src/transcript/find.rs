@@ -286,6 +286,14 @@ struct FindTarget(WeakEntity<Transcript>, Option<gpui::AnyWindowHandle>);
 
 impl Global for FindTarget {}
 
+/// Whether the transcript find's keys reach has its find open: ⇧⌘G steps back in it then, and
+/// is Go to Directory otherwise (`shell::picker`).
+pub(crate) fn find_open(cx: &App) -> bool {
+    cx.try_global::<FindTarget>()
+        .and_then(|target| target.0.upgrade())
+        .is_some_and(|transcript| transcript.read(cx).find.open)
+}
+
 /// The app's find actions are registered.
 struct FindActions;
 

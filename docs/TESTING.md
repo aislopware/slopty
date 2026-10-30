@@ -177,11 +177,12 @@ prompt makes through the `slopty mcp` it is handed. `apps/slopty-worker/tests/th
 the TUI-first worker one behaviour per test against it, and `crates/slopty-client/tests/threads.rs`
 the client's table and follow over the same stand-in. The conversation fixtures
 (`crates/slopty-agent/tests/fixtures/conversation/`) are recorded from a real session and hold
-the transcript decoder. The app's e2e reads them too: `tests/app/planted.rs` lays recordings,
-and turns a test writes, end to end as one past session in the worker's Claude Code store, an
-hour old whatever day it runs, and takes it up from History, so the stand-in `--resume`s it in a
-terminal while the inspector beside it reads what Claude Code wrote. A fixture no recording can reach,
-such as an agent asking to be signed in, is written to the schema by hand, and its test says so.
+the transcript decoder. The app's e2e reads them too: `tests/app/planted.rs` lays recordings, and
+turns a test writes, end to end as one past session in the worker's Claude Code store, an hour
+before the clock the stack pins the app to, and takes it up from the session picker (⌘K), so the
+stand-in `--resume`s it in a terminal while the inspector beside it reads what Claude Code wrote. A
+fixture no recording can reach, such as an agent asking to be signed in, is written to the schema
+by hand, and its test says so.
 
 ## Where the gate runs
 Layers 1 and 2 and every lint make up `cargo gate`, split between this Mac and

@@ -410,7 +410,7 @@ pub(super) struct ThreadStand {
     pub seen: TurnId,
 }
 
-/// A thread that waits on the person, for the bell, *Needs you* and the Dock's count.
+/// A thread that waits on the person, for its note and the Dock's count.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct ThreadWait {
     /// The worker whose agent runs it.

@@ -232,9 +232,12 @@ pub(crate) const VIEW_COMMANDS: [WindowCommand; 9] = [
 ];
 
 /// slopty: the Go menu's moves.
-pub(crate) const GO_COMMANDS: [WindowCommand; 8] = [
+pub(crate) const GO_COMMANDS: [WindowCommand; 10] = [
     command!("Back", crate::icons::ARROW_LEFT, shell::NavigateBack),
     command!("Forward", crate::icons::ARROW_RIGHT, shell::NavigateForward),
+    // slopty: the session picker and Go to Directory (`shell::picker`).
+    command!("Go to session\u{2026}", crate::icons::MAGNIFER, shell::OpenPicker),
+    command!("Go to directory\u{2026}", crate::icons::FOLDER, shell::GoToDirectory),
     command!("Next pane", crate::icons::ALT_ARROW_RIGHT, shell::NextPane),
     command!("Previous pane", crate::icons::ALT_ARROW_LEFT, shell::PreviousPane),
     command!("Next session", crate::icons::ALT_ARROW_DOWN, shell::NextSession),
@@ -349,11 +352,14 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Dark", AppearanceDark),
         ])),
     ])));
-    let [back, forward, next_pane, previous_pane, next, previous, needs_you, inbox] =
+    let [back, forward, sessions, directory, next_pane, previous_pane, next, previous, needs_you, inbox] =
         GO_COMMANDS.map(|command| command.menu_item());
     let mut go = vec![
         back,
         forward,
+        MenuItem::separator(),
+        sessions,
+        directory,
         MenuItem::separator(),
         next_pane,
         previous_pane,

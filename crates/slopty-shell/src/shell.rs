@@ -109,7 +109,9 @@ mod closed_tabs; // slopty: the views closed last, opened again
 mod open_in; // slopty: a chat's folder in the person's editor
 mod terminal_runs; // slopty: a transcript's Run in the chat's own shell terminal
 mod new_session; // slopty: New session…: an agent's TUI, or a terminal, in a project at once
-mod past_sessions; // slopty: Claude Code's past sessions: History, and Resume a Claude Code session…
+mod past_sessions; // slopty: Claude Code's past sessions, found in the picker and taken up again
+mod picker; // slopty: the session picker (⌘K) and Go to Directory (⇧⌘G)
+pub use picker::{GoToDirectory, OpenPicker}; // slopty: for the menu bar's Go menu
 #[cfg(test)]
 mod chrome_tests; // slopty: the chrome as a person and assistive tech meet it
 pub mod agent_ui; // slopty: an agent drives this window (`slopty ui`)
@@ -436,10 +438,13 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             cx,
         ),
         // Fixed: ⇧⌘P summons the command palette (Ghostty's and VS Code's key), and pressing it
-        // again dismisses it. ⌘K opens it too until the session picker takes that key; bound
-        // last, ⇧⌘P is the key the palette and the menu show.
-        crate::keys::binding(&platform_combo("mod-k"), ToggleCommandPalette, None, cx),
+        // again dismisses it. ⌘K is the session picker in every session (`picker`).
         crate::keys::binding(&platform_combo("mod-shift-p"), ToggleCommandPalette, None, cx),
+        crate::keys::binding(&platform_combo("mod-k"), picker::OpenPicker, None, cx),
+        // ⇧⌘G is Go to Directory, bound before `chrome_keys`' Find Previous on the same key, so
+        // that one goes first and passes the key on unless a find is open where the keyboard is.
+        // A terminal's own Find Previous goes before both and passes it on with its card shut.
+        crate::keys::binding(&platform_combo("mod-shift-g"), picker::GoToDirectory, None, cx),
     ]);
     crate::browser::bind_keys(cx, keymap);
     // slopty: the files surface's and the diff's fixed keys, in their own contexts.
@@ -1016,6 +1021,9 @@ pub struct Shell {
     transcript: Entity<Transcript>,
     // slopty: the main column's session terminal and the right pane's inspector of it.
     session_terminal: Entity<TerminalPanel>,
+    /// The appearance the window was last given for the ground it shows
+    /// (`docs/decisions/layout.md`, "The window wears its ground's appearance").
+    window_ground: crate::window_appearance::WindowGround,
     /// slopty: the session a note's tap last landed on, and when: its terminal wears one accent
     /// border fade ([`landing_opacity`]).
     landed: Option<(String, std::time::Instant)>,
@@ -1159,6 +1167,8 @@ pub struct Shell {
     /// The New project palette's collapsed-breadcrumbs (`…`) menu.
     project_crumb_menu: popover::Popup<()>,
     command_palette: Option<command_palette::CommandPalette>,
+    /// slopty: the session picker or Go to Directory, while up (`picker`).
+    picker: Option<picker::Picker>,
     /// The focus whose workspace search index was last warmed (see `search_warm`).
     search_warm: Option<search_warm::SearchWarm>,
     /// Per chat, the files opened in editor tabs, most recent first.
@@ -1496,6 +1506,7 @@ impl Shell {
             add_space: None,
             project_crumb_menu: popover::Popup::default(),
             command_palette: None,
+            picker: None, // slopty
             search_warm: None,
             recent_files: std::collections::HashMap::new(),
             pending_change: None,
@@ -1561,6 +1572,7 @@ impl Shell {
             _inspector_events: inspector_events,
             _session_terminal_events: session_terminal_events,
             session_terminal,
+            window_ground: Default::default(),
             landed: None, // slopty
             inspector,
             followed_terminal: None,
@@ -3359,16 +3371,16 @@ impl Shell {
     }
 
     /// Whether an overlay that owns the keyboard is up — the command palette, the add-space
-    /// palette, Resume or New session. Session-nav shortcuts (cycle/jump/archive) go quiet
-    /// underneath one: gpui runs a matched binding before any `on_key_down`, so an unguarded
-    /// jump would switch sessions UNDER the open overlay, stranding it over a session the user
-    /// never picked. The Settings page is not one: navigating leaves it, and its shortcut
+    /// palette, the session picker or New session. Session-nav shortcuts (cycle/jump/archive)
+    /// go quiet underneath one: gpui runs a matched binding before any `on_key_down`, so an
+    /// unguarded jump would switch sessions UNDER the open overlay, stranding it over a session
+    /// the user never picked. The Settings page is not one: navigating leaves it, and its shortcut
     /// recorder intercepts the keys it records before they can dispatch.
     pub(super) fn overlay_owns_keyboard(&self) -> bool {
         self.command_palette.is_some()
             // slopty: voice removed.
             || self.add_space.is_some()
-            || self.past_sessions.picker_open() // slopty: Resume a Claude Code session…
+            || self.picker_open() // slopty: the session picker or Go to Directory
             || self.inbox.is_open() // slopty: the inbox
             || self.new_session.is_some() // slopty: New session…
     }
@@ -4519,7 +4531,7 @@ impl Shell {
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
         }
-        overlays.extend(self.render_resume_picker(viewport, window, cx)); // slopty: past_sessions
+        overlays.extend(self.render_picker(viewport, window, cx)); // slopty: `picker`
         overlays.extend(self.render_new_session_picker(viewport, window, cx)); // slopty
         overlays.extend(self.render_inbox(window, cx)); // slopty: the inbox under the eye
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
@@ -5662,7 +5674,10 @@ impl Render for Shell {
             // this matched binding beats its key handler to the dispatch —
             // forward the slot instead of eating it.
             .on_action(cx.listener(|this, jump: &JumpSession, _, cx| {
-                if !this.overlay_owns_keyboard() {
+                // slopty: the session picker marks its first nine with the same keys.
+                if this.picker_open() {
+                    this.pick_digit(jump.0, cx);
+                } else if !this.overlay_owns_keyboard() {
                     this.jump_to_session(jump.0, cx)
                 }
             }))
@@ -5683,7 +5698,10 @@ impl Render for Shell {
                 }
             }));
         let root = self.chrome_actions(root, cx); // slopty: `chrome_keys`
+        let root = self.picker_actions(root, cx); // slopty: `picker`
 
+        // The ground the window shows, a session's, for the window to wear its appearance.
+        let mut shown_ground = None;
         // slopty: no accounts, sync or sign-in.
         let root = match &gate {
             GatePhase::Ready => 'ready: {
@@ -5861,6 +5879,7 @@ impl Render for Shell {
                     let chat = state.selected_chat.as_deref();
                     chat.is_some_and(|chat| state.session_terminal(chat).is_some())
                 };
+                shown_ground = session.then(|| self.shown_ground(cx));
                 let frame = self.compact_frame(page, session, window, cx);
                 root.child(sidebar_tone)
                     // slopty: clear of a phone's or tablet's edges.
@@ -5872,6 +5891,7 @@ impl Render for Shell {
                 root.child(card)
             }
         };
+        self.window_ground.follow(shown_ground, window, cx);
         // Toasts float over every phase and route.
         // slopty: never over a session's terminal (`toast_place`).
         let place = self.toast_place(window, cx);

@@ -950,8 +950,13 @@ impl TerminalView {
         self.step_match(-1, cx);
     }
 
-    /// ⌘⇧G / ⇧⏎: back down the history.
+    /// ⌘⇧G / ⇧⏎: back down the history. With the find card shut the key is the window's
+    /// (Go to Directory, `docs/decisions/layout.md`), so it goes on.
     pub fn find_prev(&mut self, _: &FindPrev, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.is_none() {
+            cx.propagate();
+            return;
+        }
         self.step_match(1, cx);
     }
 
@@ -4651,6 +4656,42 @@ mod tests {
 
     fn top_line(view: &Entity<TerminalView>, cx: &VisualTestContext) -> LineIndex {
         view.read_with(cx, |view, _| view.state.index_at_row(0))
+    }
+
+    mod window_keys {
+        #![expect(
+            clippy::derive_partial_eq_without_eq,
+            reason = "gpui::actions! derives PartialEq only"
+        )]
+        gpui::actions!(terminal_test, [WindowsOwn]);
+    }
+    use window_keys::WindowsOwn;
+
+    /// ⌘⇧G steps back through the hits while the find card is up; with it shut the key is the
+    /// window's (the shell's Go to Directory), so it goes on past the terminal. From inside the
+    /// card's field the window's key, bound with no context, comes first, and the shell passes it
+    /// on there; this is the grid's half.
+    #[gpui::test]
+    fn cmd_shift_g_goes_on_while_find_is_shut(cx: &mut TestAppContext) {
+        let heard = Rc::new(std::cell::Cell::new(0_u32));
+        cx.update(|cx| {
+            let heard = Rc::clone(&heard);
+            cx.on_action(move |_: &WindowsOwn, _| heard.set(heard.get().saturating_add(1)));
+            cx.bind_keys([gpui::KeyBinding::new("cmd-shift-g", WindowsOwn, None)]);
+        });
+        let (view, _rx, cx) = terminal(cx);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-shift-g");
+        assert_eq!(heard.get(), 1, "shut: the window's key");
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |view, _| view.search.is_some()), "the card is up");
+        // The keyboard back in the grid, the card still up, as a press on the text leaves it.
+        view.update_in(cx, |view, window, cx| window.focus(&view.focus, cx));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-shift-g");
+        assert_eq!(heard.get(), 1, "up: the terminal's own Find Previous");
+        assert!(view.read_with(cx, |view, _| view.search.is_some()), "and the card stays");
     }
 
     /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport.

@@ -1,5 +1,5 @@
 //! Sessions planted in Claude Code's own store on a stack's worker, as its TUI leaves them, and
-//! taken up from the project's History: the recordings `slopty-agent`'s tests hold
+//! taken up from the session picker (⌘K): the recordings `slopty-agent`'s tests hold
 //! (`tests/fixtures/conversation`), turns answered in words alone, or records a test writes, laid
 //! end to end as one session. The stand-in TUI (`slopty-stub-claude`, `--resume <id>`) takes the
 //! session up in a terminal, and the inspector beside it reads what Claude Code wrote.
@@ -257,27 +257,25 @@ pub fn thread_of(id: &str) -> String {
     slopty_proto::thread::ThreadId::derived(&["claude-code session", id]).to_string()
 }
 
-/// Take up the past session first asked `title` from History: its terminal is the main column,
-/// the inspector shown beside it, and the pointer off the window.
+/// Take up the past session first asked `title`, found by typing it in the session picker
+/// (⌘K): its terminal is the main column, the inspector shown beside it, and the pointer off the
+/// window.
 pub async fn resume(drv: &mut Driver, title: &str) -> Dump {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let (closed, open) = ("History: past Claude Code sessions", "History, open");
-    let shut = seen(drv, "History", STEP, |d| holding(d, "Button", closed).is_some()).await;
-    let (x, y) = middle(holding(&shut, "Button", closed).unwrap());
-    drv.click(x, y).await.unwrap();
+    drv.keys("cmd-k").await.unwrap();
+    seen(drv, "the session picker", STEP, |d| holding(d, "Dialog", "Sessions").is_some()).await;
+    drv.type_text(title).await.unwrap();
     let row = format!("Past session: {title}");
-    let listed = seen(drv, "the session in History", STEP, |d| {
-        holding(d, "Button", open).is_some() && holding(d, "Button", &row).is_some()
-    })
-    .await;
+    let listed =
+        seen(drv, "the session in the picker", STEP, |d| holding(d, "Button", &row).is_some())
+            .await;
     let (x, y) = middle(holding(&listed, "Button", &row).unwrap());
     drv.click(x, y).await.unwrap();
-    // Taken up, the session's own row joins the list above History and moves History's header
-    // to where the pointer pressed, so its hover and tooltip would show in whatever frame is
-    // read next: the pointer leaves the window.
+    // Picked, the card goes and leaves the pointer over what lay under it, whose hover and
+    // tooltip would show in whatever frame is read next: the pointer leaves the window.
     drv.ok(&Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
     seen(drv, "the session in its terminal", STEP, |d| {
-        holding(d, "Button", &row).is_none() && d.a11y.iter().any(|n| n.role == "Terminal")
+        holding(d, "Dialog", "Sessions").is_none() && d.a11y.iter().any(|n| n.role == "Terminal")
     })
     .await;
     crate::served::show_inspector(drv).await

@@ -12,7 +12,9 @@
 //! - ⌥⌘[ and ⌥⌘] walk the history, as the mouse's side buttons do; ⌘⇧T opens the view closed
 //!   last again (`closed_tabs`).
 //! - ⌘Z undoes the archive just made, while its toast is up.
-//! - ⇧⌘O opens "Resume a session…", the picker of Claude Code's past sessions (`past_sessions`).
+//! - ⇧⌘G is Find Previous while the find where the keyboard is stands open (a terminal's card
+//!   takes it in its own context first, the inspector's here), and otherwise goes on to Go to
+//!   Directory (`picker`).
 //! - ⌘. opens the next chat that needs the person, across projects and machines, then the
 //!   finished ones nobody has seen (`sidebar_status::needing_you`).
 //! - ⌥⌘O opens Open in under its button.
@@ -41,7 +43,6 @@ actions!(
         NavigateForward,
         ReopenClosedTab,
         UndoArchive,
-        ResumeSession,
         NextNeedsYou,
         // slopty: what needs the person, across sessions and machines (`inbox`).
         Inbox,
@@ -114,7 +115,6 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     ));
     for (id, action) in [
         (ShortcutId::ReopenClosedTab, Box::new(ReopenClosedTab) as Box<dyn gpui::Action>),
-        (ShortcutId::ResumeSession, Box::new(ResumeSession)),
         (ShortcutId::NextNeedsYou, Box::new(NextNeedsYou)),
         (ShortcutId::Inbox, Box::new(Inbox)),
     ] {
@@ -162,8 +162,14 @@ impl Shell {
         .on_action(cx.listener(|this, _: &FindNext, window, cx| {
             this.find(FindStep::Next, window, cx);
         }))
+        // ⇧⌘G steps back in the inspector's open find; with none open the key goes on to Go to
+        // Directory, which the shell binds to the same key under this one (`picker`).
         .on_action(cx.listener(|this, _: &FindPrevious, window, cx| {
-            this.find(FindStep::Previous, window, cx);
+            if crate::transcript::find::find_open(cx) {
+                this.find(FindStep::Previous, window, cx);
+            } else {
+                cx.propagate();
+            }
         }))
         .on_action(cx.listener(|this, _: &NavigateBack, window, cx| {
             if in_own_keys(window) {
@@ -183,13 +189,6 @@ impl Shell {
             if !matches!(this.route, Route::Chat) || !this.reopen_closed_tab(window, cx) {
                 cx.propagate();
             }
-        }))
-        .on_action(cx.listener(|this, _: &ResumeSession, window, cx| {
-            // Over another overlay the key waits; the picker's own key shuts it.
-            if this.overlay_owns_keyboard() && !this.past_sessions.picker_open() {
-                return;
-            }
-            this.toggle_resume_picker(window, cx);
         }))
         .on_action(cx.listener(|this, _: &NextNeedsYou, _, cx| {
             // Under an overlay that holds the keyboard the key waits, as the chat keys do.

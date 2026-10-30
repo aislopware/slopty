@@ -1,93 +1,39 @@
-//! slopty: Claude Code's past sessions, seen and taken up again (`docs/decisions/agents.md`,
+//! slopty: Claude Code's past sessions, found and taken up again (`docs/decisions/agents.md`,
 //! "Past Claude Code sessions are seen and continued in the GUI").
 //!
-//! - **History.** The sidebar holds one quiet "History" disclosure for every project (the
-//!   filtered one's alone while the sidebar is filtered), shut at first, above Archived, each
-//!   row naming its project. Opened, it asks the projects' machines for the Claude Code sessions kept in their
-//!   folders (the TUI's and `claude -p`'s alike) that are no chat here yet, newest first: each
-//!   row titled by its first prompt, with how long ago and its branch where the machine says.
-//!   It lists a page and pages on with "Show more"; nothing is asked while it is shut, and the
-//!   rows already listed stand while it asks again.
-//! - **Resume a Claude Code session…** (the palette, and its shortcut) searches the person's past prompts
-//!   on the chat's machine, in its project or in every folder (⇥), and shows the prompt that
-//!   matched with the words lit.
+//! - **Finding** one is typing in the session picker (`picker`, ⌘K): every project's machine is
+//!   asked for the Claude Code sessions kept in its folders (the TUI's and `claude -p`'s alike)
+//!   whose prompts hold the words, each named by its first prompt, the prompt that matched lit.
 //! - **Opening** a session the machine keeps a chat of opens that chat; any other is taken up by
 //!   Claude Code's own `--resume` in its folder, and the chat opens with its whole conversation
-//!   once its machine has started it. Its machine's words say why one does not open.
+//!   once its machine has started it. Its machine's words say why one does not open. An ended
+//!   session's Resume takes it up the same way.
 //!
 //! The view model answers both calls (`slopty_ui`'s `view_model::past`) from the session's own
 //! machine, so a remote project reads as a local one.
 
 use std::time::Duration;
 
-use gpui::Focusable as _;
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Pixels, SharedString, Subscription, Task, Window,
-    div, px,
-};
+use gpui::{AnyElement, Context, Task, div};
 use serde::Deserialize;
 
 use super::Shell;
-use super::command_palette::{
-    command_key_hint, palette_card, palette_empty, palette_footer, palette_header,
-    palette_overlay, palette_results_fade, palette_results_height,
-};
-use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::icons::{self, icon};
 use crate::popover;
-use crate::settings::ShortcutId;
 use crate::theme::Theme;
 
 /// What the shell asks the view model.
-mod calls {
-    pub(super) const LIST: &str = "slopty.PastSessions";
-    pub(super) const OPEN: &str = "slopty.OpenPastSession";
+pub(super) mod calls {
+    pub(in crate::shell) const LIST: &str = "slopty.PastSessions";
+    pub(in crate::shell) const OPEN: &str = "slopty.OpenPastSession";
 }
 
-/// The History disclosure's label.
-pub(super) const HISTORY: &str = "History";
-/// The key History's disclosure tweens under, beside the sidebar's sections.
-const MOTION: &str = "history";
-/// What a History row is called before its title, for a screen reader.
+/// What a past session's row is called before its title, for a screen reader.
 pub(super) const PAST_SESSION: &str = "Past session:";
-/// The palette's entry, and the picker's title.
-pub(super) const RESUME: &str = "Resume a Claude Code session\u{2026}";
-
-/// Rows History lists when opened, and how many more each "Show more" adds.
-const FIRST_PAGE: usize = 8;
-const PAGE: usize = 20;
-/// Sessions the picker lists.
-const PICKER_LIMIT: usize = 50;
-/// The pause in typing before the machine is asked for the words.
-const ASK_AFTER: Duration = Duration::from_millis(150);
-/// How long an opened session's chat is waited for in the sidebar's list.
+/// How long a session taken up is waited for in the sidebar's list.
 const CHAT_WITHIN: Duration = Duration::from_secs(10);
 /// How often it is looked for meanwhile.
 const CHAT_POLL: Duration = Duration::from_millis(40);
-
-/// The History header's height, and a state row's (loading, empty, failed, Show more).
-const HEADER_HEIGHT: f32 = 28.0;
-
-/// slopty: History's header row as drawn: a finger's row on a touch screen (#23).
-fn header_height() -> f32 {
-    crate::surface_chrome::touch_row_height(HEADER_HEIGHT)
-}
-const LINE_HEIGHT: f32 = 28.0;
-/// A session row's height: one line, or two with its branch.
-// slopty: a chat row's (`SIDEBAR_ROW_HEIGHT`), so History reads as the list's own.
-const ROW_HEIGHT: f32 = 29.0;
-const ROW_BRANCH_HEIGHT: f32 = 45.0;
-/// The space between History's rows, as the sidebar's list keeps.
-const GAP: f32 = 2.0;
-/// The space above History's first row.
-const BODY_INSET: f32 = 2.0;
-/// A row's one leading slot, as a chat row's (`SIDEBAR_LEADING_SLOT`): the agent's mark, a past
-/// session having no state to say, then the air before its words.
-const ROW_SLOT: f32 = super::sidebar::SIDEBAR_LEADING_SLOT;
-const ROW_SLOT_GAP: f32 = super::sidebar::SIDEBAR_LEADING_GAP;
-/// The agent's mark in the slot, as a chat row's.
-const ROW_MARK: f32 = 13.0;
 
 /// A prompt as the machine found it: its words, where the asked words are in it, and whether
 /// it was cut.
@@ -141,12 +87,12 @@ impl PastRow {
     }
 
     /// When it last changed, where known.
-    fn updated(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+    pub(super) fn updated(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         chrono::DateTime::from_timestamp_millis(self.updated_at?)
     }
 
     /// What its time slot says while a live Claude Code elsewhere holds it.
-    fn running_words(&self) -> Option<&'static str> {
+    pub(super) fn running_words(&self) -> Option<&'static str> {
         self.running.as_deref().map(|how| match how {
             "interactive" => "In a terminal",
             _ => "Running",
@@ -168,7 +114,6 @@ impl PastRow {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(super) struct Failure {
-    pub(super) device_id: String,
     pub(super) device: Option<String>,
     pub(super) words: String,
 }
@@ -179,530 +124,27 @@ pub(super) struct Failure {
 pub(super) struct Listed {
     pub(super) sessions: Vec<PastRow>,
     pub(super) failures: Vec<Failure>,
-    pub(super) more: bool,
     pub(super) cut: Option<String>,
-}
-
-impl Listed {
-    /// The sessions that are no chat here yet: History's rows.
-    fn unopened(&self) -> impl Iterator<Item = &PastRow> {
-        self.sessions.iter().filter(|row| row.chat_id.is_none())
-    }
-
-    /// Why nothing could be listed, when every machine failed and none listed anything.
-    fn failed(&self) -> Option<String> {
-        (self.sessions.is_empty() && !self.failures.is_empty()).then(|| {
-            let words: Vec<&str> = self.failures.iter().map(|f| f.words.as_str()).collect();
-            words.join("; ")
-        })
-    }
-}
-
-/// Where a listing stands.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) enum Load {
-    /// Never asked.
-    #[default]
-    Unasked,
-    /// Asked; what was listed before stands meanwhile.
-    Loading(Option<Listed>),
-    Listed(Listed),
-    /// The call failed, in its words.
-    Failed(String),
-}
-
-impl Load {
-    /// What is listed now, whether or not it is being asked again.
-    fn listed(&self) -> Option<&Listed> {
-        match self {
-            Self::Loading(had) => had.as_ref(),
-            Self::Listed(listed) => Some(listed),
-            Self::Unasked | Self::Failed(_) => None,
-        }
-    }
-
-    /// Ask again, keeping what is listed.
-    fn reload(&mut self) {
-        *self = Self::Loading(self.listed().cloned());
-    }
-}
-
-/// One project group's History.
-#[derive(Default)]
-struct History {
-    open: bool,
-    /// The rows it lists.
-    shown: usize,
-    load: Load,
-    /// Bumped per ask: an older answer is dropped.
-    asked: u64,
-    task: Option<Task<()>>,
-}
-
-/// What the picker searches: the chat's machine, and its project unless every folder.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Scope {
-    device_id: String,
-    space_id: Option<String>,
-    /// The project's name, for the scope's tab.
-    project: Option<String>,
-}
-
-/// The "Resume a Claude Code session…" picker.
-struct Picker {
-    search: Entity<ComposerInput>,
-    focus: FocusHandle,
-    previous_focus: Option<FocusHandle>,
-    focus_pending: bool,
-    scope: Scope,
-    /// Every folder of the machine, not the project's alone.
-    every: bool,
-    active: usize,
-    scroll: gpui::ScrollHandle,
-    load: Load,
-    asked: u64,
-    task: Option<Task<()>>,
-    /// The words of the listing shown, which lights them.
-    words: String,
-    /// The open that failed, in its machine's words.
-    refused: Option<(String, String)>,
-    _events: Subscription,
 }
 
 /// The past sessions' state, one per shell.
 #[derive(Default)]
 pub(super) struct PastSessions {
-    /// The sidebar's History.
-    history: History,
-    picker: Option<Picker>,
     /// The session being opened, by its key, and the open on its way.
     opening: Option<(String, Task<()>)>,
 }
 
 impl PastSessions {
-    /// Whether the picker is up: it holds the keyboard.
-    pub(super) fn picker_open(&self) -> bool {
-        self.picker.is_some()
-    }
-
     fn opening(&self, key: &str) -> bool {
         self.opening.as_ref().is_some_and(|(k, _)| k == key)
     }
 }
 
-/// How tall History stands: its header, then while open its rows, "Show more" or the line that
-/// says where it stands.
-fn history_height(history: &History) -> f32 {
-    if !history.open {
-        return header_height();
-    }
-    let body = match history.load.listed() {
-        Some(listed) => {
-            let rows: Vec<&PastRow> = listed.unopened().take(shown(history)).collect();
-            // A line says there are none, or that a machine failed beside the rows listed.
-            let said = rows.is_empty() || !listed.failures.is_empty();
-            let lines = rows.len() + usize::from(said) + usize::from(more(history));
-            let heights: f32 = rows.iter().map(|row| row_height(row)).sum::<f32>()
-                + if said { LINE_HEIGHT } else { 0.0 }
-                + if more(history) { LINE_HEIGHT } else { 0.0 };
-            heights + GAP * lines.saturating_sub(1) as f32
-        }
-        None => LINE_HEIGHT,
-    };
-    header_height() + BODY_INSET + body
-}
-
-/// How tall History's body stands under its header: nothing while shut.
-fn body_height(history: &History) -> f32 {
-    if history.open { history_height(history) - header_height() } else { 0.0 }
-}
-
-/// How many rows History shows.
-fn shown(history: &History) -> usize {
-    history.shown.max(FIRST_PAGE)
-}
-
-/// Whether History has more to show than it does.
-fn more(history: &History) -> bool {
-    history.load.listed().is_some_and(|listed| {
-        listed.more || listed.unopened().count() > shown(history)
-    })
-}
-
-fn row_height(row: &PastRow) -> f32 {
-    if row.branch.is_some() { ROW_BRANCH_HEIGHT } else { ROW_HEIGHT }
-}
-
 impl Shell {
-    /// The spaces History lists: every checkout of the filtered project, this device's first,
-    /// else every project's.
-    fn history_spaces(&self, cx: &gpui::App) -> Vec<String> {
-        let state = self.state.read(cx);
-        let Some(filter) = self.settings.space_filter.as_deref() else {
-            return state.spaces.iter().map(|s| s.id.clone()).collect();
-        };
-        let Some(space) = state.spaces.iter().find(|space| space.id == filter) else {
-            return Vec::new();
-        };
-        state.project_members(space).into_iter().map(|s| s.id.clone()).collect()
-    }
-
-    /// History of every project (or the filtered one's), above Archived.
-    pub(super) fn render_sidebar_history(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if self.state.read(cx).spaces.is_empty() {
-            return None;
-        }
-        let open = self.past_sessions.history.open;
-        let chevron = self.sidebar_disclosure_chevron(MOTION, open, theme);
-        let header = super::spaces::sidebar_disclosure_header(
-            theme,
-            "history-toggle",
-            MOTION,
-            None,
-            HISTORY.into(),
-            None,
-            None,
-            chevron,
-            open,
-            None,
-        )
-        .debug_selector(|| "history-toggle".into())
-        // slopty: a finger's row on a touch screen (#23).
-        .min_h(px(crate::surface_chrome::touch_row_height(0.0)))
-        .aria_label(SharedString::from(if open {
-            "History, open: past Claude Code sessions"
-        } else {
-            "History: past Claude Code sessions"
-        }))
-        // slopty: the key as it is bound now, as every chrome control's tooltip says it.
-        .tooltip(crate::settings::widgets::action_tooltip(
-            "Past Claude Code sessions",
-            crate::settings::widgets::Keys::Action(Box::new(super::chrome_keys::ResumeSession)),
-        ))
-        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx)));
-        let body = self.render_history_disclosure(open, theme, cx);
-        Some(div().flex().flex_col().pt(px(12.0)).child(header).child(body).into_any_element())
-    }
-
-    /// Open or shut History; opened, it asks again.
-    fn toggle_history(&mut self, cx: &mut Context<Self>) {
-        // slopty: History folds as every sidebar section does, over the same tween.
-        let before = body_height(&self.past_sessions.history);
-        let history = &mut self.past_sessions.history;
-        history.open = !history.open;
-        history.shown = FIRST_PAGE;
-        if history.open {
-            // The rows listed before show at once: by the clock now, not the sidebar's last.
-            self.sidebar_clock = crate::clock::utc(cx);
-            self.load_history(cx);
-        } else {
-            history.task = None;
-            if matches!(history.load, Load::Loading(_)) {
-                history.load = history.load.listed().cloned().map_or(Load::Unasked, Load::Listed);
-            }
-        }
-        let after = body_height(&self.past_sessions.history);
-        self.begin_sidebar_disclosure_motion(MOTION, before, after);
-        cx.notify();
-    }
-
-    /// Ask History's machines for their sessions, as many as it shows and one more, keeping the
-    /// rows listed meanwhile.
-    fn load_history(&mut self, cx: &mut Context<Self>) {
-        let spaces = self.history_spaces(cx);
-        let engine = self.state.read(cx).engine().cloned();
-        let history = &mut self.past_sessions.history;
-        let Some(engine) = engine else {
-            history.load = Load::Failed("Not connected".to_owned());
-            return;
-        };
-        history.asked = history.asked.wrapping_add(1);
-        let asked = history.asked;
-        history.load.reload();
-        let params = serde_json::json!({
-            "spaceIds": spaces,
-            "query": "",
-            // A session that became a chat here is left out: ask past the page for it.
-            "limit": shown(history).saturating_add(PAGE),
-        });
-        history.task = Some(cx.spawn(async move |this, cx| {
-            let listed = engine.client().call_as::<Listed>(calls::LIST, params).await;
-            let _gone = this.update(cx, |this, cx| {
-                // The rows that come show by the clock now, not the sidebar's last.
-                this.sidebar_clock = crate::clock::utc(cx);
-                let history = &mut this.past_sessions.history;
-                if history.asked != asked {
-                    return;
-                }
-                history.task = None;
-                let before = body_height(history);
-                history.load = match listed {
-                    Ok(listed) => match listed.failed() {
-                        Some(why) => Load::Failed(why),
-                        None => Load::Listed(listed),
-                    },
-                    Err(error) => Load::Failed(error.to_string()),
-                };
-                // slopty: the rows that came slide the body open to them, as a toggle does.
-                let after = body_height(history);
-                if before != after {
-                    this.begin_sidebar_disclosure_motion(MOTION, before, after);
-                }
-                cx.notify();
-            });
-        }));
-    }
-
-    /// An open History asks again: a session just opened is a chat now.
-    fn reload_histories(&mut self, cx: &mut Context<Self>) {
-        if self.past_sessions.history.open {
-            self.load_history(cx);
-        }
-    }
-
-    /// History's body under the sidebar's disclosure tween: its rows while open, and while it
-    /// folds shut.
-    fn render_history_disclosure(
-        &mut self,
-        open: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let full = body_height(&self.past_sessions.history);
-        let folding = self
-            .sidebar_disclosure_motion
-            .get(MOTION)
-            .is_some_and(|tween| tween.animating(self.now()));
-        let content = if open || folding {
-            self.render_history_body(theme, cx)
-        } else {
-            div().into_any_element()
-        };
-        // Shut, the tween runs from where it stood: the body it folds is the one it last drew.
-        let full = if open { full } else { self.sidebar_disclosure_motion.get(MOTION).map_or(0.0, |t| t.from.max(t.to)) };
-        self.render_sidebar_disclosure_body(MOTION, open, full, content)
-    }
-
-    /// History's rows, or the line that says where it stands.
-    fn render_history_body(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let view = cx.entity_id();
-        let history = &self.past_sessions.history;
-        let mut body = div().w_full().flex().flex_col().pt(px(BODY_INSET)).gap(px(GAP));
-        let Some(listed) = history.load.listed() else {
-            let line = match &history.load {
-                Load::Failed(why) => self.failure_line("history-failed", why.clone(), theme, cx),
-                _ => state_line(theme, "history-loading", "Reading Claude Code\u{2019}s sessions\u{2026}".into(), false)
-                    .child(crate::loaders::mini_mono_spinner(
-                        "history-spinner",
-                        2.0,
-                        theme.text_muted,
-                        view,
-                        cx,
-                    )),
-            };
-            return body.child(line).into_any_element();
-        };
-        let rows: Vec<PastRow> = listed.unopened().take(shown(history)).cloned().collect();
-        let has_more = more(history);
-        // A machine that failed beside the rows the others listed.
-        let partial = (!rows.is_empty()).then(|| listed.failures.first().map(|f| f.words.clone())).flatten();
-        if rows.is_empty() {
-            let line = match listed.failures.first() {
-                Some(failure) => self.failure_line("history-empty", failure.words.clone(), theme, cx),
-                None => state_line(theme, "history-empty", "No past Claude Code sessions here".to_owned(), false),
-            };
-            body = body.child(line);
-        }
-        for row in rows {
-            let element = self.render_history_row(&row, theme, cx);
-            body = body.child(element);
-        }
-        if let Some(words) = partial {
-            body = body.child(self.failure_line("history-partial", words, theme, cx));
-        }
-        if has_more {
-            body = body.child(
-                state_line(theme, "history-more", "Show more".to_owned(), false)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
-                    .tooltip(crate::settings::widgets::text_tooltip(
-                        "List older Claude Code sessions",
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let history = &mut this.past_sessions.history;
-                        history.shown = shown(history).saturating_add(PAGE);
-                        this.load_history(cx);
-                        cx.notify();
-                    })),
-            );
-        }
-        body.into_any_element()
-    }
-
-    /// Why History is missing sessions, in the machine's words, with Try again: a click asks
-    /// once more.
-    fn failure_line(
-        &self,
-        id: &'static str,
-        why: String,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        state_line(theme, id, why.clone(), true)
-            .tooltip(crate::settings::widgets::text_tooltip(format!("{why}\nClick to try again")))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.glass_hover()))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.load_history(cx);
-                cx.notify();
-            }))
-            .child(div().flex_none().text_color(theme.text_muted).child("Try again"))
-    }
-
-    /// One past session in History: its title, how long ago (or that it is opening, or held
-    /// elsewhere) in a slot of its own, and under it its project and its branch, where known.
-    fn render_history_row(
-        &mut self,
-        row: &PastRow,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let opening = self.past_sessions.opening(&row.key);
-        let label = row.label();
-        let corner: SharedString = if opening {
-            "Opening\u{2026}".into()
-        } else if let Some(words) = row.running_words() {
-            words.into()
-        } else {
-            // slopty: the sidebar's clock, which ticks when this next reads differently.
-            row.updated().map(|at| self.sidebar_time_ago(at)).unwrap_or_default()
-        };
-        let running = row.running.is_some();
-        let tooltip = match row.held_elsewhere() {
-            Some(held) => format!("{label}\n{held}"),
-            None => format!("{label}\nOpen and continue this Claude Code session"),
-        };
-        let target = row.clone();
-        // slopty: a chat row's grid (its one leading slot holding the agent's mark, its words
-        // fading at the edge), quieter: the words muted, as a session not yet a chat; the mark keeps its
-        // full clay, as opencode never dims an agent's colour.
-        let (mark, tint) = crate::pickers::harness_brand_icon(slopty_view_proto::HarnessId::CLAUDE_CODE);
-        let fade = SharedString::from(format!("history-row-{}-hover", row.key));
-        let title = div()
-            .flex()
-            .items_center()
-            .gap(px(ROW_SLOT_GAP))
-            .child(
-                div().flex_none().size(px(ROW_SLOT)).flex().items_center().justify_center().child(
-                    icon(mark)
-                        .size(px(ROW_MARK))
-                        .flex_none()
-                        .text_color(tint.unwrap_or(theme.text_muted)),
-                ),
-            )
-            .child(
-                div()
-                    .debug_selector({
-                        let key = row.key.clone();
-                        move || format!("history-title-{key}")
-                    })
-                    .flex_1()
-                    .min_w_0()
-                    .child(super::sidebar::sidebar_faded_label(
-                    SharedString::from(format!("history-title-{}", row.key)),
-                    true,
-                    div()
-                        .line_height(px(17.0))
-                        .text_color(crate::motion::hover_blend(&fade, theme.text_muted, theme.text))
-                        .child(SharedString::from(label.clone())),
-                )),
-            )
-            .child(
-                div()
-                    .debug_selector({
-                        let key = row.key.clone();
-                        move || format!("history-time-{key}")
-                    })
-                    .flex_none()
-                    // slopty: 8 from the words, past the row's gap.
-                    .ml(px(8.0 - ROW_SLOT_GAP))
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .font_features(crate::typography::tabular())
-                    .text_color(if running { theme.warning } else { theme.text_faint })
-                    .child(corner.clone()),
-            );
-        let project = self.row_project(row, cx);
-        let meta = (project.is_some() || row.branch.is_some()).then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                // Under the words, past the two slots.
-                .pl(px(ROW_SLOT + ROW_SLOT_GAP))
-                .text_size(crate::typography::ui_rems(11.0))
-                .line_height(px(14.0))
-                .text_color(theme.text_faint)
-                .when_some(project.clone(), |el, project| {
-                    el.child(div().flex_none().max_w(px(120.0)).truncate().child(SharedString::from(project)))
-                })
-                .when_some(row.branch.clone(), |el, branch| {
-                    el.child(icon(icons::GIT_BRANCH).size(px(11.0)).flex_none().text_color(theme.text_faint))
-                        .child(div().min_w_0().truncate().child(SharedString::from(branch)))
-                })
-        });
-        let height = if meta.is_some() { ROW_BRANCH_HEIGHT } else { ROW_HEIGHT };
-        div()
-            .id(SharedString::from(format!("history-row-{}", row.key)))
-            .debug_selector({
-                let key = row.key.clone();
-                move || format!("history-row-{key}")
-            })
-            .h(px(height))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .gap(px(2.0))
-            .px(px(Theme::SPACE_SM))
-            .rounded(px(8.0))
-            .cursor_pointer()
-            .role(gpui::Role::Button)
-            .aria_label(SharedString::from(format!("{PAST_SESSION} {label}, {corner}")))
-            .text_size(crate::typography::ui_rems(13.0))
-            .bg(crate::motion::hover_blend(&fade, crate::theme::wash(0.0), theme.glass_hover()))
-            .on_hover(crate::motion::hover_listener(fade.clone()))
-            .child(crate::motion::fade_driver(fade.clone()))
-            .tooltip(crate::settings::widgets::text_tooltip(tooltip))
-            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.open_past_session(target.clone(), cx);
-            }))
-            .child(title)
-            .children(meta)
-            .into_any_element()
-    }
-
-    /// The project `row` ran in, by its name here, else its folder's.
-    fn row_project(&self, row: &PastRow, cx: &gpui::App) -> Option<String> {
-        let state = self.state.read(cx);
-        let named = row.space_id.as_deref().and_then(|id| state.spaces.iter().find(|s| s.id == id));
-        named.map(|space| space.display_name().to_owned()).or_else(|| {
-            let cwd = row.cwd.as_deref()?.trim_end_matches('/');
-            Some(cwd.rsplit('/').next().unwrap_or(cwd).to_owned())
-        })
-    }
-
     /// Open `row`: the chat it already is, else Claude Code takes it up again on its machine and
     /// its chat opens once started. Why it does not open is said in its machine's words.
     pub(super) fn open_past_session(&mut self, row: PastRow, cx: &mut Context<Self>) {
         if let Some(chat) = row.chat_id.clone() {
-            self.close_resume_picker(None, cx);
             self.open_chat(chat, cx);
             return;
         }
@@ -718,19 +160,18 @@ impl Shell {
             "cwd": row.cwd,
             "resume": row.resume,
         });
-        let key = row.key.clone();
         let task = cx.spawn(async move |this, cx| {
             let opened = engine.client().call(calls::OPEN, params).await;
             let chat = match opened {
                 Ok(answer) => answer.get("chatId").and_then(|c| c.as_str()).map(str::to_owned),
                 Err(error) => {
-                    let _gone = this.update(cx, |this, cx| this.past_refused(&key, &error.to_string(), cx));
+                    let _gone = this.update(cx, |this, cx| this.past_refused(&error.to_string(), cx));
                     return;
                 }
             };
             let Some(chat) = chat else {
                 let _gone =
-                    this.update(cx, |this, cx| this.past_refused(&key, "It did not say its chat", cx));
+                    this.update(cx, |this, cx| this.past_refused("It did not say its chat", cx));
                 return;
             };
             // The chat opens once the sidebar's list has it.
@@ -746,11 +187,9 @@ impl Shell {
             }
             let _gone = this.update(cx, |this, cx| {
                 this.past_sessions.opening = None;
-                this.close_resume_picker(None, cx);
                 // slopty: its terminal shows once its machine names it.
                 this.mark_starting(chat.clone(), cx);
                 this.open_chat(chat, cx);
-                this.reload_histories(cx);
             });
         });
         self.past_sessions.opening = Some((row.key, task));
@@ -780,468 +219,16 @@ impl Shell {
             .is_some_and(|native| self.past_sessions.opening(&format!("{}:{native}", chat.device_id)))
     }
 
-    /// The session `key` did not open, for `why`: said where it was asked, the picker's footer
-    /// or a notice.
-    fn past_refused(&mut self, key: &str, why: &str, cx: &mut Context<Self>) {
+    /// The session `key` did not open, for `why`: said in a notice.
+    fn past_refused(&mut self, why: &str, cx: &mut Context<Self>) {
         self.past_sessions.opening = None;
-        match self.past_sessions.picker.as_mut() {
-            Some(picker) => picker.refused = Some((key.to_owned(), why.to_owned())),
-            None => self.show_error_detail("Couldn\u{2019}t open the Claude Code session. Try again.", why.to_owned(), cx),
-        }
+        self.show_error_detail("Couldn\u{2019}t open the Claude Code session. Try again.", why.to_owned(), cx);
         cx.notify();
     }
-
-    // ---- the picker ----
-
-    /// Where the picker searches: the open chat's machine and project, else the new chat's
-    /// project, else the machine the new chat targets.
-    fn resume_scope(&self, cx: &gpui::App) -> Option<Scope> {
-        let state = self.state.read(cx);
-        let project = |space: &str| {
-            state.spaces.iter().find(|s| s.id == space).map(|s| s.display_name().to_owned())
-        };
-        let chat = state
-            .selected_chat
-            .as_deref()
-            .and_then(|id| state.chats.iter().find(|chat| chat.id == id));
-        if let Some(chat) = chat {
-            let space_id = chat.space_id.clone();
-            let project = space_id.as_deref().and_then(project);
-            return Some(Scope { device_id: chat.device_id.clone(), space_id, project });
-        }
-        if let Some(space) = state.selected_space_row() {
-            return Some(Scope {
-                device_id: space.device_id.clone(),
-                space_id: Some(space.id.clone()),
-                project: Some(space.display_name().to_owned()),
-            });
-        }
-        let device = state.effective_device_id().or_else(|| state.devices.first().map(|d| d.id.clone()))?;
-        Some(Scope { device_id: device, space_id: None, project: None })
-    }
-
-    /// "Resume a Claude Code session…": the picker, or shut it when it is up.
-    pub(super) fn toggle_resume_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.past_sessions.picker.is_some() {
-            self.close_resume_picker(Some(window), cx);
-            return;
-        }
-        let Some(scope) = self.resume_scope(cx) else {
-            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t list past sessions with no machine connected. Add one in Settings \u{2192} Devices.", cx);
-            return;
-        };
-        self.command_palette = None;
-        crate::live::chrome::release_held_keys(cx);
-        let search = cx.new(|cx| {
-            ComposerInput::with_context("Search what you asked Claude Code\u{2026}", "PaletteSearch", cx)
-        });
-        let events = cx.subscribe(&search, |this, _, event, cx| {
-            if matches!(event, ComposerInputEvent::Edited) {
-                this.ask_picker(true, cx);
-            }
-        });
-        let every = scope.space_id.is_none();
-        self.sidebar_clock = crate::clock::utc(cx);
-        self.past_sessions.picker = Some(Picker {
-            search,
-            focus: cx.focus_handle(),
-            previous_focus: window.focused(cx),
-            focus_pending: true,
-            scope,
-            every,
-            active: 0,
-            scroll: gpui::ScrollHandle::new(),
-            load: Load::Unasked,
-            asked: 0,
-            task: None,
-            words: String::new(),
-            refused: None,
-            _events: events,
-        });
-        self.ask_picker(false, cx);
-        cx.notify();
-    }
-
-    /// Shut the picker, the keyboard back where it was.
-    fn close_resume_picker(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
-        let Some(picker) = self.past_sessions.picker.take() else { return };
-        if let (Some(window), Some(focus)) = (window, picker.previous_focus) {
-            window.focus(&focus, cx);
-        }
-        cx.notify();
-    }
-
-    /// Ask the machine for what the picker's words find, after a pause in typing when `typed`.
-    fn ask_picker(&mut self, typed: bool, cx: &mut Context<Self>) {
-        let engine = self.state.read(cx).engine().cloned();
-        let Some(picker) = self.past_sessions.picker.as_mut() else { return };
-        let Some(engine) = engine else {
-            picker.load = Load::Failed("Not connected".to_owned());
-            return;
-        };
-        let words = picker.search.read(cx).text().trim().to_owned();
-        picker.asked = picker.asked.wrapping_add(1);
-        picker.refused = None;
-        let asked = picker.asked;
-        picker.load.reload();
-        let mut params = serde_json::json!({ "query": words, "limit": PICKER_LIMIT });
-        match (&picker.scope.space_id, picker.every) {
-            (Some(space), false) => params["spaceIds"] = serde_json::json!([space]),
-            _ => {
-                params["deviceId"] = serde_json::json!(picker.scope.device_id);
-                params["allFolders"] = serde_json::json!(true);
-            }
-        }
-        picker.task = Some(cx.spawn(async move |this, cx| {
-            if typed {
-                cx.background_executor().timer(ASK_AFTER).await;
-            }
-            let listed = engine.client().call_as::<Listed>(calls::LIST, params).await;
-            let _gone = this.update(cx, |this, cx| {
-                this.sidebar_clock = crate::clock::utc(cx);
-                let Some(picker) = this.past_sessions.picker.as_mut() else { return };
-                if picker.asked != asked {
-                    return;
-                }
-                picker.task = None;
-                picker.words = words;
-                picker.active = 0;
-                picker.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-                picker.load = match listed {
-                    Ok(listed) => match listed.failed() {
-                        Some(why) => Load::Failed(why),
-                        None => Load::Listed(listed),
-                    },
-                    Err(error) => Load::Failed(error.to_string()),
-                };
-                cx.notify();
-            });
-        }));
-    }
-
-    /// Search the project alone, or every folder of the machine.
-    fn toggle_picker_scope(&mut self, cx: &mut Context<Self>) {
-        let Some(picker) = self.past_sessions.picker.as_mut() else { return };
-        if picker.scope.space_id.is_none() {
-            return;
-        }
-        picker.every = !picker.every;
-        self.ask_picker(false, cx);
-        cx.notify();
-    }
-
-    fn picker_rows(&self) -> Vec<PastRow> {
-        self.past_sessions
-            .picker
-            .as_ref()
-            .and_then(|p| p.load.listed())
-            .map(|listed| listed.sessions.clone())
-            .unwrap_or_default()
-    }
-
-    fn move_picker(&mut self, down: bool, cx: &mut Context<Self>) {
-        let count = self.picker_rows().len();
-        let Some(picker) = self.past_sessions.picker.as_mut() else { return };
-        if count == 0 {
-            return;
-        }
-        picker.active = if down {
-            (picker.active + 1) % count
-        } else {
-            (picker.active + count - 1) % count
-        };
-        picker.scroll.scroll_to_item(picker.active);
-        cx.notify();
-    }
-
-    fn open_picked(&mut self, cx: &mut Context<Self>) {
-        let rows = self.picker_rows();
-        let Some(row) = self.past_sessions.picker.as_ref().and_then(|p| rows.get(p.active)).cloned()
-        else {
-            return;
-        };
-        self.open_past_session(row, cx);
-    }
-
-    /// The picker over the window, while it is up.
-    pub(super) fn render_resume_picker(
-        &mut self,
-        viewport: gpui::Size<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let theme = Theme::of(cx).for_popup();
-        // slopty: a key reads as everywhere else (`keys::combo_text`).
-        let shortcut = crate::keys::combo_text(self.settings.keymap.get(ShortcutId::ResumeSession));
-        let view = cx.entity_id();
-        let opening = self.past_sessions.opening.as_ref().map(|(key, _)| key.clone());
-        let picker = self.past_sessions.picker.as_mut()?;
-        if std::mem::take(&mut picker.focus_pending) {
-            window.focus(&picker.search.focus_handle(cx), cx);
-        }
-        let search = picker.search.clone();
-        let focus = picker.focus.clone();
-        let scroll = picker.scroll.clone();
-        let active = picker.active;
-        let every = picker.every;
-        let words = picker.words.clone();
-        let refused = picker.refused.clone();
-        let scope = picker.scope.clone();
-        let load = picker.load.clone();
-        let mut children: Vec<AnyElement> = Vec::new();
-        let rows = load.listed().map(|l| l.sessions.clone()).unwrap_or_default();
-        // slopty: the sidebar's clock, which ticks when the soonest of these next reads
-        // differently.
-        let ago: Vec<SharedString> =
-            rows.iter().map(|row| row.updated().map(|at| self.sidebar_time_ago(at)).unwrap_or_default()).collect();
-        self.tick_sidebar_clock(cx);
-        for (ix, row) in rows.iter().enumerate() {
-            let target = row.clone();
-            let opening = opening.as_deref() == Some(row.key.as_str());
-            let refusal = refused.as_ref().filter(|(key, _)| *key == row.key).map(|(_, why)| why.clone());
-            let element = picker_row(row, ix, ix == active, opening, refusal, every, &words, ago[ix].clone(), &theme)
-                .on_click(cx.listener(move |this, _, _, cx| this.open_past_session(target.clone(), cx)))
-                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
-                    if let Some(picker) = this.past_sessions.picker.as_mut()
-                        && picker.active != ix
-                    {
-                        picker.active = ix;
-                        cx.notify();
-                    }
-                }));
-            children.push(div().px(px(8.0)).child(element).into_any_element());
-        }
-        let status: Option<AnyElement> = match &load {
-            Load::Unasked | Load::Loading(None) => Some(
-                div()
-                    .py(px(24.0))
-                    .flex()
-                    .justify_center()
-                    .child(crate::loaders::mini_mono_spinner("picker-spinner", 2.5, theme.text_muted, view, cx))
-                    .into_any_element(),
-            ),
-            Load::Failed(why) => Some(
-                palette_empty(&theme, "Couldn\u{2019}t read Claude Code\u{2019}s sessions", why.clone())
-                    .into_any_element(),
-            ),
-            Load::Listed(listed) | Load::Loading(Some(listed)) if listed.sessions.is_empty() => {
-                let hint = match (words.is_empty(), every) {
-                    (true, false) => "Claude Code kept no sessions in this project. Press \u{21E5} for every folder.",
-                    (true, true) => "Claude Code kept no sessions on this machine.",
-                    (false, false) => "No prompt here says that. Press \u{21E5} to search every folder.",
-                    (false, true) => "No prompt on this machine says that.",
-                };
-                Some(palette_empty(&theme, "No past sessions", hint).into_any_element())
-            }
-            _ => None,
-        };
-        let body = div()
-            .id("resume-results")
-            .min_h_0()
-            .max_h(px(palette_results_height(viewport)))
-            .overflow_y_scroll()
-            .track_scroll(&scroll)
-            .flex()
-            .flex_col()
-            .gap(px(super::SIDEBAR_LIST_GAP))
-            .pt(px(8.0))
-            .pb(px(8.0))
-            .children(children)
-            .children(status);
-        let body = palette_results_fade(body, &scroll);
-        let has_project = scope.space_id.is_some();
-        let project_label: SharedString = scope.project.clone().unwrap_or_else(|| "This project".to_owned()).into();
-        let tabs = div()
-            .flex_none()
-            .px(px(12.0))
-            .py(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.06))
-            .when(has_project, |tabs| {
-                tabs.child(
-                    crate::surface_chrome::tab("resume-scope-project", !every, &theme)
-                        .px(px(8.0))
-                        .role(gpui::Role::Tab)
-                        .aria_label(project_label.clone())
-                        .tooltip(crate::settings::widgets::text_tooltip("Search this project \u{00B7} \u{21E5}"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if this.past_sessions.picker.as_ref().is_some_and(|p| p.every) {
-                                this.toggle_picker_scope(cx);
-                            }
-                        }))
-                        .child(project_label.clone()),
-                )
-            })
-            .child(
-                crate::surface_chrome::tab("resume-scope-every", every, &theme)
-                    .px(px(8.0))
-                    .role(gpui::Role::Tab)
-                    .aria_label("Every folder")
-                    .tooltip(crate::settings::widgets::text_tooltip("Search every folder on this machine \u{00B7} \u{21E5}"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.past_sessions.picker.as_ref().is_some_and(|p| !p.every) {
-                            this.toggle_picker_scope(cx);
-                        }
-                    }))
-                    .child("Every folder"),
-            )
-            .child(div().flex_1())
-            .when_some(load.listed().and_then(|l| l.cut.clone()), |tabs, cut| {
-                tabs.child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child(SharedString::from(cut)),
-                )
-            });
-        // slopty: the keys, where there are keys.
-        let keys = (!crate::shell::touch_screen()).then(|| {
-            palette_footer()
-                .child(command_key_hint(&theme, "\u{2191} \u{2193}", "Navigate", window, cx))
-                .child(command_key_hint(&theme, "\u{23CE}", "Open", window, cx))
-                .when(has_project, |footer| footer.child(command_key_hint(&theme, "Tab", "Scope", window, cx)))
-                .child(command_key_hint(&theme, "Esc", "Close", window, cx))
-        });
-        let card = palette_card("resume-picker", &focus, viewport, &theme)
-            .key_context("ResumePicker")
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                match event.keystroke.key.as_str() {
-                    "up" | "down" => this.move_picker(event.keystroke.key == "down", cx),
-                    "enter" => this.open_picked(cx),
-                    "tab" => this.toggle_picker_scope(cx),
-                    "escape" => this.close_resume_picker(Some(window), cx),
-                    _ => return,
-                }
-                cx.stop_propagation();
-            }))
-            .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_resume_picker(Some(window), cx)))
-            .child(palette_header(&theme, search.into_any_element(), popover::kbd_hint(&theme, &shortcut)))
-            .child(tabs)
-            .child(body)
-            .children(keys);
-        Some(palette_overlay(viewport, card))
-    }
-}
-
-/// A state line of History: what it is doing, or why it has nothing, one line tall.
-fn state_line(theme: &Theme, id: &'static str, words: String, failed: bool) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .h(px(LINE_HEIGHT))
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .px(px(Theme::SPACE_SM))
-        .rounded(px(6.0))
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(if failed { theme.danger.opacity(0.8) } else { theme.text_muted.opacity(0.55) })
-        .role(gpui::Role::Status)
-        .aria_label(SharedString::from(words.clone()))
-        .child(div().flex_1().min_w_0().truncate().child(SharedString::from(words)))
-}
-
-/// One session in the picker: its title with the words lit, the prompt that matched (or its
-/// last) with the words lit, and where and when; why it did not open, when it did not.
-#[expect(clippy::too_many_arguments, reason = "one row's facts, drawn together")]
-fn picker_row(
-    row: &PastRow,
-    ix: usize,
-    active: bool,
-    opening: bool,
-    refused: Option<String>,
-    every: bool,
-    words: &str,
-    ago: SharedString,
-    theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
-    let label = row.label();
-    // The prompt that matched is its own line unless it is the title, already lit above.
-    let prompt = row.prompt.as_ref().filter(|p| crate::transcript::single_line(&p.text) != label);
-    let prompt_line = prompt.map(|p| prompt_text(p, theme));
-    let mut place: Vec<String> = Vec::new();
-    if every && let Some(cwd) = row.cwd.as_deref() {
-        place.push(cwd.rsplit('/').find(|part| !part.is_empty()).unwrap_or(cwd).to_owned());
-    }
-    if let Some(branch) = &row.branch {
-        place.push(branch.clone());
-    }
-    let corner: SharedString = if opening {
-        "Opening\u{2026}".into()
-    } else if let Some(words) = row.running_words() {
-        words.into()
-    } else {
-        ago
-    };
-    let second: Option<AnyElement> = match (&refused, prompt_line) {
-        (Some(why), _) => Some(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.danger)
-                .child(SharedString::from(why.clone()))
-                .into_any_element(),
-        ),
-        (None, Some(line)) => Some(line),
-        (None, None) => None,
-    };
-    let label_text: SharedString = label.clone().into();
-    let tooltip = row.held_elsewhere().unwrap_or_else(|| "Open and continue \u{00B7} \u{21B5}".to_owned());
-    popover::menu_row(theme, active, format!("resume-row-{ix}"))
-        .id(("resume-row", ix))
-        .rounded(px(popover::PALETTE_ITEM_RADIUS))
-        .role(gpui::Role::Button)
-        .aria_label(SharedString::from(format!(
-            "{label}{}, {corner}",
-            prompt.map(|p| format!(", {}", p.text)).unwrap_or_default()
-        )))
-        .min_h(px(44.0))
-        .py(px(5.0))
-        .tooltip(crate::settings::widgets::text_tooltip(tooltip))
-        .child(icon(icons::CLAUDE_MARK).size(px(16.0)).flex_none().text_color(crate::icons::claude_brand()))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(div().truncate().child(popover::search_highlight(label_text, Some(words), theme)))
-                .children(second),
-        )
-        .child(
-            div()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .items_end()
-                .gap(px(2.0))
-                .text_size(crate::typography::ui_rems(11.0))
-                .child(
-                    div()
-                        .text_color(if row.running.is_some() { theme.warning } else { theme.text_faint })
-                        .child(corner),
-                )
-                .when(!place.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .max_w(px(160.0))
-                            .truncate()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(place.join(" \u{00B7} "))),
-                    )
-                }),
-        )
 }
 
 /// A prompt on one line with the asked words lit: `…` where it was cut.
-fn prompt_text(prompt: &PromptLine, theme: &Theme) -> AnyElement {
+pub(super) fn prompt_text(prompt: &PromptLine, theme: &Theme) -> AnyElement {
     let (line, ranges) = prompt_line(prompt);
     div()
         .min_w_0()
@@ -1313,17 +300,17 @@ mod tests {
             }],
             "failures": [{ "deviceId": "other", "device": "Laptop", "words": "Laptop is out of reach" }],
             "more": true,
-            "cut": null,
+            "cut": "read the newest 500",
         });
         let listed: Listed = serde_json::from_value(answer).unwrap();
         assert_eq!(listed.sessions[0].branch.as_deref(), Some("main"));
         assert_eq!(listed.sessions[0].prompt.as_ref().unwrap().spans, vec![[0, 3]]);
-        assert!(listed.more);
-        assert_eq!(listed.failed(), None, "a listing with sessions is no failure");
+        assert_eq!(listed.cut.as_deref(), Some("read the newest 500"));
+        assert_eq!(listed.failures[0].words, "Laptop is out of reach");
         let empty: Listed =
             serde_json::from_value(serde_json::json!({ "failures": [{ "words": "unreadable" }] }))
                 .unwrap();
-        assert_eq!(empty.failed().as_deref(), Some("unreadable"));
+        assert!(empty.sessions.is_empty(), "a field left out reads as none");
     }
 
     /// The asked words stay lit after the line is made one line and marked where it was cut, and
@@ -1342,40 +329,6 @@ mod tests {
         assert_eq!(&line[ranges[0].clone()], "the");
     }
 
-    /// History's height is its rows' and lines' exactly, so the group it closes never clips it.
-    #[test]
-    fn history_stands_as_tall_as_what_it_shows() {
-        assert_eq!(history_height(&History::default()), HEADER_HEIGHT);
-        let mut history = History { open: true, ..History::default() };
-        assert_eq!(history_height(&history), HEADER_HEIGHT + BODY_INSET + LINE_HEIGHT);
-        let mut branched = row("b");
-        branched.branch = Some("main".to_owned());
-        let mut chat = row("c");
-        chat.chat_id = Some("chat".to_owned());
-        history.load = Load::Listed(Listed {
-            sessions: vec![row("a"), branched, chat],
-            more: true,
-            ..Listed::default()
-        });
-        assert_eq!(
-            history_height(&history),
-            HEADER_HEIGHT + BODY_INSET + ROW_HEIGHT + ROW_BRANCH_HEIGHT + LINE_HEIGHT + 2.0 * GAP,
-            "a chat here is no row; Show more is a line"
-        );
-        history.load = Load::Listed(Listed::default());
-        assert_eq!(history_height(&history), HEADER_HEIGHT + BODY_INSET + LINE_HEIGHT);
-        history.load = Load::Listed(Listed {
-            sessions: vec![row("a")],
-            failures: vec![Failure { words: "Laptop is out of reach".to_owned(), ..Failure::default() }],
-            ..Listed::default()
-        });
-        assert_eq!(
-            history_height(&history),
-            HEADER_HEIGHT + BODY_INSET + ROW_HEIGHT + LINE_HEIGHT + GAP,
-            "a machine that failed beside the rows says so in a line"
-        );
-    }
-
     /// A session held by a live Claude Code elsewhere says so, naming its machine.
     #[test]
     fn a_session_held_elsewhere_says_where() {
@@ -1386,173 +339,5 @@ mod tests {
         let said = past.held_elsewhere().unwrap();
         assert!(said.contains("in a terminal on Studio"), "{said}");
         assert_eq!(past.running_words(), Some("In a terminal"));
-    }
-
-    // slopty: History opens and shuts over the sidebar's own tween, as every section does, and
-    // what comes in while it is open slides it to its new height.
-    #[gpui::test]
-    fn history_folds_over_the_sidebars_tween(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let path = tempfile::tempdir().unwrap().keep();
-        let (shell, cx) = cx.add_window_view(move |_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            Shell::new(
-                state,
-                crate::state::EngineBootConfig {
-                    data_dir: path.clone(),
-                    default_harness: slopty_view_proto::HarnessId::MOCK,
-                },
-                cx,
-            )
-        });
-        let tween = |shell: &Shell| {
-            shell.sidebar_disclosure_motion.get(MOTION).map(|t| (t.from, t.to))
-        };
-        shell.update(cx, |shell, cx| shell.toggle_history(cx));
-        // No engine: History says it is not connected, one line under its inset.
-        let open = BODY_INSET + LINE_HEIGHT;
-        assert_eq!(shell.read_with(cx, |shell, _| tween(shell)), Some((0.0, open)), "it slides open");
-        shell.update(cx, |shell, cx| shell.toggle_history(cx));
-        let (from, to) = shell.read_with(cx, |shell, _| tween(shell)).unwrap();
-        assert_eq!(to, 0.0, "it slides shut");
-        assert!(from <= open, "from where it stood: {from}");
-    }
-
-    /// A History row's title takes the row's width up to its time, which is only as wide as its
-    /// words: "1d" leaves the title all but its gap, never a fixed slot's.
-    #[gpui::test]
-    fn a_history_title_runs_up_to_its_time(cx: &mut gpui::TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let path = dir.keep();
-        let (shell, cx) = cx.add_window_view(move |_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            let shell = Shell::new(
-                state,
-                crate::state::EngineBootConfig {
-                    data_dir: path.clone(),
-                    default_harness: slopty_view_proto::HarnessId::MOCK,
-                },
-                cx,
-            );
-            shell.state.update(cx, |state, _| {
-                state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
-                state.local_device_id = Some("local".into());
-                state.spaces = vec![serde_json::from_value(serde_json::json!({
-                    "id": "local:/work", "deviceId": "local", "path": "/work",
-                    "gitDetected": true, "createdAt": "2026-09-20T00:00:00Z",
-                }))
-                .unwrap()];
-            });
-            shell
-        });
-        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
-        let day_ago = chrono::Utc::now().checked_sub_signed(chrono::TimeDelta::hours(25)).expect("a day ago");
-        shell.update(cx, |shell, cx| {
-            shell.debug_gate = Some(crate::state::GatePhase::Ready);
-            shell.splash = super::super::SplashPhase::Gone;
-            crate::motion::set_reduced_motion(cx, true);
-            let mut past = row("lexer");
-            past.title = Some("Rename the lexer module and every one of its callers".to_owned());
-            past.updated_at = Some(day_ago.timestamp_millis());
-            shell.past_sessions.history = History {
-                open: true,
-                shown: FIRST_PAGE,
-                load: Load::Listed(Listed { sessions: vec![past], ..Listed::default() }),
-                ..History::default()
-            };
-        });
-        for _ in 0..3 {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.refresh();
-                window.draw(cx).clear(cx);
-            });
-        }
-        let title = cx.debug_bounds("history-title-d:lexer").expect("the row's title");
-        let time = cx.debug_bounds("history-time-d:lexer").expect("the row's time");
-        let gap = f32::from(time.left() - title.right());
-        assert!((gap - 8.0).abs() < 0.5, "the title runs up to the time: {title:?} {time:?}");
-        assert!(f32::from(time.size.width) < 24.0, "\"1d\" is as wide as its words: {time:?}");
-        // slopty: on a chat row's grid: its words past the one leading slot, as a chat row's, a
-        // chat row tall.
-        let row = cx.debug_bounds("history-row-d:lexer").expect("the row");
-        let inset = f32::from(title.left() - row.left());
-        assert!(
-            (inset - (Theme::SPACE_SM + ROW_SLOT + ROW_SLOT_GAP)).abs() < 0.5,
-            "the words start where a chat row's do: {inset}"
-        );
-        assert_eq!(f32::from(row.size.height), super::super::sidebar::SIDEBAR_ROW_HEIGHT);
-    }
-
-    // slopty: History's times read the sidebar's clock, taken as History opens, and the clock
-    // ticks when a time shown next reads differently, so a row's "now" turns into "1m" with
-    // nothing else moving.
-    #[gpui::test]
-    fn history_s_times_move_on_by_the_sidebar_s_clock(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let path = tempfile::tempdir().unwrap().keep();
-        let (shell, cx) = cx.add_window_view(move |_, cx| {
-            let shell = Shell::new(
-                cx.new(|_| crate::state::AppState::new()),
-                crate::state::EngineBootConfig {
-                    data_dir: path.clone(),
-                    default_harness: slopty_view_proto::HarnessId::MOCK,
-                },
-                cx,
-            );
-            shell.state.update(cx, |state, _| {
-                state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
-                state.local_device_id = Some("local".into());
-                state.spaces = vec![serde_json::from_value(serde_json::json!({
-                    "id": "local:/work", "deviceId": "local", "path": "/work",
-                    "gitDetected": true, "createdAt": "2026-09-20T00:00:00Z",
-                }))
-                .unwrap()];
-            });
-            shell
-        });
-        let now = cx.update(|_, cx| crate::clock::utc(cx));
-        // As the machine says it: to the millisecond.
-        let updated = chrono::DateTime::from_timestamp_millis((now - chrono::Duration::seconds(30)).timestamp_millis())
-            .expect("a moment");
-        shell.update(cx, |shell, cx| {
-            shell.debug_gate = Some(crate::state::GatePhase::Ready);
-            shell.splash = super::super::SplashPhase::Gone;
-            crate::motion::set_reduced_motion(cx, true);
-            shell.sidebar_clock = now - chrono::Duration::hours(1);
-            shell.toggle_history(cx);
-            assert_eq!(shell.sidebar_clock, now, "taken as History opens, not the sidebar's last");
-            let mut past = row("lexer");
-            past.updated_at = Some(updated.timestamp_millis());
-            shell.past_sessions.history.load =
-                Load::Listed(Listed { sessions: vec![past], ..Listed::default() });
-        });
-        cx.update(|window, cx| {
-            window.refresh();
-            window.draw(cx).clear(cx);
-        });
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.sidebar_time_ago(updated).as_ref(), "now");
-            let due = shell.sidebar_clock_tick.as_ref().map(|(due, _)| *due);
-            assert_eq!(due, Some(updated + chrono::Duration::seconds(60)), "ticks when it reads 1m");
-        });
-        cx.executor().advance_clock(std::time::Duration::from_secs(31));
-        cx.run_until_parked();
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.sidebar_time_ago(updated).as_ref(), "1m", "the minute turned");
-        });
     }
 }

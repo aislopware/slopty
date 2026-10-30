@@ -174,8 +174,11 @@ impl Shell {
         // Inked for the ground under it: the terminal's over the session, the window's own over
         // the canvas.
         let ink = if on_canvas { theme.clone() } else { ink_for(self.shown_ground(cx), &theme) };
-        let identity =
-            (!on_canvas).then(|| self.render_titlebar_identity(&ink, window.is_window_active(), cx));
+        // The picker hangs under the identity (`picker`).
+        let identity = super::picker::identity_anchor(
+            (!on_canvas).then(|| self.render_titlebar_identity(&ink, window.is_window_active(), cx)),
+            window,
+        );
         // At the trailing end: the inbox's eye, the palette, then a new session, which over the
         // new-session canvas would open the canvas it is on.
         let eye = self.render_inbox_button(&ink, cx);
@@ -224,7 +227,8 @@ impl Shell {
     /// tooltip when cut, rising in over the old when the agent gives another), its machine and
     /// branch in secondary text, then its state's mark, the same glyph as its row's in the
     /// list. `ink` is the theme inked for the ground under the row; the title dims to secondary
-    /// while the window is not `key`. A right-click opens the session's menu under the row.
+    /// while the window is not `key`. A press opens the session picker under it, as ⌘K does
+    /// (Rex's); a right-click opens the session's menu under the row.
     fn render_titlebar_identity(
         &mut self,
         ink: &Theme,
@@ -284,6 +288,14 @@ impl Shell {
             .gap(px(6.0))
             .text_size(crate::typography::ui_rems(13.0))
             .child(icon(glyph).size(px(14.0)).flex_none().text_color(tint.unwrap_or(title_ink)))
+            // Out of the drag strip, as the row's buttons are (`window_control_button`).
+            .occlude()
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.toggle_picker(super::picker::Mode::Sessions, window, cx);
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -354,28 +366,13 @@ pub(super) fn machine_and_branch(machine: Option<&str>, branch: Option<&str>) ->
     }
 }
 
-/// Whether text over `ground` reads as on a light one, as Ghostty picks a transparent
-/// titlebar's appearance from the terminal's background: its luma past half.
-pub(super) fn ground_is_light(ground: gpui::Hsla) -> bool {
-    let rgb = ground.to_rgb();
-    0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b > 0.5
-}
-
-/// The theme inked for words over `ground`: the window's own when the ground is of its
-/// appearance, else the other appearance's, so a dark program's titlebar row in a light window
+/// The theme inked for words over `ground`, read as the window's appearance is
+/// (`window_appearance::of_ground`): the theme's own when the ground is of its appearance, else
+/// the other appearance's, so a dark program's titlebar row in a light window
 /// keeps its title readable (`docs/decisions/layout.md`, "One row of chrome").
 pub(super) fn ink_for(ground: gpui::Hsla, theme: &Theme) -> Theme {
-    let light = ground_is_light(ground);
-    if light == !theme.appearance.is_dark() {
-        theme.clone()
-    } else {
-        let appearance = if light {
-            crate::theme::Appearance::Light
-        } else {
-            crate::theme::Appearance::Dark
-        };
-        Theme::for_appearance(appearance)
-    }
+    let appearance = crate::window_appearance::of_ground(ground);
+    if appearance == theme.appearance { theme.clone() } else { Theme::for_appearance(appearance) }
 }
 
 #[cfg(test)]

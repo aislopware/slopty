@@ -3777,7 +3777,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - *The bypass half is superseded 2026-10-29 by "TUI-first" above:* the person picks a mode
     in the TUI itself, and a start passes one only when it names it.
 
-- ❌ **Past Claude Code sessions are seen and continued in the GUI (2026-10-16, lane R).** *Superseded 2026-10-29 by "TUI-first" above: a past session is resumed as its TUI in a terminal.* The TUI
+- ❌ **Past Claude Code sessions are seen and continued in the GUI (2026-10-16, lane R).** *Superseded 2026-10-29 by "TUI-first" above: a past session is resumed as its TUI in a terminal.* *History and "Resume a Claude Code session…" are deleted 2026-10-30: typing in the session picker (⌘K) finds past sessions on every machine (`docs/decisions/layout.md`, "The picker as built").* The TUI
   and Slopty's `claude -p` share Claude Code's own store on each machine, so a session run in a
   terminal is one Slopty can show and go on with. Claude desktop's Code tab, t3code and zeron
   each keep history apart from live work and reachable from a search; Slopty does both.
@@ -3825,8 +3825,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     so a pid used again holds nothing. The sessions this worker's own Claude Codes run are left
     out. A session another Claude Code takes up while its thread here rests is caught at the
     next message too: the message waits in the queue, and the thread says why.
-  - Tests: e2e `app::past_sessions` (`a_tui_session_is_listed_opened_and_continued`,
-    `history_says_why_it_has_nothing`, `a_session_running_elsewhere_is_shown_not_taken`);
+  - Tests: e2e `app::past_sessions` (`a_tui_session_is_found_opened_and_continued`,
+    `the_picker_says_why_it_found_no_past_session`, `a_session_running_elsewhere_is_shown_not_taken`);
     `slopty-worker` `claude::{a_resumed_session_starts_claude_code_with_its_first_message,
     a_session_held_elsewhere_is_shown_and_not_taken}` and
     `thread::claude::held::tests`; `slopty-agent` `claude::sessions::tests::{

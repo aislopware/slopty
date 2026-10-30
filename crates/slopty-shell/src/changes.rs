@@ -4893,7 +4893,15 @@ impl Render for Changes {
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &FindInDiff, window, cx| this.open_find(window, cx)))
             .on_action(cx.listener(|this, _: &FindNextInDiff, _, cx| this.step_find(1, cx)))
-            .on_action(cx.listener(|this, _: &FindPreviousInDiff, _, cx| this.step_find(-1, cx)))
+            // ⇧⌘G steps back in the diff's open find; with it shut the key goes on to the
+            // window's Find Previous, then Go to Directory (`shell::picker`).
+            .on_action(cx.listener(|this, _: &FindPreviousInDiff, _, cx| {
+                if this.find.is_some() {
+                    this.step_find(-1, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleDiffTree, _, cx| this.toggle_tree(cx)))
             .on_mouse_down(
                 gpui::MouseButton::Left,

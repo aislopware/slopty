@@ -230,7 +230,6 @@ impl Section {
 enum Command {
     NewChat,
     NewProject,
-    ResumeSession, // slopty: a past Claude Code session (`past_sessions`)
     Settings,
     Theme(AppearanceMode),
     ArchiveThread,
@@ -244,7 +243,6 @@ impl Command {
         match self {
             Self::NewChat => "New session",
             Self::NewProject => "New project\u{2026}", // slopty: it opens a picker
-            Self::ResumeSession => super::past_sessions::RESUME, // slopty
             Self::Settings => "Settings", // slopty: the name its menu and button use
             // The View menu's Appearance, one row a mode, the one in use ticked.
             Self::Theme(AppearanceMode::System) => "Appearance: System",
@@ -259,7 +257,6 @@ impl Command {
         match self {
             Self::NewChat => icons::PLUS, // slopty: the titlebar's glyph for it
             Self::NewProject => icons::FOLDER,
-            Self::ResumeSession => icons::CLOCK_CIRCLE, // slopty
             Self::Settings => icons::SETTINGS,
             Self::Theme(mode) => mode.icon(),
             Self::ArchiveThread => icons::ARCHIVE_MINIMALISTIC,
@@ -381,7 +378,6 @@ fn all_commands(can_archive: bool) -> impl Iterator<Item = Command> {
     [
         Command::NewChat,
         Command::NewProject,
-        Command::ResumeSession, // slopty
         Command::Settings,
         Command::Theme(AppearanceMode::System),
         Command::Theme(AppearanceMode::Light),
@@ -881,7 +877,6 @@ impl Shell {
         match row.kind {
             RowKind::Command(Command::NewChat) => self.open_new_session(None, cx),
             RowKind::Command(Command::NewProject) => self.open_add_space(cx),
-            RowKind::Command(Command::ResumeSession) => self.toggle_resume_picker(window, cx), // slopty
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
@@ -956,7 +951,7 @@ impl Shell {
                     CommandState::None
                 }
             }
-            Command::NewChat | Command::NewProject | Command::ResumeSession => CommandState::None,
+            Command::NewChat | Command::NewProject => CommandState::None,
         }
     }
 
@@ -977,7 +972,6 @@ impl Shell {
         let id = match command {
             Command::NewChat => ShortcutId::NewSession,
             Command::NewProject => ShortcutId::NewProject,
-            Command::ResumeSession => ShortcutId::ResumeSession, // slopty
             Command::Settings => return Some(crate::keys::combo_text("mod-,").to_string()),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
             Command::Theme(_) => return None,
@@ -3066,11 +3060,10 @@ mod tests {
         let none = std::collections::BTreeMap::new();
         let all = labels("", &none);
         assert_eq!(
-            all[..7],
+            all[..6],
             [
                 "New session",
                 "New project\u{2026}",
-                super::super::past_sessions::RESUME,
                 "Settings",
                 "Appearance: System",
                 "Appearance: Light",
