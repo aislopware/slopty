@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Loader motion — the pure math behind slopty's loading indicators.
+//! Loader motion — the pure math behind Slopty's loading indicators.
 //!
 //! These are the curves and constants the gpui viewport animates with
 //! (`slopty-shell/src/motion.rs`, `slopty-shell/src/loaders.rs`), lifted here so any
@@ -23,7 +23,7 @@ pub const PULSE_MIN_SCALE: f32 = 0.9;
 /// Per-cell stagger, as a fraction of the pulse period (0.15s of 2.4s).
 pub const PULSE_STAGGER: f32 = 0.15 / 2.4;
 
-/// Per-row tints of the gradient matrix spinner — slopty's "sunrise" gradient
+/// Per-row tints of the gradient matrix spinner — the "sunrise" gradient
 /// sampled at each row: cool blue at the top, through amber, to pink.
 pub const GSPIN_ROW_TINTS: [u32; MATRIX_SIDE] = [0x00b6_d3ef, 0x00ed_b185, 0x00f8_88a0];
 /// Opacity a gradient-spinner cell rests at between pulses.
