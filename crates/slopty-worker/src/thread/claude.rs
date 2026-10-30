@@ -332,14 +332,9 @@ impl Watch {
         if live.started_at.is_some() {
             term.since = live.started_at;
         }
-        if let (Some(name), Some(followed)) = (&live.name, &term.session)
-            && followed.native == live.session
-        {
-            let _gone = followed.says.send(Say::Named(name.clone()));
-        }
         let current = term.session.as_ref().map(|f| f.native.as_str());
         if current == Some(live.session.as_str()) {
-            self.waits(terminal, &live);
+            self.told(terminal, &live);
             return;
         }
         if term.ended.contains(&live.session) {
@@ -352,14 +347,17 @@ impl Watch {
         tracing::info!(%terminal, session = live.session, "a Claude Code's session, by its record");
         let (native, since) = (live.session.clone(), live.started_at);
         self.follow(Begin { terminal, native, cwd, version, transcript, since });
-        self.waits(terminal, &live);
+        self.told(terminal, &live);
     }
 
-    /// Tell the session followed in `terminal` what its record `live` says it waits on, when
-    /// that changed.
-    fn waits(&mut self, terminal: SessionId, live: &Live) {
+    /// Tell the session followed in `terminal` what its record `live` says: its name, and what
+    /// it waits on when that changed.
+    fn told(&mut self, terminal: SessionId, live: &Live) {
         let followed = self.terms.get_mut(&terminal).and_then(|t| t.session.as_mut());
         let Some(followed) = followed.filter(|f| f.native == live.session) else { return };
+        if let Some(name) = &live.name {
+            let _gone = followed.says.send(Say::Named(name.clone()));
+        }
         let wait = live.waiting();
         if followed.waits == wait {
             return;
@@ -616,9 +614,10 @@ struct Reader {
     /// Whether a hook was heard: the phase follows the hooks then, not the record or the
     /// transcript.
     hooked: bool,
-    /// Whether the phase waits on the person because the record says so ([`Say::Waits`]): the
-    /// transcript leaves it alone until the record no longer does.
-    asked: bool,
+    /// What the record says the session waits on the person for ([`Say::Waits`]), in its own
+    /// words: the transcript leaves the phase alone until the record no longer does, and the
+    /// call it writes meanwhile words the wait.
+    asked: Option<Wait>,
     /// The calls the transcript has written with no result yet, the latest last, while no hook
     /// is heard: what a dialog the record says is open is about.
     open: Vec<Open>,
@@ -699,7 +698,7 @@ impl Reader {
             cwd,
             home: home.to_path_buf(),
             hooked: false,
-            asked: false,
+            asked: None,
             open: Vec::new(),
             pictures,
             stores,
@@ -792,6 +791,7 @@ impl Reader {
         }
         take(host, self.history.transcript(&changes, &outputs));
         take(host, self.phase_from_transcript());
+        take(host, self.reworded());
     }
 
     /// Keep the calls `changes` leave open, the latest last.
@@ -831,7 +831,7 @@ impl Reader {
             TurnState::Interrupted if at_work && ended.is_some_and(|e| e >= since) => {
                 Phase::Stopped
             }
-            _ if self.hooked || self.asked => return Vec::new(),
+            _ if self.hooked || self.asked.is_some() => return Vec::new(),
             state => phase_of(&state),
         };
         if status.as_ref().is_some_and(|s| s.phase == phase) {
@@ -845,7 +845,7 @@ impl Reader {
         let outs = match say {
             Say::Signal(signal, at, prompt) => {
                 self.hooked = true;
-                self.asked = false;
+                self.asked = None;
                 self.open.clear();
                 self.signal(signal, prompt.as_deref(), at)
             }
@@ -873,17 +873,35 @@ impl Reader {
         }
         match wait {
             Some(wait) => {
-                self.asked = true;
+                self.asked = Some(wait.clone());
                 let wait = self.worded(wait);
                 self.history.status(Phase::NeedsYou, Some(wait), live, at)
             }
-            None if std::mem::take(&mut self.asked) => {
+            None if self.asked.take().is_some() => {
                 let phase =
                     self.history.last_turn().map_or(Phase::Idle, |turn| phase_of(&turn.state));
                 self.history.status(phase, None, live, at)
             }
             None => Vec::new(),
         }
+    }
+
+    /// The record's wait said anew of the call the transcript has open now, since the dialog
+    /// opened: Claude Code writes a call a moment after its dialog opens, and the record may be
+    /// read between. A call's result leaves the wait as it was said.
+    fn reworded(&mut self) -> Vec<Out> {
+        let Some(asked) = self.asked.clone() else { return Vec::new() };
+        if self.open.is_empty() {
+            return Vec::new();
+        }
+        let wait = self.worded(asked);
+        let Some(status) = self.history.phase() else { return Vec::new() };
+        // An interruption the transcript shows ends the dialog, whatever the record still says.
+        if status.phase != Phase::NeedsYou || status.wait.as_ref() == Some(&wait) {
+            return Vec::new();
+        }
+        let since = status.since_ms;
+        self.history.status(Phase::NeedsYou, Some(wait), Liveness::Live, since)
     }
 
     /// `wait` said of the call it is about, when the record says a permission or a question

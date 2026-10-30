@@ -2596,7 +2596,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Said of its call.** The record names no call, so a permission or a question is worded
     from the call the transcript has open, the latest (`conversation::call_input`,
     `history::asks_for`): "Run touch allowed.txt", the question itself, and a plan's approval
-    as a plan. A dialog of Claude Code's own keeps the record's words.
+    as a plan. A dialog of Claude Code's own keeps the record's words. Claude Code writes a call
+    a moment after it begins (the recorded `permission` session wrote its second dialog's call
+    95 ms after its `PermissionRequest`), and a tick can read the record between, so a dialog
+    said in the record's words is said anew of its call once the transcript writes it, its
+    time still the dialog's; the call's result leaves it as said. Replayed from the recordings
+    in `threads::hooks::each_recorded_session_shows_each_moment_as_it_came`.
   - **The stand-in writes it.** `slopty-stub-claude` records `status`, `waitingFor` (`input
     needed` while it asks) and `statusUpdatedAt` as 2.1.312 does, so a test sees a typed
     session's dialog: `a_claude_code_typed_by_hand_waits_on_the_person_as_its_record_says`
