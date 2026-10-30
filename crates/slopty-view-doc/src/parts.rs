@@ -96,7 +96,7 @@ pub enum MessagePart {
     Reasoning {
         id: String,
         text: String,
-        // slopty: how long the model thought, once known, for its group's "thought for 12s".
+        // How long the model thought, once known, for its group's "thought for 12s".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thought_ms: Option<u64>,
     },
@@ -143,7 +143,6 @@ pub enum MessagePart {
         /// `failed` → frozen (blob first, doc as fallback).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_status: Option<SubagentStatus>,
-        // slopty: what the call says beyond zeron's chip, in the TUI's words.
         /// The call's facts: its line in the TUI's words, what came of it, its timer, the tray
         /// row of the task it became, and a subagent's progress on its spawn card.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,12 +159,10 @@ pub enum MessagePart {
     Error {
         id: String,
         message: String,
-        // slopty: one error grammar: the copy in `message`, what the agent said kept apart.
         /// What the agent or its machine said, word for word, behind the copy.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
-    // slopty: a quiet one-line divider of Slopty's: a compaction, a subagent's news.
     /// A one-line divider between turns that no one wrote: "Compacted · 143k tokens →
     /// summary", "ui-lane came to rest".
     Marker {
@@ -177,7 +174,6 @@ pub enum MessagePart {
     /// chat's own. Written once by the fork RPC; renders as a labeled
     /// divider. Old desktop builds' unknown-kind fallback yields an empty
     /// text part (invisible); iOS drops unknown kinds.
-    // slopty: a background task's notice, a page shown inline, a quiet notice row.
     /// A background task's notice, a quiet row linked to its task's tray row
     /// ([`crate::part_kinds::TaskRow::row`], `task:{id}`): an agent finished or waits on its
     /// own work, a command exited, a monitor's event. Its part id is the thread item's.
@@ -210,7 +206,7 @@ impl MessagePart {
             | MessagePart::Tool { id, .. }
             | MessagePart::Input { id, .. }
             | MessagePart::Error { id, .. }
-            | MessagePart::Marker { id, .. } // slopty: dividers.
+            | MessagePart::Marker { id, .. }
             | MessagePart::Task { id, .. }
             | MessagePart::Page { id, .. }
             | MessagePart::Note { id, .. } => id,
@@ -248,8 +244,8 @@ impl MessagePart {
             MessagePart::Visual { id, path, title } => id.len() + path.len() + title.len(),
             MessagePart::Error {
                 message, detail, ..
-            } => message.len() + detail.as_ref().map_or(0, String::len), // slopty: its detail.
-            MessagePart::Marker { text, .. } => text.len(), // slopty: dividers.
+            } => message.len() + detail.as_ref().map_or(0, String::len),
+            MessagePart::Marker { text, .. } => text.len(),
             MessagePart::Task { task, .. } => {
                 task.text.len() + task.title.len() + task.body.as_ref().map_or(0, String::len)
             }
@@ -431,7 +427,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
             out.push(MessagePart::Error {
                 id,
                 message: message.clone(),
-                detail: None, // slopty: one error grammar.
+                detail: None,
             });
         }
         AgentEvent::Done { error, .. } => {
@@ -440,7 +436,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 out.push(MessagePart::Error {
                     id,
                     message: message.clone(),
-                    detail: None, // slopty: one error grammar.
+                    detail: None,
                 });
             }
         }
@@ -652,7 +648,7 @@ pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
     for part in parts {
         // Both text-bodied kinds chunk the same way; extended thinking can
         // exceed the cap just as easily as a long reply.
-        // slopty: a thought's duration stays on its first piece.
+        // A thought's duration stays on its first piece.
         let (id, text, reasoning) = match part {
             MessagePart::Text { id, text } if text.len() > MSG_INLINE_MAX => (id, text, None),
             MessagePart::Reasoning { id, text, thought_ms } if text.len() > MSG_INLINE_MAX => {

@@ -1,6 +1,6 @@
-//! slopty: what Slopty's transcript parts carry beyond zeron's: a call's facts in the TUI's
+//! What the transcript's parts carry of Slopty's own: a call's facts in the TUI's
 //! words, a subagent's progress on its spawn card, a background task's notice row and a quiet
-//! notice row (Slopty's own; not in zeron).
+//! notice row.
 //!
 //! The view model fills them from the thread (`slopty_ui::view_model::transcript`), so the shell
 //! draws the words here as they are: each is the TUI's own line for the same thing
