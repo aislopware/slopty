@@ -7,14 +7,12 @@
 //! transcript (`slopty-shell`, which recolors GPUI text runs) and the voice call
 //! captions on desktop and mobile:
 //!
-//! - [`ElemVeil`] tracks, per rendered text element, the previously rendered
-//!   flat text. Each append registers the new byte range as a chunk with its
-//!   arrival time; a fast stream keeps several chunks fading concurrently (a
-//!   rolling veil). A chunk fades exactly once — already-faded text never
-//!   re-animates, and a fully settled element returns no spans at all.
-//! - [`CaptionVeil`] veils a live caption shown as the tail of a long
-//!   utterance, and fades the previous utterance out when the speaker turn
-//!   changes.
+//! - [`ElemVeil`] tracks, per rendered text element, the previously rendered flat text. Each append
+//!   registers the new byte range as a chunk with its arrival time; a fast stream keeps several
+//!   chunks fading concurrently (a rolling veil). A chunk fades exactly once — already-faded text
+//!   never re-animates, and a fully settled element returns no spans at all.
+//! - [`CaptionVeil`] veils a live caption shown as the tail of a long utterance, and fades the
+//!   previous utterance out when the speaker turn changes.
 //!
 //! Constants and curve match mugen-markdown's web `FadePainter` (the engine the
 //! desktop app ships): per-chunk duration adapts to the stream's cadence — an
@@ -25,11 +23,11 @@
 //! content" rule.
 
 mod caption;
-pub use caption::{CAPTION_EXIT_MS, CaptionFrame, CaptionVeil, caption_tail};
-
 use std::collections::HashMap;
 use std::ops::Range;
 use std::time::Instant;
+
+pub use caption::{CAPTION_EXIT_MS, CaptionFrame, CaptionVeil, caption_tail};
 
 /// EMA seed for the inter-append gap (mugen `EMA_SEED_MS`).
 pub const VEIL_EMA_SEED_MS: f32 = 160.0;
@@ -101,12 +99,7 @@ impl Default for ElemVeil {
 
 /// Longest common prefix length, snapped back to a char boundary.
 fn common_prefix(a: &str, b: &str) -> usize {
-    let mut p = a
-        .as_bytes()
-        .iter()
-        .zip(b.as_bytes())
-        .take_while(|(x, y)| x == y)
-        .count();
+    let mut p = a.as_bytes().iter().zip(b.as_bytes()).take_while(|(x, y)| x == y).count();
     while p > 0 && !b.is_char_boundary(p) {
         p -= 1;
     }
@@ -193,10 +186,7 @@ pub struct RowVeil {
 impl RowVeil {
     /// A veil whose first render pass seeds baselines instead of fading.
     pub fn seeded() -> Self {
-        Self {
-            elems: HashMap::new(),
-            seeding: true,
-        }
+        Self { elems: HashMap::new(), seeding: true }
     }
 
     /// The attach pass is over — elements that appear from here on are newly
@@ -236,8 +226,9 @@ pub fn slice_spans(spans: &[VeilSpan], start: usize, end: usize) -> Vec<VeilSpan
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     fn at(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)

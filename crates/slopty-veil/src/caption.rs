@@ -2,8 +2,9 @@
 //! A live voice caption: the tail of the current utterance, its streamed words
 //! veiled in exactly like transcript text, and the previous utterance fading
 //! out when the speaker turn changes.
-use crate::{ElemVeil, VeilSpan, slice_spans, veil_opacity};
 use std::time::Instant;
+
+use crate::{ElemVeil, VeilSpan, slice_spans, veil_opacity};
 
 /// The previous utterance fades out over this long when the turn changes.
 pub const CAPTION_EXIT_MS: f32 = 180.0;
@@ -23,18 +24,11 @@ fn caption_window(text: &str, max: usize) -> (String, usize, usize) {
     if count <= max {
         return (body.to_owned(), start, 0);
     }
-    let skip = body
-        .char_indices()
-        .nth(count - max)
-        .map_or(body.len(), |(i, _)| i);
+    let skip = body.char_indices().nth(count - max).map_or(body.len(), |(i, _)| i);
     let tail = &body[skip..];
     let shown = tail.trim_start();
     let ellipsis = '…'.len_utf8();
-    (
-        format!("…{shown}"),
-        start + skip + (tail.len() - shown.len()),
-        ellipsis,
-    )
+    (format!("…{shown}"), start + skip + (tail.len() - shown.len()), ellipsis)
 }
 
 /// One frame of a caption.
@@ -105,11 +99,7 @@ impl CaptionVeil {
                 (previous, 1.0 - veil_opacity(progress))
             })
         });
-        CaptionFrame {
-            text: shown,
-            spans,
-            previous,
-        }
+        CaptionFrame { text: shown, spans, previous }
     }
 
     /// Something is still fading (as of the last advance): keep repainting.
@@ -120,8 +110,9 @@ impl CaptionVeil {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     fn at(base: Instant, ms: u64) -> Instant {
         base + Duration::from_millis(ms)
@@ -175,11 +166,7 @@ mod tests {
         caption.advance(Some("user"), "Open the sync test", t0, false);
         caption.advance(Some("user"), "Open the sync test", at(t0, 900), false);
         let frame = caption.advance(Some("assistant"), "On it", at(t0, 1000), false);
-        assert_eq!(
-            frame.spans,
-            vec![(0..5, 0.0)],
-            "the new turn fades in from empty"
-        );
+        assert_eq!(frame.spans, vec![(0..5, 0.0)], "the new turn fades in from empty");
         let (previous, alpha) = frame.previous.unwrap();
         assert_eq!(previous, "Open the sync test");
         assert_eq!(alpha, 1.0);
