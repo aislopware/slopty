@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! Agent-side wire types: harness identity, run requests, streaming events, tool calls.
+//! Agent-side wire types: harness identity, streaming events, tool calls.
 
 use serde::{Deserialize, Serialize};
 
@@ -159,83 +159,6 @@ pub struct ModelOption {
 pub struct ModelOptionChoice {
     pub id: String,
     pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunRequest {
-    pub prompt: String,
-    /// The harness picked at send time. Rides the command plane so
-    /// claim-on-first-command (chat row still in flight on the registry
-    /// channel) dispatches — and records — the picked harness instead of the
-    /// engine default. Additive + serde-defaulted for wire compat.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness: Option<HarnessId>,
-    pub model: Option<String>,
-    pub reasoning: Option<ReasoningLevel>,
-    /// Harness-specific option selections (option id -> choice id), JSON round-tripped.
-    #[serde(default)]
-    pub model_options: serde_json::Map<String, serde_json::Value>,
-    pub cwd: String,
-    pub sandbox: SandboxLevel,
-    #[serde(default)]
-    pub auto_approve: bool,
-    /// Harness-native session id to resume, if any.
-    pub resume: Option<String>,
-    /// Absolute paths of image attachments already staged on the run device
-    /// (composer uploads: UploadChunk/UploadCommit → durable path). The same
-    /// paths also ride the prompt text as `Attached images (local files …)`
-    /// refs; this field also lets a harness inline the bytes as image content
-    /// blocks.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<String>,
-    /// Host-side isolated-worktree creation (see [`WorktreeSpec`]): when set,
-    /// the HOST materializes the worktree at command-drain time and runs there
-    /// instead of `cwd`. Additive + serde-defaulted for wire compat — an old
-    /// host ignores it and runs in `cwd` (the repo's main checkout).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree: Option<WorktreeSpec>,
-    /// Slopty's own MCP server, injected by the HOST engine as it starts the
-    /// run: the `slopty mcp` subcommand of this same binary, pointed at the
-    /// engine's loopback IPC and stamped with the originating chat so the
-    /// agent can spawn, read, and message side chats. Additive +
-    /// serde-defaulted — an old host leaves it unset and the agent simply has
-    /// no Slopty tools; title runs never carry it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp: Option<McpServer>,
-}
-
-/// A stdio MCP server the harness should add to the agent's session, on top
-/// of whatever the user configured. Each driver spells it in its own dialect
-/// (Claude `--mcp-config`, ACP `session/new` `mcpServers`, Codex
-/// `mcp_servers.*` config overrides).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpServer {
-    pub name: String,
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: std::collections::BTreeMap<String, String>,
-}
-
-/// Isolated-worktree directive riding [`RunRequest`]. The worktree is created
-/// by the HOST while draining the queued Run — not by the sender over a
-/// blocking CreateWorktree RPC — so the send path stays durable: a lost relay
-/// frame can't wedge the composer on "Sending…" while the session runs anyway
-/// (2026-08-18 user report).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorktreeSpec {
-    /// The repo whose worktree to create (the space's folder on the host).
-    pub repo_path: String,
-    /// Base ref the fresh `slopty/<name>` branch is created off.
-    pub base: String,
-    /// Owning project used to resolve host-local setup Actions. Optional for
-    /// wire compatibility with clients that only request worktree creation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub space_id: Option<String>,
 }
 
 /// The session-scoped singleton id for the live plan/todo chip. ACP plan
@@ -617,17 +540,6 @@ pub struct RuleOffer {
     pub scope: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserInputAnswer {
-    pub question_id: String,
-    pub labels: Vec<String>,
-    // The person's notes on a question whose options have previews (the TUI's "Add
-    // notes on this design…"), beside the answer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DoneStatus {
@@ -838,50 +750,6 @@ mod tests {
             spawn(serde_json::json!({ "model": 5 })).subagent_model(),
             None
         );
-    }
-
-    #[test]
-    fn run_request_attachments_default_and_round_trip() {
-        // Old-wire JSON without the field parses (additive compat)…
-        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
-        let req: RunRequest = serde_json::from_str(old).unwrap();
-        assert!(req.attachments.is_empty());
-        // …and an empty list serializes away (old readers never see it).
-        let json = serde_json::to_value(&req).unwrap();
-        assert!(json.get("attachments").is_none());
-        // Populated lists round-trip.
-        let req = RunRequest {
-            attachments: vec!["/tmp/a.png".into()],
-            ..req
-        };
-        let round: RunRequest =
-            serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
-        assert_eq!(round.attachments, vec!["/tmp/a.png".to_string()]);
-    }
-
-    #[test]
-    fn run_request_worktree_default_and_round_trip() {
-        // Old-wire JSON without the field parses (additive compat)…
-        let old = r#"{"prompt":"p","model":null,"reasoning":null,"cwd":".","sandbox":"workspace-write","resume":null}"#;
-        let req: RunRequest = serde_json::from_str(old).unwrap();
-        assert!(req.worktree.is_none());
-        // …and `None` serializes away (old readers never see it).
-        let json = serde_json::to_value(&req).unwrap();
-        assert!(json.get("worktree").is_none());
-        // A populated spec round-trips camelCased.
-        let req = RunRequest {
-            worktree: Some(WorktreeSpec {
-                repo_path: "/repos/comet".into(),
-                base: "main".into(),
-                space_id: Some("space-1".into()),
-            }),
-            ..req
-        };
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["worktree"]["repoPath"], "/repos/comet");
-        assert_eq!(json["worktree"]["spaceId"], "space-1");
-        let round: RunRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(round.worktree, req.worktree);
     }
 
     #[test]

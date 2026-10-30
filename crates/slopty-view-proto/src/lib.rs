@@ -5,7 +5,6 @@
 //! alike ([`view`]).
 
 pub mod agent;
-pub mod change_request_assessment;
 pub mod device_paths;
 pub mod entities;
 pub mod motion;
