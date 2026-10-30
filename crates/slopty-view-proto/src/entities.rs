@@ -1405,6 +1405,36 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    fn pins(range: std::ops::Range<usize>) -> Vec<String> {
+        range.map(|n| format!("session-{n}")).collect()
+    }
+
+    /// A pin is a non-empty id, pinned once.
+    #[test]
+    fn a_pin_is_a_non_empty_id_pinned_once() {
+        let current = pins(0..2);
+        assert!(validate_sidebar_pin_update(&current, &pins(0..3)).is_ok());
+        let empty = [current.clone(), vec![String::new()]].concat();
+        assert!(validate_sidebar_pin_update(&current, &empty).is_err(), "an empty id");
+        let twice = [current.clone(), vec![current[0].clone()]].concat();
+        assert!(validate_sidebar_pin_update(&current, &twice).is_err(), "a pin twice");
+    }
+
+    /// New pins are admitted up to the limit and not past it, while pins already held past it
+    /// (concurrent offline additions) stay editable: reordered or kept, never truncated.
+    #[test]
+    fn new_pins_stop_at_the_limit_and_an_overflow_already_held_stays_editable() {
+        let at_limit = pins(0..MAX_SIDEBAR_PINS);
+        assert!(validate_sidebar_pin_update(&[], &at_limit).is_ok(), "up to the limit");
+        let past = pins(0..MAX_SIDEBAR_PINS + 1);
+        assert!(validate_sidebar_pin_update(&at_limit, &past).is_err(), "one past it");
+        assert!(validate_sidebar_pin_update(&[], &past).is_err(), "all new past it");
+        let mut reordered = past.clone();
+        reordered.reverse();
+        assert!(validate_sidebar_pin_update(&past, &reordered).is_ok(), "held overflow reordered");
+        assert!(validate_sidebar_pin_update(&past, &past).is_ok(), "held overflow kept");
+    }
+
     #[test]
     fn outside_workspace_reads_round_trip_without_breaking_older_reasons() {
         let reason = WorkspaceReadOnlyReason::OutsideWorkspace;
