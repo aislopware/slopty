@@ -3114,3 +3114,31 @@ more full-window layer.
     (`element_bench`, 0, 1 and 10 rows changed): 0.806, 0.868 and 0.973 ms before, 0.751,
     0.782 and 0.832 after. The from-scratch column, which the change barely touches, moved as
     much (7.53 to 7.00 ms): the load moved, not the code.
+- ✅ **The copied crates take the workspace lints (2026-10-30).** The crates copied from zeron
+  kept the lints they arrived with: rustc's and clippy's defaults, upstream's trips allowed by
+  name in their manifests, their own `clippy.toml` and `rustfmt.toml`, and no rustfmt, typos or
+  taplo pass. That kept the copy a diff, so a zeron sync's three-way merge saw only Slopty's
+  edits (`ui.md`, "zeron's improvements keep coming, by machine"). Zeron stopped being adopted
+  with `layout.md`'s "What the layout leaves out", nothing merges into the copy any more, and
+  the reason went with it. The hard line stands: lints are never loosened.
+  - **What moved.** view-rpc, view-proto and view-doc, and markdown, shell-theme, visual,
+    visual-gpu, math, syntax and veil, each take `[lints] workspace = true`. Their allow
+    tables and the `clippy.toml` and `rustfmt.toml` kept only for the diff are gone. What the
+    workspace lints flagged was fixed: missing docs written, bare arithmetic, indexing and
+    slicing replaced by checked forms, and `#[expect(lint, reason = "...")]` only where the code
+    is right and the lint wrong. They come under the workspace rustfmt, typos and taplo too:
+    typos found nothing in the view crates, and taplo spaced their manifests' arrays as the
+    workspace's own.
+  - **What the move found dead went, undocumented.** view-doc's event fold
+    (`fold_event_into_parts`, the sidecar refs, the tool-call sanitising, the continuation
+    splitting with `MSG_INLINE_MAX`) and view-proto's `AgentEvent` with `DoneStatus`,
+    `SlashCommand` and `SUBAGENT_INPUT_KEEP` were zeron's engine writing its transcript doc.
+    Slopty's view model builds a transcript's parts from the thread
+    (`slopty_ui::view_model::transcript`), so only their own tests called them.
+  - **The shell moves too, this round.** It first dropped `dead_code = "allow"` and the
+    browser fixture's check-cfg, and deleted what that surfaced: the glass and haptics
+    modules, project actions end to end, the surface tab strip, and the helpers and test hooks
+    nothing called. Its `[lints.clippy]` allow table was to wait for a count. The person ruled
+    instead that the shell takes the workspace lints, rustfmt, typos and taplo now: one
+    mechanical reformat, then the lints in slices worked in parallel. Lane S's plan
+    (`target/lanes/S/plan.md`) holds the count per lint and the partition.
