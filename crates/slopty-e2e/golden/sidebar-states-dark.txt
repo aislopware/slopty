@@ -15,17 +15,14 @@ Status │ Done
 Button │ hello
 Status │ Done
 Button │ Tidy the README's install section
-Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group │ Tidy the README's install section
 Group (focused)
 Terminal │ shell │ >
-Button │ Open in…
-Button │ Show inspector
+Button │ Tidy the README's install section
 Button │ Inbox, 4 waiting
 Button │ Command palette
 Button │ New session
-Button │ Show files panel
-Button │ Show side pane
 Button │ Hide sidebar

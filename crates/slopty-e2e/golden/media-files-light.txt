@@ -2,19 +2,24 @@ Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ Chart:…
-Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group │ Chart:…
+Button │ Fill the view
 Group (focused)
 Terminal │ shell │ >
-Article │ You
-Paragraph │ Show the files
-Button │ Copy message
+Group │ Inspector
+Button │ Fill the view
+Button │ Close Inspector
+Button │ Prompts
+Button │ Steps
+Button │ All
 Group │ Page: Report │ live
 Button │ Copy image
 Button │ Open in pane
 Image │ page 1 of 1 │ drawn
+Button │ Tool mcp__slopty__show_page
 Group │ Page: Latency │ live
 Button │ Copy table
 Button │ Open in pane
@@ -39,16 +44,8 @@ Row
 Cell │ sa-east
 Cell │ 43
 Cell │ 210
-Splitter │ Resize side pane
-Button │ Open in…
-Button │ Hide inspector
+Button │ Chart:…
 Button │ Inbox
 Button │ Command palette
 Button │ New session
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
-Button │ Show files panel
-Button │ Hide side pane
 Button │ Hide sidebar

@@ -3,13 +3,14 @@ Label │ No projects yet
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group │ New session
+Button │ Fill the view
 Heading │ Add a project to get started
 Label │ A project is a folder on one of your devices.
 Button │ Add a project
-Tab │ Terminal 1
+Group │ Terminal 1
+Button │ Fill the view
 Button │ Close Terminal 1
-Button │ New terminal
-Button │ Hide terminal
 Group (focused)
 Terminal │ shell
 Status │ The shell exited, code 3

@@ -1,0 +1,16 @@
+Window
+Button │ Filter projects: All projects
+Button │ repo, 1
+Button │ Tidy the greeting
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Splitter │ Resize sidebar
+Group │ Tidy the greeting
+Group (focused)
+Terminal │ shell │ >
+Button │ Tidy the greeting
+Button │ Inbox
+Button │ Command palette
+Button │ New session
+Button │ Hide sidebar
+Tooltip │ Command palette │ ⇧⌘P

@@ -2,12 +2,19 @@ Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ Notes: The area is $\pi r^2$ for a circle of radius $r$.
-Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Group (focused)
+Group │ Notes: The area is $\pi r^2$ for a circle of radius $r$.
+Button │ Fill the view
+Group
 Terminal │ shell │ >
+Group │ Inspector (focused)
+Button │ Fill the view
+Button │ Close Inspector
+Button │ Prompts
+Button │ Steps
+Button │ All
 Article │ You
 Paragraph │ Notes:⏎⏎The area is $\pi r^2$ for a circle of radius $r$.⏎⏎$$\int_0^1 x^2\,dx = \frac{1}{3}$$⏎⏎```mermaid⏎flowchart LR⏎  plan[Plan] --> build[Build] --> ship[Ship]⏎```
 Math │ \pi r^2
@@ -16,6 +23,7 @@ Math │ \int_0^1 x^2\,dx = \frac{1}{3}
 Button │ Copy code
 Button │ Expand message
 Button │ Copy message
+Status │ claude-stub · 1 in · 1 out · 2s
 Article │ Claude Code
 Paragraph │ Done: Notes:
 Paragraph │ The area is \pi r^2 for a circle of radius r.
@@ -26,16 +34,9 @@ Math │ \int_0^1 x^2\,dx = \frac{1}{3}
 Paragraph │ flowchart LR⏎  plan[Plan] --> build[Build] --> ship[Ship]
 Button │ Copy code
 Button │ Enlarge image
-Splitter │ Resize side pane
-Button │ Open in…
-Button │ Hide inspector
+Button │ Copy message
+Button │ Notes: The area is $\pi r^2$ for a circle of radius $r$.
 Button │ Inbox
 Button │ Command palette
 Button │ New session
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
-Button │ Show files panel
-Button │ Hide side pane
 Button │ Hide sidebar

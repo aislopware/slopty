@@ -2,28 +2,28 @@ Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ Read the guide before the first run.
-Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Group (focused)
+Group │ Read the guide before the first run.
+Button │ Fill the view
+Group
 Terminal │ shell │ >
+Group │ Inspector (focused)
+Button │ Fill the view
+Button │ Close Inspector
+Button │ Prompts
+Button │ Steps
+Button │ All
 Article │ You
 Paragraph │ Read [the guide](https://example.com/docs/guide/getting-started) before the first run.
 Link │ the guide
+Status │ claude-stub · 1 in · 1 out · 2s
 Article │ Claude Code
 Paragraph │ Done: Read the guide before the first run.
 Link │ the guide
-Splitter │ Resize side pane
-Button │ Open in…
-Button │ Hide inspector
+Button │ Read the guide before the first run.
 Button │ Inbox
 Button │ Command palette
 Button │ New session
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
-Button │ Show files panel
-Button │ Hide side pane
 Button │ Hide sidebar

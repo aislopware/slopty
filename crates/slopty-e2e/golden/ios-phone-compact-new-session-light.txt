@@ -1,13 +1,12 @@
 Window
 Group │ Sessions
+Heading │ Sessions
+Button │ Inbox
+Button │ Command palette
+Button │ Settings
+Button │ New session
 Button │ Filter projects: All projects
 Label │ No sessions yet
-Button │ History: past Claude Code sessions
-Button │ New session
-TabList │ Tabs
-Tab │ Sessions
-Tab │ Settings
-Tab │ Search
 MultilineTextInput │ Search projects… (focused)
 TabList │ Agent
 Tab │ Claude Code

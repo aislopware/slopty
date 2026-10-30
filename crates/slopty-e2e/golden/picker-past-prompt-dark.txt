@@ -1,0 +1,21 @@
+Window
+Button │ Filter projects: All projects
+Button │ repo, 2
+Button │ Explain the parser
+Button │ Say hello
+Status │ Done
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Splitter │ Resize sidebar
+Group │ Explain the parser
+Group
+Terminal │ shell │ >
+Button │ Explain the parser
+Button │ Inbox, 1 waiting
+Button │ Command palette
+Button │ New session
+Button │ Hide sidebar
+Dialog │ Sessions
+MultilineTextInput │ Filter or create… │ scanner (focused)
+Button │ Start Claude Code “scanner” in repo
+Button │ Past session: Rename the lexer module, Then point every import at scanner, repo · past · main, 1d

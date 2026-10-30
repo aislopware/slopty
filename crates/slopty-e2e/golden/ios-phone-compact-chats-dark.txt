@@ -1,8 +1,8 @@
 Window (focused)
 Group │ Sessions
-Label │ No projects yet
+Heading │ Sessions
+Button │ Inbox
+Button │ Command palette
+Button │ Settings
 Button │ Add a project
-TabList │ Tabs
-Tab │ Sessions
-Tab │ Settings
-Tab │ Search
+Label │ No projects yet

@@ -1,31 +1,39 @@
-Window (focused)
+Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ List the machines
-Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group │ List the machines
+Button │ Fill the view
 Group
 Terminal │ shell │ >
+Group │ Inspector (focused)
+Button │ Fill the view
+Button │ Close Inspector
+Button │ Prompts
+Button │ Steps
+Button │ All
 Article │ You
 Paragraph │ List the machines
 Button │ Copy message
+Status │ claude-stub · 2 in · 2 out · 4s
+Article │ Claude Code
 Button │ MCP slopty · machines
 Code │ slopty · machines⏎{}
-Code │ [{"worker":"7ee7bc23-d948-bc06-1956-95be56974ce1","name":"session","liveness":"online","address":"127.0.0.1:$PORT","os":"macos","os_version":"$OS…
+TabList │ Output format
+Tab │ Text
+Tab │ JSON
+Tab │ Markdown
+Tree
+TreeItem │ (1) [{…}]
+Paragraph │ Timing: Started 9:00:01 AM, 1s into the turn · Ended 9:00:02 AM · Took 1s
+Button │ Raw record
 Paragraph │ Done: List the machines
 Button │ Copy message
-Splitter │ Resize side pane
-Button │ Open in…
-Button │ Hide inspector
+Button │ List the machines
 Button │ Inbox
 Button │ Command palette
 Button │ New session
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
-Button │ Show files panel
-Button │ Hide side pane
 Button │ Hide sidebar

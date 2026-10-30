@@ -2,20 +2,12 @@ Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ Say hello
-Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Group
-Terminal │ shell │ >
 Button │ Window controls
+Button │ Say hello
 Button │ Inbox
 Button │ Command palette
 Button │ New session
-Button │ Synthetic editor
-Button │ Close Synthetic editor
-Button │ New tab
-Button │ Restore side pane
-Button │ Show files panel
-Button │ Hide side pane
 Button │ Hide sidebar

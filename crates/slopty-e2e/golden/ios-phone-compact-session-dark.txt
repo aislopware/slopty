@@ -1,8 +1,6 @@
-Window (focused)
-Group
+Window
+Group (focused)
 Terminal │ shell │ >
-Group │ Navigation
-Heading │ Say hello
+Group │ Session
 Button │ Back to Sessions
-Button │ Show files
-Button │ Show inspector
+Button │ Say hello

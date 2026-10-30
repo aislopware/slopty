@@ -4,46 +4,49 @@ Button │ work, 2
 Button │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
 Button │ Say hello
 Status │ Done
-Button │ History, open: past Claude Code sessions
-Status │ No past Claude Code sessions here
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Group (focused)
+Group │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
+Button │ Fill the view
+Group
 Terminal │ shell │ >
-Button │ Open the diff of notes.md
-Button │ Open the diff of notes.txt
+Group │ Inspector (focused)
+Button │ Fill the view
+Button │ Close Inspector
+Button │ Prompts
+Button │ Steps
+Button │ All
+Button │ Changes: 2 files, +4 −1
 Article │ You
 Paragraph │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate a task "Survey files" and a task "Write notes". 2) TaskUpdate "Survey files" to in_progress. 3) Glob "*.rs". 4) Grep for "println" with output mode content. 5) Bash: `printf 'one\ntwo\n'` with a description. 6) Bash: `ls missing-file` (it fails; that is expected). 7) Bash with run_in_background true: `sleep 1; echo bg-finished`. 8) Write notes.md containing two lines: "# Notes" and "main.rs prints hello". 9) Use the Agent tool (subagent_type general-purpose, description "Count lines", run_in_background false) to count the lines in main.rs with Read; tell it to reply with just the number. 10) TaskUpdate both tasks to completed.
 Button │ Expand message
 Button │ Copy message
+Status │ Haiku 5.5 · 15.7k in · 315k cached · 2.5k out · +2 −0 · 29s
+Article │ Claude Code
+Button │ Ran 2 commands (1 failed) and searched 2 times
+Paragraph │ The ls failure was expected. Next, the background command.
+Button │ Run sleep 1; echo bg-finished │ Running in the background · task b00000001
+Status │ Running in the background · task b00000001
 Status │ Background command "Sleep one second then print a completion marker" completed (exit code 0) │ completed
+Button │ Write notes.md │ Wrote 2 lines
+Status │ Wrote 2 lines
+Paragraph │ The background command finished. Next, the subagent that counts the lines in main.rs.
+Button │ Subagent Count lines │ 4 · Haiku 5.5 · 1 tool · 14.6k tokens · 4s
+Button │ Open subagent
+Button │ Todo 2/2 done
 Paragraph │ done
-Group │ notes.md +2 −0
 Button │ Copy message
 Article │ You
 Paragraph │ What did you find?
 Button │ Copy message
+Status │ Opus 5.5 · 2 in · 120 out · 1s
 Article │ Claude Code
 Paragraph │ Here's what the survey turned up:
 Paragraph │ main.rs is the only source file: three lines, and it prints hello.⏎ls missing-file failed as planned; nothing else did.⏎The background check finished cleanly, exit 0.
-Paragraph │ The notes I wrote are in notes.md:
-Paragraph │ # Notes⏎main.rs prints hello
-Button │ Copy code
-Paragraph │ Next I'd add a test for the greeting, then run cargo test in CI.
-Article │ You
-Paragraph │ Do these steps in order with the named tools, then reply "done". 1) Read notes.txt. 2) Edit notes.txt: change beta to BETA. 3) Write notes.txt again with this exact content, four lines: alpha, BETA, gamma, delta. 4) Read notes.txt lines 2 to 3 only (offset 2, limit 2).
-Button │ Copy message
-Splitter │ Resize side pane
-Button │ Open in…
-Button │ Hide inspector
+Button │ Scroll to bottom
+Button │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
 Button │ Inbox, 1 waiting
 Button │ Command palette
 Button │ New session
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
-Button │ Show files panel
-Button │ Hide side pane
 Button │ Hide sidebar

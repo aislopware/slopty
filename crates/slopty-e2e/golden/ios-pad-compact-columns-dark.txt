@@ -3,9 +3,10 @@ Label │ No projects yet
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group │ New session
 Heading │ Add a project to get started
 Label │ A project is a folder on one of your devices.
 Button │ Add a project
+Button │ Inbox
+Button │ Command palette
 Button │ Hide sidebar
-Button │ Back
-Button │ Forward

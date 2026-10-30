@@ -2,31 +2,33 @@ Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ Show the latency
-Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Group (focused)
+Group │ Show the latency
+Button │ Fill the view
+Group
 Terminal │ shell │ >
+Group │ Inspector (focused)
+Button │ Fill the view
+Button │ Close Inspector
+Button │ Prompts
+Button │ Steps
+Button │ All
 Article │ You
 Paragraph │ Show the latency
 Button │ Copy message
+Status │ claude-stub · 2 in · 2 out · 4s
+Article │ Claude Code
+Button │ Tool mcp__slopty__show_visual
 Group │ Latency
 TabList
 Tab │ p95
 Tab │ p99
 Paragraph │ Done: Show the latency
 Button │ Copy message
-Splitter │ Resize side pane
-Button │ Open in…
-Button │ Hide inspector
+Button │ Show the latency
 Button │ Inbox
 Button │ Command palette
 Button │ New session
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
-Button │ Show files panel
-Button │ Hide side pane
 Button │ Hide sidebar

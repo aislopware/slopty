@@ -4,45 +4,50 @@ Button │ work, 2
 Button │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
 Button │ Say hello
 Status │ Done
-Button │ History, open: past Claude Code sessions
-Status │ No past Claude Code sessions here
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Group (focused)
+Group │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
+Button │ Fill the view
+Group
 Terminal │ shell │ >
-Button │ Open the diff of notes.md
-Button │ Open the diff of notes.txt
+Group │ Inspector (focused)
+Button │ Fill the view
+Button │ Close Inspector
+Button │ Prompts
+Button │ Steps
+Button │ All
+Button │ Changes: 2 files, +4 −1
 Article │ You
 Paragraph │ Do these steps in order with the named tools, then reply "done". 1) Read notes.txt. 2) Edit notes.txt: change beta to BETA. 3) Write notes.txt again with this exact content, four lines: alpha, BETA, gamma, delta. 4) Read notes.txt lines 2 to 3 only (offset 2, limit 2).
 Button │ Copy message
+Status │ Haiku 5.5 · 8.2k in · 87.1k cached · 775 out · +2 −1 · 10s
+Article │ Claude Code
+Button │ Edited 1 file (+2 −1) and read 2 files
 Paragraph │ done
-Group │ notes.txt +2 −1
 Button │ Copy message
 Article │ You
 Paragraph │ scenario:background start a background command
 Button │ Copy message
+Status │ Haiku 5.5 · 36 in · 60 out · 3s
+Article │ Claude Code
+Button │ Run sleep 3; echo woke │ Running in the background · task b00000001
+Status │ Running in the background · task b00000001
+Paragraph │ Done: the command said hi.
 Status │ Background command "Sleep then print a marker" completed (exit code 0) │ completed
 Paragraph │ It finished.
 Button │ Copy message
 Article │ You
 Paragraph │ Sum it up for the PR
 Button │ Copy message
+Status │ Opus 5.5 · 2 in · 120 out · 1s
 Article │ Claude Code
 Paragraph │ Ready for review. The PR:
 Paragraph │ Surveys the crate and records what it found in notes.md.⏎Makes beta loud in notes.txt (BETA), one line changed.⏎Runs the slow check in the background; it woke and passed.
 Paragraph │ Nothing is left open.
 Button │ Copy message
-Splitter │ Resize side pane
-Button │ Open in…
-Button │ Hide inspector
+Button │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
 Button │ Inbox, 1 waiting
 Button │ Command palette
 Button │ New session
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
-Button │ Show files panel
-Button │ Hide side pane
 Button │ Hide sidebar

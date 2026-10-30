@@ -2,31 +2,32 @@ Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ Output: \x1b[1;32m✓\x1b[0m 12 passed \x1b[2m(0.4s)\x1b[0m
-Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
-Group (focused)
+Group │ Output: \x1b[1;32m✓\x1b[0m 12 passed \x1b[2m(0.4s)\x1b[0m
+Button │ Fill the view
+Group
 Terminal │ shell │ >
+Group │ Inspector (focused)
+Button │ Fill the view
+Button │ Close Inspector
+Button │ Prompts
+Button │ Steps
+Button │ All
 Article │ You
 Paragraph │ Output:⏎⏎```ansi⏎\x1b[1;32m✓\x1b[0m 12 passed \x1b[2m(0.4s)\x1b[0m⏎\x1b[31merror\x1b[0m: \x1b[1mcannot find\x1b[0m `x` in this scope⏎\x1b[38;5;208mwarning\x1b[0m: unused import⏎```
 Button │ Copy code
 Button │ Expand message
 Button │ Copy message
+Status │ claude-stub · 1 in · 1 out · 2s
 Article │ Claude Code
 Paragraph │ Done: Output:
 Paragraph │ ✓ 12 passed (0.4s)⏎error: cannot find `x` in this scope⏎warning: unused import
 Button │ Copy code
-Splitter │ Resize side pane
-Button │ Open in…
-Button │ Hide inspector
+Button │ Copy message
+Button │ Output: \x1b[1;32m✓\x1b[0m 12 passed \x1b[2m(0.4s)\x1b[0m
 Button │ Inbox
 Button │ Command palette
 Button │ New session
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
-Button │ Show files panel
-Button │ Hide side pane
 Button │ Hide sidebar

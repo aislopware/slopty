@@ -1,18 +1,19 @@
-Window (focused)
+Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ Say hello
 Status │ Done
-Button │ History, open: past Claude Code sessions
-Button │ Past session: Explain the parser, 1d
-Button │ Past session: Rename the lexer module to scanner, 1d
-Button │ Past session: Profile the startup path, 1d
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group │ New session
 Heading │ No session open
 Label
 Button │ New session
 Button │ Inbox, 1 waiting
 Button │ Command palette
 Button │ Hide sidebar
+Dialog │ Sessions
+MultilineTextInput │ Filter or create… │ parser (focused)
+Button │ Start Claude Code “parser” in repo
+Button │ Past session: Explain the parser, repo · past · main, 1d

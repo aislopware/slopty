@@ -2,15 +2,16 @@ Window
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ Tidy the greeting
-Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group │ Tidy the greeting
+Button │ Fill the view
 Group
 Terminal │ shell │ >
-Group │ Workspace files (focused)
-Button │ Reveal file in tree
-Button │ Turn on word wrap
+Group │ Files
+Button │ Fill the view
+Button │ Close Files
 Group │ Workspace files
 SearchInput │ Search files
 Button │ Show hidden files
@@ -19,17 +20,14 @@ TreeItem │ src
 TreeItem │ main.rs
 TreeItem │ NOTES.md
 TreeItem │ README.md
-Splitter │ Resize files panel
-Splitter │ Resize side pane
-Button │ Open in…
-Button │ Show inspector
+Group │ main.rs
+Button │ Fill the view
+Button │ Close main.rs
+Group │ Workspace files (focused)
+Button │ Reveal file in tree
+Button │ Turn on word wrap
+Button │ Tidy the greeting
 Button │ Inbox
 Button │ Command palette
 Button │ New session
-Button │ src/main.rs
-Button │ Close main.rs
-Button │ New tab
-Button │ Expand side pane
-Button │ Hide files panel
-Button │ Hide side pane
 Button │ Hide sidebar

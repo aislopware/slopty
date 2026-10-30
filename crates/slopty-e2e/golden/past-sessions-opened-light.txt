@@ -4,19 +4,14 @@ Button │ repo, 2
 Button │ Explain the parser
 Button │ Say hello
 Status │ Done
-Button │ History, open: past Claude Code sessions
-Button │ Past session: Rename the lexer module to scanner, 1d
-Button │ Past session: Profile the startup path, 1d
 Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
+Group │ Explain the parser
 Group (focused)
 Terminal │ shell │ >
-Button │ Open in…
-Button │ Show inspector
+Button │ Explain the parser
 Button │ Inbox, 1 waiting
 Button │ Command palette
 Button │ New session
-Button │ Show files panel
-Button │ Show side pane
 Button │ Hide sidebar
