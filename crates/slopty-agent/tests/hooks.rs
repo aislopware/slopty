@@ -83,4 +83,43 @@ mod hooks {
         }
         insta::assert_yaml_snapshot!(said);
     }
+
+    /// The `tool_use_id`s of the calls in a transcript file.
+    fn calls_in(file: &Path) -> Vec<String> {
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|r| r.pointer("/message/content").and_then(Value::as_array).cloned())
+            .flatten()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+            .filter_map(|b| b.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect()
+    }
+
+    /// Every call's end, scenario by scenario, says how long its run took, of a call its
+    /// transcript holds: the session's own in the main transcript, a subagent's in that
+    /// subagent's file.
+    #[test]
+    fn a_calls_end_says_how_long_it_ran() {
+        let mut ran = 0_usize;
+        for name in scenarios() {
+            for payload in payloads(&name) {
+                let hook = Hook::parse(&payload.to_string()).expect("a payload Slopty reads");
+                let ends = matches!(hook.event.as_str(), "PostToolUse" | "PostToolUseFailure");
+                let Some(said) = hook.ran() else {
+                    assert!(!ends, "{name}: a call's end names its call and time: {payload}");
+                    continue;
+                };
+                let file = match &said.agent {
+                    Some(agent) => {
+                        fixtures().join(&name).join(format!("subagents/agent-{agent}.jsonl"))
+                    }
+                    None => fixtures().join(&name).join("transcript.jsonl"),
+                };
+                assert!(calls_in(&file).contains(&said.call), "{name}: {said:?} in {file:?}");
+                ran = ran.saturating_add(1);
+            }
+        }
+        assert!(ran > 0, "the recordings end calls");
+    }
 }

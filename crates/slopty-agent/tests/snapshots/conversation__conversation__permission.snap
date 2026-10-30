@@ -21,6 +21,11 @@ expression: "decode(\"permission\").snapshot()"
       body:
         Tool:
           name: Bash
+          input:
+            text: "{\n  \"command\": \"touch refused.txt\",\n  \"description\": \"Create refused.txt in the working directory\"\n}"
+            lines: 4
+            chars: 100
+            full: ~
           detail:
             Bash:
               command:
@@ -53,6 +58,11 @@ expression: "decode(\"permission\").snapshot()"
       body:
         Tool:
           name: Bash
+          input:
+            text: "{\n  \"command\": \"touch allowed.txt\",\n  \"description\": \"Create allowed.txt in the working directory\"\n}"
+            lines: 4
+            chars: 100
+            full: ~
           detail:
             Bash:
               command:
@@ -81,6 +91,11 @@ expression: "decode(\"permission\").snapshot()"
       body:
         Tool:
           name: Read
+          input:
+            text: "{\n  \"file_path\": \"/work/notes.txt\"\n}"
+            lines: 3
+            chars: 36
+            full: ~
           detail:
             Read:
               path: /work/notes.txt
@@ -101,6 +116,11 @@ expression: "decode(\"permission\").snapshot()"
       body:
         Tool:
           name: Edit
+          input:
+            text: "{\n  \"file_path\": \"/work/notes.txt\",\n  \"new_string\": \"BETA\",\n  \"old_string\": \"beta\",\n  \"replace_all\": false\n}"
+            lines: 6
+            chars: 108
+            full: ~
           detail:
             Edit:
               path: /work/notes.txt
@@ -133,6 +153,11 @@ expression: "decode(\"permission\").snapshot()"
       body:
         Tool:
           name: Write
+          input:
+            text: "{\n  \"content\": \"ship\\n\",\n  \"file_path\": \"/work/todo.txt\"\n}"
+            lines: 4
+            chars: 58
+            full: ~
           detail:
             Write:
               path: /work/todo.txt
@@ -174,3 +199,5 @@ expression: "decode(\"permission\").snapshot()"
         cache_write: 8193
         output: 912
         thinking: 169
+      mode: default
+      context: 19467

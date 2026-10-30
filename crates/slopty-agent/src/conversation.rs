@@ -698,7 +698,7 @@ impl Conversation {
             let ends_turn = matches!(body, Body::Interrupted { .. });
             self.add(ctx, id.clone(), body, batch);
             if opens_turn {
-                self.start_turn(ctx, &id, str_at(record, "promptId"), batch);
+                self.start_turn(ctx, &id, record, batch);
             } else if ends_turn {
                 self.end_turn(ctx, batch);
             }
@@ -711,21 +711,16 @@ impl Conversation {
                 command: None,
             });
             self.add(ctx, ctx.uuid.to_owned(), body, batch);
-            self.start_turn(ctx, ctx.uuid, str_at(record, "promptId"), batch);
+            self.start_turn(ctx, ctx.uuid, record, batch);
         }
     }
 
-    /// A prompt opens a turn, named `prompt_id` for the hooks: what the thread's records say
-    /// from here on is its. One the person sent while the turn before it still ran ends that
-    /// turn here, if Claude Code did not close it first: no turn stays running behind a later
-    /// one.
-    fn start_turn(
-        &mut self,
-        ctx: &Ctx<'_>,
-        prompt: &str,
-        prompt_id: Option<&str>,
-        batch: &mut Batch,
-    ) {
+    /// A prompt opens a turn, named for the hooks by its `record`'s `promptId` and run in the
+    /// permission mode it says (`permissionMode`): what the thread's records say from here on
+    /// is its. One the person sent while the turn before it still ran ends that turn here, if
+    /// Claude Code did not close it first: no turn stays running behind a later one.
+    fn start_turn(&mut self, ctx: &Ctx<'_>, prompt: &str, record: &Value, batch: &mut Batch) {
+        let prompt_id = str_at(record, "promptId");
         let thread = self.threads.entry(ctx.thread.clone()).or_default();
         if let Some(open) = thread.turns.last_mut().filter(|t| t.ended_ms.is_none()) {
             open.ended_ms = Some(ctx.at_ms);
@@ -739,6 +734,7 @@ impl Conversation {
                 .into_iter()
                 .collect(),
             started_ms: ctx.at_ms,
+            mode: string_at(record, "permissionMode").filter(|m| !m.trim().is_empty()),
             ..Turn::default()
         };
         thread.turns.push(turn.clone());
@@ -761,9 +757,10 @@ impl Conversation {
         }
     }
 
-    /// An assistant record's model and usage, counted in its turn. The records of one request
-    /// (one per content block) repeat its usage, so a request is counted once, at the latest
-    /// figures its records give.
+    /// An assistant record's model and usage, counted in its turn, and the context its request
+    /// carried, the turn's as the latest request's. The records of one request (one per content
+    /// block) repeat its usage, so a request is counted once, at the latest figures its records
+    /// give.
     fn usage(&mut self, ctx: &Ctx<'_>, message: &Value, batch: &mut Batch) {
         let model = str_at(message, "model").filter(|m| !m.is_empty() && !m.starts_with('<'));
         let Some(usage) = message.get("usage").filter(|u| u.is_object()) else { return };
@@ -795,6 +792,8 @@ impl Conversation {
         } else {
             turn.usage = turn.usage.plus(now);
         }
+        let read = now.input.saturating_add(now.cache_read).saturating_add(now.cache_write);
+        turn.context = (read > 0).then_some(read).or(turn.context);
         if let Some(model) = model
             && !turn.models.iter().any(|m| m == model)
         {
@@ -1039,7 +1038,12 @@ impl Conversation {
         let detail = detail(name, input, Some((id, ctx.uuid)));
         self.calls.insert(id.to_owned(), ctx.thread.clone());
         let title = said::header(name, input);
-        let call = ToolCall { name: name.to_owned(), detail, result: None, title };
+        let whole = TextRef {
+            record: ctx.uuid.to_owned(),
+            part: Part::Call { tool_use_id: id.to_owned() },
+        };
+        let input = Clipped::head(&input_json(input), OUTPUT, Some(whole));
+        let call = ToolCall { name: name.to_owned(), input, detail, result: None, title };
         self.add(ctx, id.to_owned(), Body::Tool(Box::new(call)), batch);
         for waiting in self.pending.remove(id).unwrap_or_default() {
             match waiting {
@@ -1085,7 +1089,7 @@ impl Conversation {
         };
         let structured = result.filter(|r| r.is_object());
         let images = media::in_result(ctx.uuid, id, block, structured);
-        let input = said_input(&call.detail);
+        let input = said_input(call);
         let said = said::said(
             &call.name,
             said::Outcome {
@@ -1552,6 +1556,9 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
             tokens: None,
             tool_uses: None,
             duration_ms: None,
+            model: None,
+            tally: BTreeMap::new(),
+            changed: slopty_proto::thread::Changed::default(),
         }),
         "TaskCreate" => ToolDetail::TaskCreate(TaskCreateDetail {
             task_id: None,
@@ -1604,17 +1611,15 @@ fn detail(name: &str, input: &Value, at: Option<(&str, &str)>) -> ToolDetail {
             {
                 return ToolDetail::Shown(Box::new(shown));
             }
-            let json = Clipped::head(&input.to_string(), OUTPUT, None);
             match name.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")) {
                 Some((server, tool)) => ToolDetail::Mcp(McpDetail {
                     server: server.to_owned(),
                     tool: tool.to_owned(),
-                    input: json,
                     structured: None,
                     links: Vec::new(),
                     result: None,
                 }),
-                None => ToolDetail::Other { input: json },
+                None => ToolDetail::Other,
             }
         }
     }
@@ -1645,16 +1650,17 @@ fn question(q: &Value) -> Question {
     }
 }
 
-/// The input of a call as far as its detail keeps it, in the tool's own fields.
+/// The input a call was given, as the transcript wrote it.
 ///
-/// That is the command, file, address, query or pattern it acts on, a subagent's description,
-/// an MCP or untyped tool's whole input, a question's questions, a plan's text: what a dialog
-/// about the call is worded from (`crate::claude::history::asks_for`) when only the transcript
-/// names the call.
+/// Its whole JSON when the call holds all of it, else what each tool's own fields keep of it (a
+/// dialog about the call is worded from it, `crate::claude::history::asks_for`).
 #[must_use]
-pub fn call_input(detail: &ToolDetail) -> Value {
+pub fn call_input(call: &ToolCall) -> Value {
     use serde_json::json;
-    match detail {
+    if let Some(whole) = whole_input(call) {
+        return whole;
+    }
+    match &call.detail {
         ToolDetail::Bash(bash) => json!({ "command": bash.command.text }),
         ToolDetail::Edit(EditDetail { path, .. })
         | ToolDetail::Write(WriteDetail { path, .. })
@@ -1666,16 +1672,24 @@ pub fn call_input(detail: &ToolDetail) -> Value {
         ToolDetail::WebFetch(fetch) => json!({ "url": fetch.url }),
         ToolDetail::WebSearch(search) => json!({ "query": search.query }),
         ToolDetail::Agent(agent) => json!({ "description": agent.description }),
-        ToolDetail::Mcp(mcp) => serde_json::from_str(&mcp.input.text).unwrap_or(Value::Null),
-        other => said_input(other).unwrap_or(Value::Null),
+        other => kept_input(other).unwrap_or(Value::Null),
     }
 }
 
-/// The input [`said::said`] reads of a call, where the call keeps it: an untyped tool's JSON, a
-/// question's questions, a plan's text.
-fn said_input(detail: &ToolDetail) -> Option<Value> {
+/// The input [`said::said`] reads of a call: its whole JSON, else what a question's or a plan's
+/// detail keeps of it.
+fn said_input(call: &ToolCall) -> Option<Value> {
+    whole_input(call).or_else(|| kept_input(&call.detail))
+}
+
+/// The call's input, when it holds all of it.
+fn whole_input(call: &ToolCall) -> Option<Value> {
+    if call.input.is_clipped() { None } else { serde_json::from_str(&call.input.text).ok() }
+}
+
+/// What a question's or a plan's detail keeps of its input.
+fn kept_input(detail: &ToolDetail) -> Option<Value> {
     match detail {
-        ToolDetail::Other { input } => serde_json::from_str(&input.text).ok(),
         ToolDetail::Question(question) => Some(serde_json::json!({
             "questions": question
                 .questions
@@ -1690,6 +1704,12 @@ fn said_input(detail: &ToolDetail) -> Option<Value> {
         ToolDetail::Plan { plan } => Some(serde_json::json!({ "plan": plan.text })),
         _ => None,
     }
+}
+
+/// A call's input as its whole is shown and fetched ([`Part::Call`]): pretty JSON, so a clipped
+/// head reads by its lines.
+fn input_json(input: &Value) -> String {
+    serde_json::to_string_pretty(input).unwrap_or_default()
 }
 
 /// Fold a result into the call's detail. Returns whether the detail now shows the outcome, so
@@ -1821,6 +1841,10 @@ fn apply_result(
             agent.tokens = u64_at(r, "totalTokens");
             agent.tool_uses = u64_at(r, "totalToolUseCount");
             agent.duration_ms = u64_at(r, "totalDurationMs");
+            agent.model = string_at(r, "resolvedModel").filter(|m| !m.trim().is_empty());
+            if let Some(stats) = r.get("toolStats").and_then(Value::as_object) {
+                (agent.tally, agent.changed) = tally(stats);
+            }
             if bool_at(r, "isAsync") {
                 agent.background = true;
                 agent.status = AgentRun::Running;
@@ -1901,7 +1925,7 @@ fn apply_result(
                 Some(slopty_proto::thread::Clipped::head(&spelled, crate::shown::RESULT, None));
             false
         }
-        ToolDetail::Plan { .. } | ToolDetail::Shown(_) | ToolDetail::Other { .. } => false,
+        ToolDetail::Plan { .. } | ToolDetail::Shown(_) | ToolDetail::Other => false,
     }
 }
 
@@ -2581,6 +2605,11 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
             }
             _ => None,
         },
+        Part::Call { tool_use_id } => blocks()
+            .iter()
+            .find(|b| str_at(b, "id") == Some(tool_use_id.as_str()))
+            .and_then(|b| b.get("input"))
+            .map(input_json),
         Part::Input { tool_use_id, field } => blocks()
             .iter()
             .find(|b| str_at(b, "id") == Some(tool_use_id.as_str()))
@@ -2633,6 +2662,45 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
             Some(out)
         }
     }
+}
+
+/// A subagent's calls by kind and the lines its edits changed, from its result's `toolStats`
+/// (`readCount`, `searchCount`, `bashCount`, `editFileCount`, `otherToolCount`, `linesAdded`,
+/// `linesRemoved`): each count under the thread model's kind of call, a count it adds later
+/// under its own word (`fooCount` as `foo`), and none that is zero.
+fn tally(
+    stats: &serde_json::Map<String, Value>,
+) -> (BTreeMap<String, u64>, slopty_proto::thread::Changed) {
+    use slopty_proto::thread::kind;
+    let mut calls = BTreeMap::new();
+    let mut changed = slopty_proto::thread::Changed::default();
+    let lines = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+    for (key, n) in stats.iter().filter_map(|(key, n)| Some((key.as_str(), n.as_u64()?))) {
+        let named = match key {
+            "linesAdded" => {
+                changed.added = lines(n);
+                continue;
+            }
+            "linesRemoved" => {
+                changed.removed = lines(n);
+                continue;
+            }
+            "readCount" => kind::READ,
+            "searchCount" => kind::SEARCH,
+            "bashCount" => kind::EXEC,
+            "editFileCount" => kind::EDIT,
+            "otherToolCount" => kind::OTHER,
+            other => match other.strip_suffix("Count") {
+                Some(word) if !word.is_empty() => word,
+                _ => continue,
+            },
+        };
+        if n > 0 {
+            let have = calls.entry(named.to_owned()).or_insert(0_u64);
+            *have = have.saturating_add(n);
+        }
+    }
+    (calls, changed)
 }
 
 /// A kind of subagent as the card names it: Claude Code's own name for it, a fork (which

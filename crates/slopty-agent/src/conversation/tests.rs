@@ -171,7 +171,10 @@ fn a_subagent_talks_in_its_own_thread() {
     assert!(matches!(&ag2.entries[0].body, Body::Prompt(p) if p.text.text == "Make a plan"));
 
     let structured = json!({"status": "completed", "agentId": "ag1", "agentType": "Explore",
-        "content": [{"type": "text", "text": "4"}], "totalTokens": 900, "totalToolUseCount": 1, "totalDurationMs": 1200});
+        "content": [{"type": "text", "text": "4"}], "totalTokens": 900, "totalToolUseCount": 1, "totalDurationMs": 1200,
+        "resolvedModel": "claude-haiku-5-5",
+        "toolStats": {"readCount": 3, "searchCount": 2, "bashCount": 0, "editFileCount": 1,
+            "otherToolCount": 0, "notebookCount": 1, "linesAdded": 12, "linesRemoved": 4}});
     c.ingest(&MAIN, &result("u1", Some("a1"), "t1", "[Subagent hand-back] 4", &structured));
     let ToolDetail::Agent(detail) = &tool(&c, &MAIN, "t1").detail else { panic!("agent") };
     assert_eq!(detail.agent_id.as_deref(), Some("ag1"));
@@ -184,6 +187,18 @@ fn a_subagent_talks_in_its_own_thread() {
     assert_eq!(
         (detail.tokens, detail.tool_uses, detail.duration_ms),
         (Some(900), Some(1), Some(1200))
+    );
+    assert_eq!(detail.model.as_deref(), Some("claude-haiku-5-5"));
+    let tally: Vec<(&str, u64)> = detail.tally.iter().map(|(k, n)| (k.as_str(), *n)).collect();
+    assert_eq!(
+        tally,
+        [("edit", 1), ("notebook", 1), ("read", 3), ("search", 2)],
+        "by the thread model's kinds, a count it adds later by its own word, no zeros"
+    );
+    assert_eq!(
+        detail.changed,
+        slopty_proto::thread::Changed { added: 12, removed: 4 },
+        "the lines its edits changed"
     );
     assert_eq!(thread_of(Path::new("/p/abc.jsonl")), MAIN);
     assert_eq!(thread_of(Path::new("/p/agent-x.jsonl")), MAIN, "only under subagents/");
@@ -199,10 +214,12 @@ fn a_long_text_is_clipped_and_can_be_had_whole() {
     });
     let prompt = user("p1", None, &json!(long));
     let structured = json!({"stdout": long, "stderr": ""});
+    let written = json!({"file_path": "/w/long.txt", "content": long});
     let jsonl = [
         line(&prompt),
         line(&call("a1", Some("p1"), "t1", "Bash", &json!({"command": "seq"}))),
         line(&result("u1", Some("a1"), "t1", "…", &structured)),
+        line(&call("a2", Some("u1"), "t2", "Write", &written)),
     ]
     .concat();
     let mut c = Conversation::default();
@@ -222,6 +239,19 @@ fn a_long_text_is_clipped_and_can_be_had_whole() {
         full_text(&jsonl, stdout.full.as_ref().expect("ref")).as_deref(),
         Some(long.as_str())
     );
+
+    // A call's input is pretty JSON: a short one held whole, a long one by its head.
+    let seq = tool(&c, &MAIN, "t1");
+    assert_eq!(
+        (seq.input.text.as_str(), seq.input.full.is_some()),
+        ("{\n  \"command\": \"seq\"\n}", false)
+    );
+    let input = &tool(&c, &MAIN, "t2").input;
+    assert!(input.is_clipped(), "{input:?}");
+    assert!(input.text.contains("\n  \"content\": \"line 1\\nline 2"), "{:?}", input.text);
+    let whole = full_text(&jsonl, input.full.as_ref().expect("ref")).expect("the whole input");
+    assert_eq!(serde_json::from_str::<Value>(&whole).expect("json"), written);
+    assert_eq!(u32::try_from(whole.chars().count()).ok(), Some(input.chars));
 
     // A single line longer than the cap is cut inside it, at a character.
     let wide = "ở".repeat(OUTPUT.chars * 2);
@@ -345,9 +375,8 @@ fn what_it_does_not_know_is_passed_over() {
     let entries = c.entries(&MAIN);
     assert_eq!(entries.len(), 3, "{entries:#?}");
     let other = tool(&c, &MAIN, "t1");
-    assert!(
-        matches!(&other.detail, ToolDetail::Other { input } if input.text == r#"{"alpha":1,"beta":"two"}"#)
-    );
+    assert!(matches!(&other.detail, ToolDetail::Other), "{other:?}");
+    assert_eq!(other.input.text, "{\n  \"alpha\": 1,\n  \"beta\": \"two\"\n}");
     let mcp = tool(&c, &MAIN, "t2");
     assert!(
         matches!(&mcp.detail, ToolDetail::Mcp(m) if m.server == "github" && m.tool == "create_issue")
@@ -489,8 +518,9 @@ fn the_task_tools_keep_the_list() {
     assert_eq!(subjects, ["a", "b"]);
 }
 
-/// What a dialog about a call is worded from, when only the transcript names the call, is kept
-/// in each tool's own fields (`call_input`, which the worker reads).
+/// What a dialog about a call is worded from, when only the transcript names the call, is its
+/// whole input, or what each tool's own fields keep of one too long to hold whole
+/// (`call_input`, which the worker reads).
 #[test]
 fn a_calls_input_keeps_the_fields_a_dialog_is_worded_from() {
     let mcp = json!({"server": "arg", "n": 2});
@@ -527,7 +557,22 @@ fn a_calls_input_keeps_the_fields_a_dialog_is_worded_from() {
         ("ExitPlanMode", plan.clone(), plan),
     ];
     for (name, input, kept) in cases {
-        assert_eq!(call_input(&detail(name, &input, None)), kept, "{name}");
+        let mut call = ToolCall {
+            name: name.to_owned(),
+            input: Clipped::head(&input.to_string(), OUTPUT, None),
+            detail: detail(name, &input, None),
+            result: None,
+            title: None,
+        };
+        assert_eq!(call_input(&call), input, "{name}: a whole input is read whole");
+        call.input = Clipped::head(&"x".repeat(OUTPUT.chars + 1), OUTPUT, None);
+        call.input.full = Some(TextRef {
+            record: "r".to_owned(),
+            part: Part::Call { tool_use_id: "t".to_owned() },
+        });
+        let mcp_or_untyped = name.starts_with("mcp__") || name == "SomeTool";
+        let kept = if mcp_or_untyped { Value::Null } else { kept };
+        assert_eq!(call_input(&call), kept, "{name}: a clipped one by the fields its detail keeps");
     }
 }
 
@@ -755,11 +800,16 @@ fn answered(uuid: &str, message: &str, blocks: &Value, usage: &Value, stop: Opti
 }
 
 /// A turn counts each request once, however many records it wrote, and adds up its tokens; it
-/// knows its model and when Claude Code closed it.
+/// knows its model, the mode its prompt was sent in, the context its latest request carried,
+/// and when Claude Code closed it.
 #[test]
 fn a_turn_adds_up_its_requests() {
     let mut c = Conversation::default();
-    c.ingest(&MAIN, &user("p1", None, &json!("go")));
+    let mut prompt = user("p1", None, &json!("go"));
+    prompt["permissionMode"] = json!("acceptEdits");
+    c.ingest(&MAIN, &prompt);
+    assert_eq!(c.turns(&MAIN)[0].mode.as_deref(), Some("acceptEdits"), "its prompt's mode");
+    assert_eq!(c.turns(&MAIN)[0].context, None, "no request yet");
     let first = json!({
         "input_tokens": 10, "cache_read_input_tokens": 1_000, "cache_creation_input_tokens": 200,
         "output_tokens": 50, "output_tokens_details": {"thinking_tokens": 20},
@@ -795,6 +845,7 @@ fn a_turn_adds_up_its_requests() {
         Usage { input: 15, cache_read: 2_300, cache_write: 200, output: 80, thinking: 20 }
     );
     assert_eq!(turn.models, ["claude-opus-5-5"]);
+    assert_eq!(turn.context, Some(1_305), "what its latest request read");
     assert_eq!(turn.ended_ms, None);
     let mut end = json!({
         "type": "system", "subtype": "stop_hook_summary", "uuid": "s1",

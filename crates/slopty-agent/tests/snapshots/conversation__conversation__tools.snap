@@ -21,13 +21,12 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: ToolSearch
-          detail:
-            Other:
-              input:
-                text: "{\"max_results\":5,\"query\":\"select:TaskCreate,TaskUpdate\"}"
-                lines: 1
-                chars: 56
-                full: ~
+          input:
+            text: "{\n  \"max_results\": 5,\n  \"query\": \"select:TaskCreate,TaskUpdate\"\n}"
+            lines: 4
+            chars: 65
+            full: ~
+          detail: Other
           result:
             status: Ok
             text:
@@ -44,6 +43,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: TaskCreate
+          input:
+            text: "{\n  \"description\": \"Glob for Rust files, then grep for println calls in the project\",\n  \"subject\": \"Survey files\"\n}"
+            lines: 4
+            chars: 115
+            full: ~
           detail:
             TaskCreate:
               task_id: "1"
@@ -61,6 +65,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: TaskCreate
+          input:
+            text: "{\n  \"description\": \"Write notes.md with the heading and the main.rs line, then count main.rs lines via a subagent\",\n  \"subject\": \"Write notes\"\n}"
+            lines: 4
+            chars: 144
+            full: ~
           detail:
             TaskCreate:
               task_id: "2"
@@ -78,6 +87,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: TaskUpdate
+          input:
+            text: "{\n  \"status\": \"in_progress\",\n  \"taskId\": \"1\"\n}"
+            lines: 4
+            chars: 46
+            full: ~
           detail:
             TaskUpdate:
               task_id: "1"
@@ -98,6 +112,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: Glob
+          input:
+            text: "{\n  \"pattern\": \"*.rs\"\n}"
+            lines: 3
+            chars: 23
+            full: ~
           detail:
             Glob:
               pattern: "*.rs"
@@ -120,6 +139,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: Grep
+          input:
+            text: "{\n  \"output_mode\": \"content\",\n  \"pattern\": \"println\"\n}"
+            lines: 4
+            chars: 54
+            full: ~
           detail:
             Grep:
               pattern: println
@@ -144,6 +168,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: Bash
+          input:
+            text: "{\n  \"command\": \"printf 'one\\\\ntwo\\\\n'\",\n  \"description\": \"Print two lines of text\"\n}"
+            lines: 4
+            chars: 84
+            full: ~
           detail:
             Bash:
               command:
@@ -176,6 +205,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: Bash
+          input:
+            text: "{\n  \"command\": \"ls missing-file\",\n  \"description\": \"List a missing file (expected to fail)\"\n}"
+            lines: 4
+            chars: 93
+            full: ~
           detail:
             Bash:
               command:
@@ -216,6 +250,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: Bash
+          input:
+            text: "{\n  \"command\": \"sleep 1; echo bg-finished\",\n  \"description\": \"Sleep one second then print a completion marker\",\n  \"run_in_background\": true\n}"
+            lines: 5
+            chars: 141
+            full: ~
           detail:
             Bash:
               command:
@@ -260,6 +299,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: TaskUpdate
+          input:
+            text: "{\n  \"status\": \"completed\",\n  \"taskId\": \"1\"\n}"
+            lines: 4
+            chars: 44
+            full: ~
           detail:
             TaskUpdate:
               task_id: "1"
@@ -280,6 +324,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: TaskUpdate
+          input:
+            text: "{\n  \"status\": \"in_progress\",\n  \"taskId\": \"2\"\n}"
+            lines: 4
+            chars: 46
+            full: ~
           detail:
             TaskUpdate:
               task_id: "2"
@@ -300,6 +349,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: Write
+          input:
+            text: "{\n  \"content\": \"# Notes\\nmain.rs prints hello\\n\",\n  \"file_path\": \"/work/notes.md\"\n}"
+            lines: 4
+            chars: 83
+            full: ~
           detail:
             Write:
               path: /work/notes.md
@@ -331,6 +385,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: Agent
+          input:
+            text: "{\n  \"description\": \"Count lines\",\n  \"prompt\": \"Count the number of lines in the file /work/main.rs. Use the Read tool on that absolute path to do it. Reply with just the number and nothing else.\",\n  \"run_in_background\": false,\n  \"subagent_type\": \"general-purpose\"\n}"
+            lines: 6
+            chars: 265
+            full: ~
           detail:
             Agent:
               agent_id: a0000000000000001
@@ -352,6 +411,12 @@ expression: "decode(\"tools\").snapshot()"
               tokens: 14647
               tool_uses: 1
               duration_ms: 4957
+              model: claude-haiku-5-5
+              tally:
+                read: 1
+              changed:
+                added: 0
+                removed: 0
           result:
             status: Ok
             text: ~
@@ -364,6 +429,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: TaskUpdate
+          input:
+            text: "{\n  \"status\": \"completed\",\n  \"taskId\": \"2\"\n}"
+            lines: 4
+            chars: 44
+            full: ~
           detail:
             TaskUpdate:
               task_id: "2"
@@ -408,6 +478,8 @@ expression: "decode(\"tools\").snapshot()"
         cache_write: 15667
         output: 2493
         thinking: 466
+      mode: default
+      context: 25609
 - id:
     Agent: a0000000000000001
   origin:
@@ -431,6 +503,11 @@ expression: "decode(\"tools\").snapshot()"
       body:
         Tool:
           name: Read
+          input:
+            text: "{\n  \"file_path\": \"/work/main.rs\"\n}"
+            lines: 3
+            chars: 34
+            full: ~
           detail:
             Read:
               path: /work/main.rs
@@ -473,3 +550,5 @@ expression: "decode(\"tools\").snapshot()"
         cache_write: 14269
         output: 445
         thinking: 373
+      mode: ~
+      context: 14271

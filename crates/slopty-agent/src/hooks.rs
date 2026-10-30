@@ -8,9 +8,10 @@
 //! never answered: the TUI shows its own.
 //!
 //! The relay hands each payload to the worker, which reads the session's status from it
-//! ([`Hook::signal`]). Slopty's own mod relays the TUI's prompt box the same way, under an event of
-//! its own ([`DRAFT_EVENT`], `crate::claude::draft`). Unknown events and fields are passed over,
-//! so a newer Claude Code's additions cost nothing.
+//! ([`Hook::signal`]) and, once a call ended, how long its run took apart from the wait for the
+//! person's permission ([`Hook::ran`]). Slopty's own mod relays the TUI's prompt box the same way,
+//! under an event of its own ([`DRAFT_EVENT`], `crate::claude::draft`). Unknown events and fields
+//! are passed over, so a newer Claude Code's additions cost nothing.
 
 use std::path::Path;
 
@@ -155,6 +156,16 @@ pub struct Hook {
     /// The tool's input, on tool events.
     #[serde(default)]
     pub tool_input: Option<Value>,
+    /// The call, on tool events: its `tool_use_id`, as the transcript names it.
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
+    /// How long the call ran, in ms, on `PostToolUse` and `PostToolUseFailure`: its run alone,
+    /// the wait for a permission prompt and the `PreToolUse` hooks left out.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// The subagent whose call it is, on a subagent's tool events.
+    #[serde(default)]
+    pub agent_id: Option<String>,
     /// What a `Notification` is about: `permission_prompt`, `idle_prompt`,
     /// `elicitation_dialog`, …
     #[serde(default)]
@@ -184,6 +195,17 @@ pub struct Hook {
     /// [`DRAFT_EVENT`] whose TUI has one set.
     #[serde(default)]
     pub tmpdir: Option<String>,
+}
+
+/// How long a call ran, as its `PostToolUse` or `PostToolUseFailure` says ([`Hook::ran`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ran {
+    /// The call (`tool_use_id`).
+    pub call: String,
+    /// The subagent whose call it is; `None` for the session's own.
+    pub agent: Option<String>,
+    /// Its run alone, in ms: the wait for the person's permission left out.
+    pub ms: u64,
 }
 
 /// What a hook says of its session.
@@ -227,6 +249,20 @@ impl Hook {
     #[must_use]
     pub fn parse(json: &str) -> Option<Self> {
         serde_json::from_str(json).ok()
+    }
+
+    /// How long the call it ends ran, on `PostToolUse` and `PostToolUseFailure`; `None` on any
+    /// other event, or one that names no call or time.
+    #[must_use]
+    pub fn ran(&self) -> Option<Ran> {
+        if !matches!(self.event.as_str(), "PostToolUse" | "PostToolUseFailure") {
+            return None;
+        }
+        Some(Ran {
+            call: self.tool_use_id.clone().filter(|id| !id.is_empty())?,
+            agent: self.agent_id.clone().filter(|id| !id.is_empty()),
+            ms: self.duration_ms?,
+        })
     }
 
     /// What it says of the session's status.
@@ -423,5 +459,31 @@ mod tests {
         );
         assert_eq!(hook(json!({"hook_event_name": "SomethingNew", "x": 1})), Signal::Nothing);
         assert_eq!(Hook::parse("not json"), None);
+    }
+
+    /// A call's end says how long its run took, the subagent it is of, and nothing on any other
+    /// event or with no call or time.
+    #[test]
+    fn a_calls_end_says_how_long_it_ran() {
+        let ran = |json: Value| Hook::parse(&json.to_string()).expect("a payload").ran();
+        assert_eq!(
+            ran(
+                json!({"hook_event_name": "PostToolUse", "tool_use_id": "toolu_7", "duration_ms": 541})
+            ),
+            Some(Ran { call: "toolu_7".to_owned(), agent: None, ms: 541 })
+        );
+        assert_eq!(
+            ran(
+                json!({"hook_event_name": "PostToolUseFailure", "tool_use_id": "toolu_8", "duration_ms": 46, "agent_id": "a1"})
+            ),
+            Some(Ran { call: "toolu_8".to_owned(), agent: Some("a1".to_owned()), ms: 46 })
+        );
+        assert_eq!(
+            ran(json!({"hook_event_name": "PreToolUse", "tool_use_id": "toolu_7"})),
+            None,
+            "a call that has not ended"
+        );
+        assert_eq!(ran(json!({"hook_event_name": "PostToolUse", "duration_ms": 3})), None);
+        assert_eq!(ran(json!({"hook_event_name": "PostToolUse", "tool_use_id": "t"})), None);
     }
 }

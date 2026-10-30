@@ -230,6 +230,8 @@ struct Mapped {
     /// What each call's header and line said in the TUI's words, as last noted: a call is noted
     /// again only when they change.
     worded: HashMap<String, (Option<String>, Option<String>)>,
+    /// The calls whose run time ([`History::ran`]) was noted.
+    ran: HashSet<String>,
 }
 
 impl Mapped {
@@ -250,6 +252,7 @@ impl Mapped {
             tasks: Vec::new(),
             told: None,
             worded: HashMap::new(),
+            ran: HashSet::new(),
         }
     }
 
@@ -467,12 +470,16 @@ pub struct History {
     went: Option<WallMs>,
     /// No Claude Code runs the session: the last one ended by then ([`Self::rest`]).
     rested: Option<WallMs>,
-    /// Its context is being compacted ([`Wait::COMPACTING`]).
-    compacting: bool,
+    /// Its context is being compacted ([`Wait::COMPACTING`]), since this time.
+    compacting: Option<WallMs>,
     /// When the latest entry was made.
     last_at: WallMs,
     /// The TUI's prompt box as last told ([`Self::draft`]).
     draft: Option<Draft>,
+    /// How long each call ran, as its hook said ([`Self::ran`]), by call: its thread, its run
+    /// in ms and when the hook said it, noted on the call once its thread holds it, and again
+    /// once the thread begins anew.
+    ran: HashMap<String, (conv::ThreadId, u64, WallMs)>,
     /// The prompts queued in the TUI, as its transcript says them.
     queue: Vec<conv::Queued>,
     /// When the TUI that runs the session now began ([`Self::run_began`]): a prompt queued
@@ -519,15 +526,40 @@ impl History {
             failed: false,
             went: None,
             rested: None,
-            compacting: false,
+            compacting: None,
             last_at: WallMs::ZERO,
             draft: None,
+            ran: HashMap::new(),
             queue: Vec::new(),
             queue_since: None,
             queued: Vec::new(),
         };
         history.out.push(Out::Begin(Box::new(history.meta.clone())));
         history
+    }
+
+    /// A call ended and its hook said how long it ran, at `at` ([`crate::hooks::Ran`]): its run
+    /// alone, which the call's wall time from its record to its result's holds with the wait for
+    /// the person's permission. Noted on the call ([`Action::CallNoted`]) now if its thread
+    /// holds it, else once the transcript shows it.
+    pub fn ran(&mut self, ran: &crate::hooks::Ran, at: WallMs) -> Vec<Out> {
+        let thread = ran.agent.clone().map_or(conv::ThreadId::Main, conv::ThreadId::Agent);
+        self.ran.insert(ran.call.clone(), (thread, ran.ms, at));
+        self.tell_ran(&ran.call);
+        self.drain()
+    }
+
+    /// Note call `call`'s run time, once it is heard and its thread holds the call, unless it
+    /// was noted already.
+    fn tell_ran(&mut self, call: &str) {
+        let Some((thread, ms, at)) = self.ran.get(call).cloned() else { return };
+        let Some(mapped) = self.threads.get_mut(&thread) else { return };
+        if !mapped.items.contains_key(call) || !mapped.ran.insert(call.to_owned()) {
+            return;
+        }
+        let id = mapped.id;
+        let note = thread::CallNote { ran_ms: Some(ms), at_ms: at, ..thread::CallNote::default() };
+        self.push(id, Action::CallNoted { item: ItemId(call.to_owned()), note });
     }
 
     /// The main thread's turn under way, or its last: what a session with no hooks takes its
@@ -551,13 +583,17 @@ impl History {
         self.drain()
     }
 
-    /// `status` as the thread shows it: compacting while its context is compacted.
+    /// `status` as the thread shows it: compacting while its context is compacted, since the
+    /// compaction began.
     fn shown(&self, status: Option<Status>) -> Option<Status> {
         let mut status = status?;
-        if status.liveness == Liveness::Live && self.compacting {
+        if status.liveness == Liveness::Live
+            && let Some(since) = self.compacting
+        {
             status.phase = Phase::Working;
             let text = COMPACTING_TEXT.to_owned();
             status.wait = Some(Wait { kind: Wait::COMPACTING.to_owned(), text });
+            status.since_ms = since;
         }
         Some(status)
     }
@@ -572,6 +608,10 @@ impl History {
     /// Claude Code is at `phase` since `since_ms`, as its hooks or its transcript say, alive or
     /// not; what it waits on, if anything, is `wait` (a permission, a question), else its
     /// compaction.
+    ///
+    /// The same status told again keeps its time, since the session is still where it was
+    /// (working since its turn began, asking since it asked), unless it says a turn's end:
+    /// another end at a later time is another turn's, which ended then.
     pub fn status(
         &mut self,
         phase: Phase,
@@ -581,8 +621,12 @@ impl History {
     ) -> Vec<Out> {
         let phase = if phase == Phase::Done && self.failed { Phase::Failed } else { phase };
         let status = Status { phase, wait, liveness, since_ms };
+        let ends = matches!(phase, Phase::Done | Phase::Failed | Phase::Stopped);
         let same = self.status.as_ref().is_some_and(|had| {
-            had.phase == status.phase && had.wait == status.wait && had.liveness == status.liveness
+            had.phase == status.phase
+                && had.wait == status.wait
+                && had.liveness == status.liveness
+                && !(ends && had.since_ms < status.since_ms)
         });
         if !same {
             self.status = Some(status);
@@ -631,10 +675,11 @@ impl History {
         self.drain()
     }
 
-    /// Its context is being compacted, or was ([`Wait::COMPACTING`]).
-    pub fn compacting(&mut self, on: bool) -> Vec<Out> {
-        if self.compacting != on {
-            self.compacting = on;
+    /// Its context is being compacted since `at`, or no longer is ([`Wait::COMPACTING`]): the
+    /// thread shows it compacting since it began, and then where it is.
+    pub fn compacting(&mut self, on: bool, at: WallMs) -> Vec<Out> {
+        if self.compacting.is_some() != on {
+            self.compacting = on.then_some(at);
             self.reshow();
         }
         self.drain()
@@ -990,6 +1035,8 @@ impl History {
                     usage: Usage::default(),
                     models: Vec::new(),
                     changed: Changed::default(),
+                    mode: None,
+                    context: None,
                 };
                 mapped.turns.insert(turn, started.clone());
                 actions.push(Action::TurnStarted(started));
@@ -1053,6 +1100,10 @@ impl History {
         }
         for action in actions {
             self.push(id, action);
+        }
+        // How long a call ran, heard from its hook before the transcript showed it.
+        if matches!(entry.body, Body::Tool(_)) {
+            self.tell_ran(&entry.id);
         }
         // A new prompt leaves the failure behind: its own turn's end says how it went.
         if began {
@@ -1222,9 +1273,13 @@ impl History {
             usage: Usage::default(),
             models: Vec::new(),
             changed: Changed::default(),
+            mode: None,
+            context: None,
         });
         updated.models.clone_from(&record.models);
         updated.usage = usage(&record.usage);
+        updated.mode.clone_from(&record.mode);
+        updated.context = record.context;
         updated.changed = mapped.changed(turn);
         mapped.turns.insert(turn, updated);
         let settled = mapped.settle(turn);
@@ -1362,7 +1417,7 @@ impl History {
         };
         let mut output = call.result.as_ref().and_then(|r| r.text.as_ref()).map(clip);
         let images = call.result.iter().flat_map(|r| &r.images).map(|i| image(thread, i)).collect();
-        let mut input = Clipped::default();
+        let input = clip(&call.input);
         let mut child = None;
         let (kind, title, detail) = match &call.detail {
             conv::ToolDetail::Edit(e) => {
@@ -1475,6 +1530,9 @@ impl History {
                         tokens: a.tokens,
                         tool_uses: a.tool_uses,
                         duration_ms: a.duration_ms,
+                        model: a.model.clone(),
+                        tally: a.tally.clone(),
+                        changed: a.changed,
                     })),
                 )
             }
@@ -1523,7 +1581,6 @@ impl History {
                 Some(detail::ToolDetail::Plan { text: clip(plan) }),
             ),
             conv::ToolDetail::Mcp(m) => {
-                input = clip(&m.input);
                 let shown = detail::ToolDetail::Mcp(detail::McpDetail {
                     server: m.server.clone(),
                     tool: m.tool.clone(),
@@ -1558,10 +1615,7 @@ impl History {
                 let title = if title.is_empty() { call.name.clone() } else { title };
                 (kind::MCP, title, Some(self.rooted(shown)))
             }
-            conv::ToolDetail::Other { input: raw } => {
-                input = clip(raw);
-                (kind::OTHER, call.name.clone(), None)
-            }
+            conv::ToolDetail::Other => (kind::OTHER, call.name.clone(), None),
         };
         ToolCall {
             name: call.name.clone(),

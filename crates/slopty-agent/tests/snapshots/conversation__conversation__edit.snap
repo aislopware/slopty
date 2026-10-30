@@ -21,6 +21,11 @@ expression: "decode(\"edit\").snapshot()"
       body:
         Tool:
           name: Read
+          input:
+            text: "{\n  \"file_path\": \"/work/notes.txt\"\n}"
+            lines: 3
+            chars: 36
+            full: ~
           detail:
             Read:
               path: /work/notes.txt
@@ -41,6 +46,11 @@ expression: "decode(\"edit\").snapshot()"
       body:
         Tool:
           name: Edit
+          input:
+            text: "{\n  \"file_path\": \"/work/notes.txt\",\n  \"new_string\": \"BETA\",\n  \"old_string\": \"beta\",\n  \"replace_all\": false\n}"
+            lines: 6
+            chars: 108
+            full: ~
           detail:
             Edit:
               path: /work/notes.txt
@@ -74,6 +84,11 @@ expression: "decode(\"edit\").snapshot()"
       body:
         Tool:
           name: Write
+          input:
+            text: "{\n  \"content\": \"alpha\\nBETA\\ngamma\\ndelta\\n\",\n  \"file_path\": \"/work/notes.txt\"\n}"
+            lines: 4
+            chars: 80
+            full: ~
           detail:
             Write:
               path: /work/notes.txt
@@ -107,6 +122,11 @@ expression: "decode(\"edit\").snapshot()"
       body:
         Tool:
           name: Read
+          input:
+            text: "{\n  \"file_path\": \"/work/notes.txt\",\n  \"limit\": 2,\n  \"offset\": 2\n}"
+            lines: 5
+            chars: 65
+            full: ~
           detail:
             Read:
               path: /work/notes.txt
@@ -145,3 +165,5 @@ expression: "decode(\"edit\").snapshot()"
         cache_write: 8179
         output: 775
         thinking: 361
+      mode: default
+      context: 19565

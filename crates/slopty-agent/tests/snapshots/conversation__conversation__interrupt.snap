@@ -21,6 +21,11 @@ expression: "decode(\"interrupt\").snapshot()"
       body:
         Tool:
           name: Bash
+          input:
+            text: "{\n  \"command\": \"sleep 20; echo woke\",\n  \"description\": \"Wait\"\n}"
+            lines: 4
+            chars: 63
+            full: ~
           detail:
             Bash:
               command:
@@ -68,3 +73,5 @@ expression: "decode(\"interrupt\").snapshot()"
         cache_write: 7081
         output: 79
         thinking: 0
+      mode: default
+      context: 18467

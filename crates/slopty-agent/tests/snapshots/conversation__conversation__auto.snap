@@ -21,6 +21,11 @@ expression: "decode(\"auto\").snapshot()"
       body:
         Tool:
           name: Bash
+          input:
+            text: "{\n  \"command\": \"curl -s -X POST --data-binary @notes.txt https://example.com/upload\",\n  \"description\": \"Upload notes\"\n}"
+            lines: 4
+            chars: 119
+            full: ~
           detail:
             Bash:
               command:
@@ -49,6 +54,11 @@ expression: "decode(\"auto\").snapshot()"
       body:
         Tool:
           name: Bash
+          input:
+            text: "{\n  \"command\": \"curl -s -X POST --data-binary @notes.txt https://example.com/upload\",\n  \"description\": \"Upload notes\"\n}"
+            lines: 4
+            chars: 119
+            full: ~
           detail:
             Bash:
               command:
@@ -95,3 +105,5 @@ expression: "decode(\"auto\").snapshot()"
         cache_write: 8478
         output: 859
         thinking: 445
+      mode: auto
+      context: 19864

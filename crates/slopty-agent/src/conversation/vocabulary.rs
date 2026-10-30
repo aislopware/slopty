@@ -13,8 +13,8 @@
 //!
 //! **Turns.** Beside its entries, a thread's turns carry what the transcript says of each one
 //! and no entry shows: the models that answered, the tokens they read and wrote, the context
-//! the last request carried, the permission mode, and when Claude Code closed it
-//! ([`Change::Turn`], keyed by the prompt that opened the turn).
+//! the last request carried, the permission mode its prompt was sent in, and when Claude Code
+//! closed it ([`Change::Turn`], keyed by the prompt that opened the turn).
 //!
 //! **Background output.** A command Claude Code runs in the background writes to a file of its
 //! own, not to the transcript. The worker tails that file while the command runs ([`Output`]);
@@ -66,6 +66,11 @@ pub enum Part {
     Block {
         /// The block's position in `message.content`.
         index: u32,
+    },
+    /// A tool call's whole input, as pretty JSON ([`ToolCall::input`]).
+    Call {
+        /// The call.
+        tool_use_id: String,
     },
     /// A string field of a tool call's input.
     Input {
@@ -319,6 +324,9 @@ pub struct Retry {
 pub struct ToolCall {
     /// The tool's name as the model called it.
     pub name: String,
+    /// Its whole input as the model gave it, as pretty JSON, clipped at
+    /// [`super::OUTPUT`] with a [`Part::Call`] to the whole.
+    pub input: Clipped,
     /// What it was asked to do, and what came of it, typed by tool.
     pub detail: ToolDetail,
     /// The result, once it arrived.
@@ -421,11 +429,8 @@ pub enum ToolDetail {
     /// shows, read from its whole input ([`crate::shown::shown`]); its paths as the call gave
     /// them, made absolute against the session's folder where the thread is mapped.
     Shown(Box<slopty_proto::thread::ToolDetail>),
-    /// Any other tool: its input, clipped.
-    Other {
-        /// The input as JSON.
-        input: Clipped,
-    },
+    /// Any other tool: its input is the call's own ([`ToolCall::input`]).
+    Other,
 }
 
 /// `Read`.
@@ -581,6 +586,17 @@ pub struct AgentDetail {
     pub tool_uses: Option<u64>,
     /// How long it ran.
     pub duration_ms: Option<u64>,
+    /// The model it ran on, as its result resolves it (`resolvedModel`).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Its tool calls by kind, from its result's `toolStats`: `slopty_proto::thread::kind`'s
+    /// names (`read`, `search`, `exec`, `edit`, `other`; a count Claude Code adds later by its
+    /// own word), each counted at least once.
+    #[serde(default)]
+    pub tally: std::collections::BTreeMap<String, u64>,
+    /// Lines its edits added and removed (`toolStats`' `linesAdded`, `linesRemoved`).
+    #[serde(default)]
+    pub changed: slopty_proto::thread::Changed,
 }
 
 /// Where a subagent stands.
@@ -712,8 +728,6 @@ pub struct McpDetail {
     pub server: String,
     /// The tool.
     pub tool: String,
-    /// The input as JSON.
-    pub input: Clipped,
     /// Its result's `structuredContent`, as JSON, once it came with one.
     #[serde(default)]
     pub structured: Option<slopty_proto::thread::Clipped>,
@@ -772,6 +786,14 @@ pub struct Turn {
     pub models: Vec<String>,
     /// Tokens, summed over its requests.
     pub usage: Usage,
+    /// The permission mode its prompt was sent in (`permissionMode`: `default`, `acceptEdits`,
+    /// `plan`, `auto`, `bypassPermissions`).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The context its latest request carried: that request's input, fresh, read from the
+    /// cache and written to it.
+    #[serde(default)]
+    pub context: Option<u64>,
 }
 
 /// Tokens a request (or a turn's) used.

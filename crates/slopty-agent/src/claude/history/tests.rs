@@ -838,13 +838,27 @@ enum Arrival {
     HooksFirst,
 }
 
-/// What the worker makes of a hook heard at `at`: the status it says, and the turn of the
-/// prompt its `Stop` names ended.
+/// What the worker makes of a hook heard at `at`: how long the call it ends ran, the status it
+/// says, and the turn of the prompt its `Stop` names ended.
 fn hear(history: &mut History, payload: &str, at: WallMs) -> Vec<Out> {
-    use crate::hooks::{Hook, Signal};
+    use crate::hooks::Hook;
     let hook = Hook::parse(payload).expect("a recorded hook");
-    let (live, prompt) = (Liveness::Live, hook.prompt_id.as_deref());
-    match hook.signal() {
+    let prompt = hook.prompt_id.as_deref();
+    let mut outs = hook.ran().map(|ran| history.ran(&ran, at)).unwrap_or_default();
+    outs.extend(signalled(history, hook.signal(), prompt, at));
+    outs
+}
+
+/// What the worker makes of a hook's `signal`, heard at `at`.
+fn signalled(
+    history: &mut History,
+    signal: crate::hooks::Signal,
+    prompt: Option<&str>,
+    at: WallMs,
+) -> Vec<Out> {
+    use crate::hooks::Signal;
+    let live = Liveness::Live;
+    match signal {
         Signal::Began => history.status(Phase::Idle, None, live, at),
         Signal::Working => history.status(Phase::Working, None, live, at),
         Signal::Asks { kind, text } => {
@@ -860,7 +874,7 @@ fn hear(history: &mut History, payload: &str, at: WallMs) -> Vec<Out> {
             outs.extend(history.status(Phase::Failed, None, live, at));
             outs
         }
-        Signal::Compacting(on) => history.compacting(on),
+        Signal::Compacting(on) => history.compacting(on, at),
         Signal::Ended | Signal::Nothing | Signal::Draft { .. } => Vec::new(),
     }
 }
@@ -869,6 +883,13 @@ fn hear(history: &mut History, payload: &str, at: WallMs) -> Vec<Out> {
 /// its turns and its phase. The `n`th hook is heard at the same moment however it arrives,
 /// long after anything the transcript says, so a time the hook gave a turn shows as one.
 fn arrived(scenario: &str, arrival: Arrival) -> (Vec<Turn>, Phase) {
+    let (host, history) = arrive(scenario, arrival);
+    let thread = host.thread(history.main());
+    (thread.turns.clone(), thread.status.phase)
+}
+
+/// Recorded `scenario`'s threads as they settle when its files arrive as `arrival` says.
+fn arrive(scenario: &str, arrival: Arrival) -> (Host, History) {
     let dir = dir("conversation", scenario);
     let lines_of = |name: &str| -> Vec<String> {
         let text = std::fs::read_to_string(dir.join(name)).expect("a recorded file");
@@ -940,8 +961,63 @@ fn arrived(scenario: &str, arrival: Arrival) -> (Vec<Turn>, Phase) {
             host.take(history.transcript(&decoder.read(&main, &known), &[]));
         }
     }
-    let thread = host.thread(history.main());
-    (thread.turns.clone(), thread.status.phase)
+    (host, history)
+}
+
+/// However a recorded session's hooks and transcripts arrive, each call its `PostToolUse` or
+/// `PostToolUseFailure` ended holds how long its run took, as that hook said, in its own thread
+/// (a subagent's call in the subagent's); no call holds one no hook said.
+#[test]
+fn a_calls_run_time_lands_however_its_hook_and_records_arrive() {
+    use crate::hooks::Hook;
+    let mut said = 0_usize;
+    for scenario in CONVERSATIONS {
+        let text = std::fs::read_to_string(dir("conversation", scenario).join("hooks.jsonl"))
+            .expect("the hooks");
+        let heard: BTreeMap<String, (Option<String>, u64)> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| {
+                let payload =
+                    serde_json::from_str::<serde_json::Value>(l).expect("a hook")["input"]
+                        .to_string();
+                let ran = Hook::parse(&payload).expect("a hook").ran()?;
+                Some((ran.call, (ran.agent, ran.ms)))
+            })
+            .collect();
+        for arrival in [
+            Arrival::Recorded,
+            Arrival::RecordedTwice,
+            Arrival::TranscriptFirst,
+            Arrival::HooksFirst,
+        ] {
+            let (host, _) = arrive(scenario, arrival);
+            let held: HashSet<&str> = host
+                .threads
+                .values()
+                .flat_map(|t| &t.items)
+                .map(|item| item.id.0.as_str())
+                .collect();
+            let mut noted = BTreeMap::new();
+            for thread in host.threads.values() {
+                let agent = (thread.meta.origin == ThreadMeta::SUBAGENT)
+                    .then(|| thread.meta.native.clone());
+                for (item, note) in &thread.calls {
+                    if let Some(ms) = note.ran_ms {
+                        noted.insert(item.0.clone(), (agent.clone(), ms));
+                    }
+                }
+            }
+            let want: BTreeMap<String, (Option<String>, u64)> = heard
+                .iter()
+                .filter(|(call, _)| held.contains(call.as_str()))
+                .map(|(call, ran)| (call.clone(), ran.clone()))
+                .collect();
+            assert_eq!(noted, want, "{scenario}: {arrival:?}");
+            said = said.saturating_add(noted.len());
+        }
+    }
+    assert!(said > 0, "the recordings' hooks say how long their calls ran");
 }
 
 /// However a recorded session's hooks and transcripts arrive (as they came, each hook twice,
@@ -1073,4 +1149,67 @@ fn a_stop_ends_the_turn_a_notice_moved_on() {
     assert_eq!(run(records.len()), first, "heard after the result");
     let [turn] = first.as_slice() else { panic!("one turn: {first:#?}") };
     assert_eq!((&turn.state, turn.ended_ms), (&TurnState::Complete, Some(at)), "the hook's end");
+}
+
+/// The recorded `/compact`'s hooks heard one by one: from its `PreCompact` until its
+/// `PostCompact` the session shows compacting since the compaction began, whatever its phase
+/// beneath said meanwhile (its `SessionStart` of the compacted session), and then that phase,
+/// at that phase's own time.
+#[test]
+fn a_compaction_shows_since_it_began() {
+    let text = std::fs::read_to_string(dir("conversation", "compact").join("hooks.jsonl"))
+        .expect("the hooks");
+    let (mut history, mut host) = (observed(), Host::default());
+    host.take(history.drain());
+    let (mut began, mut seen) = (None, 0_usize);
+    for (n, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+        let input =
+            serde_json::from_str::<serde_json::Value>(line).expect("a hook")["input"].clone();
+        let n_ms = u64::try_from(n).expect("a count").saturating_mul(1_000);
+        let at = WallMs::from_millis(1_800_000_000_000_u64.saturating_add(n_ms));
+        host.take(hear(&mut history, &input.to_string(), at));
+        match input["hook_event_name"].as_str() {
+            Some("PreCompact") => began = Some(at),
+            Some("PostCompact") => began = None,
+            _ => {}
+        }
+        let status = &host.thread(history.main()).status;
+        let compacting = status.wait.as_ref().is_some_and(|w| w.kind == Wait::COMPACTING);
+        assert_eq!(compacting, began.is_some(), "hook {n}: {status:?}");
+        if let Some(began) = began {
+            assert_eq!(status.since_ms, began, "hook {n}: compacting since it began");
+            seen = seen.saturating_add(1);
+        }
+    }
+    assert!(seen >= 2, "the compaction outlasts a status beneath it");
+    let status = &host.thread(history.main()).status;
+    let session_start = WallMs::from_millis(1_800_000_005_000);
+    assert_eq!((status.phase, status.since_ms), (Phase::Idle, session_start), "{status:?}");
+}
+
+/// A status told again keeps its time, the session still where it was (working since its turn
+/// began, asking since it asked), but another turn's end told later moves it: the turn the
+/// record alone shows (a background task's notice) ended then, not when the one before did.
+#[test]
+fn a_status_told_again_keeps_its_time_but_a_later_end_moves_it() {
+    let (mut history, mut host) = (observed(), Host::default());
+    host.take(history.drain());
+    let at = |ms: u64| WallMs::from_millis(1_800_000_000_000_u64.saturating_add(ms));
+    let live = Liveness::Live;
+    let mut told = |phase: Phase, wait: Option<Wait>, ms: u64| {
+        host.take(history.status(phase, wait, live, at(ms)));
+        let status = host.thread(history.main()).status.clone();
+        (status.phase, status.since_ms)
+    };
+    assert_eq!(told(Phase::Working, None, 100), (Phase::Working, at(100)));
+    assert_eq!(told(Phase::Working, None, 300), (Phase::Working, at(100)), "still at work");
+    let asks = || Some(Wait { kind: "permission".to_owned(), text: "Run ls".to_owned() });
+    assert_eq!(told(Phase::NeedsYou, asks(), 400), (Phase::NeedsYou, at(400)));
+    assert_eq!(told(Phase::NeedsYou, asks(), 450), (Phase::NeedsYou, at(400)), "still asking");
+    assert_eq!(told(Phase::Done, None, 542), (Phase::Done, at(542)));
+    assert_eq!(told(Phase::Done, None, 542), (Phase::Done, at(542)), "the same end again");
+    assert_eq!(told(Phase::Done, None, 3_587), (Phase::Done, at(3_587)), "a later turn's end");
+    assert_eq!(told(Phase::Done, None, 2_000), (Phase::Done, at(3_587)), "an earlier end, late");
+    assert_eq!(told(Phase::Stopped, None, 4_000), (Phase::Stopped, at(4_000)));
+    assert_eq!(told(Phase::Stopped, None, 5_000), (Phase::Stopped, at(5_000)), "stopped again");
 }
