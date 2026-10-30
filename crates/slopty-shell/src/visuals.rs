@@ -11,36 +11,6 @@
 //! which change its state, and the view renders again. Canvases and scenes
 //! run their draw functions at paint time and are painted as GPUI paths and
 //! shaped text in theme colors.
-#![allow(
-    let_underscore_drop,
-    missing_copy_implementations,
-    missing_debug_implementations,
-    missing_docs,
-    clippy::allow_attributes_without_reason,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::float_cmp,
-    clippy::indexing_slicing,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::manual_midpoint,
-    clippy::many_single_char_names,
-    clippy::map_with_unused_argument_over_ranges,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::or_fun_call,
-    clippy::rc_buffer,
-    clippy::semicolon_if_nothing_returned,
-    clippy::suboptimal_flops,
-    clippy::too_many_arguments,
-    clippy::unreadable_literal,
-    clippy::unused_self,
-    clippy::unwrap_used,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -63,8 +33,10 @@ use crate::markdown::render::LinkUi;
 use crate::motion::HoverFade as _;
 use crate::state::EngineHandle;
 use crate::theme::Theme;
+use crate::transcript::num;
 
 /// The visual's tree changed shape; the transcript remeasures its row.
+#[derive(Debug, Clone, Copy)]
 pub struct VisualLayoutChanged;
 
 enum Load {
@@ -93,6 +65,17 @@ pub struct VisualFrame {
 }
 
 impl EventEmitter<VisualLayoutChanged> for VisualFrame {}
+
+impl std::fmt::Debug for VisualFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VisualFrame")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("generation", &self.generation)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
 
 /// View-local state the script doesn't own, keyed by node key or tree path.
 #[derive(Default)]
@@ -134,7 +117,7 @@ struct CanvasCache {
     generation: u64,
     size: (f32, f32),
     pointer: Option<(f32, f32, bool)>,
-    commands: Rc<Vec<DrawCmd>>,
+    commands: Rc<[DrawCmd]>,
 }
 
 /// A scene's drawing, its newest finished image, and the next one in the
@@ -170,8 +153,8 @@ struct RasterKey {
 #[derive(Clone)]
 struct SceneImage {
     image: Arc<gpui::RenderImage>,
-    hints: Arc<Vec<([f32; 2], f32, String)>>,
-    labels: Arc<Vec<slopty_visual::RasterLabel>>,
+    hints: Arc<[([f32; 2], f32, String)]>,
+    labels: Arc<[slopty_visual::RasterLabel]>,
 }
 
 /// A rendered frame as an image GPUI can paint (off the main thread).
@@ -207,13 +190,15 @@ impl Render for DragGhost {
 }
 
 impl VisualFrame {
+    /// The visual of row `id`, titled `title`: its script at `path` on `target_device_id`
+    /// (this machine when `None`), read through `engine` with the files beside it, then run.
     pub fn new(
         id: SharedString,
         title: String,
         path: String,
         engine: Option<EngineHandle>,
         target_device_id: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Self {
         // Its drawings leave every window's sprite atlas with it.
         cx.on_release(|this, cx| {
@@ -262,9 +247,9 @@ impl VisualFrame {
                         }
                     }
                     let assets = slopty_visual::Assets::new(files);
-                    let _ = this.update(cx, |this, cx| {
+                    let _gone = this.update(cx, |this, cx| {
                         if let Some(script) = script {
-                            this.start(&script, assets, cx)
+                            this.start(&script, assets, cx);
                         } else {
                             this.load = Load::Failed(None);
                             cx.notify();
@@ -299,6 +284,7 @@ impl VisualFrame {
         frame
     }
 
+    /// Open links the way the transcript around it does.
     pub fn set_link_ui(&mut self, link_ui: Option<LinkUi>) {
         self.link_ui = link_ui;
     }
@@ -341,7 +327,7 @@ impl VisualFrame {
                     free_images(images, cx);
                 }
                 self.tree = Some(Rc::new(tree));
-                self.generation += 1;
+                self.generation = self.generation.wrapping_add(1);
                 self.error = None;
                 if changed {
                     cx.emit(VisualLayoutChanged);
@@ -399,12 +385,12 @@ impl VisualFrame {
 pub(crate) fn chart_series(theme: &Theme) -> [Hsla; 6] {
     // (hue in turns, light tone, dark tone): teal, amber, rose, violet, lime, sky.
     const FIXED: [(f32, u32, u32); 6] = [
-        (0.486, 0x0d9488, 0x2dd4bf),
-        (0.106, 0xd97706, 0xfbbf24),
-        (0.964, 0xe11d48, 0xfb7185),
-        (0.728, 0x7c3aed, 0xa78bfa),
-        (0.236, 0x65a30d, 0xa3e635),
-        (0.553, 0x0284c7, 0x38bdf8),
+        (0.486, 0x0d_94_88, 0x2d_d4_bf),
+        (0.106, 0xd9_77_06, 0xfb_bf_24),
+        (0.964, 0xe1_1d_48, 0xfb_71_85),
+        (0.728, 0x7c_3a_ed, 0xa7_8b_fa),
+        (0.236, 0x65_a3_0d, 0xa3_e6_35),
+        (0.553, 0x02_84_c7, 0x38_bd_f8),
     ];
     let accent = theme.accent_strong;
     let distance = |hue: f32| {
@@ -413,18 +399,23 @@ pub(crate) fn chart_series(theme: &Theme) -> [Hsla; 6] {
     };
     // A grey accent has no hue to collide with; drop the last fixed color.
     let closest = if accent.s < 0.15 {
-        FIXED.len() - 1
+        FIXED.len().saturating_sub(1)
     } else {
-        (0..FIXED.len())
-            .min_by(|a, b| distance(FIXED[*a].0).total_cmp(&distance(FIXED[*b].0)))
-            .unwrap_or(0)
+        FIXED
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| distance(a.0).total_cmp(&distance(b.0)))
+            .map_or(0, |(ix, _)| ix)
     };
     let light = theme.appearance.is_light();
+    let others = FIXED
+        .iter()
+        .enumerate()
+        .filter(|(ix, _)| *ix != closest)
+        .map(|(_, (_, l, d))| gpui::rgb(if light { *l } else { *d }).into());
     let mut out = [accent; 6];
-    for (slot, (_, (_, l, d))) in
-        FIXED.iter().enumerate().filter(|(ix, _)| *ix != closest).enumerate()
-    {
-        out[slot + 1] = gpui::rgb(if light { *l } else { *d }).into();
+    for (slot, color) in out.iter_mut().skip(1).zip(others) {
+        *slot = color;
     }
     out
 }
@@ -471,7 +462,7 @@ impl Palette {
             Token::Warning => self.warning,
             Token::Danger => self.danger,
             Token::Border => self.border,
-            Token::Chart(i) => self.chart[usize::from(i) % 6],
+            Token::Chart(i) => self.chart.get(usize::from(i) % 6).copied().unwrap_or(self.accent),
             Token::Rgb(rgb) => gpui::rgb(rgb).into(),
         }
     }
@@ -486,10 +477,17 @@ impl Palette {
     }
 }
 
+/// The theme and the palette resolved from it, which a node's elements are drawn in.
+#[derive(Clone, Copy)]
+struct Look<'a> {
+    theme: &'a Theme,
+    palette: &'a Palette,
+}
+
 /// Blend in RGB, so a ramp between two hues doesn't swing through a third.
 fn mix_rgb(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let (a, b) = (a.to_rgb(), b.to_rgb());
-    let lerp = |x: f32, y: f32| x + (y - x) * t;
+    let lerp = |x: f32, y: f32| (y - x).mul_add(t, x);
     gpui::Rgba { r: lerp(a.r, b.r), g: lerp(a.g, b.g), b: lerp(a.b, b.b), a: lerp(a.a, b.a) }.into()
 }
 
@@ -545,7 +543,7 @@ impl Render for VisualFrame {
             (Load::Ready, Some(tree)) => {
                 let palette = Palette::new(&theme);
                 let root = self.id.to_string();
-                self.node(&tree, &root, &theme, &palette, window, cx)
+                self.node(&tree, &root, Look { theme: &theme, palette: &palette }, window, cx)
             }
             // The house's pending line, after its grace.
             _ => crate::loaders::pending(format!("{}-load", self.id), "Loading visual…")
@@ -636,13 +634,13 @@ impl Local {
         let mut images = Vec::new();
         self.shaders.retain(|key, cache| {
             kept(key) || {
-                images.extend(cache.shown.as_ref().map(|(_, image)| image.clone()));
+                images.extend(cache.shown.as_ref().map(|(_, image)| Arc::clone(image)));
                 false
             }
         });
         self.scenes.retain(|key, cache| {
             kept(key) || {
-                images.extend(cache.image.as_ref().map(|(_, image)| image.image.clone()));
+                images.extend(cache.image.as_ref().map(|(_, image)| Arc::clone(&image.image)));
                 false
             }
         });
@@ -693,17 +691,17 @@ impl VisualFrame {
     }
 
     fn node(
-        &mut self,
+        &self,
         node: &Node,
         path: &str,
-        theme: &Theme,
-        palette: &Palette,
+        look: Look<'_>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
+        let Look { theme, palette } = look;
         let key = Self::key(node, path);
         match &node.kind {
-            NodeKind::Stack(stack) => self.stack(stack, path, theme, palette, window, cx),
+            NodeKind::Stack(stack) => self.stack(stack, path, look, window, cx),
             NodeKind::Grid { columns, gap, children } => {
                 let mut grid = div().w_full().grid().grid_cols(*columns).gap(px(*gap));
                 for (ix, child) in children.iter().enumerate() {
@@ -711,8 +709,7 @@ impl VisualFrame {
                     grid = grid.child(div().min_w_0().child(self.node(
                         child,
                         &child_path,
-                        theme,
-                        palette,
+                        look,
                         window,
                         cx,
                     )));
@@ -725,8 +722,8 @@ impl VisualFrame {
             NodeKind::Stat { value, label, delta, tone } => {
                 stat(value, label, delta.as_deref(), *tone, theme, palette)
             }
-            NodeKind::Table(table) => self.table(table, path, theme, palette, window, cx),
-            NodeKind::Chart(chart) => self.chart(chart, key, theme, palette, cx),
+            NodeKind::Table(table) => self.table(table, path, look, window, cx),
+            NodeKind::Chart(chart) => self.chart(chart, &key, theme, palette, cx),
             NodeKind::Canvas(canvas) => self.canvas(canvas, key, cx),
             NodeKind::Scene(scene) => self.scene(scene, key, cx),
             NodeKind::Shader(shader) => self.shader(shader, key, cx),
@@ -841,7 +838,7 @@ impl VisualFrame {
                     handler: *on_change,
                     shown: format.format(*value),
                 },
-                key,
+                &key,
                 theme,
                 cx,
             ),
@@ -870,14 +867,14 @@ impl VisualFrame {
     }
 
     fn stack(
-        &mut self,
+        &self,
         stack: &slopty_visual::Stack,
         path: &str,
-        theme: &Theme,
-        palette: &Palette,
+        look: Look<'_>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
+        let theme = look.theme;
         let horizontal = stack.axis == slopty_visual::Axis::Horizontal;
         let mut el = div().flex().gap(px(stack.gap));
         el = if horizontal {
@@ -902,7 +899,7 @@ impl VisualFrame {
         }
         for (ix, child) in stack.children.iter().enumerate() {
             let child_path = format!("{path}.{ix}");
-            let rendered = self.node(child, &child_path, theme, palette, window, cx);
+            let rendered = self.node(child, &child_path, look, window, cx);
             // Nodes with no natural width (a slider's track, a plot) fill a
             // row's spare width unless the script sized them.
             let fluid = matches!(
@@ -951,15 +948,15 @@ impl VisualFrame {
     /// The markdown table's frameless treatment: a bold header and hairlines
     /// between rows, no outer box or fills.
     fn table(
-        &mut self,
+        &self,
         table: &slopty_visual::TableNode,
         path: &str,
-        theme: &Theme,
-        palette: &Palette,
+        look: Look<'_>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         use crate::markdown::render::{TABLE_CELL_PADDING, TABLE_HEADER_WEIGHT, table_hairline};
+        let theme = look.theme;
         let columns = table.columns.len().max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
         let cell = |align: Align, width: Option<f32>| {
             let cell = div().min_w_0().px(px(TABLE_CELL_PADDING)).py(px(8.0)).flex().flex_row();
@@ -1011,7 +1008,7 @@ impl VisualFrame {
                 let content = match row.get(c) {
                     Some(node) => {
                         let child_path = format!("{path}.{r}.{c}");
-                        self.node(node, &child_path, theme, palette, window, cx)
+                        self.node(node, &child_path, look, window, cx)
                     }
                     None => gpui::Empty.into_any_element(),
                 };
@@ -1136,9 +1133,9 @@ impl SliderSpec {
         let inset = px(SLIDER_THUMB / 2.0);
         let width = (bounds.size.width - inset * 2.0).max(px(1.0));
         let t = f64::from(((x - bounds.origin.x - inset) / width).clamp(0.0, 1.0));
-        let mut value = self.min + (self.max - self.min) * t;
+        let mut value = (self.max - self.min).mul_add(t, self.min);
         if self.step > 0.0 {
-            value = self.min + ((value - self.min) / self.step).round() * self.step;
+            value = ((value - self.min) / self.step).round().mul_add(self.step, self.min);
         }
         value.clamp(self.min, self.max)
     }
@@ -1150,8 +1147,8 @@ impl SliderSpec {
         let value = match key {
             "right" | "up" => self.value + step,
             "left" | "down" => self.value - step,
-            "pageup" => self.value + step * 10.0,
-            "pagedown" => self.value - step * 10.0,
+            "pageup" => step.mul_add(10.0, self.value),
+            "pagedown" => step.mul_add(-10.0, self.value),
             "home" => self.min,
             "end" => self.max,
             _ => return None,
@@ -1165,17 +1162,18 @@ const SLIDER_THUMB: f32 = 14.0;
 
 impl VisualFrame {
     fn slider(
-        &mut self,
+        &self,
         spec: SliderSpec,
-        key: SharedString,
+        key: &SharedString,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
-        let fraction = ((spec.value - spec.min) / (spec.max - spec.min)).clamp(0.0, 1.0) as f32;
+        let fraction =
+            num::narrow(((spec.value - spec.min) / (spec.max - spec.min)).clamp(0.0, 1.0));
         let spec = Rc::new(spec);
         let (track, fill, thumb) = (theme.border, theme.accent, theme.text);
         let press = {
-            let (spec, key) = (spec.clone(), key.clone());
+            let (spec, key) = (Rc::clone(&spec), key.clone());
             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                 cx.stop_propagation();
                 this.local.borrow_mut().pressed = Some(key.clone());
@@ -1188,7 +1186,7 @@ impl VisualFrame {
         };
         let drag_key = key.clone();
         let drag = {
-            let (spec, key) = (spec.clone(), key.clone());
+            let (spec, key) = (Rc::clone(&spec), key.clone());
             cx.listener(move |this, event: &gpui::DragMoveEvent<VisualDrag>, _, cx| {
                 if event.drag(cx).0 != key {
                     return;
@@ -1199,7 +1197,7 @@ impl VisualFrame {
                 }
             })
         };
-        let local = self.local.clone();
+        let local = Rc::clone(&self.local);
         let bounds_key = key.clone();
         div()
             .flex()
@@ -1223,7 +1221,7 @@ impl VisualFrame {
             )
             .child(crate::surface_chrome::focus_ring(
                 div()
-                    .id(SharedString::from(format!("{}-slider", self.element_id(&key))))
+                    .id(SharedString::from(format!("{}-slider", self.element_id(key))))
                     .h(px(SLIDER_THUMB + 4.0))
                     .w_full()
                     .cursor_pointer()
@@ -1235,7 +1233,7 @@ impl VisualFrame {
                     .tab_index(0)
                     .rounded(px(6.0))
                     .on_key_down({
-                        let spec = spec.clone();
+                        let spec = Rc::clone(&spec);
                         cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
                             if let Some(value) = spec.value_by_key(&event.keystroke.key) {
                                 cx.stop_propagation();
@@ -1302,10 +1300,9 @@ impl VisualFrame {
 
     /// Track the pointer over a drawn node (canvas, chart, scene).
     fn pointer_tracking(
-        &self,
         el: gpui::Stateful<gpui::Div>,
         key: &SharedString,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let (move_key, hover_key) = (key.clone(), key.clone());
         el.on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
@@ -1321,22 +1318,22 @@ impl VisualFrame {
     }
 
     fn canvas(
-        &mut self,
+        &self,
         node: &slopty_visual::Canvas,
         key: SharedString,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let Some(runtime) = self.runtime.clone() else {
             return gpui::Empty.into_any_element();
         };
         let (local, generation, time) =
-            (self.local.clone(), self.generation, self.time(crate::clock::now(cx)));
+            (Rc::clone(&self.local), self.generation, self.time(crate::clock::now(cx)));
         let (draw, animate) = (node.draw, node.animate);
         let paint_palette = Rc::new(Palette::new(Theme::of(cx)));
         let cache_key = key.clone();
         let mut el =
             div().id(self.element_id(&format!("{key}-canvas"))).w_full().h(px(node.height));
-        el = self.pointer_tracking(el, &key, cx);
+        el = Self::pointer_tracking(el, &key, cx);
         let (down_key, up_key) = (key.clone(), key.clone());
         el = el
             .on_mouse_down(
@@ -1390,7 +1387,7 @@ impl VisualFrame {
                             && cached.pointer == pointer
                     });
                     if let Some(cached) = fresh {
-                        return Some(cached.commands.clone());
+                        return Some(Rc::clone(&cached.commands));
                     }
                     if state.stopped.get(&key) == Some(&generation) {
                         return None;
@@ -1409,14 +1406,14 @@ impl VisualFrame {
                     let mut state = local.borrow_mut();
                     match drawn {
                         Ok(commands) => {
-                            let commands = Rc::new(commands);
+                            let commands: Rc<[DrawCmd]> = Rc::from(commands);
                             state.canvases.insert(
                                 key.clone(),
                                 CanvasCache {
                                     generation,
                                     size,
                                     pointer,
-                                    commands: commands.clone(),
+                                    commands: Rc::clone(&commands),
                                 },
                             );
                             state.draw_error = None;
@@ -1493,17 +1490,24 @@ fn fill_path(points: impl IntoIterator<Item = Point<Pixels>>, color: Hsla, windo
 
 /// A convex polygon as a triangle fan, skipping tessellation (3D faces).
 fn fill_convex(points: &[Point<Pixels>], color: Hsla, window: &mut Window) {
-    if points.len() < 3 {
+    let [first, rest @ ..] = points else {
+        return;
+    };
+    if rest.len() < 2 {
         return;
     }
-    let mut path = gpui::Path::new(points[0]);
-    for p in &points[1..] {
+    let mut path = gpui::Path::new(*first);
+    for p in rest {
         path.line_to(*p);
     }
     window.paint_path(path, color);
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one label's text, place and look, which its callers (a script's draw commands, a \
+              chart's axes, a scene's labels) each set apart"
+)]
 fn paint_text(
     text: &str,
     at: Point<Pixels>,
@@ -1543,7 +1547,9 @@ fn paint_text(
         Align::Center => at.y - line_height / 2.0,
         Align::End => at.y - line_height,
     };
-    let _ = line.paint(point(x, y), line_height, TextAlign::Left, None, window, cx);
+    if let Err(error) = line.paint(point(x, y), line_height, TextAlign::Left, None, window, cx) {
+        tracing::debug!(%error, "a visual's label failed to paint");
+    }
     width
 }
 
@@ -1588,14 +1594,34 @@ fn paint_commands(
 // ---- 3D -------------------------------------------------------------------
 
 impl VisualFrame {
+    /// The camera of the scene or shader at `key`, set at `yaw` and `pitch` the first time.
+    fn orbit(&self, yaw: f32, pitch: f32, key: &SharedString, cx: &App) -> Orbit {
+        *self.local.borrow_mut().cameras.entry(key.clone()).or_insert_with(|| Orbit {
+            yaw,
+            pitch,
+            spin_epoch: crate::clock::now(cx),
+            drag: None,
+        })
+    }
+
+    /// The yaw `orbit` shows now: where a drag holds it, or turned by `spin` since it rested.
+    fn shown_yaw(orbit: Orbit, spin: f32, cx: &App) -> f32 {
+        match orbit.drag {
+            Some(_) => orbit.yaw,
+            None => spin.mul_add(
+                crate::clock::now(cx).saturating_duration_since(orbit.spin_epoch).as_secs_f32(),
+                orbit.yaw,
+            ),
+        }
+    }
+
     /// Drag to orbit a scene's or shader's camera, picking up from where a
     /// turntable `spin` has turned it.
     fn orbit_handlers(
-        &self,
         mut el: gpui::Stateful<gpui::Div>,
         key: &SharedString,
         spin: f32,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let (down_key, drag_key, move_key, up_key, out_key) =
             (key.clone(), key.clone(), key.clone(), key.clone(), key.clone());
@@ -1613,10 +1639,10 @@ impl VisualFrame {
                 cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                     cx.stop_propagation();
                     if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(&down_key) {
-                        orbit.yaw += spin
-                            * crate::clock::now(cx)
-                                .saturating_duration_since(orbit.spin_epoch)
-                                .as_secs_f32();
+                        let turned = crate::clock::now(cx)
+                            .saturating_duration_since(orbit.spin_epoch)
+                            .as_secs_f32();
+                        orbit.yaw = spin.mul_add(turned, orbit.yaw);
                         orbit.drag = Some((event.position, orbit.yaw, orbit.pitch));
                     }
                     cx.notify();
@@ -1632,8 +1658,8 @@ impl VisualFrame {
                         && let Some((start, yaw, pitch)) = orbit.drag
                     {
                         let delta = event.event.position - start;
-                        orbit.yaw = yaw - f32::from(delta.x) * 0.01;
-                        orbit.pitch = (pitch + f32::from(delta.y) * 0.01).clamp(-1.5, 1.5);
+                        orbit.yaw = f32::from(delta.x).mul_add(-0.01, yaw);
+                        orbit.pitch = f32::from(delta.y).mul_add(0.01, pitch).clamp(-1.5, 1.5);
                     }
                     cx.notify();
                 },
@@ -1658,33 +1684,19 @@ impl VisualFrame {
     /// A `ui.shader`: the script's GLSL run on the GPU every frame it
     /// animates, painted as an image like any other.
     fn shader(
-        &mut self,
+        &self,
         node: &slopty_visual::ShaderNode,
         key: SharedString,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let spin = if cx.reduce_motion() { 0.0 } else { node.spin };
         let animate = node.animate && !cx.reduce_motion();
-        let orbit = *self.local.borrow_mut().cameras.entry(key.clone()).or_insert(Orbit {
-            yaw: node.yaw,
-            pitch: node.pitch,
-            spin_epoch: crate::clock::now(cx),
-            drag: None,
-        });
-        let yaw = match orbit.drag {
-            Some(_) => orbit.yaw,
-            None => {
-                orbit.yaw
-                    + spin
-                        * crate::clock::now(cx)
-                            .saturating_duration_since(orbit.spin_epoch)
-                            .as_secs_f32()
-            }
-        };
+        let orbit = self.orbit(node.yaw, node.pitch, &key, cx);
+        let yaw = Self::shown_yaw(orbit, spin, cx);
         let moving = animate || (spin != 0.0 && orbit.drag.is_none());
         let mut el =
             div().id(self.element_id(&format!("{key}-shader"))).w_full().h(px(node.height));
-        el = self.pointer_tracking(el, &key, cx);
+        el = Self::pointer_tracking(el, &key, cx);
         let (down_key, up_key, out_key) = (key.clone(), key.clone(), key.clone());
         el = el
             .on_mouse_down(
@@ -1709,12 +1721,12 @@ impl VisualFrame {
                 }),
             );
         if node.orbit {
-            el = self.orbit_handlers(el, &key, spin, cx);
+            el = Self::orbit_handlers(el, &key, spin, cx);
         }
         let names: Vec<String> = node.inputs.iter().map(|(n, _)| n.clone()).collect();
         let mut inputs = [[0.0_f32; 4]; slopty_visual::shader::MAX_INPUTS / 4];
-        for (i, (_, value)) in node.inputs.iter().enumerate() {
-            inputs[i / 4][i % 4] = *value;
+        for (slot, (_, value)) in inputs.as_flattened_mut().iter_mut().zip(&node.inputs) {
+            *slot = *value;
         }
         let assets = self
             .runtime
@@ -1736,7 +1748,7 @@ impl VisualFrame {
         // Buffers evolve every frame, so a shader with any keeps running.
         let moving = moving || !buffers.is_empty() && !cx.reduce_motion();
         let (local, time, entity) =
-            (self.local.clone(), self.time(crate::clock::now(cx)), cx.entity().downgrade());
+            (Rc::clone(&self.local), self.time(crate::clock::now(cx)), cx.entity().downgrade());
         el.child(
             canvas(
                 move |bounds, window, cx| {
@@ -1744,17 +1756,20 @@ impl VisualFrame {
                         window.request_animation_frame();
                     }
                     let scale = window.scale_factor();
-                    let size = (
-                        (f32::from(bounds.size.width) * scale).round().max(1.0) as u32,
-                        (f32::from(bounds.size.height) * scale).round().max(1.0) as u32,
-                    );
+                    let device_side = |side: Pixels| {
+                        num::whole_side(f64::from((f32::from(side) * scale).round().max(1.0)))
+                    };
+                    let size = (device_side(bounds.size.width), device_side(bounds.size.height));
                     let mut state = local.borrow_mut();
                     // Shadertoy's mouse: pixels from the bottom-left; xy where
                     // the pointer is, zw where it went down while it's held
                     // (negative otherwise).
                     let device = |p: Point<Pixels>| {
                         let at = p - bounds.origin;
-                        [f32::from(at.x) * scale, size.1 as f32 - f32::from(at.y) * scale]
+                        [
+                            f32::from(at.x) * scale,
+                            f32::from(at.y).mul_add(-scale, num::side(size.1)),
+                        ]
                     };
                     let mouse = match (state.presses.get(&key), state.pointers.get(&key)) {
                         (Some(start), Some(now)) => {
@@ -1777,27 +1792,35 @@ impl VisualFrame {
                     let delta =
                         if entry.frame == 0 { 0.0 } else { (time - entry.last_time).max(0.0) };
                     let uniforms = slopty_visual::shader::ShaderUniforms {
-                        resolution: [size.0 as f32, size.1 as f32, scale, 0.0],
+                        resolution: [num::side(size.0), num::side(size.1), scale, 0.0],
                         mouse,
                         camera: [yaw, orbit.pitch, zoom, 0.0],
-                        time: [shown_time as f32, delta as f32, entry.frame as f32, 0.0],
+                        time: [
+                            num::narrow(shown_time),
+                            num::narrow(delta),
+                            num::frames(entry.frame),
+                            0.0,
+                        ],
                         inputs,
                         channels: Default::default(),
                     };
                     let unchanged = buffers.is_empty()
                         && entry.shown.as_ref().is_some_and(|(p, _)| {
-                            p.resolution == uniforms.resolution
-                                && p.mouse == uniforms.mouse
-                                && p.camera == uniforms.camera
-                                && p.inputs == uniforms.inputs
-                                && (!animate || p.time[0] == uniforms.time[0])
+                            same_bits(&p.resolution, &uniforms.resolution)
+                                && same_bits(&p.mouse, &uniforms.mouse)
+                                && same_bits(&p.camera, &uniforms.camera)
+                                && same_bits(
+                                    p.inputs.as_flattened(),
+                                    uniforms.inputs.as_flattened(),
+                                )
+                                && (!animate || p.time[0].to_bits() == uniforms.time[0].to_bits())
                         });
-                    let shown = entry.shown.as_ref().map(|(_, image)| image.clone());
+                    let shown = entry.shown.as_ref().map(|(_, image)| Arc::clone(image));
                     // One frame in flight at a time; when it lands the view
                     // paints again and starts the next if anything moved.
                     if !unchanged && !entry.rendering {
                         entry.rendering = true;
-                        entry.frame += 1;
+                        entry.frame = entry.frame.saturating_add(1);
                         entry.last_time = time;
                         let mut gpu_state = entry.gpu.take();
                         let (code, buffers, names, textures) =
@@ -1823,7 +1846,7 @@ impl VisualFrame {
                             });
                             (rendered, gpu_state)
                         });
-                        let (local, key, entity) = (local.clone(), key.clone(), entity.clone());
+                        let (local, key, entity) = (Rc::clone(&local), key.clone(), entity.clone());
                         cx.spawn(async move |cx| {
                             let (rendered, gpu_state) = render.await;
                             cx.update(|cx| {
@@ -1852,7 +1875,7 @@ impl VisualFrame {
                                 }
                                 drop(state);
                                 free_images(freed, cx);
-                                let _ = entity.update(cx, |_, cx| cx.notify());
+                                let _gone = entity.update(cx, |_, cx| cx.notify());
                             });
                         })
                         .detach();
@@ -1860,16 +1883,18 @@ impl VisualFrame {
                     shown
                 },
                 move |bounds, image, window, _| {
-                    if let Some(image) = image {
-                        // gpui-fast takes the image's bounds too.
-                        let _ = window.paint_image(
+                    // gpui-fast takes the image's bounds too.
+                    if let Some(image) = image
+                        && let Err(error) = window.paint_image(
                             bounds,
                             bounds,
                             gpui::Corners::default(),
                             image,
                             0,
                             false,
-                        );
+                        )
+                    {
+                        tracing::debug!(%error, "a shader's frame failed to paint");
                     }
                 },
             )
@@ -1879,46 +1904,32 @@ impl VisualFrame {
     }
 
     fn scene(
-        &mut self,
+        &self,
         node: &slopty_visual::SceneNode,
         key: SharedString,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let Some(runtime) = self.runtime.clone() else {
             return gpui::Empty.into_any_element();
         };
         let spin = if cx.reduce_motion() { 0.0 } else { node.spin };
-        let orbit = *self.local.borrow_mut().cameras.entry(key.clone()).or_insert(Orbit {
-            yaw: node.yaw,
-            pitch: node.pitch,
-            spin_epoch: crate::clock::now(cx),
-            drag: None,
-        });
-        let yaw = match orbit.drag {
-            Some(_) => orbit.yaw,
-            None => {
-                orbit.yaw
-                    + spin
-                        * crate::clock::now(cx)
-                            .saturating_duration_since(orbit.spin_epoch)
-                            .as_secs_f32()
-            }
-        };
+        let orbit = self.orbit(node.yaw, node.pitch, &key, cx);
+        let yaw = Self::shown_yaw(orbit, spin, cx);
         let camera = slopty_visual::Camera { yaw, pitch: orbit.pitch, zoom: node.zoom };
         let moving = (spin != 0.0 && orbit.drag.is_none()) || node.animate;
         let dragging = orbit.drag.is_some();
         let (local, generation, time) =
-            (self.local.clone(), self.generation, self.time(crate::clock::now(cx)));
+            (Rc::clone(&self.local), self.generation, self.time(crate::clock::now(cx)));
         let entity = cx.entity().downgrade();
         let (draw, animate) = (node.draw, node.animate);
         let paint_palette = Rc::new(Palette::new(Theme::of(cx)));
         let mut el = div().id(self.element_id(&format!("{key}-scene"))).w_full().h(px(node.height));
-        el = self.pointer_tracking(el, &key, cx);
+        el = Self::pointer_tracking(el, &key, cx);
         if node.orbit {
-            el = self.orbit_handlers(el, &key, spin, cx);
+            el = Self::orbit_handlers(el, &key, spin, cx);
         }
         let pointer_key = key.clone();
-        let render_palette = paint_palette.clone();
+        let render_palette = Rc::clone(&paint_palette);
         el.child(
             canvas(
                 move |bounds, window, cx| {
@@ -1946,7 +1957,7 @@ impl VisualFrame {
                                 match state.scenes.get_mut(&key) {
                                     Some(entry) => {
                                         entry.generation = generation;
-                                        entry.drawing += 1;
+                                        entry.drawing = entry.drawing.wrapping_add(1);
                                         entry.scene = scene;
                                     }
                                     None => {
@@ -2008,7 +2019,7 @@ impl VisualFrame {
                     if entry.image.as_ref().map(|(k, _)| *k) != Some(raster_key) && !entry.rendering
                     {
                         entry.rendering = true;
-                        let (scene, mut gpu_state) = (entry.scene.clone(), entry.gpu.take());
+                        let (scene, mut gpu_state) = (Arc::clone(&entry.scene), entry.gpu.take());
                         let palette = (**paint_palette).clone();
                         let render = cx.background_executor().spawn(async move {
                             let rgba = move |color| {
@@ -2053,12 +2064,12 @@ impl VisualFrame {
                             };
                             let image = render_image(width, height, bgra).map(|image| SceneImage {
                                 image,
-                                hints: Arc::new(hints),
-                                labels: Arc::new(labels),
+                                hints: Arc::from(hints),
+                                labels: Arc::from(labels),
                             });
                             (image, gpu_state, cost)
                         });
-                        let (local, key, entity) = (local.clone(), key.clone(), entity.clone());
+                        let (local, key, entity) = (Rc::clone(&local), key.clone(), entity.clone());
                         cx.spawn(async move |cx| {
                             let (image, gpu_state, cost) = render.await;
                             cx.update(|cx| {
@@ -2085,7 +2096,7 @@ impl VisualFrame {
                                 }
                                 drop(state);
                                 free_images(freed, cx);
-                                let _ = entity.update(cx, |_, cx| cx.notify());
+                                let _gone = entity.update(cx, |_, cx| cx.notify());
                             });
                         })
                         .detach();
@@ -2109,14 +2120,16 @@ impl VisualFrame {
                         return;
                     };
                     // gpui-fast takes the image's bounds too.
-                    let _ = window.paint_image(
+                    if let Err(error) = window.paint_image(
                         bounds,
                         bounds,
                         gpui::Corners::default(),
-                        image.image.clone(),
+                        Arc::clone(&image.image),
                         0,
                         false,
-                    );
+                    ) {
+                        tracing::debug!(%error, "a scene's image failed to paint");
+                    }
                     for label in image.labels.iter() {
                         paint_text(
                             &label.text,
@@ -2151,6 +2164,12 @@ impl VisualFrame {
         )
         .into_any_element()
     }
+}
+
+/// Whether two runs of floats hold the same bits: a shader's inputs unchanged since its last
+/// frame.
+fn same_bits(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
 }
 
 /// Identifies a palette's colors, so a theme change re-renders scenes.
@@ -2211,7 +2230,10 @@ fn domain(lo: f64, hi: f64, include_zero: bool) -> (f64, f64, Vec<f64>) {
         hi = lo + lo.abs().max(1.0);
     }
     let ticks = slopty_visual::nice_ticks(lo, hi, 4);
-    let step = if ticks.len() > 1 { ticks[1] - ticks[0] } else { (hi - lo).max(1.0) };
+    let step = match ticks.as_slice() {
+        [first, second, ..] => second - first,
+        _ => (hi - lo).max(1.0),
+    };
     let lo = (lo / step).floor() * step;
     let hi = (hi / step).ceil() * step;
     (lo, hi, slopty_visual::nice_ticks(lo, hi, 4))
@@ -2272,20 +2294,20 @@ fn measure(text: &str, size: slopty_visual::TextSize, window: &Window, cx: &App)
 
 impl VisualFrame {
     fn chart(
-        &mut self,
+        &self,
         chart: &slopty_visual::Chart,
-        key: SharedString,
+        key: &SharedString,
         theme: &Theme,
         palette: &Palette,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let chart = Rc::new(chart.clone());
         let n = categories(&chart);
         // The hovered category, from the plot the last paint laid out.
         let (hover, hover_point) = {
             let local = self.local.borrow();
-            let geometry = local.charts.get(&key).copied();
-            let pointer = local.pointers.get(&key).copied();
+            let geometry = local.charts.get(key).copied();
+            let pointer = local.pointers.get(key).copied();
             match (geometry, pointer) {
                 (Some(g), Some(p)) if g.plot.size.width > px(0.0) => {
                     let along = if chart.horizontal && chart.kind == ChartKind::Bar {
@@ -2294,11 +2316,11 @@ impl VisualFrame {
                         (p.x - g.plot.origin.x) / g.plot.size.width
                     };
                     let ix = if chart.kind == ChartKind::Bar || n <= 1 {
-                        (along * n as f32).floor()
+                        (along * num::count(n)).floor()
                     } else {
-                        (along * (n - 1) as f32).round()
+                        (along * num::count(n.saturating_sub(1))).round()
                     };
-                    let hover = (0.0..n as f32).contains(&ix).then_some(ix as usize);
+                    let hover = (0.0..num::count(n)).contains(&ix).then_some(num::whole(ix));
                     (
                         hover.filter(|_| chart.kind != ChartKind::Scatter),
                         (chart.kind == ChartKind::Scatter)
@@ -2329,8 +2351,9 @@ impl VisualFrame {
                 div().text_color(theme.text).font_weight(FontWeight::MEDIUM).child(label.clone()),
             );
         }
-        if let Some((s, p)) = hover_point {
-            let (x, y) = chart.series[s].points[p];
+        if let Some((x, y)) = hover_point
+            .and_then(|(s, p)| chart.series.get(s).and_then(|series| series.points.get(p)).copied())
+        {
             legend = legend.child(div().text_color(theme.text).child(format!(
                 "{} · {}",
                 chart.x_format.format(x),
@@ -2364,12 +2387,12 @@ impl VisualFrame {
             }
         }
 
-        let local = self.local.clone();
+        let local = Rc::clone(&self.local);
         let paint_palette = Rc::new(Palette::new(theme));
-        let (plan_key, paint_chart) = (key.clone(), chart.clone());
+        let (plan_key, paint_chart) = (key.clone(), Rc::clone(&chart));
         let mut plot =
             div().id(self.element_id(&format!("{key}-chart"))).w_full().h(px(chart.height));
-        plot = self.pointer_tracking(plot, &key, cx);
+        plot = Self::pointer_tracking(plot, key, cx);
         div()
             .flex()
             .flex_col()
@@ -2410,8 +2433,8 @@ fn nearest_point(
     let mut best: Option<(f32, usize, usize)> = None;
     for (s, series) in chart.series.iter().enumerate() {
         for (p, (x, y)) in series.points.iter().enumerate() {
-            let sx = plot.origin.x + plot.size.width * ((x - x_lo) / (x_hi - x_lo)) as f32;
-            let sy = plot.origin.y + plot.size.height * (1.0 - ((y - lo) / (hi - lo)) as f32);
+            let sx = plot.origin.x + plot.size.width * num::narrow((x - x_lo) / (x_hi - x_lo));
+            let sy = plot.origin.y + plot.size.height * (1.0 - num::narrow((y - lo) / (hi - lo)));
             let d = f32::from((sx - pointer.x).abs()).hypot(f32::from((sy - pointer.y).abs()));
             if d < 12.0 && best.is_none_or(|(bd, ..)| d < bd) {
                 best = Some((d, s, p));
@@ -2434,8 +2457,8 @@ fn plan_chart(
     bounds: Bounds<Pixels>,
     hover: Option<usize>,
     hover_point: Option<(usize, usize)>,
-    window: &mut Window,
-    cx: &mut App,
+    window: &Window,
+    cx: &App,
 ) -> ChartPlan {
     use slopty_visual::TextSize::Xs;
     let (_, tick_line) = text_px(Xs, window);
@@ -2479,8 +2502,8 @@ fn plan_chart(
         1
     } else {
         let widest = chart.x.iter().map(|l| measure(l, Xs, window, cx)).fold(0.0, f32::max) + 12.0;
-        let band = f32::from(plot.size.width) / n as f32;
-        ((widest / band.max(1.0)).ceil() as usize).max(1)
+        let band = f32::from(plot.size.width) / num::count(n);
+        num::whole((widest / band.max(1.0)).ceil()).max(1)
     };
     ChartPlan { plot, lo, hi, ticks, x_lo, x_hi, x_ticks, label_stride, hover, hover_point }
 }
@@ -2498,27 +2521,27 @@ fn paint_chart_plan(
         return;
     }
     let horizontal = chart.kind == ChartKind::Bar && chart.horizontal;
-    let n = categories(chart).max(1);
+    let slots = categories(chart).max(1);
     let (pw, ph) = (f32::from(plot.size.width), f32::from(plot.size.height));
     let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
-    let value_t = |v: f64| ((v - plan.lo) / (plan.hi - plan.lo)) as f32;
+    let value_t = |v: f64| num::narrow((v - plan.lo) / (plan.hi - plan.lo));
     // Value -> screen along the value axis.
-    let vy = |v: f64| oy + ph * (1.0 - value_t(v));
-    let vx = |v: f64| ox + pw * value_t(v);
+    let vy = |v: f64| ph.mul_add(1.0 - value_t(v), oy);
+    let vx = |v: f64| pw.mul_add(value_t(v), ox);
     let grid = palette.border;
     let muted = palette.muted;
     let hover_wash = Theme::of(cx).glass_hover();
-    let p = |x: f32, y: f32| point(px(x), px(y));
+    let pt = |x: f32, y: f32| point(px(x), px(y));
 
     // Gridlines and value ticks.
     for tick in &plan.ticks {
         let label = chart.format.format(*tick);
         if horizontal {
             let x = vx(*tick);
-            stroke_path([p(x, oy), p(x, oy + ph)], false, 1.0, None, grid, window);
+            stroke_path([pt(x, oy), pt(x, oy + ph)], false, 1.0, None, grid, window);
             paint_text(
                 &label,
-                p(x, oy + ph + AXIS_GAP / 2.0),
+                pt(x, oy + ph + AXIS_GAP / 2.0),
                 Xs,
                 FontWeight::NORMAL,
                 false,
@@ -2530,10 +2553,10 @@ fn paint_chart_plan(
             );
         } else {
             let y = vy(*tick);
-            stroke_path([p(ox, y), p(ox + pw, y)], false, 1.0, None, grid, window);
+            stroke_path([pt(ox, y), pt(ox + pw, y)], false, 1.0, None, grid, window);
             paint_text(
                 &label,
-                p(ox - AXIS_GAP, y),
+                pt(ox - AXIS_GAP, y),
                 Xs,
                 FontWeight::NORMAL,
                 false,
@@ -2548,47 +2571,47 @@ fn paint_chart_plan(
 
     match chart.kind {
         ChartKind::Bar => {
-            let band = if horizontal { ph } else { pw } / n as f32;
+            let band = if horizontal { ph } else { pw } / num::count(slots);
             if let Some(i) = plan.hover {
-                let start = if horizontal { oy } else { ox } + band * i as f32;
+                let start = band.mul_add(num::count(i), if horizontal { oy } else { ox });
                 let rect = if horizontal {
-                    Bounds::from_corners(p(ox, start), p(ox + pw, start + band))
+                    Bounds::from_corners(pt(ox, start), pt(ox + pw, start + band))
                 } else {
-                    Bounds::from_corners(p(start, oy), p(start + band, oy + ph))
+                    Bounds::from_corners(pt(start, oy), pt(start + band, oy + ph))
                 };
                 window.paint_quad(gpui::fill(rect, hover_wash).corner_radii(px(4.0)));
             }
             let groups = if chart.stacked { 1 } else { chart.series.len().max(1) };
             let inner = band * 0.72;
-            let bar = (inner / groups as f32).max(1.0);
-            for i in 0..n {
-                let start = band * i as f32 + (band - inner) / 2.0;
+            let bar = (inner / num::count(groups)).max(1.0);
+            for i in 0..slots {
+                let start = band.mul_add(num::count(i), (band - inner) / 2.0);
                 let (mut pos, mut neg) = (0.0_f64, 0.0_f64);
-                for (s, series) in chart.series.iter().enumerate() {
-                    let Some(v) = series.values.get(i).copied().flatten() else {
+                for (series_ix, series) in chart.series.iter().enumerate() {
+                    let Some(value) = series.values.get(i).copied().flatten() else {
                         continue;
                     };
                     let (from, to) = if chart.stacked {
-                        if v >= 0.0 {
-                            pos += v;
-                            (pos - v, pos)
+                        if value >= 0.0 {
+                            pos += value;
+                            (pos - value, pos)
                         } else {
-                            neg += v;
-                            (neg - v, neg)
+                            neg += value;
+                            (neg - value, neg)
                         }
                     } else {
-                        (0.0_f64.clamp(plan.lo, plan.hi), v)
+                        (0.0_f64.clamp(plan.lo, plan.hi), value)
                     };
-                    let offset = if chart.stacked { 0.0 } else { bar * s as f32 };
+                    let offset = if chart.stacked { 0.0 } else { bar * num::count(series_ix) };
                     let gap = if groups > 1 && !chart.stacked { 1.0 } else { 0.0 };
                     let rect = if horizontal {
                         let y = oy + start + offset;
                         let (a, b) = (vx(from), vx(to));
-                        Bounds::from_corners(p(a.min(b), y), p(a.max(b), y + bar - gap))
+                        Bounds::from_corners(pt(a.min(b), y), pt(a.max(b), y + bar - gap))
                     } else {
                         let x = ox + start + offset;
                         let (a, b) = (vy(from), vy(to));
-                        Bounds::from_corners(p(x, a.min(b)), p(x + bar - gap, a.max(b)))
+                        Bounds::from_corners(pt(x, a.min(b)), pt(x + bar - gap, a.max(b)))
                     };
                     let radius = if chart.stacked { 0.0 } else { 2.0 };
                     window.paint_quad(
@@ -2597,15 +2620,15 @@ fn paint_chart_plan(
                 }
             }
             // Category labels.
-            for (i, label) in chart.x.iter().enumerate().take(n) {
-                if i % plan.label_stride != 0 {
+            for (i, label) in chart.x.iter().enumerate().take(slots) {
+                if !i.is_multiple_of(plan.label_stride) {
                     continue;
                 }
-                let center = band * (i as f32 + 0.5);
+                let center = band * (num::count(i) + 0.5);
                 if horizontal {
                     paint_text(
                         label,
-                        p(ox - AXIS_GAP, oy + center),
+                        pt(ox - AXIS_GAP, oy + center),
                         Xs,
                         FontWeight::NORMAL,
                         false,
@@ -2618,7 +2641,7 @@ fn paint_chart_plan(
                 } else {
                     paint_text(
                         label,
-                        p(ox + center, oy + ph + AXIS_GAP / 2.0),
+                        pt(ox + center, oy + ph + AXIS_GAP / 2.0),
                         Xs,
                         FontWeight::NORMAL,
                         false,
@@ -2633,12 +2656,16 @@ fn paint_chart_plan(
         }
         ChartKind::Line | ChartKind::Area => {
             let x_at = |i: usize| {
-                if n <= 1 { ox + pw / 2.0 } else { ox + pw * i as f32 / (n - 1) as f32 }
+                if slots <= 1 {
+                    ox + pw / 2.0
+                } else {
+                    ox + pw * num::count(i) / num::count(slots.saturating_sub(1))
+                }
             };
             if let Some(i) = plan.hover {
                 let x = x_at(i);
                 stroke_path(
-                    [p(x, oy), p(x, oy + ph)],
+                    [pt(x, oy), pt(x, oy + ph)],
                     false,
                     1.0,
                     None,
@@ -2651,45 +2678,47 @@ fn paint_chart_plan(
                 let color = palette.color(series.color);
                 // Gaps split a series into runs.
                 let mut runs: Vec<Vec<Point<Pixels>>> = vec![Vec::new()];
-                for (i, v) in series.values.iter().enumerate() {
-                    match v {
-                        Some(v) => runs.last_mut().unwrap().push(p(x_at(i), vy(*v))),
-                        None => runs.push(Vec::new()),
+                for (i, value) in series.values.iter().enumerate() {
+                    match (value, runs.last_mut()) {
+                        (Some(value), Some(run)) => run.push(pt(x_at(i), vy(*value))),
+                        _ => runs.push(Vec::new()),
                     }
                 }
-                for run in runs.iter().filter(|r| !r.is_empty()) {
-                    if chart.kind == ChartKind::Area && run.len() > 1 {
-                        let mut area = run.clone();
-                        area.push(point(run.last().unwrap().x, px(base)));
-                        area.push(point(run[0].x, px(base)));
-                        fill_path(area, Hsla { a: color.a * 0.22, ..color }, window);
-                    }
-                    if run.len() == 1 {
-                        fill_convex(&dot(run[0], 2.5), color, window);
-                    } else {
-                        stroke_path(run.iter().copied(), false, 1.75, None, color, window);
+                for run in &runs {
+                    match run.as_slice() {
+                        [] => {}
+                        [only] => fill_convex(&dot(*only, 2.5), color, window),
+                        [first, .., last] => {
+                            if chart.kind == ChartKind::Area {
+                                let mut area = run.clone();
+                                area.push(point(last.x, px(base)));
+                                area.push(point(first.x, px(base)));
+                                fill_path(area, Hsla { a: color.a * 0.22, ..color }, window);
+                            }
+                            stroke_path(run.iter().copied(), false, 1.75, None, color, window);
+                        }
                     }
                 }
                 if let Some(i) = plan.hover
-                    && let Some(Some(v)) = series.values.get(i)
+                    && let Some(Some(value)) = series.values.get(i)
                 {
-                    fill_convex(&dot(p(x_at(i), vy(*v)), 3.5), color, window);
+                    fill_convex(&dot(pt(x_at(i), vy(*value)), 3.5), color, window);
                 }
             }
-            for (i, label) in chart.x.iter().enumerate().take(n) {
-                if i % plan.label_stride != 0 {
+            for (i, label) in chart.x.iter().enumerate().take(slots) {
+                if !i.is_multiple_of(plan.label_stride) {
                     continue;
                 }
-                let align = if n > 1 && i == 0 {
+                let align = if slots > 1 && i == 0 {
                     Align::Start
-                } else if n > 1 && i == n - 1 {
+                } else if slots > 1 && slots.checked_sub(1) == Some(i) {
                     Align::End
                 } else {
                     Align::Center
                 };
                 paint_text(
                     label,
-                    p(x_at(i), oy + ph + AXIS_GAP / 2.0),
+                    pt(x_at(i), oy + ph + AXIS_GAP / 2.0),
                     Xs,
                     FontWeight::NORMAL,
                     false,
@@ -2702,13 +2731,14 @@ fn paint_chart_plan(
             }
         }
         ChartKind::Scatter => {
-            let sx = |x: f64| ox + pw * ((x - plan.x_lo) / (plan.x_hi - plan.x_lo)) as f32;
+            let sx =
+                |x: f64| pw.mul_add(num::narrow((x - plan.x_lo) / (plan.x_hi - plan.x_lo)), ox);
             for tick in &plan.x_ticks {
                 let x = sx(*tick);
-                stroke_path([p(x, oy), p(x, oy + ph)], false, 1.0, None, grid, window);
+                stroke_path([pt(x, oy), pt(x, oy + ph)], false, 1.0, None, grid, window);
                 paint_text(
                     &chart.x_format.format(*tick),
-                    p(x, oy + ph + AXIS_GAP / 2.0),
+                    pt(x, oy + ph + AXIS_GAP / 2.0),
                     Xs,
                     FontWeight::NORMAL,
                     false,
@@ -2719,11 +2749,11 @@ fn paint_chart_plan(
                     cx,
                 );
             }
-            for (s, series) in chart.series.iter().enumerate() {
+            for (series_ix, series) in chart.series.iter().enumerate() {
                 let color = palette.color(series.color);
                 for (ix, (x, y)) in series.points.iter().enumerate() {
-                    let r = if plan.hover_point == Some((s, ix)) { 5.0 } else { 3.0 };
-                    fill_convex(&dot(p(sx(*x), vy(*y)), r), color, window);
+                    let radius = if plan.hover_point == Some((series_ix, ix)) { 5.0 } else { 3.0 };
+                    fill_convex(&dot(pt(sx(*x), vy(*y)), radius), color, window);
                 }
             }
         }
@@ -2731,9 +2761,9 @@ fn paint_chart_plan(
 }
 
 fn dot(center: Point<Pixels>, radius: f32) -> Vec<Point<Pixels>> {
-    (0..14)
+    (0..14_u8)
         .map(|i| {
-            let a = std::f32::consts::TAU * i as f32 / 14.0;
+            let a = std::f32::consts::TAU * f32::from(i) / 14.0;
             center + point(px(radius * a.cos()), px(radius * a.sin()))
         })
         .collect()
@@ -2767,7 +2797,7 @@ mod tests {
             }
             assert_eq!(palette.token(Token::Text), theme.text);
             let half = palette.color(slopty_visual::Color::token(Token::Accent).with_alpha(0.5));
-            assert!((half.a - theme.accent.a * 0.5).abs() < 1e-6);
+            assert!(theme.accent.a.mul_add(-0.5, half.a).abs() < 1e-6);
         }
     }
 
@@ -2830,8 +2860,8 @@ end
                             label: tab.label().unwrap_or_default().to_owned(),
                             selected: tab.is_selected() == Some(true),
                             center: point(
-                                px(((r.x0 + r.x1) / 2.0 / scale) as f32),
-                                px(((r.y0 + r.y1) / 2.0 / scale) as f32),
+                                px(num::narrow(r.x0.midpoint(r.x1) / scale)),
+                                px(num::narrow(r.y0.midpoint(r.y1) / scale)),
                             ),
                         }
                     })
@@ -2920,9 +2950,9 @@ end
         };
         draw(cx);
         assert_eq!(selected(cx), [true, false]);
-        let mut stops = 0;
+        let mut stops = 0_u8;
         while selected(cx) != [false, true] {
-            stops += 1;
+            stops = stops.saturating_add(1);
             assert!(stops <= 4, "Tab never reached the p99 tab");
             cx.update(|window, cx| {
                 window.focus_next(cx);
@@ -3012,7 +3042,9 @@ end
         let first = frame_time(&frame, cx, VisualFrame::rerender);
         assert!(first >= std::time::Duration::from_millis(60), "{first:?}");
         let mut after: Vec<std::time::Duration> =
-            (0..30).map(|_| frame_time(&frame, cx, |_, cx| cx.notify())).collect();
+            std::iter::repeat_with(|| frame_time(&frame, cx, |_, cx| cx.notify()))
+                .take(30)
+                .collect();
         after.sort();
         println!("stopping frame {first:?}; the 30 frames after: {after:?}");
         // A draw tried again would cost the budget on every frame after; a frame the machine
