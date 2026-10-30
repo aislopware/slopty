@@ -176,11 +176,9 @@ impl Gpu {
         );
         self.queue.submit([encoder.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
-        buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         let mut bgra = vec![0u8; (width * height * 4) as usize];
         if let Ok(Ok(())) = rx.recv() {
@@ -199,21 +197,13 @@ impl Gpu {
             }
             buffer.unmap();
         }
-        Frame {
-            width,
-            height,
-            bgra,
-        }
+        Frame { width, height, bgra }
     }
 
     pub(crate) fn target(&self, width: u32, height: u32, label: &str) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,

@@ -4,21 +4,19 @@
 //!
 //! Passes, per frame:
 //! 1. shadow: the key light's depth over the geometry (orthographic);
-//! 2. main: the environment map behind everything, when the scene asks for
-//!    it; opaque surfaces (textured or not) into a multisampled HDR target
-//!    with depth (GGX specular, sky/ground ambient, key light with PCF
-//!    shadows, a fill light, glow); other see-through surfaces blended over
-//!    them unbent, far to near; sprites (flares, glints) adding their light
-//!    behind nearer surfaces; then lines and points unlit; resolved;
-//! 3. glass: transmissive surfaces over that, refracting the resolved image
-//!    (see-through surfaces and sprites behind it included) per color
-//!    channel (dispersion) under a Fresnel reflection;
+//! 2. main: the environment map behind everything, when the scene asks for it; opaque surfaces
+//!    (textured or not) into a multisampled HDR target with depth (GGX specular, sky/ground
+//!    ambient, key light with PCF shadows, a fill light, glow); other see-through surfaces blended
+//!    over them unbent, far to near; sprites (flares, glints) adding their light behind nearer
+//!    surfaces; then lines and points unlit; resolved;
+//! 3. glass: transmissive surfaces over that, refracting the resolved image (see-through surfaces
+//!    and sprites behind it included) per color channel (dispersion) under a Fresnel reflection;
 //! 4. bloom: bright parts downsampled and blurred;
-//! 5. composite: bloom added, a fine depth-edge outline, tonemapped to sRGB
-//!    straight alpha, transparent wherever nothing was drawn.
+//! 5. composite: bloom added, a fine depth-edge outline, tonemapped to sRGB straight alpha,
+//!    transparent wherever nothing was drawn.
 
-use wgpu::util::DeviceExt;
 use slopty_visual::{Camera, CameraFrame, Color, Scene, V3};
+use wgpu::util::DeviceExt;
 
 use crate::textures::{Loaded, Space};
 use crate::{EDGE_FADE, FORMAT, Frame, gpu};
@@ -510,17 +508,11 @@ impl Pipelines {
         });
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene material"),
-            entries: &[
-                texture(0, float, false),
-                sampler(1, wgpu::SamplerBindingType::Filtering),
-            ],
+            entries: &[texture(0, float, false), sampler(1, wgpu::SamplerBindingType::Filtering)],
         });
         let glass_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene behind glass"),
-            entries: &[
-                texture(0, float, false),
-                sampler(1, wgpu::SamplerBindingType::Filtering),
-            ],
+            entries: &[texture(0, float, false), sampler(1, wgpu::SamplerBindingType::Filtering)],
         });
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene post"),
@@ -553,16 +545,10 @@ impl Pipelines {
         };
         let shadow_layout = layout(&[Some(&globals_layout)]);
         let surface_layout = layout(&[Some(&globals_layout), Some(&material_layout)]);
-        let glass_pipeline_layout = layout(&[
-            Some(&globals_layout),
-            Some(&material_layout),
-            Some(&glass_layout),
-        ]);
+        let glass_pipeline_layout =
+            layout(&[Some(&globals_layout), Some(&material_layout), Some(&glass_layout)]);
         let post_pipeline_layout = layout(&[Some(&post_layout)]);
-        let msaa = wgpu::MultisampleState {
-            count: SAMPLES,
-            ..Default::default()
-        };
+        let msaa = wgpu::MultisampleState { count: SAMPLES, ..Default::default() };
         let depth = |write: bool, bias: wgpu::DepthBiasState| {
             Some(wgpu::DepthStencilState {
                 format: DEPTH,
@@ -619,14 +605,7 @@ impl Pipelines {
             &surface_layout,
             "fs_overlay",
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-            depth(
-                false,
-                wgpu::DepthBiasState {
-                    constant: -4,
-                    slope_scale: -1.0,
-                    clamp: 0.0,
-                },
-            ),
+            depth(false, wgpu::DepthBiasState { constant: -4, slope_scale: -1.0, clamp: 0.0 }),
         );
         let glass = surface_pipeline(
             "scene glass",
@@ -710,11 +689,7 @@ impl Pipelines {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: Default::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
-                },
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
             }),
             multisample: Default::default(),
             fragment: None,
@@ -815,36 +790,19 @@ fn dot(a: V3, b: V3) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 fn normalize(a: V3) -> V3 {
     let len = dot(a, a).sqrt();
-    if len < 1e-9 {
-        [0.0, 1.0, 0.0]
-    } else {
-        scale(a, 1.0 / len)
-    }
+    if len < 1e-9 { [0.0, 1.0, 0.0] } else { scale(a, 1.0 / len) }
 }
 
 fn to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
 fn linear(rgba: [f32; 4]) -> [f32; 4] {
-    [
-        to_linear(rgba[0]),
-        to_linear(rgba[1]),
-        to_linear(rgba[2]),
-        rgba[3],
-    ]
+    [to_linear(rgba[0]), to_linear(rgba[1]), to_linear(rgba[2]), rgba[3]]
 }
 
 /// Rows of a matrix into WGSL's column-major layout.
@@ -882,10 +840,7 @@ fn push_batch(
     let end = out.len() as u32;
     match batches.last_mut() {
         Some(last) if last.texture == texture && last.range.end == start => last.range.end = end,
-        _ => batches.push(Batch {
-            texture,
-            range: start..end,
-        }),
+        _ => batches.push(Batch { texture, range: start..end }),
     }
 }
 
@@ -934,12 +889,7 @@ fn geometry(scene: &Scene, frame: &CameraFrame, rgba: &dyn Fn(Color) -> [f32; 4]
             face: face.normal,
             color,
             mat: [m.roughness, m.metalness, m.glow, m.glass],
-            opt: [
-                m.ior,
-                m.dispersion,
-                if face.two_sided { 1.0 } else { 0.0 },
-                0.0,
-            ],
+            opt: [m.ior, m.dispersion, if face.two_sided { 1.0 } else { 0.0 }, 0.0],
             uv: face.uvs.map_or([0.0; 2], |uv| uv[i]),
         };
         let mut tris = Vec::with_capacity((face.corners.len() - 2) * 3);
@@ -976,12 +926,7 @@ fn geometry(scene: &Scene, frame: &CameraFrame, rgba: &dyn Fn(Color) -> [f32; 4]
     }
     translucent_faces.sort_by(|a, b| b.0.total_cmp(&a.0));
     for (_, texture, tris) in &translucent_faces {
-        push_batch(
-            &mut out.translucent,
-            &mut out.translucent_batches,
-            *texture,
-            tris,
-        );
+        push_batch(&mut out.translucent, &mut out.translucent_batches, *texture, tris);
     }
 
     // Lines and points face the camera, sized in screen pixels.
@@ -1019,8 +964,7 @@ fn geometry(scene: &Scene, frame: &CameraFrame, rgba: &dyn Fn(Color) -> [f32; 4]
             (sub(sub(at, x), y), [-1.0, -1.0]),
         ];
         for i in [0, 1, 2, 0, 2, 3] {
-            out.overlay
-                .push(flat(corners[i].0, color, 2.0, corners[i].1));
+            out.overlay.push(flat(corners[i].0, color, 2.0, corners[i].1));
         }
     }
     let mut sprites: Vec<_> = scene.sprites().iter().collect();
@@ -1039,21 +983,11 @@ fn geometry(scene: &Scene, frame: &CameraFrame, rgba: &dyn Fn(Color) -> [f32; 4]
         let quad: Vec<Vertex> = [0, 1, 2, 0, 2, 3]
             .into_iter()
             .map(|i| Vertex {
-                mat: [
-                    if sprite.texture.is_some() { 1.0 } else { 0.0 },
-                    0.0,
-                    sprite.glow,
-                    0.0,
-                ],
+                mat: [if sprite.texture.is_some() { 1.0 } else { 0.0 }, 0.0, sprite.glow, 0.0],
                 ..flat(corners[i].0, color, 3.0, corners[i].1)
             })
             .collect();
-        push_batch(
-            &mut out.sprites,
-            &mut out.sprite_batches,
-            sprite.texture,
-            &quad,
-        );
+        push_batch(&mut out.sprites, &mut out.sprite_batches, sprite.texture, &quad);
     }
     out
 }
@@ -1081,11 +1015,7 @@ impl SceneState {
         let texture = |label: &str, size: (u32, u32), format, samples, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d {
-                    width: size.0,
-                    height: size.1,
-                    depth_or_array_layers: 1,
-                },
+                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: samples,
                 dimension: wgpu::TextureDimension::D2,
@@ -1098,13 +1028,7 @@ impl SceneState {
         let half = ((w / 2).max(1), (h / 2).max(1));
         Self {
             size: (w, h),
-            shadow_map: texture(
-                "scene shadow map",
-                (SHADOW_SIZE, SHADOW_SIZE),
-                DEPTH,
-                1,
-                sampled,
-            ),
+            shadow_map: texture("scene shadow map", (SHADOW_SIZE, SHADOW_SIZE), DEPTH, 1, sampled),
             msaa_color: texture("scene color", (w, h), HDR, SAMPLES, U::RENDER_ATTACHMENT),
             msaa_depth: texture("scene depth", (w, h), DEPTH, SAMPLES, sampled),
             opaque_resolved: texture("scene behind glass", (w, h), HDR, 1, sampled),
@@ -1137,24 +1061,17 @@ pub fn render_scene(
         (width * pixel_scale).round().max(1.0) as u32,
         (height * pixel_scale).round().max(1.0) as u32,
     );
-    let pipelines = gpu
-        .scene
-        .get_or_init(|| Pipelines::new(&gpu.device, &gpu.queue));
+    let pipelines = gpu.scene.get_or_init(|| Pipelines::new(&gpu.device, &gpu.queue));
     let device = &gpu.device;
     let geometry = geometry(scene, &frame, rgba);
     // Textures, decoded and uploaded once each; one that fails draws plain.
     let loaded: Vec<Option<Loaded>> = scene
         .textures()
         .iter()
-        .map(|t| {
-            gpu.textures
-                .get(device, &gpu.queue, &t.data, Space::Color)
-                .ok()
-        })
+        .map(|t| gpu.textures.get(device, &gpu.queue, &t.data, Space::Color).ok())
         .collect();
-    let environment = scene
-        .environment()
-        .and_then(|e| Some((e, loaded.get(e.texture as usize)?.clone()?)));
+    let environment =
+        scene.environment().and_then(|e| Some((e, loaded.get(e.texture as usize)?.clone()?)));
 
     // Camera: the same framing and projection as the software renderer.
     let distance = dot(sub(frame.center, frame.eye), sub(frame.center, frame.eye)).sqrt();
@@ -1162,14 +1079,7 @@ pub fn render_scene(
     let far = distance + frame.radius * 2.0;
     let (sx, sy) = (frame.focal / (width / 2.0), frame.focal / (height / 2.0));
     let (a, b) = (far / (far - near), -far * near / (far - near));
-    let row = |axis: V3, s: f32| {
-        [
-            axis[0] * s,
-            axis[1] * s,
-            axis[2] * s,
-            -dot(axis, frame.eye) * s,
-        ]
-    };
+    let row = |axis: V3, s: f32| [axis[0] * s, axis[1] * s, axis[2] * s, -dot(axis, frame.eye) * s];
     let f = frame.forward;
     let view_proj = columns([
         row(frame.right, sx),
@@ -1185,18 +1095,8 @@ pub fn render_scene(
     let r = frame.radius * 1.1;
     let c = frame.center;
     let light_view_proj = columns([
-        [
-            light_right[0] / r,
-            light_right[1] / r,
-            light_right[2] / r,
-            -dot(light_right, c) / r,
-        ],
-        [
-            light_up[0] / r,
-            light_up[1] / r,
-            light_up[2] / r,
-            -dot(light_up, c) / r,
-        ],
+        [light_right[0] / r, light_right[1] / r, light_right[2] / r, -dot(light_right, c) / r],
+        [light_up[0] / r, light_up[1] / r, light_up[2] / r, -dot(light_up, c) / r],
         [
             light_forward[0] / (2.0 * r),
             light_forward[1] / (2.0 * r),
@@ -1218,12 +1118,9 @@ pub fn render_scene(
         up: [frame.up[0], frame.up[1], frame.up[2], 0.0],
         forward: [f[0], f[1], f[2], 0.0],
         env: match &environment {
-            Some((e, map)) => [
-                e.intensity,
-                1.0,
-                if e.background { 1.0 } else { 0.0 },
-                map.mips as f32,
-            ],
+            Some((e, map)) => {
+                [e.intensity, 1.0, if e.background { 1.0 } else { 0.0 }, map.mips as f32]
+            }
             None => [0.0; 4],
         },
         lens: [sx, sy, 0.0, 0.0],
@@ -1255,9 +1152,7 @@ pub fn render_scene(
     let half = ((w / 2).max(1), (h / 2).max(1));
     let view = |t: &wgpu::Texture| t.create_view(&Default::default());
 
-    let env_view = environment
-        .as_ref()
-        .map_or(&pipelines.white, |(_, map)| &map.view);
+    let env_view = environment.as_ref().map_or(&pipelines.white, |(_, map)| &map.view);
     // Slot 0 is plain white (untextured); texture `i` is slot `i + 1`.
     let material_binds: Vec<wgpu::BindGroup> = std::iter::once(Some(&pipelines.white))
         .chain(loaded.iter().map(|l| l.as_ref().map(|l| &l.view)))
@@ -1281,18 +1176,13 @@ pub fn render_scene(
         })
         .collect();
     let material = |texture: Option<u32>| {
-        &material_binds[texture
-            .map_or(0, |t| t as usize + 1)
-            .min(material_binds.len() - 1)]
+        &material_binds[texture.map_or(0, |t| t as usize + 1).min(material_binds.len() - 1)]
     };
     let globals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("scene globals"),
         layout: &pipelines.globals_layout,
         entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals_buffer.as_entire_binding(),
-            },
+            wgpu::BindGroupEntry { binding: 0, resource: globals_buffer.as_entire_binding() },
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(&view(shadow_map)),
@@ -1349,10 +1239,7 @@ pub fn render_scene(
         label: Some("scene shadow globals"),
         layout: &pipelines.globals_layout,
         entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals_buffer.as_entire_binding(),
-            },
+            wgpu::BindGroupEntry { binding: 0, resource: globals_buffer.as_entire_binding() },
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::TextureView(&view(dummy_depth)),
@@ -1460,10 +1347,7 @@ pub fn render_scene(
                 view: &color_view,
                 depth_slice: None,
                 resolve_target: Some(&resolve),
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth_view,
@@ -1511,10 +1395,7 @@ pub fn render_scene(
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&pipelines.linear),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: uniform.as_entire_binding(),
-                },
+                wgpu::BindGroupEntry { binding: 2, resource: uniform.as_entire_binding() },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(&view(bloom)),
@@ -1554,12 +1435,7 @@ pub fn render_scene(
     let zero = post_uniform([0.0; 4]);
     let step_x = post_uniform([1.0 / half.0 as f32, 0.0, 0.0, 0.0]);
     let step_y = post_uniform([0.0, 1.0 / half.1 as f32, 0.0, 0.0]);
-    fullscreen(
-        &mut encoder,
-        bloom_a,
-        &pipelines.bright,
-        &post_bind(shaded, &zero, bloom_b),
-    );
+    fullscreen(&mut encoder, bloom_a, &pipelines.bright, &post_bind(shaded, &zero, bloom_b));
     for _ in 0..2 {
         fullscreen(
             &mut encoder,
@@ -1575,12 +1451,7 @@ pub fn render_scene(
         );
     }
     let strength = post_uniform([0.9, 0.0, 0.0, 0.0]);
-    fullscreen(
-        &mut encoder,
-        output,
-        &pipelines.composite,
-        &post_bind(shaded, &strength, bloom_a),
-    );
+    fullscreen(&mut encoder, output, &pipelines.composite, &post_bind(shaded, &strength, bloom_a));
     Some(gpu.read_back(encoder, output, staging))
 }
 
@@ -1589,11 +1460,7 @@ pub fn render_scene(
 fn lit_dummy(device: &wgpu::Device) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("scene unused"),
-        size: wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1607,11 +1474,7 @@ fn lit_dummy(device: &wgpu::Device) -> wgpu::Texture {
 fn lit_dummy_depth(device: &wgpu::Device) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("scene unused depth"),
-        size: wgpu::Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -1623,8 +1486,9 @@ fn lit_dummy_depth(device: &wgpu::Device) -> wgpu::Texture {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use slopty_visual::Token;
+
+    use super::*;
 
     fn palette(color: Color) -> [f32; 4] {
         let [r, g, b] = match color.token {
@@ -1640,9 +1504,7 @@ mod tests {
     fn scene(script: &str) -> Scene {
         let mut visual = slopty_visual::Visual::load(script, 1).unwrap();
         let tree = visual.render().unwrap();
-        let slopty_visual::NodeKind::Scene(node) = tree.kind else {
-            panic!("a scene")
-        };
+        let slopty_visual::NodeKind::Scene(node) = tree.kind else { panic!("a scene") };
         visual.draw_scene(node.draw, 0.0).unwrap()
     }
 
@@ -1663,9 +1525,7 @@ mod tests {
         )
         .unwrap();
         let tree = visual.render().unwrap();
-        let slopty_visual::NodeKind::Scene(node) = tree.kind else {
-            panic!("a scene")
-        };
+        let slopty_visual::NodeKind::Scene(node) = tree.kind else { panic!("a scene") };
         visual.draw_scene(node.draw, 0.0).unwrap()
     }
 
@@ -1697,11 +1557,7 @@ mod tests {
                     png(256, 128, |x, y| {
                         let band = (x / 32) % 2 == 0;
                         let up = 255 - (y * 2).min(255) as u8;
-                        if band {
-                            [255, up, 80, 255]
-                        } else {
-                            [40, 80, up, 255]
-                        }
+                        if band { [255, up, 80, 255] } else { [40, 80, up, 255] }
                     }),
                 ),
             ]
@@ -1725,9 +1581,7 @@ mod tests {
         .unwrap()
         .with_assets(assets);
         let tree = visual.render().unwrap();
-        let slopty_visual::NodeKind::Scene(node) = tree.kind else {
-            panic!("a scene")
-        };
+        let slopty_visual::NodeKind::Scene(node) = tree.kind else { panic!("a scene") };
         visual.draw_scene(node.draw, 0.0).unwrap()
     }
 
@@ -1738,11 +1592,7 @@ mod tests {
         }
         let scene = gallery();
         let mut state = None;
-        let camera = Camera {
-            yaw: 0.5,
-            pitch: 0.35,
-            zoom: 1.0,
-        };
+        let camera = Camera { yaw: 0.5, pitch: 0.35, zoom: 1.0 };
         let frame = render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
         if let Ok(path) = std::env::var("SLOPTY_VISUAL_DUMP_ASSETS") {
             crate::dump_ppm(&frame, &path);
@@ -1758,11 +1608,8 @@ mod tests {
         assert!(inside.all(|(_, p)| p[3] == 255));
         assert!(frame.bgra[3] < 3, "the corner fades out");
         // The checker shows both of its colors somewhere.
-        let blueish = frame
-            .bgra
-            .chunks_exact(4)
-            .filter(|p| p[0] > 150 && p[2] < 90 && p[1] < 120)
-            .count();
+        let blueish =
+            frame.bgra.chunks_exact(4).filter(|p| p[0] > 150 && p[2] < 90 && p[1] < 120).count();
         assert!(blueish > 500, "{blueish}");
         // A texture uploads once, however many frames draw it.
         render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
@@ -1775,21 +1622,12 @@ mod tests {
         }
         let scene = room();
         let mut state = None;
-        let camera = Camera {
-            yaw: 0.6,
-            pitch: 0.45,
-            zoom: 1.0,
-        };
+        let camera = Camera { yaw: 0.6, pitch: 0.45, zoom: 1.0 };
         // The first frame also makes the device and compiles pipelines.
         render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
         let start = std::time::Instant::now();
         let frame = render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
-        eprintln!(
-            "gpu scene {}x{} in {:?}",
-            frame.width,
-            frame.height,
-            start.elapsed()
-        );
+        eprintln!("gpu scene {}x{} in {:?}", frame.width, frame.height, start.elapsed());
         if let Ok(path) = std::env::var("SLOPTY_VISUAL_DUMP") {
             crate::dump_ppm(&frame, &path);
         }
@@ -1818,11 +1656,7 @@ mod tests {
         if !crate::available() {
             return;
         }
-        let camera = Camera {
-            yaw: 0.6,
-            pitch: 0.3,
-            zoom: 1.0,
-        };
+        let camera = Camera { yaw: 0.6, pitch: 0.3, zoom: 1.0 };
         let render = |shell: &str| {
             let script = format!(
                 r#"return ui.scene {{ height = 300, draw = function(s)
@@ -1830,16 +1664,7 @@ mod tests {
                   {shell}
                 end }}"#
             );
-            render_scene(
-                &scene(&script),
-                camera,
-                720.0,
-                360.0,
-                1.0,
-                &palette,
-                &mut None,
-            )
-            .unwrap()
+            render_scene(&scene(&script), camera, 720.0, 360.0, 1.0, &palette, &mut None).unwrap()
         };
         let bare = red_center(&render(""));
         // A faded shell around the box (like a cutaway wall) must not shift
@@ -1847,9 +1672,6 @@ mod tests {
         let shelled = red_center(&render(
             r#"s:box { at = { 0, 0.6, 0 }, size = 1.8, color = ui.color("muted", 0.3) }"#,
         ));
-        assert!(
-            (bare - shelled).abs() < 6.0,
-            "box moved from {bare} to {shelled}"
-        );
+        assert!((bare - shelled).abs() < 6.0, "box moved from {bare} to {shelled}");
     }
 }

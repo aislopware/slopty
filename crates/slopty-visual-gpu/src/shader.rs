@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use wgpu::util::DeviceExt;
 use slopty_visual::shader::{Blend, MAX_BUFFERS, ShaderUniforms};
+use wgpu::util::DeviceExt;
 
 use crate::{EDGE_FADE, FORMAT, Frame, gpu};
 
@@ -182,12 +182,7 @@ impl Pipelines {
         });
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shader post"),
-            entries: &[
-                texture_entry(0),
-                sampler_entry(1),
-                uniform_entry(2),
-                texture_entry(3),
-            ],
+            entries: &[texture_entry(0), sampler_entry(1), uniform_entry(2), texture_entry(3)],
         });
         let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shader post"),
@@ -271,11 +266,7 @@ impl Pipelines {
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("shader empty channel"),
-                size: wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -347,9 +338,7 @@ impl Pipelines {
                 cache: None,
             })
         });
-        let result = compiled
-            .map(Arc::new)
-            .map_err(|error| format!("shader: {error}"));
+        let result = compiled.map(Arc::new).map_err(|error| format!("shader: {error}"));
         // Keep the cache bounded; a session rarely holds more than a few.
         if passes.len() > 64 {
             passes.clear();
@@ -367,11 +356,7 @@ fn texture(
 ) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d {
-            width: size.0,
-            height: size.1,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -427,24 +412,15 @@ pub fn render_shader(
     let height = height.clamp(1, 8192);
     let buffers = spec.buffers.len().min(MAX_BUFFERS);
     let device = &gpu.device;
-    let pipelines = gpu
-        .shaders
-        .get_or_init(|| Pipelines::new(device, &gpu.queue));
+    let pipelines = gpu.shaders.get_or_init(|| Pipelines::new(device, &gpu.queue));
     // Compile every pass first, so an error leaves the state untouched.
     let mut programs = Vec::with_capacity(buffers + 1);
-    for code in spec
-        .buffers
-        .iter()
-        .take(buffers)
-        .map(String::as_str)
-        .chain([spec.image])
-    {
+    for code in spec.buffers.iter().take(buffers).map(String::as_str).chain([spec.image]) {
         let (program, _) = slopty_visual::shader::program(code, spec.inputs);
         programs.push(pipelines.pass(device, &program)?);
     }
-    let fresh = state
-        .as_ref()
-        .is_none_or(|s| s.size != (width, height) || s.buffers.len() != buffers);
+    let fresh =
+        state.as_ref().is_none_or(|s| s.size != (width, height) || s.buffers.len() != buffers);
     if fresh {
         *state = Some(ShaderState::new(device, (width, height), buffers));
     }
@@ -468,9 +444,7 @@ pub fn render_shader(
             spec.textures
                 .get(i)
                 .and_then(|data| {
-                    gpu.textures
-                        .get(device, &gpu.queue, data, crate::textures::Space::Raw)
-                        .ok()
+                    gpu.textures.get(device, &gpu.queue, data, crate::textures::Space::Raw).ok()
                 })
                 .map_or_else(|| empty.clone(), |loaded| loaded.view)
         })
@@ -491,10 +465,7 @@ pub fn render_shader(
             label: Some("shader inputs"),
             layout: &pipelines.layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform.as_entire_binding(),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&channels[0]),
@@ -541,11 +512,8 @@ pub fn render_shader(
                 },
             ],
         });
-        let target = if pass < buffers {
-            view(&state.buffers[pass][write])
-        } else {
-            view(&state.image)
-        };
+        let target =
+            if pass < buffers { view(&state.buffers[pass][write]) } else { view(&state.image) };
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("shader pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -588,10 +556,7 @@ pub fn render_shader(
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&pipelines.clamp),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: values.as_entire_binding(),
-                },
+                wgpu::BindGroupEntry { binding: 2, resource: values.as_entire_binding() },
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(glow),
@@ -680,24 +645,12 @@ mod tests {
     use super::*;
 
     fn spec<'a>(image: &'a str, buffers: &'a [String], blend: Blend) -> ShaderSpec<'a> {
-        ShaderSpec {
-            image,
-            buffers,
-            inputs: &[],
-            blend,
-            bloom: 0.0,
-            textures: &[],
-        }
+        ShaderSpec { image, buffers, inputs: &[], blend, bloom: 0.0, textures: &[] }
     }
 
     fn px(frame: &Frame, x: u32, y: u32) -> [u8; 4] {
         let o = ((y * frame.width + x) * 4) as usize;
-        [
-            frame.bgra[o + 2],
-            frame.bgra[o + 1],
-            frame.bgra[o],
-            frame.bgra[o + 3],
-        ]
+        [frame.bgra[o + 2], frame.bgra[o + 1], frame.bgra[o], frame.bgra[o + 3]]
     }
 
     #[test]
@@ -709,27 +662,16 @@ mod tests {
             vec2 uv = fragCoord / iResolution.xy;\n\
             fragColor = vec4(uv.x, uv.y, fract(iTime), 1.0);\n\
         }";
-        let mut uniforms = ShaderUniforms {
-            resolution: [64.0, 32.0, 1.0, 0.0],
-            ..Default::default()
-        };
+        let mut uniforms =
+            ShaderUniforms { resolution: [64.0, 32.0, 1.0, 0.0], ..Default::default() };
         uniforms.time[0] = 0.5;
-        let frame = render_shader(
-            &spec(code, &[], Blend::Opaque),
-            &uniforms,
-            64,
-            32,
-            &mut None,
-        )
-        .unwrap();
+        let frame =
+            render_shader(&spec(code, &[], Blend::Opaque), &uniforms, 64, 32, &mut None).unwrap();
         // Red grows to the right; green grows upward (Shadertoy's origin is
         // bottom-left), so the top row is the greenest.
         assert!(px(&frame, 60, 16)[0] > px(&frame, 4, 16)[0]);
         assert!(px(&frame, 32, 2)[1] > px(&frame, 32, 29)[1]);
-        assert!(
-            (i32::from(px(&frame, 32, 16)[2]) - 128).abs() < 3,
-            "iTime reaches the shader"
-        );
+        assert!((i32::from(px(&frame, 32, 16)[2]) - 128).abs() < 3, "iTime reaches the shader");
     }
 
     #[test]
@@ -746,23 +688,14 @@ mod tests {
             height: 1,
             pixels: vec![255, 0, 0, 255, 0, 0, 128, 255].into(),
         }];
-        let spec = ShaderSpec {
-            textures: &textures,
-            ..spec(code, &[], Blend::Opaque)
-        };
-        let uniforms = ShaderUniforms {
-            resolution: [64.0, 16.0, 1.0, 0.0],
-            ..Default::default()
-        };
+        let spec = ShaderSpec { textures: &textures, ..spec(code, &[], Blend::Opaque) };
+        let uniforms = ShaderUniforms { resolution: [64.0, 16.0, 1.0, 0.0], ..Default::default() };
         let frame = render_shader(&spec, &uniforms, 64, 16, &mut None).unwrap();
         // At the texel centers (it repeats, so edges blend with the far side).
         let left = px(&frame, 16, 8);
         assert!(left[0] > 245 && left[2] < 8, "{left:?}");
         let right = px(&frame, 48, 8);
-        assert!(
-            right[0] < 8 && (i32::from(right[2]) - 128).abs() < 6,
-            "{right:?}"
-        );
+        assert!(right[0] < 8 && (i32::from(right[2]) - 128).abs() < 6, "{right:?}");
     }
 
     #[test]
@@ -779,14 +712,8 @@ mod tests {
             height: 2,
             pixels: vec![255, 0, 0, 255, 0, 0, 255, 255].into(),
         }];
-        let spec = ShaderSpec {
-            textures: &textures,
-            ..spec(code, &[], Blend::Opaque)
-        };
-        let uniforms = ShaderUniforms {
-            resolution: [16.0, 64.0, 1.0, 0.0],
-            ..Default::default()
-        };
+        let spec = ShaderSpec { textures: &textures, ..spec(code, &[], Blend::Opaque) };
+        let uniforms = ShaderUniforms { resolution: [16.0, 64.0, 1.0, 0.0], ..Default::default() };
         let frame = render_shader(&spec, &uniforms, 16, 64, &mut None).unwrap();
         let (top, bottom) = (px(&frame, 8, 16), px(&frame, 8, 48));
         assert!(top[0] > 245 && top[2] < 8, "{top:?}");
@@ -803,10 +730,7 @@ mod tests {
             float d = length(fragCoord - iResolution.xy * 0.5);\n\
             fragColor = vec4(vec3(d < 8.0 ? 1.0 : 0.0), 1.0);\n\
         }";
-        let uniforms = ShaderUniforms {
-            resolution: [48.0, 48.0, 1.0, 0.0],
-            ..Default::default()
-        };
+        let uniforms = ShaderUniforms { resolution: [48.0, 48.0, 1.0, 0.0], ..Default::default() };
         let frame =
             render_shader(&spec(code, &[], Blend::Light), &uniforms, 48, 48, &mut None).unwrap();
         assert_eq!(px(&frame, 2, 2)[3], 0, "black is see-through");
@@ -822,10 +746,8 @@ mod tests {
         let code = "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
             fragColor = vec4(1.0);\n\
         }";
-        let uniforms = ShaderUniforms {
-            resolution: [200.0, 100.0, 1.0, 0.0],
-            ..Default::default()
-        };
+        let uniforms =
+            ShaderUniforms { resolution: [200.0, 100.0, 1.0, 0.0], ..Default::default() };
         let render =
             |blend| render_shader(&spec(code, &[], blend), &uniforms, 200, 100, &mut None).unwrap();
         let light = render(Blend::Light);
@@ -858,31 +780,17 @@ mod tests {
         let image = "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
             fragColor = vec4(texture(iChannel0, fragCoord / iResolution.xy).r, 0.0, 0.0, 1.0);\n\
         }";
-        let uniforms = ShaderUniforms {
-            resolution: [16.0, 16.0, 1.0, 0.0],
-            ..Default::default()
-        };
+        let uniforms = ShaderUniforms { resolution: [16.0, 16.0, 1.0, 0.0], ..Default::default() };
         let mut state = None;
         let mut reds = Vec::new();
         for _ in 0..3 {
-            let frame = render_shader(
-                &spec(image, &buffer, Blend::Opaque),
-                &uniforms,
-                16,
-                16,
-                &mut state,
-            )
-            .unwrap();
+            let frame =
+                render_shader(&spec(image, &buffer, Blend::Opaque), &uniforms, 16, 16, &mut state)
+                    .unwrap();
             reds.push(px(&frame, 8, 8)[0]);
         }
-        assert!(
-            reds[0] < reds[1] && reds[1] < reds[2],
-            "accumulates: {reds:?}"
-        );
-        assert!(
-            (i32::from(reds[2]) - 191).abs() < 4,
-            "0.75 after three frames: {reds:?}"
-        );
+        assert!(reds[0] < reds[1] && reds[1] < reds[2], "accumulates: {reds:?}");
+        assert!((i32::from(reds[2]) - 191).abs() < 4, "0.75 after three frames: {reds:?}");
     }
 
     #[test]

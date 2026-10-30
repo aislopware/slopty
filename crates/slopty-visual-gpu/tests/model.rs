@@ -64,10 +64,8 @@ fn covered(bgra: &[u8]) -> usize {
 
 /// The scene a script draws with the model, and its camera.
 fn model_scene() -> (slopty_visual::Scene, Camera) {
-    let assets = Assets::new(HashMap::from([(
-        "square.glb".to_owned(),
-        Arc::<[u8]>::from(square_glb()),
-    )]));
+    let assets =
+        Assets::new(HashMap::from([("square.glb".to_owned(), Arc::<[u8]>::from(square_glb()))]));
     let source = r#"
         return ui.scene { height = 200, draw = function(s)
           s:model { asset = "square.glb", fit = 2 }

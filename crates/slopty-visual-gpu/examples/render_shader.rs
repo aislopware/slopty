@@ -53,14 +53,8 @@ fn main() {
         inputs: slots,
         channels: Default::default(),
     };
-    let spec = ShaderSpec {
-        image: &code,
-        buffers: &[],
-        inputs: &names,
-        blend,
-        bloom,
-        textures: &[],
-    };
+    let spec =
+        ShaderSpec { image: &code, buffers: &[], inputs: &names, blend, bloom, textures: &[] };
     let frame = render_shader(&spec, &uniforms, w, h, &mut None).expect("render");
     let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
     for p in frame.bgra.chunks_exact(4) {

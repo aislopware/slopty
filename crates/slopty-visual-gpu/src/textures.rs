@@ -99,10 +99,7 @@ impl Textures {
             let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let state = &mut *guard;
             if known.is_none() {
-                state.aliases.push(Alias {
-                    bytes: Arc::downgrade(bytes),
-                    hash,
-                });
+                state.aliases.push(Alias { bytes: Arc::downgrade(bytes), hash });
             }
             state.clock += 1;
             if let Some(entry) = state.entries.iter_mut().find(|e| e.key == key) {
@@ -125,12 +122,7 @@ impl Textures {
             entry.used = state.clock;
             return entry.loaded.clone();
         }
-        state.entries.push(Entry {
-            key,
-            loaded: loaded.clone(),
-            size,
-            used: state.clock,
-        });
+        state.entries.push(Entry { key, loaded: loaded.clone(), size, used: state.clock });
         while state.entries.iter().map(|e| e.size).sum::<usize>() > BUDGET_BYTES
             && state.entries.len() > 1
         {
@@ -149,11 +141,7 @@ impl Textures {
 
 /// An `f32` as IEEE half-precision bits (finite light values only).
 fn half(value: f32) -> u16 {
-    let value = if value.is_finite() {
-        value.clamp(0.0, 65504.0)
-    } else {
-        0.0
-    };
+    let value = if value.is_finite() { value.clamp(0.0, 65504.0) } else { 0.0 };
     let bits = value.to_bits();
     let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
     let mantissa = bits & 0x7f_ffff;
@@ -285,24 +273,13 @@ fn upload(
             &data,
         )
     })?;
-    Ok((
-        Loaded {
-            view: texture.create_view(&Default::default()),
-            mips,
-        },
-        size,
-    ))
+    Ok((Loaded { view: texture.create_view(&Default::default()), mips }, size))
 }
 
 /// The image upside down.
 fn flip_rows(image: &Image) -> Image {
     fn flip<T: Copy>(pixels: &[T], width: usize) -> Vec<T> {
-        pixels
-            .chunks_exact(width * 4)
-            .rev()
-            .flatten()
-            .copied()
-            .collect()
+        pixels.chunks_exact(width * 4).rev().flatten().copied().collect()
     }
     let width = image.width as usize;
     Image {
@@ -327,11 +304,7 @@ pub(crate) fn solid(
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("visual solid texture"),
-                size: wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -361,11 +334,7 @@ mod tests {
 
     #[test]
     fn mip_chains_reach_one_texel() {
-        let image = Image {
-            width: 5,
-            height: 2,
-            pixels: Pixels::Rgba8(vec![200; 5 * 2 * 4]),
-        };
+        let image = Image { width: 5, height: 2, pixels: Pixels::Rgba8(vec![200; 5 * 2 * 4]) };
         let (data, mips, _) = levels(&image);
         assert_eq!(mips, 3);
         assert_eq!(data.len(), 5 * 2 * 4 + 2 * 4 + 4);
@@ -374,14 +343,9 @@ mod tests {
 
     #[test]
     fn raw_images_flip_to_bottom_row_first() {
-        let image = Image {
-            width: 1,
-            height: 2,
-            pixels: Pixels::Rgba8(vec![1, 1, 1, 1, 2, 2, 2, 2]),
-        };
-        let Pixels::Rgba8(pixels) = flip_rows(&image).pixels else {
-            unreachable!()
-        };
+        let image =
+            Image { width: 1, height: 2, pixels: Pixels::Rgba8(vec![1, 1, 1, 1, 2, 2, 2, 2]) };
+        let Pixels::Rgba8(pixels) = flip_rows(&image).pixels else { unreachable!() };
         assert_eq!(pixels, [2, 2, 2, 2, 1, 1, 1, 1]);
     }
 }
