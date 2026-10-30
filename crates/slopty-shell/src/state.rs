@@ -3,11 +3,10 @@
 //! transcript — one gpui [`Entity`] the whole shell renders from.
 //!
 //! ## `EngineHandle`
-//! The UI talks the same typed RPC whether the engine is in-process or a separate
-//! daemon (ARCHITECTURE §1). [`EngineHandle::bootstrap`] probes the localhost IPC
-//! port, mirroring slopty: if an engine is listening it connects over WebSocket
-//! ([`RemoteEngine`]); otherwise it embeds one via [`EngineCore::assemble`] and an
-//! in-memory RPC transport ([`InProcessEngine`]) — same envelopes, same dispatch.
+//! The UI talks typed RPC to one engine: Slopty's server, through the [`EngineService`] the
+//! host installs (`slopty-ui`). [`EngineHandle::bootstrap`] wraps that service in the
+//! slow-call watch and an in-memory RPC transport, the same envelopes and dispatch a socket
+//! would carry.
 //!
 //! ## Async bridging
 //! `bootstrap` runs on tokio via `gpui_tokio::Tokio::spawn`. Once an [`RpcClient`]
@@ -17,27 +16,6 @@
 //!
 //! Pure logic (sort order, staleness, gate phase) lives in free functions with
 //! unit tests; rendering reads them.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::assigning_clones,
-    clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::indexing_slicing,
-    clippy::map_unwrap_or,
-    clippy::needless_pass_by_ref_mut,
-    clippy::partial_pub_fields,
-    clippy::question_mark,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    clippy::unwrap_used,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -71,24 +49,25 @@ struct CachedTranscript {
 // A cancelled GPUI watch may own a whale's mirror between updates. Its
 // destructor must not free that entire object graph on the UI thread either.
 struct WatchPreparation {
-    worker: Option<crate::transcript::TranscriptPreparation>,
+    worker: crate::transcript::TranscriptPreparation,
     executor: gpui::BackgroundExecutor,
 }
 impl WatchPreparation {
     fn new(executor: gpui::BackgroundExecutor) -> Self {
-        Self { worker: Some(Default::default()), executor }
+        Self { worker: crate::transcript::TranscriptPreparation::default(), executor }
     }
 
     fn prepare(
         &mut self,
         update: &slopty_view_doc::TranscriptUpdate,
     ) -> Result<Arc<crate::transcript::PreparedTranscript>, TranscriptDesync> {
-        self.worker.as_mut().unwrap().prepare(update)
+        self.worker.prepare(update)
     }
 }
 impl Drop for WatchPreparation {
     fn drop(&mut self) {
-        let worker = self.worker.take();
+        // An empty preparation stands in for the one freed off the UI thread.
+        let worker = std::mem::take(&mut self.worker);
         self.executor
             .spawn(async move {
                 drop(worker);
@@ -117,13 +96,23 @@ pub struct EngineService(pub Arc<dyn RpcService>);
 
 impl gpui::Global for EngineService {}
 
+// By hand: the service has no `Debug`.
+impl std::fmt::Debug for EngineService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EngineService").finish_non_exhaustive()
+    }
+}
+
 /// How this UI reached its engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineMode {
     /// Engine embedded in this process (in-memory RPC transport).
     InProcess,
     /// Connected to a separate daemon over localhost WebSocket.
-    Remote { url: String },
+    Remote {
+        /// The daemon's WebSocket address.
+        url: String,
+    },
 }
 
 /// One of the two ways to own an engine connection. Both end at an [`RpcClient`]
@@ -167,6 +156,16 @@ pub struct EngineHandle {
     >,
 }
 
+// By hand: the backend has no `Debug`.
+impl std::fmt::Debug for EngineHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineHandle")
+            .field("mode", &self.mode())
+            .field("engine_info", &self.engine_info)
+            .finish_non_exhaustive()
+    }
+}
+
 impl EngineHandle {
     pub(crate) fn same_connection(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
@@ -181,7 +180,7 @@ impl EngineHandle {
         let service = service.ok_or_else(|| anyhow::anyhow!("no engine service is installed"))?;
         // Every call passes the slow-call watch.
         let (service, slow) = slow_calls::SlowCallWatch::wrap(service, slow_calls::SLOW_AFTER);
-        let client = memory_client(service.clone());
+        let client = memory_client(Arc::clone(&service));
         let engine_info = client.call_as(methods::ENGINE_INFO, serde_json::json!({})).await?;
         Ok(Self {
             inner: Arc::new(ServiceEngine { client }),
@@ -203,18 +202,22 @@ impl EngineHandle {
         }
     }
 
+    /// The RPC client every call and watch goes through.
     pub fn client(&self) -> &RpcClient {
         self.inner.client()
     }
 
+    /// How this handle reached its engine.
     pub fn mode(&self) -> EngineMode {
         self.inner.mode()
     }
 
+    /// What the engine said of itself at attach: its device and the data it holds.
     pub const fn engine_info(&self) -> &EngineInfo {
         &self.engine_info
     }
 
+    /// Let the engine go: an in-process one drains its runs and flushes its docs first.
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
     }
@@ -240,21 +243,29 @@ pub fn time_ago_changes(then: DateTime<Utc>, now: DateTime<Utc>) -> Option<DateT
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
+    const WEEK: i64 = 7 * DAY;
+    const MONTH: i64 = 30 * DAY;
+    const YEAR: i64 = 365 * DAY;
     let age = now.signed_duration_since(then).num_seconds().max(0);
-    let next = if age < HOUR {
-        (age / MINUTE + 1) * MINUTE
+    // The unit the age is said in, then the next whole one of it.
+    let unit = if age < HOUR {
+        MINUTE
     } else if age < DAY {
-        (age / HOUR + 1) * HOUR
-    } else if age < 7 * DAY {
-        (age / DAY + 1) * DAY
+        HOUR
+    } else if age < WEEK {
+        DAY
     } else if age < 35 * DAY {
-        (age / (7 * DAY) + 1) * 7 * DAY
+        WEEK
     } else if age < 360 * DAY {
-        ((age / (30 * DAY) + 1) * 30 * DAY).min(360 * DAY)
+        MONTH
     } else {
-        (age / (365 * DAY) + 1) * 365 * DAY
+        YEAR
     };
-    then.checked_add_signed(chrono::Duration::seconds(next))
+    let mut next = age.checked_div(unit)?.checked_add(1)?.checked_mul(unit)?;
+    if unit == MONTH {
+        next = next.min(360 * DAY); // past 359 days it reads a year
+    }
+    then.checked_add_signed(chrono::Duration::try_seconds(next)?)
 }
 
 // A row's time reads the same up to its next change and differently from it on.
@@ -299,7 +310,8 @@ struct ClockTransitions {
     /// The last time observers saw current state (a notify or a wake).
     checked_at: Option<DateTime<Utc>>,
     wake_at: Option<DateTime<Utc>>,
-    task: Option<Task<()>>,
+    /// Its `Err`, the state gone by the wake, is nobody's to read.
+    task: Option<Task<anyhow::Result<()>>>,
 }
 
 #[cfg(test)]
@@ -308,7 +320,7 @@ thread_local! {
 }
 
 /// Wall-clock time for clock-driven state derivations. Tests pin it to the
-/// simulated executor's timeline with [`TestClock`].
+/// simulated executor's timeline with `TestClock`.
 pub(crate) fn clock_now() -> DateTime<Utc> {
     #[cfg(test)]
     if let Some(now) = TEST_CLOCK.with(std::cell::Cell::get) {
@@ -330,6 +342,10 @@ impl TestClock {
         clock
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "the guard in hand is the proof that the clock is pinned, and its drop unpins"
+    )]
     pub(crate) fn set(&self, now: DateTime<Utc>) {
         TEST_CLOCK.with(|clock| clock.set(Some(now)));
     }
@@ -357,13 +373,26 @@ pub(crate) struct CanvasTarget {
     device: Option<String>,
 }
 
-/// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
-/// are plain `&mut self` functions so tests construct the struct directly; gpui
-/// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
+/// Root application state.
+///
+/// Reducer methods (`apply_*`, [`Self::session_for`], …) are plain `&mut self` functions so
+/// tests construct the struct directly; gpui glue ([`Self::bootstrap`], [`Self::select_chat`])
+/// layers subscriptions on top.
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the views read the state's lists as fields; its watches, caches and pending work \
+              stay its own"
+)]
+#[expect(
+    clippy::field_scoped_visibility_modifiers,
+    reason = "shell lint migration: seam, callers in slice B"
+)]
 pub struct AppState {
+    /// Where the engine connection stands: connecting, ready or failed.
     pub connection: ConnectionStatus,
     /// The data the attached engine holds; `None` until it attaches.
     pub workspace_scope: Option<WorkspaceScope>,
+    /// Every device the engine knows, this one among them.
     pub devices: Vec<Device>,
     // Last published device presentation. Heartbeats refresh the underlying
     // timestamps without invalidating every view when no displayed value changed.
@@ -377,6 +406,7 @@ pub struct AppState {
     pub spaces: Vec<Space>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
+    /// Each chat's live session (status, lease, waiting-on), as the engine last published.
     pub sessions: Vec<Session>,
     /// The terminal each session is, by chat (`calls::WATCH_SESSION_TERMINALS`): an
     /// agent's session by the one its TUI runs in now, a plain terminal by its own. A chat with
@@ -399,7 +429,8 @@ pub struct AppState {
     /// The new-session canvas's own target, set aside while a chat is open
     /// (a chat implies ITS project/device) and put back on return, so the
     /// canvas always reopens where the user left it.
-    pub(crate) canvas_target: Option<CanvasTarget>,
+    canvas_target: Option<CanvasTarget>,
+    /// The open chat; `None` on the new-session canvas.
     pub selected_chat: Option<String>,
     /// Boot auto-select happened (or a manual selection superseded it).
     pub auto_selected: bool,
@@ -407,6 +438,7 @@ pub struct AppState {
     /// prunes against the doc (open tabs, the sidebar space filter) must not
     /// judge by the empty pre-sync lists.
     pub chats_synced: bool,
+    /// First spaces watch frame has landed, as [`Self::chats_synced`] for projects.
     pub spaces_synced: bool,
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
     deep_link_notice: Option<String>,
@@ -425,12 +457,12 @@ pub struct AppState {
     pub(crate) prepared_transcripts: HashMap<String, Arc<crate::transcript::PreparedTranscript>>,
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
-    pub(crate) transcript_revision: u64,
-    /// Changes whenever an input of [`Self::file_link_roots`] does — chat
-    /// rows, projects, this device's id — so views can memoize the roots.
-    pub(crate) link_roots_revision: u64,
-    /// This engine's device id (best-effort `LocalDevice` probe; `None` until
-    /// the engine serves it — views degrade gracefully).
+    pub transcript_revision: u64,
+    /// Changes whenever an input of the file-link roots does — chat rows,
+    /// projects, this device's id — so views can memoize the roots.
+    pub link_roots_revision: u64,
+    /// This engine's device id, as the engine said at attach (`None` until it
+    /// attaches; views degrade gracefully).
     pub local_device_id: Option<String>,
     /// Data directory (`ui-settings.json`); set at
     /// bootstrap so child views can persist small preference files.
@@ -493,7 +525,23 @@ impl Default for AppState {
     }
 }
 
+// By hand: the watches and caches it holds have no `Debug`, and the lists are long.
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("connection", &self.connection)
+            .field("workspace_scope", &self.workspace_scope)
+            .field("local_device_id", &self.local_device_id)
+            .field("devices", &self.devices.len())
+            .field("chats", &self.chats.len())
+            .field("selected_chat", &self.selected_chat)
+            .field("transcript", &self.transcript.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl AppState {
+    /// A state with nothing in it yet: connecting, no lists, nothing selected.
     pub fn new() -> Self {
         Self {
             connection: ConnectionStatus::Connecting,
@@ -516,7 +564,7 @@ impl AppState {
             transcript_replayed: false,
             window_active: false,
             transcript_baselines: HashMap::new(),
-            transcript_cache: Default::default(),
+            transcript_cache: std::collections::VecDeque::new(),
             prepared_transcripts: HashMap::new(),
             transcript_revision: 0,
             link_roots_revision: 0,
@@ -579,9 +627,7 @@ impl AppState {
     /// [`Self::terminal_open_cwd`] for a specific panel key (the tab being
     /// opened, which matches the selected session).
     pub fn terminal_open_cwd_for(&self, session_key: &str) -> Option<String> {
-        let Some(space_id) = session_key.strip_prefix(CANVAS_PANEL_PREFIX) else {
-            return None;
-        };
+        let space_id = session_key.strip_prefix(CANVAS_PANEL_PREFIX)?;
         if space_id.is_empty() || self.no_project {
             return Some("~".to_owned());
         }
@@ -659,6 +705,8 @@ impl AppState {
         self.session_terminals.get(&self.panel_owner(chat)).map(String::as_str)
     }
 
+    /// Take a sessions frame as of now. Returns whether anything a view shows changed: a
+    /// session's lease moving alone does not.
     pub fn apply_sessions(&mut self, sessions: Vec<Session>) -> bool {
         self.apply_sessions_at(sessions, clock_now())
     }
@@ -794,6 +842,8 @@ impl AppState {
         changed
     }
 
+    /// Take a devices frame as of now. Returns whether anything a view shows changed: a
+    /// heartbeat that keeps a device's online state and last-seen words does not.
     pub fn apply_devices(&mut self, devices: Vec<Device>) -> bool {
         self.apply_devices_at(devices, clock_now())
     }
@@ -807,7 +857,7 @@ impl AppState {
             && let Some(device) = devices.iter_mut().find(|device| device.id == local_id)
             && device.name == "unknown-device"
         {
-            device.name = "Local".to_owned();
+            "Local".clone_into(&mut device.name);
         }
         let presentation = device_presentation_at(&devices, now);
         let session_presence = session_presence_at(&self.sessions, now);
@@ -846,6 +896,7 @@ impl AppState {
             .map(|s| s.id.clone())
     }
 
+    /// Replace the selected chat's transcript with `entries`, a whole replay.
     pub fn apply_transcript(&mut self, entries: Vec<SessionMessageEntry>) {
         if let Some(id) = &self.selected_chat {
             self.prepared_transcripts.remove(id);
@@ -896,6 +947,8 @@ impl AppState {
         self.transcript_baselines.get(doc_id)
     }
 
+    /// Take a transcript update for the selected chat: its frame, and the replay baseline it
+    /// carries. `Err` = this copy has diverged; the watch resubscribes for a fresh reset.
     pub fn receive_transcript_update(
         &mut self,
         update: slopty_view_doc::TranscriptUpdate,
@@ -941,13 +994,13 @@ impl AppState {
     /// A subagent doc's current transcript copy (empty until its watch's
     /// replay frame lands, or its frozen snapshot is set).
     pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
-        self.sub_transcripts.get(doc_id).map(Vec::as_slice).unwrap_or(&[])
+        self.sub_transcripts.get(doc_id).map_or(&[], Vec::as_slice)
     }
 
     /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
     /// Single-flight per key; a frozen snapshot already in place wins — the
     /// watch would race the (complete) blob with a possibly-purged live doc.
-    pub fn watch_subagent_doc(&mut self, doc_id: String, cx: &mut Context<Self>) {
+    pub fn watch_subagent_doc(&mut self, doc_id: String, cx: &Context<Self>) {
         if self.sub_watch_tasks.contains_key(&doc_id) {
             return;
         }
@@ -1021,6 +1074,7 @@ impl AppState {
         }
     }
 
+    /// The picked project's row; `None` under "Don't work in a project" or before the row lands.
     pub fn selected_space_row(&self) -> Option<&Space> {
         if self.no_project {
             return None;
@@ -1057,6 +1111,7 @@ impl AppState {
         cx.notify();
     }
 
+    /// The project row `space_id` names, once it has landed.
     pub fn space_row(&self, space_id: &str) -> Option<&Space> {
         self.spaces.iter().find(|s| s.id == space_id)
     }
@@ -1070,6 +1125,7 @@ impl AppState {
         spaces
     }
 
+    /// The project `chat` runs in; `None` for a project-less chat.
     pub fn space_for_chat(&self, chat: &Chat) -> Option<&Space> {
         self.space_row(chat.space_id.as_deref()?)
     }
@@ -1107,6 +1163,7 @@ impl AppState {
         chats
     }
 
+    /// What device `device_id` is called, once its row has landed.
     pub fn device_name(&self, device_id: &str) -> Option<&str> {
         self.devices.iter().find(|d| d.id == device_id).map(|d| d.name.as_str())
     }
@@ -1210,9 +1267,12 @@ impl AppState {
             .filter(|space| seen.insert(slopty_view_proto::view::project_key(space)))
             .map(|space| self.project_members(space))
             .collect();
+        // Each project has its first checkout, the one it was found by.
         projects.sort_by_key(|members| {
-            let representative = self.representative_space(members[0]);
-            (representative.display_name().to_lowercase(), representative.id.clone())
+            members.first().map(|first| {
+                let representative = self.representative_space(first);
+                (representative.display_name().to_lowercase(), representative.id.clone())
+            })
         });
         projects
     }
@@ -1226,9 +1286,9 @@ impl AppState {
                 devices.push(member.device_id.as_str());
             }
         }
-        match devices.as_slice() {
-            [] => (String::new(), false),
-            [_] => self.space_device_tag(members[0], now),
+        match (devices.as_slice(), members.first()) {
+            ([], _) | (_, None) => (String::new(), false),
+            ([_], Some(member)) => self.space_device_tag(member, now),
             _ => {
                 let offline = devices.iter().all(|d| !self.device_online(d, now));
                 let tag = if devices.len() == 2 {
@@ -1245,6 +1305,7 @@ impl AppState {
         }
     }
 
+    /// The live session of `chat_id`, as the engine last published it.
     pub fn session_for(&self, chat_id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.chat_id == chat_id)
     }
@@ -1270,7 +1331,9 @@ impl AppState {
     /// announced, `now` itself.
     pub fn announced(&self, now: DateTime<Utc>) -> DateTime<Utc> {
         match self.clock.wake_at {
-            Some(wake) if now >= wake => wake - chrono::TimeDelta::milliseconds(1),
+            Some(wake) if now >= wake => {
+                wake.checked_sub_signed(chrono::TimeDelta::milliseconds(1)).unwrap_or(wake)
+            }
             _ => now,
         }
     }
@@ -1305,8 +1368,10 @@ impl AppState {
                 )
             })
             // `age_ms > SESSION_STALE_MS` first holds one millisecond past it.
-            .map(|session| {
-                session.updated_at + chrono::TimeDelta::milliseconds(SESSION_STALE_MS + 1)
+            .filter_map(|session| {
+                session
+                    .updated_at
+                    .checked_add_signed(chrono::TimeDelta::milliseconds(SESSION_STALE_MS + 1))
             });
         let offline = self
             .devices
@@ -1314,10 +1379,10 @@ impl AppState {
             .filter(|device| self.local_device_id.as_deref() != Some(device.id.as_str()))
             .filter_map(|device| device.last_seen_at)
             // Whole seconds `<= DEVICE_ONLINE_WINDOW_SECS` stay online.
-            .map(|at| {
-                at + chrono::TimeDelta::seconds(
+            .filter_map(|at| {
+                at.checked_add_signed(chrono::TimeDelta::seconds(
                     crate::settings::devices::DEVICE_ONLINE_WINDOW_SECS + 1,
-                )
+                ))
             });
         stale.chain(offline)
     }
@@ -1351,7 +1416,7 @@ impl AppState {
         }
         self.clock.wake_at = wake;
         self.clock.task = wake.map(|wake| {
-            let delay = (wake - now).to_std().unwrap_or_default();
+            let delay = wake.signed_duration_since(now).to_std().unwrap_or_default();
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(delay).await;
                 this.update(cx, |state, cx| {
@@ -1370,7 +1435,6 @@ impl AppState {
                         state.arm_clock_transition(cx);
                     }
                 })
-                .ok();
             })
         });
     }
@@ -1381,6 +1445,7 @@ impl AppState {
         !self.chats_synced || self.chats.iter().any(|chat| chat.id == chat_id)
     }
 
+    /// The open chat's row; `None` on the canvas or before the row lands.
     pub fn selected_chat_row(&self) -> Option<&Chat> {
         let id = self.selected_chat.as_deref()?;
         self.chats.iter().find(|c| c.id == id)
@@ -1393,10 +1458,12 @@ impl AppState {
         self.selected_chat_row().filter(|chat| !chat.archived).map(|chat| chat.id.as_str())
     }
 
+    /// Which boot gate the window shows for the connection as it stands.
     pub fn gate(&self) -> GatePhase {
         gate_phase(&self.connection)
     }
 
+    /// The attached engine; `None` until it attaches.
     pub const fn engine(&self) -> Option<&EngineHandle> {
         self.engine.as_ref()
     }
@@ -1440,7 +1507,7 @@ impl AppState {
         cx.notify();
     }
 
-    fn start_chat_watches(&mut self, chat_id: String, cx: &mut Context<Self>) {
+    fn start_chat_watches(&mut self, chat_id: String, cx: &Context<Self>) {
         let Some(handle) = self.engine.clone() else {
             return;
         };
@@ -1460,7 +1527,7 @@ impl AppState {
             cx.notify();
         });
         // The service comes from the `EngineService` global.
-        let service = cx.try_global::<EngineService>().map(|service| service.0.clone());
+        let service = cx.try_global::<EngineService>().map(|service| Arc::clone(&service.0));
         let boot = Tokio::spawn(cx, EngineHandle::bootstrap(config, service));
         cx.spawn(async move |cx| {
             let outcome = match boot.await {
@@ -1520,7 +1587,6 @@ impl AppState {
             spawn_watch(cx, handle.clone(), methods::WATCH_DEVICES, Self::apply_devices),
             spawn_watch(cx, handle.clone(), methods::WATCH_CONNECTIVITY, Self::apply_connectivity),
             spawn_watch(cx, handle.clone(), methods::WATCH_SPACES, Self::apply_spaces),
-            spawn_local_device_probe(cx, handle.clone()),
         ]);
         self.watch_tasks = watch_tasks;
         // EngineInfo is part of the attachment boundary: views must know which
@@ -1533,6 +1599,9 @@ impl AppState {
         cx.notify();
     }
 
+    /// Open the chat a `slopty://open/chat/…` link names, once the engine has attached and
+    /// listed it; a link this workspace cannot open leaves a notice saying why
+    /// ([`Self::take_deep_link_notice`]).
     pub fn open_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
         match crate::links::parse_slopty_conversation_link(url) {
             Ok(link) => {
@@ -1573,6 +1642,7 @@ impl AppState {
         }
     }
 
+    /// What the last link opened said about itself (from another workspace, not found), once.
     pub const fn take_deep_link_notice(&mut self) -> Option<String> {
         self.deep_link_notice.take()
     }
@@ -1616,18 +1686,16 @@ impl AppState {
                         entries
                             .iter()
                             .map(|entry| {
+                                let parts = entry.parts.iter().fold(0_usize, |bytes, part| {
+                                    bytes
+                                        .saturating_add(size_of::<slopty_view_doc::MessagePart>())
+                                        .saturating_add(part.byte_len())
+                                });
                                 size_of::<SessionMessageEntry>()
-                                    + entry.id.len()
-                                    + entry
-                                        .parts
-                                        .iter()
-                                        .map(|part| {
-                                            size_of::<slopty_view_doc::MessagePart>()
-                                                + part.byte_len()
-                                        })
-                                        .sum::<usize>()
+                                    .saturating_add(entry.id.len())
+                                    .saturating_add(parts)
                             })
-                            .sum()
+                            .fold(0, usize::saturating_add)
                     },
                     |p| p.bytes,
                 );
@@ -1650,7 +1718,7 @@ impl AppState {
                 }
             }
         }
-        self.selected_chat = chat_id.clone();
+        self.selected_chat.clone_from(&chat_id);
         self.auto_selected = true;
         self.transcript.clear();
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
@@ -1660,7 +1728,7 @@ impl AppState {
                 cached.chat_id.clone(),
                 cached.prepared.as_ref().map_or_else(
                     || Arc::new(slopty_view_doc::TranscriptBaseline::capture(&cached.entries)),
-                    |p| p.navigation_baseline.clone(),
+                    |p| Arc::clone(&p.navigation_baseline),
                 ),
             );
             if let Some(prepared) = cached.prepared {
@@ -1744,7 +1812,7 @@ impl AppState {
 /// Chats watch. Boot selection is the shell's job (it lands on the first
 /// restored open tab, device-local state this entity can't see); this task
 /// only pumps frames.
-fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
+fn spawn_chats_watch(cx: &Context<AppState>, handle: EngineHandle) -> Task<()> {
     cx.spawn(async move |this, cx| {
         // Resubscribe loop (same contract as the transcript watch): a daemon
         // restart or RPC drop ends the stream, and a bare return here froze
@@ -1800,7 +1868,7 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
 pub use slopty_view_proto::version_triple;
 
 fn spawn_watch<T: DeserializeOwned + 'static>(
-    cx: &mut Context<AppState>,
+    cx: &Context<AppState>,
     handle: EngineHandle,
     method: &'static str,
     apply: fn(&mut AppState, T) -> bool,
@@ -1852,33 +1920,8 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
     })
 }
 
-/// Best-effort `LocalDevice` probe: fills `local_device_id` for the "This
-/// device" badge. Engines that don't serve the method leave it `None`.
-fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
-    cx.spawn(async move |this, cx| {
-        let Ok(value) = handle.client().call("LocalDevice", serde_json::json!({})).await else {
-            tracing::debug!("LocalDevice unavailable; skipping this-device badge");
-            return;
-        };
-        let id = value
-            .get("id")
-            .or_else(|| value.get("deviceId"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        if let Some(id) = id {
-            this.update(cx, |state, cx| {
-                state.local_device_id = Some(id);
-                state.link_roots_revision = state.link_roots_revision.wrapping_add(1);
-                state.apply_pending_deep_link(cx);
-                cx.notify();
-            })
-            .ok();
-        }
-    })
-}
-
 fn spawn_transcript_watch(
-    cx: &mut Context<AppState>,
+    cx: &Context<AppState>,
     handle: EngineHandle,
     chat_id: String,
 ) -> Task<()> {
@@ -1977,11 +2020,7 @@ fn spawn_transcript_watch(
 /// [`spawn_transcript_watch`]'s shape, writing into `sub_transcripts[doc_id]`
 /// instead of the selected chat's transcript. The apply guard is per key so a
 /// subagent tab can outlive chat switches.
-fn spawn_subagent_watch(
-    cx: &mut Context<AppState>,
-    handle: EngineHandle,
-    doc_id: String,
-) -> Task<()> {
+fn spawn_subagent_watch(cx: &Context<AppState>, handle: EngineHandle, doc_id: String) -> Task<()> {
     cx.spawn(async move |this, cx| {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         'resubscribe: loop {
@@ -2062,6 +2101,10 @@ fn spawn_subagent_watch(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "fixture dates in 2026 moved by seconds to hours, and counts of a few notifies"
+)]
 mod tests {
     use chrono::TimeDelta;
     use gpui::AppContext as _;
@@ -2232,7 +2275,7 @@ mod tests {
             assert_eq!(state.transcript[0].id, "new-authoritative-row");
             // An authoritative empty reset must still be honored.
             state.apply_transcript_frame(TranscriptFrame::reset(&[])).unwrap();
-            assert!(state.transcript.is_empty());
+            assert_eq!(state.transcript, []);
         });
     }
 
@@ -2295,7 +2338,7 @@ mod tests {
         assert_ne!(state.transcript_revision, before_subagent);
         let before_close = state.transcript_revision;
         state.unwatch_subagent_doc("sub");
-        assert!(state.sub_transcript("sub").is_empty());
+        assert_eq!(state.sub_transcript("sub"), []);
         assert_ne!(state.transcript_revision, before_close);
     }
 
@@ -2857,7 +2900,7 @@ mod tests {
             state
         });
         let notifies = std::rc::Rc::new(std::cell::Cell::new(0));
-        let counter = notifies.clone();
+        let counter = std::rc::Rc::clone(&notifies);
         let subscription =
             cx.update(|cx| cx.observe(&state, move |_, _| counter.set(counter.get() + 1)));
         (state, notifies, subscription)
@@ -2865,7 +2908,7 @@ mod tests {
 
     /// Steps the simulated executor and the pinned wall clock together.
     fn advance_to(
-        cx: &mut gpui::TestAppContext,
+        cx: &gpui::TestAppContext,
         clock: &TestClock,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
@@ -3198,7 +3241,7 @@ mod tests {
         assert_eq!(labels, ["slopty", "zed", "No project"]);
         let slopty_ids: Vec<&str> = groups[0].chats.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(slopty_ids, ["a", "c"]);
-        assert!(group_chats(std::iter::empty()).is_empty());
+        assert_eq!(group_chats(std::iter::empty()), []);
     }
 
     #[test]

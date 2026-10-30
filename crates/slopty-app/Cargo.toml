@@ -52,8 +52,7 @@ slopty-ui.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 # The app's window: the shell on the workspace (`interface`), with the Tokio bridge it
-# runs its engine calls on, and its deep-link channel.
-futures.workspace = true
+# runs its engine calls on.
 gpui_tokio.workspace = true
 slopty-view-proto.workspace = true
 slopty-shell.workspace = true

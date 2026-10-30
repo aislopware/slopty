@@ -5,11 +5,6 @@
 //!
 //! The watch wraps the engine's service, so every call the shell makes passes through it,
 //! whatever view made it; the toast is kept by a task on the app's side.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -174,7 +169,7 @@ impl SlowCalls {
             .and_then(|device| state.device_name(device))
             .unwrap_or("the server");
         let what = said(newest.op.as_deref().unwrap_or(&newest.method));
-        let more = self.open.len() - 1;
+        let more = self.open.len().saturating_sub(1); // the newest is named
         Some(match more {
             0 => format!("Waiting on {machine} \u{b7} {what}"),
             1 => format!("Waiting on {machine} \u{b7} {what}, and 1 more"),
@@ -186,7 +181,7 @@ impl SlowCalls {
 /// A method's name as words: `ListFolders` or `setChatArchived` reads "List folders" or "Set
 /// chat archived".
 fn said(name: &str) -> String {
-    let mut words = String::with_capacity(name.len() + 4);
+    let mut words = String::with_capacity(name.len().saturating_add(4));
     for (ix, ch) in name.chars().enumerate() {
         if ch.is_uppercase() && ix > 0 {
             words.push(' ');
@@ -270,7 +265,7 @@ mod tests {
     /// The toast names the machine (by the call's device, else its chat's), says how many more
     /// wait, and goes when the last answers.
     #[gpui::test]
-    fn the_toast_names_the_machine_and_goes_with_the_last_answer(cx: &mut gpui::TestAppContext) {
+    fn the_toast_names_the_machine_and_goes_with_the_last_answer(cx: &gpui::TestAppContext) {
         let mut state = AppState::new();
         state.devices = vec![
             serde_json::from_value(serde_json::json!({

@@ -8586,7 +8586,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "data-encoding",
- "futures",
  "gpui",
  "gpui-kit",
  "gpui_ios",

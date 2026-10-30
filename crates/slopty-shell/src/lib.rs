@@ -71,7 +71,6 @@ mod workspace_links;
 
 use std::path::PathBuf;
 
-use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 pub use slopty_view_proto::HarnessId;
 pub use state::EngineBootConfig;
@@ -84,8 +83,6 @@ pub struct UiConfig {
     pub data_dir: PathBuf,
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
-    /// Conversation URL passed by the OS on a cold launch.
-    pub initial_url: Option<String>,
     /// The engine: Slopty's server through the `RpcService` in `slopty-ui`.
     pub service: std::sync::Arc<dyn slopty_view_rpc::RpcService>,
     /// Whether the app comes forward once its window is open; a self-test's never does.
@@ -98,7 +95,6 @@ impl std::fmt::Debug for UiConfig {
         f.debug_struct("UiConfig")
             .field("data_dir", &self.data_dir)
             .field("default_harness", &self.default_harness)
-            .field("initial_url", &self.initial_url)
             .field("activate", &self.activate)
             .finish_non_exhaustive()
     }
@@ -135,14 +131,11 @@ pub fn application() -> gpui::Application {
 /// Start the interface in a host app that made its own application and runtime.
 ///
 /// It sets up settings, typography, theme and motion, bootstraps the engine, and opens the main
-/// window and the menus.
-pub fn start(
-    config: UiConfig,
-    mut url_rx: futures::channel::mpsc::UnboundedReceiver<String>,
-    cx: &mut App,
-) -> gpui::WindowHandle<shell::Shell> {
+/// window and the menus. A `slopty://` link the system opens Slopty with comes in through the
+/// host, which hands a conversation's to [`open_conversation_link`].
+pub fn start(config: UiConfig, cx: &mut App) -> gpui::WindowHandle<shell::Shell> {
     {
-        let UiConfig { data_dir, default_harness, service, activate, .. } = config;
+        let UiConfig { data_dir, default_harness, service, activate } = config;
         let boot = EngineBootConfig { data_dir: data_dir.clone(), default_harness };
         gpui_base::init(cx);
         let ui_settings = settings::UiSettings::load(&data_dir);
@@ -177,13 +170,6 @@ pub fn start(
             state.watch_clock_transitions(cx);
             state
         });
-        let url_state = state.clone();
-        cx.spawn(async move |cx| {
-            while let Some(url) = url_rx.next().await {
-                url_state.update(cx, |state, cx| state.open_deep_link(&url, cx));
-            }
-        })
-        .detach();
         cx.set_global(state::EngineService(service));
         state::AppState::bootstrap(state.clone(), boot.clone(), cx);
         invariants::watch(&state, cx);
@@ -251,6 +237,27 @@ pub fn activate_main_window(cx: &mut App) {
     }
 }
 
+/// What every link to a conversation starts with ([`links::slopty_conversation_link`]).
+const CONVERSATION_LINK: &str = "slopty://open/chat/";
+
+/// Open a link to a conversation that the system opened Slopty with.
+///
+/// It is the link the session menu's "Slopty conversation link" copies, clicked in another app.
+/// Slopty comes forward, and the chat opens once the engine lists it, or a notice says why it
+/// cannot (another workspace's, gone). Returns `false`, doing nothing, for a link of any other
+/// kind, or before [`start`].
+pub fn open_conversation_link(url: &str, cx: &mut App) -> bool {
+    if !url.starts_with(CONVERSATION_LINK) {
+        return false;
+    }
+    let Some(state) = cx.try_global::<ReopenState>().map(|reopen| reopen.state.clone()) else {
+        return false;
+    };
+    activate_main_window(cx);
+    state.update(cx, |state, cx| state.open_deep_link(url, cx));
+    true
+}
+
 /// Bring Slopty forward on the chat `chat_id`, as a clicked banner does: the host's
 /// own notes open their chats this way.
 pub fn open_chat(chat_id: String, cx: &mut App) {
@@ -312,17 +319,13 @@ fn save_main_window_geometry(window: &gpui::Window, cx: &mut App) {
     save_window_geometry(window, true, cx);
 }
 
-/// `query_display: false` keeps the display recorded by the last bounds
-/// change. The close path must not query displays: on X11 the should-close
-/// callback runs while the platform client is mutably borrowed, and the
-/// display lookup panicked — killing the app before its quit hooks (engine
-/// drain, install-on-quit) could run.
+/// `query_display: false` keeps the display the last bounds change recorded, as the close path
+/// does: the window is going, and it has not moved since.
 fn save_window_geometry(window: &gpui::Window, query_display: bool, cx: &mut App) {
     if window.is_fullscreen() {
         return;
     }
-    // macos infers maximization from screen-sized bounds, including ordinary
-    // windows; other desktop backends report a distinct maximized variant.
+    // macOS infers maximization from screen-sized bounds, including ordinary windows.
     let WindowBounds::Windowed(bounds) = window.window_bounds() else {
         return;
     };
@@ -450,4 +453,45 @@ fn open_main_window(
     // attached; re-pushing it here means a window is never left opaque.
     appearance::reapply_window_background(cx);
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_view_proto::WorkspaceScope;
+
+    use super::*;
+
+    /// A conversation link the system opens Slopty with reaches the state and opens its chat;
+    /// another workspace's says so instead, and a link of any other kind is left to the host.
+    #[gpui::test]
+    fn a_conversation_link_from_another_app_opens_its_chat(cx: &mut gpui::TestAppContext) {
+        let chat = serde_json::json!({
+            "id": "c1", "deviceId": "here", "archived": false, "createdAt": "2026-10-31T00:00:00Z",
+        });
+        let state = cx.new(|_| {
+            let mut state = state::AppState::new();
+            state.workspace_scope = Some(WorkspaceScope::Local);
+            state.local_device_id = Some("here".into());
+            state.apply_chats(vec![serde_json::from_value(chat).unwrap()]);
+            state
+        });
+        let boot =
+            EngineBootConfig { data_dir: PathBuf::new(), default_harness: HarnessId::CLAUDE_CODE };
+        cx.update(|cx| cx.set_global(ReopenState { state: state.clone(), boot }));
+        // The main window is up, so bringing Slopty forward reopens nothing.
+        cx.add_empty_window();
+        let here = links::workspace_locator(Some(WorkspaceScope::Local), Some("here")).unwrap();
+
+        assert!(!cx.update(|cx| open_conversation_link("slopty://connect?server=a:1", cx)));
+        state.read_with(cx, |state, _| assert_eq!(state.selected_chat, None));
+
+        let link = links::slopty_conversation_link("c1", &here);
+        assert!(cx.update(|cx| open_conversation_link(&link, cx)));
+        state.read_with(cx, |state, _| assert_eq!(state.selected_chat.as_deref(), Some("c1")));
+
+        let elsewhere = links::slopty_conversation_link("c1", "another-workspace");
+        assert!(cx.update(|cx| open_conversation_link(&elsewhere, cx)));
+        let notice = state.update(cx, |state, _| state.take_deep_link_notice());
+        assert_eq!(notice.as_deref(), Some("This conversation link belongs to another workspace"));
+    }
 }

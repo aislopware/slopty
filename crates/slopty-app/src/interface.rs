@@ -40,16 +40,13 @@ pub(crate) fn open(
     });
     view.update(cx, |v, cx| v.serve_interface(feed, asks, cx));
     host_live_views(&view, cx);
-    // The shell's own deep links are not Slopty's: nothing sends on this.
-    let (_links, links) = futures::channel::mpsc::unbounded();
     let config = slopty_shell::UiConfig {
         data_dir: slopty_platform::dirs::data_dir().join("interface"),
         default_harness: slopty_view_proto::HarnessId::CLAUDE_CODE,
-        initial_url: None,
         service: view_model,
         activate: !self_test(),
     };
-    let shell = slopty_shell::start(config, links, cx);
+    let shell = slopty_shell::start(config, cx);
     // The shell's and the kit's bindings are in: Tab and the rest go back to the views that take
     // every key.
     slopty_ui::key_takers::release(cx);

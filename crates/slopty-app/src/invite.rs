@@ -167,8 +167,11 @@ pub(crate) fn links() -> UnboundedReceiver<String> {
 
 /// A link opened Slopty: one naming a server opens Settings → Devices' Add device on "A server"
 /// with its address in the field, in `shell`'s window, and connecting stays the person's press.
-/// Any other is ignored.
+/// One to a conversation (the shell's Copy link) opens that chat. Any other is ignored.
 pub(crate) fn open_in(url: &str, shell: AnyWindowHandle, cx: &mut App) {
+    if slopty_shell::open_conversation_link(url, cx) {
+        return;
+    }
     let Some(server) = server_in(url) else { return };
     tracing::debug!(%server, "a link names a server");
     let Some(shell) = shell.downcast::<slopty_shell::shell::Shell>() else { return };
