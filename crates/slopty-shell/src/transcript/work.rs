@@ -11,14 +11,15 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use gpui::{AnyElement, Context, SharedString, Task, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, SharedString, Task, div, px};
 use serde::Serialize;
 use slopty_view_doc::{NoteLine, NoteRow, StepTime, TaskRow, ToolFacts, ToolTimer, ran_for_words};
 
 use super::{Row, RowKind, Transcript, fnv1a};
+use crate::motion::HoverFade as _;
 use crate::settings::widgets::ActionHint as _;
 use crate::theme::Theme;
-use crate::motion::HoverFade as _;
 
 /// The height of a task notice's or a notice's line.
 pub const NOTICE_ROW_HEIGHT: f32 = 26.0;
@@ -65,9 +66,7 @@ pub fn task_row(entry_id: &str, part_id: &str, task: &TaskRow) -> Row {
         entry_id,
         part_id,
         fnv1a(&acc),
-        RowKind::TaskNote {
-            task: std::sync::Arc::new(task.clone()),
-        },
+        RowKind::TaskNote { task: std::sync::Arc::new(task.clone()) },
     )
 }
 
@@ -75,14 +74,7 @@ pub fn task_row(entry_id: &str, part_id: &str, task: &TaskRow) -> Row {
 pub fn notice_row(entry_id: &str, part_id: &str, note: &NoteRow) -> Row {
     let mut acc = Vec::new();
     hash_into(&mut acc, note);
-    row(
-        entry_id,
-        part_id,
-        fnv1a(&acc),
-        RowKind::Notice {
-            note: std::sync::Arc::new(note.clone()),
-        },
-    )
+    row(entry_id, part_id, fnv1a(&acc), RowKind::Notice { note: std::sync::Arc::new(note.clone()) })
 }
 
 /// What a notice says at `now`: a request tried again counts down to its next attempt.
@@ -131,7 +123,8 @@ fn clock_at<Tz: chrono::TimeZone>(ms: i64, format: &str, tz: &Tz) -> Option<Stri
 where
     Tz::Offset: std::fmt::Display,
 {
-    chrono::DateTime::from_timestamp_millis(ms).map(|utc| utc.with_timezone(tz).format(format).to_string())
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|utc| utc.with_timezone(tz).format(format).to_string())
 }
 
 /// What a step's time lane says at `now`: its time, ticking from its start while it runs ("12s",
@@ -160,9 +153,9 @@ where
     let ran_ms = match (time, timer) {
         (Some(time), _) => now.saturating_sub(time.started),
         // A clock behind the agent's never runs its time backwards.
-        (None, Some(timer)) => {
-            i64::try_from(timer.elapsed_ms).unwrap_or(i64::MAX).saturating_add(now.saturating_sub(timer.at).max(0))
-        }
+        (None, Some(timer)) => i64::try_from(timer.elapsed_ms)
+            .unwrap_or(i64::MAX)
+            .saturating_add(now.saturating_sub(timer.at).max(0)),
         (None, None) => return None,
     };
     Some(super::ticking_elapsed(ran_ms / 1_000))
@@ -180,7 +173,10 @@ where
     if let Some(began) = clock_at(time.started, full, tz) {
         lines.push(match time.turn_started.map(|turn| time.started.saturating_sub(turn)) {
             Some(into) if into >= 0 => {
-                format!("Started {began}, {} into the turn", ran_for_words(u64::try_from(into).unwrap_or(0)))
+                format!(
+                    "Started {began}, {} into the turn",
+                    ran_for_words(u64::try_from(into).unwrap_or(0))
+                )
             }
             _ => format!("Started {began}"),
         });
@@ -190,7 +186,11 @@ where
     }
     if let (Some(ran), Some(waited)) = (time.ran_ms, time.waited_ms()) {
         if waited > 0 {
-            lines.push(format!("Ran {}, after {} waiting for permission", ran_for_words(ran), ran_for_words(waited)));
+            lines.push(format!(
+                "Ran {}, after {} waiting for permission",
+                ran_for_words(ran),
+                ran_for_words(waited)
+            ));
         }
     }
     lines.join("\n")
@@ -205,13 +205,17 @@ where
 {
     let tip = lane_tip(time, tz);
     let split = time.ran_ms.is_some() && time.waited_ms().is_some_and(|waited| waited > 0);
-    let took = time.wall_ms().filter(|_| !split).map(|wall| format!("Took {}", ran_for_words(wall)));
+    let took =
+        time.wall_ms().filter(|_| !split).map(|wall| format!("Took {}", ran_for_words(wall)));
     tip.lines().map(str::to_owned).chain(took).collect::<Vec<_>>().join(" · ")
 }
 
 /// The span of steps `times`: from the first start to the last end, open while any still runs
 /// (`running`); `None` when none says when it began.
-pub(super) fn span<'a>(times: impl IntoIterator<Item = &'a StepTime>, running: bool) -> Option<StepTime> {
+pub(super) fn span<'a>(
+    times: impl IntoIterator<Item = &'a StepTime>,
+    running: bool,
+) -> Option<StepTime> {
     let mut started: Option<i64> = None;
     let mut ended: Option<i64> = None;
     let mut turn_started = None;
@@ -220,7 +224,12 @@ pub(super) fn span<'a>(times: impl IntoIterator<Item = &'a StepTime>, running: b
         ended = ended.max(time.ended);
         turn_started = turn_started.or(time.turn_started);
     }
-    Some(StepTime { started: started?, ended: ended.filter(|_| !running), ran_ms: None, turn_started })
+    Some(StepTime {
+        started: started?,
+        ended: ended.filter(|_| !running),
+        ran_ms: None,
+        turn_started,
+    })
 }
 
 /// What a tool chip's header adds from its call's facts: the result line and the time lane.
@@ -243,16 +252,14 @@ impl ChipFacts {
         // A running step's time is its lane's; its trail keeps only its limit.
         let running_timer = facts.timer.as_ref().filter(|_| !resolved);
         let words = match (running_timer, &facts.result) {
-            (Some(timer), _) => timer.timeout_ms.map(|limit| format!("timeout {}", slopty_view_doc::duration_words(limit))),
+            (Some(timer), _) => timer
+                .timeout_ms
+                .map(|limit| format!("timeout {}", slopty_view_doc::duration_words(limit))),
             (None, Some(result)) => Some(result.clone()),
             (None, None) => None,
         };
         let words = words?;
-        let tint = if facts.failed {
-            theme.danger
-        } else {
-            theme.text_faint
-        };
+        let tint = if facts.failed { theme.danger } else { theme.text_faint };
         Some(
             div()
                 .id(SharedString::from(format!("{part_id}-result")))
@@ -275,7 +282,14 @@ impl ChipFacts {
     /// The time lane of step `id` (its records' `time`, else its running `timer`), always drawn
     /// at its fixed width; its tooltip says when it began, how far into its turn, when it ended
     /// and any wait for permission.
-    pub fn lane(&self, id: &str, time: Option<&StepTime>, timer: Option<&ToolTimer>, resolved: bool, theme: &Theme) -> AnyElement {
+    pub fn lane(
+        &self,
+        id: &str,
+        time: Option<&StepTime>,
+        timer: Option<&ToolTimer>,
+        resolved: bool,
+        theme: &Theme,
+    ) -> AnyElement {
         let words = lane_words(time, timer, resolved, self.now, self.alt, &chrono::Local);
         let tip = time.map(|time| lane_tip(time, &chrono::Local)).filter(|tip| !tip.is_empty());
         div()
@@ -290,8 +304,10 @@ impl ChipFacts {
             .font_features(crate::typography::tabular())
             .text_color(theme.text_faint)
             .when_some(tip, |lane, tip| {
-                lane.tooltip(move |window, cx| crate::settings::widgets::text_tooltip(tip.clone())(window, cx))
-                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                lane.tooltip(move |window, cx| {
+                    crate::settings::widgets::text_tooltip(tip.clone())(window, cx)
+                })
+                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
             })
             .children(words.map(SharedString::from))
             .into_any_element()
@@ -448,7 +464,8 @@ impl Transcript {
         let words = notice_words(note, self.clock.timestamp_millis());
         let tint = tone_tint(&note.tone, theme);
         // A plain notice ("+N more tasks") is no list item: no dot (#4).
-        let plain = !matches!(note.tone.as_str(), NoteLine::ERROR | NoteLine::WARNING | NoteRow::SUCCESS);
+        let plain =
+            !matches!(note.tone.as_str(), NoteLine::ERROR | NoteLine::WARNING | NoteRow::SUCCESS);
         let lead: Option<AnyElement> = if retrying {
             Some(
                 crate::loaders::mini_glyph_spinner(
@@ -488,11 +505,7 @@ impl Transcript {
             .items_center()
             .gap(px(Theme::SPACE_SM))
             .text_size(px(super::TOOL_TEXT_SIZE))
-            .text_color(if note.tone == NoteLine::ERROR {
-                theme.danger
-            } else {
-                theme.text_muted
-            })
+            .text_color(if note.tone == NoteLine::ERROR { theme.danger } else { theme.text_muted })
             .child(lead_slot(lead))
             .child(div().min_w_0().flex_1().truncate().child(SharedString::from(words)))
             .children(toggle);
@@ -546,7 +559,11 @@ fn disclosure(
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::ink(0.08)))
+                .bg(crate::motion::hover_blend(
+                    &fade,
+                    gpui::transparent_black(),
+                    crate::theme::ink(0.08),
+                ))
                 .child(
                     crate::icons::icon(if open {
                         crate::icons::ALT_ARROW_DOWN
@@ -581,8 +598,9 @@ fn body_block(text: &str, theme: &Theme) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use slopty_view_doc::RetryLine;
+
+    use super::*;
 
     /// A step's lane ticks from its start while it runs (from the agent's timer when its records
     /// say no start), says what it took once it ended, nothing when its records say no time, and
@@ -593,21 +611,43 @@ mod tests {
         let utc = chrono::Utc;
         // 2026-07-01 15:42:05 UTC.
         let started = 1_782_920_525_000;
-        let running = StepTime { started, ended: None, ran_ms: None, turn_started: Some(started - 12_000) };
-        assert_eq!(lane_words(Some(&running), None, false, started + 65_000, false, &utc).as_deref(), Some("1m 05s"));
+        let running =
+            StepTime { started, ended: None, ran_ms: None, turn_started: Some(started - 12_000) };
+        assert_eq!(
+            lane_words(Some(&running), None, false, started + 65_000, false, &utc).as_deref(),
+            Some("1m 05s")
+        );
         let timer = ToolTimer { elapsed_ms: 10_000, at: 1_000, timeout_ms: Some(120_000) };
-        assert_eq!(lane_words(None, Some(&timer), false, 3_000, false, &utc).as_deref(), Some("12s"));
-        assert_eq!(lane_words(None, Some(&timer), false, 0, false, &utc).as_deref(), Some("10s"), "a clock behind");
-        assert_eq!(lane_words(None, Some(&timer), true, 3_000, false, &utc), None, "ended, with no time said");
+        assert_eq!(
+            lane_words(None, Some(&timer), false, 3_000, false, &utc).as_deref(),
+            Some("12s")
+        );
+        assert_eq!(
+            lane_words(None, Some(&timer), false, 0, false, &utc).as_deref(),
+            Some("10s"),
+            "a clock behind"
+        );
+        assert_eq!(
+            lane_words(None, Some(&timer), true, 3_000, false, &utc),
+            None,
+            "ended, with no time said"
+        );
         let ended = StepTime { ended: Some(started + 400), ..running };
         assert_eq!(lane_words(Some(&ended), None, true, 0, false, &utc).as_deref(), Some("<1s"));
-        let clock = if crate::transcript::clock_format().contains('p') { "3:42:05" } else { "15:42:05" };
+        let clock =
+            if crate::transcript::clock_format().contains('p') { "3:42:05" } else { "15:42:05" };
         assert_eq!(lane_words(Some(&ended), None, true, 0, true, &utc).as_deref(), Some(clock));
-        let tip = lane_tip(&StepTime { ended: Some(started + 9_000), ran_ms: Some(1_000), ..running }, &utc);
+        let tip = lane_tip(
+            &StepTime { ended: Some(started + 9_000), ran_ms: Some(1_000), ..running },
+            &utc,
+        );
         assert!(tip.contains("12s into the turn"), "{tip}");
         assert!(tip.contains("Ran 1s, after 8s waiting for permission"), "{tip}");
         // An open step's Timing: the same, on one line, with what it took when no wait is said.
-        let timing = timing_words(&StepTime { ended: Some(started + 9_000), ran_ms: Some(1_000), ..running }, &utc);
+        let timing = timing_words(
+            &StepTime { ended: Some(started + 9_000), ran_ms: Some(1_000), ..running },
+            &utc,
+        );
         assert!(timing.contains(" · Ran 1s, after 8s waiting for permission"), "{timing}");
         assert!(!timing.contains("Took"), "the wait apart says what it took: {timing}");
         let timing = timing_words(&StepTime { ended: Some(started + 9_000), ..running }, &utc);

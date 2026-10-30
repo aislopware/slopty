@@ -1,12 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! A read-only workspace image. The client resolves bytes on the owning device.
+use std::sync::Arc;
+use std::time::Duration;
+
+use gpui::prelude::*;
+use gpui::{Bounds, Context, FocusHandle, Pixels, Render, Task, Window, div, px};
+
 use super::client::{FilesRequestContext, WorkspaceFilesClient};
-use crate::{
-    image_media::{MediaImage, decode_image, release_media},
-    theme::Theme,
-};
-use gpui::{Bounds, Context, FocusHandle, Pixels, Render, Task, Window, div, prelude::*, px};
-use std::{sync::Arc, time::Duration};
+use crate::image_media::{MediaImage, decode_image, release_media};
+use crate::theme::Theme;
 
 const MAX_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 
@@ -62,10 +64,7 @@ impl ImagePreview {
 
     fn release(&mut self, cx: &mut gpui::App) {
         self.viewer.reset();
-        release_media(
-            self.source.take().into_iter().chain(self.display.take()),
-            cx,
-        );
+        release_media(self.source.take().into_iter().chain(self.display.take()), cx);
     }
 
     pub fn suspend(&mut self, cx: &mut Context<Self>) {
@@ -125,13 +124,9 @@ impl ImagePreview {
                 if checkout.is_empty() && !outside {
                     return Err("Workspace checkout identity unavailable".into());
                 }
-                let (mime, bytes) = client
-                    .read_image(path, checkout)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                executor
-                    .spawn(async move { decode_image(&mime, bytes) })
-                    .await
+                let (mime, bytes) =
+                    client.read_image(path, checkout).await.map_err(|e| e.to_string())?;
+                executor.spawn(async move { decode_image(&mime, bytes) }).await
             };
             let result = match futures::future::select(
                 Box::pin(load),
@@ -249,9 +244,9 @@ mod tests {
     use super::*;
     #[test]
     fn recognizes_only_supported_workspace_formats() {
-        for path in [
-            "a.PNG", "a.jpeg", "a.JPG", "a.gif", "a.webp", "a.svg", "a.bmp", "a.tif", "a.tiff",
-        ] {
+        for path in
+            ["a.PNG", "a.jpeg", "a.JPG", "a.gif", "a.webp", "a.svg", "a.bmp", "a.tif", "a.tiff"]
+        {
             assert!(is_image(path));
         }
         for path in ["a.rs", "a.md", "a", "a.png.txt", "a.avif"] {
@@ -268,11 +263,13 @@ mod tests {
         ) -> Result<serde_json::Value, slopty_view_rpc::RpcError> {
             std::future::pending().await
         }
+
         async fn subscribe(
             &self,
             _: &str,
             _: serde_json::Value,
-        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, slopty_view_rpc::RpcError> {
+        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, slopty_view_rpc::RpcError>
+        {
             unreachable!()
         }
     }
@@ -363,10 +360,7 @@ mod tests {
             params: serde_json::Value,
         ) -> Result<serde_json::Value, slopty_view_rpc::RpcError> {
             use base64::Engine as _;
-            self.calls
-                .lock()
-                .unwrap()
-                .push((method.to_string(), params.clone()));
+            self.calls.lock().unwrap().push((method.to_string(), params.clone()));
             assert_eq!(params["targetDeviceId"], "owner");
             assert_eq!(params["chatId"], "chat");
             assert_eq!(params["path"], "remote.svg");
@@ -382,11 +376,13 @@ mod tests {
                 serde_json::json!({ "checkoutId": "checkout", "contentHash": "version", "mimeType": "image/svg+xml", "data": base64::engine::general_purpose::STANDARD.encode(bytes), "nextOffset": bytes.len(), "size": bytes.len(), "done": true }),
             )
         }
+
         async fn subscribe(
             &self,
             _: &str,
             _: serde_json::Value,
-        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, slopty_view_rpc::RpcError> {
+        ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, slopty_view_rpc::RpcError>
+        {
             unreachable!()
         }
     }
@@ -422,10 +418,7 @@ mod tests {
             });
             let calls = transport.calls.lock().unwrap();
             assert_eq!(calls.len(), if legacy { 2 } else { 1 });
-            assert_eq!(
-                calls.last().unwrap().0,
-                slopty_view_rpc::methods::READ_WORKSPACE_IMAGE
-            );
+            assert_eq!(calls.last().unwrap().0, slopty_view_rpc::methods::READ_WORKSPACE_IMAGE);
         }
     }
 }

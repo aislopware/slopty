@@ -8,11 +8,11 @@
 //!   too, by title, project, branch, machine and state (its mark's word: "needs you", "working",
 //!   "failed", "done"). Then come what was said in them (`SearchChats`) and Claude Code's past
 //!   sessions in the projects (`slopty.PastSessions`), which open where they stopped. Words that
-//!   name no session start one in the project on screen, the agent ⇥ picks, titled as typed:
-//!   the title is Slopty's, never typed to the agent.
-//! - **⇧⌘G, Go to Directory**: the same card over a machine's folders, its projects and the
-//!   folders gone to most first, filtered by typing (its home index, `SearchHomeFolders`) or a
-//!   typed path. ⏎ opens a terminal there, or the agent ⇥ picks; ⌘[ and ⌘] step the machine.
+//!   name no session start one in the project on screen, the agent ⇥ picks, titled as typed: the
+//!   title is Slopty's, never typed to the agent.
+//! - **⇧⌘G, Go to Directory**: the same card over a machine's folders, its projects and the folders
+//!   gone to most first, filtered by typing (its home index, `SearchHomeFolders`) or a typed path.
+//!   ⏎ opens a terminal there, or the agent ⇥ picks; ⌘[ and ⌘] step the machine.
 //!
 //! It works from the keyboard alone and answers nothing for the person.
 
@@ -21,21 +21,19 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gpui::Focusable as _;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, Context, Entity, FocusHandle, Pixels, Point, SharedString, Subscription,
-    Task, Window, WindowId, actions, div, px,
+    AnyElement, Bounds, Context, Entity, FocusHandle, Focusable as _, Pixels, Point, SharedString,
+    Subscription, Task, Window, WindowId, actions, div, px,
 };
 use slopty_view_proto::{HarnessId, HomeFolderMatch, HomeFolderSearchResult};
 
-use super::Shell;
 use super::marks::Mark;
 use super::new_session::{AGENTS, Agent, Start, agent_mark};
 use super::past_sessions::{Listed, PastRow};
 use super::session_search::{ChatWordsMatch, ChatWordsQuery};
 use super::sidebar_status::{self, Filter, INACTIVE};
-use super::thread_search;
+use super::{Shell, thread_search};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
 use crate::popover;
@@ -68,9 +66,16 @@ pub(super) enum Row {
     Header(SharedString),
     Session(SessionRow),
     /// A session whose words match: its title, its program, and the words with its chat.
-    Said { title: SharedString, harness: Option<HarnessId>, found: ChatWordsMatch },
+    Said {
+        title: SharedString,
+        harness: Option<HarnessId>,
+        found: ChatWordsMatch,
+    },
     /// A Claude Code session its machine keeps that is no session here yet, and its project.
-    Past { past: PastRow, project: Option<SharedString> },
+    Past {
+        past: PastRow,
+        project: Option<SharedString>,
+    },
     /// Start a session titled as typed.
     Create(String),
     /// A folder on the machine.
@@ -177,7 +182,8 @@ pub(super) fn identity_bounds(window: &Window) -> Option<Bounds<Pixels>> {
 /// Where the card's top left goes in `window`: under the identity, else centred under the
 /// titlebar.
 fn anchor(viewport: gpui::Size<Pixels>, window: &Window) -> Point<Pixels> {
-    let centred = gpui::point((viewport.width - px(PICKER_WIDTH)) / 2.0, px(Theme::TITLEBAR_HEIGHT));
+    let centred =
+        gpui::point((viewport.width - px(PICKER_WIDTH)) / 2.0, px(Theme::TITLEBAR_HEIGHT));
     // Held inside the window by an 8 pt margin, however far right the identity stands.
     let widest = (viewport.width - px(PICKER_WIDTH + 8.0)).max(px(8.0));
     identity_bounds(window).map_or(centred, |bounds| {
@@ -260,7 +266,8 @@ pub(super) fn session_rows(state: &AppState, typed: &str, now: DateTime<Utc>) ->
             .iter()
             .filter(|chat| chat.is_top_level())
             .filter_map(|chat| {
-                let mark = Mark::of(state.display_status_for(chat, now), state.session_for(&chat.id), now);
+                let mark =
+                    Mark::of(state.display_status_for(chat, now), state.session_for(&chat.id), now);
                 let fields = thread_search::ThreadFields {
                     title: chat.title.as_deref().unwrap_or("New session"),
                     project: state.space_for_chat(chat).map_or("", |space| space.display_name()),
@@ -268,7 +275,8 @@ pub(super) fn session_rows(state: &AppState, typed: &str, now: DateTime<Utc>) ->
                     device: state.device_name(&chat.device_id).unwrap_or(""),
                     archived: chat.archived,
                 };
-                let score = thread_search::score_session(&fields, mark.word().unwrap_or(""), &terms)?;
+                let score =
+                    thread_search::score_session(&fields, mark.word().unwrap_or(""), &terms)?;
                 let active = chat.last_message_at.unwrap_or(chat.created_at).timestamp_millis();
                 let cached = sidebar_status::out_of_reach(state, &chat.device_id, now);
                 Some((session_row(state, chat, mark, cached, current), score, active))
@@ -289,11 +297,16 @@ pub(super) fn session_rows(state: &AppState, typed: &str, now: DateTime<Utc>) ->
     let spans = if terms.is_empty() {
         machines.len() > 1
     } else {
-        let mut devices = state.chats.iter().filter(|chat| chat.is_top_level()).map(|chat| chat.device_id.as_str());
+        let mut devices = state
+            .chats
+            .iter()
+            .filter(|chat| chat.is_top_level())
+            .map(|chat| chat.device_id.as_str());
         devices.next().is_some_and(|first| devices.any(|device| device != first))
     };
     if spans && terms.is_empty() {
-        machines.sort_by_key(|device| (Some(device.as_str()) != local, machine_name(state, device)));
+        machines
+            .sort_by_key(|device| (Some(device.as_str()) != local, machine_name(state, device)));
         rows.sort_by_key(|row| {
             let device = device_of(state, &row.chat_id);
             machines.iter().position(|machine| *machine == device)
@@ -330,10 +343,13 @@ fn session_row(
     cached: bool,
     current: Option<&str>,
 ) -> SessionRow {
-    let project = state.space_for_chat(chat).map(|space| state.representative_space(space).display_name().to_owned());
+    let project = state
+        .space_for_chat(chat)
+        .map(|space| state.representative_space(space).display_name().to_owned());
     SessionRow {
         chat_id: chat.id.clone(),
-        title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
+        title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
+            .into(),
         place: project.map(SharedString::from),
         mark,
         harness: chat.config.as_ref().map(|config| config.harness),
@@ -344,7 +360,12 @@ fn session_row(
 }
 
 fn device_of(state: &AppState, chat_id: &str) -> String {
-    state.chats.iter().find(|chat| chat.id == chat_id).map(|chat| chat.device_id.clone()).unwrap_or_default()
+    state
+        .chats
+        .iter()
+        .find(|chat| chat.id == chat_id)
+        .map(|chat| chat.device_id.clone())
+        .unwrap_or_default()
 }
 
 /// A machine as a header says it: this Mac by that name, the others by theirs.
@@ -358,7 +379,12 @@ fn machine_name(state: &AppState, device: &str) -> String {
 /// The folders Go to Directory lists on `device` for `typed`: a typed path first, then the
 /// machine's projects that match, then what its home index found (or, untyped, the folders gone
 /// to most), each folder once.
-pub(super) fn folder_rows(state: &AppState, device: &str, typed: &str, search: &FolderSearchView<'_>) -> Vec<Row> {
+pub(super) fn folder_rows(
+    state: &AppState,
+    device: &str,
+    typed: &str,
+    search: &FolderSearchView<'_>,
+) -> Vec<Row> {
     let typed = typed.trim();
     let words = thread_search::search_terms(typed);
     let home = search.home.as_deref();
@@ -386,12 +412,22 @@ pub(super) fn folder_rows(state: &AppState, device: &str, typed: &str, search: &
     };
     for space in state.spaces.iter().filter(|space| space.device_id == device) {
         if words.is_empty() || said(&space.path, space.display_name()) {
-            push(Folder { shown: shown(&space.path), path: space.path.clone(), project: true, typed: false });
+            push(Folder {
+                shown: shown(&space.path),
+                path: space.path.clone(),
+                project: true,
+                typed: false,
+            });
         }
     }
     let found = if words.is_empty() { search.visited } else { search.found };
     for found in found {
-        push(Folder { shown: shown(&found.path), path: found.path.clone(), project: false, typed: false });
+        push(Folder {
+            shown: shown(&found.path),
+            path: found.path.clone(),
+            project: false,
+            typed: false,
+        });
     }
     folders.into_iter().map(Row::Folder).collect()
 }
@@ -415,7 +451,11 @@ fn in_a_find_field(window: &Window) -> bool {
 impl Shell {
     /// `root` taking the picker's actions. Over another overlay that holds the keyboard a key
     /// waits; the card's own keys shut it or turn it to the other list.
-    pub(super) fn picker_actions<E: InteractiveElement>(&self, root: E, cx: &mut Context<Self>) -> E {
+    pub(super) fn picker_actions<E: InteractiveElement>(
+        &self,
+        root: E,
+        cx: &mut Context<Self>,
+    ) -> E {
         root.on_action(cx.listener(|this, _: &OpenPicker, window, cx| {
             if this.overlay_owns_keyboard() && !this.picker_open() {
                 return;
@@ -441,7 +481,12 @@ impl Shell {
 
     /// The session picker (⌘K, the identity's press) or Go to Directory (⇧⌘G); the same key
     /// again shuts it.
-    pub(super) fn toggle_picker(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn toggle_picker(
+        &mut self,
+        mode: Mode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.picker.as_ref().is_some_and(|picker| picker.mode == mode) {
             self.close_picker(Some(window), cx);
             return;
@@ -471,7 +516,9 @@ impl Shell {
                 Mode::Directories => AGENTS.len() - 1,
                 Mode::Sessions => shown
                     .and_then(|chat| chat.config.as_ref())
-                    .and_then(|config| AGENTS.iter().position(|agent| agent.id == config.harness.as_str()))
+                    .and_then(|config| {
+                        AGENTS.iter().position(|agent| agent.id == config.harness.as_str())
+                    })
                     .unwrap_or(0),
             };
             (device, agent)
@@ -523,7 +570,12 @@ impl Shell {
         let typed = picker.search.read(cx).text().trim().to_owned();
         match picker.mode {
             Mode::Sessions => {
-                picker.said.search(engine, typed, |shell| shell.picker.as_mut().map(|picker| &mut picker.said), cx);
+                picker.said.search(
+                    engine,
+                    typed,
+                    |shell| shell.picker.as_mut().map(|picker| &mut picker.said),
+                    cx,
+                );
                 self.ask_past(cx);
             }
             Mode::Directories => self.ask_folders(false, cx),
@@ -562,7 +614,9 @@ impl Shell {
                     .filter(|found| !listed.contains(&found.chat_id))
                     .filter_map(|found| {
                         let chat = state.chats.iter().find(|chat| chat.id == found.chat_id)?;
-                        let title = crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session"));
+                        let title = crate::transcript::single_line(
+                            chat.title.as_deref().unwrap_or("New session"),
+                        );
                         let harness = chat.config.as_ref().map(|config| config.harness);
                         Some(Row::Said { title: title.into(), harness, found: found.clone() })
                     })
@@ -570,11 +624,12 @@ impl Shell {
                 rows.extend(said);
                 let before = rows.len();
                 rows.extend(picker.past.iter().filter(|past| past.chat_id.is_none()).map(|past| {
-                    let project = past
-                        .space_id
-                        .as_deref()
-                        .and_then(|id| state.space_row(id))
-                        .map(|space| SharedString::from(state.representative_space(space).display_name().to_owned()));
+                    let project =
+                        past.space_id.as_deref().and_then(|id| state.space_row(id)).map(|space| {
+                            SharedString::from(
+                                state.representative_space(space).display_name().to_owned(),
+                            )
+                        });
                     Row::Past { past: past.clone(), project }
                 }));
                 // A machine that could not look says why when nothing was listed, and a search
@@ -636,20 +691,33 @@ impl Shell {
     fn step_picker_agent(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(picker) = self.picker.as_mut() else { return };
         let count = AGENTS.len();
-        picker.agent = if forward { (picker.agent + 1) % count } else { (picker.agent + count - 1) % count };
+        picker.agent =
+            if forward { (picker.agent + 1) % count } else { (picker.agent + count - 1) % count };
         picker.refused = None;
         cx.notify();
     }
 
     /// Go to Directory's machine, stepped through the machines in order.
     fn step_picker_machine(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let devices: Vec<String> = self.state.read(cx).devices.iter().map(|device| device.id.clone()).collect();
-        let Some(picker) = self.picker.as_mut().filter(|picker| picker.mode == Mode::Directories) else { return };
+        let devices: Vec<String> =
+            self.state.read(cx).devices.iter().map(|device| device.id.clone()).collect();
+        let Some(picker) = self.picker.as_mut().filter(|picker| picker.mode == Mode::Directories)
+        else {
+            return;
+        };
         if devices.len() < 2 {
             return;
         }
-        let at = picker.device.as_ref().and_then(|device| devices.iter().position(|d| d == device)).unwrap_or(0);
-        let next = if forward { (at + 1) % devices.len() } else { (at + devices.len() - 1) % devices.len() };
+        let at = picker
+            .device
+            .as_ref()
+            .and_then(|device| devices.iter().position(|d| d == device))
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % devices.len()
+        } else {
+            (at + devices.len() - 1) % devices.len()
+        };
         let Some(old) = self.picker.take() else { return };
         self.release_folders(&old, cx);
         self.picker = Some(Picker {
@@ -668,7 +736,9 @@ impl Shell {
         let rows = self.picker_rows(cx);
         // The row drawn at the cursor, the last one when the list shrank under it.
         let at = self.picker.as_ref().map(|picker| picker.active.min(rows.len().saturating_sub(1)));
-        let Some(row) = at.and_then(|at| rows.get(at)).filter(|row| row.pickable()).cloned() else { return };
+        let Some(row) = at.and_then(|at| rows.get(at)).filter(|row| row.pickable()).cloned() else {
+            return;
+        };
         self.pick(row, cx);
     }
 
@@ -676,7 +746,8 @@ impl Shell {
     fn pick(&mut self, row: Row, cx: &mut Context<Self>) {
         match row {
             Row::Header(_) | Row::Note(_) => {}
-            Row::Session(SessionRow { chat_id, .. }) | Row::Said { found: ChatWordsMatch { chat_id, .. }, .. } => {
+            Row::Session(SessionRow { chat_id, .. })
+            | Row::Said { found: ChatWordsMatch { chat_id, .. }, .. } => {
                 self.close_picker(None, cx);
                 self.open_chat(chat_id, cx);
             }
@@ -691,14 +762,24 @@ impl Shell {
             }
             Row::Create(title) => {
                 let Some((device_id, cwd)) = self.create_target(cx) else {
-                    self.picker_refused("Add a project first: a session starts in one.".to_owned(), cx);
+                    self.picker_refused(
+                        "Add a project first: a session starts in one.".to_owned(),
+                        cx,
+                    );
                     return;
                 };
-                self.picker_start(Start { device_id, cwd, agent: self.picker_agent(), title: Some(title) }, cx);
+                self.picker_start(
+                    Start { device_id, cwd, agent: self.picker_agent(), title: Some(title) },
+                    cx,
+                );
             }
             Row::Folder(folder) => {
-                let Some(device_id) = self.picker.as_ref().and_then(|picker| picker.device.clone()) else { return };
-                let start = Start { device_id, cwd: folder.path, agent: self.picker_agent(), title: None };
+                let Some(device_id) = self.picker.as_ref().and_then(|picker| picker.device.clone())
+                else {
+                    return;
+                };
+                let start =
+                    Start { device_id, cwd: folder.path, agent: self.picker_agent(), title: None };
                 self.picker_start(start, cx);
             }
         }
@@ -710,9 +791,9 @@ impl Shell {
     pub(super) fn pick_digit(&mut self, slot: usize, cx: &mut Context<Self>) {
         let rows = self.picker_rows(cx);
         let digit = slot.checked_add(1);
-        let row = rows
-            .into_iter()
-            .find(|row| matches!(row, Row::Session(session) if session.digit.map(usize::from) == digit));
+        let row = rows.into_iter().find(
+            |row| matches!(row, Row::Session(session) if session.digit.map(usize::from) == digit),
+        );
         if let Some(row) = row {
             self.pick(row, cx);
         }
@@ -772,7 +853,10 @@ impl Shell {
     fn ask_past(&mut self, cx: &mut Context<Self>) {
         let (engine, spaces) = {
             let state = self.state.read(cx);
-            (state.engine().cloned(), state.spaces.iter().map(|space| space.id.clone()).collect::<Vec<_>>())
+            (
+                state.engine().cloned(),
+                state.spaces.iter().map(|space| space.id.clone()).collect::<Vec<_>>(),
+            )
         };
         let Some(picker) = self.picker.as_mut() else { return };
         picker.past_asked = picker.past_asked.wrapping_add(1);
@@ -788,9 +872,13 @@ impl Shell {
         let params = serde_json::json!({ "query": words, "limit": PAST_LIMIT, "spaceIds": spaces });
         picker.past_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(ASK_AFTER).await;
-            let listed = engine.client().call_as::<Listed>(super::past_sessions::calls::LIST, params).await;
+            let listed =
+                engine.client().call_as::<Listed>(super::past_sessions::calls::LIST, params).await;
             let _gone = this.update(cx, |this, cx| {
-                let Some(picker) = this.picker.as_mut().filter(|picker| picker.past_asked == asked) else { return };
+                let Some(picker) = this.picker.as_mut().filter(|picker| picker.past_asked == asked)
+                else {
+                    return;
+                };
                 picker.past_task = None;
                 // A machine that cannot answer lists nothing, and says why; the sessions here
                 // still stand.
@@ -838,7 +926,14 @@ impl Shell {
         }
         if warm && !search.started {
             search.started = true;
-            search.warm_task = Some(ask_home_folders(engine.clone(), device.clone(), local.clone(), String::new(), None, cx));
+            search.warm_task = Some(ask_home_folders(
+                engine.clone(),
+                device.clone(),
+                local.clone(),
+                String::new(),
+                None,
+                cx,
+            ));
         }
         if typed.chars().count() < FOLDER_MIN_CHARS || crate::pickers::is_typed_path(&typed) {
             return;
@@ -854,7 +949,8 @@ impl Shell {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else { return };
-        let params = target(picker.device.as_deref(), self.state.read(cx).local_device_id.as_deref());
+        let params =
+            target(picker.device.as_deref(), self.state.read(cx).local_device_id.as_deref());
         cx.spawn(async move |_, _| {
             let method = slopty_view_rpc::methods::RELEASE_HOME_FOLDER_SEARCH;
             if let Err(error) = engine.client().call(method, params).await {
@@ -879,7 +975,8 @@ impl Shell {
             let target = self.create_target(cx);
             let state = self.state.read(cx);
             target.map(|(device, cwd)| {
-                let folder = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(&cwd).to_owned();
+                let folder =
+                    cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(&cwd).to_owned();
                 state
                     .spaces
                     .iter()
@@ -889,7 +986,11 @@ impl Shell {
         };
         let machines: Vec<(String, String)> = {
             let state = self.state.read(cx);
-            state.devices.iter().map(|device| (device.id.clone(), machine_name(state, &device.id))).collect()
+            state
+                .devices
+                .iter()
+                .map(|device| (device.id.clone(), machine_name(state, &device.id)))
+                .collect()
         };
         let picker = self.picker.as_mut()?;
         if std::mem::take(&mut picker.focus_pending) {
@@ -907,10 +1008,20 @@ impl Shell {
         let words = (!typed.is_empty()).then_some(typed.as_str());
         let mut children: Vec<AnyElement> = Vec::with_capacity(rows.len());
         for (ix, row) in rows.iter().enumerate() {
-            let Some(drawn) = picker_row(row, ix == active, words, agent, create_place.as_deref(), starting, now, &theme)
-            else {
+            let Some(drawn) = picker_row(
+                row,
+                ix == active,
+                words,
+                agent,
+                create_place.as_deref(),
+                starting,
+                now,
+                &theme,
+            ) else {
                 match row {
-                    Row::Header(name) => children.push(header(name.clone(), &theme).into_any_element()),
+                    Row::Header(name) => {
+                        children.push(header(name.clone(), &theme).into_any_element())
+                    }
                     Row::Note(why) => children.push(note(why.clone(), &theme).into_any_element()),
                     _ => {}
                 }
@@ -934,7 +1045,9 @@ impl Shell {
         let empty = rows.is_empty().then(|| {
             let (title, hint) = match mode {
                 Mode::Sessions => ("No sessions yet", "Type a name to start one."),
-                Mode::Directories if typed.is_empty() => ("No folders yet", "Type a folder\u{2019}s name or a path."),
+                Mode::Directories if typed.is_empty() => {
+                    ("No folders yet", "Type a folder\u{2019}s name or a path.")
+                }
                 Mode::Directories => ("No folder matches", "Try another name, or a path."),
             };
             super::command_palette::palette_empty(&theme, title, hint).into_any_element()
@@ -967,14 +1080,17 @@ impl Shell {
             for (ix, (id, name)) in machines.iter().enumerate() {
                 let selected = device.as_deref() == Some(id.as_str());
                 let target = id.clone();
-                tabs = tabs.child(
-                    crate::surface_chrome::tab(("picker-machine", ix), selected, &theme)
-                        .px(px(8.0))
-                        .role(gpui::Role::Tab)
-                        .aria_label(SharedString::from(name.clone()))
-                        .on_click(cx.listener(move |this, _, _, cx| this.pick_machine(target.clone(), cx)))
-                        .child(SharedString::from(name.clone())),
-                );
+                tabs =
+                    tabs.child(
+                        crate::surface_chrome::tab(("picker-machine", ix), selected, &theme)
+                            .px(px(8.0))
+                            .role(gpui::Role::Tab)
+                            .aria_label(SharedString::from(name.clone()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.pick_machine(target.clone(), cx)
+                            }))
+                            .child(SharedString::from(name.clone())),
+                    );
             }
             tabs
         });
@@ -1005,7 +1121,9 @@ impl Shell {
                 }
                 cx.stop_propagation();
             }))
-            .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_picker(Some(window), cx)))
+            .on_mouse_down_out(
+                cx.listener(|this, _, window, cx| this.close_picker(Some(window), cx)),
+            )
             .child(
                 div()
                     .h(px(44.0))
@@ -1017,7 +1135,13 @@ impl Shell {
                     .border_b_1()
                     .border_color(hairline(0.06))
                     .child(popover::palette_search_icon(&theme))
-                    .child(div().flex_1().min_w_0().text_size(crate::typography::ui_rems(14.0)).child(search)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(crate::typography::ui_rems(14.0))
+                            .child(search),
+                    ),
             )
             .children(machine_tabs)
             .child(body)
@@ -1034,7 +1158,13 @@ impl Shell {
             return;
         }
         self.release_folders(&old, cx);
-        self.picker = Some(Picker { device: Some(device), folders: FolderSearch::default(), active: 0, refused: None, ..old });
+        self.picker = Some(Picker {
+            device: Some(device),
+            folders: FolderSearch::default(),
+            active: 0,
+            refused: None,
+            ..old
+        });
         self.ask_folders(true, cx);
         cx.notify();
     }
@@ -1159,11 +1289,14 @@ fn picker_row(
     theme: &Theme,
 ) -> Option<gpui::Stateful<gpui::Div>> {
     let small = crate::typography::ui_rems(12.0);
-    let quiet = |text: SharedString| div().flex_none().text_size(small).text_color(theme.text_faint).child(text);
+    let quiet = |text: SharedString| {
+        div().flex_none().text_size(small).text_color(theme.text_faint).child(text)
+    };
     let parts = match row {
         Row::Header(_) | Row::Note(_) => return None,
         Row::Session(session) => {
-            let (glyph, tint) = session.harness.map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
+            let (glyph, tint) =
+                session.harness.map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
             let mut trailing = Vec::new();
             trailing.extend(super::marks::mark_element(
                 SharedString::from(format!("picker-mark-{}", session.chat_id)),
@@ -1173,10 +1306,17 @@ fn picker_row(
                 theme.bg,
             ));
             if session.current {
-                trailing.push(icon(icons::CHECK).size(px(12.0)).flex_none().text_color(theme.text_muted).into_any_element());
+                trailing.push(
+                    icon(icons::CHECK)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(theme.text_muted)
+                        .into_any_element(),
+                );
             }
             if let Some(digit) = session.digit.filter(|_| !crate::shell::touch_screen()) {
-                trailing.push(popover::kbd_hint(theme, &format!("\u{2318}{digit}")).into_any_element());
+                trailing
+                    .push(popover::kbd_hint(theme, &format!("\u{2318}{digit}")).into_any_element());
             }
             let said = [
                 Some(session.title.to_string()),
@@ -1195,20 +1335,35 @@ fn picker_row(
                 .items_baseline()
                 .gap(px(6.0))
                 .when(session.cached, |title| title.opacity(0.6))
-                .child(div().min_w_0().truncate().child(popover::search_highlight(session.title.clone(), words, theme)))
+                .child(div().min_w_0().truncate().child(popover::search_highlight(
+                    session.title.clone(),
+                    words,
+                    theme,
+                )))
                 .children(session.place.clone().map(|place| quiet(place).min_w_0().truncate()))
                 .into_any_element();
-            Parts { key: format!("session-{}", session.chat_id), glyph, tint, title, second: None, trailing, said }
+            Parts {
+                key: format!("session-{}", session.chat_id),
+                glyph,
+                tint,
+                title,
+                second: None,
+                trailing,
+                said,
+            }
         }
         Row::Said { title, harness, found } => {
-            let (glyph, tint) = harness.map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
+            let (glyph, tint) =
+                harness.map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
             let who = if found.agent { "Agent" } else { "You" };
             Parts {
                 key: format!("said-{}", found.chat_id),
                 glyph,
                 tint,
                 title: div().min_w_0().truncate().child(title.clone()).into_any_element(),
-                second: Some(super::session_search::chat_words_line(who, found, theme).into_any_element()),
+                second: Some(
+                    super::session_search::chat_words_line(who, found, theme).into_any_element(),
+                ),
                 trailing: Vec::new(),
                 said: format!("{title}, {who}: {}", found.excerpt),
             }
@@ -1216,27 +1371,36 @@ fn picker_row(
         Row::Past { past, project } => {
             let label: SharedString = past.label().into();
             // Its project, its machine and its branch, as far as each is known.
-            let place = [project.as_ref().map(ToString::to_string), past.device.clone(), past.branch.clone()]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" \u{b7} ");
+            let place = [
+                project.as_ref().map(ToString::to_string),
+                past.device.clone(),
+                past.branch.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
             // While a live Claude Code elsewhere holds it, it says so where its age would stand.
             let when = past.running_words().map(SharedString::from).or_else(|| {
                 past.updated().map(|at| SharedString::from(crate::state::format_time_ago(at, now)))
             });
             // The prompt that matched under the title, its words lit, unless it is the title.
-            let matched = past
-                .prompt
-                .as_ref()
-                .filter(|prompt| crate::transcript::single_line(&prompt.text).as_str() != label.as_ref());
+            let matched = past.prompt.as_ref().filter(|prompt| {
+                crate::transcript::single_line(&prompt.text).as_str() != label.as_ref()
+            });
             let title = div()
                 .min_w_0()
                 .flex()
                 .items_baseline()
                 .gap(px(6.0))
-                .child(div().min_w_0().truncate().child(popover::search_highlight(label.clone(), words, theme)))
-                .children((!place.is_empty()).then(|| quiet(place.clone().into()).min_w_0().truncate()))
+                .child(div().min_w_0().truncate().child(popover::search_highlight(
+                    label.clone(),
+                    words,
+                    theme,
+                )))
+                .children(
+                    (!place.is_empty()).then(|| quiet(place.clone().into()).min_w_0().truncate()),
+                )
                 .into_any_element();
             Parts {
                 key: format!("past-{}", past.key),
@@ -1276,7 +1440,13 @@ fn picker_row(
                 tint: None,
                 title,
                 second: None,
-                trailing: vec![icon(mark).size(px(13.0)).flex_none().text_color(tint.unwrap_or(theme.text_muted)).into_any_element()],
+                trailing: vec![
+                    icon(mark)
+                        .size(px(13.0))
+                        .flex_none()
+                        .text_color(tint.unwrap_or(theme.text_muted))
+                        .into_any_element(),
+                ],
                 said: format!("{doing} {} \u{201c}{name}\u{201d}{where_}", agent.name),
             }
         }
@@ -1287,24 +1457,49 @@ fn picker_row(
             title: div()
                 .min_w_0()
                 .truncate()
-                .child(popover::search_highlight(folder.shown.clone(), words.filter(|_| !folder.typed), theme))
+                .child(popover::search_highlight(
+                    folder.shown.clone(),
+                    words.filter(|_| !folder.typed),
+                    theme,
+                ))
                 .into_any_element(),
             second: None,
-            trailing: folder.project.then(|| quiet("Project".into()).into_any_element()).into_iter().collect(),
+            trailing: folder
+                .project
+                .then(|| quiet("Project".into()).into_any_element())
+                .into_iter()
+                .collect(),
             said: format!("Go to {}", folder.shown),
         },
     };
     let Parts { key, glyph, tint, title, second, trailing, said } = parts;
     Some(
         row_frame(key, active, theme, said, second.is_some())
-            .child(icon(glyph).size(px(14.0)).flex_none().text_color(tint.unwrap_or(theme.text_muted)))
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.0)).child(title).children(second))
+            .child(
+                icon(glyph).size(px(14.0)).flex_none().text_color(tint.unwrap_or(theme.text_muted)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(title)
+                    .children(second),
+            )
             .child(div().flex_none().flex().items_center().gap(px(6.0)).children(trailing)),
     )
 }
 
 /// A row's frame: the menu's row, a button a screen reader hears by `said`.
-fn row_frame(key: String, active: bool, theme: &Theme, said: String, two: bool) -> gpui::Stateful<gpui::Div> {
+fn row_frame(
+    key: String,
+    active: bool,
+    theme: &Theme,
+    said: String,
+    two: bool,
+) -> gpui::Stateful<gpui::Div> {
     popover::menu_row(theme, active, format!("picker-row-{key}"))
         .id(SharedString::from(format!("picker-row-{key}")))
         .debug_selector({
@@ -1358,9 +1553,10 @@ fn picker_foot(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::TimeDelta;
     use slopty_view_proto::{Chat, Device, Space};
+
+    use super::*;
 
     fn chat(id: &str, device: &str, space: &str, title: &str, at: DateTime<Utc>) -> Chat {
         serde_json::from_value(serde_json::json!({
@@ -1371,8 +1567,10 @@ mod tests {
     }
 
     fn device(id: &str, name: &str, now: DateTime<Utc>) -> Device {
-        serde_json::from_value(serde_json::json!({ "id": id, "name": name, "platform": "macos", "lastSeenAt": now }))
-            .unwrap()
+        serde_json::from_value(
+            serde_json::json!({ "id": id, "name": name, "platform": "macos", "lastSeenAt": now }),
+        )
+        .unwrap()
     }
 
     fn space(id: &str, device: &str, path: &str) -> Space {
@@ -1414,7 +1612,11 @@ mod tests {
         let rows = session_rows(&state(now), "", now);
         let shown = titles(&rows);
         let this_mac = if cfg!(target_os = "macos") { "# This Mac" } else { "# studio" };
-        assert_eq!(shown.first().map(String::as_str), Some(this_mac), "this Mac's header first: {shown:?}");
+        assert_eq!(
+            shown.first().map(String::as_str),
+            Some(this_mac),
+            "this Mac's header first: {shown:?}"
+        );
         let mac = shown.iter().position(|t| t == "Write the docs").unwrap();
         let other = shown.iter().position(|t| t == "Fix the lexer").unwrap();
         assert!(mac < other, "this Mac's first: {shown:?}");
@@ -1426,8 +1628,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(sessions.iter().map(|s| s.digit).collect::<Vec<_>>(), vec![Some(1), Some(2), Some(3)]);
-        assert!(sessions.iter().find(|s| s.chat_id == "b").unwrap().current, "the one on screen is ticked");
+        assert_eq!(
+            sessions.iter().map(|s| s.digit).collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3)]
+        );
+        assert!(
+            sessions.iter().find(|s| s.chat_id == "b").unwrap().current,
+            "the one on screen is ticked"
+        );
         assert!(!sessions.iter().find(|s| s.chat_id == "a").unwrap().current);
     }
 
@@ -1452,8 +1660,13 @@ mod tests {
     fn go_to_directory_lists_projects_then_folders_and_a_typed_path() {
         let now = Utc::now();
         let state = state(now);
-        let visited = vec![HomeFolderMatch { path: "/Users/me/notes".into(), relative: "notes".into(), is_repo: false }];
-        let view = FolderSearchView { home: Some("/Users/me".into()), visited: &visited, found: &[] };
+        let visited = vec![HomeFolderMatch {
+            path: "/Users/me/notes".into(),
+            relative: "notes".into(),
+            is_repo: false,
+        }];
+        let view =
+            FolderSearchView { home: Some("/Users/me".into()), visited: &visited, found: &[] };
         let paths = |rows: Vec<Row>| -> Vec<String> {
             rows.into_iter()
                 .map(|row| match row {
@@ -1464,7 +1677,11 @@ mod tests {
         };
         assert_eq!(paths(folder_rows(&state, "mac", "", &view)), vec!["/work/app", "~/notes"]);
         assert_eq!(paths(folder_rows(&state, "box", "", &view)), vec!["/srv/api", "~/notes"]);
-        assert_eq!(paths(folder_rows(&state, "mac", "app", &view)), vec!["/work/app"], "typed words narrow");
+        assert_eq!(
+            paths(folder_rows(&state, "mac", "app", &view)),
+            vec!["/work/app"],
+            "typed words narrow"
+        );
         let typed = folder_rows(&state, "mac", "~/code/x", &view);
         let Row::Folder(first) = &typed[0] else { panic!("a folder") };
         assert_eq!(first.path, "/Users/me/code/x", "a typed path, home expanded");
@@ -1478,7 +1695,8 @@ mod tests {
     #[gpui::test]
     fn shift_cmd_g_is_go_to_directory_unless_a_find_is_open(cx: &mut gpui::TestAppContext) {
         use crate::settings::platform_combo;
-        let (shell, cx) = super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
+        let (shell, cx) =
+            super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
         // The card as the last frame drew it, which the next key is dispatched through.
         let card = |cx: &mut gpui::VisualTestContext| {
             cx.run_until_parked();
@@ -1511,10 +1729,15 @@ mod tests {
         // its find there): its find shut, ⇧⌘G goes on to Go to Directory, whose Esc gives the
         // keyboard back; its find open, ⇧⌘G steps back there.
         cx.update(|window, cx| shell.update(cx, |shell, cx| shell.add_diff_surface(window, cx)));
-        let (id, diff) = shell.read_with(cx, |shell, _| (shell.diff_seq, shell.diffs[&shell.diff_seq].clone()));
+        let (id, diff) =
+            shell.read_with(cx, |shell, _| (shell.diff_seq, shell.diffs[&shell.diff_seq].clone()));
         // A diff to read: an empty Changes has no find to open.
         diff.update(cx, |changes, cx| {
-            changes.show_patch("/work/app", "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old();\n+new();\n", cx);
+            changes.show_patch(
+                "/work/app",
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old();\n+new();\n",
+                cx,
+            );
         });
         assert_eq!(card(cx), None);
         assert_eq!(card(cx), None);
@@ -1522,15 +1745,19 @@ mod tests {
         let in_changes = |cx: &mut gpui::VisualTestContext| {
             cx.update(|window, cx| shell.read(cx).pane_holds_keyboard(pane, window, cx))
         };
-        let find_has_keyboard =
-            |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| diff.read(cx).find_has_keyboard(window, cx));
+        let find_has_keyboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| diff.read(cx).find_has_keyboard(window, cx))
+        };
         assert!(in_changes(cx), "the new Changes pane has the keyboard");
         cx.simulate_keystrokes(&platform_combo("mod-f"));
         assert_eq!(card(cx), None);
         assert!(find_has_keyboard(cx), "in Changes' own keys: ⌘F opens its find");
         cx.simulate_keystrokes("escape");
         assert_eq!(card(cx), None);
-        assert!(!find_has_keyboard(cx) && in_changes(cx), "its find shut, the pane keeps the keyboard");
+        assert!(
+            !find_has_keyboard(cx) && in_changes(cx),
+            "its find shut, the pane keeps the keyboard"
+        );
         cx.simulate_keystrokes(&platform_combo("mod-shift-g"));
         assert_eq!(card(cx), Some(Mode::Directories), "Changes' find shut: Go to Directory");
         cx.simulate_keystrokes("escape");
@@ -1542,7 +1769,9 @@ mod tests {
         cx.simulate_keystrokes(&platform_combo("mod-shift-g"));
         assert_eq!(card(cx), None, "⇧⌘G steps back in Changes' find");
         assert!(find_has_keyboard(cx), "which keeps the keyboard");
-        cx.update(|_, cx| shell.update(cx, |shell, cx| shell.close_view(super::super::RightSurface::Diff(id), cx)));
+        cx.update(|_, cx| {
+            shell.update(cx, |shell, cx| shell.close_view(super::super::RightSurface::Diff(id), cx))
+        });
         assert_eq!(card(cx), None);
         assert!(!in_changes(cx), "closed, the pane gives the keyboard back");
 
@@ -1551,7 +1780,10 @@ mod tests {
         assert_eq!(card(cx), None);
         cx.simulate_keystrokes(&platform_combo("mod-f"));
         assert_eq!(card(cx), None);
-        assert!(cx.update(|_, cx| crate::transcript::find::find_open(cx)), "the inspector's find is open");
+        assert!(
+            cx.update(|_, cx| crate::transcript::find::find_open(cx)),
+            "the inspector's find is open"
+        );
         cx.simulate_keystrokes(&platform_combo("mod-shift-g"));
         assert_eq!(card(cx), None, "⇧⌘G steps back in it");
         assert!(cx.update(|_, cx| crate::transcript::find::find_open(cx)), "and leaves it open");

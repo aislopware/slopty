@@ -4,9 +4,10 @@
 //! The person meets bugs where the worker, the view model and the shell meet: a message shown
 //! twice, an open chat unread. Each such state is named here as a breach of what the person must
 //! see, and the shell's state is checked against them every [`EVERY`]. A breach counts once it
-//! has stood for [`GRACE`], since a turn passes through each briefly. One is logged once, with what makes it up (`slopty::invariant`), and
-//! under `SLOPTY_INVARIANTS=panic` (the e2e harness's) the app stops on it, so an e2e run that
-//! meets one fails where it happened instead of in a golden later.
+//! has stood for [`GRACE`], since a turn passes through each briefly. One is logged once, with what
+//! makes it up (`slopty::invariant`), and under `SLOPTY_INVARIANTS=panic` (the e2e harness's) the
+//! app stops on it, so an e2e run that meets one fails where it happened instead of in a golden
+//! later.
 
 use std::collections::HashMap;
 use std::time::Duration;

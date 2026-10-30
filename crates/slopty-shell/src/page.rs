@@ -5,12 +5,13 @@
 //! key through [`crate::live::page`]; this card frames it in zeron's language for foreign
 //! pixels: a code or diagram card's frame (its corner, hairline and surface), a header bar with
 //! the page's title and its source (an app's server, a file's path; never the tool that showed
-//! it) and the actions on the right, over the body, opaque on the transcript's surface. At rest the page's last picture stands for it, so it
-//! frosts, fades and clips like any row; it goes live while the person engages it (a pointer
-//! over it, the keyboard in it) and rests again 2 s after they leave, or once it has scrolled
-//! wholly out of the transcript's clear band. A live page shows only within that band, under
-//! the titlebar's fade and over the composer's frost, where a native view would read as a seam:
-//! past it the card draws the page's picture, which fades and frosts as the chat does.
+//! it) and the actions on the right, over the body, opaque on the transcript's surface. At rest the
+//! page's last picture stands for it, so it frosts, fades and clips like any row; it goes live
+//! while the person engages it (a pointer over it, the keyboard in it) and rests again 2 s after
+//! they leave, or once it has scrolled wholly out of the transcript's clear band. A live page shows
+//! only within that band, under the titlebar's fade and over the composer's frost, where a native
+//! view would read as a seam: past it the card draws the page's picture, which fades and frosts as
+//! the chat does.
 //!
 //! The header's actions show on hover (`docs/decisions/ui.md`, "A page's card carries its
 //! own actions"): Copy image (the page's last picture, as a PNG), Save (its HTML in the chat's
@@ -29,9 +30,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, Context, ObjectFit, Pixels, Render, SharedString, StyledImage as _,
-    Subscription, Task, Window, canvas, div, img, prelude::*, px,
+    AnyElement, Bounds, Context, ObjectFit, Pixels, Render, SharedString, Subscription, Task,
+    Window, canvas, div, img, px,
 };
 use slopty_view_doc::{PageCard, PageState, calls};
 
@@ -43,8 +45,9 @@ pub mod fence;
 pub mod pane;
 
 pub use doc::{PageDoc, PageTable, PdfDoc};
-pub use fence::{FenceChart, FenceCards};
+pub use fence::{FenceCards, FenceChart};
 pub use pane::{PagePaneAsk, PagePaneView};
+
 use crate::state::EngineHandle;
 use crate::theme::Theme;
 use crate::transcript::{Row, RowKind};
@@ -100,15 +103,26 @@ pub(crate) fn header_action(
 
 /// What a page's card or pane says when its page could not be shown: why, and Try again when
 /// a try could go otherwise (`retry`), which opens the page afresh.
-pub(crate) fn failed_body(id: &str, why: SharedString, retry: bool, page: &str, theme: &Theme) -> AnyElement {
+pub(crate) fn failed_body(
+    id: &str,
+    why: SharedString,
+    retry: bool,
+    page: &str,
+    theme: &Theme,
+) -> AnyElement {
     let page = page.to_owned();
     let again = retry.then(|| {
-        live::chrome::button(format!("{id}-try-again"), live::screen::TRY_AGAIN, live::chrome::Tone::Ghost, theme)
-            .on_click(move |_, _, cx| {
-                cx.stop_propagation();
-                live::page_act(&page, PageAct::Reload, cx);
-            })
-            .into_any_element()
+        live::chrome::button(
+            format!("{id}-try-again"),
+            live::screen::TRY_AGAIN,
+            live::chrome::Tone::Ghost,
+            theme,
+        )
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            live::page_act(&page, PageAct::Reload, cx);
+        })
+        .into_any_element()
     });
     div()
         .size_full()
@@ -138,10 +152,7 @@ pub fn page_row(
         id: format!("{}#{part_id}", entry.id).into(),
         version: fnv(&acc),
         turn_start: false,
-        kind: RowKind::Page {
-            owner: entry.device_id.clone(),
-            card: Arc::new(card.clone()),
-        },
+        kind: RowKind::Page { owner: entry.device_id.clone(), card: Arc::new(card.clone()) },
         entry_id: entry.id.clone().into(),
         timestamp: None,
         copy_text: None,
@@ -383,7 +394,8 @@ impl PageCardView {
         if !self.answered.insert(request.clone()) {
             return;
         }
-        let params = serde_json::json!({ "page": self.card.page, "request": request, "allow": allow });
+        let params =
+            serde_json::json!({ "page": self.card.page, "request": request, "allow": allow });
         self.call(calls::ANSWER_PAGE, params, cx);
         cx.notify();
     }
@@ -397,12 +409,7 @@ impl PageCardView {
     }
 
     /// Call `method`, and show `action` done once it answers.
-    fn call_done(
-        &mut self,
-        action: &'static str,
-        method: &'static str,
-        cx: &mut Context<Self>,
-    ) {
+    fn call_done(&mut self, action: &'static str, method: &'static str, cx: &mut Context<Self>) {
         let Some(engine) = self.engine.clone() else { return };
         let params = serde_json::json!({ "page": self.card.page });
         cx.spawn(async move |this, cx| match engine.client().call(method, params).await {
@@ -446,7 +453,12 @@ impl PageCardView {
     }
 
     /// The header's actions for what the page is.
-    fn actions(&self, doc: Option<&PageDoc>, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn actions(
+        &self,
+        doc: Option<&PageDoc>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let page = self.card.page.clone();
         let id = |name: &str| SharedString::from(format!("{page}-{name}"));
         let done = |action: &str| self.done.as_ref().is_some_and(|(done, _)| *done == action);
@@ -570,8 +582,14 @@ impl PageCardView {
             .gap(px(Theme::SPACE_SM))
             .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text_muted)
-            .child(crate::icons::icon(crate::icons::SPLIT_COLUMNS).size(px(13.0)).text_color(theme.text_faint))
-            .child(div().flex_1().min_w_0().truncate().child(SharedString::from("Shown in the pane")))
+            .child(
+                crate::icons::icon(crate::icons::SPLIT_COLUMNS)
+                    .size(px(13.0))
+                    .text_color(theme.text_faint),
+            )
+            .child(
+                div().flex_1().min_w_0().truncate().child(SharedString::from("Shown in the pane")),
+            )
             .child(
                 div()
                     .id(SharedString::from(format!("{}-bring-back", self.card.page)))
@@ -649,10 +667,7 @@ impl Render for PageCardView {
             let page = key.clone();
             cx.defer(move |cx| live::page_act(&page, act, cx));
         };
-        if presence == Some(PagePresence::Live)
-            && !in_pane
-            && !self.shows_in_band()
-        {
+        if presence == Some(PagePresence::Live) && !in_pane && !self.shows_in_band() {
             ask(PageAct::Rest, cx);
         }
         if let Some(bounds) = self.bounds.get() {
@@ -667,9 +682,7 @@ impl Render for PageCardView {
 
         let viewport = f32::from(window.viewport_size().height);
         let cap = (viewport * PAGE_VIEWPORT_SHARE).clamp(PAGE_MIN_HEIGHT, PAGE_MAX_HEIGHT);
-        let asked_full = state
-            .as_ref()
-            .is_some_and(|state| state.display_mode == "fullscreen");
+        let asked_full = state.as_ref().is_some_and(|state| state.display_mode == "fullscreen");
         let height = if self.expanded || asked_full {
             viewport * PAGE_VIEWPORT_SHARE
         } else {
@@ -677,7 +690,12 @@ impl Render for PageCardView {
                 .as_ref()
                 .and_then(|page| page.height)
                 // The view model's height is whole points.
-                .or_else(|| state.as_ref().and_then(|state| state.height).map(|h| u16::try_from(h).map_or(f32::MAX, f32::from)))
+                .or_else(|| {
+                    state
+                        .as_ref()
+                        .and_then(|state| state.height)
+                        .map(|h| u16::try_from(h).map_or(f32::MAX, f32::from))
+                })
                 .unwrap_or(PAGE_RESERVED_HEIGHT)
                 .clamp(PAGE_MIN_HEIGHT, cap)
         };
@@ -707,14 +725,14 @@ impl Render for PageCardView {
 
         let body_content: AnyElement = match (&hosted, presence) {
             // Why, and Try again unless the call that showed it failed.
-            _ if failed => failed_body(&self.card.page, why.clone(), !self.card.failed, &self.card.page, &theme),
-            (
-                Some(live::HostedPage {
-                    native: Some(native),
-                    ..
-                }),
-                Some(PagePresence::Live),
-            ) => {
+            _ if failed => failed_body(
+                &self.card.page,
+                why.clone(),
+                !self.card.failed,
+                &self.card.page,
+                &theme,
+            ),
+            (Some(live::HostedPage { native: Some(native), .. }), Some(PagePresence::Live)) => {
                 // The wheel passes to the chat under the card. On the Mac the page
                 // takes it first, and hands the window what it cannot scroll
                 // (`slopty_platform::web::page`'s wheel); GPUI then scrolls what is under it.
@@ -762,7 +780,11 @@ impl Render for PageCardView {
                             .into_any_element()
                     }
                     None => live::chrome::loading(
-                        if self.card.streaming { "Writing the page…" } else { "Loading the page…" },
+                        if self.card.streaming {
+                            "Writing the page…"
+                        } else {
+                            "Loading the page…"
+                        },
                         &theme,
                         cx.entity_id(),
                         cx,
@@ -874,13 +896,12 @@ impl Render for PageCardView {
             body.into_any_element()
         };
 
-        let actions = div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(2.0))
-            .children(self.actions(doc.as_ref(), &theme, cx));
+        let actions =
+            div().flex_none().flex().flex_row().items_center().gap(px(2.0)).children(self.actions(
+                doc.as_ref(),
+                &theme,
+                cx,
+            ));
         // A code card's header bar: the page's title and where it comes from, its actions
         // on the right.
         let header = div()
@@ -908,9 +929,7 @@ impl Render for PageCardView {
                     .child(SharedString::from(self.card.title.clone())),
             )
             .when(source_words(&self.card).is_some(), |header| {
-                header
-                    .child(SharedString::from("·"))
-                    .child(self.source(&theme, cx))
+                header.child(SharedString::from("·")).child(self.source(&theme, cx))
             })
             .child(div().flex_1())
             .child(actions);
@@ -920,12 +939,8 @@ impl Render for PageCardView {
         if let Some(network) = state.as_ref().and_then(|state| state.network.clone())
             && !self.answered.contains("network")
         {
-            let hosts: Vec<String> = network
-                .connect
-                .iter()
-                .chain(network.resources.iter())
-                .cloned()
-                .collect();
+            let hosts: Vec<String> =
+                network.connect.iter().chain(network.resources.iter()).cloned().collect();
             asks = asks.child(ask_line(
                 "page-network",
                 format!("Wants network: {}", hosts.join(", ")),
@@ -1037,8 +1052,8 @@ impl IntoElement for BandClip {
 }
 
 impl gpui::Element for BandClip {
-    type RequestLayoutState = ();
     type PrepaintState = ();
+    type RequestLayoutState = ();
 
     fn id(&self) -> Option<gpui::ElementId> {
         None
@@ -1089,7 +1104,9 @@ impl gpui::Element for BandClip {
 type Listener = Rc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>;
 
 /// A click handler as [`ask_line`] takes it.
-fn listener(on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static) -> Listener {
+fn listener(
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> Listener {
     Rc::new(on_click)
 }
 

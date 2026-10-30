@@ -19,17 +19,12 @@
 //! enforces the same gates where the state lives, so a raced or stale toggle
 //! self-corrects from the RPC reply.
 
-use gpui::{
-    AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, prelude::*,
-    px,
-};
-
-use crate::catalog::registry::{HarnessDescriptor, descriptor_enabled};
-
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, px};
 use slopty_view_proto::HarnessId;
-
 use slopty_view_rpc::methods;
 
+use crate::catalog::registry::{HarnessDescriptor, descriptor_enabled};
 use crate::pickers::visible_harnesses;
 use crate::popover::{self, Loadable};
 use crate::settings::widgets;
@@ -71,10 +66,7 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
         .into();
     }
     let hint = if enabled {
-        format!(
-            "{} CLI not installed — turn it off or install it",
-            cli_name(harness)
-        )
+        format!("{} CLI not installed — turn it off or install it", cli_name(harness))
     } else {
         format!("Install the {} CLI to enable", cli_name(harness))
     };
@@ -193,10 +185,9 @@ impl HarnessesPage {
         cx: &mut Context<Self>,
     ) {
         let (method, params) = match set.and_then(|ix| AUTONOMY.get(ix)) {
-            Some((value, ..)) => (
-                methods::SET_AGENT_SETTINGS,
-                serde_json::json!({ "autonomy": value }),
-            ),
+            Some((value, ..)) => {
+                (methods::SET_AGENT_SETTINGS, serde_json::json!({ "autonomy": value }))
+            }
             None => (methods::GET_AGENT_SETTINGS, serde_json::json!({})),
         };
         if set.is_some() {
@@ -222,12 +213,9 @@ impl HarnessesPage {
     // The Autonomy section under the agents.
     fn render_autonomy(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.autonomy.unwrap_or(AUTONOMY_DEFAULT);
-        let select = widgets::select(
-            "agents-autonomy",
-            "Autonomy",
-            theme,
-            |page: &mut Self| &mut page.autonomy_select,
-        )
+        let select = widgets::select("agents-autonomy", "Autonomy", theme, |page: &mut Self| {
+            &mut page.autonomy_select
+        })
         // Auto is marked the default and the recommended one; Bypass permissions says
         // what it costs (M10).
         .options(
@@ -295,7 +283,6 @@ impl HarnessesPage {
         }
         value
     }
-
 
     /// Retarget the page at another device: a different device is a different
     /// install/enablement world, so drop the rows and reload through it.
@@ -445,9 +432,9 @@ impl HarnessesPage {
         let params = self.with_target(serde_json::json!({}));
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let listed = engine.client().call(methods::LIST_HARNESSES, params).await;
-            let list = listed.ok().and_then(|value| {
-                serde_json::from_value::<Vec<HarnessDescriptor>>(value).ok()
-            });
+            let list = listed
+                .ok()
+                .and_then(|value| serde_json::from_value::<Vec<HarnessDescriptor>>(value).ok());
             let arrived = list
                 .as_ref()
                 .is_some_and(|list| list.iter().any(|d| d.id == harness && d.installed));
@@ -496,8 +483,10 @@ impl HarnessesPage {
         let hosted = crate::live::terminal(&run.id, &look, cx);
         let body = match hosted {
             Some(hosted) => hosted.view.into_any_element(),
-            None => crate::live::chrome::loading("Opening the installer…", theme, cx.entity_id(), cx)
-                .into_any_element(),
+            None => {
+                crate::live::chrome::loading("Opening the installer…", theme, cx.entity_id(), cx)
+                    .into_any_element()
+            }
         };
         let footer = run.ended.map(|exit| {
             let said = match exit {
@@ -569,10 +558,7 @@ impl HarnessesPage {
         self.pending_toggle = Some((harness, enabled));
         cx.notify();
         self.toggle_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::SET_HARNESS_ENABLED, params)
-                .await;
+            let result = engine.client().call(methods::SET_HARNESS_ENABLED, params).await;
             this.update(cx, |page, cx| {
                 if page.pending_toggle == Some((harness, enabled)) {
                     page.pending_toggle = None;
@@ -600,11 +586,7 @@ impl HarnessesPage {
             let s = self.state.read(cx);
             (s.devices.clone(), s.local_device_id.clone())
         };
-        devices.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
+        devices.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
         let effective = self.target_device.clone().or_else(|| local_id.clone());
         let platform_glyph = |platform: &str| match platform {
             "macos" | "darwin" => icons::LAPTOP,
@@ -619,44 +601,31 @@ impl HarnessesPage {
             let glyph = platform_glyph(&device.platform);
             let muted = theme.text_muted;
             let option = widgets::SelectOption::new(device.name.clone()).leading(move || {
-                icon(glyph)
-                    .size(px(16.0))
-                    .flex_none()
-                    .text_color(muted)
-                    .into_any_element()
+                icon(glyph).size(px(16.0)).flex_none().text_color(muted).into_any_element()
             });
-            options.push(if is_local {
-                option.detail("You")
-            } else {
-                option
-            });
+            options.push(if is_local { option.detail("You") } else { option });
             targets.push((!is_local).then(|| device.id.clone()));
         }
-        let selected = match devices
-            .iter()
-            .position(|d| Some(d.id.as_str()) == effective.as_deref())
-        {
-            Some(ix) => ix,
-            // Not registered (yet): keep the current target reachable.
-            None => {
-                let muted = theme.text_muted;
-                options.push(widgets::SelectOption::new("This device").leading(move || {
-                    icon(icons::LAPTOP)
-                        .size(px(16.0))
-                        .flex_none()
-                        .text_color(muted)
-                        .into_any_element()
-                }));
-                targets.push(self.target_device.clone());
-                options.len() - 1
-            }
-        };
-        widgets::select(
-            "harnesses-device-switcher",
-            "Device",
-            theme,
-            |page: &mut Self| &mut page.device_select,
-        )
+        let selected =
+            match devices.iter().position(|d| Some(d.id.as_str()) == effective.as_deref()) {
+                Some(ix) => ix,
+                // Not registered (yet): keep the current target reachable.
+                None => {
+                    let muted = theme.text_muted;
+                    options.push(widgets::SelectOption::new("This device").leading(move || {
+                        icon(icons::LAPTOP)
+                            .size(px(16.0))
+                            .flex_none()
+                            .text_color(muted)
+                            .into_any_element()
+                    }));
+                    targets.push(self.target_device.clone());
+                    options.len() - 1
+                }
+            };
+        widgets::select("harnesses-device-switcher", "Device", theme, |page: &mut Self| {
+            &mut page.device_select
+        })
         .options(options, selected)
         .menu_width(260.0)
         .heading("Devices")
@@ -707,11 +676,11 @@ impl HarnessesPage {
                     enabled == default_on || last_enabled,
                 )
                 .map(|reset| {
-                        reset.on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.toggle(harness, default_on, cx);
-                        }))
-                    });
+                    reset.on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle(harness, default_on, cx);
+                    }))
+                });
 
                 let mut meta: Vec<gpui::AnyElement> = Vec::new();
                 // Installing REPLACES the not-installed hint in place, so the
@@ -782,9 +751,7 @@ impl HarnessesPage {
                     );
                 let header = widgets::card_row(&theme, ix == 0)
                     .id(("harness-row", ix))
-                    .when(!installed && self.installing != Some(harness), |el| {
-                        el.opacity(0.55)
-                    })
+                    .when(!installed && self.installing != Some(harness), |el| el.opacity(0.55))
                     .child(
                         div()
                             .flex_1()
@@ -835,14 +802,17 @@ impl HarnessesPage {
                                         .id(("harness-cancel-install", ix))
                                         .flex_none()
                                         .role(gpui::Role::Button)
-                                        .aria_label(format!("Cancel installing {}", descriptor.name))
+                                        .aria_label(format!(
+                                            "Cancel installing {}",
+                                            descriptor.name
+                                        ))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             cx.stop_propagation();
                                             this.cancel_install(cx)
                                         }))
                                         .child("Cancel"),
                                 )
-                            })
+                            }),
                     )
                     .children(reset)
                     .child(
@@ -889,13 +859,15 @@ impl HarnessesPage {
                     .flex_col()
                     .child(header)
                     // The installer's terminal, under the agent it installs.
-                    .when(self.install_run.as_ref().is_some_and(|run| run.harness == harness), |row| {
-                        row.children(self.render_install(&theme, cx))
-                    })
+                    .when(
+                        self.install_run.as_ref().is_some_and(|run| run.harness == harness),
+                        |row| row.children(self.render_install(&theme, cx)),
+                    )
                     .into_any_element()
             })
             .collect()
     }
+
     fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
         if self.scroll.set_list_hovered(*hovered) {
             cx.notify();
@@ -920,13 +892,7 @@ impl Render for HarnessesPage {
         let body: gpui::AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
                 .p(px(16.0))
-                .child(popover::skeleton_rows(
-                    "harnesses-skeleton",
-                    &theme,
-                    4,
-                    cx.entity_id(),
-                    cx,
-                ))
+                .child(popover::skeleton_rows("harnesses-skeleton", &theme, 4, cx.entity_id(), cx))
                 .into_any_element(),
             Loadable::Error(message) => {
                 let message = message.clone();
@@ -949,9 +915,7 @@ impl Render for HarnessesPage {
             }
             Loadable::Ready(_) => {
                 let rows = self.rows(cx);
-                widgets::section_card(&theme)
-                    .children(rows)
-                    .into_any_element()
+                widgets::section_card(&theme).children(rows).into_any_element()
             }
         };
         crate::toast::take_error(&mut self.error, cx);
@@ -1031,16 +995,17 @@ mod row_tests {
             let state = cx.new(|_| crate::state::AppState::new());
             super::HarnessesPage::new(state, cx)
         });
-        let descriptor = |id, name: &str, installed: bool| crate::catalog::registry::HarnessDescriptor {
-            id,
-            name: name.into(),
-            supports_steering: false,
-            steering_mode: slopty_view_proto::SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed,
-            can_install: true,
-            enabled: Some(installed),
-        };
+        let descriptor =
+            |id, name: &str, installed: bool| crate::catalog::registry::HarnessDescriptor {
+                id,
+                name: name.into(),
+                supports_steering: false,
+                steering_mode: slopty_view_proto::SteeringMode::TurnBoundary,
+                reasoning_levels: Vec::new(),
+                installed,
+                can_install: true,
+                enabled: Some(installed),
+            };
         page.update(cx, |page, _| {
             page.harnesses = super::Loadable::Ready(vec![
                 descriptor(slopty_view_proto::HarnessId::CLAUDE_CODE, "Claude Code", true),
@@ -1048,8 +1013,14 @@ mod row_tests {
             ]);
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("harness-installed-0").is_some(), "Claude Code says it is installed");
-        assert!(cx.debug_bounds("harness-installed-1").is_none(), "Codex says how to install instead");
+        assert!(
+            cx.debug_bounds("harness-installed-0").is_some(),
+            "Claude Code says it is installed"
+        );
+        assert!(
+            cx.debug_bounds("harness-installed-1").is_none(),
+            "Codex says how to install instead"
+        );
         assert!(cx.debug_bounds("harness-caret-0").is_none(), "no preferences to open");
     }
 }
@@ -1081,7 +1052,11 @@ mod install_tests {
 
     #[async_trait::async_trait]
     impl slopty_view_rpc::RpcService for Machine {
-        async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
             self.asked.lock().unwrap().push((method.to_owned(), params.clone()));
             let answer = match method {
                 methods::LIST_HARNESSES => serde_json::json!([{
@@ -1105,7 +1080,11 @@ mod install_tests {
     struct Blank;
 
     impl gpui::Render for Blank {
-        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
             gpui::div()
         }
     }
@@ -1183,7 +1162,9 @@ mod install_tests {
             });
         };
         let codex = |page: &HarnessesPage| {
-            page.harnesses.ready().and_then(|list| list.iter().find(|d| d.id == HarnessId::CODEX).cloned())
+            page.harnesses
+                .ready()
+                .and_then(|list| list.iter().find(|d| d.id == HarnessId::CODEX).cloned())
         };
         settle(cx, &|page| codex(page).is_some_and(|d| !d.installed && d.can_install));
 
@@ -1191,13 +1172,13 @@ mod install_tests {
         page.update(cx, |page, cx| page.install(HarnessId::CODEX, cx));
         settle(cx, &|page| page.installing.is_none());
         page.update(cx, |page, cx| {
-                let said = page.error.clone().or_else(|| {
-                    crate::toast::shown(cx).into_iter().map(|(_, text)| text.to_string()).last()
-                });
-                let said = said.unwrap_or_default();
-                assert!(said.contains("Couldn't install") && said.contains("out of reach"), "{said}");
-                assert!(page.install_run.is_none());
+            let said = page.error.clone().or_else(|| {
+                crate::toast::shown(cx).into_iter().map(|(_, text)| text.to_string()).last()
             });
+            let said = said.unwrap_or_default();
+            assert!(said.contains("Couldn't install") && said.contains("out of reach"), "{said}");
+            assert!(page.install_run.is_none());
+        });
 
         // Opened: the installer's terminal stands under the row while it runs.
         page.update(cx, |page, cx| page.install(HarnessId::CODEX, cx));
@@ -1206,7 +1187,14 @@ mod install_tests {
         let terminal = cx.debug_bounds("harness-install-terminal").expect("the installer shows");
         assert!(f32::from(terminal.size.height) >= super::INSTALL_TERMINAL_HEIGHT - 1.0);
         assert!(cx.debug_bounds("harness-install-ended").is_none(), "still running");
-        let install = machine.asked.lock().unwrap().iter().rev().find(|(m, _)| m == methods::INSTALL_HARNESS).cloned();
+        let install = machine
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(m, _)| m == methods::INSTALL_HARNESS)
+            .cloned();
         assert_eq!(install.map(|(_, params)| params["harness"].clone()), Some("codex".into()));
 
         // Ended: its worker sees Codex a beat later, and the row lists it installed.
@@ -1215,18 +1203,21 @@ mod install_tests {
         cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
         settle(cx, &|page| codex(page).is_some_and(|d| d.installed));
         page.read_with(cx, |page, _| {
-                assert_eq!(page.install_run.as_ref().and_then(|run| run.ended), Some(0));
-                assert_eq!(page.installing, None);
-            });
+            assert_eq!(page.install_run.as_ref().and_then(|run| run.ended), Some(0));
+            assert_eq!(page.installing, None);
+        });
         draw(cx);
         assert!(cx.debug_bounds("harness-install-ended").is_some(), "the end is said");
 
         // Close: the terminal ends on its machine and the row lets it go.
         page.update(cx, |page, cx| page.cancel_install(cx));
         let closed = || {
-            machine.asked.lock().unwrap().iter().any(|(m, params)| {
-                m == methods::CLOSE_TERMINAL && params["terminalId"] == "7"
-            })
+            machine
+                .asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(m, params)| m == methods::CLOSE_TERMINAL && params["terminalId"] == "7")
         };
         settle(cx, &|page| page.install_run.is_none() && closed());
         assert!(closed(), "the installer's terminal was closed");
@@ -1260,10 +1251,7 @@ fn install_visibility_and_hint_follow_target_capabilities() {
         }
     }
     assert_eq!(cli_name(HarnessId::ANTIGRAVITY), "Antigravity");
-    assert_eq!(
-        install_hint(HarnessId::ANTIGRAVITY, false, true),
-        "Install Antigravity to enable"
-    );
+    assert_eq!(install_hint(HarnessId::ANTIGRAVITY, false, true), "Install Antigravity to enable");
     assert!(
         install_hint(HarnessId::ANTIGRAVITY, false, false).contains("ANTIGRAVITY_ACP_EXECUTABLE")
     );
@@ -1277,10 +1265,7 @@ fn install_phase_copy_and_cancel_target_match_install() {
     for target in [None, Some("remote-device".to_string())] {
         let params = install_params(HarnessId::PI, &target);
         assert_eq!(params["harness"], "pi");
-        assert_eq!(
-            params["targetDeviceId"],
-            serde_json::to_value(&target).unwrap()
-        );
+        assert_eq!(params["targetDeviceId"], serde_json::to_value(&target).unwrap());
     }
     // The command stands on its own, with no backticks around it.
     assert_eq!(
@@ -1296,4 +1281,3 @@ fn install_phase_copy_and_cancel_target_match_install() {
             .starts_with("codex CLI not installed — turn it off or install it.")
     );
 }
-

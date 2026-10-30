@@ -1,9 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Tree menus share the editor's popup surface, positioning and dismissal.
-use super::*;
-use crate::{icons, popover, theme::Theme};
 use gpui::{ClipboardItem, KeyDownEvent, MouseButton};
 use mutations::WorkspaceInteractionOrigin;
+
+use super::*;
+use crate::theme::Theme;
+use crate::{icons, popover};
 
 pub(super) struct TreeContextMenu {
     /// Selection roots in visible order; one entry for a plain right-click.
@@ -54,12 +56,7 @@ impl FilesSurface {
         let paths = self.tree_action_paths();
         self.tree_focus.focus(window, cx);
         self.close_editor_context_menu(cx);
-        self.tree_context_menu.open(TreeContextMenu {
-            paths,
-            origin,
-            position,
-            active: 0,
-        });
+        self.tree_context_menu.open(TreeContextMenu { paths, origin, position, active: 0 });
         cx.notify();
     }
 
@@ -77,9 +74,7 @@ impl FilesSurface {
         match action {
             0 => true,
             1 => paths.len() == 1 && self.can_mutate_tree_entry(&paths[0], false, cx),
-            _ => paths
-                .iter()
-                .all(|path| self.can_mutate_tree_entry(path, true, cx)),
+            _ => paths.iter().all(|path| self.can_mutate_tree_entry(path, true, cx)),
         }
     }
 
@@ -112,11 +107,7 @@ impl FilesSurface {
                         next = popover::menu_step(
                             Some(next),
                             TREE_MENU_ROWS,
-                            if matches!(key, popover::MenuKey::Up) {
-                                -1
-                            } else {
-                                1
-                            },
+                            if matches!(key, popover::MenuKey::Up) { -1 } else { 1 },
                         )
                         .unwrap_or(0);
                         if self.tree_menu_enabled(&menu.paths, next, cx) {
@@ -213,11 +204,8 @@ impl FilesSurface {
             crate::keys::for_action(action, Some(&self.tree_focus), window, cx)
         };
         let keys = [key_of(&super::CopyPath), None, key_of(&super::DeleteSelection)];
-        let delete_label = if count > 1 {
-            format!("Delete {count} items…")
-        } else {
-            "Delete…".into()
-        };
+        let delete_label =
+            if count > 1 { format!("Delete {count} items…") } else { "Delete…".into() };
         let mut card = popover::popover_card(&theme)
             .w(px(220.0))
             .flex()
@@ -225,10 +213,7 @@ impl FilesSurface {
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_tree_context_menu(cx)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         for (index, (label, icon_path)) in [
-            (
-                if count > 1 { "Copy full paths" } else { "Copy full path" }.to_string(),
-                icons::COPY,
-            ),
+            (if count > 1 { "Copy full paths" } else { "Copy full path" }.to_string(), icons::COPY),
             ("Rename…".to_string(), icons::PEN),
             (delete_label, icons::TRASH_BIN_MINIMALISTIC),
         ]
@@ -253,15 +238,11 @@ impl FilesSurface {
                             this.dispatch_tree_menu(index, window, cx)
                         }))
                     })
-                    .child(
-                        icons::icon(icon_path)
-                            .size(px(16.0))
-                            .text_color(if index == 2 {
-                                theme.danger
-                            } else {
-                                theme.text_muted
-                            }),
-                    )
+                    .child(icons::icon(icon_path).size(px(16.0)).text_color(if index == 2 {
+                        theme.danger
+                    } else {
+                        theme.text_muted
+                    }))
                     .child(div().flex_1().min_w_0().child(label))
                     .children(keys[index].as_ref().map(|keys| popover::kbd_hint(&theme, keys)))
                     .when(index == 1, |row| popover::fixed_key(row, &theme, "f2")),
@@ -281,17 +262,14 @@ const TREE_MENU_ROWS: usize = 3;
 
 /// What the toast says after a copy of `count` full paths.
 fn copied_paths_message(count: usize) -> String {
-    if count == 1 {
-        "Copied full path".into()
-    } else {
-        format!("Copied {count} full paths")
-    }
+    if count == 1 { "Copied full path".into() } else { format!("Copied {count} full paths") }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    use super::*;
 
     #[test]
     fn full_paths_follow_the_owning_hosts_path_format() {
@@ -331,12 +309,7 @@ mod tests {
             window
                 .update(cx, |files, window, cx| {
                     assert_eq!(
-                        files
-                            .request_context
-                            .as_ref()
-                            .unwrap()
-                            .target_device_id
-                            .as_deref(),
+                        files.request_context.as_ref().unwrap().target_device_id.as_deref(),
                         Some("remote-host")
                     );
                     files.open_tree_context_menu(
@@ -346,10 +319,7 @@ mod tests {
                         cx,
                     );
                     files.dispatch_tree_menu(0, window, cx);
-                    assert_eq!(
-                        cx.read_from_clipboard().unwrap().text().as_deref(),
-                        Some(expected)
-                    );
+                    assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some(expected));
                 })
                 .unwrap();
         }
@@ -361,9 +331,7 @@ mod tests {
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _subscription = cx.update(|_, cx| {
-            cx.subscribe(&files, move |_, event, _| {
-                recorded.borrow_mut().push(event.clone())
-            })
+            cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
         files.update_in(cx, |files, window, cx| {
             files.open_tree_context_menu("a.txt".into(), gpui::point(px(50.), px(50.)), window, cx);
@@ -383,12 +351,7 @@ mod tests {
             assert!(!files.tree.is_expanded("folder"));
         });
         cx.run_until_parked();
-        assert!(
-            !events
-                .borrow()
-                .iter()
-                .any(|event| matches!(event, FilesEvent::OpenFile(_)))
-        );
+        assert!(!events.borrow().iter().any(|event| matches!(event, FilesEvent::OpenFile(_))));
     }
 
     // The tree's Mac keys (⌥⌘C, ⌘⌫) act, the menu names them, and a copy says so.
@@ -432,7 +395,10 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_keystrokes(&platform_combo("mod-backspace"));
         files.read_with(cx, |files, _| {
-            assert_eq!(files.tree_delete.as_ref().map(|d| d.paths.clone()), Some(vec!["a.txt".to_owned()]));
+            assert_eq!(
+                files.tree_delete.as_ref().map(|d| d.paths.clone()),
+                Some(vec!["a.txt".to_owned()])
+            );
         });
     }
 
@@ -448,9 +414,7 @@ mod tests {
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _subscription = cx.update(|_, cx| {
-            cx.subscribe(&files, move |_, event, _| {
-                recorded.borrow_mut().push(event.clone())
-            })
+            cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
         let at = gpui::point(px(50.), px(50.));
         files.update_in(cx, |files, window, cx| {
@@ -471,10 +435,7 @@ mod tests {
             assert!(files.tree_rename.is_none());
             files.open_tree_context_menu("folder".into(), at, window, cx);
             files.dispatch_tree_menu(2, window, cx);
-            assert_eq!(
-                files.tree_delete.as_ref().unwrap().paths,
-                ["folder", "a.txt"]
-            );
+            assert_eq!(files.tree_delete.as_ref().unwrap().paths, ["folder", "a.txt"]);
             files.dismiss_tree_delete(true, window, cx);
         });
         cx.run_until_parked();

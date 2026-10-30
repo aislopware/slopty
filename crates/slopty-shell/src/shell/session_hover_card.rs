@@ -43,8 +43,7 @@ impl SessionHoverCard {
     }
 
     pub(super) fn target(&self) -> Option<&str> {
-        self.shown()
-            .or_else(|| self.pending.as_ref().map(|(id, _)| id.as_str()))
+        self.shown().or_else(|| self.pending.as_ref().map(|(id, _)| id.as_str()))
     }
 
     /// The pointer entered `chat_id`'s row. True when the card should show
@@ -54,9 +53,7 @@ impl SessionHoverCard {
             return false;
         }
         let warm = self.shown.is_some()
-            || self
-                .hidden_at
-                .is_some_and(|hidden| now.duration_since(hidden) < WARM);
+            || self.hidden_at.is_some_and(|hidden| now.duration_since(hidden) < WARM);
         if warm {
             self.pending = None;
             self.shown = Some(chat_id.to_owned());
@@ -66,11 +63,7 @@ impl SessionHoverCard {
 
     /// The pointer left `chat_id`'s row. True when a shown card hid.
     fn leave(&mut self, chat_id: &str, now: Instant) -> bool {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|(pending, _)| pending == chat_id)
-        {
+        if self.pending.as_ref().is_some_and(|(pending, _)| pending == chat_id) {
             self.pending = None;
         }
         if self.shown.as_deref() != Some(chat_id) {
@@ -83,11 +76,7 @@ impl SessionHoverCard {
 
     /// The dwell on `chat_id` ran out with the pointer still there.
     fn settle(&mut self, chat_id: &str) -> bool {
-        if self
-            .pending
-            .as_ref()
-            .is_none_or(|(pending, _)| pending != chat_id)
-        {
+        if self.pending.as_ref().is_none_or(|(pending, _)| pending != chat_id) {
             return false;
         }
         self.pending = None;
@@ -123,9 +112,7 @@ impl Shell {
             return;
         };
         if !self.sidebar_hover_card_row_visible(target, cx)
-            || self
-                .rename_input_for(target)
-                .is_some()
+            || self.rename_input_for(target).is_some()
             || cx.has_active_drag()
         {
             self.dismiss_session_card(cx);
@@ -178,7 +165,7 @@ impl Shell {
     /// it goes or another shows.
     fn watch_card_ports(&mut self, cx: &mut Context<Self>) {
         let shown = self.session_hover_card.shown.clone();
-        let watched = self.session_hover_card.ports.as_ref().map(|(chat, _, _)| chat.clone());
+        let watched = self.session_hover_card.ports.as_ref().map(|(chat, ..)| chat.clone());
         if shown == watched {
             return;
         }
@@ -189,16 +176,22 @@ impl Shell {
         let task = cx.spawn(async move |this, cx| {
             let Ok(mut updates) = engine
                 .client()
-                .subscribe(slopty_view_rpc::methods::WATCH_PREVIEWS, serde_json::json!({ "chatId": watched }))
+                .subscribe(
+                    slopty_view_rpc::methods::WATCH_PREVIEWS,
+                    serde_json::json!({ "chatId": watched }),
+                )
                 .await
             else {
                 return;
             };
             while let Some(value) = updates.recv().await {
-                let Ok(snapshot) = serde_json::from_value::<slopty_view_proto::PreviewSnapshot>(value) else {
+                let Ok(snapshot) =
+                    serde_json::from_value::<slopty_view_proto::PreviewSnapshot>(value)
+                else {
                     continue;
                 };
-                let mut ports: Vec<u16> = snapshot.services.iter().map(|service| service.port).collect();
+                let mut ports: Vec<u16> =
+                    snapshot.services.iter().map(|service| service.port).collect();
                 ports.sort_unstable();
                 ports.dedup();
                 let gone = this
@@ -267,21 +260,11 @@ impl Shell {
                 .gap(px(7.0))
                 .min_w_0()
                 .h(px(18.0))
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .flex_none()
-                        .flex()
-                        .justify_center()
-                        .child(glyph),
-                )
+                .child(div().w(px(14.0)).flex_none().flex().justify_center().child(glyph))
                 .child(div().flex_1().min_w_0().truncate().child(label))
         };
         let glyph = |path: &'static str| {
-            icon(path)
-                .size(px(13.0))
-                .text_color(muted.opacity(0.8))
-                .into_any_element()
+            icon(path).size(px(13.0)).text_color(muted.opacity(0.8)).into_any_element()
         };
 
         // ── The title and its age on one quiet line, the device's glyph in
@@ -296,11 +279,7 @@ impl Shell {
             icons::REMOTE_SERVER
         })
         .size(px(13.0))
-        .text_color(if online {
-            muted.opacity(0.8)
-        } else {
-            theme.warning.opacity(0.8)
-        });
+        .text_color(if online { muted.opacity(0.8) } else { theme.warning.opacity(0.8) });
         let header = div()
             .flex()
             .flex_row()
@@ -331,14 +310,7 @@ impl Shell {
                             .child(facts.status.clone()),
                     ),
             )
-            .child(
-                div()
-                    .h(px(18.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .child(device),
-            );
+            .child(div().h(px(18.0)).flex_none().flex().items_center().child(device));
 
         // ── Where it runs: project and branch.
         let project_row = meta_row(
@@ -366,7 +338,7 @@ impl Shell {
             .session_hover_card
             .ports
             .as_ref()
-            .filter(|(chat, _, _)| chat == chat_id)
+            .filter(|(chat, ..)| chat == chat_id)
             .and_then(|(_, ports, _)| ports_line(ports));
         let ports_row = ports.clone().map(|ports| {
             meta_row(glyph(icons::GLOBAL), ports).debug_selector({
@@ -483,11 +455,7 @@ impl Shell {
                 let chat_id = chat_id.to_owned();
                 move || format!("session-hover-card-{chat_id}")
             })
-            .child(crate::frost::frosted(
-                popover::CARD_RADIUS,
-                crate::frost::MENU_BLUR,
-                card,
-            ));
+            .child(crate::frost::frosted(popover::CARD_RADIUS, crate::frost::MENU_BLUR, card));
         // Drifts in from the row's side, like a submenu leaving its trigger.
         let card = if self.reduced_motion.get() {
             card.into_any_element()
@@ -520,8 +488,9 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    use super::*;
 
     fn test_chat(id: &str) -> slopty_view_proto::Chat {
         serde_json::from_value(serde_json::json!({
@@ -595,11 +564,7 @@ mod tests {
         let (host, cx) = cx.add_window_view(|_, cx| {
             let shell = cx.new(|cx| test_shell(dir.path(), cx));
             let observation = cx.observe(&shell, |_, _, cx| cx.notify());
-            RowHost {
-                shell,
-                _observation: observation,
-                _dir: dir,
-            }
+            RowHost { shell, _observation: observation, _dir: dir }
         });
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         redraw(cx);
@@ -616,8 +581,7 @@ mod tests {
     }
 
     fn wait_for_card(cx: &mut VisualTestContext) {
-        cx.executor()
-            .advance_clock(DWELL + Duration::from_millis(1));
+        cx.executor().advance_clock(DWELL + Duration::from_millis(1));
         redraw(cx);
     }
 
@@ -637,9 +601,7 @@ mod tests {
             });
             let position = cx.debug_bounds("chat-archive-hover-test").unwrap().center();
             cx.simulate_mouse_down(position, MouseButton::Left, gpui::Modifiers::default());
-            shell.read_with(cx, |shell, _| {
-                assert_eq!(shell.session_hover_card.target(), None)
-            });
+            shell.read_with(cx, |shell, _| assert_eq!(shell.session_hover_card.target(), None));
             wait_for_card(cx);
             assert!(cx.debug_bounds("session-hover-card-hover-test").is_none());
         }
@@ -677,15 +639,9 @@ mod tests {
         redraw(cx);
         let next = cx.debug_bounds("chat-next").unwrap().center();
         wait_for_card(cx);
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.session_hover_card.target(), None)
-        });
+        shell.read_with(cx, |shell, _| assert_eq!(shell.session_hover_card.target(), None));
         // Leave the old hit region before entering the surviving row.
-        cx.simulate_mouse_move(
-            gpui::point(px(600.0), px(700.0)),
-            None,
-            gpui::Modifiers::default(),
-        );
+        cx.simulate_mouse_move(gpui::point(px(600.0), px(700.0)), None, gpui::Modifiers::default());
         cx.simulate_mouse_move(next, None, gpui::Modifiers::default());
         redraw(cx);
         shell.read_with(cx, |shell, _| {
@@ -707,14 +663,10 @@ mod tests {
             shell.read_with(cx, |shell, _| {
                 assert_eq!(shell.session_hover_card.shown().is_some(), shown)
             });
-            shell.update(cx, |shell, cx| {
-                shell.open_settings(SettingsSection::Appearance, cx)
-            });
+            shell.update(cx, |shell, cx| shell.open_settings(SettingsSection::Appearance, cx));
             redraw(cx);
             wait_for_card(cx);
-            shell.read_with(cx, |shell, _| {
-                assert_eq!(shell.session_hover_card.target(), None)
-            });
+            shell.read_with(cx, |shell, _| assert_eq!(shell.session_hover_card.target(), None));
             shell.update(cx, |shell, cx| shell.close_settings(cx));
             redraw(cx);
             assert!(cx.debug_bounds("session-hover-card-hover-test").is_none());
@@ -757,10 +709,7 @@ mod tests {
         assert!(card.enter("b", now + Duration::from_millis(16)));
         assert_eq!(card.shown(), Some("b"));
         // Enter fires first: the stale leave must not hide the new card.
-        let mut card = SessionHoverCard {
-            shown: Some("a".into()),
-            ..Default::default()
-        };
+        let mut card = SessionHoverCard { shown: Some("a".into()), ..Default::default() };
         assert!(card.enter("b", now));
         assert!(!card.leave("a", now));
         assert_eq!(card.shown(), Some("b"));
@@ -773,10 +722,7 @@ mod tests {
         card.shown = Some("a".into());
         card.leave("a", now);
         assert!(!card.enter("b", now + WARM + Duration::from_millis(1)));
-        let mut card = SessionHoverCard {
-            shown: Some("a".into()),
-            ..Default::default()
-        };
+        let mut card = SessionHoverCard { shown: Some("a".into()), ..Default::default() };
         assert!(card.dismiss());
         assert!(!card.enter("a", now));
         assert_eq!(card.shown(), None);

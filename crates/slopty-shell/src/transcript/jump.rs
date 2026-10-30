@@ -2,9 +2,10 @@
 //! and how many steps arrived below since it let go ("↓ 12 new steps"; `docs/decisions/
 //! inspector.md`, "Follow and anchor"). A press goes back to the end, following it.
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 
 use crate::motion::{self, AnimationExt as _, HoverFade as _};
@@ -36,7 +37,11 @@ type JumpMarks = std::collections::HashMap<&'static str, (bool, Option<std::time
 
 /// Whether `key`'s jump button is drawn at `now`: `None` gone, `Some(None)` shown, and
 /// `Some(Some(n))` leaving, `n` naming this leave so its animation plays once.
-pub(super) fn presence(key: &'static str, shown: bool, now: std::time::Instant) -> Option<Option<u64>> {
+pub(super) fn presence(
+    key: &'static str,
+    shown: bool,
+    now: std::time::Instant,
+) -> Option<Option<u64>> {
     JUMP_SHOWN.with(|marks| {
         let mut marks = marks.borrow_mut();
         let (was, leave, leaves) = marks.entry(key).or_insert((false, None, 0));
@@ -140,7 +145,11 @@ pub(super) fn button(
                 .items_center()
                 .justify_center()
                 .bg(wash)
-                .child(crate::icons::icon(crate::icons::ARROW_DOWN).size(px(16.0)).text_color(theme.text_muted))
+                .child(
+                    crate::icons::icon(crate::icons::ARROW_DOWN)
+                        .size(px(16.0))
+                        .text_color(theme.text_muted),
+                )
                 // "↓ 3 new steps", the count in the accent as new content is, each part
                 // rolled in and out (`roll_text`), the button's width gliding with them.
                 .child(
@@ -150,20 +159,26 @@ pub(super) fn button(
                         .text_size(crate::typography::ui_rems(12.5))
                         .child(div().text_color(theme.accent).child(crate::roll_text::roll_text(
                             format!("{anim_key}-count"),
-                            if unseen > 0 { format!(" {unseen}").into() } else { SharedString::default() },
-                            reduced,
-                            now,
-                        )))
-                        .child(div().text_color(theme.text_muted).child(crate::roll_text::roll_text(
-                            format!("{anim_key}-new"),
-                            match unseen {
-                                0 => SharedString::default(),
-                                1 => " new step".into(),
-                                _ => " new steps".into(),
+                            if unseen > 0 {
+                                format!(" {unseen}").into()
+                            } else {
+                                SharedString::default()
                             },
                             reduced,
                             now,
-                        ))),
+                        )))
+                        .child(div().text_color(theme.text_muted).child(
+                            crate::roll_text::roll_text(
+                                format!("{anim_key}-new"),
+                                match unseen {
+                                    0 => SharedString::default(),
+                                    1 => " new step".into(),
+                                    _ => " new steps".into(),
+                                },
+                                reduced,
+                                now,
+                            ),
+                        )),
                 ),
         );
     let button = arrive(anim_key, button.debug_selector(move || anim_key.to_owned()));
@@ -183,11 +198,11 @@ where
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
-
     use std::time::Duration;
 
-    use super::*;
     use gpui::{Context, Render, TestAppContext};
+
+    use super::*;
 
     struct Host(Rc<std::cell::Cell<u32>>, usize);
 
@@ -196,9 +211,16 @@ mod tests {
             let clicks = Rc::clone(&self.0);
             let unseen = self.1;
             // As the transcript lays it out: a row that centres it at its own width.
-            div().size_full().flex().justify_center().child(button("jump-test", "jump-test-hover", unseen, (true, std::time::Instant::now()), Theme::of(cx), move |_, _, _| {
-                clicks.set(clicks.get() + 1);
-            }))
+            div().size_full().flex().justify_center().child(button(
+                "jump-test",
+                "jump-test-hover",
+                unseen,
+                (true, std::time::Instant::now()),
+                Theme::of(cx),
+                move |_, _, _| {
+                    clicks.set(clicks.get() + 1);
+                },
+            ))
         }
     }
 
@@ -215,14 +237,17 @@ mod tests {
         let (view, cx) = cx.add_window_view(move |_, _| Host(host, 0));
         cx.run_until_parked();
         let bounds = cx.debug_bounds("jump-test").expect("the button");
-        assert_eq!((f32::from(bounds.size.width), f32::from(bounds.size.height)), (JUMP_WIDTH, JUMP_HEIGHT));
+        assert_eq!(
+            (f32::from(bounds.size.width), f32::from(bounds.size.height)),
+            (JUMP_WIDTH, JUMP_HEIGHT)
+        );
         let named = cx.update(|window, cx| {
             window.set_a11y_active(true);
             window.refresh();
             window.draw(cx).clear(cx);
-            window
-                .a11y_tree()
-                .is_some_and(|tree| tree.nodes.iter().any(|(_, node)| node.label() == Some("Scroll to bottom")))
+            window.a11y_tree().is_some_and(|tree| {
+                tree.nodes.iter().any(|(_, node)| node.label() == Some("Scroll to bottom"))
+            })
         });
         assert!(named, "named for a screen reader");
         cx.simulate_click(bounds.center(), gpui::Modifiers::default());
@@ -235,7 +260,10 @@ mod tests {
         });
         cx.run_until_parked();
         let wide = cx.debug_bounds("jump-test").expect("the button");
-        assert!(f32::from(wide.size.width) > JUMP_WIDTH + 20.0, "it says \"3 new steps\": {wide:?}");
+        assert!(
+            f32::from(wide.size.width) > JUMP_WIDTH + 20.0,
+            "it says \"3 new steps\": {wide:?}"
+        );
     }
 
     /// The jump button leaves over 300 ms, and plays its leave once.
@@ -247,7 +275,11 @@ mod tests {
         assert_eq!(presence("jump-leave-test", false, start), Some(Some(0)), "leaving");
         let mid = start + Duration::from_millis(150);
         assert_eq!(presence("jump-leave-test", false, mid), Some(Some(0)), "the same leave");
-        assert_eq!(presence("jump-leave-test", false, start + Duration::from_millis(301)), None, "gone");
+        assert_eq!(
+            presence("jump-leave-test", false, start + Duration::from_millis(301)),
+            None,
+            "gone"
+        );
         assert_eq!(presence("jump-leave-test", true, mid), Some(None));
         assert_eq!(presence("jump-leave-test", false, mid), Some(Some(1)), "a new leave");
     }

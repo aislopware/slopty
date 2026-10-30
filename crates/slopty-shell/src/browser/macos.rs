@@ -3,14 +3,20 @@
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
 // One page-to-shell message only, the page's own favicon (`FAVICON_SCRIPT`).
-use super::model::{PageState, Presentation, allowed_navigation};
+use std::{
+    cell::{Cell, RefCell},
+    mem::ManuallyDrop,
+    ptr::NonNull, // the page goes to gpui-fast's native host
+    rc::Rc,
+};
+
 use gpui::{App, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{
-    DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel,
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSScreen, NSView,
 };
-use objc2_app_kit::{NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSScreen, NSView};
 use objc2_foundation::{
     NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSObject,
     NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString,
@@ -19,13 +25,9 @@ use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
     WKNavigationResponse, WKNavigationResponsePolicy, WKWebView,
 };
-use std::{
-    cell::{Cell, RefCell},
-    mem::ManuallyDrop,
-    ptr::NonNull, // the page goes to gpui-fast's native host
-    rc::Rc,
-};
 use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
+
+use super::model::{PageState, Presentation, allowed_navigation};
 
 #[derive(Default)]
 struct BrowserStore {
@@ -63,6 +65,7 @@ impl BrowserData {
             Self(store)
         })
     }
+
     fn configuration(
         &self,
         mtm: MainThreadMarker,
@@ -125,14 +128,8 @@ impl BrowserData {
 }
 
 type Sender = tokio::sync::mpsc::Sender<NativeEvent>;
-const OBSERVED: [&str; 6] = [
-    "URL",
-    "title",
-    "loading",
-    "canGoBack",
-    "canGoForward",
-    "underPageBackgroundColor",
-];
+const OBSERVED: [&str; 6] =
+    ["URL", "title", "loading", "canGoBack", "canGoForward", "underPageBackgroundColor"];
 
 pub(super) enum NativeEvent {
     Changed,
@@ -222,6 +219,7 @@ impl Observer {
         });
         unsafe { msg_send![super(object), init] }
     }
+
     fn changed(&self) {
         if !self.ivars().pending.replace(true) {
             if self.ivars().tx.try_send(NativeEvent::Changed).is_err() {
@@ -229,6 +227,7 @@ impl Observer {
             }
         }
     }
+
     fn fail(&self, message: &str) {
         *self.ivars().error.borrow_mut() = Some(message.into());
         self.changed();
@@ -432,24 +431,30 @@ impl NativePage {
             presentation: Presentation::Hidden,
         }))))
     }
+
     pub fn handle(&self) -> Rc<RefCell<Host>> {
         self.0.clone()
     }
+
     pub fn focus_chrome(&self) {
         self.0.borrow().focus_chrome();
     }
+
     pub fn set_shortcuts(&self, shortcuts: Vec<String>) {
         *self.0.borrow().shortcuts.borrow_mut() = shortcuts;
     }
+
     pub fn present(&mut self, presentation: Presentation) {
         self.0.borrow_mut().present(presentation);
     }
+
     pub fn load(&self, url: &str) -> Result<(), String> {
         let host = self.0.borrow();
         host.observer.ivars().error.borrow_mut().take();
         *host.observer.ivars().requested_url.borrow_mut() = Some(url.into());
         host.web.load_url(url).map_err(|e| e.to_string())
     }
+
     pub fn reload(&self) {
         let host = self.0.borrow();
         host.observer.ivars().error.borrow_mut().take();
@@ -459,6 +464,7 @@ impl NativePage {
         }
         host.observer.changed();
     }
+
     pub fn history(&self, forward: bool) {
         let host = self.0.borrow();
         unsafe {
@@ -469,23 +475,15 @@ impl NativePage {
             }
         }
     }
+
     pub fn state(&self) -> PageState {
         let host = self.0.borrow();
         host.observer.ivars().pending.set(false);
         unsafe {
             PageState {
-                url: host
-                    .observer
-                    .ivars()
-                    .requested_url
-                    .borrow()
-                    .clone()
-                    .or_else(|| {
-                        host.view
-                            .URL()
-                            .and_then(|u| u.absoluteString())
-                            .map(|u| u.to_string())
-                    }),
+                url: host.observer.ivars().requested_url.borrow().clone().or_else(|| {
+                    host.view.URL().and_then(|u| u.absoluteString()).map(|u| u.to_string())
+                }),
                 title: host.view.title().map(|s| s.to_string()).unwrap_or_default(),
                 loading: host.view.isLoading(),
                 can_back: host.view.canGoBack(),
@@ -494,6 +492,7 @@ impl NativePage {
             }
         }
     }
+
     // The page reads its own icon in its own session and cookies, draws it to a
     // 64 px canvas and posts it as a PNG `data:` URL (zeron fetched the link with reqwest).
     pub fn discover_favicon(&self) {
@@ -501,10 +500,8 @@ impl NativePage {
         // Our navigation delegate owns readiness, so Wry's private pending-
         // script queue is intentionally bypassed. This runs only after finish.
         unsafe {
-            host.view.evaluateJavaScript_completionHandler(
-                &NSString::from_str(FAVICON_SCRIPT),
-                None,
-            );
+            host.view
+                .evaluateJavaScript_completionHandler(&NSString::from_str(FAVICON_SCRIPT), None);
         }
     }
 }
@@ -608,10 +605,7 @@ impl PageGlide {
             self.stop();
             return false;
         }
-        let lines = gpui::point(
-            event.scrollingDeltaX() as f32,
-            event.scrollingDeltaY() as f32,
-        );
+        let lines = gpui::point(event.scrollingDeltaX() as f32, event.scrollingDeltaY() as f32);
         if lines == gpui::Point::default() {
             return false;
         }
@@ -626,9 +620,7 @@ impl PageGlide {
         at: objc2_foundation::NSPoint,
     ) {
         self.at.set(at);
-        self.glide
-            .borrow_mut()
-            .push(lines, crate::clock::event_now());
+        self.glide.borrow_mut().push(lines, crate::clock::event_now());
         if self.timer.borrow().is_some() {
             return;
         }
@@ -705,10 +697,7 @@ fn precise_wheel(
     use objc2_core_graphics::{CGEvent, CGEventField, CGScrollEventUnit};
     let event = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Pixel, 2, dy, dx, 0)?;
     CGEvent::set_integer_value_field(Some(&*event), CGEventField::ScrollWheelEventIsContinuous, 1);
-    CGEvent::set_location(
-        Some(&*event),
-        objc2_foundation::NSPoint::new(at.x, height - at.y),
-    );
+    CGEvent::set_location(Some(&*event), objc2_foundation::NSPoint::new(at.x, height - at.y));
     NSEvent::eventWithCGEvent(&event)
 }
 
@@ -751,16 +740,19 @@ impl Host {
         }
         self.update_visibility();
     }
+
     /// The host the page is placed by.
     pub fn native_host(&self) -> gpui::composition::NativeHost {
         self.native.clone()
     }
+
     /// Return the keyboard to GPUI if the page holds it.
     pub fn focus_chrome(&self) {
         if has_focus(&self.view) {
             let _ = self.web.focus_parent();
         }
     }
+
     fn update_visibility(&self) {
         // Where it shows is gpui-fast's to say; here only whether it does.
         let visible = self.presentation != Presentation::Hidden
@@ -772,6 +764,7 @@ impl Host {
             let _ = self.web.set_visible(visible);
         }
     }
+
     fn present(&mut self, presentation: Presentation) {
         self.presentation = presentation;
         // Drags pass to GPUI through the native host's hit routing.
@@ -790,8 +783,7 @@ impl Drop for Host {
                 NSEvent::removeMonitor(&monitor);
             }
             for key in OBSERVED {
-                self.view
-                    .removeObserver_forKeyPath(&self.observer, &NSString::from_str(key));
+                self.view.removeObserver_forKeyPath(&self.observer, &NSString::from_str(key));
             }
             self.view.setNavigationDelegate(None);
             self.view.stopLoading();
@@ -804,8 +796,9 @@ impl Drop for Host {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::{Duration, Instant};
+
+    use super::*;
 
     #[test]
     fn a_tick_glides_in_whole_pixels_to_exactly_its_lines() {
@@ -833,10 +826,7 @@ mod tests {
         let at = objc2_foundation::NSPoint::new(212.0, 340.0);
         let event = precise_wheel(3, -14, at, height).unwrap();
         assert!(event.hasPreciseScrollingDeltas());
-        assert_eq!(
-            (event.scrollingDeltaX(), event.scrollingDeltaY()),
-            (3.0, -14.0)
-        );
+        assert_eq!((event.scrollingDeltaX(), event.scrollingDeltaY()), (3.0, -14.0));
         assert_eq!(event.locationInWindow(), at);
     }
 }

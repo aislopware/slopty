@@ -28,10 +28,7 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
     // A project can point at a subdirectory; match the remote workspace RPC's
     // checkout-root resolution, including linked worktrees with a .git file.
     let canonical = root.canonicalize().ok()?;
-    let root = canonical
-        .ancestors()
-        .find(|path| path.join(".git").exists())
-        .unwrap_or(&canonical);
+    let root = canonical.ancestors().find(|path| path.join(".git").exists()).unwrap_or(&canonical);
     for path in ICON_PATHS {
         let path = root.join(path);
         if !path.is_file() {
@@ -71,22 +68,12 @@ const MONOGRAM_PALETTE: [(u32, u32); 8] = [
 
 fn monogram(name: &str, seed: &str, selected: bool, theme: &Theme) -> AnyElement {
     // FNV-1a selects a stable entry from the curated palette.
-    let hash = seed.bytes().fold(2166136261u32, |hash, byte| {
-        (hash ^ u32::from(byte)).wrapping_mul(16777619)
-    });
-    let letter = name
-        .trim()
-        .chars()
-        .next()
-        .unwrap_or('?')
-        .to_uppercase()
-        .to_string();
+    let hash = seed
+        .bytes()
+        .fold(2166136261u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(16777619));
+    let letter = name.trim().chars().next().unwrap_or('?').to_uppercase().to_string();
     let (dark, light) = MONOGRAM_PALETTE[hash as usize % MONOGRAM_PALETTE.len()];
-    let tone = gpui::Hsla::from(gpui::rgb(if theme.appearance.is_dark() {
-        dark
-    } else {
-        light
-    }));
+    let tone = gpui::Hsla::from(gpui::rgb(if theme.appearance.is_dark() { dark } else { light }));
     let mut hover_text = tone;
     hover_text.l = if theme.appearance.is_dark() {
         (tone.l + 0.12).min(0.95)
@@ -101,24 +88,13 @@ fn monogram(name: &str, seed: &str, selected: bool, theme: &Theme) -> AnyElement
         .rounded(px(3.0))
         // The active row wears the hover tint permanently.
         .bg(tone.opacity(if selected { 0.24 } else { 0.08 }))
-        .text_color(if selected {
-            hover_text
-        } else {
-            tone.opacity(0.85)
-        })
+        .text_color(if selected { hover_text } else { tone.opacity(0.85) })
         .group_hover("sidebar-session-row", move |style| {
             style.bg(tone.opacity(0.24)).text_color(hover_text)
         })
         .font_family(theme.font_mono.clone())
         .font_weight(gpui::FontWeight::MEDIUM)
-        .child(
-            div()
-                .w_full()
-                .text_center()
-                .text_size(px(9.0))
-                .line_height(px(13.0))
-                .child(letter),
-        );
+        .child(div().w_full().text_center().text_size(px(9.0)).line_height(px(13.0)).child(letter));
     crate::frost::frosted(3.0, crate::frost::MENU_BLUR, tile).into_any_element()
 }
 
@@ -138,8 +114,7 @@ impl ProjectIcon {
         engine: Option<crate::state::EngineHandle>,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.on_release(|this, cx| release_media(this.media.take(), cx))
-            .detach();
+        cx.on_release(|this, cx| release_media(this.media.take(), cx)).detach();
         let task = cx.spawn(async move |this, cx| {
             let executor = cx.background_executor().clone();
             let load = async {
@@ -161,10 +136,8 @@ impl ProjectIcon {
                         Err(error) if error.retryable() => return None,
                         Err(_) => continue,
                     };
-                    let (mime, bytes) = client
-                        .read_image((*path).into(), file.checkout_id)
-                        .await
-                        .ok()?;
+                    let (mime, bytes) =
+                        client.read_image((*path).into(), file.checkout_id).await.ok()?;
                     return executor
                         .spawn(async move { decode_project_icon(&mime, bytes).ok() })
                         .await;
@@ -187,13 +160,7 @@ impl ProjectIcon {
                 cx.notify();
             });
         });
-        Self {
-            name,
-            seed,
-            media: None,
-            refreshed: crate::clock::now(cx),
-            _task: task,
-        }
+        Self { name, seed, media: None, refreshed: crate::clock::now(cx), _task: task }
     }
 }
 
@@ -268,11 +235,7 @@ fn project_icon_frame(
         .size(px(size))
         .flex_none()
         .tooltip(move |_, cx| {
-            cx.new(|_| ProjectIconTooltip {
-                name: name.clone(),
-                device: device.clone(),
-            })
-            .into()
+            cx.new(|_| ProjectIconTooltip { name: name.clone(), device: device.clone() }).into()
         })
         .tooltip_show_delay(Duration::from_millis(350))
         .child(child)
@@ -350,9 +313,7 @@ impl ProjectIcons {
         let name = representative
             .map(|space| space.display_name().to_string())
             .unwrap_or_else(|| "Home".into());
-        let seed = representative
-            .map(|space| space.path.clone())
-            .unwrap_or_else(|| "home".into());
+        let seed = representative.map(|space| space.path.clone()).unwrap_or_else(|| "home".into());
         let artwork = space.map(|space| {
             state
                 .project_members(space)
@@ -385,7 +346,9 @@ impl ProjectIcons {
         }
         let mut cache = self.entries.borrow_mut();
         let now = crate::clock::now(cx);
-        cache.retain(|_, entity| now.saturating_duration_since(entity.read(cx).refreshed) < Duration::from_secs(300));
+        cache.retain(|_, entity| {
+            now.saturating_duration_since(entity.read(cx).refreshed) < Duration::from_secs(300)
+        });
         let entity = cache
             .entry(key)
             .or_insert_with(|| {
@@ -421,12 +384,7 @@ mod tests {
         assert_eq!(load_local_icon(temp.path()).unwrap().width, 7.0);
         std::fs::write(temp.path().join(".git"), "gitdir: /unused-test-checkout").unwrap();
         std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
-        assert_eq!(
-            load_local_icon(&temp.path().join("src/nested"))
-                .unwrap()
-                .width,
-            7.0
-        );
+        assert_eq!(load_local_icon(&temp.path().join("src/nested")).unwrap().width, 7.0);
         // A corrupt first match uses the default rather than showing unrelated lower-priority art.
         std::fs::write(temp.path().join("public/apple-touch-icon.png"), b"invalid").unwrap();
         assert!(load_local_icon(temp.path()).is_none());
@@ -437,9 +395,7 @@ mod tests {
         std::fs::write(temp.path().join("favicon.svg"), br##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8" fill="#f00"/></svg>"##).unwrap();
         assert_eq!(load_local_icon(temp.path()).unwrap().width, 12.0);
         std::fs::remove_file(temp.path().join("favicon.svg")).unwrap();
-        image::RgbaImage::new(16, 16)
-            .save(temp.path().join("favicon.ico"))
-            .unwrap();
+        image::RgbaImage::new(16, 16).save(temp.path().join("favicon.ico")).unwrap();
         assert_eq!(load_local_icon(temp.path()).unwrap().width, 16.0);
     }
 }

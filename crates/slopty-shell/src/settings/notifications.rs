@@ -7,7 +7,8 @@
 //! page holds a working copy, a flip emits [`NotificationsEvent::Changed`], and the shell keeps
 //! it: a device-local UI setting.
 
-use gpui::{Context, EventEmitter, Window, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{Context, EventEmitter, Window, div, px};
 
 use crate::popover;
 use crate::settings::widgets;

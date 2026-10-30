@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
-use super::*;
 use gpui::{AppContext, TestAppContext, VisualTestContext};
 use slopty_view_proto::{WorkspaceDirectoryPage, WorkspaceEntry, WorkspaceEntryKind};
+
+use super::*;
 
 pub(crate) fn state() -> AppState {
     let mut state = AppState::new();

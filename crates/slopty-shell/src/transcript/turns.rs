@@ -4,10 +4,12 @@
 //! fresh, from the cache, and written; every kind in the tooltip), the lines it changed, and its
 //! time, at the trailing edge where every step's time stands, ticking while it runs.
 
-use gpui::{AnyElement, SharedString, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, SharedString, div, px};
 use slopty_view_doc::{TurnFacts, ran_for_words, tokens_short};
 
-use super::{Transcript, format_full_timestamp, subagents::model_words, ticking_elapsed};
+use super::subagents::model_words;
+use super::{Transcript, format_full_timestamp, ticking_elapsed};
 use crate::theme::Theme;
 
 /// The height of the line of figures under a prompt: always drawn under a session's prompt, so
@@ -40,7 +42,13 @@ fn kind_words(kind: &str) -> String {
         "reasoning" => "Reasoning".to_owned(),
         other => {
             let mut chars = other.chars();
-            chars.next().map(|c| c.to_ascii_uppercase()).into_iter().chain(chars).collect::<String>().replace('-', " ")
+            chars
+                .next()
+                .map(|c| c.to_ascii_uppercase())
+                .into_iter()
+                .chain(chars)
+                .collect::<String>()
+                .replace('-', " ")
         }
     }
 }
@@ -146,7 +154,9 @@ impl Transcript {
         let tip = words.tip.clone();
         line.role(gpui::Role::Status)
             .aria_label(SharedString::from(spoken))
-            .tooltip(move |window, cx| crate::settings::widgets::text_tooltip(tip.clone())(window, cx))
+            .tooltip(move |window, cx| {
+                crate::settings::widgets::text_tooltip(tip.clone())(window, cx)
+            })
             .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
             .children(words.fault.map(|(fault, failed)| {
                 div()
@@ -157,17 +167,36 @@ impl Transcript {
                     .child(SharedString::from(fault))
             }))
             .when(!words.figures.is_empty(), |line| {
-                line.child(div().min_w_0().flex_shrink(1.0).truncate().child(SharedString::from(words.figures)))
+                line.child(
+                    div()
+                        .min_w_0()
+                        .flex_shrink(1.0)
+                        .truncate()
+                        .child(SharedString::from(words.figures)),
+                )
             })
             .children(words.changed.map(|[added, removed]| {
                 div()
                     .flex_none()
                     .flex()
                     .gap(px(4.0))
-                    .child(div().text_color(theme.success).child(SharedString::from(format!("+{added}"))))
-                    .child(div().text_color(theme.danger).child(SharedString::from(format!("−{removed}"))))
+                    .child(
+                        div()
+                            .text_color(theme.success)
+                            .child(SharedString::from(format!("+{added}"))),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.danger)
+                            .child(SharedString::from(format!("−{removed}"))),
+                    )
             }))
-            .child(div().flex_none().text_color(theme.text_muted).child(SharedString::from(words.time)))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(words.time)),
+            )
             .into_any_element()
     }
 }
@@ -184,7 +213,11 @@ mod tests {
             error: None,
             started: 1_000_000,
             ended,
-            models: vec!["claude-opus-4-7".to_owned(), "claude-haiku-5-5".to_owned(), "claude-opus-4-7".to_owned()],
+            models: vec![
+                "claude-opus-4-7".to_owned(),
+                "claude-haiku-5-5".to_owned(),
+                "claude-opus-4-7".to_owned(),
+            ],
             tokens: BTreeMap::from([
                 ("input".to_owned(), 1_200),
                 ("cache-write".to_owned(), 800),
@@ -199,7 +232,8 @@ mod tests {
     /// and written, its lines and its time; nothing of how it ended.
     #[test]
     fn a_finished_turn_says_its_figures() {
-        let words = turn_words(&facts(TurnFacts::COMPLETE, Some(1_065_000)), 2_000_000, &chrono::Utc);
+        let words =
+            turn_words(&facts(TurnFacts::COMPLETE, Some(1_065_000)), 2_000_000, &chrono::Utc);
         assert_eq!(words.fault, None);
         assert_eq!(words.figures, "Opus 4.7 · Haiku 5.5 · 2k in · 340k cached · 2.1k out");
         assert_eq!(words.changed, Some([12, 4]));

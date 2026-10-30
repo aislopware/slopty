@@ -4,10 +4,8 @@
 //! Colors and GPUI runs deliberately stay outside this cache so appearance
 //! changes recolor existing spans without parsing again.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
-};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use slopty_syntax::{HighlightedDocument, LanguageId};
@@ -80,13 +78,7 @@ impl SyntaxHighlightCache {
             return false;
         }
         self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
-        self.documents.insert(
-            key,
-            CachedDocument {
-                retained_bytes,
-                document,
-            },
-        );
+        self.documents.insert(key, CachedDocument { retained_bytes, document });
         self.touch(key);
         while self.documents.len() > MAX_DOCUMENTS || self.retained_bytes > MAX_RETAINED_BYTES {
             let Some(oldest) = self.recency.pop_front() else {
@@ -134,8 +126,7 @@ fn estimated_document_bytes(document: &HighlightedDocument) -> usize {
         )
         .saturating_add(document.lines.iter().fold(0usize, |total, line| {
             total.saturating_add(
-                line.capacity()
-                    .saturating_mul(std::mem::size_of::<slopty_syntax::HighlightSpan>()),
+                line.capacity().saturating_mul(std::mem::size_of::<slopty_syntax::HighlightSpan>()),
             )
         }))
 }
@@ -147,18 +138,9 @@ mod tests {
     #[test]
     fn key_depends_on_content_language_and_query_not_theme() {
         let rust = DocumentHighlightKey::new(LanguageId::Rust, "fn main() {}");
-        assert_eq!(
-            rust,
-            DocumentHighlightKey::new(LanguageId::Rust, "fn main() {}")
-        );
-        assert_ne!(
-            rust,
-            DocumentHighlightKey::new(LanguageId::Rust, "fn other() {}")
-        );
-        assert_ne!(
-            rust,
-            DocumentHighlightKey::new(LanguageId::TypeScript, "fn main() {}")
-        );
+        assert_eq!(rust, DocumentHighlightKey::new(LanguageId::Rust, "fn main() {}"));
+        assert_ne!(rust, DocumentHighlightKey::new(LanguageId::Rust, "fn other() {}"));
+        assert_ne!(rust, DocumentHighlightKey::new(LanguageId::TypeScript, "fn main() {}"));
     }
 
     #[test]

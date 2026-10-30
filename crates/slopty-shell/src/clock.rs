@@ -54,7 +54,8 @@ pub fn run_on(executor: gpui::BackgroundExecutor) {
 /// Now on the dispatcher's clock, for a stamp made where no `App` is at hand (a hover's flip, a
 /// scroll seen): the clock [`now`] reads between frames. Before the shell starts, a stopwatch's.
 pub fn event_now() -> Instant {
-    DISPATCHER.with(|slot| slot.borrow().as_ref().map_or_else(stopwatch, gpui::BackgroundExecutor::now))
+    DISPATCHER
+        .with(|slot| slot.borrow().as_ref().map_or_else(stopwatch, gpui::BackgroundExecutor::now))
 }
 
 /// A stopwatch's start, for what measures work (a log line's milliseconds, a frame's cost, a
@@ -96,7 +97,8 @@ pub fn utc_at(at: Instant) -> DateTime<Utc> {
 
 /// `date` at `mono`, moved to `at`.
 fn shift(date: DateTime<Utc>, mono: Instant, at: Instant) -> DateTime<Utc> {
-    let delta = |d: std::time::Duration| chrono::TimeDelta::from_std(d).unwrap_or(chrono::TimeDelta::MAX);
+    let delta =
+        |d: std::time::Duration| chrono::TimeDelta::from_std(d).unwrap_or(chrono::TimeDelta::MAX);
     let moved = if at >= mono {
         date.checked_add_signed(delta(at - mono))
     } else {

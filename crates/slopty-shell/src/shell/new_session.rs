@@ -9,18 +9,17 @@
 
 use std::time::Duration;
 
-use gpui::Focusable as _;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Hsla, Pixels, SharedString, Subscription, Task,
-    Window, div, px,
+    AnyElement, Context, Entity, FocusHandle, Focusable as _, Hsla, Pixels, SharedString,
+    Subscription, Task, Window, div, px,
 };
 use slopty_view_doc::calls;
 
 use super::Shell;
 use super::command_palette::{
-    command_key_hint, palette_card, palette_empty, palette_footer, palette_header,
-    palette_overlay, palette_results_fade, palette_results_height,
+    command_key_hint, palette_card, palette_empty, palette_footer, palette_header, palette_overlay,
+    palette_results_fade, palette_results_height,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::icons::{self, icon};
@@ -88,7 +87,11 @@ pub(super) struct NewSessionPicker {
 impl Shell {
     /// "New session…": the picker, the project in context first (`project`, else the open
     /// session's, else the sidebar's filter).
-    pub(super) fn open_new_session_picker(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+    pub(super) fn open_new_session_picker(
+        &mut self,
+        project: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.command_palette = None;
         crate::live::chrome::release_held_keys(cx);
         let first = project.or_else(|| {
@@ -99,9 +102,8 @@ impl Shell {
                 .or_else(|| state.selected_space.clone())
                 .or_else(|| self.settings.space_filter.clone())
         });
-        let search = cx.new(|cx| {
-            ComposerInput::with_context("Search projects\u{2026}", "PaletteSearch", cx)
-        });
+        let search = cx
+            .new(|cx| ComposerInput::with_context("Search projects\u{2026}", "PaletteSearch", cx));
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited)
                 && let Some(picker) = this.new_session.as_mut()
@@ -170,7 +172,8 @@ impl Shell {
         if count == 0 {
             return;
         }
-        picker.active = if down { (picker.active + 1) % count } else { (picker.active + count - 1) % count };
+        picker.active =
+            if down { (picker.active + 1) % count } else { (picker.active + count - 1) % count };
         picker.scroll.scroll_to_item(picker.active);
         cx.notify();
     }
@@ -178,7 +181,8 @@ impl Shell {
     fn step_new_session_agent(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(picker) = self.new_session.as_mut() else { return };
         let count = AGENTS.len();
-        picker.agent = if forward { (picker.agent + 1) % count } else { (picker.agent + count - 1) % count };
+        picker.agent =
+            if forward { (picker.agent + 1) % count } else { (picker.agent + count - 1) % count };
         picker.refused = None;
         cx.notify();
     }
@@ -192,7 +196,12 @@ impl Shell {
     }
 
     /// Start `agent` in project `space` on its machine; its session opens once listed.
-    fn start_session(&mut self, space: slopty_view_proto::Space, agent: Agent, cx: &mut Context<Self>) {
+    fn start_session(
+        &mut self,
+        space: slopty_view_proto::Space,
+        agent: Agent,
+        cx: &mut Context<Self>,
+    ) {
         if self.new_session.as_ref().is_none_or(|picker| picker.starting.is_some()) {
             return;
         }
@@ -287,14 +296,17 @@ impl Shell {
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         // A key reads as everywhere else (`keys::combo_text`).
-        let shortcut =
-            crate::keys::combo_text(self.settings.keymap.get(crate::settings::ShortcutId::NewSession));
+        let shortcut = crate::keys::combo_text(
+            self.settings.keymap.get(crate::settings::ShortcutId::NewSession),
+        );
         let rows = self.new_session_rows(cx);
         let machines: Vec<Option<String>> = {
             let state = self.state.read(cx);
             let many = state.devices.len() > 1;
             rows.iter()
-                .map(|space| many.then(|| state.device_name(&space.device_id).map(str::to_owned)).flatten())
+                .map(|space| {
+                    many.then(|| state.device_name(&space.device_id).map(str::to_owned)).flatten()
+                })
                 .collect()
         };
         let picker = self.new_session.as_mut()?;
@@ -313,7 +325,10 @@ impl Shell {
         let mut children: Vec<AnyElement> = Vec::new();
         for (ix, space) in rows.iter().enumerate() {
             let opening = starting.as_deref() == Some(space.id.as_str());
-            let why = refused.as_ref().filter(|(project, _)| *project == space.id).map(|(_, why)| why.clone());
+            let why = refused
+                .as_ref()
+                .filter(|(project, _)| *project == space.id)
+                .map(|(_, why)| why.clone());
             let name: SharedString = space.display_name().to_owned().into();
             let place = match &machines[ix] {
                 Some(machine) => format!("{machine} \u{00B7} {}", space.path),
@@ -321,53 +336,61 @@ impl Shell {
             };
             let corner: Option<SharedString> = opening.then(|| "Starting\u{2026}".into());
             let target = space.clone();
-            let row = popover::menu_row(&theme, ix == active, format!("new-session-row-{ix}"))
-                .id(("new-session-row", ix))
-                .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                .role(gpui::Role::Button)
-                .aria_label(SharedString::from(format!("Start {} in {name}", agent.name)))
-                .min_h(px(44.0))
-                .py(px(5.0))
-                .child(icon(mark).size(px(16.0)).flex_none().text_color(tint.unwrap_or(theme.text_muted)))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(div().truncate().child(name))
-                        .child(match why {
-                            Some(why) => div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.danger)
-                                .child(SharedString::from(why)),
-                            None => div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(place)),
-                        }),
-                )
-                .children(corner.map(|corner| {
-                    div()
-                        .flex_none()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_faint)
-                        .child(corner)
-                }))
-                .on_click(cx.listener(move |this, _, _, cx| this.start_session(target.clone(), agent, cx)))
-                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
-                    if let Some(picker) = this.new_session.as_mut()
-                        && picker.active != ix
-                    {
-                        picker.active = ix;
-                        cx.notify();
-                    }
-                }));
+            let row =
+                popover::menu_row(&theme, ix == active, format!("new-session-row-{ix}"))
+                    .id(("new-session-row", ix))
+                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!("Start {} in {name}", agent.name)))
+                    .min_h(px(44.0))
+                    .py(px(5.0))
+                    .child(
+                        icon(mark)
+                            .size(px(16.0))
+                            .flex_none()
+                            .text_color(tint.unwrap_or(theme.text_muted)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(div().truncate().child(name))
+                            .child(match why {
+                                Some(why) => div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.danger)
+                                    .child(SharedString::from(why)),
+                                None => div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from(place)),
+                            }),
+                    )
+                    .children(corner.map(|corner| {
+                        div()
+                            .flex_none()
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(theme.text_faint)
+                            .child(corner)
+                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.start_session(target.clone(), agent, cx)
+                    }))
+                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                        if let Some(picker) = this.new_session.as_mut()
+                            && picker.active != ix
+                        {
+                            picker.active = ix;
+                            cx.notify();
+                        }
+                    }));
             children.push(div().px(px(8.0)).child(row).into_any_element());
         }
         let empty = rows.is_empty().then(|| {
@@ -414,7 +437,10 @@ impl Shell {
                     .gap(px(5.0))
                     .role(gpui::Role::Tab)
                     .aria_label(agent.name)
-                    .tooltip(crate::settings::widgets::text_tooltip(format!("Start {} \u{00B7} \u{21E5}", agent.name)))
+                    .tooltip(crate::settings::widgets::text_tooltip(format!(
+                        "Start {} \u{00B7} \u{21E5}",
+                        agent.name
+                    )))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(picker) = this.new_session.as_mut() {
                             picker.agent = ix;

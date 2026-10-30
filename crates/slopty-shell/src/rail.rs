@@ -80,11 +80,7 @@ impl GlideTimeline {
     pub fn step(&mut self, eased: f32) -> f32 {
         let eased = eased.clamp(self.eased_prev, 1.0);
         let denom = 1.0 - self.eased_prev;
-        let frac = if denom <= 1e-6 {
-            1.0
-        } else {
-            (eased - self.eased_prev) / denom
-        };
+        let frac = if denom <= 1e-6 { 1.0 } else { (eased - self.eased_prev) / denom };
         self.eased_prev = eased;
         frac.clamp(0.0, 1.0)
     }
@@ -117,14 +113,13 @@ impl Transcript {
     /// frame's position; per-frame movement comes from the timeline, never
     /// from a percent of the remaining distance:
     ///
-    /// - a glued bottom anchor (`item_ix == len`, one viewport BELOW the
-    ///   visible top) is first materialized as the true viewport-top anchor —
-    ///   stepping straight from the glued anchor lands inside the re-glue band
-    ///   and layout undoes it every frame (the old stall→double-jump path);
-    /// - rows above the viewport are unmeasured, so the anchor glides in item
-    ///   space along the same timeline, estimating sub-row offsets from a
-    ///   local row-height EMA; the position is read back each frame, so a
-    ///   measurement correcting the estimate just re-enters the timeline;
+    /// - a glued bottom anchor (`item_ix == len`, one viewport BELOW the visible top) is first
+    ///   materialized as the true viewport-top anchor — stepping straight from the glued anchor
+    ///   lands inside the re-glue band and layout undoes it every frame (the old stall→double-jump
+    ///   path);
+    /// - rows above the viewport are unmeasured, so the anchor glides in item space along the same
+    ///   timeline, estimating sub-row offsets from a local row-height EMA; the position is read
+    ///   back each frame, so a measurement correcting the estimate just re-enters the timeline;
     /// - once the target row is measured the glide is pixel-exact.
     ///
     /// It steps once a display frame ([`Transcript::step_glide`], from the render's
@@ -136,10 +131,7 @@ impl Transcript {
         // one is parked, not behind it; the first row carries its own titlebar gap.
         let land = landing_inset(target);
         if motion::reduced_motion(cx) {
-            self.list_state().scroll_to(ListOffset {
-                item_ix: target,
-                offset_in_item: px(-land),
-            });
+            self.list_state().scroll_to(ListOffset { item_ix: target, offset_in_item: px(-land) });
             cx.notify();
             return;
         }
@@ -164,16 +156,14 @@ impl Transcript {
         let (target, land) = (glide.target, glide.land);
         let total = motion::SCROLL_GLIDE.total().mul_f32(motion::speed_scale());
         let now = crate::clock::now(cx);
-        let raw = (now.saturating_duration_since(glide.started).as_secs_f32() / total.as_secs_f32())
-            .min(1.0);
+        let raw = (now.saturating_duration_since(glide.started).as_secs_f32()
+            / total.as_secs_f32())
+        .min(1.0);
         glide.steps += 1;
         let list = self.list_state().clone();
         // The timeline runs out (it shouldn't, on frames): land exactly.
         if raw >= 1.0 || glide.steps > glide_max_steps() {
-            list.scroll_to(ListOffset {
-                item_ix: target,
-                offset_in_item: px(-land),
-            });
+            list.scroll_to(ListOffset { item_ix: target, offset_in_item: px(-land) });
             if glide.flash {
                 self.flash_landing(target, cx);
             }
@@ -189,9 +179,8 @@ impl Transcript {
             list.scroll_by(px(-(viewport + 0.5)));
         }
         let top = list.logical_scroll_top();
-        let top_height = list
-            .bounds_for_item(top.item_ix)
-            .map(|b| f32::from(b.size.height).max(1.0));
+        let top_height =
+            list.bounds_for_item(top.item_ix).map(|b| f32::from(b.size.height).max(1.0));
         // Row-height estimate for unmeasured territory: the mean
         // over the whole visible span, recomputed per frame (the
         // ~dozen mixed row kinds in a viewport average out — a
@@ -258,16 +247,11 @@ impl Transcript {
                 // pixel-exact — and never below the current offset,
                 // so motion stays monotone even when a height
                 // estimate was corrected.
-                top_height
-                    .map(|h| (within * h).min(f32::from(top.offset_in_item)))
-                    .unwrap_or(0.0)
+                top_height.map(|h| (within * h).min(f32::from(top.offset_in_item))).unwrap_or(0.0)
             } else {
                 within * height_ema.unwrap_or(0.0)
             };
-            list.scroll_to(ListOffset {
-                item_ix: ix,
-                offset_in_item: px(offset),
-            });
+            list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(offset) });
             cx.notify();
             return;
         }
@@ -312,10 +296,7 @@ mod tests {
             let frac = timeline.step(eased);
             pos -= frac * (pos - target);
             let absolute = start + eased * (target - start);
-            assert!(
-                (pos - absolute).abs() < 0.05,
-                "frame {i}: pos {pos} != absolute {absolute}"
-            );
+            assert!((pos - absolute).abs() < 0.05, "frame {i}: pos {pos} != absolute {absolute}");
         }
         assert_eq!(pos, target); // eased hits 1.0 → frac 1.0 → exact landing.
     }

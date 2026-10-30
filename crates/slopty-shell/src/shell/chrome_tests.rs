@@ -19,7 +19,8 @@ fn a_chat_title_the_agent_gives_rolls_in(cx: &mut TestAppContext) {
     let retitle = |title: &'static str, cx: &mut VisualTestContext| {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
-                state.chats.iter_mut().find(|chat| chat.id == "b").unwrap().title = Some(title.into());
+                state.chats.iter_mut().find(|chat| chat.id == "b").unwrap().title =
+                    Some(title.into());
             });
             cx.notify();
         });
@@ -48,9 +49,14 @@ fn a_selected_row_under_the_pointer_goes_past_its_selection() {
     let _appearance = crate::theme::lock_appearance();
     for appearance in [crate::theme::Appearance::Light, crate::theme::Appearance::Dark] {
         crate::theme::set_current_appearance(appearance);
-        let (selected, hovered) = (crate::theme::glass_selected_bg(), crate::theme::selected_hover_wash());
+        let (selected, hovered) =
+            (crate::theme::glass_selected_bg(), crate::theme::selected_hover_wash());
         assert!(hovered.a > selected.a, "darker than selected: {selected:?} {hovered:?}");
-        assert_eq!((hovered.h, hovered.s, hovered.l), (selected.h, selected.s, selected.l), "the same ink");
+        assert_eq!(
+            (hovered.h, hovered.s, hovered.l),
+            (selected.h, selected.s, selected.l),
+            "the same ink"
+        );
     }
 }
 
@@ -66,16 +72,24 @@ fn before_any_project_the_sidebar_says_so_and_offers_only_what_works(cx: &mut Te
         });
     });
     let nodes = tree(cx);
-    assert!(find(&nodes, Role::Label, "No projects yet").is_some(), "the empty line says what fills it first");
+    assert!(
+        find(&nodes, Role::Label, "No projects yet").is_some(),
+        "the empty line says what fills it first"
+    );
     assert!(cx.debug_bounds("sidebar-empty-key").is_none(), "no ⌘N: it makes no chat yet");
     assert!(
         !nodes.values().any(|node| node.label.starts_with("Filter projects")),
         "no filter with nothing to filter"
     );
-    assert!(find(&nodes, Role::Heading, "Add a project to get started").is_some(), "the canvas's headline");
+    assert!(
+        find(&nodes, Role::Heading, "Add a project to get started").is_some(),
+        "the canvas's headline"
+    );
     assert!(find(&nodes, Role::Button, "Add a project").is_some(), "its one action, named");
     // A project, and the list says what fills it now, with its key.
-    shell.update(cx, |shell, cx| shell.state.update(cx, |state, _| state.spaces = vec![space("app")]));
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, _| state.spaces = vec![space("app")])
+    });
     let nodes = tree(cx);
     assert!(find(&nodes, Role::Label, "No sessions yet").is_some());
     assert!(cx.debug_bounds("sidebar-empty-key").is_some(), "⌘N makes one now");
@@ -122,7 +136,10 @@ fn the_chat_menu_names_its_rows(cx: &mut TestAppContext) {
     assert!(find(&nodes, Role::MenuItem, "Pin").is_none(), "no Pin: the list keeps its order");
     let copy = find(&nodes, Role::MenuItem, "Copy").expect("Copy");
     assert_eq!(copy.expanded, Some(false), "its submenu shut: {copy:?}");
-    assert!(nodes.values().all(|node| node.role != Role::MenuItem || !node.label.is_empty()), "no row unnamed");
+    assert!(
+        nodes.values().all(|node| node.role != Role::MenuItem || !node.label.is_empty()),
+        "no row unnamed"
+    );
 }
 
 /// Escape puts away whichever context menu is up, a chat's, a project's or the account's, as a
@@ -200,7 +217,9 @@ fn the_titlebar_row_names_the_session_then_its_actions(cx: &mut TestAppContext) 
     let identity = nodes
         .values()
         .find(|node| {
-            node.role == Role::Button && node.label == "Chat a" && node.bounds.top() < px(Theme::TITLEBAR_HEIGHT)
+            node.role == Role::Button
+                && node.label == "Chat a"
+                && node.bounds.top() < px(Theme::TITLEBAR_HEIGHT)
         })
         .expect("the identity, named by the session's title");
     assert_eq!(identity.description.as_deref(), Some("Studio \u{b7} fix-lexer"));
@@ -288,7 +307,10 @@ fn each_move_between_settings_and_the_chats_fades_the_page_in(cx: &mut TestAppCo
 mod session_card {
     use super::super::*;
 
-    fn test_shell(cx: &mut gpui::TestAppContext, path: &std::path::Path) -> gpui::WindowHandle<Shell> {
+    fn test_shell(
+        cx: &mut gpui::TestAppContext,
+        path: &std::path::Path,
+    ) -> gpui::WindowHandle<Shell> {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
@@ -325,9 +347,12 @@ mod session_card {
     /// keyboard, and again puts the keyboard back in the terminal, the inspector left standing.
     /// A plain terminal has nothing to inspect.
     #[gpui::test]
-    fn a_session_opens_on_its_terminal_and_cmd_i_opens_its_inspector(cx: &mut gpui::TestAppContext) {
+    fn a_session_opens_on_its_terminal_and_cmd_i_opens_its_inspector(
+        cx: &mut gpui::TestAppContext,
+    ) {
         use super::super::RightSurface;
-        let (shell, cx) = super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
+        let (shell, cx) =
+            super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
         let show = |chat: &str, cx: &mut gpui::VisualTestContext| {
             shell.update(cx, |shell, cx| shell.open_chat(chat.into(), cx));
             cx.run_until_parked();
@@ -363,7 +388,8 @@ mod session_card {
 
         let terminal = format!("{}t", crate::inspector::TERMINAL_CHAT);
         shell.update(cx, |shell, cx| {
-            let row = super::super::retention_tests::chat_row(&terminal, 3, None, chrono::Utc::now());
+            let row =
+                super::super::retention_tests::chat_row(&terminal, 3, None, chrono::Utc::now());
             shell.state.update(cx, |state, cx| {
                 state.chats.push(row);
                 cx.notify();
@@ -372,7 +398,11 @@ mod session_card {
         show(&terminal, cx);
         cx.simulate_keystrokes("cmd-i");
         cx.run_until_parked();
-        assert_eq!(shown(&terminal, cx), (Vec::new(), false), "a plain terminal has nothing to inspect");
+        assert_eq!(
+            shown(&terminal, cx),
+            (Vec::new(), false),
+            "a plain terminal has nothing to inspect"
+        );
     }
 
     /// The inspector does not repeat its session's title, which the terminal's title bar
@@ -393,9 +423,15 @@ mod session_card {
             cx.simulate_keystrokes("cmd-i");
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            assert!(shell.read_with(cx, |shell, cx| shell.inspector_shown(cx)), "{chat}'s inspector is open");
+            assert!(
+                shell.read_with(cx, |shell, cx| shell.inspector_shown(cx)),
+                "{chat}'s inspector is open"
+            );
             assert!(cx.debug_bounds("inspector-timeline").is_some(), "its timeline is drawn");
-            assert!(cx.debug_bounds("inspector-title").is_none(), "{chat}'s title is not said again");
+            assert!(
+                cx.debug_bounds("inspector-title").is_none(),
+                "{chat}'s title is not said again"
+            );
             cx.debug_bounds("inspector-header").is_some()
         };
         assert!(inspect("a", cx), "a session at work says so over its timeline");
@@ -431,7 +467,10 @@ mod session_card {
         let toaster = cx.debug_bounds("toaster").expect("the toast shows");
         let sidebar = cx.debug_bounds("sidebar-column").expect("the sidebar");
         let foot = cx.debug_bounds("sidebar-footer-row").expect("its bottom row");
-        assert!(toaster.right() <= sidebar.right(), "inside the sidebar: {toaster:?} in {sidebar:?}");
+        assert!(
+            toaster.right() <= sidebar.right(),
+            "inside the sidebar: {toaster:?} in {sidebar:?}"
+        );
         assert!(toaster.left() >= sidebar.left(), "{toaster:?} in {sidebar:?}");
         assert!(toaster.bottom() <= foot.top(), "above its bottom row: {toaster:?} over {foot:?}");
 
@@ -462,9 +501,7 @@ mod session_card {
         cx.run_until_parked();
         // The item sits in the submenu, outside the menu card: pressing it
         // must copy rather than dismiss the menu first.
-        let item = cx
-            .debug_bounds("chat-copy-slopty")
-            .expect("the Copy submenu is open");
+        let item = cx.debug_bounds("chat-copy-slopty").expect("the Copy submenu is open");
         cx.simulate_click(item.center(), gpui::Modifiers::none());
         cx.run_until_parked();
         cx.update(|_, cx| {
@@ -472,5 +509,4 @@ mod session_card {
         });
         assert!(cx.debug_bounds("toaster").is_some(), "the shell paints it");
     }
-
 }

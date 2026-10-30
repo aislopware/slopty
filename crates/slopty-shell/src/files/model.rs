@@ -8,16 +8,9 @@ use slopty_view_proto::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectoryLoadState {
     Unloaded,
-    Loading {
-        cursor: Option<String>,
-    },
-    Loaded {
-        next_cursor: Option<String>,
-    },
-    Error {
-        message: String,
-        cursor: Option<String>,
-    },
+    Loading { cursor: Option<String> },
+    Loaded { next_cursor: Option<String> },
+    Error { message: String, cursor: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -36,13 +29,7 @@ impl TreeNode {
         } else {
             DirectoryLoadState::Loaded { next_cursor: None }
         };
-        Self {
-            entry,
-            children: Vec::new(),
-            load,
-            stale: false,
-            has_loaded: false,
-        }
+        Self { entry, children: Vec::new(), load, stale: false, has_loaded: false }
     }
 }
 
@@ -64,10 +51,7 @@ pub struct VisibleTreeRow {
 
 impl VisibleTreeRow {
     pub fn selectable(&self) -> bool {
-        matches!(
-            self.kind,
-            VisibleRowKind::Entry | VisibleRowKind::LoadMore { .. }
-        )
+        matches!(self.kind, VisibleRowKind::Entry | VisibleRowKind::LoadMore { .. })
     }
 }
 
@@ -153,9 +137,7 @@ impl FileTreeModel {
         self.selected_paths()
             .into_iter()
             .filter(|path| {
-                !path
-                    .match_indices('/')
-                    .any(|(end, _)| self.selection.contains(&path[..end]))
+                !path.match_indices('/').any(|(end, _)| self.selection.contains(&path[..end]))
             })
             .collect()
     }
@@ -169,12 +151,8 @@ impl FileTreeModel {
     }
 
     pub fn expanded_directories(&self) -> Vec<String> {
-        let mut paths = self
-            .expanded
-            .iter()
-            .filter(|path| !path.is_empty())
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut paths =
+            self.expanded.iter().filter(|path| !path.is_empty()).cloned().collect::<Vec<_>>();
         paths.sort_by_key(|path| (path.matches('/').count(), path.clone()));
         paths
     }
@@ -190,8 +168,7 @@ impl FileTreeModel {
         self.generation = self.generation.wrapping_add(1);
         self.nodes.clear();
         self.listing_children.clear();
-        self.nodes
-            .insert(String::new(), TreeNode::new(root_entry()));
+        self.nodes.insert(String::new(), TreeNode::new(root_entry()));
         self.expanded.clear();
         self.expanded.insert(String::new());
         self.visible_rows.clear();
@@ -237,10 +214,7 @@ impl FileTreeModel {
         let Some(node) = self.nodes.get_mut(directory) else {
             return false;
         };
-        node.load = DirectoryLoadState::Error {
-            message: message.into(),
-            cursor,
-        };
+        node.load = DirectoryLoadState::Error { message: message.into(), cursor };
         self.rebuild_visible_rows();
         true
     }
@@ -260,8 +234,7 @@ impl FileTreeModel {
 
         let append = matches!(parent.load, DirectoryLoadState::Loading { cursor: Some(_) });
         if !append {
-            self.listing_children
-                .insert(directory.clone(), HashSet::new());
+            self.listing_children.insert(directory.clone(), HashSet::new());
         }
         let seen = self.listing_children.entry(directory.clone()).or_default();
         seen.extend(
@@ -296,11 +269,7 @@ impl FileTreeModel {
             }
             entry.ignored |= parent_ignored;
             let path = entry.path.clone();
-            if self
-                .nodes
-                .get(&path)
-                .is_some_and(|node| node.entry.kind != entry.kind)
-            {
+            if self.nodes.get(&path).is_some_and(|node| node.entry.kind != entry.kind) {
                 self.remove_subtree(&path);
             }
             self.nodes
@@ -314,17 +283,12 @@ impl FileTreeModel {
             }
         }
 
-        let mut children = self
-            .nodes
-            .get(&directory)
-            .map(|node| node.children.clone())
-            .unwrap_or_default();
+        let mut children =
+            self.nodes.get(&directory).map(|node| node.children.clone()).unwrap_or_default();
         children.sort_by(|left, right| compare_paths(&self.nodes, left, right));
         if let Some(parent) = self.nodes.get_mut(&directory) {
             parent.children = children;
-            parent.load = DirectoryLoadState::Loaded {
-                next_cursor: page.next_cursor,
-            };
+            parent.load = DirectoryLoadState::Loaded { next_cursor: page.next_cursor };
             parent.stale = false;
             parent.has_loaded = true;
         }
@@ -341,10 +305,8 @@ impl FileTreeModel {
         }
         if !self.expanded.remove(path) {
             self.expanded.insert(path.to_string());
-        } else if let Some(cursor) = self
-            .selected
-            .clone()
-            .filter(|selected| is_descendant(selected, path))
+        } else if let Some(cursor) =
+            self.selected.clone().filter(|selected| is_descendant(selected, path))
         {
             // The folder replaces a selected cursor; a deselected cursor must
             // not pull the folder into the selection.
@@ -361,10 +323,7 @@ impl FileTreeModel {
     }
 
     pub fn expand(&mut self, path: &str) -> bool {
-        if self
-            .nodes
-            .get(path)
-            .is_none_or(|node| node.entry.kind != WorkspaceEntryKind::Directory)
+        if self.nodes.get(path).is_none_or(|node| node.entry.kind != WorkspaceEntryKind::Directory)
         {
             return false;
         }
@@ -441,9 +400,7 @@ impl FileTreeModel {
             .as_deref()
             .and_then(|path| entries.iter().position(|candidate| candidate == path));
         let next = match current {
-            Some(index) => index
-                .saturating_add_signed(delta)
-                .min(entries.len().checked_sub(1)?),
+            Some(index) => index.saturating_add_signed(delta).min(entries.len().checked_sub(1)?),
             None if delta.is_negative() => entries.len().checked_sub(1)?,
             None => 0,
         };
@@ -468,10 +425,7 @@ impl FileTreeModel {
     /// Escape: keep only the cursor.
     pub fn collapse_selection(&mut self) -> bool {
         if self.selection.len() <= 1
-            && self
-                .selected
-                .as_ref()
-                .is_none_or(|path| self.selection.contains(path))
+            && self.selected.as_ref().is_none_or(|path| self.selection.contains(path))
         {
             return false;
         }
@@ -631,10 +585,7 @@ impl FileTreeModel {
             let parent = parent_path(path).filter(|parent| !parent.is_empty());
             self.selected = parent.clone();
             if let Some(parent) = parent
-                && self
-                    .selection
-                    .iter()
-                    .all(|selected| contains(path, selected))
+                && self.selection.iter().all(|selected| contains(path, selected))
             {
                 self.selection.insert(parent);
             }
@@ -690,11 +641,7 @@ impl FileTreeModel {
     }
 
     fn remove_subtree(&mut self, path: &str) {
-        let children = self
-            .nodes
-            .get(path)
-            .map(|node| node.children.clone())
-            .unwrap_or_default();
+        let children = self.nodes.get(path).map(|node| node.children.clone()).unwrap_or_default();
         for child in children {
             self.remove_subtree(&child);
         }
@@ -722,13 +669,8 @@ impl FileTreeModel {
             .filter(|row| row.kind == VisibleRowKind::Entry)
             .map(|row| row.path.as_str())
             .collect::<HashSet<_>>();
-        self.selection
-            .retain(|path| visible.contains(path.as_str()));
-        if self
-            .anchor
-            .as_deref()
-            .is_some_and(|anchor| !visible.contains(anchor))
-        {
+        self.selection.retain(|path| visible.contains(path.as_str()));
+        if self.anchor.as_deref().is_some_and(|anchor| !visible.contains(anchor)) {
             self.anchor = None;
         }
     }
@@ -772,27 +714,21 @@ impl FileTreeModel {
                     rows.push(VisibleTreeRow {
                         path: synthetic_path(directory, "empty"),
                         depth,
-                        kind: VisibleRowKind::Empty {
-                            directory: directory.to_string(),
-                        },
+                        kind: VisibleRowKind::Empty { directory: directory.to_string() },
                     });
                 }
             }
             DirectoryLoadState::Loading { .. } => rows.push(VisibleTreeRow {
                 path: synthetic_path(directory, "loading"),
                 depth,
-                kind: VisibleRowKind::Loading {
-                    directory: directory.to_string(),
-                },
+                kind: VisibleRowKind::Loading { directory: directory.to_string() },
             }),
             DirectoryLoadState::Loaded { next_cursor } => {
                 if node.children.is_empty() {
                     rows.push(VisibleTreeRow {
                         path: synthetic_path(directory, "empty"),
                         depth,
-                        kind: VisibleRowKind::Empty {
-                            directory: directory.to_string(),
-                        },
+                        kind: VisibleRowKind::Empty { directory: directory.to_string() },
                     });
                 }
                 if let Some(cursor) = next_cursor {
@@ -861,9 +797,7 @@ fn is_descendant(candidate: &str, ancestor: &str) -> bool {
     if ancestor.is_empty() {
         return !candidate.is_empty();
     }
-    candidate
-        .strip_prefix(ancestor)
-        .is_some_and(|suffix| suffix.starts_with('/'))
+    candidate.strip_prefix(ancestor).is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn contains(ancestor: &str, path: &str) -> bool {
@@ -950,10 +884,7 @@ mod tests {
         tree.begin_load("", None, 0);
         assert_eq!(tree.visible_rows(), empty);
         assert!(tree.node("").unwrap().has_loaded);
-        tree.apply_page(
-            page("", vec![entry("src", WorkspaceEntryKind::Directory)], None),
-            0,
-        );
+        tree.apply_page(page("", vec![entry("src", WorkspaceEntryKind::Directory)], None), 0);
         let loaded = tree.visible_rows().to_vec();
         tree.begin_load("", None, 0);
         assert_eq!(tree.visible_rows(), loaded);
@@ -965,20 +896,14 @@ mod tests {
     #[test]
     fn changes_during_load_are_remembered_and_collapsed_caches_become_stale() {
         let mut tree = FileTreeModel::new();
-        tree.apply_page(
-            page("", vec![entry("src", WorkspaceEntryKind::Directory)], None),
-            0,
-        );
+        tree.apply_page(page("", vec![entry("src", WorkspaceEntryKind::Directory)], None), 0);
         tree.begin_load("", None, 0);
         tree.invalidate_all_directories();
         assert!(tree.node("").unwrap().stale);
         assert!(tree.node("src").unwrap().stale);
         assert!(!tree.begin_load("", None, 0));
         assert!(tree.node("").unwrap().stale);
-        tree.apply_page(
-            page("", vec![entry("src", WorkspaceEntryKind::Directory)], None),
-            0,
-        );
+        tree.apply_page(page("", vec![entry("src", WorkspaceEntryKind::Directory)], None), 0);
         assert!(tree.node("src").unwrap().stale);
         tree.expand("src");
         assert!(tree.begin_load("src", None, 0));
@@ -988,30 +913,13 @@ mod tests {
     #[test]
     fn refreshing_a_directory_preserves_descendants_expansion_and_selection() {
         let mut tree = FileTreeModel::new();
-        tree.apply_page(
-            page("", vec![entry("src", WorkspaceEntryKind::Directory)], None),
-            0,
-        );
+        tree.apply_page(page("", vec![entry("src", WorkspaceEntryKind::Directory)], None), 0);
         tree.expand("src");
-        tree.apply_page(
-            page(
-                "src",
-                vec![entry("src/lib.rs", WorkspaceEntryKind::File)],
-                None,
-            ),
-            0,
-        );
+        tree.apply_page(page("src", vec![entry("src/lib.rs", WorkspaceEntryKind::File)], None), 0);
         tree.select("src/lib.rs");
         tree.begin_load("", None, 0);
-        assert!(
-            tree.visible_rows()
-                .iter()
-                .any(|row| row.path == "src/lib.rs")
-        );
-        tree.apply_page(
-            page("", vec![entry("src", WorkspaceEntryKind::Directory)], None),
-            0,
-        );
+        assert!(tree.visible_rows().iter().any(|row| row.path == "src/lib.rs"));
+        tree.apply_page(page("", vec![entry("src", WorkspaceEntryKind::Directory)], None), 0);
         assert!(tree.is_expanded("src"));
         assert!(tree.is_directory_loaded("src"));
         assert_eq!(tree.selected(), Some("src/lib.rs"));
@@ -1033,27 +941,14 @@ mod tests {
             0,
         );
         tree.expand("z");
-        tree.apply_page(
-            page("z", vec![entry("z/child", WorkspaceEntryKind::File)], None),
-            0,
-        );
+        tree.apply_page(page("z", vec![entry("z/child", WorkspaceEntryKind::File)], None), 0);
         tree.select("z/child");
         tree.begin_load("", None, 0);
-        tree.apply_page(
-            page(
-                "",
-                vec![entry("a", WorkspaceEntryKind::Directory)],
-                Some("next"),
-            ),
-            0,
-        );
+        tree.apply_page(page("", vec![entry("a", WorkspaceEntryKind::Directory)], Some("next")), 0);
         assert!(tree.node("z/child").is_some());
         assert!(tree.node("removed").is_some());
         tree.begin_load("", Some("next".into()), 0);
-        tree.apply_page(
-            page("", vec![entry("z", WorkspaceEntryKind::Directory)], None),
-            0,
-        );
+        tree.apply_page(page("", vec![entry("z", WorkspaceEntryKind::Directory)], None), 0);
         assert!(tree.node("a").is_some());
         assert!(tree.node("removed").is_none());
         assert!(tree.is_expanded("z"));
@@ -1063,32 +958,16 @@ mod tests {
     #[test]
     fn refresh_removes_deleted_subtrees_and_handles_directory_becoming_file() {
         let mut tree = FileTreeModel::new();
-        tree.apply_page(
-            page("", vec![entry("src", WorkspaceEntryKind::Directory)], None),
-            0,
-        );
+        tree.apply_page(page("", vec![entry("src", WorkspaceEntryKind::Directory)], None), 0);
         tree.expand("src");
-        tree.apply_page(
-            page(
-                "src",
-                vec![entry("src/lib.rs", WorkspaceEntryKind::File)],
-                None,
-            ),
-            0,
-        );
+        tree.apply_page(page("src", vec![entry("src/lib.rs", WorkspaceEntryKind::File)], None), 0);
         tree.select("src/lib.rs");
         tree.begin_load("", None, 0);
-        tree.apply_page(
-            page("", vec![entry("src", WorkspaceEntryKind::File)], None),
-            0,
-        );
+        tree.apply_page(page("", vec![entry("src", WorkspaceEntryKind::File)], None), 0);
         assert!(tree.node("src/lib.rs").is_none());
         assert!(!tree.is_expanded("src"));
         assert_eq!(tree.selected(), None);
-        assert_eq!(
-            tree.node("src").unwrap().entry.kind,
-            WorkspaceEntryKind::File
-        );
+        assert_eq!(tree.node("src").unwrap().entry.kind, WorkspaceEntryKind::File);
         tree.begin_load("", None, 0);
         tree.apply_page(page("", vec![], None), 0);
         assert!(tree.node("src").is_none());
@@ -1134,18 +1013,10 @@ mod tests {
         tree.expand("src");
         tree.begin_load("src", None, generation);
         tree.apply_page(
-            page(
-                "src",
-                vec![entry("src/lib.rs", WorkspaceEntryKind::File)],
-                None,
-            ),
+            page("src", vec![entry("src/lib.rs", WorkspaceEntryKind::File)], None),
             generation,
         );
-        let row = tree
-            .visible_rows
-            .iter()
-            .find(|row| row.path == "src/lib.rs")
-            .unwrap();
+        let row = tree.visible_rows.iter().find(|row| row.path == "src/lib.rs").unwrap();
         assert_eq!(row.depth, 1);
     }
 
@@ -1197,11 +1068,7 @@ mod tests {
         tree.expand("src");
         tree.begin_load("src", None, generation);
         tree.apply_page(
-            page(
-                "src",
-                vec![entry("src/lib.rs", WorkspaceEntryKind::File)],
-                None,
-            ),
+            page("src", vec![entry("src/lib.rs", WorkspaceEntryKind::File)], None),
             generation,
         );
         tree.select("src/lib.rs");
@@ -1215,11 +1082,7 @@ mod tests {
         let generation = tree.generation();
         tree.begin_load("", None, generation);
         tree.apply_page(
-            page(
-                "",
-                vec![entry("a.rs", WorkspaceEntryKind::File)],
-                Some("next"),
-            ),
+            page("", vec![entry("a.rs", WorkspaceEntryKind::File)], Some("next")),
             generation,
         );
         tree.begin_load("", Some("next".into()), generation);
@@ -1292,16 +1155,10 @@ mod tests {
     #[test]
     fn visible_rows_stop_at_cycles_in_a_corrupted_model() {
         let mut tree = FileTreeModel::new();
-        tree.nodes.insert(
-            "loop".into(),
-            TreeNode::new(entry("loop", WorkspaceEntryKind::Directory)),
-        );
-        tree.nodes.get_mut("").unwrap().children.push("loop".into());
         tree.nodes
-            .get_mut("loop")
-            .unwrap()
-            .children
-            .push("loop".into());
+            .insert("loop".into(), TreeNode::new(entry("loop", WorkspaceEntryKind::Directory)));
+        tree.nodes.get_mut("").unwrap().children.push("loop".into());
+        tree.nodes.get_mut("loop").unwrap().children.push("loop".into());
         tree.expanded.insert("loop".into());
 
         tree.rebuild_visible_rows();
@@ -1321,10 +1178,12 @@ mod tests {
         let mut tree = FileTreeModel::new();
         let stale = tree.generation();
         tree.reset();
-        assert!(!tree.apply_page(
-            page("", vec![entry("stale.rs", WorkspaceEntryKind::File)], None),
-            stale,
-        ));
+        assert!(
+            !tree.apply_page(
+                page("", vec![entry("stale.rs", WorkspaceEntryKind::File)], None),
+                stale,
+            )
+        );
         assert!(tree.node("stale.rs").is_none());
     }
 
@@ -1340,11 +1199,7 @@ mod tests {
         tree.expand("src");
         tree.begin_load("src", None, generation);
         tree.apply_page(
-            page(
-                "src",
-                vec![entry("src/lib.rs", WorkspaceEntryKind::File)],
-                None,
-            ),
+            page("src", vec![entry("src/lib.rs", WorkspaceEntryKind::File)], None),
             generation,
         );
         assert!(tree.remove("src"));
@@ -1428,11 +1283,7 @@ mod tests {
         let stale_generation = tree.generation();
         tree.begin_load("", None, stale_generation);
         tree.apply_page(
-            page(
-                "",
-                vec![entry("secret.env", WorkspaceEntryKind::File)],
-                None,
-            ),
+            page("", vec![entry("secret.env", WorkspaceEntryKind::File)], None),
             stale_generation,
         );
         let current_generation = tree.reset();
@@ -1489,19 +1340,13 @@ mod tests {
 
         // The last Ctrl/Cmd click anchors the range, upward included.
         tree.select_range_to("src/lib.rs", false);
-        assert_eq!(
-            tree.selected_paths(),
-            ["src/lib.rs", "src/main.rs", "a.txt"]
-        );
+        assert_eq!(tree.selected_paths(), ["src/lib.rs", "src/main.rs", "a.txt"]);
         // A new Shift target replaces the range from the same anchor.
         tree.select_range_to("b.txt", false);
         assert_eq!(tree.selected_paths(), ["a.txt", "b.txt"]);
         tree.toggle_selected("src");
         tree.select_range_to("src/lib.rs", true);
-        assert_eq!(
-            tree.selected_paths(),
-            ["src", "src/lib.rs", "a.txt", "b.txt"]
-        );
+        assert_eq!(tree.selected_paths(), ["src", "src/lib.rs", "a.txt", "b.txt"]);
         assert_eq!(tree.selection_roots(), ["src", "a.txt", "b.txt"]);
 
         assert!(tree.collapse_selection());

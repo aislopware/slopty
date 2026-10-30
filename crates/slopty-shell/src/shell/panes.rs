@@ -244,7 +244,11 @@ impl Node {
         match self {
             Self::Leaf(pane) => *pane,
             Self::Split { first, second, .. } => {
-                if last { second.edge_leaf(true) } else { first.edge_leaf(false) }
+                if last {
+                    second.edge_leaf(true)
+                } else {
+                    first.edge_leaf(false)
+                }
             }
         }
     }
@@ -254,7 +258,11 @@ impl Node {
         match self {
             Self::Leaf(_) => None,
             Self::Split { first, second: other, .. } => {
-                if *second { other.at_path(rest) } else { first.at_path(rest) }
+                if *second {
+                    other.at_path(rest)
+                } else {
+                    first.at_path(rest)
+                }
             }
         }
     }
@@ -507,10 +515,22 @@ impl Panes {
             .filter(|(pane, _)| *pane != self.focused)
             .filter_map(|(pane, at)| {
                 let (gap, overlap) = match toward {
-                    Direction::Left => (from.left() - at.right(), span(from.top(), from.bottom(), at.top(), at.bottom())),
-                    Direction::Right => (at.left() - from.right(), span(from.top(), from.bottom(), at.top(), at.bottom())),
-                    Direction::Up => (from.top() - at.bottom(), span(from.left(), from.right(), at.left(), at.right())),
-                    Direction::Down => (at.top() - from.bottom(), span(from.left(), from.right(), at.left(), at.right())),
+                    Direction::Left => (
+                        from.left() - at.right(),
+                        span(from.top(), from.bottom(), at.top(), at.bottom()),
+                    ),
+                    Direction::Right => (
+                        at.left() - from.right(),
+                        span(from.top(), from.bottom(), at.top(), at.bottom()),
+                    ),
+                    Direction::Up => (
+                        from.top() - at.bottom(),
+                        span(from.left(), from.right(), at.left(), at.right()),
+                    ),
+                    Direction::Down => (
+                        at.top() - from.bottom(),
+                        span(from.left(), from.right(), at.left(), at.right()),
+                    ),
                 };
                 (gap >= px(0.0) && overlap > px(0.0)).then_some((*pane, gap, overlap))
             })
@@ -522,7 +542,8 @@ impl Panes {
     pub(crate) fn cycle(&self, forward: bool) -> Pane {
         let panes = self.panes();
         let at = panes.iter().position(|pane| *pane == self.focused).unwrap_or(0);
-        let next = if forward { (at + 1) % panes.len() } else { (at + panes.len() - 1) % panes.len() };
+        let next =
+            if forward { (at + 1) % panes.len() } else { (at + panes.len() - 1) % panes.len() };
         panes[next]
     }
 }
@@ -569,10 +590,7 @@ mod tests {
     /// the grid its children share, and an unknown grid snaps nothing.
     #[test]
     fn a_terminals_share_is_whole_cells_past_its_frame() {
-        let grid = Some(Grid {
-            cell: size(px(8.0), px(16.0)),
-            frame: size(px(12.0), px(30.0)),
-        });
+        let grid = Some(Grid { cell: size(px(8.0), px(16.0)), frame: size(px(12.0), px(30.0)) });
         let mut panes = Panes::default();
         panes.summon(Pane::View(RightSurface::Inspector), 0.37);
         let laid = panes.layout(view(), grid);
@@ -646,7 +664,11 @@ mod tests {
         panes.summon(inspector, 0.4);
         assert_eq!((panes.panes(), panes.focused()), (shape.clone(), inspector), "only focused");
         panes.summon(inspector, 0.4);
-        assert_eq!((panes.panes(), panes.focused()), (shape, Pane::Session), "back to the terminal");
+        assert_eq!(
+            (panes.panes(), panes.focused()),
+            (shape, Pane::Session),
+            "back to the terminal"
+        );
     }
 
     /// A view more stacks under the view with the keyboard, in the one column at the session's
@@ -654,7 +676,8 @@ mod tests {
     #[test]
     fn views_stack_in_one_column_at_the_sessions_right() {
         let mut panes = Panes::default();
-        let (files, inspector) = (Pane::View(RightSurface::Files), Pane::View(RightSurface::Inspector));
+        let (files, inspector) =
+            (Pane::View(RightSurface::Files), Pane::View(RightSurface::Inspector));
         panes.dock(files, 0.4);
         let session = panes.layout(view(), CELL).of(Pane::Session).unwrap();
         panes.focus(Pane::Session);

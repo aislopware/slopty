@@ -57,15 +57,9 @@ mod tests {
             source_session: Some("owner".into()),
         };
         assert_eq!(a.web_outcome(true), LinkOutcome::Internal);
-        assert_eq!(
-            a.web_outcome(false),
-            LinkOutcome::External("https://example.com/".into())
-        );
+        assert_eq!(a.web_outcome(false), LinkOutcome::External("https://example.com/".into()));
         a.action = LinkAction::External;
-        assert_eq!(
-            a.web_outcome(true),
-            LinkOutcome::External("https://example.com/".into())
-        );
+        assert_eq!(a.web_outcome(true), LinkOutcome::External("https://example.com/".into()));
         a.action = LinkAction::Primary;
         assert_eq!(
             a.web_outcome(true),
@@ -113,9 +107,6 @@ mod tests {
         };
         let urls: Vec<_> = runs.iter().filter_map(|r| r.style.link.as_ref()).collect();
         assert_eq!(urls.len(), 2);
-        assert!(
-            urls.iter()
-                .all(|u| LinkTarget::new("", u).navigation.is_ok())
-        );
+        assert!(urls.iter().all(|u| LinkTarget::new("", u).navigation.is_ok()));
     }
 }

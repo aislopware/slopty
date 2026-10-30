@@ -38,9 +38,7 @@ pub fn slopty_conversation_link(chat_id: &str, workspace: &str) -> String {
 }
 
 pub fn parse_slopty_conversation_link(url: &str) -> Result<ConversationDeepLink, &'static str> {
-    let rest = url
-        .strip_prefix("slopty://open/chat/")
-        .ok_or("not a Slopty conversation link")?;
+    let rest = url.strip_prefix("slopty://open/chat/").ok_or("not a Slopty conversation link")?;
     let (chat_id, query) = rest.split_once('?').ok_or("missing workspace locator")?;
     if chat_id.is_empty() || chat_id.contains('/') {
         return Err("invalid conversation id");
@@ -88,9 +86,7 @@ fn decode_component(value: &str) -> Result<String, &'static str> {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' {
-            let encoded = bytes
-                .get(index + 1..index + 3)
-                .ok_or("invalid URL escape")?;
+            let encoded = bytes.get(index + 1..index + 3).ok_or("invalid URL escape")?;
             let text = std::str::from_utf8(encoded).map_err(|_| "invalid URL escape")?;
             out.push(u8::from_str_radix(text, 16).map_err(|_| "invalid URL escape")?);
             index += 3;
@@ -169,9 +165,7 @@ mod tests {
     #[test]
     fn codex_link_is_exact_and_unverified_harnesses_are_omitted() {
         assert_eq!(
-            harness_conversation_link(&harness_chat(HarnessId::CODEX))
-                .unwrap()
-                .url,
+            harness_conversation_link(&harness_chat(HarnessId::CODEX)).unwrap().url,
             "codex://threads/thread%2Fone"
         );
         assert!(harness_conversation_link(&harness_chat(HarnessId::HERMES)).is_none());

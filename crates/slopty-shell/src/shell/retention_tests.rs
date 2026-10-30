@@ -6,12 +6,13 @@
 //! share.
 use std::collections::HashMap;
 
-use super::*;
 use chrono::TimeDelta;
 use gpui::accesskit::{NodeId, Role};
 use gpui::{TestAppContext, VisualTestContext};
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use slopty_view_proto::{Session, SessionStatus};
+
+use super::*;
 
 /// The self-test's window.
 const WINDOW: (f32, f32) = (1320.0, 880.0);
@@ -84,9 +85,14 @@ pub(super) fn wobble(cx: &mut VisualTestContext) -> Option<String> {
         std::thread::sleep(std::time::Duration::from_millis(15));
         let second = from_scratch(window, cx);
         (first != second).then(|| {
-            let cut = |lines: &[String]| lines.iter().take(8).cloned().collect::<Vec<_>>().join("\n  ");
+            let cut =
+                |lines: &[String]| lines.iter().take(8).cloned().collect::<Vec<_>>().join("\n  ");
             let (gone, came) = (only(&first, &second), only(&second, &first));
-            format!("drawn 15 ms of the wall clock later at the same moment:\n  {}\nbecame\n  {}", cut(&gone), cut(&came))
+            format!(
+                "drawn 15 ms of the wall clock later at the same moment:\n  {}\nbecame\n  {}",
+                cut(&gone),
+                cut(&came)
+            )
         })
     })
 }
@@ -107,7 +113,10 @@ pub(super) fn turn(chat: &str, now: chrono::DateTime<Utc>) -> Vec<SessionMessage
         entries.push(entry(
             &format!("{chat}:ask:{n}"),
             MessageRole::User,
-            vec![MessagePart::Text { id: format!("{chat}:ask:{n}:t"), text: format!("Question number {n} about the code") }],
+            vec![MessagePart::Text {
+                id: format!("{chat}:ask:{n}:t"),
+                text: format!("Question number {n} about the code"),
+            }],
             None,
         ));
         entries.push(entry(
@@ -129,7 +138,10 @@ pub(super) fn turn(chat: &str, now: chrono::DateTime<Utc>) -> Vec<SessionMessage
     entries.push(entry(
         &format!("{chat}:answer:last"),
         MessageRole::Assistant,
-        vec![MessagePart::Text { id: format!("{chat}:answer:last:t"), text: "Working on it".into() }],
+        vec![MessagePart::Text {
+            id: format!("{chat}:answer:last:t"),
+            text: "Working on it".into(),
+        }],
         Some(MessageStatus::Streaming),
     ));
     entries
@@ -148,7 +160,8 @@ pub(super) struct Screen {
 /// The self-test's window, motion reduced.
 pub(super) const DESKTOP: Screen = Screen { size: WINDOW, scale: 2.0, touch: false, reduced: true };
 /// The iPhone the simulator e2e runs (an iPhone 17 Pro): 402 × 874 pt at 3 ×, in motion.
-pub(super) const PHONE: Screen = Screen { size: (402.0, 874.0), scale: 3.0, touch: true, reduced: false };
+pub(super) const PHONE: Screen =
+    Screen { size: (402.0, 874.0), scale: 3.0, touch: true, reduced: false };
 
 /// A chat of the fixtures: `parent` makes it a subagent of that chat, one that runs inside its
 /// parent's agent (and takes no messages) when `in_parent`.
@@ -194,7 +207,10 @@ fn shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
 
 /// A shell window on `screen`, with two chats, the first of them at work, and no chat open yet.
 /// GPUI checks every frame it draws against one from scratch, and panics on a stale one.
-pub(super) fn launch(cx: &mut TestAppContext, screen: Screen) -> (Entity<Shell>, &mut VisualTestContext) {
+pub(super) fn launch(
+    cx: &mut TestAppContext,
+    screen: Screen,
+) -> (Entity<Shell>, &mut VisualTestContext) {
     crate::motion::forget_for_test(); // no hover from the last seed
     let dir = tempfile::tempdir().unwrap();
     compact::force_touch(screen.touch);
@@ -212,7 +228,10 @@ pub(super) fn launch(cx: &mut TestAppContext, screen: Screen) -> (Entity<Shell>,
         let state = cx.new(|_| AppState::new());
         let mut shell = Shell::new(
             state,
-            EngineBootConfig { data_dir: path.clone(), default_harness: slopty_view_proto::HarnessId::MOCK },
+            EngineBootConfig {
+                data_dir: path.clone(),
+                default_harness: slopty_view_proto::HarnessId::MOCK,
+            },
             cx,
         );
         shell.debug_gate = Some(GatePhase::Ready);
@@ -286,7 +305,11 @@ pub(super) fn find(nodes: &HashMap<NodeId, Node>, role: Role, label: &str) -> Op
     nodes.values().find(|node| node.role == role && node.label == label).cloned()
 }
 
-pub(super) fn find_starting(nodes: &HashMap<NodeId, Node>, role: Role, label: &str) -> Option<Node> {
+pub(super) fn find_starting(
+    nodes: &HashMap<NodeId, Node>,
+    role: Role,
+    label: &str,
+) -> Option<Node> {
     nodes.values().find(|node| node.role == role && node.label.starts_with(label)).cloned()
 }
 
@@ -338,7 +361,9 @@ fn a_chat_opened_with_cmd_1_paints_as_from_scratch(cx: &mut TestAppContext) {
     assert_eq!(stale(cx), None, "the window before the chat opens");
     cx.simulate_keystrokes("cmd-1");
     cx.run_until_parked();
-    assert!(shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.as_deref() == Some("a")));
+    assert!(
+        shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.as_deref() == Some("a"))
+    );
     assert_eq!(stale(cx), None, "the chat just opened, its transcript not yet in");
     let now = Utc::now();
     shell.update(cx, |shell, cx| {
@@ -355,9 +380,13 @@ fn a_chat_opened_with_cmd_1_paints_as_from_scratch(cx: &mut TestAppContext) {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
                 let mut entries = turn("a", now);
-                if let Some(MessagePart::Text { text, .. }) = entries.last_mut().and_then(|e| e.parts.first_mut()) {
+                if let Some(MessagePart::Text { text, .. }) =
+                    entries.last_mut().and_then(|e| e.parts.first_mut())
+                {
                     for n in 0..=step {
-                        text.push_str(&format!("\n\nStreaming paragraph {n}, which says a little more each frame."));
+                        text.push_str(&format!(
+                            "\n\nStreaming paragraph {n}, which says a little more each frame."
+                        ));
                     }
                 }
                 state.apply_transcript(entries);
@@ -389,7 +418,9 @@ fn chats_switched_after_a_stream_paint_as_from_scratch(cx: &mut TestAppContext) 
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
                 let mut entries = turn("a", now);
-                if let Some(MessagePart::Text { text, .. }) = entries.last_mut().and_then(|e| e.parts.first_mut()) {
+                if let Some(MessagePart::Text { text, .. }) =
+                    entries.last_mut().and_then(|e| e.parts.first_mut())
+                {
                     for n in 0..=step {
                         text.push_str(&format!("\n\nStreaming paragraph {n}."));
                     }
@@ -473,7 +504,9 @@ fn back_from_a_subagent(cx: &mut TestAppContext, screen: Screen) {
         last.status = Some(MessageStatus::Complete);
     }
     shell.update(cx, |shell, cx| {
-        shell.state.update(cx, |state, _| state.chats.push(chat_row("look", 0, Some(("b", true)), now)));
+        shell
+            .state
+            .update(cx, |state, _| state.chats.push(chat_row("look", 0, Some(("b", true)), now)));
         shell.open_chat("b".into(), cx);
         shell.state.update(cx, |state, cx| {
             state.apply_transcript(done.clone());

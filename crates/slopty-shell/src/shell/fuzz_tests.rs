@@ -28,12 +28,13 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use chrono::DateTime;
-
 use gpui::{TestAppContext, TestDispatcher, VisualTestContext};
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use slopty_view_proto::SessionStatus;
 
-use super::retention_tests::{PHONE, Screen, chat_row, frames, launch, session_row, stale, turn, wobble};
+use super::retention_tests::{
+    PHONE, Screen, chat_row, frames, launch, session_row, stale, turn, wobble,
+};
 use super::*;
 
 /// The screens a run picks from.
@@ -55,11 +56,40 @@ const RESIZES: [&[(f32, f32)]; 4] = [
 
 /// The shortcuts a step presses.
 const KEYS: &[&str] = &[
-    "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-b", "cmd-r", "cmd-e", "cmd-n", "cmd-[", "cmd-]",
-    "cmd-i", "cmd-k", "cmd-l", "cmd-/", "cmd-.", "cmd-;", "cmd-f", "cmd-shift-t", "ctrl-tab",
-    "ctrl-shift-tab", "cmd-d", "cmd-shift-d", "cmd-enter", "cmd-shift-enter", "alt-cmd-left",
-    "alt-cmd-right", "alt-cmd-up", "alt-cmd-down", "alt-cmd-[", "alt-cmd-]",
-    "escape", "escape", "tab", "enter",
+    "cmd-1",
+    "cmd-2",
+    "cmd-3",
+    "cmd-4",
+    "cmd-b",
+    "cmd-r",
+    "cmd-e",
+    "cmd-n",
+    "cmd-[",
+    "cmd-]",
+    "cmd-i",
+    "cmd-k",
+    "cmd-l",
+    "cmd-/",
+    "cmd-.",
+    "cmd-;",
+    "cmd-f",
+    "cmd-shift-t",
+    "ctrl-tab",
+    "ctrl-shift-tab",
+    "cmd-d",
+    "cmd-shift-d",
+    "cmd-enter",
+    "cmd-shift-enter",
+    "alt-cmd-left",
+    "alt-cmd-right",
+    "alt-cmd-up",
+    "alt-cmd-down",
+    "alt-cmd-[",
+    "alt-cmd-]",
+    "escape",
+    "escape",
+    "tab",
+    "enter",
 ];
 
 /// The chats a run starts with: three at the top, two subagents of `b` that run inside it, one
@@ -108,10 +138,10 @@ struct Rng(u64);
 
 impl Rng {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     }
 
@@ -169,7 +199,10 @@ struct Model {
 impl Model {
     fn new() -> Self {
         Self {
-            chats: START.iter().map(|(id, parent)| ((*id).to_owned(), parent.map(|(p, i)| (p.to_owned(), i)))).collect(),
+            chats: START
+                .iter()
+                .map(|(id, parent)| ((*id).to_owned(), parent.map(|(p, i)| (p.to_owned(), i))))
+                .collect(),
             working: vec!["a".into()],
             terminals: vec!["a".into(), "b".into()],
         }
@@ -177,7 +210,10 @@ impl Model {
 
     /// The parent of chat `id`, when it is a subagent.
     fn parent(&self, id: &str) -> Option<String> {
-        self.chats.iter().find(|(chat, _)| chat == id).and_then(|(_, parent)| parent.as_ref().map(|(p, _)| p.clone()))
+        self.chats
+            .iter()
+            .find(|(chat, _)| chat == id)
+            .and_then(|(_, parent)| parent.as_ref().map(|(p, _)| p.clone()))
     }
 
     /// Each session running in a terminal, by its chat: the view model's `WatchSessionTerminals`.
@@ -190,7 +226,12 @@ impl Model {
             .iter()
             .enumerate()
             .map(|(ago, (id, parent))| {
-                chat_row(id, i64::try_from(ago).unwrap_or(0) + 1, parent.as_ref().map(|(p, i)| (p.as_str(), *i)), now)
+                chat_row(
+                    id,
+                    i64::try_from(ago).unwrap_or(0) + 1,
+                    parent.as_ref().map(|(p, i)| (p.as_str(), *i)),
+                    now,
+                )
             })
             .collect()
     }
@@ -199,7 +240,11 @@ impl Model {
         self.chats
             .iter()
             .map(|(id, _)| {
-                let status = if self.working.contains(id) { SessionStatus::Working } else { SessionStatus::Done };
+                let status = if self.working.contains(id) {
+                    SessionStatus::Working
+                } else {
+                    SessionStatus::Done
+                };
                 session_row(id, status, now)
             })
             .collect()
@@ -241,15 +286,22 @@ fn selected(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String>
 }
 
 /// Take `step` in the window.
-fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx: &mut VisualTestContext) {
-    let notify_state = |shell: &Entity<Shell>, cx: &mut VisualTestContext, f: &dyn Fn(&mut AppState)| {
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| {
-                f(state);
-                cx.notify();
+fn take(
+    step: &Step,
+    shell: &Entity<Shell>,
+    model: &mut Model,
+    screen: usize,
+    cx: &mut VisualTestContext,
+) {
+    let notify_state =
+        |shell: &Entity<Shell>, cx: &mut VisualTestContext, f: &dyn Fn(&mut AppState)| {
+            shell.update(cx, |shell, cx| {
+                shell.state.update(cx, |state, cx| {
+                    f(state);
+                    cx.notify();
+                });
             });
-        });
-    };
+        };
     match step {
         Step::Key(keys) => cx.simulate_keystrokes(keys),
         // A row only stands for a chat that is listed: a gone one's way back is ⌘[ or a note.
@@ -264,7 +316,10 @@ fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx
         }
         Step::Terminal(id, running) => {
             model.terminals.retain(|chat| chat != id);
-            if *running && model.parent(id).is_none() && model.chats.iter().any(|(chat, _)| chat == id) {
+            if *running
+                && model.parent(id).is_none()
+                && model.chats.iter().any(|(chat, _)| chat == id)
+            {
                 model.terminals.push(id.clone());
             }
             let terminals = model.session_terminals();
@@ -292,7 +347,8 @@ fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx
                 }
                 if let Some(MessagePart::Text { text, .. }) = last.parts.first_mut() {
                     for n in 0..*paragraphs {
-                        let _ = write!(text, "\n\nStreamed paragraph {n}, which says a little more.");
+                        let _ =
+                            write!(text, "\n\nStreamed paragraph {n}, which says a little more.");
                     }
                 }
             }
@@ -303,7 +359,9 @@ fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx
             apply_model(model, shell, cx);
         }
         Step::Leave(id) => {
-            model.chats.retain(|(chat, parent)| chat != id && parent.as_ref().is_none_or(|(p, _)| p != id));
+            model.chats.retain(|(chat, parent)| {
+                chat != id && parent.as_ref().is_none_or(|(p, _)| p != id)
+            });
             model.working.retain(|w| w != id);
             model.terminals.retain(|chat| model.chats.iter().any(|(listed, _)| listed == chat));
             apply_model(model, shell, cx);
@@ -323,7 +381,8 @@ fn take(step: &Step, shell: &Entity<Shell>, model: &mut Model, screen: usize, cx
 /// a node no parent holds, the focus on no node.
 fn a11y_fault(window: &Window) -> Option<String> {
     let tree = window.a11y_tree()?;
-    let ids: std::collections::HashMap<_, _> = tree.nodes.iter().map(|(id, node)| (*id, node)).collect();
+    let ids: std::collections::HashMap<_, _> =
+        tree.nodes.iter().map(|(id, node)| (*id, node)).collect();
     if ids.len() != tree.nodes.len() {
         return Some(format!("{} nodes listed, {} distinct", tree.nodes.len(), ids.len()));
     }
@@ -340,7 +399,11 @@ fn a11y_fault(window: &Window) -> Option<String> {
     for (id, node) in &tree.nodes {
         let held = parents.get(id).copied().unwrap_or(0);
         if Some(*id) != root && held != 1 {
-            return Some(format!("{id:?} ({:?} {:?}) is held by {held} parents", node.role(), node.label()));
+            return Some(format!(
+                "{id:?} ({:?} {:?}) is held by {held} parents",
+                node.role(),
+                node.label()
+            ));
         }
     }
     (!ids.contains_key(&tree.focus)).then(|| format!("the focus {:?} is on no node", tree.focus))
@@ -370,30 +433,39 @@ const CONTROLS: &[gpui::Role] = &[
 const SLACK: f64 = 1.0;
 
 /// What a frame's accessibility tree says the layout gets wrong: a node that shows outside
-/// the window (its bounds are what its clip leaves of it) or is turned inside out, a control with nothing to name it by, two controls side by side
-/// laid over each other (a click finds only one), a shortcut not in `aria-keyshortcuts`
-/// spelling. Controls side by side are those of one container: the window's own children are
-/// its layers (the page, and the menus, popovers and tooltips over it). On a touch screen a
-/// control takes presses over a finger's 44 pt around what it draws, into its neighbours' gaps
-/// and past them by design (#23), so there controls may lie over each other.
+/// the window (its bounds are what its clip leaves of it) or is turned inside out, a control with
+/// nothing to name it by, two controls side by side laid over each other (a click finds only one),
+/// a shortcut not in `aria-keyshortcuts` spelling. Controls side by side are those of one
+/// container: the window's own children are its layers (the page, and the menus, popovers and
+/// tooltips over it). On a touch screen a control takes presses over a finger's 44 pt around what
+/// it draws, into its neighbours' gaps and past them by design (#23), so there controls may lie
+/// over each other.
 fn layout_fault(window: &Window, touch: bool) -> Option<String> {
     let tree = window.a11y_tree()?;
     let scale = f64::from(window.scale_factor());
     let size = window.viewport_size();
-    let (width, height) = (f64::from(f32::from(size.width)) * scale, f64::from(f32::from(size.height)) * scale);
-    let nodes: std::collections::HashMap<_, _> = tree.nodes.iter().map(|(id, node)| (*id, node)).collect();
+    let (width, height) =
+        (f64::from(f32::from(size.width)) * scale, f64::from(f32::from(size.height)) * scale);
+    let nodes: std::collections::HashMap<_, _> =
+        tree.nodes.iter().map(|(id, node)| (*id, node)).collect();
     let says = |text: Option<&str>| text.is_some_and(|t| !t.trim().is_empty());
     let root = tree.tree.as_ref().map(|tree| tree.root);
     for (id, node) in &tree.nodes {
         let what = || format!("{id:?} ({:?} {:?})", node.role(), node.label());
         if let Some(r) = node.bounds() {
-            if ![r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()) || r.x0 > r.x1 || r.y0 > r.y1 {
+            if ![r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()) || r.x0 > r.x1 || r.y0 > r.y1
+            {
                 return Some(format!("{} has bounds {r:?}", what()));
             }
             // A node clipped out whole keeps a rect of no size where it would be.
             let shows = r.x1 - r.x0 > SLACK && r.y1 - r.y0 > SLACK;
-            if shows && (r.x0 < -SLACK || r.y0 < -SLACK || r.x1 > width + SLACK || r.y1 > height + SLACK) {
-                return Some(format!("{} at {r:?} is outside the {width} × {height} window", what()));
+            if shows
+                && (r.x0 < -SLACK || r.y0 < -SLACK || r.x1 > width + SLACK || r.y1 > height + SLACK)
+            {
+                return Some(format!(
+                    "{} at {r:?} is outside the {width} × {height} window",
+                    what()
+                ));
             }
         }
         if CONTROLS.contains(&node.role()) && !node.is_hidden() {
@@ -418,7 +490,10 @@ fn layout_fault(window: &Window, touch: bool) -> Option<String> {
         if let Some(keys) = node.keyboard_shortcut()
             && !aria_spelling(keys)
         {
-            return Some(format!("{} has the shortcut {keys:?}, not in aria-keyshortcuts spelling", what()));
+            return Some(format!(
+                "{} has the shortcut {keys:?}, not in aria-keyshortcuts spelling",
+                what()
+            ));
         }
         // The window's own children are its layers: menus, popovers and tooltips lie over the
         // page by design.
@@ -467,7 +542,8 @@ fn aria_spelling(keys: &str) -> bool {
             let mut order = MODIFIERS.iter();
             !key.is_empty()
                 && !MODIFIERS.contains(&key)
-                && (modifiers.is_empty() || modifiers.split('+').all(|m| order.any(|known| *known == m)))
+                && (modifiers.is_empty()
+                    || modifiers.split('+').all(|m| order.any(|known| *known == m)))
         })
 }
 
@@ -543,14 +619,19 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
                     if let Some(id) = &now
                         && !present(id)
                     {
-                        return Err(Failure { step: ix, kind: "model", detail: format!("{id} is selected but gone") });
+                        return Err(Failure {
+                            step: ix,
+                            kind: "model",
+                            detail: format!("{id} is selected but gone"),
+                        });
                     }
                     let fault = cx.update(|window, cx| {
                         window.refresh();
                         window.draw(cx).clear(cx);
-                        a11y_fault(window)
-                            .map(|fault| ("a11y", fault))
-                            .or_else(|| layout_fault(window, SCREENS[screen].1.touch).map(|fault| ("layout", fault)))
+                        a11y_fault(window).map(|fault| ("a11y", fault)).or_else(|| {
+                            layout_fault(window, SCREENS[screen].1.touch)
+                                .map(|fault| ("layout", fault))
+                        })
                     });
                     if let Some((kind, fault)) = fault {
                         return Err(Failure { step: ix, kind, detail: fault });
@@ -574,7 +655,9 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
         })
         .expect("a fuzz thread")
         .join();
-    outcome.unwrap_or_else(|_| Err(Failure { step: usize::MAX, kind: "panic", detail: "the run's thread died".into() }))
+    outcome.unwrap_or_else(|_| {
+        Err(Failure { step: usize::MAX, kind: "panic", detail: "the run's thread died".into() })
+    })
 }
 
 /// The steps of `steps` kept by `keep`.
@@ -619,13 +702,24 @@ fn shrink(seed: u64, steps: &[Step], failed_at: usize, kind: &str) -> Vec<usize>
 /// its fewest steps when `shrink` (each try a whole run: the long run's), else at once with the
 /// rerun that shrinks it.
 fn fuzz(first: u64, runs: u64, len: usize, shrink_it: bool) {
-    if let (Ok(seed), Ok(keep)) = (std::env::var("SLOPTY_FUZZ_SEED"), std::env::var("SLOPTY_FUZZ_KEEP")) {
+    if let (Ok(seed), Ok(keep)) =
+        (std::env::var("SLOPTY_FUZZ_SEED"), std::env::var("SLOPTY_FUZZ_KEEP"))
+    {
         let seed: u64 = seed.parse().expect("SLOPTY_FUZZ_SEED is a number");
-        let keep: Vec<usize> = keep.split(',').map(|ix| ix.trim().parse().expect("SLOPTY_FUZZ_KEEP lists indices")).collect();
+        let keep: Vec<usize> = keep
+            .split(',')
+            .map(|ix| ix.trim().parse().expect("SLOPTY_FUZZ_KEEP lists indices"))
+            .collect();
         let len = keep.iter().max().map_or(0, |max| max + 1).max(len);
         let steps = kept(&steps_of(seed, len), &keep);
         if let Err(failure) = run(seed, &steps) {
-            panic!("seed {seed} {:?} fails at {:?}: {}: {}", keep, steps.get(failure.step), failure.kind, failure.detail);
+            panic!(
+                "seed {seed} {:?} fails at {:?}: {}: {}",
+                keep,
+                steps.get(failure.step),
+                failure.kind,
+                failure.detail
+            );
         }
         return;
     }
@@ -683,16 +777,23 @@ fn a_short_fuzz_of_the_shell_finds_nothing() {
 #[test]
 #[ignore = "long: the nightly runs it"]
 fn a_long_fuzz_of_the_shell() {
-    let env = |name: &str, default: u64| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    let env = |name: &str, default: u64| {
+        std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    };
     let first = env("SLOPTY_FUZZ_FIRST", 1000);
-    fuzz(first, env("SLOPTY_FUZZ_RUNS", 64), usize::try_from(env("SLOPTY_FUZZ_STEPS", 120)).unwrap_or(120), true);
+    fuzz(
+        first,
+        env("SLOPTY_FUZZ_RUNS", 64),
+        usize::try_from(env("SLOPTY_FUZZ_STEPS", 120)).unwrap_or(120),
+        true,
+    );
 }
 
 /// The long run's stop on the iPad (seed 4255, 2026-10-18) brought down to itself: a prompt that
 /// shows open until its first layout wraps it past five lines folds in a frame of its own, the
-/// window otherwise at rest. The timeline is the inspector's now. A prompt's bubble learns its wrapped height as it paints, and a view
-/// notified while its window paints asks for no frame, so the fold once waited for whatever drew
-/// next.
+/// window otherwise at rest. The timeline is the inspector's now. A prompt's bubble learns its
+/// wrapped height as it paints, and a view notified while its window paints asks for no frame, so
+/// the fold once waited for whatever drew next.
 #[gpui::test]
 fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut TestAppContext) {
     let (shell, cx) = launch(cx, super::retention_tests::DESKTOP);
@@ -700,7 +801,10 @@ fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut Tes
     shell.update(cx, |shell, cx| {
         shell.state.update(cx, |state, cx| {
             // No turn at work: no spinner and no turn's clock draws a frame of their own.
-            state.apply_sessions(vec![session_row("a", SessionStatus::Done, now), session_row("b", SessionStatus::Done, now)]);
+            state.apply_sessions(vec![
+                session_row("a", SessionStatus::Done, now),
+                session_row("b", SessionStatus::Done, now),
+            ]);
             cx.notify();
         });
         shell.open_chat("b".into(), cx);
@@ -737,7 +841,9 @@ fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut Tes
     frames(cx, Duration::from_millis(16), 60);
     assert_eq!(stale(cx), None, "the prompt as the window shows it at rest");
     let folded = cx.update(|window, _| {
-        window.a11y_tree().is_some_and(|tree| tree.nodes.iter().any(|(_, node)| node.label() == Some("Expand message")))
+        window.a11y_tree().is_some_and(|tree| {
+            tree.nodes.iter().any(|(_, node)| node.label() == Some("Expand message"))
+        })
     });
     assert!(folded, "the prompt wraps past five lines and folds");
 }
@@ -754,7 +860,13 @@ fn a_gone_chat_is_not_opened_again_by_the_way_back() {
     ];
     for seed in [0, 2] {
         if let Err(failure) = run(seed, &steps) {
-            panic!("{} at {:?}: {}: {}", SCREENS[screen_of(seed)].0, steps.get(failure.step), failure.kind, failure.detail);
+            panic!(
+                "{} at {:?}: {}: {}",
+                SCREENS[screen_of(seed)].0,
+                steps.get(failure.step),
+                failure.kind,
+                failure.detail
+            );
         }
     }
 }
@@ -771,7 +883,12 @@ fn a_seed_takes_the_same_steps_every_time() {
 /// The spelling the layout check holds a shortcut to is the one the shell writes.
 #[test]
 fn a_shortcut_is_held_to_the_spelling_the_shell_writes() {
-    for (combo, mac) in [("cmd-shift-t", true), ("ctrl-alt-shift-cmd-k", true), ("ctrl-tab", false), ("cmd-k cmd-s", true)] {
+    for (combo, mac) in [
+        ("cmd-shift-t", true),
+        ("ctrl-alt-shift-cmd-k", true),
+        ("ctrl-tab", false),
+        ("cmd-k cmd-s", true),
+    ] {
         let aria = crate::keys::aria_combo_on(mac, combo);
         assert!(aria_spelling(&aria), "{combo} as {aria}");
     }

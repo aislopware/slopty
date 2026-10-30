@@ -249,7 +249,9 @@ impl Doc {
                 kind => scalar(kind).0,
             });
             let sep = if first { "" } else { ", " };
-            if out.chars().count().saturating_add(sep.len()).saturating_add(part.chars().count()) > room {
+            if out.chars().count().saturating_add(sep.len()).saturating_add(part.chars().count())
+                > room
+            {
                 out.push_str(if first { "…" } else { ", …" });
                 break;
             }
@@ -314,11 +316,23 @@ mod tests {
             .expect("JSON");
         assert_eq!(
             texts(&doc, &HashSet::new()),
-            ["{4}", "type: \"user\"", "n: 3", "ok: true", "items: [3]", "0: 1", "1: \"two\"", "2: null"]
+            [
+                "{4}",
+                "type: \"user\"",
+                "n: 3",
+                "ok: true",
+                "items: [3]",
+                "0: 1",
+                "1: \"two\"",
+                "2: null"
+            ]
         );
         let items = doc.lines(&HashSet::new(), usize::MAX).0[4].value;
         assert_eq!(texts(&doc, &HashSet::from([items]))[4], "items: (3) [1, \"two\", null]");
-        assert_eq!(texts(&doc, &HashSet::from([0])), ["{type: \"user\", n: 3, ok: true, items: […]}"]);
+        assert_eq!(
+            texts(&doc, &HashSet::from([0])),
+            ["{type: \"user\", n: 3, ok: true, items: […]}"]
+        );
     }
 
     /// A larger document opens its top level and its values' fields; deeper containers start
@@ -347,6 +361,10 @@ mod tests {
         let long = "x".repeat(LINE_CHARS * 2);
         let doc = Doc::parse(&serde_json::json!({ "file": long }).to_string()).expect("JSON");
         let line = &texts(&doc, &HashSet::new())[1];
-        assert!(line.chars().count() < LINE_CHARS + 16 && line.ends_with("…\""), "cut: {}", line.len());
+        assert!(
+            line.chars().count() < LINE_CHARS + 16 && line.ends_with("…\""),
+            "cut: {}",
+            line.len()
+        );
     }
 }

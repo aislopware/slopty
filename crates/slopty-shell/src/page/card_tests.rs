@@ -9,7 +9,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::accesskit::{NodeId, Role};
-use gpui::{Entity, IntoElement, Render, VisualTestContext, Window, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{Entity, IntoElement, Render, VisualTestContext, Window, div, px};
 use slopty_view_doc::{PageCard, PageState};
 
 use super::{PageCardView, PageDoc, PagePaneView, PageTable, PdfDoc};
@@ -170,9 +171,8 @@ fn a_pdf_shows_its_first_page_and_names_its_count(cx: &mut gpui::TestAppContext)
     let (_, width) = *asked.last().expect("it asks for the first page");
     assert!(width > 100.0 && width <= 900.0, "drawn as wide as it shows: {width}");
 
-    let picture = Arc::new(gpui::RenderImage::new([image::Frame::new(image::RgbaImage::new(
-        10, 13,
-    ))]));
+    let picture =
+        Arc::new(gpui::RenderImage::new([image::Frame::new(image::RgbaImage::new(10, 13))]));
     let mut drawn = pdf;
     drawn.drawn.insert(0, (width, picture));
     stand.borrow_mut().page = Some(hosted(Some(PageDoc::Pdf(Arc::new(drawn)))));
@@ -247,7 +247,9 @@ fn a_page_in_the_pane_leaves_a_line_in_its_card(cx: &mut gpui::TestAppContext) {
     assert!(find(&nodes, Role::Group, "Shown in the pane").is_some(), "the card's line");
     assert!(find(&nodes, Role::Button, "Bring back").is_some());
     assert!(find(&nodes, Role::Button, "Open in pane").is_none(), "it is there already");
-    let pane = nodes.values().find(|n| n.role == Role::Group && n.label == "Page: Plot" && n.value == "pane");
+    let pane = nodes
+        .values()
+        .find(|n| n.role == Role::Group && n.label == "Page: Plot" && n.value == "pane");
     assert!(pane.is_some(), "the pane's node, beside the card's");
     assert!(find(&nodes, Role::Button, "Back to the inspector").is_some());
 }
@@ -271,7 +273,6 @@ fn a_failed_page_offers_try_again(cx: &mut gpui::TestAppContext) {
     let nodes = draw(cx);
     assert!(find(&nodes, Role::Button, "Try again").is_none(), "a failed call is not tried again");
 }
-
 
 struct Moved(gpui::AnyView, f32);
 
@@ -301,7 +302,8 @@ fn a_live_page_moved_out_of_its_band_rests_in_the_frame_shown(cx: &mut gpui::Tes
     };
     frame(cx);
     frame(cx);
-    let rests = |stand: &Shared| stand.borrow().acts.iter().filter(|a| **a == PageAct::Rest).count();
+    let rests =
+        |stand: &Shared| stand.borrow().acts.iter().filter(|a| **a == PageAct::Rest).count();
     assert_eq!(rests(&stand), 0, "in its band it stays live: {:?}", stand.borrow().acts);
 
     host.update(cx, |host, cx| {
@@ -321,7 +323,8 @@ fn a_live_page_moved_out_of_its_band_rests_in_the_frame_shown(cx: &mut gpui::Tes
     assert!(rests(&stand) > 0, "out of its band it rests: {:?}", stand.borrow().acts);
 
     // A press on its picture there wakes nothing: it would rest again at once.
-    let engages = |stand: &Shared| stand.borrow().acts.iter().filter(|a| **a == PageAct::Engage).count();
+    let engages =
+        |stand: &Shared| stand.borrow().acts.iter().filter(|a| **a == PageAct::Engage).count();
     let before = engages(&stand);
     let below = gpui::point(px(450.0), px(770.0));
     cx.simulate_mouse_down(below, gpui::MouseButton::Left, gpui::Modifiers::none());
@@ -337,8 +340,10 @@ fn a_page_rested_while_engaged_wakes_at_the_next_press(cx: &mut gpui::TestAppCon
     let stand = serve(cx, HostedPage { presence: PagePresence::Warm, ..hosted(None) });
     let (view, cx) = open_card(cx, card(PageCard::HTML, "slopty-page:1/html", "Plot"));
     draw(cx);
-    let engages = |stand: &Shared| stand.borrow().acts.iter().filter(|a| **a == PageAct::Engage).count();
-    let middle = view.read_with(cx, |view, _| view.bounds.get()).expect("the card was drawn").center();
+    let engages =
+        |stand: &Shared| stand.borrow().acts.iter().filter(|a| **a == PageAct::Engage).count();
+    let middle =
+        view.read_with(cx, |view, _| view.bounds.get()).expect("the card was drawn").center();
     cx.simulate_mouse_down(middle, gpui::MouseButton::Left, gpui::Modifiers::none());
     cx.simulate_mouse_up(middle, gpui::MouseButton::Left, gpui::Modifiers::none());
     let woken = engages(&stand);

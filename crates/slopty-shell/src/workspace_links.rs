@@ -10,10 +10,7 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) enum FileLinkResolution {
     /// `roots[index]` owns the target: the link opens in that root's file
     /// context and `link.path` stays workspace-relative.
-    Owned {
-        root: usize,
-        link: WorkspaceFileLink,
-    },
+    Owned { root: usize, link: WorkspaceFileLink },
     /// An absolute path no known root owns: the linking chat reads it as a
     /// host file and the file surface keeps it read-only.
     Outside(WorkspaceFileLink),
@@ -32,19 +29,16 @@ pub(crate) fn first_root_owning<'a>(
 ) -> Option<FileLinkResolution> {
     let classified = classify_file_link(target)?;
     match classified.kind {
-        ClassifiedKind::Relative => roots.into_iter().next().map(|_| FileLinkResolution::Owned {
-            root: 0,
-            link: classified.link,
-        }),
+        ClassifiedKind::Relative => roots
+            .into_iter()
+            .next()
+            .map(|_| FileLinkResolution::Owned { root: 0, link: classified.link }),
         ClassifiedKind::Absolute => {
             for (ix, root) in roots.into_iter().enumerate() {
                 if let Some(path) = resolve_decoded_path(&classified.link.path, root) {
                     return Some(FileLinkResolution::Owned {
                         root: ix,
-                        link: WorkspaceFileLink {
-                            path,
-                            ..classified.link.clone()
-                        },
+                        link: WorkspaceFileLink { path, ..classified.link.clone() },
                     });
                 }
             }
@@ -181,9 +175,8 @@ pub(crate) fn resolve_inline_code_path(
         // target the link grammar rejects, turning the span into a dead link,
         // so it keeps its inline-code look instead.
         let path = path.to_string_lossy();
-        path.starts_with('/').then(|| {
-            InlineCodePath::File(format!("file://{}{anchor}", percent_encode_path(&path)))
-        })
+        path.starts_with('/')
+            .then(|| InlineCodePath::File(format!("file://{}{anchor}", percent_encode_path(&path))))
     };
     if let Some(rest) = decoded.strip_prefix("~/") {
         let home = std::env::var_os("HOME").filter(|home| !home.is_empty())?;
@@ -272,23 +265,14 @@ pub(crate) fn resolve_workspace_file_link(
     match classified.kind {
         ClassifiedKind::Relative => {
             let path = resolve_decoded_path(&classified.link.path, workspace_root)?;
-            Some(WorkspaceFileLink {
-                path,
-                ..classified.link
+            Some(WorkspaceFileLink { path, ..classified.link })
+        }
+        ClassifiedKind::Absolute => {
+            Some(match resolve_decoded_path(&classified.link.path, workspace_root) {
+                Some(path) => WorkspaceFileLink { path, ..classified.link },
+                None => WorkspaceFileLink { outside: true, ..classified.link },
             })
         }
-        ClassifiedKind::Absolute => Some(
-            match resolve_decoded_path(&classified.link.path, workspace_root) {
-                Some(path) => WorkspaceFileLink {
-                    path,
-                    ..classified.link
-                },
-                None => WorkspaceFileLink {
-                    outside: true,
-                    ..classified.link
-                },
-            },
-        ),
     }
 }
 
@@ -400,13 +384,9 @@ fn split_line_fragment(target: &str) -> Option<(&str, ParsedAnchor)> {
     match parse_anchor(fragment) {
         LineAnchor::Invalid => None,
         LineAnchor::None => Some((path, ParsedAnchor::default())),
-        LineAnchor::Line { line, column } => Some((
-            path,
-            ParsedAnchor {
-                line: Some(line),
-                column,
-            },
-        )),
+        LineAnchor::Line { line, column } => {
+            Some((path, ParsedAnchor { line: Some(line), column }))
+        }
     }
 }
 
@@ -424,13 +404,7 @@ fn split_line_suffix(target: &str) -> Option<(&str, ParsedAnchor)> {
         return if start == 0 || end < start {
             None
         } else {
-            Some((
-                &target[..colon],
-                ParsedAnchor {
-                    line: Some(start),
-                    column: None,
-                },
-            ))
+            Some((&target[..colon], ParsedAnchor { line: Some(start), column: None }))
         };
     }
     if last.parse::<u32>().is_ok_and(|number| number == 0) {
@@ -442,31 +416,15 @@ fn split_line_suffix(target: &str) -> Option<(&str, ParsedAnchor)> {
     let before = &target[..colon];
     let anchor = match before.rfind(':') {
         Some(colon2) => match positive_number(&before[colon2 + 1..]) {
-            Some(line) => (
-                &before[..colon2],
-                ParsedAnchor {
-                    line: Some(line),
-                    column: Some(last_number),
-                },
-            ),
+            Some(line) => {
+                (&before[..colon2], ParsedAnchor { line: Some(line), column: Some(last_number) })
+            }
             // `a:0:5` rejects like `a:0`; `a:x:5` keeps `a:x` as the path —
             // the `:` it carries rejects it as a scheme-shaped target anyway.
             None if before[colon2 + 1..].parse::<u32>() == Ok(0) => return None,
-            None => (
-                before,
-                ParsedAnchor {
-                    line: Some(last_number),
-                    column: None,
-                },
-            ),
+            None => (before, ParsedAnchor { line: Some(last_number), column: None }),
         },
-        None => (
-            before,
-            ParsedAnchor {
-                line: Some(last_number),
-                column: None,
-            },
-        ),
+        None => (before, ParsedAnchor { line: Some(last_number), column: None }),
     };
     Some(anchor)
 }
@@ -561,10 +519,7 @@ fn file_name(path: &str) -> &str {
 /// `scheme:` at the start of a relative path means it is a URL, not a file.
 fn has_url_scheme(path: &str) -> bool {
     let mut chars = path.chars();
-    if !chars
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic())
-    {
+    if !chars.next().is_some_and(|first| first.is_ascii_alphabetic()) {
         return false;
     }
     for character in chars {
@@ -617,21 +572,11 @@ mod tests {
     use super::*;
 
     fn link(path: &str, line: Option<u32>, column: Option<u32>) -> WorkspaceFileLink {
-        WorkspaceFileLink {
-            path: path.into(),
-            line,
-            column,
-            outside: false,
-        }
+        WorkspaceFileLink { path: path.into(), line, column, outside: false }
     }
 
     fn outside_link(path: &str) -> WorkspaceFileLink {
-        WorkspaceFileLink {
-            path: path.into(),
-            line: None,
-            column: None,
-            outside: true,
-        }
+        WorkspaceFileLink { path: path.into(), line: None, column: None, outside: true }
     }
 
     fn owned(ix: usize, link: WorkspaceFileLink) -> FileLinkResolution {
@@ -642,10 +587,7 @@ mod tests {
         match (actual, expected) {
             (
                 Some(FileLinkResolution::Owned { root, link }),
-                FileLinkResolution::Owned {
-                    root: expected_root,
-                    link: expected_link,
-                },
+                FileLinkResolution::Owned { root: expected_root, link: expected_link },
             ) => root == expected_root && link == expected_link,
             (Some(FileLinkResolution::Outside(link)), FileLinkResolution::Outside(expected)) => {
                 link == expected
@@ -713,10 +655,7 @@ mod tests {
     fn decodes_relative_and_absolute_paths_once() {
         let root = "/work/comet";
         for (target, path) in [
-            (
-                "2026-09-26/Some%20Folder/it's%20here.txt",
-                "2026-09-26/Some Folder/it's here.txt",
-            ),
+            ("2026-09-26/Some%20Folder/it's%20here.txt", "2026-09-26/Some Folder/it's here.txt"),
             (
                 "/work/comet/2026-09-26/Some%20Folder/it's%20here.txt",
                 "2026-09-26/Some Folder/it's here.txt",
@@ -747,14 +686,8 @@ mod tests {
         );
         // Broken escapes keep the raw spelling — a file literally named
         // `a%zz.md` still resolves.
-        assert_eq!(
-            resolve_workspace_file_link("a%zz.md", root),
-            Some(link("a%zz.md", None, None))
-        );
-        assert_eq!(
-            resolve_workspace_file_link("a%2.md", root),
-            Some(link("a%2.md", None, None))
-        );
+        assert_eq!(resolve_workspace_file_link("a%zz.md", root), Some(link("a%zz.md", None, None)));
+        assert_eq!(resolve_workspace_file_link("a%2.md", root), Some(link("a%2.md", None, None)));
         // A decode that would produce unsafe content never resolves.
         assert!(resolve_workspace_file_link("%2E%2E/secret.md", root).is_none());
         assert!(resolve_workspace_file_link("a%5Cb.md", root).is_none());
@@ -798,10 +731,7 @@ mod tests {
             "src/lib.rs#L5-3",
             "src/lib.rs#L5-L3",
         ] {
-            assert!(
-                resolve_workspace_file_link(target, root).is_none(),
-                "{target}"
-            );
+            assert!(resolve_workspace_file_link(target, root).is_none(), "{target}");
         }
     }
 
@@ -830,17 +760,8 @@ mod tests {
     fn absolute_paths_follow_the_strict_shape() {
         let root = "/work/comet";
         // `//`, a bare root and a trailing slash are not file paths.
-        for target in [
-            "//work/comet/a.md",
-            "/",
-            "/work/comet/",
-            "/work/comet",
-            "/other/dir/",
-        ] {
-            assert!(
-                resolve_workspace_file_link(target, root).is_none(),
-                "{target}"
-            );
+        for target in ["//work/comet/a.md", "/", "/work/comet/", "/work/comet", "/other/dir/"] {
+            assert!(resolve_workspace_file_link(target, root).is_none(), "{target}");
         }
         // `/work/comet` ends in no dot — and is also the root itself minus
         // the trailing slash; either way not a link.
@@ -862,10 +783,7 @@ mod tests {
             Some(link("src", None, None))
         );
         // A leading-dot file name counts for the dot rule too.
-        assert_eq!(
-            resolve_workspace_file_link("/etc/.env", root),
-            Some(outside_link("/etc/.env"))
-        );
+        assert_eq!(resolve_workspace_file_link("/etc/.env", root), Some(outside_link("/etc/.env")));
         // `?` and control characters are never file paths.
         for target in ["/tmp/a?b.md", "/tmp/a\nb.md"] {
             assert!(resolve_workspace_file_link(target, root).is_none());
@@ -884,10 +802,7 @@ mod tests {
             owned(0, link("Makefile", Some(12), None))
         ));
         assert!(resolution_eq(
-            first_root_owning(
-                "file:///repo%20dir/2026-09-28/Some%20Title/SOURCES.md#L4",
-                roots
-            ),
+            first_root_owning("file:///repo%20dir/2026-09-28/Some%20Title/SOURCES.md#L4", roots),
             owned(0, link("2026-09-28/Some Title/SOURCES.md", Some(4), None))
         ));
         assert!(matches!(
@@ -912,12 +827,7 @@ mod tests {
         let target = |path: &Path| format!("file://{}", path.to_string_lossy().replace(' ', "%20"));
         // Percent escapes decode once, and the line anchor survives.
         assert_eq!(
-            resolve_inline_code_path(
-                "Some%20Title/Some%20Title.txt#L12",
-                &local,
-                &[],
-                &mut probes
-            ),
+            resolve_inline_code_path("Some%20Title/Some%20Title.txt#L12", &local, &[], &mut probes),
             Some(InlineCodePath::File(format!(
                 "{}:12",
                 target(&root.join("Some Title/Some Title.txt"))
@@ -981,10 +891,7 @@ mod tests {
             "src/./lib.rs",
             "src//lib.rs",
         ] {
-            assert!(
-                resolve_workspace_file_link(target, root).is_none(),
-                "{target}"
-            );
+            assert!(resolve_workspace_file_link(target, root).is_none(), "{target}");
         }
         // A sibling directory sharing the root's prefix is outside it, so it
         // resolves as a host file rather than into the workspace.
@@ -993,10 +900,7 @@ mod tests {
             Some(outside_link("/work/comet-other/src/lib.rs"))
         );
         // Leading-dot relative names are files; mid-path dots do not count.
-        assert_eq!(
-            resolve_workspace_file_link(".env", root),
-            Some(link(".env", None, None))
-        );
+        assert_eq!(resolve_workspace_file_link(".env", root), Some(link(".env", None, None)));
         assert_eq!(
             resolve_workspace_file_link("docs/.env", root),
             Some(link("docs/.env", None, None))
@@ -1013,10 +917,7 @@ mod tests {
             "file:///work/comet/a.md?query",
             "file://a.md",
         ] {
-            assert!(
-                resolve_workspace_file_link(target, root).is_none(),
-                "{target}"
-            );
+            assert!(resolve_workspace_file_link(target, root).is_none(), "{target}");
         }
         assert_eq!(
             resolve_workspace_file_link("file:///work/comet/a%20b.md", root),
@@ -1041,5 +942,4 @@ mod tests {
             })
         );
     }
-
 }

@@ -23,7 +23,8 @@
 //! session moves it, from whichever device looked (`AppState::mark_chat_seen`, `Intent::Seen`).
 
 use chrono::{DateTime, Utc};
-use gpui::{AnyElement, Hsla, SharedString, div, prelude::*};
+use gpui::prelude::*;
+use gpui::{AnyElement, Hsla, SharedString, div};
 use slopty_view_proto::{ChatIndicator, Session, SessionStatus, SessionWait};
 
 use crate::loaders::status_mark::{MarkState, StatusMark};
@@ -114,13 +115,13 @@ impl Mark {
 
 /// The loudest of `marks` ([`Mark::urgency`]), the first of equals; none while all rest.
 pub(crate) fn loudest<'a>(marks: impl IntoIterator<Item = &'a Mark>) -> Option<&'a Mark> {
-    marks
-        .into_iter()
-        .filter(|mark| mark.urgency() > 0)
-        .fold(None, |loudest: Option<&Mark>, mark| match loudest {
+    marks.into_iter().filter(|mark| mark.urgency() > 0).fold(
+        None,
+        |loudest: Option<&Mark>, mark| match loudest {
             Some(loudest) if loudest.urgency() >= mark.urgency() => Some(loudest),
             _ => Some(mark),
-        })
+        },
+    )
 }
 
 /// The hue table: at work blue, needs you amber, failed red, done green. On light each takes
@@ -197,7 +198,9 @@ pub(crate) fn need(wait: Option<&SessionWait>) -> Need {
         .map(crate::transcript::single_line)
         .filter(|summary| !summary.trim().is_empty());
     match wait.kind.as_str() {
-        SessionWait::QUESTION => Need { glyph: MarkState::Question, words: "Has a question".into() },
+        SessionWait::QUESTION => {
+            Need { glyph: MarkState::Question, words: "Has a question".into() }
+        }
         SessionWait::PLAN => Need { glyph: MarkState::Plan, words: "Plan ready for review".into() },
         SessionWait::APPROVAL => Need {
             glyph: MarkState::Approval,
@@ -225,7 +228,11 @@ pub(crate) fn works_on_its_own(session: Option<&Session>, now: DateTime<Utc>) ->
 mod tests {
     use super::*;
 
-    fn session(status: SessionStatus, wait: Option<(&str, Option<&str>)>, at: DateTime<Utc>) -> Session {
+    fn session(
+        status: SessionStatus,
+        wait: Option<(&str, Option<&str>)>,
+        at: DateTime<Utc>,
+    ) -> Session {
         Session {
             last_completed_turn: None,
             chat_id: "c".into(),
@@ -304,7 +311,10 @@ mod tests {
     /// work, the first of equals; a group all at rest wears none.
     #[test]
     fn the_loudest_mark_speaks_for_a_group() {
-        let asks = Mark::NeedsYou(need(Some(&SessionWait { kind: SessionWait::QUESTION.into(), summary: None })));
+        let asks = Mark::NeedsYou(need(Some(&SessionWait {
+            kind: SessionWait::QUESTION.into(),
+            summary: None,
+        })));
         let marks = [Mark::AtWork, Mark::DoneUnseen, Mark::Failed, asks.clone(), Mark::AtRest];
         assert_eq!(loudest(&marks), Some(&asks));
         assert_eq!(loudest(&marks[..3]), Some(&Mark::Failed));
@@ -321,10 +331,11 @@ mod tests {
     #[test]
     fn one_hue_per_state() {
         for mut theme in [Theme::dark(), Theme::light()] {
-            let hues: Vec<Hsla> = [Mark::AtWork, Mark::NeedsYou(need(None)), Mark::Failed, Mark::DoneUnseen]
-                .iter()
-                .map(|mark| mark.hue(&theme).unwrap())
-                .collect();
+            let hues: Vec<Hsla> =
+                [Mark::AtWork, Mark::NeedsYou(need(None)), Mark::Failed, Mark::DoneUnseen]
+                    .iter()
+                    .map(|mark| mark.hue(&theme).unwrap())
+                    .collect();
             // Every need's glyph is needs you's one amber.
             for glyph in [MarkState::Question, MarkState::Approval, MarkState::Plan] {
                 assert_eq!(hue(glyph, &theme), hues[1], "{glyph:?}");

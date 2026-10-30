@@ -8,15 +8,13 @@ pub mod model;
 pub(crate) mod profile;
 mod view;
 
-use crate::composer::{ComposerInput, ComposerInputEvent};
 use gpui::{
     App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window,
 };
 use model::{PageState, Presentation};
-gpui::actions!(
-    browser,
-    [Reload, FocusAddress, NewTab, CloseTab, Back, Forward]
-);
+
+use crate::composer::{ComposerInput, ComposerInputEvent};
+gpui::actions!(browser, [Reload, FocusAddress, NewTab, CloseTab, Back, Forward]);
 
 pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     use crate::settings::{ShortcutId, parse_combo, platform_combo};
@@ -24,8 +22,7 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     let available = |combo: &str, own: Option<ShortcutId>| {
         !combo.is_empty()
             && !ShortcutId::ALL.iter().any(|id| {
-                Some(*id) != own
-                    && parse_combo(keymap.get(*id)).ok() == parse_combo(combo).ok()
+                Some(*id) != own && parse_combo(keymap.get(*id)).ok() == parse_combo(combo).ok()
             })
     };
     macro_rules! bind {
@@ -46,15 +43,8 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     bind!("mod-[", Back);
     bind!("mod-]", Forward);
     let reload = keymap.get(ShortcutId::BrowserReload);
-    if available(reload, Some(ShortcutId::BrowserReload))
-        && parse_combo(reload).is_ok()
-    {
-        cx.bind_keys([crate::keys::binding(
-            &platform_combo(reload),
-            Reload,
-            Some("Browser"),
-            cx,
-        )]);
+    if available(reload, Some(ShortcutId::BrowserReload)) && parse_combo(reload).is_ok() {
+        cx.bind_keys([crate::keys::binding(&platform_combo(reload), Reload, Some("Browser"), cx)]);
     }
 }
 
@@ -77,9 +67,7 @@ impl BrowserContext {
     pub(crate) fn for_profile(profile: profile::BrowserProfile) -> Self {
         #[cfg(target_os = "macos")]
         {
-            Self {
-                data: native::BrowserData::for_profile(profile),
-            }
+            Self { data: native::BrowserData::for_profile(profile) }
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -152,9 +140,7 @@ impl BrowserSurface {
         let native_task = cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.recv().await {
                 if this
-                    .update_in(cx, |this, window, cx| {
-                        this.on_native_event(event, window, cx)
-                    })
+                    .update_in(cx, |this, window, cx| this.on_native_event(event, window, cx))
                     .is_err()
                 {
                     break;
@@ -196,13 +182,16 @@ impl BrowserSurface {
     pub fn title(&self) -> gpui::SharedString {
         self.page.label().into()
     }
+
     /// The page shown, kept to show it again.
     pub fn url(&self) -> Option<&str> {
         self.page.url.as_deref()
     }
+
     pub fn set_remote(&mut self, remote: bool) {
         self.remote = remote;
     }
+
     pub fn set_shortcuts(&mut self, keymap: &crate::settings::KeymapConfig) {
         #[cfg(target_os = "macos")]
         if let Some(native) = &self.native {
@@ -247,7 +236,6 @@ impl BrowserSurface {
         }
         cx.notify();
     }
-
 
     /// The daemon resolves the session's current cwd for every update, so a
     /// checkout change cannot leave this tab discovering the previous project.
@@ -295,9 +283,7 @@ impl BrowserSurface {
                 {
                     return;
                 }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(2))
-                    .await;
+                cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
             }
         }));
     }
@@ -312,8 +298,7 @@ impl BrowserSurface {
             }
         };
         self.validation = None;
-        self.address
-            .update(cx, |input, cx| input.set_text(url.clone(), cx));
+        self.address.update(cx, |input, cx| input.set_text(url.clone(), cx));
         self.address_edited = false;
         self.page.url = Some(url.clone());
         self.page.title.clear();
@@ -372,12 +357,7 @@ impl BrowserSurface {
     }
 
     fn open_external(&self, cx: &mut Context<Self>) {
-        if let Some(url) = self
-            .page
-            .url
-            .as_deref()
-            .filter(|url| model::allowed_navigation(url))
-        {
+        if let Some(url) = self.page.url.as_deref().filter(|url| model::allowed_navigation(url)) {
             cx.open_url(url);
         }
     }
@@ -454,8 +434,7 @@ impl BrowserSurface {
                 if !self.address.focus_handle(cx).is_focused(window) {
                     if let Some(url) = &page.url {
                         if self.address.read(cx).text() != url {
-                            self.address
-                                .update(cx, |input, cx| input.set_text(url.clone(), cx));
+                            self.address.update(cx, |input, cx| input.set_text(url.clone(), cx));
                         }
                     }
                     self.address_edited = false;
@@ -537,9 +516,7 @@ mod tests {
         window
             .update(cx, |browser, window, cx| {
                 browser.page.url = Some("https://example.com/".into());
-                browser
-                    .address
-                    .update(cx, |input, cx| input.set_text("javascript:alert(1)", cx));
+                browser.address.update(cx, |input, cx| input.set_text("javascript:alert(1)", cx));
                 browser.focus_address(window, cx);
             })
             .unwrap();
@@ -569,45 +546,15 @@ mod tests {
         cx.update(|cx| {
             let mut config = crate::settings::KeymapConfig::default();
             bind_keys(cx, &config);
-            assert_eq!(
-                cx.key_bindings()
-                    .borrow()
-                    .bindings_for_action(&FocusAddress)
-                    .count(),
-                1
-            );
-            assert_eq!(
-                cx.key_bindings()
-                    .borrow()
-                    .bindings_for_action(&Reload)
-                    .count(),
-                1
-            );
+            assert_eq!(cx.key_bindings().borrow().bindings_for_action(&FocusAddress).count(), 1);
+            assert_eq!(cx.key_bindings().borrow().bindings_for_action(&Reload).count(), 1);
             cx.clear_key_bindings();
             config.toggle_sidebar = crate::settings::platform_combo("mod-l");
             config.toggle_changes = "mod-shift-r".into();
             bind_keys(cx, &config);
-            assert_eq!(
-                cx.key_bindings()
-                    .borrow()
-                    .bindings_for_action(&FocusAddress)
-                    .count(),
-                0
-            );
-            assert_eq!(
-                cx.key_bindings()
-                    .borrow()
-                    .bindings_for_action(&Reload)
-                    .count(),
-                0
-            );
-            assert_eq!(
-                cx.key_bindings()
-                    .borrow()
-                    .bindings_for_action(&NewTab)
-                    .count(),
-                1
-            );
+            assert_eq!(cx.key_bindings().borrow().bindings_for_action(&FocusAddress).count(), 0);
+            assert_eq!(cx.key_bindings().borrow().bindings_for_action(&Reload).count(), 0);
+            assert_eq!(cx.key_bindings().borrow().bindings_for_action(&NewTab).count(), 1);
         });
     }
 }
@@ -680,8 +627,9 @@ fn favicon_png(data: &str) -> Option<Vec<u8>> {
 // leaves the globe.
 #[cfg(test)]
 mod favicon_tests {
-    use super::{FAVICON_SIDE, favicon_message, favicon_png};
     use base64::Engine as _;
+
+    use super::{FAVICON_SIDE, favicon_message, favicon_png};
 
     fn png_url(side: u32) -> String {
         picture_url("image/png", side, image::ImageFormat::Png)

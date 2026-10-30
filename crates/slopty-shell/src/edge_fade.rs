@@ -9,8 +9,8 @@
 use std::cell::RefCell;
 
 use gpui::{
-    AnyElement, App, Bounds, Element, Global, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, Pixels, ScrollHandle, Window, WindowId, px,
+    AnyElement, App, Bounds, Element, Global, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, Pixels, ScrollHandle, Window, WindowId, px,
 };
 
 // The fade's scope, which `paint` maps onto gpui-fast's `with_edge_fade` (the bounds and a
@@ -249,8 +249,8 @@ impl EdgeFaded {
 }
 
 impl Element for EdgeFaded {
-    type RequestLayoutState = ();
     type PrepaintState = ();
+    type RequestLayoutState = ();
 
     fn id(&self) -> Option<gpui::ElementId> {
         None
@@ -288,10 +288,7 @@ impl Element for EdgeFaded {
         if !cx.has_global::<PaintFades>() {
             cx.set_global(PaintFades::default());
         }
-        cx.global::<PaintFades>()
-            .0
-            .borrow_mut()
-            .push((window.window_handle().window_id(), fade));
+        cx.global::<PaintFades>().0.borrow_mut().push((window.window_handle().window_id(), fade));
         window.with_edge_fade(fade.bounds, fade.fast(), |window| self.child.prepaint(window, cx));
         cx.global::<PaintFades>().0.borrow_mut().pop();
     }
@@ -313,10 +310,7 @@ impl Element for EdgeFaded {
         if !cx.has_global::<PaintFades>() {
             cx.set_global(PaintFades::default());
         }
-        cx.global::<PaintFades>()
-            .0
-            .borrow_mut()
-            .push((window.window_handle().window_id(), fade));
+        cx.global::<PaintFades>().0.borrow_mut().push((window.window_handle().window_id(), fade));
         window.with_edge_fade(fade.bounds, fade.fast(), |window| self.child.paint(window, cx));
         cx.global::<PaintFades>().0.borrow_mut().pop();
     }
@@ -421,9 +415,12 @@ fn label_fade_outset(overflow: f32, band: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use gpui::{AppContext, Context, Render, Styled, div, prelude::*};
     use std::rc::Rc;
+
+    use gpui::prelude::*;
+    use gpui::{AppContext, Context, Render, Styled, div};
+
+    use super::*;
 
     #[gpui::test]
     fn menu_fades_follow_scroll_and_disappear_when_content_fits(cx: &mut gpui::TestAppContext) {
@@ -439,28 +436,23 @@ mod tests {
                     gpui::canvas(
                         |_, _, _| (),
                         move |_, _, window, cx| {
-                            observed
-                                .borrow_mut()
-                                .push((inside, active_fade(window, cx)));
+                            observed.borrow_mut().push((inside, active_fade(window, cx)));
                         },
                     )
                     .w(px(100.0))
                     .h(px(40.0))
                     .flex_none()
                 };
-                div()
-                    .w(px(300.0))
-                    .flex()
-                    .flex_col()
-                    .child(probe(false))
-                    .child(crate::popover::faded_menu_list(
+                div().w(px(300.0)).flex().flex_col().child(probe(false)).child(
+                    crate::popover::faded_menu_list(
                         &self.scroll,
                         crate::popover::menu_scroll_list("menu", &self.scroll)
                             .max_h(px(100.0))
                             .flex()
                             .flex_col()
                             .children((0..self.rows).map(|_| probe(true))),
-                    ))
+                    ),
+                )
             }
         }
         let observed = Rc::new(RefCell::new(Vec::new()));
@@ -473,11 +465,9 @@ mod tests {
         let scroll = menu.read_with(cx, |menu, _| menu.scroll.clone());
         let max = scroll.max_offset().y;
         assert!(max > px(100.0));
-        for (offset, top, bottom) in [
-            (px(0.0), false, true),
-            (-max / 2.0, true, true),
-            (-max, true, false),
-        ] {
+        for (offset, top, bottom) in
+            [(px(0.0), false, true), (-max / 2.0, true, true), (-max, true, false)]
+        {
             scroll.set_offset(gpui::point(px(0.0), offset));
             observed.borrow_mut().clear();
             cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -530,7 +520,8 @@ mod tests {
             }
         }
         let observed = Rc::new(RefCell::new(Vec::new()));
-        let handle = cx.add_window(|_, _| Fixture { hidden: (0.0, 0.0), observed: observed.clone() });
+        let handle =
+            cx.add_window(|_, _| Fixture { hidden: (0.0, 0.0), observed: observed.clone() });
         let mut ramps = |hidden: (f32, f32)| {
             handle
                 .update(cx, |view, _, cx| {
@@ -600,11 +591,7 @@ mod tests {
                             24.0,
                             self.top,
                             self.bottom,
-                            div()
-                                .w(px(300.0))
-                                .h(px(100.0))
-                                .child(label)
-                                .child(probe(20.0)),
+                            div().w(px(300.0)).h(px(100.0)).child(label).child(probe(20.0)),
                         )
                         .band_top(12.0)
                         .band_bottom(30.0)
@@ -639,9 +626,7 @@ mod tests {
                 })
                 .unwrap();
                 let seen = observed.borrow();
-                let [label, sibling, outside] = &seen[seen.len() - 3..] else {
-                    unreachable!()
-                };
+                let [label, sibling, outside] = &seen[seen.len() - 3..] else { unreachable!() };
                 assert!(outside.is_none(), "fade leaked outside scroll container");
                 let overflowing = width < 200.0;
                 if top || bottom {

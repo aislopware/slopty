@@ -1,9 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Workspace drag targets are scoped to the tree viewport; the chat keeps its own receiver.
-use super::*;
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gpui::{AnyElement, Bounds, CursorStyle, DragMoveEvent};
-use std::{cell::RefCell, rc::Rc};
 use slopty_view_proto::WorkspaceEntryKind;
+
+use super::*;
 
 #[derive(Default)]
 pub(super) struct TreeDrag {
@@ -31,11 +34,7 @@ pub(super) fn destination_path(
         return None;
     }
     let name = source.rsplit('/').next()?;
-    Some(if directory.is_empty() {
-        name.into()
-    } else {
-        format!("{directory}/{name}")
-    })
+    Some(if directory.is_empty() { name.into() } else { format!("{directory}/{name}") })
 }
 
 /// Resolve a multi-entry drop. Entries already in `directory` are skipped;
@@ -94,8 +93,7 @@ impl FilesSurface {
             .child(
                 gpui::canvas(
                     move |bounds, _, _| {
-                        rows.borrow_mut()
-                            .insert(key.clone(), (bounds, target.clone()));
+                        rows.borrow_mut().insert(key.clone(), (bounds, target.clone()));
                     },
                     |_, _, _, _| {},
                 )
@@ -148,9 +146,7 @@ impl FilesSurface {
             && !self.mutation_busy()
             && self.tree_rename.is_none()
             && self.tree_delete.is_none()
-            && self
-                .mutation_capabilities
-                .is_some_and(|caps| caps.move_entry)
+            && self.mutation_capabilities.is_some_and(|caps| caps.move_entry)
             && payload.items().iter().all(|item| {
                 self.tree.node(&item.path).is_some_and(|node| {
                     node.entry.kind != WorkspaceEntryKind::Symlink
@@ -191,13 +187,7 @@ impl FilesSurface {
     /// workspace root for drops and clears the selection when clicked.
     pub(super) fn is_tree_empty_space(&self, point: Point<Pixels>) -> bool {
         let viewport = self.tree_list.viewport_bounds();
-        let last = self
-            .tree_drag
-            .rows
-            .borrow()
-            .values()
-            .map(|(bounds, _)| bounds.bottom())
-            .max();
+        let last = self.tree_drag.rows.borrow().values().map(|(bounds, _)| bounds.bottom()).max();
         viewport.contains(&point) && last.is_none_or(|bottom| point.y >= bottom)
     }
 
@@ -230,9 +220,7 @@ impl FilesSurface {
             self.tree_drag.last_tick = Some(cx.background_executor().now());
             self.tree_drag.tick_task = Some(cx.spawn_in(window, async move |this, cx| {
                 loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(16))
-                        .await;
+                    cx.background_executor().timer(Duration::from_millis(16)).await;
                     if !this
                         .update_in(cx, |files, window, cx| files.tree_drag_tick(window, cx))
                         .unwrap_or(false)
@@ -266,10 +254,8 @@ impl FilesSurface {
         };
         self.clear_tree_drag(window, cx);
         if let Some(moves) = moves {
-            let requests = moves
-                .into_iter()
-                .map(|(path, destination)| (path, Some(destination)))
-                .collect();
+            let requests =
+                moves.into_iter().map(|(path, destination)| (path, Some(destination))).collect();
             self.request_mutations(requests, cx);
         }
     }
@@ -346,27 +332,17 @@ impl FilesSurface {
     pub(crate) fn suspend_tree_interactions(&mut self, cx: &mut Context<Self>) {
         if self.tree_drag.payload.is_some()
             || self.tree_context_menu.is_open()
-            || self
-                .tree_rename
-                .as_ref()
-                .is_some_and(|rename| !rename.submitted)
+            || self.tree_rename.as_ref().is_some_and(|rename| !rename.submitted)
             || self.tree_delete.is_some()
         {
             self.interaction_generation = self.interaction_generation.wrapping_add(1);
             self.tree_drag = TreeDrag::default();
             self.close_tree_context_menu(cx);
-            if self
-                .tree_rename
-                .as_ref()
-                .is_some_and(|rename| !rename.submitted)
-            {
+            if self.tree_rename.as_ref().is_some_and(|rename| !rename.submitted) {
                 self.tree_rename = None;
             }
             if let Some(dialog) = self.tree_delete.take() {
-                cx.emit(FilesEvent::HoldMutation {
-                    origin: dialog.origin,
-                    paths: Vec::new(),
-                });
+                cx.emit(FilesEvent::HoldMutation { origin: dialog.origin, paths: Vec::new() });
             }
             cx.notify();
         }
@@ -407,9 +383,7 @@ mod tests {
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
-            cx.subscribe(&files, move |_, event, _| {
-                recorded.borrow_mut().push(event.clone())
-            })
+            cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
         let start = cx.debug_bounds("tree-entry:a.txt").unwrap().center();
         let end = cx.debug_bounds("tree-entry:folder").unwrap().center();
@@ -419,24 +393,17 @@ mod tests {
             Some(gpui::MouseButton::Left),
             gpui::Modifiers::default(),
         );
-        cx.simulate_mouse_move(
-            end,
-            Some(gpui::MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
+        cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
         cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
         cx.run_until_parked();
         let events = events.borrow();
-        let moves = events
-            .iter()
-            .filter_map(|event| {
-                if let FilesEvent::Mutate(intent) = event {
-                    Some(intent)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
+        let moves =
+            events
+                .iter()
+                .filter_map(|event| {
+                    if let FilesEvent::Mutate(intent) = event { Some(intent) } else { None }
+                })
+                .collect::<Vec<_>>();
         assert_eq!(moves.len(), 1);
         assert_eq!(moves[0].destination.as_deref(), Some("folder/a.txt"));
     }
@@ -451,11 +418,7 @@ mod tests {
             Some(gpui::MouseButton::Left),
             gpui::Modifiers::default(),
         );
-        cx.simulate_mouse_move(
-            end,
-            Some(gpui::MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
+        cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
         cx.executor().advance_clock(Duration::from_millis(649));
         files.update_in(cx, |files, window, cx| {
             files.tree_drag_tick(window, cx);
@@ -496,9 +459,7 @@ mod tests {
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
-            cx.subscribe(&files, move |_, event, _| {
-                recorded.borrow_mut().push(event.clone())
-            })
+            cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
         files.update(cx, |files, cx| {
             files.tree.select("a.txt");
@@ -514,11 +475,7 @@ mod tests {
             Some(gpui::MouseButton::Left),
             gpui::Modifiers::default(),
         );
-        cx.simulate_mouse_move(
-            end,
-            Some(gpui::MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
+        cx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), gpui::Modifiers::default());
         files.read_with(cx, |files, _| {
             assert_eq!(files.tree_drag.destination.as_deref(), Some("folder"));
             assert_eq!(files.tree_drag.payload.as_ref().unwrap().items().len(), 2);
@@ -538,18 +495,8 @@ mod tests {
             .iter()
             .map(|intent| (intent.entry.path.as_str(), intent.destination.as_deref()))
             .collect::<Vec<_>>();
-        assert_eq!(
-            moves,
-            [
-                ("a.txt", Some("folder/a.txt")),
-                ("b.txt", Some("folder/b.txt"))
-            ]
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, FilesEvent::Mutate(_)))
-        );
+        assert_eq!(moves, [("a.txt", Some("folder/a.txt")), ("b.txt", Some("folder/b.txt"))]);
+        assert!(!events.iter().any(|event| matches!(event, FilesEvent::Mutate(_))));
     }
 
     #[test]
@@ -564,26 +511,14 @@ mod tests {
             Some(vec![("b/y".into(), "a/y".into())])
         );
         assert_eq!(destination_paths(&[item("a/x", false)], "a"), None);
-        assert_eq!(
-            destination_paths(&[item("dir", true), item("f", false)], "dir/sub"),
-            None
-        );
-        assert_eq!(
-            destination_paths(&[item("a/x", false), item("b/x", false)], "c"),
-            None
-        );
+        assert_eq!(destination_paths(&[item("dir", true), item("f", false)], "dir/sub"), None);
+        assert_eq!(destination_paths(&[item("a/x", false), item("b/x", false)], "c"), None);
     }
 
     #[test]
     fn tree_drop_resolves_parent_root_and_descendants() {
-        assert_eq!(
-            destination_path("a/file", "b", false).as_deref(),
-            Some("b/file")
-        );
-        assert_eq!(
-            destination_path("a/file", "", false).as_deref(),
-            Some("file")
-        );
+        assert_eq!(destination_path("a/file", "b", false).as_deref(), Some("b/file"));
+        assert_eq!(destination_path("a/file", "", false).as_deref(), Some("file"));
         assert_eq!(destination_path("a/file", "a", false), None);
         assert_eq!(destination_path("a", "a/sub", true), None);
         assert_eq!(destination_path("a", "a", true), None);

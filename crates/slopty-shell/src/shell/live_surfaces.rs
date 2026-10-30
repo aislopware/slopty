@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
-use gpui::{AnyElement, App, AppContext as _, Context, Empty, Entity, Global, IntoElement, SharedString};
+use gpui::{
+    AnyElement, App, AppContext as _, Context, Empty, Entity, Global, IntoElement, SharedString,
+};
 
 use super::{RightSurface, Shell};
 use crate::live::screen::ScreenSurface;

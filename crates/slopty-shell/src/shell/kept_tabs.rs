@@ -118,8 +118,7 @@ impl Shell {
             let connects = self.unrestored_tabs[&key].tabs.iter().any(|tab| {
                 matches!(tab, SavedSurface::Terminal { .. } | SavedSurface::Screen { .. })
             });
-            (!connects || state.engine().is_some())
-                && state.chats.iter().any(|chat| chat.id == key)
+            (!connects || state.engine().is_some()) && state.chats.iter().any(|chat| chat.id == key)
         };
         let Some(saved) = ready.then(|| self.unrestored_tabs.remove(&key)).flatten() else {
             return;

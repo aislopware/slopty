@@ -1,8 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+use gpui::{StyledText, TestAppContext, VisualTestContext, canvas};
+
 use super::*;
 use crate::markdown::{render, selection};
 use crate::popover;
-use gpui::{StyledText, TestAppContext, VisualTestContext, canvas};
 
 const BACKGROUND_KEY: &str = "modal-selection-background";
 const BACKGROUND_TEXT: &str = "Transcript text behind the modal must never be selected.";
@@ -42,18 +43,9 @@ impl Render for ModalSelectionHarness {
             .line_height(px(22.0))
             .child(render::selection_frame_reset())
             .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        render::selectable_text_wrap()
-                            .w(px(560.0))
-                            .child(underlay)
-                            .child(styled),
-                    ),
+                div().absolute().inset_0().flex().items_center().justify_center().child(
+                    render::selectable_text_wrap().w(px(560.0)).child(underlay).child(styled),
+                ),
             )
             .when(self.modal_open, |root| {
                 root.child(popover::modal(

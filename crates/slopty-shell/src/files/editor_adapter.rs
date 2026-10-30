@@ -1,7 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 85006f4), see THIRD_PARTY_NOTICES.md
 //! Slopty-owned styling and highlighting adapters for `gpui-base`.
 
-use std::{ops::Range, rc::Rc, sync::Arc};
+use std::ops::Range;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{Context, HighlightStyle, SharedString, Window};
 use gpui_base::input::{
@@ -126,10 +128,7 @@ impl InputHighlighter for SloptyInputHighlighter {
                 runs.push((cursor..start, HighlightStyle::default()));
             }
             if start < end {
-                runs.push((
-                    start..end,
-                    resolver.style(name_for_kind(*kind)).unwrap_or_default(),
-                ));
+                runs.push((start..end, resolver.style(name_for_kind(*kind)).unwrap_or_default()));
                 cursor = end;
             }
         }
@@ -137,10 +136,7 @@ impl InputHighlighter for SloptyInputHighlighter {
             runs.push((cursor..range.end, HighlightStyle::default()));
         }
         #[cfg(test)]
-        probe::record(probe::Event::Styles {
-            request: range.clone(),
-            runs: runs.clone(),
-        });
+        probe::record(probe::Event::Styles { request: range.clone(), runs: runs.clone() });
         runs
     }
 
@@ -159,9 +155,7 @@ pub(crate) fn editor_style(theme: &Theme) -> InputEditorStyle {
         // One selection colour for every text surface (M40).
         selection: theme.selection,
         caret: theme.caret,
-        highlight_styles: Arc::new(SloptyHighlightStyleResolver {
-            palette: theme.syntax.clone(),
-        }),
+        highlight_styles: Arc::new(SloptyHighlightStyleResolver { palette: theme.syntax.clone() }),
         editor_active_line: Some(crate::theme::wash(0.025)),
         // The caret's line number reads a step brighter than the rest, as in Claude
         // desktop's and T3 Code's editors.
@@ -185,9 +179,7 @@ pub(super) fn install_highlighter(
         state.set_highlighter_factory(
             Rc::new(move |_| {
                 #[cfg(test)]
-                probe::record(probe::Event::FactoryBuilt {
-                    source: source.clone(),
-                });
+                probe::record(probe::Event::FactoryBuilt { source: source.clone() });
                 Some(Box::new(SloptyInputHighlighter::new(&source, &document)) as Box<_>)
             }),
             cx,
@@ -201,10 +193,9 @@ fn highlight_source_matches_editor(highlight_source: &str, editor_source: &str) 
 
 /// Whether applying `edit` to `source` yields `text`.
 fn source_matches_edited_text(source: &str, edit: &InputEdit, text: &str) -> bool {
-    let (Some(prefix), Some(suffix)) = (
-        source.get(..edit.start_byte),
-        source.get(edit.old_end_byte..),
-    ) else {
+    let (Some(prefix), Some(suffix)) =
+        (source.get(..edit.start_byte), source.get(edit.old_end_byte..))
+    else {
         return false;
     };
     let inserted = edit.new_end_byte.saturating_sub(edit.start_byte);
@@ -220,7 +211,8 @@ fn source_matches_edited_text(source: &str, edit: &InputEdit, text: &str) -> boo
 /// with the text the editor is about to shape.
 #[cfg(test)]
 pub(super) mod probe {
-    use std::{cell::RefCell, ops::Range};
+    use std::cell::RefCell;
+    use std::ops::Range;
 
     use gpui::HighlightStyle;
 
@@ -229,16 +221,9 @@ pub(super) mod probe {
         /// The installed factory built a highlighter from its captured source.
         FactoryBuilt { source: String },
         /// `update` applied an edit; `spans` are the ranges kept afterwards.
-        Updated {
-            edit: Range<usize>,
-            new_end: usize,
-            spans: Vec<Range<usize>>,
-        },
+        Updated { edit: Range<usize>, new_end: usize, spans: Vec<Range<usize>> },
         /// `styles` answered a prepaint request.
-        Styles {
-            request: Range<usize>,
-            runs: Vec<(Range<usize>, HighlightStyle)>,
-        },
+        Styles { request: Range<usize>, runs: Vec<(Range<usize>, HighlightStyle)> },
     }
 
     thread_local! {
@@ -260,10 +245,7 @@ fn absolute_spans(
 ) -> Vec<(Range<usize>, HighlightKind)> {
     let mut starts = vec![0];
     starts.extend(
-        source
-            .bytes()
-            .enumerate()
-            .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+        source.bytes().enumerate().filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
     );
     let mut spans = Vec::new();
     for (line_index, line) in document.lines.iter().enumerate() {
@@ -361,9 +343,10 @@ fn kind_for_name(name: &str) -> Option<HighlightKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui_base::input::Point;
     use slopty_syntax::{HighlightSpan, LanguageId};
+
+    use super::*;
 
     fn highlighted(source: &str, spans: Vec<HighlightSpan>) -> HighlightedDocument {
         HighlightedDocument::from_absolute_spans(LanguageId::Rust, source, spans).unwrap()
@@ -397,20 +380,12 @@ mod tests {
         let document = highlighted(
             source,
             vec![
-                HighlightSpan {
-                    range: 0..3,
-                    kind: HighlightKind::Keyword,
-                },
-                HighlightSpan {
-                    range: 12..14,
-                    kind: HighlightKind::Number,
-                },
+                HighlightSpan { range: 0..3, kind: HighlightKind::Keyword },
+                HighlightSpan { range: 12..14, kind: HighlightKind::Number },
             ],
         );
         let highlighter = SloptyInputHighlighter::new(source, &document);
-        let resolver = SloptyHighlightStyleResolver {
-            palette: Theme::dark().syntax,
-        };
+        let resolver = SloptyHighlightStyleResolver { palette: Theme::dark().syntax };
         let runs = highlighter.styles(&(0..source.len()), &resolver);
         assert_eq!(runs.first().unwrap().0.start, 0);
         assert_eq!(runs.last().unwrap().0.end, source.len());
@@ -422,15 +397,10 @@ mod tests {
         let stale_source = "ab";
         let stale_document = highlighted(
             stale_source,
-            vec![HighlightSpan {
-                range: 1..2,
-                kind: HighlightKind::Variable,
-            }],
+            vec![HighlightSpan { range: 1..2, kind: HighlightKind::Variable }],
         );
         let highlighter = SloptyInputHighlighter::new(stale_source, &stale_document);
-        let resolver = SloptyHighlightStyleResolver {
-            palette: Theme::dark().syntax,
-        };
+        let resolver = SloptyHighlightStyleResolver { palette: Theme::dark().syntax };
         let updated_text = "é";
 
         let stale_runs = highlighter.styles(&(0..updated_text.len()), &resolver);
@@ -456,22 +426,10 @@ mod tests {
     fn highlight_source_is_verified_against_the_edited_text() {
         let source = r#"{"": 1}"#;
         assert!(source_matches_edited_text(source, &edit(0, 0, 0), source));
-        assert!(source_matches_edited_text(
-            source,
-            &edit(5, 6, 7),
-            r#"{"": 42}"#
-        ));
+        assert!(source_matches_edited_text(source, &edit(5, 6, 7), r#"{"": 42}"#));
         assert!(source_matches_edited_text(source, &edit(0, 7, 6), "\" →\""));
-        assert!(!source_matches_edited_text(
-            source,
-            &edit(0, 0, 0),
-            "\" →\""
-        ));
-        assert!(!source_matches_edited_text(
-            source,
-            &edit(0, 0, 0),
-            r#"{"": 2}"#
-        ));
+        assert!(!source_matches_edited_text(source, &edit(0, 0, 0), "\" →\""));
+        assert!(!source_matches_edited_text(source, &edit(0, 0, 0), r#"{"": 2}"#));
         assert!(!source_matches_edited_text("→", &edit(1, 1, 1), "→"));
     }
 

@@ -15,7 +15,11 @@ pub(super) struct HorizontalPanelFit {
 /// The sidebar fits while the session keeps [`CHAT_PANEL_MIN`] beside it at the sidebar's
 /// least: its rail when it is put away, [`SIDEBAR_MIN`] when it is open. Open, it is as wide as
 /// the person made it, within what the session leaves.
-pub(super) fn horizontal_panel_fit(viewport: f32, sidebar_width: f32, put_away: bool) -> HorizontalPanelFit {
+pub(super) fn horizontal_panel_fit(
+    viewport: f32,
+    sidebar_width: f32,
+    put_away: bool,
+) -> HorizontalPanelFit {
     let viewport = viewport.max(0.0);
     let least = if put_away { sidebar::SIDEBAR_RAIL_WIDTH } else { SIDEBAR_MIN };
     let sidebar = least + CHAT_PANEL_MIN <= viewport;
@@ -27,7 +31,10 @@ impl Shell {
     /// Whether the window has room for the sidebar this frame.
     pub(super) fn horizontal_fit(&self) -> HorizontalPanelFit {
         if !matches!(self.route, Route::Chat) {
-            return HorizontalPanelFit { sidebar: true, sidebar_limit: self.settings.sidebar_width };
+            return HorizontalPanelFit {
+                sidebar: true,
+                sidebar_limit: self.settings.sidebar_width,
+            };
         }
         horizontal_panel_fit(
             self.viewport_width,
@@ -117,9 +124,7 @@ impl Shell {
 
     /// The width the sidebar keeps laying out at while the fit slides it out.
     fn fit_exit_content(&self) -> Option<f32> {
-        self.fit_exit
-            .filter(|(exit, _)| self.tween_active(Some(*exit)))
-            .map(|(_, content)| content)
+        self.fit_exit.filter(|(exit, _)| self.tween_active(Some(*exit))).map(|(_, content)| content)
     }
 
     /// The width the sidebar lays its content out at: the fit's allowance, or what it had while
@@ -176,6 +181,9 @@ mod tests {
         assert_eq!(narrow, HorizontalPanelFit { sidebar: false, sidebar_limit: 0.0 });
         // Put away, its rail still fits where the open sidebar would not.
         assert!(horizontal_panel_fit(CHAT_PANEL_MIN + SIDEBAR_MIN - 1.0, 280.0, true).sidebar);
-        assert!(!horizontal_panel_fit(CHAT_PANEL_MIN + sidebar::SIDEBAR_RAIL_WIDTH - 1.0, 280.0, true).sidebar);
+        assert!(
+            !horizontal_panel_fit(CHAT_PANEL_MIN + sidebar::SIDEBAR_RAIL_WIDTH - 1.0, 280.0, true)
+                .sidebar
+        );
     }
 }

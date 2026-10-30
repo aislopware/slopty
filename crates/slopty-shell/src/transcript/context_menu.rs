@@ -5,7 +5,8 @@
 
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, Context, FocusHandle, Pixels, Point, SharedString, Window, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, App, Context, FocusHandle, Pixels, Point, SharedString, Window, px};
 
 use super::Transcript;
 use crate::markdown::render::MenuChoice;
@@ -59,13 +60,24 @@ impl Transcript {
     }
 
     /// The code blocks' right-click: their menu opens here.
-    pub(super) fn code_menu_ui(&self, cx: &mut Context<Self>) -> Rc<crate::markdown::render::MenuFn> {
+    pub(super) fn code_menu_ui(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Rc<crate::markdown::render::MenuFn> {
         let entity = cx.weak_entity();
-        Rc::new(move |label: &'static str, choices: Vec<MenuChoice>, position: Point<Pixels>, window: &mut Window, cx: &mut App| {
-            entity
-                .update(cx, |this, cx| this.open_context_menu(label, choices, position, window, cx))
-                .ok();
-        })
+        Rc::new(
+            move |label: &'static str,
+                  choices: Vec<MenuChoice>,
+                  position: Point<Pixels>,
+                  window: &mut Window,
+                  cx: &mut App| {
+                entity
+                    .update(cx, |this, cx| {
+                        this.open_context_menu(label, choices, position, window, cx)
+                    })
+                    .ok();
+            },
+        )
     }
 
     /// A right-click over the chat: the selection's menu, when text is selected.
@@ -80,7 +92,13 @@ impl Transcript {
             .filter(|text| !text.is_empty());
         if let Some(words) = words {
             cx.stop_propagation();
-            self.open_context_menu("Selection", selection_choices(&words), event.position, window, cx);
+            self.open_context_menu(
+                "Selection",
+                selection_choices(&words),
+                event.position,
+                window,
+                cx,
+            );
         }
     }
 
@@ -105,7 +123,12 @@ impl Transcript {
         }
     }
 
-    fn context_menu_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn context_menu_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use crate::popover::MenuKey;
         let Some(menu) = self.context_menu.menu.open_mut() else {
             return;
@@ -143,7 +166,9 @@ impl Transcript {
             .min_w(px(180.0))
             .flex()
             .flex_col()
-            .on_key_down(cx.listener(|this, event, window, cx| this.context_menu_key(event, window, cx)))
+            .on_key_down(
+                cx.listener(|this, event, window, cx| this.context_menu_key(event, window, cx)),
+            )
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_context_menu(cx)))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
         for (nth, choice) in menu.choices.iter().enumerate() {
@@ -153,8 +178,12 @@ impl Transcript {
                     .id(id)
                     .role(gpui::Role::MenuItem)
                     .aria_label(choice.label.clone())
-                    .when_some(choice.keys, |row, keys| row.aria_keyshortcuts(crate::keys::aria_combo(keys)))
-                    .on_click(cx.listener(move |this, _, window, cx| this.pick_context_choice(nth, window, cx)))
+                    .when_some(choice.keys, |row, keys| {
+                        row.aria_keyshortcuts(crate::keys::aria_combo(keys))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.pick_context_choice(nth, window, cx)
+                    }))
                     .child(div_label(choice.label.clone()))
                     .when_some(choice.keys, |row, keys| {
                         row.child(crate::popover::kbd_hint(&theme, &crate::keys::combo_text(keys)))

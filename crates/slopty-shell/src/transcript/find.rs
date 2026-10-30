@@ -12,17 +12,18 @@
 //! filters, failed steps only and steps of one kind, share the match: with either on, only the
 //! steps it keeps match, each one a match by itself while no words are typed.
 
+use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, Global, SharedString,
-    Subscription, WeakEntity, Window, div, prelude::*, px,
+    Subscription, WeakEntity, Window, div, px,
 };
 
 use super::trace::Cursor;
 use super::{CallKind, Row, RowKind, ToolDetail, ToolItem, ToolItemKind, Transcript, fnv1a};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::markdown::find as paint;
-use crate::popover;
 use crate::motion::HoverFade as _;
+use crate::popover;
 use crate::settings::widgets::{self, ActionHint as _, Keys, SelectOption, SelectState};
 use crate::theme::Theme;
 
@@ -53,8 +54,16 @@ pub(crate) enum StepKind {
 
 impl StepKind {
     /// Every kind, in the filter's order.
-    pub(crate) const ALL: [Self; 8] =
-        [Self::Command, Self::Edit, Self::Read, Self::Search, Self::Fetch, Self::Subagent, Self::Thought, Self::Other];
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Command,
+        Self::Edit,
+        Self::Read,
+        Self::Search,
+        Self::Fetch,
+        Self::Subagent,
+        Self::Thought,
+        Self::Other,
+    ];
 
     /// Its name, as the filter says it.
     pub(crate) const fn name(self) -> &'static str {
@@ -102,7 +111,8 @@ impl Filter {
 
     /// Whether the filters keep step `tool`.
     fn keeps(self, tool: &ToolItem) -> bool {
-        (!self.failed || super::trace::failed(tool)) && self.kind.is_none_or(|kind| StepKind::of(tool) == kind)
+        (!self.failed || super::trace::failed(tool))
+            && self.kind.is_none_or(|kind| StepKind::of(tool) == kind)
     }
 }
 
@@ -198,20 +208,36 @@ fn step_body(tool: &ToolItem) -> Vec<String> {
         match detail.as_ref() {
             ToolDetail::Output { lines, .. } => out.extend(lines.iter().map(ToString::to_string)),
             ToolDetail::Thought { lines, .. } => {
-                out.extend(lines.iter().map(|runs| runs.iter().map(|run| run.text.as_str()).collect::<String>()));
+                out.extend(
+                    lines
+                        .iter()
+                        .map(|runs| runs.iter().map(|run| run.text.as_str()).collect::<String>()),
+                );
             }
             ToolDetail::Diff { file, .. } => {
-                out.extend(file.hunks.iter().flat_map(|hunk| hunk.lines.iter().map(|line| line.text.clone())));
+                out.extend(
+                    file.hunks
+                        .iter()
+                        .flat_map(|hunk| hunk.lines.iter().map(|line| line.text.clone())),
+                );
             }
             ToolDetail::Stats { stats } => out.extend(stats.iter().map(|stat| stat.path.clone())),
-            ToolDetail::Json { lines, .. } => out.extend(lines.iter().map(|line| line.text.clone())),
+            ToolDetail::Json { lines, .. } => {
+                out.extend(lines.iter().map(|line| line.text.clone()))
+            }
         }
     }
     out
 }
 
 /// Step `tool`'s place, as find counts it in row `row` (`step`: its part id in a group).
-fn step_hit(row: &SharedString, step: Option<&str>, tool: &ToolItem, needle: &str, filter: Filter) -> Option<Hit> {
+fn step_hit(
+    row: &SharedString,
+    step: Option<&str>,
+    tool: &ToolItem,
+    needle: &str,
+    filter: Filter,
+) -> Option<Hit> {
     if !filter.keeps(tool) {
         return None;
     }
@@ -224,7 +250,13 @@ fn step_hit(row: &SharedString, step: Option<&str>, tool: &ToolItem, needle: &st
         let in_line = paint::count(&step_line(tool), needle);
         (in_line, in_line + paint::count(&step_body(tool), needle))
     };
-    (count > 0).then(|| Hit { row: row.clone(), step: step.map(str::to_owned), text: false, in_line, count })
+    (count > 0).then(|| Hit {
+        row: row.clone(),
+        step: step.map(str::to_owned),
+        text: false,
+        in_line,
+        count,
+    })
 }
 
 /// Every place in `rows` with matches of `needle` that `filter` keeps, in order: with no filter,
@@ -236,7 +268,9 @@ pub(crate) fn hits(rows: &[Row], needle: &str, filter: Filter) -> Vec<Hit> {
     for row in rows {
         match &row.kind {
             RowKind::ToolGroup { tools, .. } => {
-                out.extend(tools.iter().filter_map(|tool| step_hit(&row.id, Some(&tool.part_id), tool, needle, filter)));
+                out.extend(tools.iter().filter_map(|tool| {
+                    step_hit(&row.id, Some(&tool.part_id), tool, needle, filter)
+                }));
             }
             RowKind::Spawn { tool } => out.extend(step_hit(&row.id, None, tool, needle, filter)),
             RowKind::ErrorCard { .. } | RowKind::ErrorChip { .. } if filter.kind.is_none() => {
@@ -246,14 +280,26 @@ pub(crate) fn hits(rows: &[Row], needle: &str, filter: Filter) -> Vec<Hit> {
                     paint::count(&error_texts(row), needle)
                 };
                 if count > 0 {
-                    out.push(Hit { row: row.id.clone(), step: None, text: false, in_line: count, count });
+                    out.push(Hit {
+                        row: row.id.clone(),
+                        step: None,
+                        text: false,
+                        in_line: count,
+                        count,
+                    });
                 }
             }
             _ if filter.active() || needle.is_empty() => {}
             _ => {
                 let count = paint::count(&row_texts(row), needle);
                 if count > 0 {
-                    out.push(Hit { row: row.id.clone(), step: None, text: true, in_line: count, count });
+                    out.push(Hit {
+                        row: row.id.clone(),
+                        step: None,
+                        text: true,
+                        in_line: count,
+                        count,
+                    });
                 }
             }
         }
@@ -264,9 +310,9 @@ pub(crate) fn hits(rows: &[Row], needle: &str, filter: Filter) -> Vec<Hit> {
 /// What an error row says.
 fn error_texts(row: &Row) -> Vec<String> {
     match &row.kind {
-        RowKind::ErrorCard { message, detail } => {
-            std::iter::once(message.to_string()).chain(detail.as_ref().map(ToString::to_string)).collect()
-        }
+        RowKind::ErrorCard { message, detail } => std::iter::once(message.to_string())
+            .chain(detail.as_ref().map(ToString::to_string))
+            .collect(),
         RowKind::ErrorChip { message } => vec![message.to_string()],
         _ => Vec::new(),
     }
@@ -300,10 +346,12 @@ struct FindActions;
 
 impl Global for FindActions {}
 
-fn with_target(cx: &mut App, act: impl FnOnce(&mut Transcript, &mut Window, &mut Context<Transcript>) + 'static) {
-    let Some((target, window)) = cx
-        .try_global::<FindTarget>()
-        .and_then(|target| Some((target.0.upgrade()?, target.1)))
+fn with_target(
+    cx: &mut App,
+    act: impl FnOnce(&mut Transcript, &mut Window, &mut Context<Transcript>) + 'static,
+) {
+    let Some((target, window)) =
+        cx.try_global::<FindTarget>().and_then(|target| Some((target.0.upgrade()?, target.1)))
     else {
         return;
     };
@@ -346,22 +394,25 @@ impl Transcript {
                     .with_accessibility_role(gpui::Role::SearchInput)
                     .with_text_metrics(12.5, 18.0)
             });
-            let events = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
-                ComposerInputEvent::Edited => {
-                    this.find.active = None;
-                    this.refresh_find(cx);
-                    if this.find.total > 0 {
-                        this.find_step(1, window, cx);
+            let events =
+                cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
+                    ComposerInputEvent::Edited => {
+                        this.find.active = None;
+                        this.refresh_find(cx);
+                        if this.find.total > 0 {
+                            this.find_step(1, window, cx);
+                        }
+                        cx.notify();
                     }
-                    cx.notify();
-                }
-                ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
-                    this.find_step(1, window, cx)
-                }
-                ComposerInputEvent::MentionNavigate(delta) => this.find_step(*delta, window, cx),
-                ComposerInputEvent::MentionDismiss => this.close_find(window, cx),
-                _ => {}
-            });
+                    ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
+                        this.find_step(1, window, cx)
+                    }
+                    ComposerInputEvent::MentionNavigate(delta) => {
+                        this.find_step(*delta, window, cx)
+                    }
+                    ComposerInputEvent::MentionDismiss => this.close_find(window, cx),
+                    _ => {}
+                });
             self.find.input = Some(input);
             self.find._events = Some(events);
         }
@@ -416,7 +467,8 @@ impl Transcript {
         };
         self.find.active = Some(next);
         self.publish_find(cx);
-        if let Some((hit, place)) = self.find.locate(next).map(|(hit, place)| (hit.clone(), place)) {
+        if let Some((hit, place)) = self.find.locate(next).map(|(hit, place)| (hit.clone(), place))
+        {
             // A step's match lies in its detail when it is past what the step's line says.
             let detail = hit.step.is_some() && place >= hit.in_line;
             let cursor = Cursor { row: hit.row.clone(), step: hit.step.clone() };
@@ -429,7 +481,12 @@ impl Transcript {
     }
 
     /// Set what the filters keep and land on the first step they keep.
-    pub(super) fn set_find_filter(&mut self, filter: Filter, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_find_filter(
+        &mut self,
+        filter: Filter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.find.filter == filter {
             return;
         }
@@ -454,7 +511,10 @@ impl Transcript {
         let rows = self.whole_rows();
         let signature = rows_signature(rows);
         let filter = self.find.filter;
-        if query == self.find.query && filter == self.find.counted_filter && signature == self.find.signature {
+        if query == self.find.query
+            && filter == self.find.counted_filter
+            && signature == self.find.signature
+        {
             return;
         }
         let kept = self
@@ -500,7 +560,13 @@ impl Transcript {
             surface,
             paint::FindPaint {
                 needle: self.find.query.clone(),
-                rows: self.find.hits.iter().filter(|hit| hit.text).map(|hit| hit.row.to_string()).collect(),
+                rows: self
+                    .find
+                    .hits
+                    .iter()
+                    .filter(|hit| hit.text)
+                    .map(|hit| hit.row.to_string())
+                    .collect(),
                 active,
                 washes: paint::washes(Theme::of(cx)),
             },
@@ -513,7 +579,11 @@ impl Transcript {
     }
 
     /// The find card over the transcript's top right, while find is open.
-    pub(super) fn render_find_bar(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_find_bar(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         self.note_find_window(window, cx);
         if !self.find.open {
             return None;
@@ -536,21 +606,30 @@ impl Transcript {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .child(crate::icons::icon(crate::icons::MAGNIFER).size(px(14.0)).flex_none().text_color(theme.text_muted))
+            .child(
+                crate::icons::icon(crate::icons::MAGNIFER)
+                    .size(px(14.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
             .child(div().flex_1().min_w_0().child(input))
             .children(tally.map(|tally| popover::find_tally(&theme, tally)))
             .child(
                 popover::find_step("find-previous", crate::icons::ALT_ARROW_UP, has, &theme)
                     .action_hint("Previous match", Keys::Action(Box::new(FindPrevious)), cx)
                     .when(has, |el| {
-                        el.on_click(cx.listener(|this, _, window, cx| this.find_step(-1, window, cx)))
+                        el.on_click(
+                            cx.listener(|this, _, window, cx| this.find_step(-1, window, cx)),
+                        )
                     }),
             )
             .child(
                 popover::find_step("find-next", crate::icons::ALT_ARROW_DOWN, has, &theme)
                     .action_hint("Next match", Keys::Action(Box::new(FindNext)), cx)
                     .when(has, |el| {
-                        el.on_click(cx.listener(|this, _, window, cx| this.find_step(1, window, cx)))
+                        el.on_click(
+                            cx.listener(|this, _, window, cx| this.find_step(1, window, cx)),
+                        )
                     }),
             )
             .child(
@@ -561,7 +640,10 @@ impl Transcript {
         let filter = self.find.filter;
         let kinds = std::iter::once(SelectOption::new("Every kind"))
             .chain(StepKind::ALL.iter().map(|kind| SelectOption::new(kind.name())));
-        let kind_at = filter.kind.and_then(|kind| StepKind::ALL.iter().position(|k| *k == kind)).map_or(0, |at| at + 1);
+        let kind_at = filter
+            .kind
+            .and_then(|kind| StepKind::ALL.iter().position(|k| *k == kind))
+            .map_or(0, |at| at + 1);
         let filters = div()
             .px(px(8.0))
             .pb(px(8.0))
@@ -569,19 +651,21 @@ impl Transcript {
             .flex_row()
             .items_center()
             .gap(px(6.0))
-            .child(
-                failed_toggle(filter.failed, &theme).on_click(cx.listener(move |this, _, window, cx| {
+            .child(failed_toggle(filter.failed, &theme).on_click(cx.listener(
+                move |this, _, window, cx| {
                     this.set_find_filter(Filter { failed: !filter.failed, ..filter }, window, cx);
-                })),
-            )
+                },
+            )))
             .child(
-                widgets::select("find-kind", "Kind", &theme, |this: &mut Self| &mut this.find.kind_menu)
-                    .options(kinds, kind_at)
-                    .on_select(move |this, at, window, cx| {
-                        let kind = at.checked_sub(1).and_then(|at| StepKind::ALL.get(at).copied());
-                        this.set_find_filter(Filter { kind, ..this.find.filter }, window, cx);
-                    })
-                    .render(&self.find.kind_menu, cx),
+                widgets::select("find-kind", "Kind", &theme, |this: &mut Self| {
+                    &mut this.find.kind_menu
+                })
+                .options(kinds, kind_at)
+                .on_select(move |this, at, window, cx| {
+                    let kind = at.checked_sub(1).and_then(|at| StepKind::ALL.get(at).copied());
+                    this.set_find_filter(Filter { kind, ..this.find.filter }, window, cx);
+                })
+                .render(&self.find.kind_menu, cx),
             );
         let card = popover::popover_card_flush(&theme)
             .id("find-in-thread")
@@ -614,9 +698,9 @@ impl Transcript {
     fn note_find_window(&self, window: &Window, cx: &mut Context<Self>) {
         let handle = window.window_handle();
         let me = cx.entity_id();
-        let stale = cx.try_global::<FindTarget>().is_some_and(|target| {
-            target.0.entity_id() == me && target.1 != Some(handle)
-        });
+        let stale = cx
+            .try_global::<FindTarget>()
+            .is_some_and(|target| target.0.entity_id() == me && target.1 != Some(handle));
         if stale {
             cx.global_mut::<FindTarget>().1 = Some(handle);
         }
@@ -636,7 +720,11 @@ fn failed_toggle(on: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .bg(if on {
             crate::theme::selected_wash()
         } else {
-            crate::motion::hover_blend(&hover, widgets::select_fill(theme, false), widgets::select_fill(theme, true))
+            crate::motion::hover_blend(
+                &hover,
+                widgets::select_fill(theme, false),
+                widgets::select_fill(theme, true),
+            )
         })
         .hover_fade(hover)
         .flex()
@@ -651,11 +739,11 @@ fn failed_toggle(on: bool, theme: &Theme) -> gpui::Stateful<gpui::Div> {
         .aria_label("Failed steps only")
         .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
-        .child(
-            crate::icons::icon(crate::icons::DANGER_TRIANGLE)
-                .size(px(13.0))
-                .text_color(if on { theme.danger } else { theme.text_muted }),
-        )
+        .child(crate::icons::icon(crate::icons::DANGER_TRIANGLE).size(px(13.0)).text_color(if on {
+            theme.danger
+        } else {
+            theme.text_muted
+        }))
         .child("Failed");
     crate::surface_chrome::focus_ring(toggle, theme)
 }
@@ -682,7 +770,12 @@ mod tests {
         }
     }
 
-    fn call(id: &str, call: slopty_view_proto::ToolCall, failed: bool, output: &[&str]) -> ToolItem {
+    fn call(
+        id: &str,
+        call: slopty_view_proto::ToolCall,
+        failed: bool,
+        output: &[&str],
+    ) -> ToolItem {
         ToolItem {
             part_id: id.into(),
             call,
@@ -690,7 +783,10 @@ mod tests {
             resolved: true,
             detail: (!output.is_empty()).then(|| {
                 Arc::new(ToolDetail::Output {
-                    lines: output.iter().map(|line| SharedString::from((*line).to_owned())).collect(),
+                    lines: output
+                        .iter()
+                        .map(|line| SharedString::from((*line).to_owned()))
+                        .collect(),
                     truncated_by: 0,
                     stderr_from: None,
                 })
@@ -709,7 +805,10 @@ mod tests {
     }
 
     fn group(id: &str, tools: Vec<ToolItem>) -> Row {
-        Row { kind: RowKind::ToolGroup { summary: "Ran 3 commands".into(), tools: Arc::new(tools) }, ..markdown(id, "") }
+        Row {
+            kind: RowKind::ToolGroup { summary: "Ran 3 commands".into(), tools: Arc::new(tools) },
+            ..markdown(id, "")
+        }
     }
 
     #[test]
@@ -720,15 +819,11 @@ mod tests {
             markdown("c", "Cat and CAT, again a cat."),
         ];
         let hits = hits(&rows, "cat", Filter::default());
-        let counts: Vec<(&str, usize)> = hits.iter().map(|hit| (hit.row.as_ref(), hit.count)).collect();
+        let counts: Vec<(&str, usize)> =
+            hits.iter().map(|hit| (hit.row.as_ref(), hit.count)).collect();
         assert_eq!(counts, [("a", 1), ("c", 3)]);
-        let mut state = FindState {
-            open: true,
-            query: "cat".into(),
-            total: 4,
-            hits,
-            ..Default::default()
-        };
+        let mut state =
+            FindState { open: true, query: "cat".into(), total: 4, hits, ..Default::default() };
         assert_eq!(state.tally().as_deref(), Some("4 found"));
         state.active = Some(1);
         assert_eq!(state.tally().as_deref(), Some("2 of 4"));
@@ -750,14 +845,26 @@ mod tests {
             group(
                 "g",
                 vec![
-                    call("t1", ToolCall::Exec { command: "cargo test parser".into() }, false, &["test parser ... ok"]),
-                    call("t2", ToolCall::Exec { command: "cargo build".into() }, true, &["error: parser failed"]),
+                    call(
+                        "t1",
+                        ToolCall::Exec { command: "cargo test parser".into() },
+                        false,
+                        &["test parser ... ok"],
+                    ),
+                    call(
+                        "t2",
+                        ToolCall::Exec { command: "cargo build".into() },
+                        true,
+                        &["error: parser failed"],
+                    ),
                     call("t3", ToolCall::ReadFile { path: "src/parser.rs".into() }, false, &[]),
                 ],
             ),
         ];
         let places = |hits: &[Hit]| -> Vec<(String, Option<String>, usize, usize)> {
-            hits.iter().map(|hit| (hit.row.to_string(), hit.step.clone(), hit.in_line, hit.count)).collect()
+            hits.iter()
+                .map(|hit| (hit.row.to_string(), hit.step.clone(), hit.in_line, hit.count))
+                .collect()
         };
         let step = |id: &str| Some(id.to_owned());
         assert_eq!(
@@ -771,10 +878,22 @@ mod tests {
             "the words, then each step's line and detail"
         );
         let failed = Filter { failed: true, kind: None };
-        assert_eq!(places(&hits(&rows, "parser", failed)), [("g".into(), step("t2"), 0, 1)], "failed steps alone");
-        assert_eq!(places(&hits(&rows, "", failed)), [("g".into(), step("t2"), 1, 1)], "each a match by itself");
+        assert_eq!(
+            places(&hits(&rows, "parser", failed)),
+            [("g".into(), step("t2"), 0, 1)],
+            "failed steps alone"
+        );
+        assert_eq!(
+            places(&hits(&rows, "", failed)),
+            [("g".into(), step("t2"), 1, 1)],
+            "each a match by itself"
+        );
         let reads = Filter { failed: false, kind: Some(StepKind::Read) };
-        assert_eq!(places(&hits(&rows, "", reads)), [("g".into(), step("t3"), 1, 1)], "a kind alone");
+        assert_eq!(
+            places(&hits(&rows, "", reads)),
+            [("g".into(), step("t3"), 1, 1)],
+            "a kind alone"
+        );
         assert!(hits(&rows, "", Filter::default()).is_empty(), "nothing before a word or a filter");
         let state = FindState { counted_filter: failed, ..Default::default() };
         assert_eq!(state.tally().as_deref(), Some("No results"), "a filter on says its tally");
@@ -810,7 +929,12 @@ mod tests {
         cx.run_until_parked();
         assert!(transcript.read_with(cx, |this, _| this.finding()), "find opened");
         let keyboard = cx.update(|window, cx| {
-            transcript.read(cx).find.input.as_ref().is_some_and(|input| input.focus_handle(cx).is_focused(window))
+            transcript
+                .read(cx)
+                .find
+                .input
+                .as_ref()
+                .is_some_and(|input| input.focus_handle(cx).is_focused(window))
         });
         assert!(keyboard, "and has the keyboard");
     }

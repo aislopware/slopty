@@ -2,9 +2,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::sync::mpsc;
 use slopty_view_proto::{
     ListWorkspaceDirectoryRequest, ReadWorkspaceFileRequest, SearchWorkspaceContentRequest,
     SearchWorkspaceFilesRequest, WarmWorkspaceSearchRequest, WarmWorkspaceSearchResult,
@@ -13,6 +13,7 @@ use slopty_view_proto::{
     WriteWorkspaceFileRequest,
 };
 use slopty_view_rpc::{RpcError, methods};
+use tokio::sync::mpsc;
 
 use crate::state::{AppState, EngineHandle};
 
@@ -27,10 +28,7 @@ pub struct FilesRequestContext {
 impl FilesRequestContext {
     pub fn for_chat(state: &AppState, chat_id: &str) -> Option<Self> {
         let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
-        let cwd = chat
-            .cwd
-            .clone()
-            .or_else(|| chat.space_id.is_none().then(|| "~".to_string()))?;
+        let cwd = chat.cwd.clone().or_else(|| chat.space_id.is_none().then(|| "~".to_string()))?;
         let target_device_id = (state.local_device_id.as_deref() != Some(&chat.device_id))
             .then(|| chat.device_id.clone());
         Some(Self {
@@ -115,10 +113,7 @@ impl WorkspaceFilesTransport for EngineFilesTransport {
 
 impl WorkspaceFilesClient {
     pub fn new(engine: EngineHandle, context: FilesRequestContext) -> Self {
-        Self {
-            transport: Arc::new(EngineFilesTransport(engine)),
-            context,
-        }
+        Self { transport: Arc::new(EngineFilesTransport(engine)), context }
     }
 
     #[cfg(test)]
@@ -151,10 +146,8 @@ impl WorkspaceFilesClient {
     ) -> Result<WorkspaceDirectoryPage, FilesClientError> {
         let mut page = self.list_directory(request.clone()).await?;
         if !cached_paths.is_empty() {
-            let mut remaining = cached_paths
-                .iter()
-                .map(String::as_str)
-                .collect::<std::collections::HashSet<_>>();
+            let mut remaining =
+                cached_paths.iter().map(String::as_str).collect::<std::collections::HashSet<_>>();
             for entry in &page.entries {
                 remaining.remove(entry.path.as_str());
             }
@@ -200,9 +193,7 @@ impl WorkspaceFilesClient {
 
     /// Start or keep alive the host's search index for this workspace.
     pub async fn warm_search(&self) -> Result<WarmWorkspaceSearchResult, FilesClientError> {
-        let request = WarmWorkspaceSearchRequest {
-            target: self.context.target.clone(),
-        };
+        let request = WarmWorkspaceSearchRequest { target: self.context.target.clone() };
         self.call(methods::WARM_WORKSPACE_SEARCH, &request).await
     }
 
@@ -232,9 +223,7 @@ impl WorkspaceFilesClient {
         // Outside files carry no checkout identity — the device resolves
         // them by absolute path.
         if checkout_id.is_empty() && !path.starts_with('/') {
-            return Err(FilesClientError::Decode(
-                "Workspace checkout identity unavailable".into(),
-            ));
+            return Err(FilesClientError::Decode("Workspace checkout identity unavailable".into()));
         }
         let mut request = slopty_view_proto::ReadWorkspaceImageRequest {
             target: self.context.target.clone(),
@@ -260,9 +249,7 @@ impl WorkspaceFilesClient {
                 || mime.as_ref().is_some_and(|m| m != &chunk.mime_type)
                 || size.is_some_and(|s| s != chunk.size)
             {
-                return Err(FilesClientError::Decode(
-                    "Image identity or size changed".into(),
-                ));
+                return Err(FilesClientError::Decode("Image identity or size changed".into()));
             }
             let part = base64::engine::general_purpose::STANDARD
                 .decode(&chunk.data)
@@ -272,9 +259,7 @@ impl WorkspaceFilesClient {
                 || chunk.next_offset > chunk.size
                 || chunk.done != (chunk.next_offset == chunk.size)
             {
-                return Err(FilesClientError::Decode(
-                    "Invalid image chunk offset".into(),
-                ));
+                return Err(FilesClientError::Decode("Invalid image chunk offset".into()));
             }
             bytes.extend(part);
             if chunk.done {
@@ -285,9 +270,7 @@ impl WorkspaceFilesClient {
             mime = Some(chunk.mime_type);
             size = Some(chunk.size);
         }
-        Err(FilesClientError::Decode(
-            "Image chunk limit exceeded".into(),
-        ))
+        Err(FilesClientError::Decode("Image chunk limit exceeded".into()))
     }
 
     pub async fn write_file(
@@ -312,14 +295,9 @@ impl WorkspaceFilesClient {
     }
 
     pub async fn watch(&self) -> Result<mpsc::Receiver<serde_json::Value>, FilesClientError> {
-        let request = WatchWorkspaceFilesRequest {
-            target: self.context.target.clone(),
-        };
+        let request = WatchWorkspaceFilesRequest { target: self.context.target.clone() };
         let params = request_params(&request, self.context.target_device_id.as_deref())?;
-        self.transport
-            .subscribe(methods::WATCH_WORKSPACE_FILES, params)
-            .await
-            .map_err(Into::into)
+        self.transport.subscribe(methods::WATCH_WORKSPACE_FILES, params).await.map_err(Into::into)
     }
 
     async fn call<Request, Response>(
@@ -348,17 +326,15 @@ pub fn request_params<Request: Serialize>(
         let object = value.as_object_mut().ok_or_else(|| {
             FilesClientError::Encode("workspace request must serialize as an object".into())
         })?;
-        object.insert(
-            "targetDeviceId".into(),
-            Value::String(target_device_id.into()),
-        );
+        object.insert("targetDeviceId".into(), Value::String(target_device_id.into()));
     }
     Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     use super::*;
 
@@ -395,11 +371,7 @@ mod tests {
     }
 
     fn target() -> WorkspaceTarget {
-        WorkspaceTarget {
-            chat_id: Some("chat-1".into()),
-            space_id: None,
-            checkout_path: None,
-        }
+        WorkspaceTarget { chat_id: Some("chat-1".into()), space_id: None, checkout_path: None }
     }
 
     fn directory_page(name: &str, next: Option<&str>) -> Value {
@@ -450,11 +422,7 @@ mod tests {
         for refresh in [false, true] {
             let transport = Arc::new(DeterministicTransport {
                 scripted_responses: Mutex::new(
-                    [
-                        Ok(directory_page("a", Some("next"))),
-                        Ok(directory_page("z", None)),
-                    ]
-                    .into(),
+                    [Ok(directory_page("a", Some("next"))), Ok(directory_page("z", None))].into(),
                 ),
                 ..Default::default()
             });
@@ -475,11 +443,7 @@ mod tests {
                         include_ignored: true,
                         cursor: None,
                     },
-                    &if refresh {
-                        vec!["a".into(), "z".into()]
-                    } else {
-                        vec![]
-                    },
+                    &if refresh { vec!["a".into(), "z".into()] } else { vec![] },
                 )
                 .await
                 .unwrap();
@@ -500,11 +464,7 @@ mod tests {
         for missing in [false, true] {
             let transport = Arc::new(DeterministicTransport {
                 scripted_responses: Mutex::new(
-                    [
-                        Ok(directory_page("a", Some("next"))),
-                        Ok(directory_page("z", None)),
-                    ]
-                    .into(),
+                    [Ok(directory_page("a", Some("next"))), Ok(directory_page("z", None))].into(),
                 ),
                 ..Default::default()
             });
@@ -525,28 +485,20 @@ mod tests {
                         include_ignored: false,
                         cursor: None,
                     },
-                    &[if missing {
-                        "deleted".into()
-                    } else {
-                        "a".into()
-                    }],
+                    &[if missing { "deleted".into() } else { "a".into() }],
                 )
                 .await
                 .unwrap();
             assert_eq!(page.next_cursor.is_none(), missing);
-            assert_eq!(
-                transport.calls.lock().unwrap().len(),
-                if missing { 2 } else { 1 }
-            );
+            assert_eq!(transport.calls.lock().unwrap().len(), if missing { 2 } else { 1 });
         }
     }
 
     #[tokio::test]
     async fn failed_or_repeated_later_page_does_not_publish_a_partial_refresh() {
-        for second in [
-            Err(RpcError::Transport("offline".into())),
-            Ok(directory_page("z", Some("next"))),
-        ] {
+        for second in
+            [Err(RpcError::Transport("offline".into())), Ok(directory_page("z", Some("next")))]
+        {
             let transport = Arc::new(DeterministicTransport {
                 scripted_responses: Mutex::new(
                     [Ok(directory_page("a", Some("next"))), second].into(),
@@ -599,10 +551,7 @@ mod tests {
     #[test]
     fn remote_params_add_only_the_relay_target() {
         let params = request_params(
-            &ReadWorkspaceFileRequest {
-                target: target(),
-                path: "src/lib.rs".into(),
-            },
+            &ReadWorkspaceFileRequest { target: target(), path: "src/lib.rs".into() },
             Some("device-b"),
         )
         .unwrap();
@@ -737,10 +686,7 @@ mod tests {
             .await
             .unwrap();
         let file = client
-            .read_file(ReadWorkspaceFileRequest {
-                target: target(),
-                path: "src/lib.rs".into(),
-            })
+            .read_file(ReadWorkspaceFileRequest { target: target(), path: "src/lib.rs".into() })
             .await
             .unwrap();
         let outcome = client
@@ -828,12 +774,9 @@ mod tests {
         async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
             assert_eq!(method, methods::READ_WORKSPACE_IMAGE);
             self.calls.lock().unwrap().push(params);
-            self.responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("unexpected extra request")
+            self.responses.lock().unwrap().pop_front().expect("unexpected extra request")
         }
+
         async fn subscribe(&self, _: &str, _: Value) -> Result<mpsc::Receiver<Value>, RpcError> {
             unreachable!()
         }
@@ -871,15 +814,10 @@ mod tests {
     }
     #[tokio::test]
     async fn remote_images_keep_checkout_hash_and_offset_across_chunks() {
-        let (client, transport) = image_client(vec![
-            Ok(image_chunk(b"ab", 2, false)),
-            Ok(image_chunk(b"cd", 4, true)),
-        ]);
+        let (client, transport) =
+            image_client(vec![Ok(image_chunk(b"ab", 2, false)), Ok(image_chunk(b"cd", 4, true))]);
         assert_eq!(
-            client
-                .read_image("docs/image.png".into(), "checkout".into())
-                .await
-                .unwrap(),
+            client.read_image("docs/image.png".into(), "checkout".into()).await.unwrap(),
             ("image/png".into(), b"abcd".to_vec())
         );
         let calls = transport.calls.lock().unwrap();
@@ -896,35 +834,17 @@ mod tests {
             let mut chunk = image_chunk(b"cd", 4, true);
             chunk[field] = "changed".into();
             let (client, _) = image_client(vec![Ok(image_chunk(b"ab", 2, false)), Ok(chunk)]);
-            assert!(
-                client
-                    .read_image("image.png".into(), "checkout".into())
-                    .await
-                    .is_err()
-            );
+            assert!(client.read_image("image.png".into(), "checkout".into()).await.is_err());
         }
-        for chunk in [
-            image_chunk(b"ab", 0, false),
-            image_chunk(b"ab", 2, true),
-            image_chunk(b"", 0, false),
-        ] {
+        for chunk in
+            [image_chunk(b"ab", 0, false), image_chunk(b"ab", 2, true), image_chunk(b"", 0, false)]
+        {
             let (client, _) = image_client(vec![Ok(chunk)]);
-            assert!(
-                client
-                    .read_image("image.png".into(), "checkout".into())
-                    .await
-                    .is_err()
-            );
+            assert!(client.read_image("image.png".into(), "checkout".into()).await.is_err());
         }
-        let (client, _) = image_client(vec![Err(RpcError::UnknownMethod(
-            methods::READ_WORKSPACE_IMAGE.into(),
-        ))]);
-        assert!(
-            client
-                .read_image("image.png".into(), "checkout".into())
-                .await
-                .is_err()
-        );
+        let (client, _) =
+            image_client(vec![Err(RpcError::UnknownMethod(methods::READ_WORKSPACE_IMAGE.into()))]);
+        assert!(client.read_image("image.png".into(), "checkout".into()).await.is_err());
     }
     #[tokio::test]
     async fn image_reads_reject_malformed_repeated_and_oversized_chunks() {
@@ -944,38 +864,17 @@ mod tests {
             let mut chunk = image_chunk(b"abcd", 4, true);
             chunk[field] = value;
             let (client, _) = image_client(vec![Ok(chunk)]);
-            assert!(
-                client
-                    .read_image("a.png".into(), "checkout".into())
-                    .await
-                    .is_err(),
-                "{field}"
-            );
+            assert!(client.read_image("a.png".into(), "checkout".into()).await.is_err(), "{field}");
         }
         let first = image_chunk(b"ab", 2, false);
         let (client, _) = image_client(vec![Ok(first.clone()), Ok(first)]);
-        assert!(
-            client
-                .read_image("a.png".into(), "checkout".into())
-                .await
-                .is_err()
-        );
+        assert!(client.read_image("a.png".into(), "checkout".into()).await.is_err());
         let mut last = image_chunk(b"cd", 4, false);
         last["size"] = 5.into();
         let (client, _) = image_client(vec![Ok(image_chunk(b"ab", 2, false)), Ok(last)]);
-        assert!(
-            client
-                .read_image("a.png".into(), "checkout".into())
-                .await
-                .is_err()
-        );
+        assert!(client.read_image("a.png".into(), "checkout".into()).await.is_err());
         let (client, transport) = image_client(Vec::new());
-        assert!(
-            client
-                .read_image("a.png".into(), String::new())
-                .await
-                .is_err()
-        );
+        assert!(client.read_image("a.png".into(), String::new()).await.is_err());
         assert!(transport.calls.lock().unwrap().is_empty());
     }
 }

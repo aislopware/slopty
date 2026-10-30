@@ -9,10 +9,10 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, Global, ObjectFit, Pixels, Render, SharedString,
-    StyledImage as _, Subscription, UniformListScrollHandle, Window, canvas, div, img,
-    prelude::*, px, uniform_list,
+    Subscription, UniformListScrollHandle, Window, canvas, div, img, px, uniform_list,
 };
 use slopty_view_doc::calls;
 
@@ -158,7 +158,12 @@ impl PagePaneView {
     }
 
     /// A table's every row, its header held over them.
-    fn table_rows(&self, table: &doc::PageTable, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn table_rows(
+        &self,
+        table: &doc::PageTable,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let entity = cx.entity();
         let geometry = table.geometry();
         let id = format!("{}-pane", self.page);
@@ -255,9 +260,13 @@ impl Render for PagePaneView {
             live::page_act(&self.page, PageAct::Engage, cx);
         }
         let body: AnyElement = match hosted.as_ref() {
-            Some(live::HostedPage { failed: Some(why), .. }) => {
-                super::failed_body(&format!("{}-pane", self.page), why.clone(), true, &self.page, &theme)
-            }
+            Some(live::HostedPage { failed: Some(why), .. }) => super::failed_body(
+                &format!("{}-pane", self.page),
+                why.clone(),
+                true,
+                &self.page,
+                &theme,
+            ),
             Some(live::HostedPage { doc: Some(PageDoc::Pdf(pdf)), .. }) => {
                 self.pdf_pages(pdf.pages, cx)
             }
@@ -265,12 +274,12 @@ impl Render for PagePaneView {
                 let table = table.clone();
                 self.table_rows(&table, &theme, cx)
             }
-            Some(live::HostedPage { native: Some(native), presence: PagePresence::Live, .. }) => {
-                gpui::composition::native_view(native)
-                    .id(SharedString::from(format!("{}-pane-native", self.page)))
-                    .size_full()
-                    .into_any_element()
-            }
+            Some(live::HostedPage {
+                native: Some(native), presence: PagePresence::Live, ..
+            }) => gpui::composition::native_view(native)
+                .id(SharedString::from(format!("{}-pane-native", self.page)))
+                .size_full()
+                .into_any_element(),
             Some(live::HostedPage { snapshot: Some(picture), .. }) => {
                 img(gpui::ImageSource::Render(picture.clone()))
                     .size_full()
@@ -279,9 +288,11 @@ impl Render for PagePaneView {
             }
             // The surfaces' loading anatomy.
             Some(live::HostedPage { waiting: Some(machine), .. }) => {
-                live::chrome::loading(super::waiting_words(machine), &theme, cx.entity_id(), cx).into_any_element()
+                live::chrome::loading(super::waiting_words(machine), &theme, cx.entity_id(), cx)
+                    .into_any_element()
             }
-            _ => live::chrome::loading("Loading the page…", &theme, cx.entity_id(), cx).into_any_element(),
+            _ => live::chrome::loading("Loading the page…", &theme, cx.entity_id(), cx)
+                .into_any_element(),
         };
         let back = live::chrome::icon_button(
             format!("{}-pane-back", self.page),
@@ -290,7 +301,8 @@ impl Render for PagePaneView {
             &theme,
         )
         .on_click({
-            let (page, title, chat) = (self.page.clone(), self.title.to_string(), self.chat.clone());
+            let (page, title, chat) =
+                (self.page.clone(), self.title.to_string(), self.chat.clone());
             move |_, _, cx| ask_pane(&chat, &page, &title, false, cx)
         });
         let probe = self.bounds.clone();
@@ -327,25 +339,18 @@ impl Render for PagePaneView {
             )
             .child(div().h(px(1.0)).w_full().flex_none().bg(theme.border))
             .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_hidden()
-                    .child(body)
-                    .child(
-                        canvas(
-                            move |bounds, _, _| {
-                                if probe.get() != Some(bounds) {
-                                    probe.set(Some(bounds));
-                                }
-                            },
-                            |_, _, _, _| (),
-                        )
-                        .absolute()
-                        .inset_0(),
-                    ),
+                div().relative().flex_1().min_h_0().w_full().overflow_hidden().child(body).child(
+                    canvas(
+                        move |bounds, _, _| {
+                            if probe.get() != Some(bounds) {
+                                probe.set(Some(bounds));
+                            }
+                        },
+                        |_, _, _, _| (),
+                    )
+                    .absolute()
+                    .inset_0(),
+                ),
             )
     }
 }

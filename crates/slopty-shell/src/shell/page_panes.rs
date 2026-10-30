@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
-use gpui::{AnyElement, App, AppContext as _, Context, Empty, Entity, Global, IntoElement, SharedString};
+use gpui::{
+    AnyElement, App, AppContext as _, Context, Empty, Entity, Global, IntoElement, SharedString,
+};
 
 use super::{RightSurface, Shell};
 use crate::page::{PagePaneAsk, PagePaneView};
@@ -24,11 +26,7 @@ impl Shell {
     pub(super) fn on_page_pane_ask(&mut self, cx: &mut Context<Self>) {
         let Some(ask) = cx.try_global::<PagePaneAsk>().cloned() else { return };
         let shown = cx.try_global::<PagePanes>().and_then(|panes| {
-            panes
-                .tabs
-                .iter()
-                .find(|(_, pane)| pane.read(cx).page() == ask.page)
-                .map(|(id, _)| *id)
+            panes.tabs.iter().find(|(_, pane)| pane.read(cx).page() == ask.page).map(|(id, _)| *id)
         });
         match (ask.show, shown) {
             (true, Some(id)) => self.open_view(RightSurface::Page(id), cx),

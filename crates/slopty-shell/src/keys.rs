@@ -317,7 +317,10 @@ mod tests {
     fn elsewhere_a_stroke_is_words() {
         assert_eq!(stroke_text_on(false, &held(true, false, true, false), "a"), "Ctrl+Shift+A");
         assert_eq!(stroke_text_on(false, &held(false, false, false, false), "escape"), "Esc");
-        assert_eq!(stroke_text_on(false, &held(true, false, false, false), "backspace"), "Ctrl+Backspace");
+        assert_eq!(
+            stroke_text_on(false, &held(true, false, false, false), "backspace"),
+            "Ctrl+Backspace"
+        );
     }
 
     #[test]
@@ -406,7 +409,9 @@ mod tests {
             let bound = |action: &dyn gpui::Action| {
                 cx.key_bindings().borrow().bindings_for_action(action).next().is_some()
             };
-            assert!(bound(&crate::files::ToggleHiddenFiles) && bound(&crate::changes::ToggleDiffTree));
+            assert!(
+                bound(&crate::files::ToggleHiddenFiles) && bound(&crate::changes::ToggleDiffTree)
+            );
             let mut keymap = KeymapConfig::default();
             keymap.set(ShortcutId::ToggleFiles, "mod-shift-e".into());
             crate::shell::apply_keymap(cx, &keymap);

@@ -1,18 +1,21 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Shared metadata-only Git subscription. Views hold leases; the last lease
 //! dropping cancels the RPC. Cached sources never own their consuming views.
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
+use std::time::Duration;
 
-use gpui::{App, Context, Entity, Global, Task, WeakEntity, prelude::*};
-use slopty_view_proto::{CheckoutGitStatus, GitFileState, GitFileStatus, WatchWorkspaceFilesRequest};
+use gpui::prelude::*;
+use gpui::{App, Context, Entity, Global, Task, WeakEntity};
+use slopty_view_proto::{
+    CheckoutGitStatus, GitFileState, GitFileStatus, WatchWorkspaceFilesRequest,
+};
 use slopty_view_rpc::{RpcError, methods};
 
-use super::{
-    FilesSurface,
-    client::{FilesRequestContext, request_params},
-    model::parent_path,
-};
-use crate::{state::EngineHandle, theme::Theme};
+use super::FilesSurface;
+use super::client::{FilesRequestContext, request_params};
+use super::model::parent_path;
+use crate::state::EngineHandle;
+use crate::theme::Theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum DecorationKind {
@@ -44,10 +47,7 @@ fn decoration(file: &GitFileStatus) -> Decoration {
     use GitFileState::*;
     let states = [file.index, file.worktree];
     let conflict = states.contains(&Unmerged)
-        || matches!(
-            (file.index, file.worktree),
-            (Added, Added) | (Deleted, Deleted)
-        );
+        || matches!((file.index, file.worktree), (Added, Added) | (Deleted, Deleted));
     let kind = if conflict {
         DecorationKind::Conflict
     } else if states.contains(&Deleted) && states.contains(&Untracked) {
@@ -69,9 +69,7 @@ fn decoration(file: &GitFileStatus) -> Decoration {
 fn valid_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
-        && path
-            .split('/')
-            .all(|p| !p.is_empty() && p != "." && p != "..")
+        && path.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -184,9 +182,7 @@ impl GitStatusSource {
         let source = cx.new(|cx: &mut Context<Self>| {
             let connection = engine.clone();
             let params = request_params(
-                &WatchWorkspaceFilesRequest {
-                    target: context.target.clone(),
-                },
+                &WatchWorkspaceFilesRequest { target: context.target.clone() },
                 context.target_device_id.as_deref(),
             )
             .expect("Git status request is serializable");
@@ -268,6 +264,7 @@ impl FilesSurface {
     pub(super) fn git_status_notice(&self, cx: &App) -> Option<&'static str> {
         self.git_status.as_ref()?.read(cx).notice
     }
+
     pub(crate) fn release_git_status(&mut self) {
         self.git_status_subscription = None;
         self.git_status = None;
@@ -338,24 +335,17 @@ impl FilesSurface {
 
 fn accepts(context: &FilesRequestContext, device: &str, snapshot: &CheckoutGitStatus) -> bool {
     snapshot.device_id == device
-        && context
-            .checkout_id
-            .as_ref()
-            .is_none_or(|id| *id == snapshot.checkout_id)
+        && context.checkout_id.as_ref().is_none_or(|id| *id == snapshot.checkout_id)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use slopty_view_proto::GitFileState::*;
 
+    use super::*;
+
     fn file(path: &str, index: GitFileState, worktree: GitFileState) -> GitFileStatus {
-        GitFileStatus {
-            path: path.into(),
-            old_path: None,
-            index,
-            worktree,
-        }
+        GitFileStatus { path: path.into(), old_path: None, index, worktree }
     }
     fn snapshot(files: Vec<GitFileStatus>) -> CheckoutGitStatus {
         CheckoutGitStatus {
@@ -378,10 +368,7 @@ mod tests {
             renamed,
         ]));
         assert_eq!(data.directories["src"].kind, DecorationKind::Conflict);
-        assert_eq!(
-            data.directories["src/nested"].kind,
-            DecorationKind::Modified
-        );
+        assert_eq!(data.directories["src/nested"].kind, DecorationKind::Modified);
         assert!(data.directories.contains_key("old"));
         assert!(data.directories.contains_key("new"));
         assert!(!data.files.contains_key("old/file.rs"));
@@ -396,10 +383,7 @@ mod tests {
         ]);
         let data = Decorations::from_snapshot(&status);
         assert_eq!(data.files.len(), 1);
-        assert_eq!(
-            data.files["new/ leading\nname"].kind,
-            DecorationKind::Untracked
-        );
+        assert_eq!(data.files["new/ leading\nname"].kind, DecorationKind::Untracked);
         status.complete = false;
         assert!(Decorations::from_snapshot(&status).files.is_empty());
     }
@@ -430,37 +414,19 @@ mod tests {
         let value = decoration(&file("a", Modified, Modified));
         let mut theme = Theme::default();
         assert_eq!(value.color(&theme), theme.warning);
-        assert_eq!(
-            decoration(&file("a", Modified, Unchanged)).color(&theme),
-            theme.warning
-        );
-        assert_eq!(
-            decoration(&file("a", Unchanged, Modified)).color(&theme),
-            theme.warning
-        );
+        assert_eq!(decoration(&file("a", Modified, Unchanged)).color(&theme), theme.warning);
+        assert_eq!(decoration(&file("a", Unchanged, Modified)).color(&theme), theme.warning);
         theme.warning = gpui::hsla(0.6, 0.8, 0.4, 1.0);
         assert_eq!(value.color(&theme), theme.warning);
-        assert_eq!(
-            decoration(&file("new", Added, Unchanged)).color(&theme),
-            theme.success
-        );
-        assert_eq!(
-            decoration(&file("conflict", Deleted, Deleted)).color(&theme),
-            theme.danger
-        );
+        assert_eq!(decoration(&file("new", Added, Unchanged)).color(&theme), theme.success);
+        assert_eq!(decoration(&file("conflict", Deleted, Deleted)).color(&theme), theme.danger);
     }
 
     #[test]
     fn large_snapshot_aggregates_only_real_ancestors() {
         let status = snapshot(
             (0..10_000)
-                .map(|i| {
-                    file(
-                        &format!("src/group{}/file{i}.rs", i % 100),
-                        Unchanged,
-                        Modified,
-                    )
-                })
+                .map(|i| file(&format!("src/group{}/file{i}.rs", i % 100), Unchanged, Modified))
                 .collect(),
         );
         let wire_bytes = serde_json::to_vec(&status).unwrap().len();
@@ -472,11 +438,7 @@ mod tests {
         );
         assert_eq!(data.files.len(), 10_000);
         assert_eq!(data.directories.len(), 102); // root + src + 100 groups
-        assert!(
-            data.directories
-                .values()
-                .all(|d| d.kind == DecorationKind::Modified)
-        );
+        assert!(data.directories.values().all(|d| d.kind == DecorationKind::Modified));
         assert!(!data.directories.contains_key("src/group"));
     }
 }

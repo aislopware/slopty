@@ -114,11 +114,7 @@ impl FormulaCache {
 
     /// slopty_math's options for `display`, sized in ems.
     fn options(display: bool) -> slopty_math::Options {
-        if display {
-            slopty_math::Options::display(1.0)
-        } else {
-            slopty_math::Options::inline(1.0)
-        }
+        if display { slopty_math::Options::display(1.0) } else { slopty_math::Options::inline(1.0) }
     }
 
     /// The cached result for `tex`, marked used: `Some(None)` for a cached
@@ -151,27 +147,21 @@ impl FormulaCache {
         let tick = self.tick;
         let key: Arc<str> = tex.into();
         let bytes = key.len()
-            + formula.as_ref().map_or(0, |formula| {
-                formula.items.len() * std::mem::size_of::<Item>()
-            });
-        self.entries.entry((face, display)).or_default().insert(
-            key.clone(),
-            CachedFormula {
-                formula: formula.clone(),
-                used: tick,
-                bytes,
-            },
-        );
+            + formula
+                .as_ref()
+                .map_or(0, |formula| formula.items.len() * std::mem::size_of::<Item>());
+        self.entries
+            .entry((face, display))
+            .or_default()
+            .insert(key.clone(), CachedFormula { formula: formula.clone(), used: tick, bytes });
         self.order.insert(tick, (face, display, key));
         self.bytes += bytes;
         while self.order.len() > self.capacity || self.bytes > self.max_bytes {
             let Some((_, (face, display, key))) = self.order.pop_first() else {
                 break;
             };
-            if let Some(entry) = self
-                .entries
-                .get_mut(&(face, display))
-                .and_then(|entries| entries.remove(&key))
+            if let Some(entry) =
+                self.entries.get_mut(&(face, display)).and_then(|entries| entries.remove(&key))
             {
                 self.bytes -= entry.bytes;
             }
@@ -198,9 +188,7 @@ impl FormulaCache {
 
 /// `tex` laid out in `face`, or `None` on any error.
 fn lay_out(tex: &str, face: Face, options: &slopty_math::Options) -> Option<Arc<Formula>> {
-    slopty_math::bundled::layout(tex, face, options)
-        .ok()
-        .map(Arc::new)
+    slopty_math::bundled::layout(tex, face, options).ok().map(Arc::new)
 }
 
 /// The process-wide formula cache.
@@ -290,11 +278,7 @@ const MAX_SLOT_EMS: f32 = 8192.0;
 pub(crate) fn slot_text(formula: &Formula, scale: f32) -> Option<String> {
     let span = span(formula);
     // `span` skips a NaN advance (`min`/`max` ignore NaN), so check it here.
-    let width = if formula.width.is_finite() {
-        (span.end - span.start) * scale
-    } else {
-        f32::NAN
-    };
+    let width = if formula.width.is_finite() { (span.end - span.start) * scale } else { f32::NAN };
     let height = formula.height() * scale;
     // NaN fails every comparison, so it's rejected too.
     let fits = |ems: f32| (0.0..=MAX_SLOT_EMS).contains(&ems);
@@ -322,10 +306,7 @@ pub(crate) fn line_height(flat: &FlatText, line_height: f32, size: f32, window: 
     let text_system = window.text_system();
     line_height_with(flat, line_height, size, |font| {
         let id = text_system.resolve_font(font);
-        (
-            f32::from(text_system.ascent(id, px(1.0))),
-            -f32::from(text_system.descent(id, px(1.0))),
-        )
+        (f32::from(text_system.ascent(id, px(1.0))), -f32::from(text_system.descent(id, px(1.0))))
     })
 }
 
@@ -382,10 +363,8 @@ fn line_height_with(
         }
         let lift = (ascent - descent) / 2.0;
         for slot in line_slots {
-            let (ascent, descent) = (
-                slot.formula.ascent * slot.scale,
-                slot.formula.descent * slot.scale,
-            );
+            let (ascent, descent) =
+                (slot.formula.ascent * slot.scale, slot.formula.descent * slot.scale);
             half = half.max((ascent - lift).max(descent + lift));
         }
     }
@@ -417,10 +396,7 @@ pub(crate) fn display_flat(
     let range = 0..text.len();
     Some(FlatText {
         original: Some(OriginalText {
-            offsets: OffsetMap {
-                omissions: vec![(0..source.len(), range.clone())],
-                prior: None,
-            },
+            offsets: OffsetMap { omissions: vec![(0..source.len(), range.clone())], prior: None },
             text: source.into(),
         }),
         runs: vec![TextRun {
@@ -435,13 +411,7 @@ pub(crate) fn display_flat(
         links: Vec::new(),
         code_ranges: Vec::new(),
         file_glyphs: Vec::new(),
-        math: vec![MathSlot {
-            range,
-            formula,
-            display: true,
-            scale,
-            tex: tex.to_owned().into(),
-        }],
+        math: vec![MathSlot { range, formula, display: true, scale, tex: tex.to_owned().into() }],
     })
 }
 
@@ -498,8 +468,7 @@ fn register(
 }
 
 fn math_font_id(font: u8, window: &Window, cx: &mut App) -> Option<FontId> {
-    cx.default_global::<MathFonts>()
-        .id(font, |data| register(window.text_system(), data))
+    cx.default_global::<MathFonts>().id(font, |data| register(window.text_system(), data))
 }
 
 /// Whether `id` shapes like `data`: a spread of the face's characters, laid
@@ -571,17 +540,14 @@ fn is_bundled_face(
 fn family_name(data: &[u8]) -> Option<String> {
     let face = ttf_parser::Face::parse(data, 0).ok()?;
     let names = face.names();
-    [
-        ttf_parser::name_id::TYPOGRAPHIC_FAMILY,
-        ttf_parser::name_id::FAMILY,
-    ]
-    .into_iter()
-    .find_map(|id| {
-        names
-            .into_iter()
-            .filter(|name| name.name_id == id && name.is_unicode())
-            .find_map(|name| name.to_string())
-    })
+    [ttf_parser::name_id::TYPOGRAPHIC_FAMILY, ttf_parser::name_id::FAMILY].into_iter().find_map(
+        |id| {
+            names
+                .into_iter()
+                .filter(|name| name.name_id == id && name.is_unicode())
+                .find_map(|name| name.to_string())
+        },
+    )
 }
 
 /// Paint `formula` with its baseline's left end at `origin`, scaled from
@@ -602,13 +568,7 @@ pub(crate) fn paint_formula(
     let min_rule = 1.0 / window.scale_factor();
     for item in &formula.items {
         match *item {
-            Item::Glyph {
-                font,
-                glyph,
-                x,
-                y,
-                size,
-            } => {
+            Item::Glyph { font, glyph, x, y, size } => {
                 let at = point(origin.x + px(x * scale), origin.y + px(y * scale));
                 if let Some(font_id) = math_font_id(font, window, cx) {
                     window
@@ -631,12 +591,7 @@ pub(crate) fn paint_formula(
                     );
                 }
             }
-            Item::Rule {
-                x,
-                y,
-                width,
-                height,
-            } => window.paint_quad(gpui::fill(
+            Item::Rule { x, y, width, height } => window.paint_quad(gpui::fill(
                 Bounds::new(
                     point(origin.x + px(x * scale), origin.y + px(y * scale)),
                     size(px(width * scale), px((height * scale).max(min_rule))),
@@ -667,19 +622,19 @@ impl slopty_math::PathSink for OutlineSink {
     fn move_to(&mut self, x: f32, y: f32) {
         self.0.move_to(point(px(x), px(y)));
     }
+
     fn line_to(&mut self, x: f32, y: f32) {
         self.0.line_to(point(px(x), px(y)));
     }
+
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
         self.0.curve_to(point(px(x), px(y)), point(px(x1), px(y1)));
     }
+
     fn cubic_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        self.0.cubic_bezier_to(
-            point(px(x), px(y)),
-            point(px(x1), px(y1)),
-            point(px(x2), px(y2)),
-        );
+        self.0.cubic_bezier_to(point(px(x), px(y)), point(px(x1), px(y1)), point(px(x2), px(y2)));
     }
+
     fn close(&mut self) {
         self.0.close();
     }
@@ -698,6 +653,7 @@ pub(crate) struct MathGlyphs {
 
 impl gpui::IntoElement for MathGlyphs {
     type Element = Self;
+
     fn into_element(self) -> Self {
         self
     }
@@ -729,13 +685,18 @@ fn math_node(
         .w(bounds.size.width)
         .h(bounds.size.height)
         .into_any_element();
-    node.prepaint_as_root(bounds.origin, bounds.size.map(gpui::AvailableSpace::Definite), window, cx);
+    node.prepaint_as_root(
+        bounds.origin,
+        bounds.size.map(gpui::AvailableSpace::Definite),
+        window,
+        cx,
+    );
     node
 }
 
 impl Element for MathGlyphs {
-    type RequestLayoutState = ();
     type PrepaintState = (Vec<Placed>, Vec<AnyElement>);
+    type RequestLayoutState = ();
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone().into())
@@ -860,7 +821,9 @@ mod tests {
             [const { OnceLock::new() }; FONTS];
         FACES
             .get(usize::from(font))?
-            .get_or_init(|| ttf_parser::Face::parse(slopty_math::bundled::font_at(font).data(), 0).ok())
+            .get_or_init(|| {
+                ttf_parser::Face::parse(slopty_math::bundled::font_at(font).data(), 0).ok()
+            })
             .as_ref()
     }
 
@@ -868,10 +831,7 @@ mod tests {
     fn formulas_are_cached_by_source_and_style() {
         let first = formula(r"\frac{a}{b}", false, Face::Fira).expect("lays out");
         let again = formula(r"\frac{a}{b}", false, Face::Fira).expect("lays out");
-        assert!(
-            Arc::ptr_eq(&first, &again),
-            "a repeat lookup reuses the layout"
-        );
+        assert!(Arc::ptr_eq(&first, &again), "a repeat lookup reuses the layout");
         let display = formula(r"\frac{a}{b}", true, Face::Fira).expect("lays out");
         assert!(!Arc::ptr_eq(&first, &display));
         assert!(display.height() > first.height(), "display style is taller");
@@ -892,12 +852,8 @@ mod tests {
             let tex = format!(r"{i}\begin{{matrix}}{rows}\end{{matrix}}");
             let laid = cache.get(&tex, true, Face::Fira).expect("lays out");
             assert!(laid.items.len() > 5_000);
-            let held: usize = cache
-                .entries
-                .values()
-                .flat_map(HashMap::values)
-                .map(|entry| entry.bytes)
-                .sum();
+            let held: usize =
+                cache.entries.values().flat_map(HashMap::values).map(|entry| entry.bytes).sum();
             assert_eq!(held, cache.bytes);
             assert!(cache.bytes <= cache.max_bytes, "{}", cache.bytes);
             kept = cache.order.len();
@@ -924,14 +880,8 @@ mod tests {
         let fira = formula(tex, false, Face::Fira).expect("lays out");
         let stix = formula(tex, false, Face::StixTwo).expect("lays out");
         assert!(!Arc::ptr_eq(&fira, &stix), "each face keeps its own layout");
-        assert!(Arc::ptr_eq(
-            &stix,
-            &formula(tex, false, Face::StixTwo).unwrap()
-        ));
-        assert!(Arc::ptr_eq(
-            &fira,
-            &formula(tex, false, Face::Fira).unwrap()
-        ));
+        assert!(Arc::ptr_eq(&stix, &formula(tex, false, Face::StixTwo).unwrap()));
+        assert!(Arc::ptr_eq(&fira, &formula(tex, false, Face::Fira).unwrap()));
         let options = slopty_math::Options::inline(1.0);
         for (face, laid) in [(Face::Fira, &fira), (Face::StixTwo, &stix)] {
             let fresh = slopty_math::bundled::layout(tex, face, &options).unwrap();
@@ -948,15 +898,19 @@ mod tests {
         fn move_to(&mut self, _: f32, _: f32) {
             self.0 += 1;
         }
+
         fn line_to(&mut self, _: f32, _: f32) {
             self.0 += 1;
         }
+
         fn quad_to(&mut self, _: f32, _: f32, _: f32, _: f32) {
             self.0 += 1;
         }
+
         fn cubic_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {
             self.0 += 1;
         }
+
         fn close(&mut self) {}
     }
 
@@ -972,12 +926,14 @@ mod tests {
                 if let Item::Glyph { font, glyph, .. } = *item {
                     assert!(usize::from(font) < FONTS, "{face:?}");
                     let parsed = math_face(font).unwrap();
-                    assert!(
-                        parsed
-                            .glyph_hor_advance(ttf_parser::GlyphId(glyph))
-                            .is_some()
+                    assert!(parsed.glyph_hor_advance(ttf_parser::GlyphId(glyph)).is_some());
+                    slopty_math::bundled::font_at(font).outline(
+                        glyph,
+                        16.0,
+                        0.0,
+                        0.0,
+                        &mut painted,
                     );
-                    slopty_math::bundled::font_at(font).outline(glyph, 16.0, 0.0, 0.0, &mut painted);
                     fonts.push(font);
                 }
             }
@@ -985,9 +941,7 @@ mod tests {
             // Each face sets its own glyphs; STIX Two only fills its gaps.
             assert!(fonts.contains(&face.index()), "{face:?}");
             assert!(
-                fonts
-                    .iter()
-                    .all(|&font| font == face.index() || font == stix),
+                fonts.iter().all(|&font| font == face.index() || font == stix),
                 "{face:?}: {fonts:?}"
             );
         }
@@ -1070,12 +1024,7 @@ mod tests {
             descent: 0.25,
             left: 0.0,
             right: width,
-            items: vec![Item::Rule {
-                x: 0.0,
-                y: -0.75,
-                width,
-                height: 1.0,
-            }],
+            items: vec![Item::Rule { x: 0.0, y: -0.75, width, height: 1.0 }],
         }
     }
 
@@ -1095,22 +1044,12 @@ mod tests {
             (ruled(10.0), f32::NAN),
             (ruled(10.0), -1.0),
         ] {
-            assert!(
-                slot_text(&formula, scale).is_none(),
-                "{} @ {scale}",
-                formula.width
-            );
+            assert!(slot_text(&formula, scale).is_none(), "{} @ {scale}", formula.width);
         }
         // As are absurdly tall ones and non-finite extents.
-        let tall = Formula {
-            ascent: 1e7,
-            ..ruled(1.0)
-        };
+        let tall = Formula { ascent: 1e7, ..ruled(1.0) };
         assert!(slot_text(&tall, 1.0).is_none());
-        let nan = Formula {
-            descent: f32::NAN,
-            ..ruled(1.0)
-        };
+        let nan = Formula { descent: f32::NAN, ..ruled(1.0) };
         assert!(slot_text(&nan, 1.0).is_none());
         assert!(display_flat("x", Arc::new(ruled(1e7)), 1.0, gpui::black()).is_none());
     }
@@ -1160,10 +1099,7 @@ mod tests {
         let late = blocked.join().unwrap().expect("lays out");
         assert_eq!(finished, Ok(true), "a slow layout blocked other lookups");
         assert!(Arc::ptr_eq(&first, &late));
-        assert!(Arc::ptr_eq(
-            &first,
-            &formula(slow, false, Face::Fira).unwrap()
-        ));
+        assert!(Arc::ptr_eq(&first, &formula(slow, false, Face::Fira).unwrap()));
     }
 
     #[test]
@@ -1186,29 +1122,16 @@ mod tests {
     fn display_blocks_scale_the_formula_but_not_its_padding() {
         let laid = formula(r"\int_0^1 \frac{x^2}{2}\,dx", true, Face::Fira).unwrap();
         let normal = display_line_height(&laid, 1.0, 14.0, 22.0);
-        assert_eq!(
-            normal,
-            22.0f32.max((laid.height() * 14.0 + 2.0 * DISPLAY_PAD_Y).ceil())
-        );
+        assert_eq!(normal, 22.0f32.max((laid.height() * 14.0 + 2.0 * DISPLAY_PAD_Y).ceil()));
         let larger = display_line_height(&laid, 1.5, 14.0, 22.0);
         let grown = larger - 2.0 * DISPLAY_PAD_Y;
         let formula = normal - 2.0 * DISPLAY_PAD_Y;
         assert!((grown - 1.5 * formula).abs() <= 2.0, "{normal} -> {larger}");
         // The slot widens with it.
-        let width = |scale| {
-            display_flat("x", laid.clone(), scale, gpui::black())
-                .unwrap()
-                .text
-                .len()
-        };
+        let width =
+            |scale| display_flat("x", laid.clone(), scale, gpui::black()).unwrap().text.len();
         assert!(width(1.5) > width(1.0));
-        assert_eq!(
-            display_flat("x", laid.clone(), 1.5, gpui::black())
-                .unwrap()
-                .math[0]
-                .scale,
-            1.5
-        );
+        assert_eq!(display_flat("x", laid.clone(), 1.5, gpui::black()).unwrap().math[0].scale, 1.5);
     }
 
     fn inline(parts: &[(&str, bool)]) -> FlatText {
@@ -1216,10 +1139,7 @@ mod tests {
             .iter()
             .map(|&(text, math)| crate::markdown::parser::InlineRun {
                 text: text.into(),
-                style: crate::markdown::parser::InlineStyle {
-                    math,
-                    ..Default::default()
-                },
+                style: crate::markdown::parser::InlineStyle { math, ..Default::default() },
             })
             .collect();
         crate::markdown::render::flatten_runs(&runs, &crate::theme::Theme::dark(), false)
@@ -1247,26 +1167,14 @@ mod tests {
         // the fraction's denominator inside.
         tall.runs[0].font.family = "Tall".into();
         let lifted = line_height_with(&tall, 22.0, 14.0, |font| {
-            if font.family.as_ref() == "Tall" {
-                (1.6, 0.3)
-            } else {
-                GEIST
-            }
+            if font.family.as_ref() == "Tall" { (1.6, 0.3) } else { GEIST }
         });
         assert!(lifted > grown, "{lifted} vs {grown}");
         // Only lines holding a formula count.
-        let mut apart = inline(&[
-            ("Tall\n", false),
-            ("so ", false),
-            (r"\frac{a^2}{b_1}", true),
-        ]);
+        let mut apart = inline(&[("Tall\n", false), ("so ", false), (r"\frac{a^2}{b_1}", true)]);
         apart.runs[0].font.family = "Tall".into();
         let lone = line_height_with(&apart, 22.0, 14.0, |font| {
-            if font.family.as_ref() == "Tall" {
-                (1.6, 0.3)
-            } else {
-                GEIST
-            }
+            if font.family.as_ref() == "Tall" { (1.6, 0.3) } else { GEIST }
         });
         assert_eq!(lone, grown);
         // Display slots size their own block instead.
@@ -1308,15 +1216,9 @@ mod tests {
         let original = flat.original.as_ref().unwrap();
         assert_eq!(original.text.as_ref(), r"$$\sum_{i=1}^n i$$");
         assert_eq!(original.offsets.original(0), 0);
-        assert_eq!(
-            original.offsets.original(flat.text.len()),
-            original.text.len()
-        );
+        assert_eq!(original.offsets.original(flat.text.len()), original.text.len());
         assert_eq!(flat.math[0].range, 0..flat.text.len());
-        assert_eq!(
-            flat.runs.iter().map(|run| run.len).sum::<usize>(),
-            flat.text.len()
-        );
+        assert_eq!(flat.runs.iter().map(|run| run.len).sum::<usize>(), flat.text.len());
     }
 
     #[test]
@@ -1341,18 +1243,15 @@ mod tests {
             ("y around it.", false),
         ]);
         let font_size = px(14.0);
-        let full = text_system
-            .shape_text(flat.text.clone(), font_size, &flat.runs, None, None)
-            .unwrap();
+        let full =
+            text_system.shape_text(flat.text.clone(), font_size, &flat.runs, None, None).unwrap();
         let unwrapped = &full[0].unwrapped_layout;
         // The widest run of text a slot is glued into (no breakable space).
         let widest = flat
             .math
             .iter()
             .map(|slot| {
-                let start = flat.text[..slot.range.start]
-                    .rfind(' ')
-                    .map_or(0, |at| at + 1);
+                let start = flat.text[..slot.range.start].rfind(' ').map_or(0, |at| at + 1);
                 let end = flat.text[slot.range.end..]
                     .find(' ')
                     .map_or(flat.text.len(), |at| slot.range.end + at);
@@ -1363,13 +1262,7 @@ mod tests {
         let mut wraps = 0;
         while width < f32::from(unwrapped.width) {
             let lines = text_system
-                .shape_text(
-                    flat.text.clone(),
-                    font_size,
-                    &flat.runs,
-                    Some(px(width)),
-                    None,
-                )
+                .shape_text(flat.text.clone(), font_size, &flat.runs, Some(px(width)), None)
                 .unwrap();
             let line = &lines[0];
             for boundary in &line.wrap_boundaries {
@@ -1416,12 +1309,6 @@ mod tests {
         let names: Vec<String> = (0..slopty_math::bundled::FONTS)
             .filter_map(|index| family_name(slopty_math::bundled::font_at(index).data()))
             .collect();
-        assert_eq!(
-            names,
-            [
-                "Fira Math",
-                "STIX Two Math",
-            ]
-        );
+        assert_eq!(names, ["Fira Math", "STIX Two Math",]);
     }
 }

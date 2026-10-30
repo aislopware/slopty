@@ -110,14 +110,15 @@ impl Shell {
             state
                 .selected_chat
                 .is_none()
-                .then(|| state.overview_chats(crate::clock::utc(cx)).first().map(|(_, c)| c.id.clone()))
+                .then(|| {
+                    state.overview_chats(crate::clock::utc(cx)).first().map(|(_, c)| c.id.clone())
+                })
                 .flatten()
         };
         self.state.update(cx, |s, _| s.auto_selected = true);
         if let Some(first) = first {
             self.focus_composer_on_landing(cx); // not on touch
-            self.state
-                .update(cx, |s, cx| s.select_chat(Some(first), cx));
+            self.state.update(cx, |s, cx| s.select_chat(Some(first), cx));
         }
     }
 
@@ -127,8 +128,7 @@ impl Shell {
         self.set_route(Route::Chat, cx);
         self.focus_composer_on_landing(cx); // not on touch
         self.nav.push(NavEntry::Chat(chat_id.clone()));
-        self.state
-            .update(cx, |s, cx| s.select_chat(Some(chat_id), cx));
+        self.state.update(cx, |s, cx| s.select_chat(Some(chat_id), cx));
         cx.notify();
     }
 
@@ -169,7 +169,8 @@ impl Shell {
         let ink = if on_canvas { theme.clone() } else { ink_for(self.shown_ground(cx), &theme) };
         // The picker hangs under the identity (`picker`).
         let identity = super::picker::identity_anchor(
-            (!on_canvas).then(|| self.render_titlebar_identity(&ink, window.is_window_active(), cx)),
+            (!on_canvas)
+                .then(|| self.render_titlebar_identity(&ink, window.is_window_active(), cx)),
             window,
         );
         // At the trailing end: the inbox's eye, the palette, then a new session, which over the
@@ -189,7 +190,11 @@ impl Shell {
                     &ink,
                     cx.listener(|this, _, window, cx| this.toggle_command_palette(window, cx)),
                 )
-                .action_hint("Command palette", Keys::Action(Box::new(ToggleCommandPalette)), cx),
+                .action_hint(
+                    "Command palette",
+                    Keys::Action(Box::new(ToggleCommandPalette)),
+                    cx,
+                ),
             )
             .children((!on_canvas).then(|| {
                 window_control_button(
@@ -212,8 +217,7 @@ impl Shell {
             .child(div().flex_1())
             .child(actions);
         let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
-        self.titlebar_drag_region("chat-titlebar", bar, cx)
-            .into_any_element()
+        self.titlebar_drag_region("chat-titlebar", bar, cx).into_any_element()
     }
 
     /// The session's identity in the titlebar row: its program's icon, its title (whole in a
@@ -258,8 +262,8 @@ impl Shell {
             crate::clock::now(cx),
         );
         // An agent's mark in its brand's colour; a plain terminal's the terminal glyph.
-        let (glyph, tint) = harness
-            .map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
+        let (glyph, tint) =
+            harness.map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
         let title_ink = if key { ink.text } else { ink.text_muted };
         let ground = self.shown_ground(cx);
         let mark = super::marks::mark_element(
@@ -441,14 +445,8 @@ mod cycle_tests {
         // Not a no-op by accident: with one row both directions must resolve,
         // so the shortcut never looks broken by dead-ending on `None`.
         let list = order(&["only"]);
-        assert_eq!(
-            cycle_target(&list, Some("only"), true).as_deref(),
-            Some("only")
-        );
-        assert_eq!(
-            cycle_target(&list, Some("only"), false).as_deref(),
-            Some("only")
-        );
+        assert_eq!(cycle_target(&list, Some("only"), true).as_deref(), Some("only"));
+        assert_eq!(cycle_target(&list, Some("only"), false).as_deref(), Some("only"));
     }
 
     #[test]
@@ -456,14 +454,8 @@ mod cycle_tests {
         let list = order(&["a", "b", "c"]);
         assert_eq!(cycle_target(&list, None, true).as_deref(), Some("a"));
         assert_eq!(cycle_target(&list, None, false).as_deref(), Some("c"));
-        assert_eq!(
-            cycle_target(&list, Some("gone"), true).as_deref(),
-            Some("a")
-        );
-        assert_eq!(
-            cycle_target(&list, Some("gone"), false).as_deref(),
-            Some("c")
-        );
+        assert_eq!(cycle_target(&list, Some("gone"), true).as_deref(), Some("a"));
+        assert_eq!(cycle_target(&list, Some("gone"), false).as_deref(), Some("c"));
     }
 
     #[test]

@@ -1,10 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Coordinate structural changes across every editor of the affected workspace.
-use super::*;
-use crate::files::{client::WorkspaceFilesClient, mutations::MutationIntent};
 use slopty_view_proto::{
     DeleteWorkspaceEntryRequest, MoveWorkspaceEntryRequest, WorkspaceMutationOutcome,
 };
+
+use super::*;
+use crate::files::client::WorkspaceFilesClient;
+use crate::files::mutations::MutationIntent;
 
 impl Shell {
     pub(super) fn start_file_mutation(
@@ -55,10 +57,7 @@ impl Shell {
             .filter(|surface| surface.read(cx).shares_workspace(&intent.origin))
             .cloned()
             .collect::<Vec<_>>();
-        if surfaces
-            .iter()
-            .any(|surface| surface.read(cx).mutation_busy())
-        {
+        if surfaces.iter().any(|surface| surface.read(cx).mutation_busy()) {
             source.update(cx, |files, cx| {
                 files.report_mutation_error("Another file operation is still running".into(), cx)
             });
@@ -67,9 +66,7 @@ impl Shell {
         for surface in &surfaces {
             surface.update(cx, |files, cx| files.prepare_mutation(intent.clone(), cx));
         }
-        let waited_for_save = surfaces
-            .iter()
-            .any(|surface| surface.read(cx).mutation_has_save());
+        let waited_for_save = surfaces.iter().any(|surface| surface.read(cx).mutation_has_save());
         let client = WorkspaceFilesClient::new(engine, intent.origin.context.clone());
         cx.spawn(async move |shell, cx| {
             let result: Result<WorkspaceMutationOutcome, String> = async {
@@ -200,11 +197,7 @@ fn batch_failure_message(
     total: usize,
     message: &str,
 ) -> String {
-    let verb = if intent.destination.is_some() {
-        "Moved"
-    } else {
-        "Deleted"
-    };
+    let verb = if intent.destination.is_some() { "Moved" } else { "Deleted" };
     let path = &intent.entry.path;
     let name = path.rsplit('/').next().unwrap_or(path);
     format!("{verb} {completed} of {total} — {name}: {message}")
@@ -212,9 +205,12 @@ fn batch_failure_message(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use gpui::{AppContext, TestAppContext, VisualTestContext};
-    use std::{cell::RefCell, rc::Rc};
+
+    use super::*;
 
     struct DragHost {
         shell: Entity<Shell>,
@@ -228,13 +224,7 @@ mod tests {
                 .flex()
                 .w(px(900.))
                 .h(px(600.))
-                .child(
-                    div()
-                        .w(px(280.))
-                        .h_full()
-                        .flex_none()
-                        .child(self.files.clone()),
-                )
+                .child(div().w(px(280.)).h_full().flex_none().child(self.files.clone()))
                 .child(main)
         }
     }
@@ -271,11 +261,7 @@ mod tests {
                 shell.files.insert("chat".into(), files.clone());
                 shell
             });
-            DragHost {
-                shell,
-                files,
-                _directory: directory,
-            }
+            DragHost { shell, files, _directory: directory }
         });
         let (shell, files) = host.read_with(cx, |host, _| (host.shell.clone(), host.files.clone()));
         cx.update(|window, cx| {
@@ -293,9 +279,7 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
-            cx.subscribe(&files, move |_, event, _| {
-                recorded.borrow_mut().push(event.clone())
-            })
+            cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let start = cx.debug_bounds("tree-entry:a.txt").unwrap().center();

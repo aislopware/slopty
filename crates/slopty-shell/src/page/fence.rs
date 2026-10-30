@@ -11,7 +11,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{App, Entity, Global, IntoElement, RenderOnce, SharedString, Window, div, prelude::*};
+use gpui::prelude::*;
+use gpui::{App, Entity, Global, IntoElement, RenderOnce, SharedString, Window, div};
 use slopty_view_doc::PageCard;
 
 use crate::page::PageCardView;
@@ -115,9 +116,8 @@ impl FenceChart {
 /// The title a chart's spec gives itself: Vega's `title` (a string or `{text}`), Plotly's
 /// `layout.title`.
 fn chart_title(spec: &serde_json::Value) -> Option<String> {
-    let title = spec
-        .get("title")
-        .or_else(|| spec.get("layout").and_then(|layout| layout.get("title")))?;
+    let title =
+        spec.get("title").or_else(|| spec.get("layout").and_then(|layout| layout.get("title")))?;
     let text = match title {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Object(title) => title.get("text")?.as_str()?.to_owned(),

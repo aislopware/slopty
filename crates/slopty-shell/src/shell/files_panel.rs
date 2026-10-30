@@ -70,9 +70,10 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
+    use gpui::TestAppContext;
+
     use super::super::panes::Pane;
     use super::*;
-    use gpui::TestAppContext;
 
     /// Each session keeps its own explorer, made once; a file picked opens as a pane of its own
     /// beside the session, once however often it is picked; Files' key again hands the
@@ -105,7 +106,10 @@ mod tests {
                 shell.active_chat = "first".into();
                 shell.summon_files(window, cx);
                 let explorer = shell.files["first"].entity_id();
-                assert_eq!(shell.panes_now(cx).panes(), vec![Pane::Session, Pane::View(RightSurface::Files)]);
+                assert_eq!(
+                    shell.panes_now(cx).panes(),
+                    vec![Pane::Session, Pane::View(RightSurface::Files)]
+                );
                 assert_eq!(shell.front_view(cx), Some(RightSurface::Files));
 
                 shell.add_file_surface("src/main.rs".into(), window, cx);
@@ -127,7 +131,10 @@ mod tests {
                 assert!(shell.view_open(RightSurface::Files, cx), "the view stays");
 
                 shell.active_chat = "second".into();
-                assert!(!shell.view_open(RightSurface::Files, cx), "a session has views of its own");
+                assert!(
+                    !shell.view_open(RightSurface::Files, cx),
+                    "a session has views of its own"
+                );
                 shell.summon_files(window, cx);
                 assert_ne!(shell.files["second"].entity_id(), explorer);
                 shell.active_chat = "first".into();

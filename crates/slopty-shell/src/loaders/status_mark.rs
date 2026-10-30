@@ -4,8 +4,8 @@
 //!
 //! - **Working**: a ring of six dashes (36° on, 24° off) turning once every 2 s on the shared pulse
 //!   clock, so every working mark on screen turns in step (and calms as a long wait does).
-//! - **Needs you**, in amber, its glyph naming the need (`docs/decisions/layout.md`, "A state is
-//!   a glyph"): a `?` drawn in the closed ring for a question, a raised hand for an approval, a
+//! - **Needs you**, in amber, its glyph naming the need (`docs/decisions/layout.md`, "A state is a
+//!   glyph"): a `?` drawn in the closed ring for a question, a raised hand for an approval, a
 //!   checklist for a plan to review, and a dot for any other need, each drawn in over 260 ms as the
 //!   ring closes or fades.
 //! - **Done**: the ring fades over 200 ms while a disc grows in from 0.6 of its size over 220 ms,
@@ -354,7 +354,10 @@ fn dot(middle: Point<Pixels>, radius: f32, color: Hsla, window: &mut Window) {
     path.move_to(point(middle.x + px(radius), middle.y));
     for step in 1..=16 {
         let theta = TAU * step as f32 / 16.0;
-        path.line_to(point(middle.x + px(radius * theta.cos()), middle.y + px(radius * theta.sin())));
+        path.line_to(point(
+            middle.x + px(radius * theta.cos()),
+            middle.y + px(radius * theta.sin()),
+        ));
     }
     path.close();
     if let Ok(path) = path.build() {
@@ -415,7 +418,12 @@ fn hand() -> Vec<Vec<(f32, f32)>> {
     palm.push((2.41, 16.06));
     arc(&mut palm, (3.825, 14.65), 2.0, 135.0, 315.0);
     palm.push((7.0, 15.0));
-    vec![finger(18.0, 6.0, 11.0, 6.0), finger(14.0, 4.0, 10.0, 6.0), finger(10.0, 6.0, 10.5, 14.0), palm]
+    vec![
+        finger(18.0, 6.0, 11.0, 6.0),
+        finger(14.0, 4.0, 10.0, 6.0),
+        finger(10.0, 6.0, 10.5, 14.0),
+        palm,
+    ]
 }
 
 /// A plan's checklist on the 24 grid: Lucide's `list-checks`, two ticked rows and three lines.
@@ -481,7 +489,10 @@ mod tests {
         let settled = frame(MarkState::Working, MarkState::Question, 400);
         assert_eq!((settled.closed, settled.ring_opacity, settled.ask), (1.0, 1.0, 1.0));
         assert_eq!(settled.color, hue(MarkState::Question, &theme));
-        assert_eq!((settled.disc_opacity, settled.bang, settled.hand, settled.plan), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(
+            (settled.disc_opacity, settled.bang, settled.hand, settled.plan),
+            (0.0, 0.0, 0.0, 0.0)
+        );
     }
 
     /// Each need draws its own glyph in amber where the ring was (`docs/decisions/layout.md`, "A
@@ -497,9 +508,16 @@ mod tests {
         ] {
             let mid = frame(MarkState::Working, need, 160);
             assert!(mid.ring_opacity < 0.5, "{need:?}: the ring fades as the glyph comes");
-            assert!(drawn(mid) > 0.0 && drawn(mid) < 1.0, "{need:?} drawn part way: {}", drawn(mid));
+            assert!(
+                drawn(mid) > 0.0 && drawn(mid) < 1.0,
+                "{need:?} drawn part way: {}",
+                drawn(mid)
+            );
             let end = frame(MarkState::Working, need, 400);
-            assert_eq!((end.ring_opacity, drawn(end), end.disc_opacity, end.ask), (0.0, 1.0, 0.0, 0.0));
+            assert_eq!(
+                (end.ring_opacity, drawn(end), end.disc_opacity, end.ask),
+                (0.0, 1.0, 0.0, 0.0)
+            );
             assert_eq!(end.color, hue(MarkState::Waiting, &theme), "{need:?} is needs you's amber");
         }
         let dot = frame(MarkState::Working, MarkState::Waiting, 400);
@@ -507,14 +525,20 @@ mod tests {
         assert_eq!((dot.tick, dot.ask, dot.hand, dot.plan), (0.0, 0.0, 0.0, 0.0));
         assert!(DOT_RADIUS < DISC_RADIUS * 0.7, "a dot reads apart from the done disc");
         let filling = frame(MarkState::Waiting, MarkState::Done, 100).disc_radius;
-        assert!(filling > DOT_RADIUS && filling < DISC_RADIUS, "the dot grows to the disc: {filling}");
+        assert!(
+            filling > DOT_RADIUS && filling < DISC_RADIUS,
+            "the dot grows to the disc: {filling}"
+        );
         assert_eq!(frame(MarkState::Waiting, MarkState::Done, 400).disc_radius, DISC_RADIUS);
         // A glyph whole on its first draw, and its strokes inside the mark's square.
         let first = mark_frame(None, MarkState::Approval, MS(0), 0.0, false, &theme);
         assert_eq!((first.hand, first.ring_opacity), (1.0, 0.0));
         for strokes in [ask(), hand(), plan()] {
             for (x, y) in strokes.into_iter().flatten() {
-                assert!((1.0..=23.0).contains(&x) && (1.0..=23.0).contains(&y), "({x}, {y}) in the square");
+                assert!(
+                    (1.0..=23.0).contains(&x) && (1.0..=23.0).contains(&y),
+                    "({x}, {y}) in the square"
+                );
             }
         }
     }

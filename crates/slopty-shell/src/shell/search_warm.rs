@@ -39,30 +39,22 @@ impl Shell {
             self.search_warm = None;
             return;
         };
-        if self
-            .search_warm
-            .as_ref()
-            .is_some_and(|warm| warm.is_for(&chat_id, &context, &engine))
-        {
+        if self.search_warm.as_ref().is_some_and(|warm| warm.is_for(&chat_id, &context, &engine)) {
             return;
         }
         let client = WorkspaceFilesClient::new(engine.clone(), context.clone());
-        cx.spawn(async move |_, _| client.hint_search_warm().await)
-            .detach();
-        self.search_warm = Some(SearchWarm {
-            chat_id,
-            context,
-            engine,
-        });
+        cx.spawn(async move |_, _| client.hint_search_warm().await).detach();
+        self.search_warm = Some(SearchWarm { chat_id, context, engine });
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext as _;
+
     use super::*;
     use crate::state::AppState;
     use crate::theme::Theme;
-    use gpui::AppContext as _;
 
     fn test_shell(
         cx: &mut gpui::TestAppContext,
@@ -118,15 +110,13 @@ mod tests {
 
     #[gpui::test]
     fn focusing_a_chat_warms_its_index_once(cx: &mut gpui::TestAppContext) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let _guard = runtime.enter();
         let (out, mut requests) = tokio::sync::mpsc::channel(16);
         let (replies, inbound) = tokio::sync::mpsc::channel(16);
-        let engine =
-            crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(out, inbound));
+        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(
+            out, inbound,
+        ));
         let dir = tempfile::tempdir().unwrap();
         let window = test_shell(cx, dir.path());
         window
@@ -144,20 +134,14 @@ mod tests {
 
         window
             .update(cx, |shell, _, cx| {
-                shell
-                    .state
-                    .update(cx, |state, cx| state.select_chat(Some("b".into()), cx));
+                shell.state.update(cx, |state, cx| state.select_chat(Some("b".into()), cx));
             })
             .unwrap();
         // Leaving "a" sends nothing; the host's idle eviction owns it now.
         assert_eq!(drain_warms(cx, &runtime, &mut requests, &replies), ["b"]);
 
         // Unrelated state churn does not re-send.
-        window
-            .update(cx, |shell, _, cx| {
-                shell.state.update(cx, |_, cx| cx.notify())
-            })
-            .unwrap();
+        window.update(cx, |shell, _, cx| shell.state.update(cx, |_, cx| cx.notify())).unwrap();
         assert!(drain_warms(cx, &runtime, &mut requests, &replies).is_empty());
     }
 }

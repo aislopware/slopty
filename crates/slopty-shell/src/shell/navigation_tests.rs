@@ -1,9 +1,10 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! The keyboard among a session's panes, through the shell's real panes and key dispatch,
 //! without booting an engine.
+use gpui::{AppContext, TestAppContext, VisualTestContext};
+
 use super::panes::{Direction, Pane};
 use super::*;
-use gpui::{AppContext, TestAppContext, VisualTestContext};
 
 struct NavigationHost {
     shell: Entity<Shell>,
@@ -14,15 +15,25 @@ impl Render for NavigationHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.shell.update(cx, |shell, cx| {
             let (preferred, neutral) = shell.navigation_focus_fallback(cx);
-            defer_mounted_focus_restore(shell.shortcut_focus.clone(), preferred, neutral, window, cx);
+            defer_mounted_focus_restore(
+                shell.shortcut_focus.clone(),
+                preferred,
+                neutral,
+                window,
+                cx,
+            );
             let main = shell.render_main(window, cx);
             div()
                 .size_full()
                 .flex()
                 .track_focus(&shell.shortcut_focus)
                 .child(div().track_focus(&shell.unfocused))
-                .on_action(cx.listener(|shell, _: &NextSession, _, cx| shell.cycle_navigation(true, cx)))
-                .on_action(cx.listener(|shell, _: &PrevSession, _, cx| shell.cycle_navigation(false, cx)))
+                .on_action(
+                    cx.listener(|shell, _: &NextSession, _, cx| shell.cycle_navigation(true, cx)),
+                )
+                .on_action(
+                    cx.listener(|shell, _: &PrevSession, _, cx| shell.cycle_navigation(false, cx)),
+                )
                 // The window's own keys (`chrome_keys`), and the keys the root's own
                 // listeners take (Esc out of a view among them).
                 .map(|el| shell.chrome_actions(el, cx))
@@ -78,8 +89,9 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                     .collect();
                 state.selected_chat = Some("parent".into());
                 // Each session runs in its terminal, the main column.
-                state.session_terminals =
-                    [("parent", "t-parent"), ("other", "t-other")].map(|(c, t)| (c.into(), t.into())).into();
+                state.session_terminals = [("parent", "t-parent"), ("other", "t-other")]
+                    .map(|(c, t)| (c.into(), t.into()))
+                    .into();
             });
             shell.active_chat = "parent".into();
             crate::motion::set_reduced_motion(cx, true);
@@ -185,7 +197,9 @@ fn escape_in_a_view_gives_the_keyboard_back_to_the_terminal(cx: &mut TestAppCont
     cx.simulate_keystrokes("escape");
     draw(cx);
     keyboard_in(&shell, cx, Pane::Session);
-    shell.read_with(cx, |shell, cx| assert_eq!(shell.panes_now(cx).views().len(), 2, "the views stay"));
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.panes_now(cx).views().len(), 2, "the views stay")
+    });
 }
 
 /// A press anywhere in a pane gives it the keyboard: on its header, which takes no keyboard of
@@ -194,9 +208,15 @@ fn escape_in_a_view_gives_the_keyboard_back_to_the_terminal(cx: &mut TestAppCont
 fn a_press_on_a_pane_s_header_gives_it_the_keyboard(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     keyboard_in(&shell, cx, Pane::View(RightSurface::Diff(2)));
-    for (header, pane) in [("pane-header-diff-1", Pane::View(RightSurface::Diff(1))), ("pane-header-session", Pane::Session)] {
+    for (header, pane) in [
+        ("pane-header-diff-1", Pane::View(RightSurface::Diff(1))),
+        ("pane-header-session", Pane::Session),
+    ] {
         let at = cx.debug_bounds(header).unwrap_or_else(|| panic!("{header} drawn"));
-        cx.simulate_click(gpui::point(at.left() + gpui::px(40.0), at.center().y), gpui::Modifiers::default());
+        cx.simulate_click(
+            gpui::point(at.left() + gpui::px(40.0), at.center().y),
+            gpui::Modifiers::default(),
+        );
         draw(cx);
         keyboard_in(&shell, cx, pane);
     }
@@ -255,7 +275,11 @@ fn a_closed_view_comes_back_with_its_key(cx: &mut TestAppContext) {
     draw(cx);
     let back = Pane::View(RightSurface::Diff(3));
     shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.panes_now(cx).views(), [RightSurface::Diff(2), RightSurface::Diff(3)], "the diff is back");
+        assert_eq!(
+            shell.panes_now(cx).views(),
+            [RightSurface::Diff(2), RightSurface::Diff(3)],
+            "the diff is back"
+        );
         assert!(shell.closed_tabs.is_empty());
     });
     keyboard_in(&shell, cx, back);
@@ -342,9 +366,8 @@ fn an_archive_is_undone_from_its_toast_or_cmd_z(cx: &mut TestAppContext) {
     let _guard = runtime.enter();
     let (out, mut requests) = tokio::sync::mpsc::channel(16);
     let (_replies, inbound) = tokio::sync::mpsc::channel::<String>(16);
-    let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(
-        out, inbound,
-    ));
+    let engine =
+        crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(out, inbound));
     let (shell, cx) = setup(cx);
     cx.update(|window, cx| {
         window.activate_window();

@@ -7,9 +7,28 @@ use gpui::App;
 
 /// Programs a line is read before it runs with: they act as root or undo work.
 const READ_FIRST: &[&str] = &[
-    "sudo", "su", "doas", "rm", "rmdir", "dd", "shred", "truncate", "mkfs", "fdisk", "diskutil",
-    "shutdown", "reboot", "halt", "poweroff", "kill", "killall", "pkill", "launchctl", "chmod",
-    "chown", "mv",
+    "sudo",
+    "su",
+    "doas",
+    "rm",
+    "rmdir",
+    "dd",
+    "shred",
+    "truncate",
+    "mkfs",
+    "fdisk",
+    "diskutil",
+    "shutdown",
+    "reboot",
+    "halt",
+    "poweroff",
+    "kill",
+    "killall",
+    "pkill",
+    "launchctl",
+    "chmod",
+    "chown",
+    "mv",
 ];
 
 /// Whether `line` is to be read before it runs: more than one line, or a command that acts as
@@ -47,7 +66,9 @@ fn writes_a_device(line: &str) -> bool {
 fn destroys_in_git(args: &[&str]) -> bool {
     let has = |flag: &str| args.contains(&flag);
     match args.first().copied() {
-        Some("push") => has("--force") || has("-f") || args.iter().any(|a| a.starts_with("--force")),
+        Some("push") => {
+            has("--force") || has("-f") || args.iter().any(|a| a.starts_with("--force"))
+        }
         Some("reset") => has("--hard"),
         Some("clean") => true,
         Some("branch") => has("-D"),
@@ -101,7 +122,10 @@ mod tests {
         }
         let typed = typed.borrow();
         assert!(typed.iter().all(|(id, _, enter)| id == "t1" && *enter), "{typed:?}");
-        assert_eq!(typed[0].1, "cargo test -p slopty-shell", "the fence's own newline is not typed");
+        assert_eq!(
+            typed[0].1, "cargo test -p slopty-shell",
+            "the fence's own newline is not typed"
+        );
     }
 
     /// Several lines, or a line that acts as root or destroys, waits at the prompt for Enter.

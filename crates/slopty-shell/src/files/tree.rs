@@ -1,21 +1,17 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, KeyDownEvent, ListSizingBehavior, MouseButton, Window, div, list,
-    prelude::*, px,
+    AnyElement, Context, KeyDownEvent, ListSizingBehavior, MouseButton, Window, div, list, px,
 };
 use slopty_view_proto::WorkspaceEntryKind;
 
-use super::{
-    FilesSurface, WorkspacePathDrag, model::DirectoryLoadState, model::VisibleRowKind,
-    workspace_path_drag_ghost,
-};
-use crate::{
-    file_icons::{self, FileIconIdentity},
-    icons::{self, icon},
-    motion::HoverFade as _,
-    popover,
-    theme::Theme,
-};
+use super::model::{DirectoryLoadState, VisibleRowKind};
+use super::{FilesSurface, WorkspacePathDrag, workspace_path_drag_ghost};
+use crate::file_icons::{self, FileIconIdentity};
+use crate::icons::{self, icon};
+use crate::motion::HoverFade as _;
+use crate::popover;
+use crate::theme::Theme;
 
 /// Fade band under the tree's edges (the sidebar's 24px).
 const TREE_FADE_BAND: f32 = 24.0;
@@ -142,8 +138,7 @@ impl popover::ScrollRailHost for FilesSurface {
         let Some((metrics, track_top)) = tree_rail_geometry(&self.tree_list) else {
             return false;
         };
-        self.rail_bar()
-            .begin_press_in(&metrics, track_top, pointer_y);
+        self.rail_bar().begin_press_in(&metrics, track_top, pointer_y);
         self.apply_tree_rail_target(&metrics, track_top, pointer_y)
     }
 
@@ -169,8 +164,7 @@ impl FilesSurface {
             return false;
         };
         let target = px(-fraction * metrics.max_scroll);
-        self.tree_list
-            .set_offset_from_scrollbar(gpui::Point::new(px(0.0), target));
+        self.tree_list.set_offset_from_scrollbar(gpui::Point::new(px(0.0), target));
         true
     }
 
@@ -307,10 +301,7 @@ impl FilesSurface {
                         Vec::new()
                     });
                 let drag_owner = cx.weak_entity();
-                let renaming = self
-                    .tree_rename
-                    .as_ref()
-                    .is_some_and(|rename| rename.path == path);
+                let renaming = self.tree_rename.as_ref().is_some_and(|rename| rename.path == path);
                 let rename_element = self.render_tree_rename(&path, cx);
                 let expanded = is_directory && self.tree.is_expanded(&path);
                 let text_color = if let Some(decoration) = decoration {
@@ -328,10 +319,7 @@ impl FilesSurface {
                     WorkspaceEntryKind::Symlink => FileIconIdentity::symlink(&node.entry.name),
                 };
                 div()
-                    .id(gpui::SharedString::from(format!(
-                        "files-tree-entry:{}",
-                        row.path
-                    )))
+                    .id(gpui::SharedString::from(format!("files-tree-entry:{}", row.path)))
                     .role(gpui::Role::TreeItem)
                     .aria_label(node.entry.name.clone())
                     .debug_selector({
@@ -375,21 +363,19 @@ impl FilesSurface {
                             .bg(crate::motion::hover_blend(&fade, rest, crate::theme::hover_wash()))
                             .hover_fade(fade)
                     })
-                    .on_click(
-                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                            this.tree_focus.focus(window, cx);
-                            let modifiers = event.modifiers();
-                            if modifiers.shift {
-                                this.tree.select_range_to(&path, modifiers.secondary(cx));
-                                cx.notify();
-                            } else if modifiers.secondary(cx) {
-                                this.tree.toggle_selected(path.clone());
-                                cx.notify();
-                            } else {
-                                this.activate_tree_path(path.clone(), cx);
-                            }
-                        }),
-                    )
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        this.tree_focus.focus(window, cx);
+                        let modifiers = event.modifiers();
+                        if modifiers.shift {
+                            this.tree.select_range_to(&path, modifiers.secondary(cx));
+                            cx.notify();
+                        } else if modifiers.secondary(cx) {
+                            this.tree.toggle_selected(path.clone());
+                            cx.notify();
+                        } else {
+                            this.activate_tree_path(path.clone(), cx);
+                        }
+                    }))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -488,13 +474,10 @@ impl FilesSurface {
                 ))
                 .hover_fade(format!("tree-error-{index}"))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    let cursor = this
-                        .tree
-                        .node(&directory)
-                        .and_then(|node| match &node.load {
-                            DirectoryLoadState::Error { cursor, .. } => cursor.clone(),
-                            _ => None,
-                        });
+                    let cursor = this.tree.node(&directory).and_then(|node| match &node.load {
+                        DirectoryLoadState::Error { cursor, .. } => cursor.clone(),
+                        _ => None,
+                    });
                     this.load_directory(directory.clone(), cursor, cx);
                 }))
                 .role(gpui::Role::Button)
@@ -702,12 +685,7 @@ impl FilesSurface {
         let Some(selected) = self.tree.selected() else {
             return;
         };
-        if let Some(index) = self
-            .tree
-            .visible_rows()
-            .iter()
-            .position(|row| row.path == selected)
-        {
+        if let Some(index) = self.tree.visible_rows().iter().position(|row| row.path == selected) {
             self.tree_list.scroll_to_reveal_item(index);
         }
     }
@@ -738,9 +716,10 @@ fn status_row(
 
 #[cfg(test)]
 mod tests {
+    use gpui::{AppContext, ListAlignment, ListOffset, ListState};
+
     use super::super::model::VisibleTreeRow;
     use super::*;
-    use gpui::{AppContext, ListAlignment, ListOffset, ListState};
 
     fn rows(paths: &[&str]) -> Vec<VisibleTreeRow> {
         paths
@@ -770,11 +749,9 @@ mod tests {
         let state = ListState::new(10, ListAlignment::Top, px(0.0)).measure_all();
         let view = cx.update(|_, cx| cx.new(|_| TestTree(state.clone())));
         let mut draw = |height| {
-            cx.draw(
-                gpui::point(px(0.0), px(0.0)),
-                gpui::size(px(200.0), px(height)),
-                |_, _| view.clone().into_any_element(),
-            );
+            cx.draw(gpui::point(px(0.0), px(0.0)), gpui::size(px(200.0), px(height)), |_, _| {
+                view.clone().into_any_element()
+            });
         };
 
         draw(100.0);
@@ -821,9 +798,7 @@ mod tests {
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
-            cx.subscribe(&files, move |_, event, _| {
-                recorded.borrow_mut().push(event.clone())
-            })
+            cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
         let row = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
             cx.debug_bounds(selector).unwrap().center()
@@ -841,10 +816,7 @@ mod tests {
         let folder = row(cx, "tree-entry:folder");
         cx.simulate_click(folder, shift);
         files.read_with(cx, |files, _| {
-            assert_eq!(
-                files.tree.selected_paths(),
-                ["folder", "a.txt", "b.txt", "c.txt"]
-            );
+            assert_eq!(files.tree.selected_paths(), ["folder", "a.txt", "b.txt", "c.txt"]);
             assert!(!files.tree.is_expanded("folder"));
         });
         cx.run_until_parked();
@@ -917,10 +889,7 @@ mod tests {
         let loaded = rows(&["a", "src", "src/a", "src/b", "z"]);
         let list = ListState::new(old.len(), ListAlignment::Top, px(100.0))
             .with_uniform_item_height(px(TREE_ROW_HEIGHT));
-        list.scroll_to(ListOffset {
-            item_ix: 2,
-            offset_in_item: px(7.0),
-        });
+        list.scroll_to(ListOffset { item_ix: 2, offset_in_item: px(7.0) });
         sync_list_rows(&list, &old, &loading);
         assert_eq!(list.logical_scroll_top().item_ix, 3);
         sync_list_rows(&list, &loading, &loaded);
@@ -937,10 +906,7 @@ mod tests {
         let collapsed = rows(&["a", "src", "z"]);
         let removed = rows(&["a", "z"]);
         let list = ListState::new(old.len(), ListAlignment::Top, px(100.0));
-        list.scroll_to(ListOffset {
-            item_ix: 2,
-            offset_in_item: px(3.0),
-        });
+        list.scroll_to(ListOffset { item_ix: 2, offset_in_item: px(3.0) });
         sync_list_rows(&list, &old, &collapsed);
         assert_eq!(list.logical_scroll_top().item_ix, 1);
         sync_list_rows(&list, &collapsed, &removed);

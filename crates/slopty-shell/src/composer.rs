@@ -11,13 +11,14 @@
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
+use gpui::prelude::*;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, KeyBinding, KeyDownEvent, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Role,
-    ScrollEvent, SharedString, Style, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
-    Window, WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
+    App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, ElementInputHandler, Entity,
+    EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, Role, ScrollEvent, SharedString, Style, Task, TextRun, TextStyle,
+    UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, px, relative,
+    size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -263,7 +264,8 @@ fn input_bindings(context: &'static str, cx: &App) -> Vec<KeyBinding> {
         bindings.push(crate::keys::binding(&format!("shift-{prefix}-z"), Redo, ctx, cx));
     }
     // Word-level editing: Option on Apple keyboards, Ctrl on Windows/Linux.
-    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND { // an iPad's ⌥ too
+    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND {
+        // an iPad's ⌥ too
         "alt"
     } else {
         "ctrl"
@@ -280,18 +282,8 @@ fn input_bindings(context: &'static str, cx: &App) -> Vec<KeyBinding> {
         ctx,
         cx,
     ));
-    bindings.push(crate::keys::binding(
-        &format!("{word_edit_prefix}-left"),
-        WordLeft,
-        ctx,
-        cx,
-    ));
-    bindings.push(crate::keys::binding(
-        &format!("{word_edit_prefix}-right"),
-        WordRight,
-        ctx,
-        cx,
-    ));
+    bindings.push(crate::keys::binding(&format!("{word_edit_prefix}-left"), WordLeft, ctx, cx));
+    bindings.push(crate::keys::binding(&format!("{word_edit_prefix}-right"), WordRight, ctx, cx));
     bindings.push(crate::keys::binding(
         &format!("shift-{word_edit_prefix}-left"),
         SelectWordLeft,
@@ -316,13 +308,10 @@ fn input_bindings(context: &'static str, cx: &App) -> Vec<KeyBinding> {
 /// Bind the text fields' keymap. Call once at app boot.
 pub fn init(cx: &mut App) {
     let mut generic_bindings = input_bindings(GENERIC_COMPOSER_CONTEXT, cx);
-    generic_bindings.push(KeyBinding::new(
-        "enter",
-        Submit,
-        Some(GENERIC_COMPOSER_CONTEXT),
-    ));
+    generic_bindings.push(KeyBinding::new("enter", Submit, Some(GENERIC_COMPOSER_CONTEXT)));
 
-    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND { // an iPad's ⌥ too
+    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND {
+        // an iPad's ⌥ too
         "alt"
     } else {
         "ctrl"
@@ -391,7 +380,12 @@ pub fn init(cx: &mut App) {
         palette_bindings.push(crate::keys::binding(&format!("{prefix}-x"), Cut, palette, cx));
         palette_bindings.push(crate::keys::binding(&format!("{prefix}-v"), Paste, palette, cx));
         palette_bindings.push(crate::keys::binding(&format!("{prefix}-z"), Undo, palette, cx));
-        palette_bindings.push(crate::keys::binding(&format!("shift-{prefix}-z"), Redo, palette, cx));
+        palette_bindings.push(crate::keys::binding(
+            &format!("shift-{prefix}-z"),
+            Redo,
+            palette,
+            cx,
+        ));
     }
     cx.bind_keys(palette_bindings);
     cx.bind_keys(generic_bindings);
@@ -410,7 +404,6 @@ pub enum ComposerInputEvent {
     MentionAccept,
     MentionDismiss,
 }
-
 
 /// Shaping inputs excluding mutable viewport and selection geometry.
 #[derive(Clone, PartialEq)]
@@ -600,7 +593,6 @@ impl ComposerInput {
         self
     }
 
-
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
         self
@@ -612,7 +604,6 @@ impl ComposerInput {
         self.name = Some(name.into());
         self
     }
-
 
     pub fn with_accessibility_role(mut self, role: Role) -> Self {
         self.accessibility_role = role;
@@ -644,9 +635,7 @@ impl ComposerInput {
         if self.blink_task.is_none() {
             self.blink_task = Some(cx.spawn(async move |this, cx| {
                 loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(CARET_BLINK_MS))
-                        .await;
+                    cx.background_executor().timer(Duration::from_millis(CARET_BLINK_MS)).await;
                     let flipped = this.update(cx, |this: &mut Self, cx| {
                         this.caret_on = !this.caret_on;
                         cx.notify();
@@ -743,11 +732,7 @@ impl ComposerInput {
     /// Called with the range about to be replaced, BEFORE the content changes,
     /// so the pushed snapshot is the pre-edit state.
     fn record_edit(&mut self, range: &Range<usize>, new_text: &str, now: Instant) {
-        let kind = if new_text.is_empty() {
-            EditKind::Delete
-        } else {
-            EditKind::Insert
-        };
+        let kind = if new_text.is_empty() { EditKind::Delete } else { EditKind::Insert };
         // A run merges only while it stays single-character, contiguous with
         // the previous edit, of the same kind, and inside the idle window. A
         // pause, a word break, a paste, or a caret jump all break the run so
@@ -829,11 +814,7 @@ impl ComposerInput {
     // ---- editing ops ----
 
     pub fn cursor_offset(&self) -> usize {
-        if self.selection_reversed {
-            self.selected_range.start
-        } else {
-            self.selected_range.end
-        }
+        if self.selection_reversed { self.selected_range.start } else { self.selected_range.end }
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -911,14 +892,9 @@ impl ComposerInput {
         while !self.content.is_char_boundary(offset) {
             offset -= 1;
         }
-        let start = self.content[..offset]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let end = self.content[offset..]
-            .find('\n')
-            .map(|i| offset + i)
-            .unwrap_or(self.content.len());
+        let start = self.content[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let end =
+            self.content[offset..].find('\n').map(|i| offset + i).unwrap_or(self.content.len());
         start..end
     }
 
@@ -1192,11 +1168,8 @@ impl ComposerInput {
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
         let line_end = self.line_range_at(self.cursor_offset()).end;
-        let newline = if self.line_content_end_at(self.cursor_offset()) < line_end {
-            "\r\n"
-        } else {
-            "\n"
-        };
+        let newline =
+            if self.line_content_end_at(self.cursor_offset()) < line_end { "\r\n" } else { "\n" };
         self.replace_text_in_range(None, newline, window, cx);
     }
 
@@ -1422,9 +1395,7 @@ impl ComposerInput {
         let generation = self.drag_generation;
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(DRAG_SCROLL_FRAME_MS))
-                    .await;
+                cx.background_executor().timer(Duration::from_millis(DRAG_SCROLL_FRAME_MS)).await;
                 let keep_running = this
                     .update(cx, |input, cx| input.drag_autoscroll_tick(generation, cx))
                     .unwrap_or(false);
@@ -1475,8 +1446,7 @@ impl ComposerInput {
             0.0,
             input_max_scroll(
                 self.content_height,
-                self.settled_viewport_height
-                    .unwrap_or(f32::from(bounds.size.height)),
+                self.settled_viewport_height.unwrap_or(f32::from(bounds.size.height)),
             ),
         );
         if next == self.scroll_top {
@@ -1492,25 +1462,14 @@ impl ComposerInput {
         true
     }
 
-    fn on_scroll(
-        &mut self,
-        event: &ScrollEvent,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(bounds) = self.last_bounds else {
             return;
         };
-        let viewport_height = self
-            .settled_viewport_height
-            .unwrap_or(f32::from(bounds.size.height));
+        let viewport_height = self.settled_viewport_height.unwrap_or(f32::from(bounds.size.height));
         let delta_y = f32::from(event.delta.pixel_delta(self.line_height).y);
-        let next = input_scroll_offset(
-            self.scroll_top,
-            delta_y,
-            self.content_height,
-            viewport_height,
-        );
+        let next =
+            input_scroll_offset(self.scroll_top, delta_y, self.content_height, viewport_height);
         if next == self.scroll_top {
             // Overscroll guard: when the input itself is scrollable (content
             // taller than the viewport), swallow the wheel event even at the
@@ -1570,12 +1529,7 @@ impl ComposerInput {
 
     /// Shape the text at a width; store measured layout; return content height.
     /// Called from the element's measured-layout closure.
-    fn layout_text(
-        &mut self,
-        width: Pixels,
-        style: &TextStyle,
-        window: &mut Window,
-    ) -> f32 {
+    fn layout_text(&mut self, width: Pixels, style: &TextStyle, window: &mut Window) -> f32 {
         let key = InputLayoutKey {
             width,
             font: style.font(),
@@ -1625,7 +1579,9 @@ impl ComposerInput {
         let runs: Vec<TextRun> = boundaries
             .windows(2)
             .filter(|r| r[1] > r[0])
-            .map(|r| run_for(r[1] - r[0], marked.as_ref().is_some_and(|range| range.contains(&r[0]))))
+            .map(|r| {
+                run_for(r[1] - r[0], marked.as_ref().is_some_and(|range| range.contains(&r[0])))
+            })
             .collect();
         #[cfg(test)]
         {
@@ -1650,14 +1606,8 @@ impl ComposerInput {
                 .iter()
                 .take_while(|(r, _)| r.start < end)
                 .filter_map(|(range, run)| {
-                    let len = range
-                        .end
-                        .min(end)
-                        .saturating_sub(range.start.max(display_at));
-                    (len > 0).then(|| TextRun {
-                        len,
-                        ..(*run).clone()
-                    })
+                    let len = range.end.min(end).saturating_sub(range.start.max(display_at));
+                    (len > 0).then(|| TextRun { len, ..(*run).clone() })
                 })
                 .collect();
             if let Ok(shaped) = window.text_system().shape_text(
@@ -1683,14 +1633,10 @@ impl ComposerInput {
             line_starts.push(0);
         }
 
-        let content_height: f32 = lines
-            .iter()
-            .map(|l| f32::from(l.size(self.line_height).height))
-            .sum();
-        let max_line_width: f32 = lines
-            .iter()
-            .map(|l| f32::from(l.unwrapped_layout.width))
-            .fold(0.0, f32::max);
+        let content_height: f32 =
+            lines.iter().map(|l| f32::from(l.size(self.line_height).height)).sum();
+        let max_line_width: f32 =
+            lines.iter().map(|l| f32::from(l.unwrapped_layout.width)).fold(0.0, f32::max);
 
         self.display_is_placeholder = is_placeholder;
         self.max_ascent = lines
@@ -1717,11 +1663,7 @@ impl ComposerInput {
             self.scroll_top,
         )
         .0;
-        let top_padding = if top_overflow {
-            self.overflow_top_padding
-        } else {
-            0.0
-        };
+        let top_padding = if top_overflow { self.overflow_top_padding } else { 0.0 };
         let height = input_reveal_height(
             visible,
             self.scroll_top,
@@ -1805,14 +1747,12 @@ impl EntityInputHandler for ComposerInput {
     }
 
     fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
-        self.marked_range
-            .as_ref()
-            .map(|range| self.range_to_utf16(range))
+        self.marked_range.as_ref().map(|range| self.range_to_utf16(range))
     }
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.marked_range.take().is_some() {
-                self.needs_measure = true;
+            self.needs_measure = true;
             self.last_edit = None;
             cx.emit(ComposerInputEvent::CursorMoved);
             cx.notify();
@@ -1966,14 +1906,15 @@ struct ComposerTextPrepaint {
 
 impl IntoElement for ComposerTextElement {
     type Element = Self;
+
     fn into_element(self) -> Self {
         self
     }
 }
 
 impl gpui::Element for ComposerTextElement {
-    type RequestLayoutState = ();
     type PrepaintState = ComposerTextPrepaint;
+    type RequestLayoutState = ();
 
     fn id(&self) -> Option<gpui::ElementId> {
         None
@@ -2050,10 +1991,8 @@ impl gpui::Element for ComposerTextElement {
                     caret_color,
                 ));
             } else if input.display_is_placeholder {
-                cursor = Some(fill(
-                    Bounds::new(origin, size(px(2.0), input.line_height)),
-                    caret_color,
-                ));
+                cursor =
+                    Some(fill(Bounds::new(origin, size(px(2.0), input.line_height)), caret_color));
             }
         } else if let (Some(start), Some(end)) = (
             input.point_for_index(input.selected_range.start),
@@ -2112,11 +2051,7 @@ impl gpui::Element for ComposerTextElement {
                     .point_for_index(input.content.len())
                     .map(|p| (point(origin.x + p.x, origin.y + p.y), g))
             });
-        ComposerTextPrepaint {
-            cursor,
-            selection_quads,
-            ghost,
-        }
+        ComposerTextPrepaint { cursor, selection_quads, ghost }
     }
 
     fn paint(
@@ -2144,74 +2079,58 @@ impl gpui::Element for ComposerTextElement {
 
         // WrappedLine isn't Clone — temporarily take the shaped lines out of the
         // entity for painting, then put them back for mouse mapping.
-        let (lines, line_height, scroll, scroll_left) =
-            self.input.update(cx, |input, _| {
-                (
-                    std::mem::take(&mut input.last_lines),
-                    input.line_height,
-                    input.scroll_top,
-                    input.scroll_left,
-                )
-            });
+        let (lines, line_height, scroll, scroll_left) = self.input.update(cx, |input, _| {
+            (
+                std::mem::take(&mut input.last_lines),
+                input.line_height,
+                input.scroll_top,
+                input.scroll_left,
+            )
+        });
 
         let paint_bounds = self.input.read(cx).paint_bounds(bounds);
-        window.with_content_mask(
-            Some(gpui::ContentMask {
-                bounds: paint_bounds,
-            }),
-            |window| {
-                for quad in prepaint.selection_quads.drain(..) {
-                    window.paint_quad(quad);
-                }
-                let mut y = bounds.top() - px(scroll);
-                for line in &lines {
-                    let height = line.size(line_height).height;
-                    let _ = line.paint(
-                        point(bounds.left() - px(scroll_left), y),
-                        line_height,
-                        gpui::TextAlign::Left,
-                        Some(bounds),
-                        window,
-                        cx,
-                    );
-                    y += height;
-                }
-                if let Some((ghost_origin, ghost)) = prepaint.ghost.take() {
-                    let style = window.text_style();
-                    let font_size = style.font_size.to_pixels(window.rem_size());
-                    let run = TextRun {
-                        len: ghost.len(),
-                        font: style.font(),
-                        color: Theme::of(cx).text_faint,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
-                    let line = window
-                        .text_system()
-                        .shape_line(ghost, font_size, &[run], None);
-                    // (Clipping comes from the surrounding content mask.)
-                    let _ = line.paint(
-                        ghost_origin,
-                        line_height,
-                        gpui::TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
-                }
-                // Caret only when this input is actually focused in an active
-                // window (Electron hides it on window deactivation too), and only
-                // in the "on" blink phase — solid while typing, ~500ms blink idle.
-                if self
-                    .input
-                    .update(cx, |input, cx| input.caret_shown(window, cx))
-                    && let Some(cursor) = prepaint.cursor.take()
-                {
-                    window.paint_quad(cursor);
-                }
-            },
-        );
+        window.with_content_mask(Some(gpui::ContentMask { bounds: paint_bounds }), |window| {
+            for quad in prepaint.selection_quads.drain(..) {
+                window.paint_quad(quad);
+            }
+            let mut y = bounds.top() - px(scroll);
+            for line in &lines {
+                let height = line.size(line_height).height;
+                let _ = line.paint(
+                    point(bounds.left() - px(scroll_left), y),
+                    line_height,
+                    gpui::TextAlign::Left,
+                    Some(bounds),
+                    window,
+                    cx,
+                );
+                y += height;
+            }
+            if let Some((ghost_origin, ghost)) = prepaint.ghost.take() {
+                let style = window.text_style();
+                let font_size = style.font_size.to_pixels(window.rem_size());
+                let run = TextRun {
+                    len: ghost.len(),
+                    font: style.font(),
+                    color: Theme::of(cx).text_faint,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let line = window.text_system().shape_line(ghost, font_size, &[run], None);
+                // (Clipping comes from the surrounding content mask.)
+                let _ =
+                    line.paint(ghost_origin, line_height, gpui::TextAlign::Left, None, window, cx);
+            }
+            // Caret only when this input is actually focused in an active
+            // window (Electron hides it on window deactivation too), and only
+            // in the "on" blink phase — solid while typing, ~500ms blink idle.
+            if self.input.update(cx, |input, cx| input.caret_shown(window, cx))
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+        });
         self.input.update(cx, |input, _| {
             input.last_lines = lines;
         });
@@ -2229,11 +2148,7 @@ impl Render for ComposerInput {
         } else {
             theme
         };
-        let text_color = if self.content.is_empty() {
-            theme.text_faint
-        } else {
-            theme.text
-        };
+        let text_color = if self.content.is_empty() { theme.text_faint } else { theme.text };
         div()
             .id(("composer-input", cx.entity_id()))
             .role(self.accessibility_role)
@@ -2305,9 +2220,7 @@ impl Render for ComposerInput {
                     true,
                     ComposerTextElement {
                         input: input.clone(),
-                        max_content_height: self
-                            .viewport_height
-                            .unwrap_or(INPUT_MAX_HEIGHT),
+                        max_content_height: self.viewport_height.unwrap_or(INPUT_MAX_HEIGHT),
                     },
                 )
                 // Fade through the existing top padding, like the transcript
@@ -2316,14 +2229,11 @@ impl Render for ComposerInput {
                 .inset_top(ascent - self.overflow_top_padding)
                 .fade_overflow_y_with(move |cx| {
                     let input = input.read(cx);
-                    let visible_height = input
-                        .last_bounds
-                        .map_or(0.0, |bounds| f32::from(bounds.size.height));
+                    let visible_height =
+                        input.last_bounds.map_or(0.0, |bounds| f32::from(bounds.size.height));
                     input_overflow_edges(
                         input.content_height,
-                        input
-                            .settled_viewport_height
-                            .unwrap_or(INPUT_MAX_HEIGHT),
+                        input.settled_viewport_height.unwrap_or(INPUT_MAX_HEIGHT),
                         visible_height,
                         input.scroll_top,
                     )
@@ -2337,8 +2247,13 @@ impl Render for ComposerInput {
 /// the drawn wash and the focus ring (`focus_ring_within` with the reach) stay put (#23). Under a
 /// pointer it is the drawn size. On a touch screen its press raises no keyboard: the composer's
 /// pill leaves the field unfocused for it. Returns the press and how far it reaches past each edge.
-pub(crate) fn finger_press(id: impl Into<gpui::ElementId>, width: f32, height: f32) -> (gpui::Stateful<gpui::Div>, f32) {
-    let (x, y) = (crate::surface_chrome::touch_reach(width), crate::surface_chrome::touch_reach(height));
+pub(crate) fn finger_press(
+    id: impl Into<gpui::ElementId>,
+    width: f32,
+    height: f32,
+) -> (gpui::Stateful<gpui::Div>, f32) {
+    let (x, y) =
+        (crate::surface_chrome::touch_reach(width), crate::surface_chrome::touch_reach(height));
     let press = div()
         .id(id)
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
@@ -2365,7 +2280,9 @@ pub(crate) fn ansi_color(index: u8, theme: &Theme) -> gpui::Hsla {
         0..=15 => return theme.terminal.ansi[usize::from(index)],
         16..=231 => {
             let n = u32::from(index - 16);
-            (LEVELS[(n / 36) as usize] << 16) | (LEVELS[(n / 6 % 6) as usize] << 8) | LEVELS[(n % 6) as usize]
+            (LEVELS[(n / 36) as usize] << 16)
+                | (LEVELS[(n / 6 % 6) as usize] << 8)
+                | LEVELS[(n % 6) as usize]
         }
         _ => {
             let grey = 8 + 10 * u32::from(index - 232);
@@ -2407,8 +2324,7 @@ mod tests {
             let input = cx.new(|cx| ComposerInput::new("Do anything…", cx));
             InputHarness { input }
         });
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
         (dir, window)
     }
 
@@ -2452,9 +2368,7 @@ mod tests {
         let (_dir, handle) = composer_focus_window(cx);
         handle
             .update(cx, |composer, window, cx| {
-                composer
-                    .input
-                    .update(cx, |input, cx| test(input, window, cx));
+                composer.input.update(cx, |input, cx| test(input, window, cx));
             })
             .unwrap();
     }
@@ -2464,11 +2378,11 @@ mod tests {
         struct Inputs(Vec<Entity<ComposerInput>>);
         impl Render for Inputs {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().flex().flex_col().children(
-                    self.0
-                        .iter()
-                        .map(|input| div().w(px(200.0)).child(input.clone())),
-                )
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .children(self.0.iter().map(|input| div().w(px(200.0)).child(input.clone())))
             }
         }
         cx.update(|cx| cx.set_global(Theme::dark()));
@@ -2479,8 +2393,7 @@ mod tests {
             ])
         });
         cx.run_until_parked();
-        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
+        cx.update_window(host.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
         let inputs = host.read_with(cx, |host, _| host.0.clone()).unwrap();
         // Visit both fields and return to the first: click-away capture must
         // never clear focus acquired by the clicked input during bubbling.
@@ -2540,8 +2453,7 @@ mod tests {
                 window.focus(&input.focus_handle, cx);
                 input
             });
-            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
             cx.simulate_keystrokes(handle.into(), "shift-backspace");
             handle
                 .update(cx, |input, _, cx| {
@@ -2559,12 +2471,7 @@ mod tests {
                 })
                 .unwrap();
             cx.simulate_keystrokes(handle.into(), "shift-backspace");
-            assert_eq!(
-                handle
-                    .read_with(cx, |input, _| input.text().to_owned())
-                    .unwrap(),
-                ""
-            );
+            assert_eq!(handle.read_with(cx, |input, _| input.text().to_owned()).unwrap(), "");
         }
     }
 
@@ -2579,14 +2486,8 @@ mod tests {
                 input.end(&End, window, cx);
                 assert_eq!(input.cursor_offset(), first.len());
                 input.layout_text(px(600.0), &window.text_style(), window);
-                assert_eq!(
-                    input.caret_for_point(point(px(590.0), px(1.0))).0,
-                    first.len()
-                );
-                assert_eq!(
-                    input.selection_unit(PressIntent::Line, 0),
-                    0..first.len() + 2
-                );
+                assert_eq!(input.caret_for_point(point(px(590.0), px(1.0))).0, first.len());
+                assert_eq!(input.selection_unit(PressIntent::Line, 0), 0..first.len() + 2);
                 input.move_to(0, cx);
                 input.select_end(&SelectEnd, window, cx);
                 assert_eq!(input.selected_range, 0..first.len());
@@ -2704,11 +2605,7 @@ mod tests {
                 for _ in 0..rows {
                     input.down(&Down, window, cx);
                 }
-                assert_eq!(
-                    input.cursor_offset(),
-                    last_start + 7,
-                    "column lost at width {width}"
-                );
+                assert_eq!(input.cursor_offset(), last_start + 7, "column lost at width {width}");
                 assert_eq!(input.preferred_column, Some(start.x));
                 for _ in 0..rows {
                     input.up(&Up, window, cx);
@@ -2750,9 +2647,7 @@ mod tests {
     #[gpui::test]
     fn rendered_word_selection_uses_pointer_hit_testing(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
-        let input = handle
-            .read_with(cx, |composer, _| composer.input.clone())
-            .unwrap();
+        let input = handle.read_with(cx, |composer, _| composer.input.clone()).unwrap();
         input.update(cx, |input, cx| input.set_text("hello café world", cx));
         cx.update_window(handle.into(), |_, window, cx| {
             window.draw(cx).clear(cx);
@@ -2839,24 +2734,12 @@ mod tests {
     #[test]
     fn input_scroll_reveals_only_when_caret_leaves_viewport() {
         // A visible caret preserves the user's viewport.
-        assert_eq!(
-            input_scroll_offset_for_cursor(40.0, 60.0, 20.0, 300.0, 100.0, None),
-            40.0
-        );
+        assert_eq!(input_scroll_offset_for_cursor(40.0, 60.0, 20.0, 300.0, 100.0, None), 40.0);
         // Moving above or below reveals the row with the smallest adjustment.
-        assert_eq!(
-            input_scroll_offset_for_cursor(80.0, 30.0, 20.0, 300.0, 100.0, None),
-            30.0
-        );
-        assert_eq!(
-            input_scroll_offset_for_cursor(20.0, 130.0, 20.0, 300.0, 100.0, None),
-            50.0
-        );
+        assert_eq!(input_scroll_offset_for_cursor(80.0, 30.0, 20.0, 300.0, 100.0, None), 30.0);
+        assert_eq!(input_scroll_offset_for_cursor(20.0, 130.0, 20.0, 300.0, 100.0, None), 50.0);
         // Revealing the final row clamps exactly to the content end.
-        assert_eq!(
-            input_scroll_offset_for_cursor(0.0, 290.0, 20.0, 300.0, 100.0, None),
-            200.0
-        );
+        assert_eq!(input_scroll_offset_for_cursor(0.0, 290.0, 20.0, 300.0, 100.0, None), 200.0);
     }
 
     #[test]
@@ -2915,29 +2798,18 @@ mod tests {
     fn scroll_fade_ignores_temporary_resize_overflow() {
         for visible_height in [0.0, 20.0, 60.0, 100.0, 160.0] {
             let scroll = input_max_scroll(160.0, visible_height);
-            assert_eq!(
-                input_overflow_edges(160.0, 160.0, visible_height, scroll),
-                (false, false)
-            );
+            assert_eq!(input_overflow_edges(160.0, 160.0, visible_height, scroll), (false, false));
         }
         // Deleting a capped draft disables fading immediately, even while
         // its scroll position and outer height are still settling.
-        assert_eq!(
-            input_overflow_edges(100.0, 100.0, 240.0, 80.0),
-            (false, false)
-        );
+        assert_eq!(input_overflow_edges(100.0, 100.0, 240.0, 80.0), (false, false));
     }
 
     #[test]
     fn scroll_fade_tracks_real_overflow_edges() {
         for (scroll, top, bottom) in [(0.0, false, true), (80.0, true, true), (160.0, true, false)]
         {
-            assert_eq!(
-                input_overflow_edges(400.0, 240.0, 240.0, scroll),
-                (top, bottom)
-            );
+            assert_eq!(input_overflow_edges(400.0, 240.0, 240.0, scroll), (top, bottom));
         }
     }
-
 }
-

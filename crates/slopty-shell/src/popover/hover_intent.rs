@@ -8,8 +8,9 @@
 //! `contains_pointer` from a window mouse listener to dismiss outside the safe
 //! trigger → child corridor. This works for children on either side.
 
-use gpui::{Bounds, Context, Pixels, Point, Task, px};
 use std::time::Duration;
+
+use gpui::{Bounds, Context, Pixels, Point, Task, px};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HoverAction {
@@ -27,12 +28,7 @@ pub struct HoverIntent<K> {
 
 impl<K> Default for HoverIntent<K> {
     fn default() -> Self {
-        Self {
-            origin: None,
-            pending: None,
-            pointer: None,
-            task: None,
-        }
+        Self { origin: None, pending: None, pointer: None, task: None }
     }
 }
 
@@ -141,9 +137,7 @@ impl<K: Clone + PartialEq> HoverIntent<K> {
         apply: impl FnOnce(&mut T, &mut Context<T>) + 'static,
     ) {
         self.task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(300))
-                .await;
+            cx.background_executor().timer(Duration::from_millis(300)).await;
             let _ = this.update(cx, apply);
         }));
     }
@@ -156,11 +150,7 @@ fn corridor(
     submenu: Bounds<Pixels>,
     on_left: bool,
 ) -> bool {
-    let edge = if on_left {
-        submenu.right()
-    } else {
-        submenu.left()
-    };
+    let edge = if on_left { submenu.right() } else { submenu.left() };
     let direction = if on_left { -1.0 } else { 1.0 };
     let distance = f32::from(edge - origin.x) * direction;
     let advance = f32::from(pointer.x - origin.x) * direction;
@@ -175,17 +165,16 @@ fn corridor(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::{point, size};
+
+    use super::*;
 
     #[test]
     fn diagonal_travel_renews_grace_but_reversing_switches_on_either_side() {
         for left in [false, true] {
             let p = |x: f32, y: f32| point(px(if left { 400.0 - x } else { x }), px(y));
-            let child = Bounds::new(
-                p(if left { 280.0 } else { 200.0 }, 80.0),
-                size(px(80.0), px(160.0)),
-            );
+            let child =
+                Bounds::new(p(if left { 280.0 } else { 200.0 }, 80.0), size(px(80.0), px(160.0)));
             let mut intent = HoverIntent::<usize>::default();
             intent.record_origin(p(100.0, 100.0));
             assert_eq!(
@@ -215,25 +204,16 @@ mod tests {
         let origin = point(px(100.0), px(100.0));
         let pointer = point(px(150.0), px(140.0));
         intent.record_origin(origin);
-        assert_eq!(
-            intent.enter(Some(&0), &1, pointer, Some(child), false),
-            HoverAction::Defer
-        );
+        assert_eq!(intent.enter(Some(&0), &1, pointer, Some(child), false), HoverAction::Defer);
         intent.leave(&2);
         assert_eq!(intent.pending(), Some(&1));
         intent.leave(&1);
         assert!(intent.pending().is_none());
-        assert_eq!(
-            intent.moved(Some(&0), &1, pointer, Some(child), false),
-            HoverAction::None
-        );
+        assert_eq!(intent.moved(Some(&0), &1, pointer, Some(child), false), HoverAction::None);
         intent.enter(Some(&0), &1, pointer, Some(child), false);
         intent.reset();
         assert!(intent.pending().is_none());
-        assert_eq!(
-            intent.enter(Some(&0), &1, pointer, Some(child), false),
-            HoverAction::Open
-        );
+        assert_eq!(intent.enter(Some(&0), &1, pointer, Some(child), false), HoverAction::Open);
     }
 
     #[test]
@@ -246,13 +226,7 @@ mod tests {
         assert!(intent.contains_pointer(trigger, Some(child), child.center(), false));
         assert!(!intent.contains_pointer(trigger, Some(child), point(px(175.0), px(300.0)), false));
         assert_eq!(
-            intent.enter(
-                Some(&0),
-                &1,
-                point(px(100.0), px(140.0)),
-                Some(child),
-                false
-            ),
+            intent.enter(Some(&0), &1, point(px(100.0), px(140.0)), Some(child), false),
             HoverAction::Open
         );
     }

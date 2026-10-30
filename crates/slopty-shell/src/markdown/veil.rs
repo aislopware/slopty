@@ -40,10 +40,8 @@ pub fn apply_veil(runs: Vec<TextRun>, spans: &[VeilSpan]) -> Vec<TextRun> {
             let (s, e) = (w[0], w[1]);
             let mut piece = run.clone();
             piece.len = e - s;
-            if let Some(alpha) = spans
-                .iter()
-                .find(|(r, _)| r.start <= s && e <= r.end)
-                .map(|(_, a)| *a)
+            if let Some(alpha) =
+                spans.iter().find(|(r, _)| r.start <= s && e <= r.end).map(|(_, a)| *a)
                 && alpha < 1.0
             {
                 piece.color = piece.color.opacity(alpha);
@@ -63,8 +61,9 @@ pub fn apply_veil(runs: Vec<TextRun>, spans: &[VeilSpan]) -> Vec<TextRun> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::{font, px};
+
+    use super::*;
 
     fn run(len: usize, color: gpui::Hsla) -> TextRun {
         TextRun {
@@ -87,10 +86,7 @@ mod tests {
         assert_eq!(total, 10, "split must cover the text exactly");
         assert!(out.iter().all(|r| r.font == runs[0].font));
         // Pieces: [0..2 full] [2..4 faded] [4..8 faded] [8..10 full].
-        assert_eq!(
-            out.iter().map(|r| r.len).collect::<Vec<_>>(),
-            vec![2, 2, 4, 2]
-        );
+        assert_eq!(out.iter().map(|r| r.len).collect::<Vec<_>>(), vec![2, 2, 4, 2]);
         assert_eq!(out[0].color.a, 1.0);
         assert_eq!(out[1].color.a, 0.5);
         assert_eq!(out[2].color.a, 0.5);

@@ -1,10 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Shared image geometry and native pointer gestures. Scaling reuses the texture.
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Image, MouseButton, Pixels, Point, ScrollDelta, Size, TouchPhase,
-    Window, div, point, prelude::*, px, size,
+    Window, div, point, px, size,
 };
-use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 #[derive(Clone, Default)]
 pub(crate) struct ImageView(Rc<RefCell<ViewState>>);
@@ -46,15 +50,11 @@ impl Geometry {
             .min(self.viewport.height / self.natural.height)
             .min(1.0)
     }
+
     fn resize(&mut self, natural: Size<f32>, viewport: Size<f32>) {
-        if ![
-            natural.width,
-            natural.height,
-            viewport.width,
-            viewport.height,
-        ]
-        .iter()
-        .all(|v| v.is_finite() && *v > 0.0)
+        if ![natural.width, natural.height, viewport.width, viewport.height]
+            .iter()
+            .all(|v| v.is_finite() && *v > 0.0)
         {
             return;
         }
@@ -66,11 +66,13 @@ impl Geometry {
             self.clamp_pan();
         }
     }
+
     fn fit(&mut self) {
         self.scale = self.fit_scale();
         self.pan = point(0.0, 0.0);
         self.fitted = true;
     }
+
     fn clamp_pan(&mut self) {
         let limit = point(
             ((self.natural.width * self.scale - self.viewport.width) / 2.0).max(0.0),
@@ -79,6 +81,7 @@ impl Geometry {
         self.pan.x = self.pan.x.clamp(-limit.x, limit.x);
         self.pan.y = self.pan.y.clamp(-limit.y, limit.y);
     }
+
     fn zoom(&mut self, scale: f32, anchor: Point<f32>) {
         if !scale.is_finite() || scale <= 0.0 || !anchor.x.is_finite() || !anchor.y.is_finite() {
             return;
@@ -98,6 +101,7 @@ impl Geometry {
         self.fitted = false;
         self.clamp_pan();
     }
+
     fn pan_by(&mut self, delta: Point<f32>) -> bool {
         if !delta.x.is_finite() || !delta.y.is_finite() {
             return false;
@@ -107,6 +111,7 @@ impl Geometry {
         self.clamp_pan();
         self.pan != before
     }
+
     fn image_origin(&self) -> Point<f32> {
         point(
             (self.viewport.width - self.natural.width * self.scale) / 2.0 + self.pan.x,
@@ -129,6 +134,7 @@ impl ViewState {
             f32::from(position.y - self.bounds.origin.y),
         )
     }
+
     fn pinch(&mut self, event: &gpui::PinchEvent) {
         if event.phase == TouchPhase::Ended {
             self.pinch = None;
@@ -146,6 +152,7 @@ impl ViewState {
         let local = self.local(event.position);
         self.geometry.zoom(scale, local);
     }
+
     fn wheel(&mut self, event: &gpui::ScrollEvent) -> bool {
         let delta = scroll_pixels(event.delta);
         if event.modifiers.control {
@@ -156,10 +163,12 @@ impl ViewState {
             self.geometry.pan_by(delta)
         }
     }
+
     fn pointer_down(&mut self, position: Point<Pixels>) {
         self.dragged = false;
         self.drag = Some((self.local(position), self.geometry.pan));
     }
+
     fn pointer_move(&mut self, event: &gpui::MouseMoveEvent) -> bool {
         if !event.dragging() {
             self.drag = None;
@@ -211,10 +220,9 @@ impl ImageView {
         {
             let mut state = self.0.borrow_mut();
             let bounds = state.bounds;
-            state.geometry.resize(
-                natural,
-                size(f32::from(bounds.size.width), f32::from(bounds.size.height)),
-            );
+            state
+                .geometry
+                .resize(natural, size(f32::from(bounds.size.width), f32::from(bounds.size.height)));
         }
         let geometry = self.0.borrow().geometry;
         let origin = geometry.image_origin();
@@ -338,14 +346,7 @@ impl ImageView {
                 .absolute()
                 .inset_0(),
             );
-        div()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(viewport)
-            .into_any_element()
+        div().size_full().min_w_0().min_h_0().flex().flex_col().child(viewport).into_any_element()
     }
 }
 
@@ -397,10 +398,7 @@ mod tests {
     }
     #[test]
     fn wheel_requires_control_and_normalizes_lines() {
-        let mut state = ViewState {
-            geometry: geometry(),
-            ..Default::default()
-        };
+        let mut state = ViewState { geometry: geometry(), ..Default::default() };
         let mut event = gpui::ScrollEvent {
             position: point(px(250.0), px(150.0)),
             delta: ScrollDelta::Lines(point(0.0, 1.0)),
@@ -418,17 +416,11 @@ mod tests {
         assert_eq!(state.geometry.scale, scale);
         event.delta = ScrollDelta::Lines(point(0.0, -1.0));
         state.wheel(&event);
-        assert!(
-            (state.geometry.scale - 0.5).abs() < 0.0001,
-            "wheel down reverses zoom"
-        );
+        assert!((state.geometry.scale - 0.5).abs() < 0.0001, "wheel down reverses zoom");
     }
     #[test]
     fn pinch_accumulates_native_deltas_and_a_drag_does_not_click() {
-        let mut state = ViewState {
-            geometry: geometry(),
-            ..Default::default()
-        };
+        let mut state = ViewState { geometry: geometry(), ..Default::default() };
         let mut event = gpui::PinchEvent {
             position: point(px(250.0), px(150.0)),
             phase: TouchPhase::Started,

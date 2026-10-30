@@ -1,9 +1,10 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! The sidebar beside a session's panes, and the panes themselves, through Shell's actions and
 //! GPUI's real layout.
+use gpui::{AppContext, Bounds, TestAppContext, VisualTestContext};
+
 use super::panes::Pane;
 use super::*;
-use gpui::{AppContext, Bounds, TestAppContext, VisualTestContext};
 
 fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut VisualTestContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -31,7 +32,8 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
                 })
                 .collect();
             // Each session runs in its terminal, the main column.
-            state.session_terminals = [("a", "t-a"), ("b", "t-b")].map(|(c, t)| (c.into(), t.into())).into();
+            state.session_terminals =
+                [("a", "t-a"), ("b", "t-b")].map(|(c, t)| (c.into(), t.into())).into();
             state
         });
         let mut shell = Shell::new(
@@ -79,8 +81,8 @@ fn draw(shell: &Entity<Shell>, cx: &mut VisualTestContext, millis: u64) -> Frame
     cx.executor().advance_clock(Duration::from_millis(millis).mul_f32(motion::speed_scale()));
     shell.update(cx, |_, cx| cx.notify());
     cx.update(|window, cx| window.draw(cx).clear(cx));
-    let hold =
-        shell.read_with(cx, |shell, cx| f32::from(shell.session_terminal.read(cx).fit_hold().width));
+    let hold = shell
+        .read_with(cx, |shell, cx| f32::from(shell.session_terminal.read(cx).fit_hold().width));
     let mut width = |id| cx.debug_bounds(id).map_or(0.0, |b| f32::from(b.size.width));
     Frame {
         widths: [width("sidebar-column"), width("conversation-column")],
@@ -151,8 +153,14 @@ fn the_panes_fill_the_room_the_sidebar_leaves_through_its_glide(cx: &mut TestApp
         for _ in 0..15 {
             let frame = draw(&shell, cx, 16);
             let width = frame.widths[0];
-            assert!(width >= source.min(target) - 0.5 && width <= source.max(target) + 0.5, "{width}");
-            assert!((width - previous) * (target - source) >= -0.5, "the glide turns back: {width}");
+            assert!(
+                width >= source.min(target) - 0.5 && width <= source.max(target) + 0.5,
+                "{width}"
+            );
+            assert!(
+                (width - previous) * (target - source) >= -0.5,
+                "the glide turns back: {width}"
+            );
             near(width + frame.widths[1], 1600.0);
             near(f32::from(frame.session.left()), width);
             // The terminal fits one grid through the glide: its pane less the hold stays put.
@@ -267,7 +275,11 @@ fn a_subagent_shows_its_agents_panes_and_the_panes_come_back(cx: &mut TestAppCon
     use crate::settings::SavedSurface;
     assert_eq!(kept["a"].tabs, [SavedSurface::Diff, SavedSurface::Inspector]);
     assert_eq!(kept["a"].active, Some(1), "the inspector had the keyboard");
-    assert_eq!(kept["o"].tabs, [SavedSurface::Inspector, SavedSurface::Files], "the files are kept too");
+    assert_eq!(
+        kept["o"].tabs,
+        [SavedSurface::Inspector, SavedSurface::Files],
+        "the files are kept too"
+    );
     assert_eq!(kept["o"].active, Some(1));
 
     // A new launch: no panes in this run, and the kept ones come back once "a" shows.
@@ -279,8 +291,15 @@ fn a_subagent_shows_its_agents_panes_and_the_panes_come_back(cx: &mut TestAppCon
     settled(&shell, cx);
     shell.read_with(cx, |shell, cx| {
         let views = shell.panes_now(cx).views();
-        assert!(matches!(views.as_slice(), [RightSurface::Diff(_), RightSurface::Inspector]), "{views:?}");
-        assert_eq!(shell.front_view(cx), Some(RightSurface::Inspector), "with the keyboard where it was");
+        assert!(
+            matches!(views.as_slice(), [RightSurface::Diff(_), RightSurface::Inspector]),
+            "{views:?}"
+        );
+        assert_eq!(
+            shell.front_view(cx),
+            Some(RightSurface::Inspector),
+            "with the keyboard where it was"
+        );
         // "o"'s wait until it shows.
         assert_eq!(shell.unrestored_tabs.keys().collect::<Vec<_>>(), ["o"]);
     });

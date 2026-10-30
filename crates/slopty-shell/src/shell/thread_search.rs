@@ -59,10 +59,8 @@ pub(super) fn score_session(fields: &ThreadFields, state: &str, terms: &[String]
 fn field_score(haystack: &str, term: &str, weight: u32) -> Option<u32> {
     let mut best = None;
     for (at, _) in haystack.match_indices(term) {
-        let starts_word = haystack[..at]
-            .chars()
-            .next_back()
-            .is_none_or(|previous| !previous.is_alphanumeric());
+        let starts_word =
+            haystack[..at].chars().next_back().is_none_or(|previous| !previous.is_alphanumeric());
         if starts_word {
             return Some(weight + weight / 2);
         }
@@ -78,7 +76,7 @@ pub(super) fn rank<T>(mut scored: Vec<(T, u32, i64)>, limit: usize) -> Vec<T> {
         score_b.cmp(score_a).then(active_b.cmp(active_a))
     });
     scored.truncate(limit);
-    scored.into_iter().map(|(item, _, _)| item).collect()
+    scored.into_iter().map(|(item, ..)| item).collect()
 }
 
 #[cfg(test)]
@@ -86,19 +84,13 @@ mod tests {
     use super::*;
 
     fn title(title: &str) -> ThreadFields<'_> {
-        ThreadFields {
-            title,
-            ..Default::default()
-        }
+        ThreadFields { title, ..Default::default() }
     }
 
     #[test]
     fn every_word_must_match_some_field() {
-        let fields = ThreadFields {
-            title: "Fix authentication",
-            device: "MacBook",
-            ..Default::default()
-        };
+        let fields =
+            ThreadFields { title: "Fix authentication", device: "MacBook", ..Default::default() };
         assert!(score_thread(&fields, &search_terms("mac auth")).is_some());
         assert!(score_thread(&fields, &search_terms("mac windows")).is_none());
         assert!(score_thread(&fields, &search_terms("   ")).is_none());
@@ -108,30 +100,13 @@ mod tests {
     fn fields_are_weighted_title_first() {
         let terms = search_terms("search");
         let in_title = score_thread(&title("search"), &terms).unwrap();
-        let in_project = score_thread(
-            &ThreadFields {
-                project: "search",
-                ..Default::default()
-            },
-            &terms,
-        )
-        .unwrap();
-        let in_branch = score_thread(
-            &ThreadFields {
-                branch: "search",
-                ..Default::default()
-            },
-            &terms,
-        )
-        .unwrap();
-        let in_device = score_thread(
-            &ThreadFields {
-                device: "search",
-                ..Default::default()
-            },
-            &terms,
-        )
-        .unwrap();
+        let in_project =
+            score_thread(&ThreadFields { project: "search", ..Default::default() }, &terms)
+                .unwrap();
+        let in_branch =
+            score_thread(&ThreadFields { branch: "search", ..Default::default() }, &terms).unwrap();
+        let in_device =
+            score_thread(&ThreadFields { device: "search", ..Default::default() }, &terms).unwrap();
         assert!(in_title > in_project && in_project > in_branch && in_branch > in_device);
     }
 
@@ -150,23 +125,14 @@ mod tests {
     fn archived_threads_score_half() {
         let terms = search_terms("deploy");
         let active = score_thread(&title("deploy"), &terms).unwrap();
-        let archived = score_thread(
-            &ThreadFields {
-                archived: true,
-                ..title("deploy")
-            },
-            &terms,
-        )
-        .unwrap();
+        let archived =
+            score_thread(&ThreadFields { archived: true, ..title("deploy") }, &terms).unwrap();
         assert_eq!(archived, active / 2);
     }
 
     #[test]
     fn ties_break_by_recent_activity() {
-        let ranked = rank(
-            vec![("old", 150, 10), ("new", 150, 20), ("best", 200, 0)],
-            2,
-        );
+        let ranked = rank(vec![("old", 150, 10), ("new", 150, 20), ("best", 200, 0)], 2);
         assert_eq!(ranked, vec!["best", "new"]);
     }
 

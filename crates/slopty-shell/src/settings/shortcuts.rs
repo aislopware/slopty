@@ -4,21 +4,17 @@
 //! per-row Reset and Restore defaults. Changes emit [`ShortcutsEvent`]; the
 //! shell persists them and re-applies the app keymap.
 
-use gpui::{
-    Context, Entity, EventEmitter, FocusHandle, Keystroke, SharedString, Window, div, prelude::*,
-    px,
-};
+use gpui::prelude::*;
+use gpui::{Context, Entity, EventEmitter, FocusHandle, Keystroke, SharedString, Window, div, px};
 
+use crate::motion::HoverFade as _;
 use crate::popover;
-
-use crate::settings::widgets;
 use crate::settings::{
-    KeyEquivalents, KeymapConfig, ShortcutId, canonical_key, combo_from_keystroke,
-    key_equivalents,
+    KeyEquivalents, KeymapConfig, ShortcutId, canonical_key, combo_from_keystroke, key_equivalents,
+    widgets,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
-use crate::motion::HoverFade as _;
 
 /// Outcome of one keystroke while recording. Pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,11 +75,7 @@ pub struct ShortcutsPage {
 impl EventEmitter<ShortcutsEvent> for ShortcutsPage {}
 
 impl ShortcutsPage {
-    pub fn new(
-        state: Entity<AppState>,
-        keymap: KeymapConfig,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(state: Entity<AppState>, keymap: KeymapConfig, cx: &mut Context<Self>) -> Self {
         Self {
             scroll: crate::settings::widgets::PageScroll::default(),
             keymap,
@@ -95,7 +87,6 @@ impl ShortcutsPage {
             _state: state,
         }
     }
-
 
     fn start_recording(&mut self, id: ShortcutId, window: &mut Window, cx: &mut Context<Self>) {
         self.recording = Some(id);
@@ -128,7 +119,6 @@ impl ShortcutsPage {
         cx.emit(ShortcutsEvent::KeymapChanged(self.keymap.clone()));
         cx.notify();
     }
-
 
     fn record_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let Some(recording) = self.recording else {
@@ -183,19 +173,14 @@ impl ShortcutsPage {
                     .flex()
                     .flex_col()
                     .child(widgets::row_title(theme, id.label()))
-                    .when(
-                        matches!(id, ShortcutId::NextSession | ShortcutId::PrevSession),
-                        |row| {
-                            row.child(widgets::meta_line(
-                                theme,
-                                vec![
-                                    div()
-                                        .child("Navigate within the focused pane.")
-                                        .into_any_element(),
-                                ],
-                            ))
-                        },
-                    ),
+                    .when(matches!(id, ShortcutId::NextSession | ShortcutId::PrevSession), |row| {
+                        row.child(widgets::meta_line(
+                            theme,
+                            vec![
+                                div().child("Navigate within the focused pane.").into_any_element(),
+                            ],
+                        ))
+                    }),
             )
             .child(self.render_binding_control(id, ix, recording, theme, cx))
     }
@@ -226,8 +211,7 @@ impl ShortcutsPage {
                     .ok();
             },
             move |window, cx| {
-                page.update(cx, |this, cx| this.start_recording(id, window, cx))
-                    .ok();
+                page.update(cx, |this, cx| this.start_recording(id, window, cx)).ok();
             },
         )
     }
@@ -237,7 +221,6 @@ impl ShortcutsPage {
             cx.notify();
         }
     }
-
 
     /// The shared rail under the id of whichever page is showing.
     fn render_scrollbar(
@@ -258,9 +241,6 @@ impl popover::ScrollRailHost for ShortcutsPage {
         self.scroll.rail_scroll()
     }
 }
-
-
-
 
 /// Reset (when customized) plus the click-to-record combo chip; recording
 /// inverts it to the accent wash. Shared by Settings → Shortcuts and the
@@ -358,20 +338,14 @@ fn binding_control(
 /// assigned to …"). Pure.
 fn refusal(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<SharedString> {
     conflict_owner(keymap, id, combo).map(|owner| {
-        format!(
-            "{} is already assigned to {}.",
-            crate::keys::combo_text(combo),
-            owner.label()
-        )
-        .into()
+        format!("{} is already assigned to {}.", crate::keys::combo_text(combo), owner.label())
+            .into()
     })
 }
 
 /// The shortcut (other than `id`) already bound to `combo`, if any. Pure.
 pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<ShortcutId> {
-    ShortcutId::ALL
-        .into_iter()
-        .find(|&other| other != id && keymap.get(other) == combo)
+    ShortcutId::ALL.into_iter().find(|&other| other != id && keymap.get(other) == combo)
 }
 
 /// The page's sections, in display order. [`group`] is a total match, so every
@@ -452,61 +426,64 @@ impl Render for ShortcutsPage {
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                crate::edge_fade::edge_faded(16.0, true, true, div()
-                    .id("shortcuts-page")
-                    .size_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll.scroll)
-                    .track_focus(&self.focus)
-                    .child(
-                        widgets::page_column()
-                            // One page head (`widgets::page_head`), titled as the nav
-                            // names the page (`SettingsSection::label`).
-                            .child(widgets::page_head(
-                                &theme,
-                                crate::shell::SettingsSection::Shortcuts.label(),
-                                None,
-                                "Click a binding, then press the new key combination.",
-                                Some(
-                                    {
-                                        // Dimmed when nothing differs or while recording.
-                                        let enabled = customized && recording.is_none();
-                                        widgets::restore_defaults(
-                                            &theme,
-                                            "shortcuts-restore-defaults",
-                                            enabled,
-                                        )
-                                        .when(enabled, |el| {
-                                            el.on_click(cx.listener(|this, _, _, cx| {
-                                                this.keymap = KeymapConfig::default();
-                                                this.stop_recording();
-                                                this.conflict_notice = None;
-                                                this.commit(cx);
-                                            }))
-                                        })
-                                    }
-                                    .into_any_element(),
+                crate::edge_fade::edge_faded(
+                    16.0,
+                    true,
+                    true,
+                    div()
+                        .id("shortcuts-page")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll.scroll)
+                        .track_focus(&self.focus)
+                        .child(
+                            widgets::page_column()
+                                // One page head (`widgets::page_head`), titled as the nav
+                                // names the page (`SettingsSection::label`).
+                                .child(widgets::page_head(
+                                    &theme,
+                                    crate::shell::SettingsSection::Shortcuts.label(),
+                                    None,
+                                    "Click a binding, then press the new key combination.",
+                                    Some(
+                                        {
+                                            // Dimmed when nothing differs or while recording.
+                                            let enabled = customized && recording.is_none();
+                                            widgets::restore_defaults(
+                                                &theme,
+                                                "shortcuts-restore-defaults",
+                                                enabled,
+                                            )
+                                            .when(
+                                                enabled,
+                                                |el| {
+                                                    el.on_click(cx.listener(|this, _, _, cx| {
+                                                        this.keymap = KeymapConfig::default();
+                                                        this.stop_recording();
+                                                        this.conflict_notice = None;
+                                                        this.commit(cx);
+                                                    }))
+                                                },
+                                            )
+                                        }
+                                        .into_any_element(),
+                                    ),
+                                ))
+                                .child(div().flex().flex_col().children(groups))
+                                .child(
+                                    div()
+                                        .mt(px(12.0))
+                                        .px(px(4.0))
+                                        .min_h(px(20.0))
+                                        .flex()
+                                        .justify_center()
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(helper),
                                 ),
-                            ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .children(groups),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(12.0))
-                                    .px(px(4.0))
-                                    .min_h(px(20.0))
-                                    .flex()
-                                    .justify_center()
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child(helper),
-                            )
-                            ,
-                    )).fade_overflow_y(&self.scroll.scroll),
+                        ),
+                )
+                .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
             .into_any_element()
@@ -517,11 +494,10 @@ impl Render for ShortcutsPage {
 mod tests {
     use super::*;
 
-
-
     #[gpui::test]
     fn recorder_refuses_bound_actions_before_they_can_run(cx: &mut gpui::TestAppContext) {
-        use std::{cell::Cell, rc::Rc};
+        use std::cell::Cell;
+        use std::rc::Rc;
         let fired = Rc::new(Cell::new(false));
         let observed = fired.clone();
         cx.update(|cx| {
@@ -537,53 +513,30 @@ mod tests {
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
-            ShortcutsPage::new(
-                state,
-                KeymapConfig::default(),
-                cx,
-            )
+            ShortcutsPage::new(state, KeymapConfig::default(), cx)
         });
         window
-            .update(cx, |page, window, cx| {
-                page.start_recording(ShortcutId::SaveFile, window, cx)
-            })
+            .update(cx, |page, window, cx| page.start_recording(ShortcutId::SaveFile, window, cx))
             .unwrap();
         cx.simulate_keystrokes(window.into(), &crate::settings::platform_combo("mod-n"));
         window
             .update(cx, |page, _, _| {
                 assert!(!fired.get(), "the existing action ran while recording");
-                assert!(
-                    page.conflict_notice
-                        .as_deref()
-                        .unwrap()
-                        .contains("New session")
-                );
-                assert_eq!(
-                    page.keymap.save_file,
-                    ShortcutId::SaveFile.default_combo()
-                );
+                assert!(page.conflict_notice.as_deref().unwrap().contains("New session"));
+                assert_eq!(page.keymap.save_file, ShortcutId::SaveFile.default_combo());
                 assert!(page.recording.is_none());
                 assert!(page.recording_interceptor.is_none());
             })
             .unwrap();
         cx.simulate_keystrokes(window.into(), &crate::settings::platform_combo("mod-n"));
-        assert!(
-            fired.get(),
-            "finishing recording must restore normal actions"
-        );
+        assert!(fired.get(), "finishing recording must restore normal actions");
     }
 
     #[test]
     fn recording_outcomes() {
         let us = KeyEquivalents::default();
-        assert_eq!(
-            record_key("escape", false, false, false, false, &us),
-            RecordOutcome::Cancelled
-        );
-        assert_eq!(
-            record_key("Escape", true, false, false, false, &us),
-            RecordOutcome::Cancelled
-        );
+        assert_eq!(record_key("escape", false, false, false, false, &us), RecordOutcome::Cancelled);
+        assert_eq!(record_key("Escape", true, false, false, false, &us), RecordOutcome::Cancelled);
         assert_eq!(
             record_key("s", false, false, false, true, &us),
             RecordOutcome::Set("mod-s".into())
@@ -599,14 +552,8 @@ mod tests {
             RecordOutcome::Set("ctrl-shift-tab".into())
         );
         // Bare modifiers stay recording.
-        assert_eq!(
-            record_key("shift", false, false, true, false, &us),
-            RecordOutcome::Ignored
-        );
-        assert_eq!(
-            record_key("ctrl", true, false, false, false, &us),
-            RecordOutcome::Ignored
-        );
+        assert_eq!(record_key("shift", false, false, true, false, &us), RecordOutcome::Ignored);
+        assert_eq!(record_key("ctrl", true, false, false, false, &us), RecordOutcome::Ignored);
     }
 
     #[test]
@@ -641,10 +588,7 @@ mod tests {
             RecordOutcome::Set("mod-b".into())
         );
         // No US key lands on AZERTY's @ key: nothing stored could reach it.
-        assert_eq!(
-            record_key("@", false, false, false, true, &azerty),
-            RecordOutcome::Ignored
-        );
+        assert_eq!(record_key("@", false, false, false, true, &azerty), RecordOutcome::Ignored);
     }
 
     #[test]
@@ -698,16 +642,8 @@ mod tests {
             Some(ShortcutId::ToggleChanges)
         );
         // Re-recording a shortcut's own combo is not a conflict.
-        assert_eq!(
-            conflict_owner(&keymap, ShortcutId::ToggleChanges, &combo),
-            None
-        );
+        assert_eq!(conflict_owner(&keymap, ShortcutId::ToggleChanges, &combo), None);
         // A free combo conflicts with nothing.
-        assert_eq!(
-            conflict_owner(&keymap, ShortcutId::ToggleSidebar, "mod-shift-x"),
-            None
-        );
+        assert_eq!(conflict_owner(&keymap, ShortcutId::ToggleSidebar, "mod-shift-x"), None);
     }
-
-
 }

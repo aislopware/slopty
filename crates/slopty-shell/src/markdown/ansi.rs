@@ -177,8 +177,9 @@ fn apply_sgr(mut style: AnsiStyle, params: &str) -> AnsiStyle {
                         color
                     }
                     Some(2) => {
-                        let channel =
-                            |ix: usize| codes.get(at + ix).map_or(0, |n| u8::try_from(*n).unwrap_or(u8::MAX));
+                        let channel = |ix: usize| {
+                            codes.get(at + ix).map_or(0, |n| u8::try_from(*n).unwrap_or(u8::MAX))
+                        };
                         let color = AnsiColor::Rgb(channel(2), channel(3), channel(4));
                         at += 4;
                         Some(color)

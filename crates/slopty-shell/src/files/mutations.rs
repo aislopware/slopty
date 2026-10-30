@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Shared identity and reconciliation for tree mutations and workspace references.
-use super::*;
 use slopty_view_proto::{WorkspaceEntry, WorkspaceEntryKind, WorkspaceMutationOutcome};
+
+use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceInteractionOrigin {
@@ -21,19 +22,13 @@ pub struct MutationIntent {
 }
 
 pub(crate) fn contains_path(ancestor: &str, path: &str) -> bool {
-    path == ancestor
-        || path
-            .strip_prefix(ancestor)
-            .is_some_and(|suffix| suffix.starts_with('/'))
+    path == ancestor || path.strip_prefix(ancestor).is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 impl MutationIntent {
     pub(crate) fn affects(&self, path: &str) -> bool {
         contains_path(&self.entry.path, path)
-            || self
-                .destination
-                .as_deref()
-                .is_some_and(|to| contains_path(to, path))
+            || self.destination.as_deref().is_some_and(|to| contains_path(to, path))
     }
 }
 
@@ -41,17 +36,15 @@ impl FilesSurface {
     pub(crate) fn interaction_origin(&self, cx: &gpui::App) -> Option<WorkspaceInteractionOrigin> {
         // No context is no origin.
         let context = self.request_context.clone()?;
-        self.is_current_target(cx)
-            .then(|| WorkspaceInteractionOrigin {
-                context,
-                surface_id: self.surface_id,
-                generation: self.interaction_generation,
-                checkout_id: self.effective_checkout_id.clone().or_else(|| {
-                    self.request_context
-                        .as_ref()
-                        .and_then(|c| c.checkout_id.clone())
-                }),
-            })
+        self.is_current_target(cx).then(|| WorkspaceInteractionOrigin {
+            context,
+            surface_id: self.surface_id,
+            generation: self.interaction_generation,
+            checkout_id: self
+                .effective_checkout_id
+                .clone()
+                .or_else(|| self.request_context.as_ref().and_then(|c| c.checkout_id.clone())),
+        })
     }
 
     pub(crate) fn accepts_origin(
@@ -72,10 +65,7 @@ impl FilesSurface {
         if context.target_device_id != origin.context.target_device_id {
             return false;
         }
-        let checkout = self
-            .effective_checkout_id
-            .as_ref()
-            .or(context.checkout_id.as_ref());
+        let checkout = self.effective_checkout_id.as_ref().or(context.checkout_id.as_ref());
         match (checkout, origin.checkout_id.as_ref()) {
             (Some(a), Some(b)) => a == b,
             _ => context.cwd == origin.context.cwd,
@@ -120,17 +110,12 @@ impl FilesSurface {
             }
         }
     }
+
     pub(super) fn mutation_blocks_path(&self, path: &str) -> bool {
-        if self
-            .mutation_hold
-            .iter()
-            .any(|hold| contains_path(hold, path))
-        {
+        if self.mutation_hold.iter().any(|hold| contains_path(hold, path)) {
             return true;
         }
-        self.pending_mutation
-            .as_ref()
-            .is_some_and(|intent| intent.affects(path))
+        self.pending_mutation.as_ref().is_some_and(|intent| intent.affects(path))
     }
 
     pub(crate) fn report_mutation_error(&mut self, message: String, cx: &mut Context<Self>) {
@@ -170,13 +155,9 @@ impl FilesSurface {
             let Some(entry) = self.tree.node(&path).map(|n| n.entry.clone()) else {
                 return;
             };
-            let available = self.mutation_capabilities.is_some_and(|c| {
-                if destination.is_some() {
-                    c.move_entry
-                } else {
-                    c.delete_entry
-                }
-            });
+            let available = self
+                .mutation_capabilities
+                .is_some_and(|c| if destination.is_some() { c.move_entry } else { c.delete_entry });
             if !available
                 || entry.mutation_revision.is_none()
                 || entry.kind == WorkspaceEntryKind::Symlink
@@ -223,12 +204,9 @@ impl FilesSurface {
             self.apply_semantic_mutation(&change, None, true, cx);
         }
         match result {
-            Ok(WorkspaceMutationOutcome::Applied {
-                checkout_id,
-                change,
-                entry,
-                ..
-            }) if intent.origin.checkout_id.as_ref() == Some(checkout_id) => {
+            Ok(WorkspaceMutationOutcome::Applied { checkout_id, change, entry, .. })
+                if intent.origin.checkout_id.as_ref() == Some(checkout_id) =>
+            {
                 self.apply_semantic_mutation(change, entry.clone(), true, cx);
             }
             Ok(WorkspaceMutationOutcome::Rejected { message, .. }) | Err(message) => {
@@ -299,10 +277,7 @@ impl FilesSurface {
                             .iter()
                             .filter(|(p, _)| contains_path(old, p))
                             .map(|(p, d)| {
-                                (
-                                    format!("{}{}", change.path, &p[old.len()..]),
-                                    d.phase.clone(),
-                                )
+                                (format!("{}{}", change.path, &p[old.len()..]), d.phase.clone())
                             })
                             .collect::<Vec<_>>()
                     } else {
@@ -327,13 +302,10 @@ impl FilesSurface {
                 let index = rows.iter().position(|r| r.path == change.path);
                 let next = index
                     .and_then(|i| {
-                        rows[i + 1..]
-                            .iter()
-                            .chain(rows[..i].iter().rev())
-                            .find(|r| {
-                                matches!(r.kind, model::VisibleRowKind::Entry)
-                                    && !contains_path(&change.path, &r.path)
-                            })
+                        rows[i + 1..].iter().chain(rows[..i].iter().rev()).find(|r| {
+                            matches!(r.kind, model::VisibleRowKind::Entry)
+                                && !contains_path(&change.path, &r.path)
+                        })
                     })
                     .map(|r| r.path.clone());
                 self.tree.remove(&change.path);
@@ -354,9 +326,10 @@ impl FilesSurface {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{AppContext, TestAppContext};
+
     use super::super::document::{DocumentKey, DocumentPhase, FileDocument};
     use super::*;
-    use gpui::{AppContext, TestAppContext};
 
     #[gpui::test]
     fn watch_before_lost_reply_still_remaps_the_dirty_buffer(cx: &mut TestAppContext) {
@@ -416,9 +389,7 @@ mod tests {
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
-            cx.subscribe(&files, move |_, event, _| {
-                recorded.borrow_mut().push(event.clone())
-            })
+            cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
         files.update(cx, |files, cx| {
             files.request_mutations(vec![("folder".into(), None), ("a.txt".into(), None)], cx);
@@ -427,11 +398,7 @@ mod tests {
         });
         cx.run_until_parked();
         let events = events.borrow();
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, FilesEvent::Mutate(_)))
-        );
+        assert!(!events.iter().any(|event| matches!(event, FilesEvent::Mutate(_))));
         let batches = events
             .iter()
             .filter_map(|event| match event {
@@ -440,10 +407,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(batches.len(), 1);
-        let paths = batches[0]
-            .iter()
-            .map(|intent| intent.entry.path.as_str())
-            .collect::<Vec<_>>();
+        let paths = batches[0].iter().map(|intent| intent.entry.path.as_str()).collect::<Vec<_>>();
         assert_eq!(paths, ["folder", "a.txt"]);
         assert_ne!(batches[0][0].operation_id, batches[0][1].operation_id);
     }

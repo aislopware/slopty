@@ -5,11 +5,12 @@
 
 use std::rc::Rc;
 
-use gpui::{AnyElement, Context, Pixels, ScrollHandle, SharedString, Window, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, Pixels, ScrollHandle, SharedString, Window, div, px};
 
+use crate::motion::HoverFade as _;
 use crate::popover::{self, MenuScrollbarMetrics, MenuScrollbarState, ScrollRailHost};
 use crate::theme::Theme;
-use crate::motion::HoverFade as _;
 
 /// Width of the section column beside the settings page, published by the
 /// shell each frame so dropdowns and responsive pages measure the page pane.
@@ -24,8 +25,7 @@ pub fn set_sidebar_width(width: f32, cx: &mut gpui::App) {
 }
 
 fn sidebar_width(cx: &gpui::App) -> f32 {
-    cx.try_global::<SettingsSidebarWidth>()
-        .map_or(crate::settings::SIDEBAR_DEFAULT, |w| w.0)
+    cx.try_global::<SettingsSidebarWidth>().map_or(crate::settings::SIDEBAR_DEFAULT, |w| w.0)
 }
 
 /// The page pane: right of the section column, below the titlebar strip.
@@ -41,11 +41,7 @@ pub fn pane_bounds(viewport: gpui::Size<Pixels>, sidebar_width: f32) -> gpui::Bo
 /// Inner width of the [`page_column`] at the current window size, for pages
 /// that choose a layout by the room they get (the Devices grid).
 pub fn column_width(window: &gpui::Window, cx: &gpui::App) -> f32 {
-    let pane = f32::from(
-        pane_bounds(window.viewport_size(), sidebar_width(cx))
-            .size
-            .width,
-    );
+    let pane = f32::from(pane_bounds(window.viewport_size(), sidebar_width(cx)).size.width);
     pane.min(PAGE_MAX_WIDTH) - 2.0 * PAGE_PAD_X
 }
 
@@ -107,13 +103,8 @@ pub fn dropdown_rows(
     trigger_height: f32,
     chrome_height: f32,
 ) -> AnyElement {
-    DropdownRows {
-        id: id.into(),
-        rows: rows.into_iter().collect(),
-        trigger_height,
-        chrome_height,
-    }
-    .into_any_element()
+    DropdownRows { id: id.into(), rows: rows.into_iter().collect(), trigger_height, chrome_height }
+        .into_any_element()
 }
 
 pub fn dropdown_list_height(
@@ -124,9 +115,8 @@ pub fn dropdown_list_height(
     // Height alone matters here, and the pane's does not depend on the
     // section column's width.
     let limits = pane_bounds(viewport, 0.0);
-    let card_height = ((f32::from(limits.size.height) - 16.0 - trigger_height) / 2.0 - 6.0)
-        .max(1.0)
-        .min(320.0);
+    let card_height =
+        ((f32::from(limits.size.height) - 16.0 - trigger_height) / 2.0 - 6.0).max(1.0).min(320.0);
     (card_height - chrome_height).max(1.0)
 }
 
@@ -186,10 +176,7 @@ pub struct PageScroll {
 
 impl Default for PageScroll {
     fn default() -> Self {
-        Self {
-            scroll: ScrollHandle::new(),
-            bar: MenuScrollbarState::default(),
-        }
+        Self { scroll: ScrollHandle::new(), bar: MenuScrollbarState::default() }
     }
 }
 
@@ -493,11 +480,7 @@ pub fn option_card(
                     gpui::FontWeight::NORMAL
                 })
                 .text_color(selected_color)
-                .child(
-                    crate::icons::icon(icon_path)
-                        .size(px(16.0))
-                        .text_color(selected_color),
-                )
+                .child(crate::icons::icon(icon_path).size(px(16.0)).text_color(selected_color))
                 .child(label.into()),
         )
 }
@@ -563,13 +546,7 @@ pub fn row_divider(theme: &Theme) -> gpui::Hsla {
 /// a section's worth of air above them; inside [`section`] the wrapper owns
 /// the spacing and zeroes this margin.
 pub fn section_card(theme: &Theme) -> gpui::Div {
-    div()
-        .mt(px(24.0))
-        .rounded(px(12.0))
-        .bg(block_fill(theme))
-        .overflow_hidden()
-        .flex()
-        .flex_col()
+    div().mt(px(24.0)).rounded(px(12.0)).bg(block_fill(theme)).overflow_hidden().flex().flex_col()
 }
 
 /// One row in a [`section_card`]: title and muted description on the left,
@@ -580,9 +557,7 @@ pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
         .mx(px(16.0))
         .py(px(12.0))
         .min_h(px(60.0))
-        .when(!first, |el| {
-            el.border_t_1().border_color(row_divider(theme))
-        })
+        .when(!first, |el| el.border_t_1().border_color(row_divider(theme)))
         .flex()
         .flex_row()
         .flex_wrap()
@@ -600,11 +575,7 @@ pub fn row_tile(theme: &Theme, icon_path: &'static str) -> gpui::Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            crate::icons::icon(icon_path)
-                .size(px(16.0))
-                .text_color(theme.text_muted),
-        )
+        .child(crate::icons::icon(icon_path).size(px(16.0)).text_color(theme.text_muted))
 }
 
 /// Row title. These metrics intentionally match the Shortcuts rows, whose
@@ -641,9 +612,7 @@ pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
     for fragment in fragments {
         if !first {
             line = line.child(
-                div()
-                    .text_color(theme.text_muted.opacity(0.3))
-                    .child(SharedString::from("·")),
+                div().text_color(theme.text_muted.opacity(0.3)).child(SharedString::from("·")),
             );
         }
         line = line.child(div().min_w_0().max_w_full().child(fragment));
@@ -665,7 +634,6 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .text_color(theme.text_muted)
         .child(label.into())
 }
-
 
 pub const SWITCH_WIDTH: f32 = 44.8;
 const SWITCH_HEIGHT: f32 = 28.8;
@@ -743,11 +711,7 @@ fn switch_track_color(theme: &Theme, on: bool) -> gpui::Hsla {
 
 fn switch_thumb_color(theme: &Theme) -> gpui::Hsla {
     let white = if theme.is_frost() {
-        if theme.appearance.is_dark() {
-            0.94
-        } else {
-            0.96
-        }
+        if theme.appearance.is_dark() { 0.94 } else { 0.96 }
     } else if theme.appearance.is_dark() {
         0.96
     } else {
@@ -776,18 +740,11 @@ impl RenderOnce for SwitchVisual {
         let reduced = crate::motion::reduced_motion(cx);
         let position = window.with_global_id(self.key.into(), |id, window| {
             window.with_element_state(id, |previous: Option<SwitchTravel>, _| {
-                let mut travel = previous.unwrap_or(SwitchTravel {
-                    from: target,
-                    target,
-                    started: now,
-                });
+                let mut travel =
+                    previous.unwrap_or(SwitchTravel { from: target, target, started: now });
                 let current = travel.value(now);
                 if travel.target != target {
-                    travel = SwitchTravel {
-                        from: current,
-                        target,
-                        started: now,
-                    };
+                    travel = SwitchTravel { from: current, target, started: now };
                 }
                 if reduced {
                     travel.from = target;
@@ -897,10 +854,7 @@ impl RenderOnce for SwitchVisual {
                         .h(px(1.0))
                         .opacity(position)
                         .rounded_full()
-                        .bg(crate::theme::flatten(
-                            gpui::white().opacity(0.45),
-                            thumb_light,
-                        )),
+                        .bg(crate::theme::flatten(gpui::white().opacity(0.45), thumb_light)),
                 )
             });
         div()
@@ -921,25 +875,14 @@ mod switch_tests {
         use std::time::{Duration, Instant};
 
         let start = Instant::now();
-        let forward = TabSelectionTravel {
-            from: 0.0,
-            target: 1.0,
-            started: start,
-        };
+        let forward = TabSelectionTravel { from: 0.0, target: 1.0, started: start };
         let halfway = start + Duration::from_millis(75);
         let current = forward.value(halfway);
-        let reverse = TabSelectionTravel {
-            from: current,
-            target: 0.0,
-            started: halfway,
-        };
+        let reverse = TabSelectionTravel { from: current, target: 0.0, started: halfway };
         assert_eq!(reverse.value(halfway), current);
         assert_eq!(
             reverse.value(
-                halfway
-                    + crate::motion::TAB_SLIDE
-                        .total()
-                        .mul_f32(crate::motion::speed_scale())
+                halfway + crate::motion::TAB_SLIDE.total().mul_f32(crate::motion::speed_scale())
             ),
             0.0
         );
@@ -971,10 +914,7 @@ mod switch_tests {
         assert!(dark_on.l < dark.accent_strong.l);
         assert_eq!(switch_track_color(&dark, false).a, 1.0);
         assert_eq!(switch_thumb_color(&dark).a, 1.0);
-        assert_eq!(
-            switch_surface_tones(&dark, dark_on, false),
-            (dark_on, dark_on)
-        );
+        assert_eq!(switch_surface_tones(&dark, dark_on, false), (dark_on, dark_on));
         let opaque_off = switch_track_color(&dark, false);
 
         dark.surface_treatment = SurfaceTreatment::Frosted;
@@ -993,28 +933,17 @@ mod switch_tests {
         assert_eq!(switch_track_color(&light, true).a, 1.0);
         assert!(switch_track_color(&light, true).l > light.accent.l);
         let light_on = switch_track_color(&light, true);
-        assert_eq!(
-            switch_surface_tones(&light, light_on, false),
-            (light_on, light_on)
-        );
+        assert_eq!(switch_surface_tones(&light, light_on, false), (light_on, light_on));
     }
 
     #[test]
     fn switch_reversal_keeps_current_position_and_settles() {
         use std::time::{Duration, Instant};
         let now = Instant::now();
-        let forward = SwitchTravel {
-            from: 0.0,
-            target: 1.0,
-            started: now,
-        };
+        let forward = SwitchTravel { from: 0.0, target: 1.0, started: now };
         let halfway = now + Duration::from_millis(90);
         let current = forward.value(halfway);
-        let reverse = SwitchTravel {
-            from: current,
-            target: 0.0,
-            started: halfway,
-        };
+        let reverse = SwitchTravel { from: current, target: 0.0, started: halfway };
         assert_eq!(reverse.value(halfway), current);
         assert_eq!(reverse.value(halfway + Duration::from_millis(180)), 0.0);
         assert_eq!(forward.value(now + Duration::from_millis(180)), 1.0);
@@ -1023,7 +952,11 @@ mod switch_tests {
     struct Switched;
 
     impl gpui::Render for Switched {
-        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
             let theme = Theme::dark();
             div()
                 .flex()
@@ -1054,7 +987,12 @@ mod switch_tests {
             (window.painted_quads(), window.scale_factor())
         });
         let points = |b: gpui::Bounds<gpui::ScaledPixels>| {
-            [b.origin.x.0 / scale, b.origin.y.0 / scale, b.size.width.0 / scale, b.size.height.0 / scale]
+            [
+                b.origin.x.0 / scale,
+                b.origin.y.0 / scale,
+                b.size.width.0 / scale,
+                b.size.height.0 / scale,
+            ]
         };
         // Quads land on whole pixels, so 28.8 is drawn within half a pixel.
         let accent = Theme::dark().accent;
@@ -1101,18 +1039,11 @@ pub fn tab_selection_t(
     let target = if selected { 1.0 } else { 0.0 };
     let value = window.with_global_id(key.into().into(), |id, window| {
         window.with_element_state(id, |previous: Option<TabSelectionTravel>, _| {
-            let mut travel = previous.unwrap_or(TabSelectionTravel {
-                from: target,
-                target,
-                started: now,
-            });
+            let mut travel =
+                previous.unwrap_or(TabSelectionTravel { from: target, target, started: now });
             let current = travel.value(now);
             if travel.target != target {
-                travel = TabSelectionTravel {
-                    from: current,
-                    target,
-                    started: now,
-                };
+                travel = TabSelectionTravel { from: current, target, started: now };
             }
             if reduced_motion {
                 travel.from = target;
@@ -1137,17 +1068,10 @@ pub fn section_tab(
     hover_key: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
     let hover_key = hover_key.into();
-    let base_bg = crate::motion::mix(
-        crate::theme::wash(0.0),
-        crate::theme::glass_selected_bg(),
-        selection_t,
-    );
+    let base_bg =
+        crate::motion::mix(crate::theme::wash(0.0), crate::theme::glass_selected_bg(), selection_t);
     let base_text = crate::motion::mix(theme.text_muted, theme.text, selection_t);
-    let hover_bg = if selected {
-        base_bg
-    } else {
-        theme.glass_hover()
-    };
+    let hover_bg = if selected { base_bg } else { theme.glass_hover() };
     div()
         .flex()
         .flex_row()
@@ -1160,9 +1084,7 @@ pub fn section_tab(
         .flex_shrink_0()
         .text_size(crate::typography::ui_rems(13.0))
         .when(selected, |el| el.font_weight(gpui::FontWeight::MEDIUM))
-        .text_color(crate::motion::hover_blend(
-            &hover_key, base_text, theme.text,
-        ))
+        .text_color(crate::motion::hover_blend(&hover_key, base_text, theme.text))
         .bg(crate::motion::hover_blend(&hover_key, base_bg, hover_bg))
         .id(id.into())
         .hover_fade(hover_key)
@@ -1251,18 +1173,9 @@ pub fn select_row(
 
 /// The trailing check slot, kept on every row so labels align.
 pub fn select_check(theme: &Theme, selected: bool) -> gpui::Div {
-    div()
-        .w(px(18.0))
-        .flex_none()
-        .flex()
-        .justify_end()
-        .when(selected, |slot| {
-            slot.child(
-                crate::icons::icon(crate::icons::CHECK)
-                    .size(px(14.0))
-                    .text_color(theme.accent),
-            )
-        })
+    div().w(px(18.0)).flex_none().flex().justify_end().when(selected, |slot| {
+        slot.child(crate::icons::icon(crate::icons::CHECK).size(px(14.0)).text_color(theme.accent))
+    })
 }
 
 /// Open state for one [`select`], owned by its page: the popup with its exit
@@ -1305,11 +1218,7 @@ pub struct SelectOption {
 
 impl SelectOption {
     pub fn new(label: impl Into<SharedString>) -> Self {
-        Self {
-            label: label.into(),
-            leading: None,
-            detail: None,
-        }
+        Self { label: label.into(), leading: None, detail: None }
     }
 
     /// A glyph or swatch before the label, in the row and (when selected)
@@ -1462,9 +1371,7 @@ impl<V: 'static> Select<V> {
         let count = options.len();
         let open = state.menu.is_open();
         let current = options.get(selected);
-        let value = current
-            .map(|option| option.label.clone())
-            .unwrap_or_default();
+        let value = current.map(|option| option.label.clone()).unwrap_or_default();
         let trigger_leading = current.and_then(|option| option.leading.clone());
 
         let mut trigger = select_trigger(&theme, id.clone(), open)
@@ -1573,10 +1480,7 @@ impl<V: 'static> Select<V> {
                     .into_any_element()
             });
             let menu = select_menu(&theme)
-                .w(px(menu_width
-                    .or(width)
-                    .unwrap_or(0.0)
-                    .max(SELECT_MENU_MIN_WIDTH)))
+                .w(px(menu_width.or(width).unwrap_or(0.0).max(SELECT_MENU_MIN_WIDTH)))
                 .when_some(font, |menu, font| menu.font_family(font))
                 .on_mouse_down_out({
                     let reach = reach.clone();
@@ -1654,9 +1558,7 @@ pub fn action_button_when(theme: &Theme, tone: ActionTone, enabled: bool) -> gpu
     match tone {
         ActionTone::Quiet => {
             let (wash, text) = (theme.glass_hover(), theme.text);
-            lift(button.text_color(theme.text_muted), enabled, move |s| {
-                s.bg(wash).text_color(text)
-            })
+            lift(button.text_color(theme.text_muted), enabled, move |s| s.bg(wash).text_color(text))
         }
         ActionTone::QuietDanger => {
             let wash = theme.glass_hover();
@@ -1676,26 +1578,21 @@ pub fn action_button_when(theme: &Theme, tone: ActionTone, enabled: bool) -> gpu
         }
         ActionTone::Filled => {
             let lifted = select_fill(theme, true);
-            lift(
-                button.bg(select_fill(theme, false)).text_color(theme.text),
-                enabled,
-                move |s| s.bg(lifted),
-            )
+            lift(button.bg(select_fill(theme, false)).text_color(theme.text), enabled, move |s| {
+                s.bg(lifted)
+            })
         }
         ActionTone::Solid => lift(
-            button
-                .bg(theme.solid)
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.on_solid),
+            button.bg(theme.solid).font_weight(gpui::FontWeight::MEDIUM).text_color(theme.on_solid),
             enabled,
             |s| s.opacity(0.9),
         ),
         // The dialogs' destructive fill (`popover::btn_danger`).
-        ActionTone::Danger => lift(
-            button.bg(theme.danger_strong).text_color(gpui::white()),
-            enabled,
-            |s| s.opacity(0.9),
-        ),
+        ActionTone::Danger => {
+            lift(button.bg(theme.danger_strong).text_color(gpui::white()), enabled, |s| {
+                s.opacity(0.9)
+            })
+        }
     }
 }
 
@@ -1747,13 +1644,7 @@ pub fn error_strip_with(
             ),
         )
         .child(
-            div()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(message.into())
-                .children(details),
+            div().min_w_0().flex().flex_col().gap(px(4.0)).child(message.into()).children(details),
         )
 }
 
@@ -1793,10 +1684,7 @@ pub fn scroll_faded(
     key: impl Into<SharedString>,
     area: gpui::Stateful<gpui::Div>,
 ) -> impl IntoElement {
-    SettingsScroll {
-        key: key.into(),
-        area,
-    }
+    SettingsScroll { key: key.into(), area }
 }
 
 #[derive(IntoElement)]
@@ -1840,8 +1728,12 @@ impl Render for TextTooltip {
         // The card is `live::chrome::tooltip_card`, which Slopty's own views draw too.
         let theme = Theme::of(cx);
         match self.detail.clone() {
-            Some(detail) => tooltip_card_detail(self.text.clone(), detail, self.keys.clone(), theme),
-            None => crate::live::chrome::tooltip_card_keyed(self.text.clone(), self.keys.clone(), theme),
+            Some(detail) => {
+                tooltip_card_detail(self.text.clone(), detail, self.keys.clone(), theme)
+            }
+            None => {
+                crate::live::chrome::tooltip_card_keyed(self.text.clone(), self.keys.clone(), theme)
+            }
         }
     }
 }
@@ -1851,14 +1743,7 @@ pub fn text_tooltip(
     text: impl Into<SharedString>,
 ) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
     let text: SharedString = text.into();
-    move |_, cx| {
-        cx.new(|_| TextTooltip {
-            text: text.clone(),
-            keys: None,
-            detail: None,
-        })
-        .into()
-    }
+    move |_, cx| cx.new(|_| TextTooltip { text: text.clone(), keys: None, detail: None }).into()
 }
 
 // Tooltips name the action and its key (`docs/decisions/ui.md`, "Tooltips name the
@@ -1931,12 +1816,7 @@ pub fn detail_tooltip(
     move |window, cx| {
         let keys = keys.as_ref().and_then(|keys| keys.text(window, cx));
         let (title, detail) = (title.clone(), detail.clone());
-        cx.new(|_| TextTooltip {
-            text: title,
-            keys,
-            detail: Some(detail),
-        })
-        .into()
+        cx.new(|_| TextTooltip { text: title, keys, detail: Some(detail) }).into()
     }
 }
 
@@ -1948,12 +1828,7 @@ fn keyed_tooltip(
     move |window, cx| {
         let keys = keys.text(window, cx);
         let (text, detail) = (label.clone(), detail.clone());
-        cx.new(|_| TextTooltip {
-            text,
-            keys,
-            detail,
-        })
-        .into()
+        cx.new(|_| TextTooltip { text, keys, detail }).into()
     }
 }
 
@@ -2123,13 +1998,9 @@ pub fn restore_defaults(theme: &Theme, id: &str, any_changed: bool) -> gpui::Sta
         .aria_label("Restore defaults")
         .flex_none()
         .when(any_changed, |el| el.tab_index(0))
-        .when(!any_changed, |el| {
-            el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
-        })
+        .when(!any_changed, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
         .child(
-            crate::icons::icon(crate::icons::RESTART)
-                .size(px(14.0))
-                .text_color(theme.text_muted),
+            crate::icons::icon(crate::icons::RESTART).size(px(14.0)).text_color(theme.text_muted),
         )
         .child(SharedString::from("Restore defaults"))
 }
@@ -2199,10 +2070,7 @@ pub fn split_tail(value: &str, tail: usize) -> (&str, &str) {
     if chars <= tail {
         return ("", value);
     }
-    let at = value
-        .char_indices()
-        .nth(chars - tail)
-        .map_or(value.len(), |(ix, _)| ix);
+    let at = value.char_indices().nth(chars - tail).map_or(value.len(), |(ix, _)| ix);
     value.split_at(at)
 }
 
@@ -2256,10 +2124,7 @@ mod hint_tests {
         assert_eq!(Standing::of(false, false), None);
         assert_eq!(Standing::of(true, false).map(Standing::words), Some("Default"));
         assert_eq!(Standing::of(false, true).map(Standing::words), Some("Recommended"));
-        assert_eq!(
-            Standing::of(true, true).map(Standing::words),
-            Some("Default · Recommended")
-        );
+        assert_eq!(Standing::of(true, true).map(Standing::words), Some("Default · Recommended"));
     }
 
     #[test]
@@ -2281,7 +2146,11 @@ mod hint_tests {
     struct Hinted;
 
     impl Render for Hinted {
-        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
             div().size(px(200.0)).child(
                 div()
                     .id("hinted")
@@ -2311,7 +2180,10 @@ mod hint_tests {
             assert_eq!(keys.text(window, cx), Some(crate::keys::combo_text("cmd-shift-e")));
             cx.clear_key_bindings();
             assert_eq!(keys.text(window, cx), None);
-            assert_eq!(Keys::Fixed("shift-tab").text(window, cx), Some(crate::keys::combo_text("shift-tab")));
+            assert_eq!(
+                Keys::Fixed("shift-tab").text(window, cx),
+                Some(crate::keys::combo_text("shift-tab"))
+            );
         });
     }
 }
@@ -2323,7 +2195,11 @@ mod page_head_tests {
     struct Page;
 
     impl Render for Page {
-        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
             let theme = Theme::of(cx);
             div().w(px(600.0)).child(page_head(
                 &theme,
@@ -2349,15 +2225,25 @@ mod page_head_tests {
         let action = cx.debug_bounds("page-head-action").expect("the action");
         let subtitle = cx.debug_bounds("page-head-subtitle").expect("the subtitle");
         assert!(f32::from(row.size.height) >= PAGE_HEAD_ROW - 0.5, "{row:?}");
-        assert!((f32::from(row.center().y - action.center().y)).abs() < 0.5, "centred: {row:?} {action:?}");
-        assert!((f32::from(row.right() - action.right())).abs() < 0.5, "at the right edge: {row:?} {action:?}");
+        assert!(
+            (f32::from(row.center().y - action.center().y)).abs() < 0.5,
+            "centred: {row:?} {action:?}"
+        );
+        assert!(
+            (f32::from(row.right() - action.right())).abs() < 0.5,
+            "at the right edge: {row:?} {action:?}"
+        );
         assert!(subtitle.top() >= row.bottom(), "the line under it: {row:?} {subtitle:?}");
     }
 
     struct Row;
 
     impl Render for Row {
-        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
             let theme = Theme::of(cx);
             div()
                 .w(px(600.0))

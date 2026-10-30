@@ -35,12 +35,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+pub use gpui::AnimationExt;
 use gpui::{
     Animation, AnimationElement, App, ElementId, EntityId, Global, Hsla, IntoElement,
     ParentElement, Rgba, SharedString, StatefulInteractiveElement, Styled, Window, px,
 };
-
-pub use gpui::AnimationExt;
 
 // ---------------------------------------------------------------------------
 // Pulse clock — throttled drive for the repeating loaders
@@ -251,9 +250,9 @@ pub fn activity_pulse_slow(view: EntityId, cx: &mut App) -> ActivityPulse {
 fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPulse {
     let subtle = cx.reduce_motion();
     let animate = !subtle
-        || cx.try_global::<MotionState>().is_some_and(|state| {
-            state.system && !(state.pause_in_background && !state.active)
-        });
+        || cx
+            .try_global::<MotionState>()
+            .is_some_and(|state| state.system && !(state.pause_in_background && !state.active));
     let phase = if animate {
         let stride = if subtle { 2 } else { stride };
         schedule_pulse_every(view, stride, cx);
@@ -284,10 +283,7 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
     clock
         .leases
         .entry(view)
-        .or_insert(PulseLease {
-            until: now + PULSE_LEASE,
-            stride,
-        })
+        .or_insert(PulseLease { until: now + PULSE_LEASE, stride })
         .renew(now, stride);
     if !clock.running {
         clock.running = true;
@@ -397,11 +393,7 @@ impl CubicBezier {
         let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
         for _ in 0..32 {
             let mid = (lo + hi) / 2.0;
-            if self.sample_x(mid) < x {
-                lo = mid
-            } else {
-                hi = mid
-            }
+            if self.sample_x(mid) < x { lo = mid } else { hi = mid }
         }
         (lo + hi) / 2.0
     }
@@ -457,11 +449,7 @@ pub struct MotionSpec {
 
 impl MotionSpec {
     pub const fn new(duration_ms: u64, curve: CubicBezier) -> Self {
-        Self {
-            duration_ms,
-            delay_ms: 0,
-            curve,
-        }
+        Self { duration_ms, delay_ms: 0, curve }
     }
 
     pub const fn with_delay(mut self, delay_ms: u64) -> Self {
@@ -676,10 +664,7 @@ pub struct ResizeEdgeBounce {
 
 impl ResizeEdgeBounce {
     pub fn new(edge: ResizeEdge, now: Instant) -> Self {
-        Self {
-            edge,
-            started: now,
-        }
+        Self { edge, started: now }
     }
 }
 
@@ -756,9 +741,7 @@ where
     E: Styled + IntoElement + 'static,
 {
     element.with_animation(id, MENU_IN.animation(), |el, t| {
-        el.relative()
-            .opacity(0.3 + 0.7 * t)
-            .top(px(-2.0 * (1.0 - t)))
+        el.relative().opacity(0.3 + 0.7 * t).top(px(-2.0 * (1.0 - t)))
     })
 }
 
@@ -770,9 +753,7 @@ where
     E: Styled + IntoElement + 'static,
 {
     element.with_animation(id, MENU_IN.animation(), move |el, t| {
-        el.relative()
-            .opacity(0.3 + 0.7 * t)
-            .top(px(from * (1.0 - t)))
+        el.relative().opacity(0.3 + 0.7 * t).top(px(from * (1.0 - t)))
     })
 }
 
@@ -822,9 +803,8 @@ pub fn splash_out<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E
 where
     E: Styled + IntoElement + 'static,
 {
-    element.with_animation(id, SPLASH_OUT.animation(), |el, t| {
-        el.opacity(1.0 - t).top(px(-6.0 * t))
-    })
+    element
+        .with_animation(id, SPLASH_OUT.animation(), |el, t| el.opacity(1.0 - t).top(px(-6.0 * t)))
 }
 
 // ---------------------------------------------------------------------------
@@ -915,12 +895,7 @@ pub(crate) struct DisclosureMotion {
 
 impl DisclosureMotion {
     pub(crate) fn new(epoch: u64, from: f32, to: f32, now: Instant) -> Self {
-        Self {
-            epoch,
-            from,
-            to,
-            started: now,
-        }
+        Self { epoch, from, to, started: now }
     }
 
     pub(crate) fn current(self, now: Instant) -> f32 {
@@ -951,11 +926,7 @@ pub struct IndicatorSlide {
 
 impl IndicatorSlide {
     pub fn at(position: f32, now: Instant) -> Self {
-        Self {
-            from: position,
-            to: position,
-            started: now,
-        }
+        Self { from: position, to: position, started: now }
     }
 
     fn duration() -> Duration {
@@ -979,11 +950,7 @@ impl IndicatorSlide {
     /// Aim at a new slot. Reduced motion snaps.
     pub fn retarget(&mut self, to: f32, reduced: bool, now: Instant) {
         let from = if reduced { to } else { self.value_at(now) };
-        *self = Self {
-            from,
-            to,
-            started: now,
-        };
+        *self = Self { from, to, started: now };
     }
 
     pub fn animating_at(&self, now: Instant) -> bool {
@@ -1012,25 +979,13 @@ impl HoverFades {
     pub fn set_at(&mut self, key: &str, hovered: bool, reduced: bool, now: Instant) {
         let target = if hovered { 1.0 } else { 0.0 };
         let duration = Self::duration();
-        let current = self
-            .entries
-            .get(key)
-            .map(|e| e.value(now, duration))
-            .unwrap_or(0.0);
+        let current = self.entries.get(key).map(|e| e.value(now, duration)).unwrap_or(0.0);
         if target == 0.0 && !self.entries.contains_key(key) {
             return; // never-hovered element reporting a leave — nothing to do
         }
         let origin = if reduced { target } else { current };
         let seen = self.frame;
-        self.entries.insert(
-            key.to_string(),
-            FadeEntry {
-                origin,
-                target,
-                started: now,
-                seen,
-            },
-        );
+        self.entries.insert(key.to_string(), FadeEntry { origin, target, started: now, seen });
     }
 
     /// Hover progress (0..1) for `key` at `now`; stamps liveness.
@@ -1150,11 +1105,7 @@ pub(crate) fn hover_unread(key: &str) -> bool {
 
 /// Record a hover flip for `key` (reduced motion snaps).
 pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
-    HOVER_FADES.with(|fades| {
-        fades
-            .borrow_mut()
-            .set_at(key, hovered, reduced, hover_now())
-    });
+    HOVER_FADES.with(|fades| fades.borrow_mut().set_at(key, hovered, reduced, hover_now()));
 }
 
 /// An element's hover fade for `key`, read with [`hover_t`]/[`hover_blend`] in the
@@ -1346,13 +1297,7 @@ impl StateMorphs {
         let Some(entry) = self.entries.get_mut(key) else {
             self.entries.insert(
                 key.to_string(),
-                StateEntry {
-                    origin: target,
-                    target,
-                    started: now,
-                    spec,
-                    seen: frame,
-                },
+                StateEntry { origin: target, target, started: now, spec, seen: frame },
             );
             return target;
         };
@@ -1484,8 +1429,7 @@ struct HeardSystem(bool);
 impl Global for HeardSystem {}
 
 fn state_mut(cx: &mut App) -> Option<&mut MotionState> {
-    cx.has_global::<MotionState>()
-        .then(|| cx.global_mut::<MotionState>())
+    cx.has_global::<MotionState>().then(|| cx.global_mut::<MotionState>())
 }
 
 /// Combine the OS setting with a paused background and window focus.
@@ -1502,8 +1446,7 @@ pub fn init(pause_in_background: bool, cx: &mut App) {
 }
 
 pub fn pause_in_background(cx: &App) -> bool {
-    cx.try_global::<MotionState>()
-        .is_some_and(|state| state.pause_in_background)
+    cx.try_global::<MotionState>().is_some_and(|state| state.pause_in_background)
 }
 
 pub fn set_pause_in_background(enabled: bool, cx: &mut App) {
@@ -1606,7 +1549,8 @@ pub fn shimmer_text(
     let text: SharedString = text.into();
     if !active || reduced_motion(cx) || text.is_empty() {
         let len = text.len();
-        return gpui::StyledText::new(text).with_highlights([(0..len, ink_style(theme.text_muted))]);
+        return gpui::StyledText::new(text)
+            .with_highlights([(0..len, ink_style(theme.text_muted))]);
     }
     window.request_animation_frame();
     let period = Duration::from_secs_f32(SHIMMER_PERIOD_MS / 1000.0);
@@ -1720,10 +1664,12 @@ mod tests {
             cx.run_until_parked();
         };
         frame(cx);
-        let inner = cx.debug_bounds("inner").unwrap_or_else(|| gpui::Bounds::new(
-            gpui::point(gpui::px(10.), gpui::px(10.)),
-            gpui::size(gpui::px(10.), gpui::px(10.)),
-        ));
+        let inner = cx.debug_bounds("inner").unwrap_or_else(|| {
+            gpui::Bounds::new(
+                gpui::point(gpui::px(10.), gpui::px(10.)),
+                gpui::size(gpui::px(10.), gpui::px(10.)),
+            )
+        });
         cx.simulate_mouse_move(inner.center(), None, gpui::Modifiers::default());
         frame(cx);
         let start = read.borrow().len();
@@ -1783,28 +1729,14 @@ mod tests {
     #[test]
     fn reduced_activity_pulse_is_slow_uniform_and_gentle() {
         for phase in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9] {
-            let pulse = ActivityPulse {
-                phase,
-                subtle: true,
-            };
+            let pulse = ActivityPulse { phase, subtle: true };
             let opacity = pulse.opacity(0.0, 0.1);
             assert!((0.6..=0.8).contains(&opacity));
             assert_eq!(opacity, pulse.opacity(0.5, 0.1), "no travelling wave");
         }
-        let rest = ActivityPulse {
-            phase: 0.0,
-            subtle: true,
-        }
-        .opacity(0.0, 0.1);
-        let crest = ActivityPulse {
-            phase: 0.5,
-            subtle: true,
-        }
-        .opacity(0.0, 0.1);
-        assert!(
-            crest > rest,
-            "the activity cue must visibly change brightness"
-        );
+        let rest = ActivityPulse { phase: 0.0, subtle: true }.opacity(0.0, 0.1);
+        let crest = ActivityPulse { phase: 0.5, subtle: true }.opacity(0.0, 0.1);
+        assert!(crest > rest, "the activity cue must visibly change brightness");
     }
 
     #[gpui::test]
@@ -1821,12 +1753,7 @@ mod tests {
                 (false, true, false, None, false),
                 (false, false, true, Some(true), false),
             ] {
-                cx.set_global(MotionState {
-                    pause_in_background,
-                    system,
-                    active,
-                    held,
-                });
+                cx.set_global(MotionState { pause_in_background, system, active, held });
                 apply(cx);
                 let view = cx.new(|_| ());
                 let pulse = activity_pulse(view.entity_id(), cx);
@@ -1840,10 +1767,7 @@ mod tests {
                 if reduced_motion(cx) {
                     assert!(pulse.subtle);
                     let decorative_view = cx.new(|_| ());
-                    assert_eq!(
-                        pulse_delta(&SLOPTY_PULSE, decorative_view.entity_id(), cx),
-                        0.0
-                    );
+                    assert_eq!(pulse_delta(&SLOPTY_PULSE, decorative_view.entity_id(), cx), 0.0);
                     assert!(!cx.try_global::<PulseClock>().is_some_and(|clock| {
                         clock.leases.contains_key(&decorative_view.entity_id())
                     }));
@@ -1917,23 +1841,17 @@ mod tests {
             apply(cx);
         });
         let window = cx.add_window(|_, _| Loaders);
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
         cx.run_until_parked();
         for _ in 0..20 {
             cx.background_executor.advance_clock(PULSE_TICK);
             cx.run_until_parked();
-            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-                .unwrap();
+            cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
         }
         cx.update(|cx| {
             let clock = cx.global::<PulseClock>();
             assert!(clock.tick >= 20);
-            assert_eq!(
-                clock.leases.len(),
-                2,
-                "transcript and cached sidebar loader"
-            );
+            assert_eq!(clock.leases.len(), 2, "transcript and cached sidebar loader");
             assert!(
                 clock.leases.values().all(|lease| lease.stride == 2),
                 "both loaders renew at 15Hz"
@@ -1974,10 +1892,7 @@ mod tests {
     #[test]
     fn pulse_stride_reestablishes_after_each_paint() {
         let now = Instant::now();
-        let mut lease = PulseLease {
-            until: now + PULSE_LEASE,
-            stride: 2,
-        };
+        let mut lease = PulseLease { until: now + PULSE_LEASE, stride: 2 };
         assert!(!lease.take_tick(1), "slow loader skips odd ticks");
         assert!(lease.take_tick(2));
         lease.renew(now, 2);
@@ -1986,10 +1901,7 @@ mod tests {
         lease.renew(now, 2);
         assert!(lease.take_tick(4));
         lease.renew(now, 2);
-        assert!(
-            !lease.take_tick(5),
-            "retired fast animation leaves no sticky stride"
-        );
+        assert!(!lease.take_tick(5), "retired fast animation leaves no sticky stride");
         assert!(lease.take_tick(6));
         assert!(!lease.take_tick(7), "unpainted view cannot renew itself");
         assert!(lease.until <= now + PULSE_LEASE);
@@ -2035,21 +1947,9 @@ mod tests {
     fn bezier_known_values() {
         // References computed independently with 80-step bisection.
         let cases: [(&str, CubicBezier, [f32; 5]); 3] = [
-            (
-                "expo",
-                EASE_OUT_EXPO,
-                [0.494391, 0.825622, 0.971779, 0.997677, 0.999878],
-            ),
-            (
-                "ease-out",
-                EASE_OUT,
-                [0.160572, 0.378138, 0.684643, 0.906535, 0.982973],
-            ),
-            (
-                "ease",
-                EASE,
-                [0.094796, 0.408511, 0.802403, 0.960459, 0.994316],
-            ),
+            ("expo", EASE_OUT_EXPO, [0.494391, 0.825622, 0.971779, 0.997677, 0.999878]),
+            ("ease-out", EASE_OUT, [0.160572, 0.378138, 0.684643, 0.906535, 0.982973]),
+            ("ease", EASE, [0.094796, 0.408511, 0.802403, 0.960459, 0.994316]),
         ];
         for (name, curve, expected) in cases {
             for (x, want) in [0.1, 0.25, 0.5, 0.75, 0.9].into_iter().zip(expected) {
@@ -2094,12 +1994,7 @@ mod tests {
         let mid = SPLASH_OUT.progress(0.65);
         assert!(mid > 0.0 && mid < 1.0);
         // No-delay specs pass straight through the curve.
-        assert_close(
-            FADE_IN.progress(0.5),
-            EASE_OUT_EXPO.eval(0.5),
-            1e-6,
-            "no-delay",
-        );
+        assert_close(FADE_IN.progress(0.5), EASE_OUT_EXPO.eval(0.5), 1e-6, "no-delay");
     }
 
     #[test]
@@ -2180,10 +2075,7 @@ mod tests {
         let at_flip = fades.value_at("pill", ms(75));
         fades.set_at("pill", false, false, ms(75));
         let after_flip = fades.value_at("pill", ms(75));
-        assert!(
-            (after_flip - at_flip).abs() < 1e-4,
-            "continuity: {at_flip} vs {after_flip}"
-        );
+        assert!((after_flip - at_flip).abs() < 1e-4, "continuity: {at_flip} vs {after_flip}");
         let falling = fades.value_at("pill", ms(140));
         assert!(falling < after_flip, "fades back down");
         assert_eq!(fades.value_at("pill", ms(225)), 0.0, "lands at rest");
@@ -2411,15 +2303,15 @@ mod tests {
         assert_eq!(end, text.len());
         assert!(runs.len() < text.len(), "unlit glyphs share a run");
         let crest = super::shimmer_color(1.0, &theme);
-        assert!(
-            runs.iter().any(|(_, style)| style.color == Some(crest)),
-            "a glyph at the crest"
-        );
+        assert!(runs.iter().any(|(_, style)| style.color == Some(crest)), "a glyph at the crest");
         // The ramp passes through the accent hue, and the crest keeps colour, lighter than it.
         assert_eq!(super::shimmer_color(0.5, &theme), theme.accent);
         assert_eq!(super::shimmer_color(0.0, &theme), theme.text_faint);
         assert!(crest.s > 0.05, "a crest in colour, not grey");
-        assert!(crate::theme::contrast(crest, theme.bg) > crate::theme::contrast(theme.accent, theme.bg));
+        assert!(
+            crate::theme::contrast(crest, theme.bg)
+                > crate::theme::contrast(theme.accent, theme.bg)
+        );
     }
 
     /// The side pane moves over 240 ms on the quint ease-out; its contents wait 40 ms before
@@ -2451,7 +2343,9 @@ mod tests {
         let base = super::process_epoch() + Duration::from_secs(1000);
         for offset_ms in [0_u64, 137, 512] {
             let since = base + Duration::from_millis(offset_ms);
-            assert!(gap(paced_phase(period, since, Some(since)), locked_phase(period, since)) < 1e-4);
+            assert!(
+                gap(paced_phase(period, since, Some(since)), locked_phase(period, since)) < 1e-4
+            );
             let calm = period.div_f64(0.6);
             for later in [60.0, 61.3, 3600.0] {
                 let now = since + Duration::from_secs_f64(later);

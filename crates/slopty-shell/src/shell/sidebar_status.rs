@@ -6,27 +6,28 @@
 //!   (`slopty_view_proto::view::project_key`), or the folder of a session with no project. The
 //!   groups stand in the order of their names. Inside a group rows keep the order their sessions
 //!   started in, the newest first (`docs/decisions/ui.md`), so a row never moves on its own: not
-//!   when its state changes, not when it answers. Its state is its mark (`marks`), a need's
-//!   glyph naming the need; the need's words are its hover card's and a screen reader's, never a
-//!   line of the row (`docs/decisions/layout.md`, "A state is a glyph").
-//! - **Inactive.** A session nobody has touched for [`INACTIVE_AFTER_HOURS`] that calls for
-//!   nothing (at rest, or done) folds into Inactive at the foot, shut at first. Opened, it shows
-//!   its first [`INACTIVE_FIRST`] rows, then "Show N more", which adds [`INACTIVE_PAGE`] at a
-//!   time, as the Archived shelf does; the open chat always shows.
-//! - **The hint.** A row is one line. After its title a quiet hint says only what tells it from
-//!   the rows beside it: its machine while the list spans machines, its branch while its
-//!   project's rows stand on more than one, and its project in Inactive, where projects mix.
+//!   when its state changes, not when it answers. Its state is its mark (`marks`), a need's glyph
+//!   naming the need; the need's words are its hover card's and a screen reader's, never a line of
+//!   the row (`docs/decisions/layout.md`, "A state is a glyph").
+//! - **Inactive.** A session nobody has touched for [`INACTIVE_AFTER_HOURS`] that calls for nothing
+//!   (at rest, or done) folds into Inactive at the foot, shut at first. Opened, it shows its first
+//!   [`INACTIVE_FIRST`] rows, then "Show N more", which adds [`INACTIVE_PAGE`] at a time, as the
+//!   Archived shelf does; the open chat always shows.
+//! - **The hint.** A row is one line. After its title a quiet hint says only what tells it from the
+//!   rows beside it: its machine while the list spans machines, its branch while its project's rows
+//!   stand on more than one, and its project in Inactive, where projects mix.
 //! - **Cached.** The row of a session whose machine is out of reach stays where it is, dimmed and
 //!   marked as cached: what it shows is the last word heard from there.
-//! - **The hover card** says what the row has no room for: where it runs, the agent and model,
-//!   how long it has stood as it is, what it needs in the agent's words, the last line the agent
-//!   wrote, and the subagents it has running.
-//! - **The jump.** The key to the next session that needs the person walks every session that
-//!   waits on them, then each that failed, then each finished unseen, across every project and
-//!   machine, each kind oldest first ([`needing_you`]).
+//! - **The hover card** says what the row has no room for: where it runs, the agent and model, how
+//!   long it has stood as it is, what it needs in the agent's words, the last line the agent wrote,
+//!   and the subagents it has running.
+//! - **The jump.** The key to the next session that needs the person walks every session that waits
+//!   on them, then each that failed, then each finished unseen, across every project and machine,
+//!   each kind oldest first ([`needing_you`]).
 
 use chrono::{DateTime, Local, Utc};
-use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, IntoElement, SharedString, div, px};
 use slopty_view_proto::{Chat, ChatIndicator, Session, SessionStatus, SessionWait};
 
 use super::marks::Mark;
@@ -175,7 +176,10 @@ pub(super) fn list(
         }
     }
     groups.sort_by(|left, right| {
-        left.label.to_lowercase().cmp(&right.label.to_lowercase()).then_with(|| left.key.cmp(&right.key))
+        left.label
+            .to_lowercase()
+            .cmp(&right.label.to_lowercase())
+            .then_with(|| left.key.cmp(&right.key))
     });
     for group in &mut groups {
         group.rows.sort_by(|left, right| started(&left.chat, &right.chat));
@@ -186,7 +190,12 @@ pub(super) fn list(
         let projects: Vec<SharedString> = inactive.iter().map(|(_, label)| label.clone()).collect();
         let mut rows: Vec<Row> = inactive.into_iter().map(|(row, _)| row).collect();
         hints(state, &mut rows, spans_machines, Some(&projects));
-        groups.push(Group { key: INACTIVE.to_owned(), label: INACTIVE_LABEL.into(), rows, hidden: 0 });
+        groups.push(Group {
+            key: INACTIVE.to_owned(),
+            label: INACTIVE_LABEL.into(),
+            rows,
+            hidden: 0,
+        });
     }
     (groups, next)
 }
@@ -244,7 +253,8 @@ fn place(state: &AppState, chat: &Chat) -> (String, SharedString) {
         .filter(|cwd| !cwd.is_empty());
     match folder {
         Some(folder) => {
-            let leaf = folder.rsplit(['/', '\\']).next().filter(|leaf| !leaf.is_empty()).unwrap_or(folder);
+            let leaf =
+                folder.rsplit(['/', '\\']).next().filter(|leaf| !leaf.is_empty()).unwrap_or(folder);
             (format!("folder:{folder}"), SharedString::from(leaf.to_owned()))
         }
         None => ("project:".to_owned(), NO_PROJECT.into()),
@@ -264,12 +274,18 @@ fn touched(chat: &Chat) -> DateTime<Utc> {
 /// Give each of a group's `rows` the hint that tells it from the others: its project
 /// (`projects`, a shelf's or Inactive's, while they are not all one), its machine while the list
 /// spans machines, and its branch while the group's rows stand on more than one.
-fn hints(state: &AppState, rows: &mut [Row], spans_machines: bool, projects: Option<&[SharedString]>) {
+fn hints(
+    state: &AppState,
+    rows: &mut [Row],
+    spans_machines: bool,
+    projects: Option<&[SharedString]>,
+) {
     let mut branches: Vec<&str> = rows.iter().filter_map(|row| branch_of(&row.chat)).collect();
     branches.sort_unstable();
     branches.dedup();
     let spans_branches = branches.len() > 1;
-    let projects = projects.filter(|projects| projects.iter().any(|project| project != &projects[0]));
+    let projects =
+        projects.filter(|projects| projects.iter().any(|project| project != &projects[0]));
     let lines: Vec<Option<SharedString>> = rows
         .iter()
         .enumerate()
@@ -320,7 +336,11 @@ pub(super) fn needing_you(state: &AppState, now: DateTime<Utc>) -> Vec<String> {
         })
         .collect();
     calls.sort_by(|left, right| {
-        right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)).then_with(|| left.2.id.cmp(&right.2.id))
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.id.cmp(&right.2.id))
     });
     calls.into_iter().map(|(_, _, chat)| chat.id.clone()).collect()
 }
@@ -345,7 +365,12 @@ impl super::Shell {
 
 /// The "Show N more" line under Inactive while `hidden` rows wait, `height` tall, drawn as the
 /// Archived shelf draws its own.
-fn show_more_row(id: SharedString, hidden: usize, height: f32, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+fn show_more_row(
+    id: SharedString,
+    hidden: usize,
+    height: f32,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     let id_text = id.to_string();
     let words = SharedString::from(format!("Show {} more", hidden.min(INACTIVE_PAGE)));
     div()
@@ -397,8 +422,10 @@ impl super::Shell {
         let id = SharedString::from(format!("sidebar-group-more-{key}"));
         let element = show_more_row(id, hidden, height, theme)
             .on_click(cx.listener(move |this, _, _, cx| {
-                let shown = this.sidebar_group_shown.get(&shown_key).copied().unwrap_or(INACTIVE_FIRST);
-                this.sidebar_group_shown.insert(shown_key.clone(), shown.saturating_add(INACTIVE_PAGE));
+                let shown =
+                    this.sidebar_group_shown.get(&shown_key).copied().unwrap_or(INACTIVE_FIRST);
+                this.sidebar_group_shown
+                    .insert(shown_key.clone(), shown.saturating_add(INACTIVE_PAGE));
                 cx.notify();
             }))
             .into_any_element();
@@ -408,7 +435,8 @@ impl super::Shell {
 
 /// `session`, unless it has gone quiet past the staleness window (its machine stopped saying).
 fn live(session: Option<&Session>, now: DateTime<Utc>) -> Option<&Session> {
-    session.filter(|s| now.signed_duration_since(s.updated_at).num_milliseconds() <= SESSION_STALE_MS)
+    session
+        .filter(|s| now.signed_duration_since(s.updated_at).num_milliseconds() <= SESSION_STALE_MS)
 }
 
 /// What a row's hover card says beyond zeron's, line by line.
@@ -472,7 +500,9 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
     let agent = chat.config.as_ref().map(|config| {
         let mut words = vec![agent_name(config.harness).to_owned()];
         words.extend(config.model.clone().filter(|model| !model.is_empty()));
-        words.extend(config.reasoning.map(|level| crate::pickers::reasoning_label(level).to_owned()));
+        words.extend(
+            config.reasoning.map(|level| crate::pickers::reasoning_label(level).to_owned()),
+        );
         words.join(" \u{b7} ")
     });
     let cached = out_of_reach(state, &chat.device_id, now);
@@ -531,7 +561,12 @@ pub(crate) fn absolute_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
 }
 
 /// How long a chat has stood as it is, for its hover card.
-fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> String {
+fn status_words(
+    chat: &Chat,
+    status: ChatIndicator,
+    session: Option<&Session>,
+    now: DateTime<Utc>,
+) -> String {
     let session = live(session, now);
     let since = session.and_then(|s| s.status_since.or(s.started_at));
     let ago = |at: DateTime<Utc>| format_time_ago(at, now);
@@ -552,14 +587,19 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
         },
         ChatIndicator::AwaitingInput => match since {
             Some(since) => {
-                format!("Waiting on you since {}", since.with_timezone(&Local).format(crate::transcript::clock_format()))
+                format!(
+                    "Waiting on you since {}",
+                    since.with_timezone(&Local).format(crate::transcript::clock_format())
+                )
             }
             None => "Waiting on you".to_owned(),
         },
         ChatIndicator::Errored => {
             when(format!("Failed {} ago", ago(last)).replace("now ago", "just now"))
         }
-        ChatIndicator::Completed | ChatIndicator::Idle if super::marks::works_on_its_own(session, now) => {
+        ChatIndicator::Completed | ChatIndicator::Idle
+            if super::marks::works_on_its_own(session, now) =>
+        {
             match since.map(ago) {
                 Some(age) if age != "now" => format!("Waiting on its own work for {age}"),
                 _ => "Waiting on its own work".to_owned(),
@@ -583,10 +623,11 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::marks::Need;
-    use crate::loaders::status_mark::MarkState;
     use chrono::TimeDelta;
+
+    use super::super::marks::Need;
+    use super::*;
+    use crate::loaders::status_mark::MarkState;
 
     /// A relative time also says when: the hour today, the date before, the year past this one.
     #[test]
@@ -622,7 +663,14 @@ mod tests {
 
     /// Chat `id` in space `space` (none for a session with no project), started `started` minutes
     /// before `now` and last touched `touched` minutes before it, seen unless `unseen`.
-    fn chat(id: &str, space: Option<&str>, started: i64, touched: i64, now: DateTime<Utc>, unseen: bool) -> Chat {
+    fn chat(
+        id: &str,
+        space: Option<&str>,
+        started: i64,
+        touched: i64,
+        now: DateTime<Utc>,
+        unseen: bool,
+    ) -> Chat {
         let last = now - TimeDelta::minutes(touched);
         serde_json::from_value(serde_json::json!({
             "id": id, "title": id, "deviceId": "local", "archived": false,
@@ -634,7 +682,12 @@ mod tests {
         .unwrap()
     }
 
-    fn space(id: &str, name: &str, repository: Option<&str>, device: &str) -> slopty_view_proto::Space {
+    fn space(
+        id: &str,
+        name: &str,
+        repository: Option<&str>,
+        device: &str,
+    ) -> slopty_view_proto::Space {
         serde_json::from_value(serde_json::json!({
             "id": id, "deviceId": device, "path": format!("/src/{name}"), "name": name,
             "repositoryId": repository, "createdAt": Utc::now() - TimeDelta::days(30),
@@ -643,8 +696,10 @@ mod tests {
     }
 
     fn device(id: &str, seen: Option<DateTime<Utc>>) -> slopty_view_proto::Device {
-        serde_json::from_value(serde_json::json!({ "id": id, "name": id, "platform": "macos", "lastSeenAt": seen }))
-            .unwrap()
+        serde_json::from_value(
+            serde_json::json!({ "id": id, "name": id, "platform": "macos", "lastSeenAt": seen }),
+        )
+        .unwrap()
     }
 
     /// Two projects, one of them checked out twice (its clones are one project), and a session
@@ -672,7 +727,12 @@ mod tests {
     fn keys(groups: &[Group]) -> Vec<(String, Vec<String>)> {
         groups
             .iter()
-            .map(|group| (group.label.to_string(), group.rows.iter().map(|row| row.chat.id.clone()).collect()))
+            .map(|group| {
+                (
+                    group.label.to_string(),
+                    group.rows.iter().map(|row| row.chat.id.clone()).collect(),
+                )
+            })
             .collect()
     }
 
@@ -741,7 +801,10 @@ mod tests {
         let folds = fresh.last_message_at.unwrap() + TimeDelta::hours(INACTIVE_AFTER_HOURS);
         assert!(next.is_some_and(|next| next <= folds), "the clock wakes when it folds: {next:?}");
         let (groups, _) = list(&state, Filter::default(), folds);
-        assert!(groups.iter().any(|group| group.key == INACTIVE && group.rows.iter().any(|row| row.chat.id == "fresh")));
+        assert!(
+            groups.iter().any(|group| group.key == INACTIVE
+                && group.rows.iter().any(|row| row.chat.id == "fresh"))
+        );
     }
 
     /// Inactive pages its rows as the Archived shelf does, the open chat shown wherever it falls.
@@ -774,11 +837,16 @@ mod tests {
         let mut state = state(now);
         let hint = |state: &AppState, id: &str| {
             let (groups, _) = list(state, Filter::default(), now);
-            groups.into_iter().flat_map(|group| group.rows).find(|row| row.chat.id == id).and_then(|row| row.hint)
+            groups
+                .into_iter()
+                .flat_map(|group| group.rows)
+                .find(|row| row.chat.id == id)
+                .and_then(|row| row.hint)
         };
         assert_eq!(hint(&state, "zed-old"), None, "one machine, one branch: the title alone");
         state.devices = vec![device("local", Some(now)), device("studio", Some(now))];
-        state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id = "studio".into();
+        state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id =
+            "studio".into();
         assert_eq!(hint(&state, "zed-new").as_deref(), Some("studio"));
         assert_eq!(hint(&state, "zed-old").as_deref(), Some("local"));
         // The machine is a filter, not a level: narrowed to one, the list holds its rows alone,
@@ -788,8 +856,12 @@ mod tests {
         assert_eq!(keys(&groups), [("zed".to_owned(), vec!["zed-new".to_owned()])]);
         assert_eq!(groups[0].rows[0].hint, None, "one machine shown: no machine said");
         let both = Filter { project: Some("s-app"), machine: Some("studio") };
-        assert!(list(&state, both, now).0.is_empty(), "a project with nothing on the machine shows nothing");
-        state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id = "local".into();
+        assert!(
+            list(&state, both, now).0.is_empty(),
+            "a project with nothing on the machine shows nothing"
+        );
+        state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id =
+            "local".into();
         let context = |branch: &str| -> slopty_view_proto::ConversationSourceContext {
             serde_json::from_value(serde_json::json!({
                 "checkoutId": "k", "repoRoot": "/src/app", "cwd": "/src/app", "branch": branch,
@@ -798,15 +870,26 @@ mod tests {
             .unwrap()
         };
         for (id, branch) in [("app-old", "main"), ("app-new", "lexer")] {
-            state.chats.iter_mut().find(|chat| chat.id == id).unwrap().source_context = Some(context(branch));
+            state.chats.iter_mut().find(|chat| chat.id == id).unwrap().source_context =
+                Some(context(branch));
         }
-        assert_eq!(hint(&state, "app-new").as_deref(), Some("lexer"), "two branches in one project");
+        assert_eq!(
+            hint(&state, "app-new").as_deref(),
+            Some("lexer"),
+            "two branches in one project"
+        );
         assert_eq!(hint(&state, "zed-old"), None, "its own project stands on one");
         let rows = shelf(&state, state.chats.clone(), now);
         let said: Vec<Option<&str>> = rows.iter().map(|row| row.hint.as_deref()).collect();
         assert_eq!(
             said,
-            [Some("app \u{b7} lexer"), Some("zed"), Some("app \u{b7} main"), Some("scratch"), Some("zed")],
+            [
+                Some("app \u{b7} lexer"),
+                Some("zed"),
+                Some("app \u{b7} main"),
+                Some("scratch"),
+                Some("zed")
+            ],
             "a shelf of projects says each, and the branches it spans"
         );
     }
@@ -817,14 +900,21 @@ mod tests {
     fn a_row_whose_machine_is_out_of_reach_is_cached() {
         let now = Utc::now();
         let mut state = state(now);
-        state.devices = vec![device("local", Some(now)), device("studio", Some(now - TimeDelta::minutes(5)))];
-        state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id = "studio".into();
+        state.devices =
+            vec![device("local", Some(now)), device("studio", Some(now - TimeDelta::minutes(5)))];
+        state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id =
+            "studio".into();
         let mut asking = session("zed-new", SessionStatus::AwaitingInput, now);
         asking.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
         state.apply_sessions(vec![asking]);
         let cached = |state: &AppState| {
             let (groups, _) = list(state, Filter::default(), now);
-            groups.into_iter().flat_map(|group| group.rows).filter(|row| row.cached).map(|row| row.chat.id).collect::<Vec<_>>()
+            groups
+                .into_iter()
+                .flat_map(|group| group.rows)
+                .filter(|row| row.cached)
+                .map(|row| row.chat.id)
+                .collect::<Vec<_>>()
         };
         assert_eq!(cached(&state), ["zed-new"], "its row stays, cached");
         let card = chat_card(&state, "zed-new", now).unwrap();
@@ -834,7 +924,10 @@ mod tests {
         assert!(cached(&state).is_empty());
         let card = chat_card(&state, "zed-new", now).unwrap();
         let need = card.need.expect("its need, live again");
-        assert_eq!((need.glyph, need.words.as_ref()), (MarkState::Approval, "Needs approval \u{b7} run cargo test"));
+        assert_eq!(
+            (need.glyph, need.words.as_ref()),
+            (MarkState::Approval, "Needs approval \u{b7} run cargo test")
+        );
     }
 
     /// The card says what the row has no room for: the need in the agent's words, with the glyph
@@ -850,16 +943,25 @@ mod tests {
         state.chats.iter_mut().find(|chat| chat.id == "zed-old").unwrap().last_message_preview =
             Some("Which accent reads best\non glass?".into());
         let card = chat_card(&state, "zed-old", now).unwrap();
-        assert_eq!(card.need, Some(Need { glyph: MarkState::Question, words: "Has a question".into() }));
+        assert_eq!(
+            card.need,
+            Some(Need { glyph: MarkState::Question, words: "Has a question".into() })
+        );
         assert_eq!(card.last.as_deref(), Some("Which accent reads best on glass?"));
         assert!(card.status.starts_with("Waiting on you since"), "{}", card.status);
         asking.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
         state.apply_sessions(vec![asking.clone()]);
         let need = chat_card(&state, "zed-old", now).unwrap().need.unwrap();
-        assert_eq!((need.glyph, need.words.as_ref()), (MarkState::Approval, "Needs approval \u{b7} run cargo test"));
+        assert_eq!(
+            (need.glyph, need.words.as_ref()),
+            (MarkState::Approval, "Needs approval \u{b7} run cargo test")
+        );
         asking.waiting_on = None;
         state.apply_sessions(vec![asking]);
-        assert_eq!(chat_card(&state, "zed-old", now).unwrap().need.map(|need| need.words), Some("Needs input".into()));
+        assert_eq!(
+            chat_card(&state, "zed-old", now).unwrap().need.map(|need| need.words),
+            Some("Needs input".into())
+        );
         let mut busy = session("zed-old", SessionStatus::Working, now);
         busy.waiting_on = wait(SessionWait::COMPACTING, None);
         state.apply_sessions(vec![busy]);
@@ -867,7 +969,10 @@ mod tests {
         assert_eq!((compacting.status.as_ref(), compacting.need), ("Compacting its context", None));
         state.apply_sessions(vec![session("zed-old", SessionStatus::Waiting, now)]);
         let resting = chat_card(&state, "zed-old", now).unwrap();
-        assert_eq!((resting.status.as_ref(), resting.need), ("Waiting on its own work for 4m", None));
+        assert_eq!(
+            (resting.status.as_ref(), resting.need),
+            ("Waiting on its own work for 4m", None)
+        );
         let rested = chat_card(&state, "zed-new", now).unwrap();
         assert_eq!((rested.need, rested.last), (None, None));
     }
@@ -884,7 +989,11 @@ mod tests {
             asking
         };
         state.chats.push(chat("done-late", Some("s-zed"), 3, 1, now, true));
-        state.apply_sessions(vec![since("zed-new", 2), since("loose", 9), session("zed-old", SessionStatus::Working, now)]);
+        state.apply_sessions(vec![
+            since("zed-new", 2),
+            since("loose", 9),
+            session("zed-old", SessionStatus::Working, now),
+        ]);
         // `app-old` finished unseen 1 minute ago, `done-late` too; a tie goes by id.
         assert_eq!(needing_you(&state, now), ["loose", "zed-new", "app-old", "done-late"]);
     }
@@ -895,13 +1004,18 @@ mod tests {
     impl gpui::Render for SidebarHost {
         fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.0.update(cx, |shell, cx| {
-                div().w(px(300.0)).h(px(900.0)).child(shell.render_chat_sidebar(&Theme::default(), cx))
+                div()
+                    .w(px(300.0))
+                    .h(px(900.0))
+                    .child(shell.render_chat_sidebar(&Theme::default(), cx))
             })
         }
     }
 
     /// A sidebar over [`state`]'s chats, one of them asking, one at work.
-    fn sidebar(cx: &mut gpui::TestAppContext) -> (gpui::Entity<super::super::Shell>, &mut gpui::VisualTestContext) {
+    fn sidebar(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<super::super::Shell>, &mut gpui::VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -949,7 +1063,10 @@ mod tests {
         });
     }
 
-    fn bounds(cx: &mut gpui::VisualTestContext, selector: &str) -> Option<gpui::Bounds<gpui::Pixels>> {
+    fn bounds(
+        cx: &mut gpui::VisualTestContext,
+        selector: &str,
+    ) -> Option<gpui::Bounds<gpui::Pixels>> {
         cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
     }
 
@@ -964,15 +1081,28 @@ mod tests {
         let mut edges = Vec::new();
         for id in ids {
             let row = bounds(cx, &format!("chat-{id}")).unwrap_or_else(|| panic!("{id}'s row"));
-            assert_eq!(f32::from(row.size.height), super::super::sidebar::SIDEBAR_ROW_HEIGHT, "{id}: one line");
+            assert_eq!(
+                f32::from(row.size.height),
+                super::super::sidebar::SIDEBAR_ROW_HEIGHT,
+                "{id}: one line"
+            );
             let program = bounds(cx, &format!("chat-agent-{id}")).expect("its program's mark");
             let title = bounds(cx, &format!("chat-title-{id}")).expect("its title");
             let slot = bounds(cx, &format!("chat-status-{id}")).expect("its mark's slot");
-            assert!(program.right() <= title.left() && title.right() <= slot.left(), "{id}: program, title, mark");
+            assert!(
+                program.right() <= title.left() && title.right() <= slot.left(),
+                "{id}: program, title, mark"
+            );
             edges.push((title.left(), slot.left()));
         }
         assert!(edges.iter().all(|edge| *edge == edges[0]), "every title at one edge: {edges:?}");
-        for (id, marked) in [("zed-old", true), ("app-new", true), ("app-old", true), ("zed-new", false), ("loose", false)] {
+        for (id, marked) in [
+            ("zed-old", true),
+            ("app-new", true),
+            ("app-old", true),
+            ("zed-new", false),
+            ("loose", false),
+        ] {
             assert_eq!(bounds(cx, &format!("chat-mark-{id}")).is_some(), marked, "{id}'s mark");
         }
         // Across two machines each row's hint says its own, after its title on the same line.
@@ -981,7 +1111,8 @@ mod tests {
             shell.state.update(cx, |state, cx| {
                 let now = Utc::now();
                 state.devices = vec![device("local", Some(now)), device("studio", Some(now))];
-                state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id = "studio".into();
+                state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id =
+                    "studio".into();
                 cx.notify();
             });
         });
@@ -989,9 +1120,16 @@ mod tests {
         let hint = bounds(cx, "chat-hint-zed-new").expect("its machine, after its title");
         let title = bounds(cx, "chat-title-zed-new").unwrap();
         let slot = bounds(cx, "chat-status-zed-new").unwrap();
-        assert!(title.left() < hint.left() && hint.right() <= slot.left(), "{title:?} {hint:?} {slot:?}");
+        assert!(
+            title.left() < hint.left() && hint.right() <= slot.left(),
+            "{title:?} {hint:?} {slot:?}"
+        );
         let row = bounds(cx, "chat-zed-new").unwrap();
-        assert_eq!(f32::from(row.size.height), super::super::sidebar::SIDEBAR_ROW_HEIGHT, "still one line");
+        assert_eq!(
+            f32::from(row.size.height),
+            super::super::sidebar::SIDEBAR_ROW_HEIGHT,
+            "still one line"
+        );
     }
 
     // A screen reader hears a waiting row say "Needs you", then what it needs in its
@@ -1039,7 +1177,10 @@ mod tests {
         assert!(said(words), "the approval: {nodes:?}");
         assert!(said("Has a question"), "the question: {nodes:?}");
         assert!(
-            !nodes.iter().any(|(_, label, _)| label.starts_with("Needs approval") || label == "Has a question"),
+            !nodes
+                .iter()
+                .any(|(_, label, _)| label.starts_with("Needs approval")
+                    || label == "Has a question"),
             "no node named by a need's words: {nodes:?}"
         );
     }
@@ -1052,7 +1193,9 @@ mod tests {
         redraw(cx);
         let ids = ["app-new", "app-old", "loose", "zed-new", "zed-old"];
         let tops = |cx: &mut gpui::VisualTestContext| -> Vec<f32> {
-            ids.iter().map(|id| f32::from(bounds(cx, &format!("chat-{id}")).unwrap().origin.y)).collect()
+            ids.iter()
+                .map(|id| f32::from(bounds(cx, &format!("chat-{id}")).unwrap().origin.y))
+                .collect()
         };
         let before = tops(cx);
         assert!(before.windows(2).all(|pair| pair[0] < pair[1]), "top to bottom: {before:?}");
@@ -1060,7 +1203,8 @@ mod tests {
             shell.update(cx, |shell, cx| {
                 shell.state.update(cx, |state, cx| {
                     let now = Utc::now() + TimeDelta::seconds(i64::try_from(round).unwrap());
-                    let statuses = [SessionStatus::Done, SessionStatus::AwaitingInput, SessionStatus::Working];
+                    let statuses =
+                        [SessionStatus::Done, SessionStatus::AwaitingInput, SessionStatus::Working];
                     let sessions = ids
                         .iter()
                         .enumerate()
@@ -1089,18 +1233,30 @@ mod tests {
         });
         redraw(cx);
         let (zed, app) = ("project:s-zed", "project:repo:repo-app");
-        assert!(bounds(cx, &format!("sidebar-group-mark-{zed}")).is_none(), "open, its rows say it");
+        assert!(
+            bounds(cx, &format!("sidebar-group-mark-{zed}")).is_none(),
+            "open, its rows say it"
+        );
         for key in [zed, app] {
             let header = bounds(cx, &format!("sidebar-group-{key}")).expect("its header");
             cx.simulate_click(header.center(), gpui::Modifiers::default());
             redraw(cx);
-            assert!(bounds(cx, &format!("sidebar-group-mark-{key}")).is_some(), "{key}: its loudest mark");
-            assert!(bounds(cx, &format!("sidebar-group-count-{key}")).is_some(), "{key}: its count");
+            assert!(
+                bounds(cx, &format!("sidebar-group-mark-{key}")).is_some(),
+                "{key}: its loudest mark"
+            );
+            assert!(
+                bounds(cx, &format!("sidebar-group-count-{key}")).is_some(),
+                "{key}: its count"
+            );
         }
         // Past the fold's motion, a shut group builds no rows.
         cx.executor().advance_clock(std::time::Duration::from_millis(400));
         redraw(cx);
-        assert!(bounds(cx, "chat-zed-old").is_none() && bounds(cx, "chat-app-old").is_none(), "shut");
+        assert!(
+            bounds(cx, "chat-zed-old").is_none() && bounds(cx, "chat-app-old").is_none(),
+            "shut"
+        );
         let heard = |cx: &mut gpui::VisualTestContext, label: &str| {
             cx.update(|window, _| {
                 let tree = window.a11y_tree().expect("the tree built");
@@ -1116,7 +1272,10 @@ mod tests {
         cx.simulate_click(header.center(), gpui::Modifiers::default());
         redraw(cx);
         assert!(bounds(cx, "chat-zed-old").is_some(), "open again");
-        assert!(bounds(cx, &format!("sidebar-group-mark-{zed}")).is_none(), "its rows say it again");
+        assert!(
+            bounds(cx, &format!("sidebar-group-mark-{zed}")).is_none(),
+            "its rows say it again"
+        );
     }
 
     /// The key walks the sessions that need the person, then the one finished unseen, and comes
@@ -1127,7 +1286,10 @@ mod tests {
         let mut opened = Vec::new();
         for _ in 0..3 {
             shell.update(cx, |shell, cx| assert!(shell.open_next_needing_you(cx)));
-            opened.push(shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone().unwrap()));
+            opened
+                .push(shell.read_with(cx, |shell, cx| {
+                    shell.state.read(cx).selected_chat.clone().unwrap()
+                }));
         }
         assert_eq!(opened, ["zed-old", "app-old", "zed-old"]);
         shell.update(cx, |shell, cx| {
@@ -1169,7 +1331,10 @@ mod tests {
         assert!(says_done(cx), "unseen, it says so");
         assert_eq!(stale(cx), None, "before it opens");
         frames(cx, tick, 120);
-        let slot = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)).iter().position(|id| id == "b");
+        let slot = shell
+            .update(cx, |shell, cx| shell.sidebar_visible_order(cx))
+            .iter()
+            .position(|id| id == "b");
         let key = format!("cmd-{}", slot.expect("b's row") + 1);
         cx.simulate_keystrokes(&key);
         frames(cx, tick, 120);
@@ -1184,7 +1349,9 @@ mod tests {
         let _watch = cx.update(|_, cx| {
             let heard = heard.clone();
             cx.observe(&state, move |state, cx| {
-                heard.set(Some(state.read(cx).chats.iter().any(|chat| chat.id == "b" && chat.unseen())));
+                heard.set(Some(
+                    state.read(cx).chats.iter().any(|chat| chat.id == "b" && chat.unseen()),
+                ));
             })
         });
         let answer = |cx: &mut gpui::VisualTestContext, round: i64| {
@@ -1199,7 +1366,9 @@ mod tests {
             });
         };
         let seen = |cx: &mut gpui::VisualTestContext| {
-            shell.read_with(cx, |shell, cx| shell.state.read(cx).chats.iter().any(|chat| chat.id == "b" && !chat.unseen()))
+            shell.read_with(cx, |shell, cx| {
+                shell.state.read(cx).chats.iter().any(|chat| chat.id == "b" && !chat.unseen())
+            })
         };
         // The chat open, a new answer arrives in it (or its server sends the row back before
         // its seen mark is round): seen as it arrives.
@@ -1254,7 +1423,10 @@ mod tests {
         cx.simulate_click(devices, gpui::Modifiers::default());
         redraw(cx);
         shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.route, super::super::Route::Settings(super::super::SettingsSection::Devices));
+            assert_eq!(
+                shell.route,
+                super::super::Route::Settings(super::super::SettingsSection::Devices)
+            );
         });
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
@@ -1333,7 +1505,11 @@ mod tests {
         for id in ["jump-hint-c00", "jump-hint-c01", "jump-hint-c02"] {
             assert!(cx.debug_bounds(id).is_some(), "{id} while held");
         }
-        assert!(cx.debug_bounds("chat-mark-c00").is_none() && cx.debug_bounds("chat-status-c00").is_none(), "the key in the mark's place");
+        assert!(
+            cx.debug_bounds("chat-mark-c00").is_none()
+                && cx.debug_bounds("chat-status-c00").is_none(),
+            "the key in the mark's place"
+        );
         cx.simulate_modifiers_change(gpui::Modifiers::default());
         redraw(cx);
         assert!(cx.debug_bounds("jump-hint-c00").is_none(), "gone once let go");
@@ -1358,7 +1534,10 @@ mod tests {
         });
         redraw(cx);
         let more = format!("sidebar-group-more-{INACTIVE}");
-        assert!(bounds(cx, "chat-c09").is_some() && bounds(cx, "chat-c10").is_none(), "the first page");
+        assert!(
+            bounds(cx, "chat-c09").is_some() && bounds(cx, "chat-c10").is_none(),
+            "the first page"
+        );
         let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
         assert_eq!(order.len(), INACTIVE_FIRST, "keys reach only the rows drawn: {order:?}");
         let more = bounds(cx, &more).expect("Show more").center();
@@ -1375,7 +1554,10 @@ mod tests {
         let long = "/Users/someone/Workspace/oss/a-very-long-project-name/crates/slopty-shell";
         let elided = elide_middle(long);
         assert_eq!(elided.chars().count(), FOLDER_CHARS);
-        assert!(elided.starts_with("/Users/some") && elided.ends_with("crates/slopty-shell"), "{elided}");
+        assert!(
+            elided.starts_with("/Users/some") && elided.ends_with("crates/slopty-shell"),
+            "{elided}"
+        );
         assert!(elided.contains('\u{2026}'));
     }
 }

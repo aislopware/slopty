@@ -2,19 +2,19 @@
 
 use std::ops::Range;
 
-use gpui::{AnyElement, App, Context, Focusable as _, Hsla, SharedString, Window, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, App, Context, Focusable as _, Hsla, SharedString, Window, div, px};
 
 use super::review::{self, DiffMatch};
 use super::{
-    Changes, DiffFind, DiffRow, FindInDiff, FindNextInDiff, FindPreviousInDiff,
-    ToggleDiffTree, add_color, body_rows, del_color,
+    Changes, DiffFind, DiffRow, FindInDiff, FindNextInDiff, FindPreviousInDiff, ToggleDiffTree,
+    add_color, body_rows, del_color,
 };
 use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::motion;
-use crate::popover;
+use crate::motion::HoverFade as _;
 use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::theme::Theme;
-use crate::motion::HoverFade as _;
+use crate::{motion, popover};
 
 /// The changed files' column beside the diff.
 const TREE_WIDTH: f32 = 208.0;
@@ -142,10 +142,7 @@ impl Changes {
         let Some(file) = self.parsed.as_ref().and_then(|p| p.files.get(file_ix)).cloned() else {
             return;
         };
-        let folding = self
-            .row_ranges
-            .get(file_ix)
-            .and_then(|range| self.rows.get(range.start + 1))
+        let folding = self.row_ranges.get(file_ix).and_then(|range| self.rows.get(range.start + 1))
             == Some(&DiffRow::FoldingBody { file: file_ix as u32 });
         let collapsed = self.folds.get(&file.path).is_some_and(|fold| fold.collapsed);
         if !collapsed && !folding {
@@ -168,7 +165,13 @@ impl Changes {
     }
 
     /// The find's marks on one line: every match on it, the active one louder.
-    pub(super) fn find_marks(&self, file: u32, hunk: u32, line: u32, theme: &Theme) -> Vec<(Range<usize>, Hsla)> {
+    pub(super) fn find_marks(
+        &self,
+        file: u32,
+        hunk: u32,
+        line: u32,
+        theme: &Theme,
+    ) -> Vec<(Range<usize>, Hsla)> {
         if self.found.is_empty() {
             return Vec::new();
         }
@@ -202,27 +205,27 @@ impl Changes {
     // ---- drawing ----
 
     /// The trailing toolbar's review aids: find, the files' tree and whitespace.
-    pub(super) fn render_aid_controls(&self, theme: &Theme, cx: &mut Context<Self>) -> [AnyElement; 3] {
-        let find = Self::header_toggle(
-            "changes-find",
-            crate::icons::MAGNIFER,
-            self.find.is_some(),
-            theme,
-        )
-        .action_hint(
-            "Find in diff",
-            Keys::ActionIn(Box::new(FindInDiff), self.focus.clone()),
-            cx,
-        )
-        .on_click(cx.listener(|this, _, window, cx| {
-            cx.stop_propagation();
-            if this.find.is_some() {
-                this.close_find(cx);
-            } else {
-                this.open_find(window, cx);
-            }
-        }))
-        .into_any_element();
+    pub(super) fn render_aid_controls(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> [AnyElement; 3] {
+        let find =
+            Self::header_toggle("changes-find", crate::icons::MAGNIFER, self.find.is_some(), theme)
+                .action_hint(
+                    "Find in diff",
+                    Keys::ActionIn(Box::new(FindInDiff), self.focus.clone()),
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    if this.find.is_some() {
+                        this.close_find(cx);
+                    } else {
+                        this.open_find(window, cx);
+                    }
+                }))
+                .into_any_element();
         let tree = Self::header_toggle(
             "changes-tree-toggle",
             crate::icons::FILE_TREE,
@@ -269,7 +272,9 @@ impl Changes {
             .role(gpui::Role::Search)
             .aria_label("Find in diff")
             .track_focus(&find.focus)
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| this.find_key(event, cx)))
+            .on_key_down(
+                cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| this.find_key(event, cx)),
+            )
             .occlude()
             .child(
                 div()
@@ -280,18 +285,23 @@ impl Changes {
             )
             .child(popover::find_tally(&popup, tally))
             .child(
-                popover::find_step("changes-find-previous", crate::icons::ALT_ARROW_UP, any, &popup)
-                    .action_hint(
-                        "Previous match",
-                        Keys::ActionIn(Box::new(FindPreviousInDiff), find.focus.clone()),
-                        cx,
-                    )
-                    .when(any, |step| {
-                        step.on_click(cx.listener(|this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.step_find(-1, cx);
-                        }))
-                    }),
+                popover::find_step(
+                    "changes-find-previous",
+                    crate::icons::ALT_ARROW_UP,
+                    any,
+                    &popup,
+                )
+                .action_hint(
+                    "Previous match",
+                    Keys::ActionIn(Box::new(FindPreviousInDiff), find.focus.clone()),
+                    cx,
+                )
+                .when(any, |step| {
+                    step.on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.step_find(-1, cx);
+                    }))
+                }),
             )
             .child(
                 popover::find_step("changes-find-next", crate::icons::ALT_ARROW_DOWN, any, &popup)
@@ -327,7 +337,11 @@ impl Changes {
     }
 
     /// The changed files as a tree beside the diff; a click brings a file's header to the top.
-    pub(super) fn render_tree(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_tree(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.show_tree {
             return None;
         }
@@ -338,91 +352,100 @@ impl Changes {
         let selected = self.tree_selected;
         let rail = popover::rail(self, "changes-tree-rail", theme, cx);
         let list = div()
-                .id("changes-tree")
-                .role(gpui::Role::Tree)
-                .aria_label("Changed files")
-                .size_full()
-                .overflow_y_scroll()
-                .track_scroll(&self.tree_scroll)
-                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                    if this.aid_rail.set_list_hovered(*hovered) {
-                        cx.notify();
-                    }
-                }))
-                .py(px(4.0))
-                .children(rows.into_iter().map(|row| {
-                    let key = SharedString::from(format!("changes-tree-row:{}", row.path));
-                    let file = row.file;
-                    let on = file.is_some() && file == selected;
-                    let identity = match file {
-                        Some(_) => crate::file_icons::FileIconIdentity::file(&row.name),
-                        None => crate::file_icons::FileIconIdentity::directory(&row.name, true),
-                    };
-                    let icon = crate::file_icons::icon(identity, theme.appearance).size(px(14.0));
-                    let counts = file.and_then(|ix| files.get(ix)).map(|diff| {
-                        div()
-                            .flex_none()
-                            .flex()
-                            .gap(px(4.0))
-                            // Counts in the file headers' tabular figures (item 18).
-                            .font_features(crate::typography::tabular())
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .when(diff.additions > 0, |el| {
-                                el.child(
-                                    div()
-                                        .text_color(add_color(theme))
-                                        .child(SharedString::from(format!("+{}", diff.additions))),
-                                )
-                            })
-                            .when(diff.deletions > 0, |el| {
-                                el.child(
-                                    div()
-                                        .text_color(del_color(theme))
-                                        .child(SharedString::from(format!("−{}", diff.deletions))),
-                                )
-                            })
-                    });
+            .id("changes-tree")
+            .role(gpui::Role::Tree)
+            .aria_label("Changed files")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.tree_scroll)
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if this.aid_rail.set_list_hovered(*hovered) {
+                    cx.notify();
+                }
+            }))
+            .py(px(4.0))
+            .children(rows.into_iter().map(|row| {
+                let key = SharedString::from(format!("changes-tree-row:{}", row.path));
+                let file = row.file;
+                let on = file.is_some() && file == selected;
+                let identity = match file {
+                    Some(_) => crate::file_icons::FileIconIdentity::file(&row.name),
+                    None => crate::file_icons::FileIconIdentity::directory(&row.name, true),
+                };
+                let icon = crate::file_icons::icon(identity, theme.appearance).size(px(14.0));
+                let counts = file.and_then(|ix| files.get(ix)).map(|diff| {
                     div()
-                        .id(gpui::ElementId::Name(key.clone()))
-                        .role(gpui::Role::TreeItem)
-                        .aria_label(SharedString::from(row.path.clone()))
-                        .h(px(TREE_ROW_HEIGHT))
-                        .mx(px(4.0))
-                        .pl(px(6.0 + row.depth as f32 * TREE_INDENT))
-                        .pr(px(6.0))
+                        .flex_none()
                         .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .rounded(px(popover::MENU_ITEM_RADIUS))
-                        .map(|el| {
-                            if on {
-                                el.bg(crate::theme::card_selected_bg())
-                            } else if file.is_some() {
-                                el.cursor_pointer()
-                                    .bg(motion::hover_blend(&key, crate::theme::ink(0.0), crate::theme::ink(0.05)))
-                                    .hover_fade(key.clone())
-                            } else {
-                                el
-                            }
+                        .gap(px(4.0))
+                        // Counts in the file headers' tabular figures (item 18).
+                        .font_features(crate::typography::tabular())
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .when(diff.additions > 0, |el| {
+                            el.child(
+                                div()
+                                    .text_color(add_color(theme))
+                                    .child(SharedString::from(format!("+{}", diff.additions))),
+                            )
                         })
-                        .when_some(file, |el, ix| {
-                            // A keyboard stop with the shell's ring, inside the tree (M8).
-                            el.map(|el| crate::surface_chrome::key_stop_inset(el, theme))
-                                .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_file(ix, cx)))
+                        .when(diff.deletions > 0, |el| {
+                            el.child(
+                                div()
+                                    .text_color(del_color(theme))
+                                    .child(SharedString::from(format!("−{}", diff.deletions))),
+                            )
                         })
-                        .child(icon)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .text_color(if on || file.is_none() { theme.text_dim } else { theme.text_muted })
-                                .child(SharedString::from(row.name)),
+                });
+                div()
+                    .id(gpui::ElementId::Name(key.clone()))
+                    .role(gpui::Role::TreeItem)
+                    .aria_label(SharedString::from(row.path.clone()))
+                    .h(px(TREE_ROW_HEIGHT))
+                    .mx(px(4.0))
+                    .pl(px(6.0 + row.depth as f32 * TREE_INDENT))
+                    .pr(px(6.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(popover::MENU_ITEM_RADIUS))
+                    .map(|el| {
+                        if on {
+                            el.bg(crate::theme::card_selected_bg())
+                        } else if file.is_some() {
+                            el.cursor_pointer()
+                                .bg(motion::hover_blend(
+                                    &key,
+                                    crate::theme::ink(0.0),
+                                    crate::theme::ink(0.05),
+                                ))
+                                .hover_fade(key.clone())
+                        } else {
+                            el
+                        }
+                    })
+                    .when_some(file, |el, ix| {
+                        // A keyboard stop with the shell's ring, inside the tree (M8).
+                        el.map(|el| crate::surface_chrome::key_stop_inset(el, theme)).on_click(
+                            cx.listener(move |this, _, _, cx| this.scroll_to_file(ix, cx)),
                         )
-                        .children(counts)
-                }));
+                    })
+                    .child(icon)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(if on || file.is_none() {
+                                theme.text_dim
+                            } else {
+                                theme.text_muted
+                            })
+                            .child(SharedString::from(row.name)),
+                    )
+                    .children(counts)
+            }));
         Some(
             div()
                 .relative()

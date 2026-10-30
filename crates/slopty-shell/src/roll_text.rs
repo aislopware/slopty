@@ -21,9 +21,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, ParentElement as _, Pixels, Radians, ScaledPixels, ShapedLine,
-    SharedString, Style, Styled as _, TextRun, TransformationMatrix, Window, div, point, px,
+    App, Bounds, ContentMask, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, ParentElement as _, Pixels, Radians, ScaledPixels, ShapedLine, SharedString, Style,
+    Styled as _, TextRun, TransformationMatrix, Window, div, point, px,
 };
 
 use crate::motion::{CubicBezier, EASE_OUT_QUINT, RESIZE, lerp, speed_scale};
@@ -49,7 +49,6 @@ const GLIDE: CubicBezier = EASE_OUT_QUINT;
 fn layout_progress(elapsed: f32) -> f32 {
     RESIZE.progress(elapsed / RESIZE.total().as_secs_f32())
 }
-
 
 #[derive(Clone)]
 struct Roll {
@@ -108,11 +107,7 @@ pub fn rolling(
         let entry = rolls.entry(key).or_insert_with(|| (text.clone(), None));
         if entry.0 != text {
             let from = std::mem::replace(&mut entry.0, text.clone());
-            entry.1 = (!reduced).then(|| Roll {
-                from,
-                to: text.clone(),
-                started: now,
-            });
+            entry.1 = (!reduced).then(|| Roll { from, to: text.clone(), started: now });
         }
         // Finished — or reduced motion switched on mid-roll, where no frames
         // would come to finish it: settle on the plain label now.
@@ -132,12 +127,8 @@ pub fn rolling(
 /// Byte lengths of the shared leading and trailing character runs, never
 /// overlapping in either string.
 fn shared_ends(from: &str, to: &str) -> (usize, usize) {
-    let prefix: usize = from
-        .chars()
-        .zip(to.chars())
-        .take_while(|(a, b)| a == b)
-        .map(|(c, _)| c.len_utf8())
-        .sum();
+    let prefix: usize =
+        from.chars().zip(to.chars()).take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
     let room = (from.len() - prefix).min(to.len() - prefix);
     let suffix: usize = from[prefix..]
         .chars()
@@ -197,8 +188,8 @@ impl RollText {
 }
 
 impl Element for RollText {
-    type RequestLayoutState = Shaped;
     type PrepaintState = ();
+    type RequestLayoutState = Shaped;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -220,11 +211,8 @@ impl Element for RollText {
         // Exactly gpui's text element: line height snapped to the device
         // pixel grid (not rounded to a logical pixel), so the line box and
         // baseline match the plain label it hands off to.
-        let line_height = window.pixel_snap(
-            text_style
-                .line_height
-                .to_pixels(font_size.into(), window.rem_size()),
-        );
+        let line_height = window
+            .pixel_snap(text_style.line_height.to_pixels(font_size.into(), window.rem_size()));
         let shape = |text: &SharedString| {
             let run = TextRun {
                 len: text.len(),
@@ -234,9 +222,7 @@ impl Element for RollText {
                 underline: None,
                 strikethrough: None,
             };
-            window
-                .text_system()
-                .shape_line(text.clone(), font_size, &[run], None)
+            window.text_system().shape_line(text.clone(), font_size, &[run], None)
         };
         let from = shape(&self.roll.from);
         let to = shape(&self.roll.to);
@@ -250,15 +236,7 @@ impl Element for RollText {
         style.min_size.width = px(0.0).into();
         style.flex_shrink = 1.0;
         let layout_id = window.request_layout(style, [], cx);
-        (
-            layout_id,
-            Shaped {
-                from,
-                to,
-                font_size,
-                line_height,
-            },
-        )
+        (layout_id, Shaped { from, to, font_size, line_height })
     }
 
     fn prepaint(
@@ -312,12 +290,8 @@ impl Element for RollText {
                 }
             }
             let width = f32::from(line.width);
-            let ends: Vec<f32> = out
-                .iter()
-                .skip(1)
-                .map(|g| g.3)
-                .chain(std::iter::once(width))
-                .collect();
+            let ends: Vec<f32> =
+                out.iter().skip(1).map(|g| g.3).chain(std::iter::once(width)).collect();
             out.into_iter()
                 .zip(ends)
                 .map(|((font, id, index, x, y, emoji), end)| Glyph {
@@ -336,21 +310,13 @@ impl Element for RollText {
         let changed = |index: usize, len: usize| index >= prefix && index < len - suffix;
         // Stagger sweeps left to right across each side's changed glyphs.
         let sweep = |list: &[Glyph], len: usize| {
-            let xs: Vec<f32> = list
-                .iter()
-                .filter(|g| changed(g.index, len))
-                .map(|g| g.x)
-                .collect();
+            let xs: Vec<f32> = list.iter().filter(|g| changed(g.index, len)).map(|g| g.x).collect();
             let count = xs.len();
             let min = xs.iter().copied().fold(f32::INFINITY, f32::min);
             let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let spread = duration * STAGGER * count.saturating_sub(1) as f32 / count.max(1) as f32;
             move |x: f32| {
-                if max > min {
-                    spread * ((x - min) / (max - min)).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                }
+                if max > min { spread * ((x - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 }
             }
         };
         let from_delay = sweep(&from_glyphs, from_len);
@@ -440,7 +406,8 @@ impl Element for RollText {
                 if !changed(glyph.index, from_len) {
                     continue; // the new line paints the shared runs
                 }
-                let progress = GLIDE.eval(((elapsed - from_delay(glyph.x)) / duration).clamp(0.0, 1.0));
+                let progress =
+                    GLIDE.eval(((elapsed - from_delay(glyph.x)) / duration).clamp(0.0, 1.0));
                 paint(
                     window,
                     glyph,

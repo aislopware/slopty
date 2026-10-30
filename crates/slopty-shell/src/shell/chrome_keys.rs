@@ -1,22 +1,22 @@
 //! The window's own keys (T3 Code's set, in the Mac's spelling).
 //!
-//! - ⌘F finds in the chat's thread, or in the diff when the Changes surface has focus; ⌘G and
-//!   ⌘⇧G step through the matches. The finding itself is the transcript's and the diff's own
+//! - ⌘F finds in the chat's thread, or in the diff when the Changes surface has focus; ⌘G and ⌘⇧G
+//!   step through the matches. The finding itself is the transcript's and the diff's own
 //!   (`transcript::FindInThread`, `FindNext`, `FindPrevious`; `changes::FindInDiff`,
 //!   `FindNextInDiff`, `FindPreviousInDiff` in the `Changes` context).
-//! - A session's panes (`docs/decisions/layout.md`, "One session per view, splits on demand"):
-//!   ⌘D opens a shell to the right, ⇧⌘D one below, ⌘⏎ one where there is most room; ⇧⌘⏎ fills
-//!   the view with the focused pane; ⌥⌘ arrows walk focus by direction, ⌘] and ⌘[ in reading
-//!   order. ⌘W closes the focused pane (`app_menus::CloseTab`).
+//! - A session's panes (`docs/decisions/layout.md`, "One session per view, splits on demand"): ⌘D
+//!   opens a shell to the right, ⇧⌘D one below, ⌘⏎ one where there is most room; ⇧⌘⏎ fills the view
+//!   with the focused pane; ⌥⌘ arrows walk focus by direction, ⌘] and ⌘[ in reading order. ⌘W
+//!   closes the focused pane (`app_menus::CloseTab`).
 //! - Views beside the session: ⌘I the inspector, and the palette's Browser and Remote window.
-//! - ⌥⌘[ and ⌥⌘] walk the history, as the mouse's side buttons do; ⌘⇧T opens the view closed
-//!   last again (`closed_tabs`).
+//! - ⌥⌘[ and ⌥⌘] walk the history, as the mouse's side buttons do; ⌘⇧T opens the view closed last
+//!   again (`closed_tabs`).
 //! - ⌘Z undoes the archive just made, while its toast is up.
-//! - ⇧⌘G is Find Previous while the find where the keyboard is stands open (a terminal's card
-//!   takes it in its own context first, the inspector's here), and otherwise goes on to Go to
-//!   Directory (`picker`).
-//! - ⌘. opens the next chat that needs the person, across projects and machines, then the
-//!   finished ones nobody has seen (`sidebar_status::needing_you`).
+//! - ⇧⌘G is Find Previous while the find where the keyboard is stands open (a terminal's card takes
+//!   it in its own context first, the inspector's here), and otherwise goes on to Go to Directory
+//!   (`picker`).
+//! - ⌘. opens the next chat that needs the person, across projects and machines, then the finished
+//!   ones nobody has seen (`sidebar_status::needing_you`).
 //! - ⌥⌘O opens Open in under the titlebar's identity.
 //!
 //! A terminal keeps every key it takes for itself (its own find, and anything its program
@@ -25,13 +25,16 @@
 
 use std::time::Duration;
 
-use gpui::{App, Context, KeyBinding, Window, actions, prelude::*};
+use gpui::prelude::*;
+use gpui::{App, Context, KeyBinding, Window, actions};
 
 use super::panes::Direction;
 use super::{Route, Shell};
 use crate::changes::{FindInDiff, FindNextInDiff, FindPreviousInDiff};
 use crate::settings::{KeymapConfig, ShortcutId, parse_combo, platform_combo};
-use crate::transcript::{FindInThread, FindNext as FindNextInThread, FindPrevious as FindPreviousInThread};
+use crate::transcript::{
+    FindInThread, FindNext as FindNextInThread, FindPrevious as FindPreviousInThread,
+};
 
 actions!(
     shell,
@@ -74,9 +77,9 @@ const UNDO_LASTS: Duration = Duration::from_secs(8);
 /// stays with that shortcut.
 pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     let taken = |combo: &str| {
-        ShortcutId::ALL.iter().any(|id| {
-            parse_combo(keymap.get(*id)).ok() == parse_combo(combo).ok()
-        })
+        ShortcutId::ALL
+            .iter()
+            .any(|id| parse_combo(keymap.get(*id)).ok() == parse_combo(combo).ok())
     };
     let mut bindings = Vec::new();
     macro_rules! fixed {
@@ -106,7 +109,12 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     fixed!("mod-[", PreviousPane);
     // The diff's own find, where the Changes surface has the keyboard.
     bindings.push(crate::keys::binding(&platform_combo("mod-f"), FindInDiff, Some("Changes"), cx));
-    bindings.push(crate::keys::binding(&platform_combo("mod-g"), FindNextInDiff, Some("Changes"), cx));
+    bindings.push(crate::keys::binding(
+        &platform_combo("mod-g"),
+        FindNextInDiff,
+        Some("Changes"),
+        cx,
+    ));
     bindings.push(crate::keys::binding(
         &platform_combo("mod-shift-g"),
         FindPreviousInDiff,
@@ -123,9 +131,7 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
             continue;
         }
         // A chord that is no chord (a hand-edited file) binds nothing.
-        if let Ok(binding) =
-            KeyBinding::load(&combo, action, None, false, None, cx)
-        {
+        if let Ok(binding) = KeyBinding::load(&combo, action, None, false, None, cx) {
             bindings.push(binding);
         }
     }
@@ -155,7 +161,11 @@ enum FindStep {
 
 impl Shell {
     /// `root` taking this module's actions.
-    pub(super) fn chrome_actions<E: InteractiveElement>(&self, root: E, cx: &mut Context<Self>) -> E {
+    pub(super) fn chrome_actions<E: InteractiveElement>(
+        &self,
+        root: E,
+        cx: &mut Context<Self>,
+    ) -> E {
         root.on_action(cx.listener(|this, _: &Find, window, cx| {
             this.find(FindStep::Open, window, cx);
         }))
@@ -209,7 +219,10 @@ impl Shell {
             }
         }))
         .on_action(cx.listener(|this, _: &OpenIn, window, cx| {
-            if in_own_keys(window) || this.overlay_owns_keyboard() || !this.toggle_open_in(window, cx) {
+            if in_own_keys(window)
+                || this.overlay_owns_keyboard()
+                || !this.toggle_open_in(window, cx)
+            {
                 cx.propagate();
             }
         }))
@@ -266,7 +279,9 @@ impl Shell {
     /// Whether a view's key works now: on a session's page, under no overlay that holds the
     /// keyboard.
     fn view_keys_live(&self) -> bool {
-        matches!(self.route, Route::Chat) && !self.active_chat.is_empty() && !self.overlay_owns_keyboard()
+        matches!(self.route, Route::Chat)
+            && !self.active_chat.is_empty()
+            && !self.overlay_owns_keyboard()
     }
 
     /// Run a pane key on a session's page or the new-session canvas, under no overlay that holds
@@ -278,7 +293,10 @@ impl Shell {
         cx: &mut Context<Self>,
         run: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
     ) {
-        if matches!(self.route, Route::Chat) && !self.overlay_owns_keyboard() && !in_own_keys(window) {
+        if matches!(self.route, Route::Chat)
+            && !self.overlay_owns_keyboard()
+            && !in_own_keys(window)
+        {
             run(self, window, cx);
         } else {
             cx.propagate();
@@ -286,7 +304,12 @@ impl Shell {
     }
 
     /// The inspector's changed file: the chat's Changes in front, at that file.
-    pub(super) fn show_change_at(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn show_change_at(
+        &mut self,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         crate::changes::show_file(path, cx);
         if matches!(self.route, Route::Chat) && !self.active_chat.is_empty() {
             self.show_changes(window, cx);

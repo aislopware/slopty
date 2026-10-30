@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Settings → Files: local preferences for workspace-file editing.
 
-use gpui::{Context, EventEmitter, Window, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{Context, EventEmitter, Window, div, px};
 
 use super::widgets;
 use crate::popover;
@@ -104,37 +105,32 @@ impl Render for FilesSettingsPage {
         let selected = self.autosave_delay_ms;
         let word_wrap = self.word_wrap;
         let show_all_files = self.show_all_files;
-        let delay_control = widgets::select(
-            "files-autosave-delay",
-            "Autosave delay",
-            &theme,
-            |page: &mut Self| &mut page.delay_select,
-        )
-        .options(
-            DELAY_OPTIONS.into_iter().map(|delay| {
-                widgets::SelectOption::new(if delay >= 1_000 {
-                    format!("{} s", delay as f32 / 1_000.0)
-                } else {
-                    format!("{delay} ms")
-                })
-                .standing(widgets::Standing::of(
-                    delay == crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS,
-                    false,
-                ))
-            }),
-            DELAY_OPTIONS
-                .iter()
-                .position(|delay| *delay == selected)
-                .unwrap_or_default(),
-        )
-        .width(112.0)
-        .on_select(|page, ix, _, cx| {
-            let delay = DELAY_OPTIONS[ix];
-            page.autosave_delay_ms = delay;
-            cx.emit(FilesSettingsEvent::AutosaveDelayChanged(delay));
-            cx.notify();
-        })
-        .render(&self.delay_select, cx);
+        let delay_control =
+            widgets::select("files-autosave-delay", "Autosave delay", &theme, |page: &mut Self| {
+                &mut page.delay_select
+            })
+            .options(
+                DELAY_OPTIONS.into_iter().map(|delay| {
+                    widgets::SelectOption::new(if delay >= 1_000 {
+                        format!("{} s", delay as f32 / 1_000.0)
+                    } else {
+                        format!("{delay} ms")
+                    })
+                    .standing(widgets::Standing::of(
+                        delay == crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS,
+                        false,
+                    ))
+                }),
+                DELAY_OPTIONS.iter().position(|delay| *delay == selected).unwrap_or_default(),
+            )
+            .width(112.0)
+            .on_select(|page, ix, _, cx| {
+                let delay = DELAY_OPTIONS[ix];
+                page.autosave_delay_ms = delay;
+                cx.emit(FilesSettingsEvent::AutosaveDelayChanged(delay));
+                cx.notify();
+            })
+            .render(&self.delay_select, cx);
         let card = widgets::section_card(&theme)
             .child(
                 widgets::card_row(&theme, true)
@@ -146,10 +142,17 @@ impl Render for FilesSettingsPage {
                             .flex_col()
                             .child(widgets::row_title(&theme, "Autosave")),
                     )
-                    .children(self.reset("files-autosave-reset", "Autosave", !autosave_enabled, &theme, cx, |this, cx| {
-                        this.autosave_enabled = false;
-                        cx.emit(FilesSettingsEvent::AutosaveChanged(false));
-                    }))
+                    .children(self.reset(
+                        "files-autosave-reset",
+                        "Autosave",
+                        !autosave_enabled,
+                        &theme,
+                        cx,
+                        |this, cx| {
+                            this.autosave_enabled = false;
+                            cx.emit(FilesSettingsEvent::AutosaveChanged(false));
+                        },
+                    ))
                     .child(
                         widgets::toggle_switch(&theme, autosave_enabled, "files-autosave")
                             .id("files-autosave-toggle")
@@ -206,10 +209,17 @@ impl Render for FilesSettingsPage {
                             .flex_col()
                             .child(widgets::row_title(&theme, "Word wrap")),
                     )
-                    .children(self.reset("files-word-wrap-reset", "Word wrap", !word_wrap, &theme, cx, |this, cx| {
-                        this.word_wrap = false;
-                        cx.emit(FilesSettingsEvent::WordWrapChanged(false));
-                    }))
+                    .children(self.reset(
+                        "files-word-wrap-reset",
+                        "Word wrap",
+                        !word_wrap,
+                        &theme,
+                        cx,
+                        |this, cx| {
+                            this.word_wrap = false;
+                            cx.emit(FilesSettingsEvent::WordWrapChanged(false));
+                        },
+                    ))
                     .child(
                         widgets::toggle_switch(&theme, word_wrap, "files-word-wrap")
                             .id("files-word-wrap-toggle")
@@ -241,13 +251,22 @@ impl Render for FilesSettingsPage {
                             .child(widgets::row_title(&theme, "Show hidden files"))
                             .child(widgets::meta_line(
                                 &theme,
-                                vec![div().child("Dotfiles and what git ignores").into_any_element()],
+                                vec![
+                                    div().child("Dotfiles and what git ignores").into_any_element(),
+                                ],
                             )),
                     )
-                    .children(self.reset("files-show-all-reset", "Show hidden files", !show_all_files, &theme, cx, |this, cx| {
-                        this.show_all_files = false;
-                        cx.emit(FilesSettingsEvent::ShowAllFilesChanged(false));
-                    }))
+                    .children(self.reset(
+                        "files-show-all-reset",
+                        "Show hidden files",
+                        !show_all_files,
+                        &theme,
+                        cx,
+                        |this, cx| {
+                            this.show_all_files = false;
+                            cx.emit(FilesSettingsEvent::ShowAllFilesChanged(false));
+                        },
+                    ))
                     .child(
                         widgets::toggle_switch(&theme, show_all_files, "files-show-all")
                             .id("files-show-all-toggle")
@@ -318,12 +337,18 @@ mod tests {
     fn a_row_offers_reset_only_off_its_default(cx: &mut TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::default()));
         let (page, cx) = cx.add_window_view(|_, cx| {
-            FilesSettingsPage::new(true, crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS, true, false, cx)
+            FilesSettingsPage::new(
+                true,
+                crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS,
+                true,
+                false,
+                cx,
+            )
         });
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let seen = events.clone();
-        let _events =
-            cx.update(|_, cx| cx.subscribe(&page, move |_, event, _| seen.borrow_mut().push(*event)));
+        let _events = cx
+            .update(|_, cx| cx.subscribe(&page, move |_, event, _| seen.borrow_mut().push(*event)));
         let draw = |cx: &mut gpui::VisualTestContext| {
             cx.update(|window, cx| {
                 window.refresh();
@@ -331,9 +356,15 @@ mod tests {
             });
         };
         draw(cx);
-        assert!(cx.debug_bounds("files-autosave-reset").is_some(), "autosave is on, off by default");
+        assert!(
+            cx.debug_bounds("files-autosave-reset").is_some(),
+            "autosave is on, off by default"
+        );
         assert!(cx.debug_bounds("files-word-wrap-reset").is_some(), "wrap is on, off by default");
-        assert!(cx.debug_bounds("files-autosave-delay-reset").is_none(), "the delay is the default");
+        assert!(
+            cx.debug_bounds("files-autosave-delay-reset").is_none(),
+            "the delay is the default"
+        );
         assert!(cx.debug_bounds("files-show-all-reset").is_none(), "hidden files are off");
         let reset = cx.debug_bounds("files-word-wrap-reset").unwrap().center();
         cx.simulate_click(reset, gpui::Modifiers::default());

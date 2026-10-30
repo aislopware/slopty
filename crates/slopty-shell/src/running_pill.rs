@@ -3,9 +3,10 @@
 //! corner. slopty: the "● 3" pill on the sidebar's chat rows is gone (Amp's prune): a subagent
 //! left at work reads as its agent's own work there, and the row's hover card counts them.
 
+use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Hsla, IntoElement, RenderOnce, SharedString, Styled as _, TextAlign, TextRun,
-    Window, canvas, div, fill, point, prelude::*, px,
+    App, Bounds, Hsla, IntoElement, RenderOnce, SharedString, TextAlign, TextRun, Window, canvas,
+    div, fill, point, px,
 };
 
 use crate::theme::Theme;
@@ -25,11 +26,7 @@ const COUNT_CAP: u32 = 99;
 
 /// The count as drawn: exact up to [`COUNT_CAP`], then "99+".
 pub fn count_label(count: u32) -> SharedString {
-    if count > COUNT_CAP {
-        format!("{COUNT_CAP}+").into()
-    } else {
-        count.to_string().into()
-    }
+    if count > COUNT_CAP { format!("{COUNT_CAP}+").into() } else { count.to_string().into() }
 }
 
 fn is_capped(count: u32) -> bool {
@@ -60,9 +57,7 @@ fn shape_count(
         underline: None,
         strikethrough: None,
     };
-    window
-        .text_system()
-        .shape_line(label, font_size, &[run], None)
+    window.text_system().shape_line(label, font_size, &[run], None)
 }
 
 /// Where to put a line of digits so their middle sits on the middle of
@@ -94,17 +89,11 @@ pub fn mark_titlebar_button(
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let tone = theme.busy;
-    button.relative().child(
-        div()
-            .absolute()
-            .top(px(-3.0))
-            .right(px(-3.0))
-            .child(CountBadge {
-                count,
-                tone,
-                family: theme.font_mono.clone(),
-            }),
-    )
+    button.relative().child(div().absolute().top(px(-3.0)).right(px(-3.0)).child(CountBadge {
+        count,
+        tone,
+        family: theme.font_mono.clone(),
+    }))
 }
 
 /// The count badge on the titlebar button, painted rather than laid out so
@@ -134,11 +123,7 @@ impl RenderOnce for CountBadge {
         let capped = is_capped(self.count);
         let text_width = f32::from(line.width);
         // Capped labels trim the padding after the "+" (see [`PLUS_TRIM`]).
-        let right_pad = if capped {
-            BADGE_PAD - PLUS_TRIM
-        } else {
-            BADGE_PAD
-        };
+        let right_pad = if capped { BADGE_PAD - PLUS_TRIM } else { BADGE_PAD };
         let width = (BADGE_PAD + text_width + right_pad).max(BADGE);
         let tone = self.tone;
         canvas(
@@ -157,14 +142,7 @@ impl RenderOnce for CountBadge {
                     left + (f32::from(bounds.size.width) - text_width) / 2.0
                 };
                 let origin = point(px(snap(x)), px(line_top));
-                let _ = line.paint(
-                    origin,
-                    bounds.size.height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
+                let _ = line.paint(origin, bounds.size.height, TextAlign::Left, None, window, cx);
             },
         )
         .w(px(width))

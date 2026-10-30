@@ -5,12 +5,13 @@
 // Mac, a machine over ssh, or the server. The page shows the server this app follows, with a way
 // to change it.
 
-use crate::motion::HoverFade as _;
 use chrono::{DateTime, Utc};
+use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    AnyElement, ClipboardItem, Context, Entity, SharedString, Subscription, Task, Window, div, px,
 };
+
+use crate::motion::HoverFade as _;
 
 // One name for what the server menu, this page and the dialog offer.
 /// What a phone or an iPad joining the server is called, wherever it is offered.
@@ -52,7 +53,10 @@ pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
 /// When a machine last seen at `last_seen`, read at `now`, next reads differently: its
 /// "Online" ends past the window, and "Last seen" moves on by the minute, the hour or the day
 /// it says. `None` for a machine never seen.
-pub fn presence_changes(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+pub fn presence_changes(
+    last_seen: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
@@ -72,7 +76,8 @@ pub fn presence_changes(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
 }
 
 /// What the page says it lists.
-const DEVICES_SUBTITLE: &str = "The machines Slopty works on, each with its own agents, files and terminals.";
+const DEVICES_SUBTITLE: &str =
+    "The machines Slopty works on, each with its own agents, files and terminals.";
 
 pub struct DevicesPage {
     state: Entity<AppState>,
@@ -141,7 +146,8 @@ impl DevicesPage {
             .min();
         self.clock_tick = next.map(|at| {
             // A hair past the change, so the clock taken then reads it.
-            let wait = (at - now).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
+            let wait =
+                (at - now).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
             cx.spawn(async move |page, cx| {
                 cx.background_executor().timer(wait).await;
                 page.update(cx, |page, cx| {
@@ -291,11 +297,7 @@ fn action_tone(id: &str) -> widgets::ActionTone {
 
 /// Short device id for the click-to-copy chip (`abcd1234…wxyz`).
 pub fn short_id(id: &str) -> String {
-    if id.len() > 12 {
-        format!("{}…{}", &id[..8], &id[id.len() - 4..])
-    } else {
-        id.to_string()
-    }
+    if id.len() > 12 { format!("{}…{}", &id[..8], &id[id.len() - 4..]) } else { id.to_string() }
 }
 
 impl Render for DevicesPage {
@@ -312,10 +314,9 @@ impl Render for DevicesPage {
             self.show_add_device(choice, window, cx);
         }
         let viewport = window.viewport_size();
-        let dialog = self
-            .add
-            .as_ref()
-            .map(|(dialog, _)| popover::modal_top("add-device-dialog", viewport, dialog.clone().into_any_element()));
+        let dialog = self.add.as_ref().map(|(dialog, _)| {
+            popover::modal_top("add-device-dialog", viewport, dialog.clone().into_any_element())
+        });
         let server = self.state.read(cx).connectivity.server.clone();
         // The server's code, while it is up and the app still offers one.
         let invite = server.as_ref().and_then(|server| server.invite.clone());
@@ -388,18 +389,14 @@ impl Render for DevicesPage {
             let mut meta: Vec<AnyElement> = (!device.platform.is_empty())
                 .then(|| {
                     div()
-                        .child(SharedString::from(
-                            platform_label(&device.platform).to_string(),
-                        ))
+                        .child(SharedString::from(platform_label(&device.platform).to_string()))
                         .into_any_element()
                 })
                 .into_iter()
                 .collect();
             if let Some(version) = device.version.as_deref().filter(|v| !v.is_empty()) {
                 meta.push(
-                    div()
-                        .child(SharedString::from(format!("v{version}")))
-                        .into_any_element(),
+                    div().child(SharedString::from(format!("v{version}"))).into_any_element(),
                 );
             }
             // Presence only says something about other devices.
@@ -442,29 +439,25 @@ impl Render for DevicesPage {
                         .child(widgets::meta_line(&theme, meta)),
                 )
                 .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .children(actions)
-                        .child(
-                            // A row's action is its words alone, as its neighbours'.
-                            widgets::action_button(&theme, widgets::ActionTone::Quiet)
-                                .child(SharedString::from(if id_copied { "Copied" } else { "Copy ID" }))
+                    div().flex_none().flex().items_center().gap(px(4.0)).children(actions).child(
+                        // A row's action is its words alone, as its neighbours'.
+                        widgets::action_button(&theme, widgets::ActionTone::Quiet)
+                            .child(SharedString::from(if id_copied { "Copied" } else { "Copy ID" }))
                             .id(("device-id", ix))
                             .tab_index(0)
                             .role(gpui::Role::Button)
-                            .tooltip(widgets::text_tooltip(if id_copied { "Copied" } else { "Copy this device's ID" }))
+                            .tooltip(widgets::text_tooltip(if id_copied {
+                                "Copied"
+                            } else {
+                                "Copy this device's ID"
+                            }))
                             .tooltip_show_delay(widgets::TOOLTIP_DELAY)
                             .aria_label(format!("Copy device ID {}", device.id))
                             .map(|el| crate::surface_chrome::focus_ring(el, &theme))
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.copy_id(copy_id.clone(), cx);
-                                },
-                            )),
-                        ),
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.copy_id(copy_id.clone(), cx);
+                            })),
+                    ),
                 )
                 .into_any_element()
         };
@@ -516,7 +509,8 @@ impl Render for DevicesPage {
                 ),
         );
         // The server this app follows, and a way to change it.
-        let server_actions = server.as_ref().map(|server| server.actions.clone()).unwrap_or_default();
+        let server_actions =
+            server.as_ref().map(|server| server.actions.clone()).unwrap_or_default();
         let server_block = {
             let (title, meta, action) = match &server {
                 Some(server) => (
@@ -551,16 +545,20 @@ impl Render for DevicesPage {
                     )
                     .children(server_actions.into_iter().enumerate().map(|(n, action)| {
                         let run = action.id.clone();
-                        widgets::text_action(&theme, widgets::ActionTone::Quiet, action.label.clone())
-                            .id(SharedString::from(format!("server-action-{n}")))
-                            .flex_none()
-                            .tab_index(0)
-                            .role(gpui::Role::Button)
-                            .aria_label(format!("{} server", action.label))
-                            .map(|el| crate::surface_chrome::focus_ring(el, &theme))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.run_action("server".to_owned(), run.clone(), cx);
-                            }))
+                        widgets::text_action(
+                            &theme,
+                            widgets::ActionTone::Quiet,
+                            action.label.clone(),
+                        )
+                        .id(SharedString::from(format!("server-action-{n}")))
+                        .flex_none()
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("{} server", action.label))
+                        .map(|el| crate::surface_chrome::focus_ring(el, &theme))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.run_action("server".to_owned(), run.clone(), cx);
+                        }))
                     }))
                     // The code a phone or iPad scans, where this device shows one.
                     .when(invite.is_some(), |row| {
@@ -598,8 +596,7 @@ impl Render for DevicesPage {
             .child(widgets::section_label(&theme, "Server").mt(px(28.0)))
             .child(server_block)
             .when_some(local_block, |el, block| {
-                el.child(widgets::section_label(&theme, "This device").mt(px(28.0)))
-                    .child(block)
+                el.child(widgets::section_label(&theme, "This device").mt(px(28.0))).child(block)
             })
             // Slopty lists every machine its server knows.
             .child(widgets::section_label(&theme, "Other devices").mt(px(28.0)))
@@ -624,7 +621,13 @@ impl Render for DevicesPage {
                         .child(
                             widgets::page_column()
                                 // Slopty's machines, not a synced registry; one page head.
-                                .child(widgets::page_head(&theme, "Devices", None, DEVICES_SUBTITLE, None))
+                                .child(widgets::page_head(
+                                    &theme,
+                                    "Devices",
+                                    None,
+                                    DEVICES_SUBTITLE,
+                                    None,
+                                ))
                                 .child(card),
                         ),
                 )
@@ -638,8 +641,9 @@ impl Render for DevicesPage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::TimeDelta;
+
+    use super::*;
 
     // Copy ID keeps its words; its glyph shows the check for the shared span (M5).
     #[gpui::test]
@@ -649,7 +653,10 @@ mod tests {
         let state = cx.new(|_| AppState::new());
         let page = cx.new(|cx| DevicesPage::new(state, cx));
         page.update(cx, |page, cx| page.copy_id("studio".into(), cx));
-        assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("studio"));
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+            Some("studio")
+        );
         assert!(cx.update(|cx| crate::motion::copied(&copied_key("studio"), cx)));
         cx.executor().advance_clock(crate::motion::COPIED_FOR);
         cx.run_until_parked();
@@ -743,12 +750,24 @@ mod tests {
                 let update = window.a11y_tree().expect("a tree");
                 let scale = f64::from(window.scale_factor());
                 let at = |label: &str, role: gpui::Role| {
-                    update.nodes.iter().find(|(_, n)| n.role() == role && n.label() == Some(label)).map(|(_, n)| {
-                        let r = n.bounds().unwrap_or_default();
-                        (r.y0 / scale, r.y1 / scale, (r.x0 + r.x1) / 2.0 / scale, (r.y0 + r.y1) / 2.0 / scale)
-                    })
+                    update
+                        .nodes
+                        .iter()
+                        .find(|(_, n)| n.role() == role && n.label() == Some(label))
+                        .map(|(_, n)| {
+                            let r = n.bounds().unwrap_or_default();
+                            (
+                                r.y0 / scale,
+                                r.y1 / scale,
+                                (r.x0 + r.x1) / 2.0 / scale,
+                                (r.y0 + r.y1) / 2.0 / scale,
+                            )
+                        })
                 };
-                (at("Add device", gpui::Role::Dialog).expect("the dialog"), at("A server", gpui::Role::Tab))
+                (
+                    at("Add device", gpui::Role::Dialog).expect("the dialog"),
+                    at("A server", gpui::Role::Tab),
+                )
             })
         };
         let (mac, server_tab) = dialog(cx);
@@ -809,11 +828,23 @@ mod tests {
         };
         assert_eq!(says(cx), "Online");
         cx.executor().advance_clock(std::time::Duration::from_secs(10));
-        assert_eq!((says(cx), drawn.get()), ("Online".to_owned(), 0), "nothing moves inside the window");
+        assert_eq!(
+            (says(cx), drawn.get()),
+            ("Online".to_owned(), 0),
+            "nothing moves inside the window"
+        );
         cx.executor().advance_clock(std::time::Duration::from_secs(2));
-        assert_eq!((says(cx), drawn.get()), ("1m ago".to_owned(), 1), "past the window, and the page drew");
+        assert_eq!(
+            (says(cx), drawn.get()),
+            ("1m ago".to_owned(), 1),
+            "past the window, and the page drew"
+        );
         cx.executor().advance_clock(std::time::Duration::from_secs(60));
-        assert_eq!((says(cx), drawn.get()), ("2m ago".to_owned(), 2), "the minute turned; this machine's own time never ticks");
+        assert_eq!(
+            (says(cx), drawn.get()),
+            ("2m ago".to_owned(), 2),
+            "the minute turned; this machine's own time never ticks"
+        );
     }
 
     #[test]
@@ -826,7 +857,11 @@ mod tests {
             let seen = now - TimeDelta::seconds(age);
             let next = presence_changes(Some(seen), now).unwrap();
             let shown = format_last_seen(Some(seen), now);
-            assert_eq!(format_last_seen(Some(seen), next - TimeDelta::seconds(1)), shown, "{age}s: the same until then");
+            assert_eq!(
+                format_last_seen(Some(seen), next - TimeDelta::seconds(1)),
+                shown,
+                "{age}s: the same until then"
+            );
             assert_ne!(format_last_seen(Some(seen), next), shown, "{age}s: different from then");
         }
     }
@@ -835,22 +870,10 @@ mod tests {
     fn last_seen_formatting() {
         let now = Utc::now();
         assert_eq!(format_last_seen(None, now), "never seen");
-        assert_eq!(
-            format_last_seen(Some(now - TimeDelta::seconds(30)), now),
-            "just now"
-        );
-        assert_eq!(
-            format_last_seen(Some(now - TimeDelta::minutes(5)), now),
-            "5m ago"
-        );
-        assert_eq!(
-            format_last_seen(Some(now - TimeDelta::hours(3)), now),
-            "3h ago"
-        );
-        assert_eq!(
-            format_last_seen(Some(now - TimeDelta::days(2)), now),
-            "2d ago"
-        );
+        assert_eq!(format_last_seen(Some(now - TimeDelta::seconds(30)), now), "just now");
+        assert_eq!(format_last_seen(Some(now - TimeDelta::minutes(5)), now), "5m ago");
+        assert_eq!(format_last_seen(Some(now - TimeDelta::hours(3)), now), "3h ago");
+        assert_eq!(format_last_seen(Some(now - TimeDelta::days(2)), now), "2d ago");
     }
 
     // One tile per machine row, by platform; an unknown platform still gets one.

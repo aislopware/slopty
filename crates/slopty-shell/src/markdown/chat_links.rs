@@ -17,7 +17,8 @@ pub fn is_chat_link(url: &str) -> bool {
 /// its title, then how it stands when it works or waits on the person.
 pub fn chip_label(title: Option<&str>, status: Option<slopty_view_proto::SessionStatus>) -> String {
     use slopty_view_proto::SessionStatus;
-    let title = title.map(str::trim).filter(|title| !title.is_empty()).unwrap_or("Untitled session");
+    let title =
+        title.map(str::trim).filter(|title| !title.is_empty()).unwrap_or("Untitled session");
     let title = crate::transcript::single_line(title);
     match status {
         Some(SessionStatus::Working) => format!("{title} · Working"),
@@ -29,10 +30,7 @@ pub fn chip_label(title: Option<&str>, status: Option<slopty_view_proto::Session
 
 /// `tree` with every link to a chat `label` knows shown as `label` says it, or `None` when it
 /// links to none it knows (the caller keeps `tree`).
-pub fn labelled(
-    tree: &BlockTree,
-    label: &dyn Fn(&str) -> Option<String>,
-) -> Option<BlockTree> {
+pub fn labelled(tree: &BlockTree, label: &dyn Fn(&str) -> Option<String>) -> Option<BlockTree> {
     let mut changed = false;
     let blocks = tree
         .blocks
@@ -157,7 +155,8 @@ mod tests {
 
     #[test]
     fn a_link_to_a_chat_shows_it_as_it_stands() {
-        let text = format!("See [the **other** chat]({}) and [a page](https://example.com).", link("b"));
+        let text =
+            format!("See [the **other** chat]({}) and [a page](https://example.com).", link("b"));
         let tree = parse_full(&text);
         let label = |url: &str| {
             let chat = crate::links::parse_slopty_conversation_link(url).ok()?.chat_id;

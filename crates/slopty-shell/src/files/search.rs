@@ -1,27 +1,21 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
-use gpui::{
-    AnyElement, Context, ListSizingBehavior, SharedString, Task, Window, div, list, prelude::*, px,
-};
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, ListSizingBehavior, SharedString, Task, Window, div, list, px};
 use slopty_view_proto::{
     ListWorkspaceDirectoryRequest, SearchWorkspaceFilesRequest, WorkspaceEntryKind,
     WorkspaceFileSearchMatch,
 };
 
-use super::{
-    FilesSurface, WorkspacePathDrag, client::WorkspaceFilesClient, model::parent_path,
-    workspace_path_drag_ghost,
-};
-use crate::{
-    file_icons::{self, FileIconIdentity},
-    icons::{self, icon},
-    motion::HoverFade as _,
-    theme::Theme,
-};
+use super::client::WorkspaceFilesClient;
+use super::model::parent_path;
+use super::{FilesSurface, WorkspacePathDrag, workspace_path_drag_ghost};
+use crate::file_icons::{self, FileIconIdentity};
+use crate::icons::{self, icon};
+use crate::motion::HoverFade as _;
+use crate::theme::Theme;
 
 pub const SEARCH_ROW_HEIGHT: f32 = 27.0;
 const SEARCH_RESULT_LIMIT: usize = 200;
@@ -78,11 +72,7 @@ impl SearchTreeModel {
         for result in results {
             let mut parent = None;
             let mut path = String::new();
-            for component in result
-                .path
-                .split('/')
-                .filter(|component| !component.is_empty())
-            {
+            for component in result.path.split('/').filter(|component| !component.is_empty()) {
                 if !path.is_empty() {
                     path.push('/');
                 }
@@ -99,16 +89,8 @@ impl SearchTreeModel {
                     })
                     .or_insert_with(|| SearchTreeNode {
                         path: path.clone(),
-                        name: if is_match {
-                            result.name.clone()
-                        } else {
-                            component.to_string()
-                        },
-                        kind: if is_match {
-                            result.kind
-                        } else {
-                            WorkspaceEntryKind::Directory
-                        },
+                        name: if is_match { result.name.clone() } else { component.to_string() },
+                        kind: if is_match { result.kind } else { WorkspaceEntryKind::Directory },
                         score: is_match.then_some(result.score),
                         best_score: result.score,
                         children: Vec::new(),
@@ -142,11 +124,7 @@ impl SearchTreeModel {
     }
 
     fn toggle(&mut self, path: &str) -> bool {
-        if !self
-            .nodes
-            .get(path)
-            .is_some_and(|node| !node.children.is_empty())
-        {
+        if !self.nodes.get(path).is_some_and(|node| !node.children.is_empty()) {
             return false;
         }
         if !self.collapsed.remove(path) {
@@ -185,10 +163,7 @@ fn update_best_score(path: &str, nodes: &mut HashMap<String, SearchTreeNode>) ->
 }
 
 fn sort_search_branch(path: &str, nodes: &mut HashMap<String, SearchTreeNode>) {
-    let children = nodes
-        .get(path)
-        .map(|node| node.children.clone())
-        .unwrap_or_default();
+    let children = nodes.get(path).map(|node| node.children.clone()).unwrap_or_default();
     for child in &children {
         sort_search_branch(child, nodes);
     }
@@ -311,15 +286,11 @@ impl FilesSurface {
                 self.search_state.reveal_scroll_pending = false;
                 self.reveal_tree_selection();
             }
-            self.search.update(cx, |search, cx| {
-                search.set_mention_controls(false, false, cx)
-            });
+            self.search.update(cx, |search, cx| search.set_mention_controls(false, false, cx));
             cx.notify();
             return;
         }
-        self.search.update(cx, |search, cx| {
-            search.set_mention_controls(true, false, cx)
-        });
+        self.search.update(cx, |search, cx| search.set_mention_controls(true, false, cx));
         let Some(context) = self.request_context.clone() else {
             self.search_state.loading = false;
             self.search_state.error = Some(super::NO_FOLDER.into());
@@ -342,9 +313,7 @@ impl FilesSurface {
         };
         let client = WorkspaceFilesClient::new(engine, context.clone());
         self.search_state.task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(200))
-                .await;
+            cx.background_executor().timer(Duration::from_millis(200)).await;
             let result = client.search(request).await;
             let _ = this.update(cx, |surface, cx| {
                 if !surface.search_state.accepts(generation, &query)
@@ -357,10 +326,7 @@ impl FilesSurface {
                     Ok(results) => {
                         surface.search_state.error = None;
                         surface.search_state.results = results;
-                        surface
-                            .search_state
-                            .tree
-                            .rebuild(&surface.search_state.results);
+                        surface.search_state.tree.rebuild(&surface.search_state.results);
                         surface.search_state.active = 0;
                     }
                     Err(error) => {
@@ -372,9 +338,9 @@ impl FilesSurface {
                     px(SEARCH_ROW_HEIGHT),
                 );
                 let has_results = !surface.search_state.tree.rows().is_empty();
-                surface.search.update(cx, |search, cx| {
-                    search.set_mention_controls(true, has_results, cx)
-                });
+                surface
+                    .search
+                    .update(cx, |search, cx| search.set_mention_controls(true, has_results, cx));
                 cx.notify();
             });
         }));
@@ -386,13 +352,7 @@ impl FilesSurface {
     }
 
     pub(super) fn activate_search_result(&mut self, cx: &mut Context<Self>) {
-        let Some(row) = self
-            .search_state
-            .tree
-            .rows()
-            .get(self.search_state.active)
-            .cloned()
-        else {
+        let Some(row) = self.search_state.tree.rows().get(self.search_state.active).cloned() else {
             return;
         };
         if row.kind == WorkspaceEntryKind::Directory
@@ -410,8 +370,7 @@ impl FilesSurface {
                 .iter()
                 .position(|candidate| candidate.path == row.path)
                 .unwrap_or(0);
-            self.search_list
-                .scroll_to_reveal_item(self.search_state.active);
+            self.search_list.scroll_to_reveal_item(self.search_state.active);
             cx.notify();
             return;
         }
@@ -465,9 +424,8 @@ impl FilesSurface {
             current = parent_path(&directory);
         }
         ancestors.reverse();
-        let directories = std::iter::once(String::new())
-            .chain(ancestors.clone())
-            .collect::<Vec<_>>();
+        let directories =
+            std::iter::once(String::new()).chain(ancestors.clone()).collect::<Vec<_>>();
         let generation = self.tree.generation();
         let reveal_generation = self.search_state.reveal_generation;
         let include_ignored = self.tree.include_ignored();
@@ -553,11 +511,8 @@ impl FilesSurface {
             return centered_search_message(error, theme.danger.opacity(0.82));
         }
         if self.search_state.results.is_empty() {
-            let label = if self.search_state.loading {
-                "Searching…"
-            } else {
-                "No matching files"
-            };
+            let label =
+                if self.search_state.loading { "Searching…" } else { "No matching files" };
             return centered_search_message(label.into(), theme.text_faint);
         }
         div()
@@ -568,31 +523,25 @@ impl FilesSurface {
             .min_h_0()
             .flex()
             .flex_col()
-            .when(
-                self.search_state.results.len() >= SEARCH_RESULT_LIMIT,
-                |element| {
-                    element.child(
-                        div()
-                            .h(px(24.0))
-                            .flex_none()
-                            .px(px(10.0))
-                            .flex()
-                            .items_center()
-                            .font_family(theme.font_sans.clone())
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_faint)
-                            .child("Showing the first 200 matches"),
-                    )
-                },
-            )
-            .child(
-                list(
-                    self.search_list.clone(),
-                    cx.processor(Self::render_search_row),
+            .when(self.search_state.results.len() >= SEARCH_RESULT_LIMIT, |element| {
+                element.child(
+                    div()
+                        .h(px(24.0))
+                        .flex_none()
+                        .px(px(10.0))
+                        .flex()
+                        .items_center()
+                        .font_family(theme.font_sans.clone())
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_faint)
+                        .child("Showing the first 200 matches"),
                 )
-                .flex_1()
-                .min_h_0()
-                .with_sizing_behavior(ListSizingBehavior::Auto),
+            })
+            .child(
+                list(self.search_list.clone(), cx.processor(Self::render_search_row))
+                    .flex_1()
+                    .min_h_0()
+                    .with_sizing_behavior(ListSizingBehavior::Auto),
             )
             .into_any_element()
     }
@@ -652,25 +601,16 @@ impl FilesSurface {
                 cx.stop_propagation();
                 workspace_path_drag_ghost(payload, cx)
             })
-            .child(
-                div()
-                    .size(px(14.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(row.has_children, |element| {
-                        element.child(
-                            icon(if expanded {
-                                icons::ALT_ARROW_DOWN
-                            } else {
-                                icons::ALT_ARROW_RIGHT
-                            })
+            .child(div().size(px(14.0)).flex_none().flex().items_center().justify_center().when(
+                row.has_children,
+                |element| {
+                    element.child(
+                        icon(if expanded { icons::ALT_ARROW_DOWN } else { icons::ALT_ARROW_RIGHT })
                             .size(px(11.0))
                             .text_color(theme.text_faint),
-                        )
-                    }),
-            )
+                    )
+                },
+            ))
             .child({
                 let identity = match row.kind {
                     WorkspaceEntryKind::Directory => {
@@ -679,9 +619,7 @@ impl FilesSurface {
                     WorkspaceEntryKind::File => FileIconIdentity::file(&row.name),
                     WorkspaceEntryKind::Symlink => FileIconIdentity::symlink(&row.name),
                 };
-                file_icons::icon(identity, theme.appearance)
-                    .size(px(14.0))
-                    .flex_none()
+                file_icons::icon(identity, theme.appearance).size(px(14.0)).flex_none()
             })
             .child(
                 div()
@@ -732,11 +670,7 @@ mod tests {
 
     #[test]
     fn search_state_rejects_stale_queries() {
-        let state = FileSearchState {
-            query: "shell".into(),
-            generation: 4,
-            ..Default::default()
-        };
+        let state = FileSearchState { query: "shell".into(), generation: 4, ..Default::default() };
         assert!(state.accepts(4, "shell"));
         assert!(!state.accepts(3, "shell"));
         assert!(!state.accepts(4, "other"));
@@ -746,16 +680,8 @@ mod tests {
     fn search_tree_groups_matches_under_real_ancestors() {
         let mut tree = SearchTreeModel::default();
         tree.rebuild(&[
-            search_match(
-                "archive-renamed/docs/docs-1.txt",
-                WorkspaceEntryKind::File,
-                100,
-            ),
-            search_match(
-                "archive-renamed/logs/file-2.txt",
-                WorkspaceEntryKind::File,
-                90,
-            ),
+            search_match("archive-renamed/docs/docs-1.txt", WorkspaceEntryKind::File, 100),
+            search_match("archive-renamed/logs/file-2.txt", WorkspaceEntryKind::File, 90),
             search_match("README.md", WorkspaceEntryKind::File, 80),
         ]);
 
@@ -771,10 +697,7 @@ mod tests {
                 "README.md",
             ]
         );
-        assert_eq!(
-            rows.iter().map(|row| row.depth).collect::<Vec<_>>(),
-            vec![0, 1, 2, 1, 2, 0]
-        );
+        assert_eq!(rows.iter().map(|row| row.depth).collect::<Vec<_>>(), vec![0, 1, 2, 1, 2, 0]);
     }
 
     #[test]
@@ -787,14 +710,8 @@ mod tests {
         )]);
 
         assert_eq!(
-            tree.rows()
-                .iter()
-                .map(|row| row.path.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "THIRD_PARTY_NOTICES",
-                "THIRD_PARTY_NOTICES/THIRD_PARTY_NOTICES.md"
-            ]
+            tree.rows().iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
+            vec!["THIRD_PARTY_NOTICES", "THIRD_PARTY_NOTICES/THIRD_PARTY_NOTICES.md"]
         );
     }
 
@@ -817,10 +734,14 @@ mod tests {
 
 #[cfg(test)]
 mod reveal_tests {
-    use super::*;
-    use crate::files::{FilesEvent, client::FilesRequestContext};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use gpui::{AppContext, TestAppContext};
-    use std::{cell::RefCell, rc::Rc};
+
+    use super::*;
+    use crate::files::FilesEvent;
+    use crate::files::client::FilesRequestContext;
 
     fn context(checkout: &str) -> FilesRequestContext {
         FilesRequestContext {
@@ -851,9 +772,7 @@ mod reveal_tests {
             })
         });
         surface.update(cx, |surface, cx| {
-            surface
-                .search
-                .update(cx, |search, cx| search.set_text("config", cx));
+            surface.search.update(cx, |search, cx| search.set_text("config", cx));
         });
         surface.update(cx, |surface, cx| {
             surface.finish_reveal("src/main.rs".into(), RevealIntent::SynchronizeSelection, cx);
@@ -888,9 +807,7 @@ mod reveal_tests {
             })
         });
         surface.update(cx, |surface, cx| {
-            surface
-                .search
-                .update(cx, |search, cx| search.set_text("emptydir", cx));
+            surface.search.update(cx, |search, cx| search.set_text("emptydir", cx));
             surface.finish_reveal("emptydir".into(), RevealIntent::ActivateDirectory, cx);
         });
         surface.read_with(cx, |surface, cx| {

@@ -32,11 +32,7 @@ impl EditorMenuAvailability {
     fn new(capabilities: InputContextMenuCapabilities, clipboard_has_text: bool) -> Self {
         let editable = capabilities.is_editable();
         let selection = capabilities.has_selection();
-        Self {
-            cut: editable && selection,
-            copy: selection,
-            paste: editable && clipboard_has_text,
-        }
+        Self { cut: editable && selection, copy: selection, paste: editable && clipboard_has_text }
     }
 }
 
@@ -70,13 +66,14 @@ pub(super) fn new_file_editor(
     let menu_editor = editor.downgrade();
     editor.update(cx, |state, cx| {
         state.set_editor_style(super::editor_adapter::editor_style(theme));
-        state.set_editor_paddings(gpui::Edges { left: gpui::px(GUTTER_INSET), ..Default::default() });
+        state.set_editor_paddings(gpui::Edges {
+            left: gpui::px(GUTTER_INSET),
+            ..Default::default()
+        });
         state.set_readonly(false, cx);
         state.on_context_menu(Rc::new(move |_, capabilities, position, _, cx| {
-            let clipboard_has_text = cx
-                .read_from_clipboard()
-                .and_then(|item| item.text())
-                .is_some();
+            let clipboard_has_text =
+                cx.read_from_clipboard().and_then(|item| item.text()).is_some();
             let Some(menu_editor) = menu_editor.upgrade() else {
                 return;
             };
@@ -149,10 +146,7 @@ pub(super) fn toggle_markdown_task(
             return;
         }
         let marker = source.get(task.range.clone());
-        if !matches!(
-            (marker, task.checked),
-            (Some("[ ]"), false) | (Some("[x]" | "[X]"), true)
-        ) {
+        if !matches!((marker, task.checked), (Some("[ ]"), false) | (Some("[x]" | "[X]"), true)) {
             return;
         }
         let selection = state.selected_range();
@@ -185,42 +179,29 @@ mod tests {
         let editable_selection = InputContextMenuCapabilities::new().selection(true);
         assert_eq!(
             EditorMenuAvailability::new(editable_selection, true),
-            EditorMenuAvailability {
-                cut: true,
-                copy: true,
-                paste: true,
-            }
+            EditorMenuAvailability { cut: true, copy: true, paste: true }
         );
 
         let without_selection = InputContextMenuCapabilities::new();
         assert_eq!(
             EditorMenuAvailability::new(without_selection, true),
-            EditorMenuAvailability {
-                cut: false,
-                copy: false,
-                paste: true,
-            }
+            EditorMenuAvailability { cut: false, copy: false, paste: true }
         );
         assert!(!EditorMenuAvailability::new(without_selection, false).paste);
 
-        let readonly_selection = InputContextMenuCapabilities::new()
-            .selection(true)
-            .readonly(true);
+        let readonly_selection = InputContextMenuCapabilities::new().selection(true).readonly(true);
         assert_eq!(
             EditorMenuAvailability::new(readonly_selection, true),
-            EditorMenuAvailability {
-                cut: false,
-                copy: true,
-                paste: false,
-            }
+            EditorMenuAvailability { cut: false, copy: true, paste: false }
         );
     }
 }
 
 #[cfg(test)]
 mod lifetime_tests {
-    use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    use super::*;
 
     #[gpui::test]
     fn dropping_file_editor_releases_entity_with_context_menu(cx: &mut TestAppContext) {
@@ -241,10 +222,7 @@ mod lifetime_tests {
             .unwrap();
         cx.run_until_parked();
         cx.update(|_| {
-            assert!(
-                weak.upgrade().is_none(),
-                "closed editor retained by its own menu callback"
-            )
+            assert!(weak.upgrade().is_none(), "closed editor retained by its own menu callback")
         });
     }
 }

@@ -42,10 +42,7 @@ fn resort_offsets(
 /// on every following keyed section.
 fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bool {
     old.len() != new.len()
-        || old
-            .iter()
-            .zip(new)
-            .any(|((old_key, _), (new_key, _))| old_key != new_key)
+        || old.iter().zip(new).any(|((old_key, _), (new_key, _))| old_key != new_key)
 }
 
 /// Exact height of the palette's session row. Harness identity lives on the title line
@@ -118,11 +115,7 @@ const SIDEBAR_FOOTER_ACTION_GAP: f32 = 4.0;
 /// A chat row's inline title editor, swapped in for its faded title while
 /// the chat is renamed in place: the title's 13/17 type in an accent-ringed
 /// field.
-fn chat_title_editor(
-    id: SharedString,
-    input: Entity<ComposerInput>,
-    theme: &Theme,
-) -> AnyElement {
+fn chat_title_editor(id: SharedString, input: Entity<ComposerInput>, theme: &Theme) -> AnyElement {
     div()
         .id(id.clone())
         .debug_selector(move || id.to_string())
@@ -332,7 +325,10 @@ impl Shell {
         for group in groups.into_iter().filter(|group| group.key != sidebar_status::INACTIVE) {
             let Some(first) = group.rows.first() else { continue };
             // A cached row's mark is the last word from a machine out of reach.
-            let loudest = super::marks::loudest(group.rows.iter().filter(|row| !row.cached).map(|row| &row.mark)).cloned();
+            let loudest = super::marks::loudest(
+                group.rows.iter().filter(|row| !row.cached).map(|row| &row.mark),
+            )
+            .cloned();
             let target = group
                 .rows
                 .iter()
@@ -357,7 +353,11 @@ impl Shell {
                 )
             });
             // The artwork alone: the entry's own tooltip says the project and its state.
-            let art = div().size(px(RAIL_ICON)).flex_none().child(self.project_icon_art(&first.chat.id, false, cx));
+            let art = div().size(px(RAIL_ICON)).flex_none().child(self.project_icon_art(
+                &first.chat.id,
+                false,
+                cx,
+            ));
             let selector = format!("sidebar-rail-{key}");
             entries.push(
                 div()
@@ -377,7 +377,11 @@ impl Shell {
                     .tooltip(crate::settings::widgets::text_tooltip(said))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_chat(target.clone(), cx)))
                     .child(art)
-                    .children(mark.map(|mark| div().absolute().right(px(-1.0)).bottom(px(-1.0)).child(mark)))
+                    .children(
+                        mark.map(|mark| {
+                            div().absolute().right(px(-1.0)).bottom(px(-1.0)).child(mark)
+                        }),
+                    )
                     .into_any_element(),
             );
         }
@@ -470,9 +474,9 @@ impl Shell {
         // A sidebar row whose machine is out of reach shows the last word from there
         // (`sidebar_status::Row::cached`).
         let cached = compact
-            && row_device
-                .as_deref()
-                .is_some_and(|device| super::sidebar_status::out_of_reach(self.state.read(cx), device, now));
+            && row_device.as_deref().is_some_and(|device| {
+                super::sidebar_status::out_of_reach(self.state.read(cx), device, now)
+            });
         // A machine that turns this device away wears the login badge in the row's mark
         // slot: why, and a press dials it again (`turned_away_badge`).
         let turned_away = row_device.as_deref().filter(|_| cached).and_then(|device| {
@@ -500,25 +504,20 @@ impl Shell {
                 mark_ground,
             )
         };
-        let subline = if search_query.is_some() {
-            theme.text_muted
-        } else {
-            theme.text_muted.opacity(0.5)
-        };
+        let subline =
+            if search_query.is_some() { theme.text_muted } else { theme.text_muted.opacity(0.5) };
         // The program's own mark leads the row (a plain terminal's the terminal glyph),
         // in its full colour; an archived or cached row dims it with the rest of the row.
         let brand = harness.map(crate::pickers::harness_brand_icon);
         let dimmed = archived_muted || cached;
         let agent_mark = |(path, tint): (&'static str, Option<gpui::Hsla>)| {
-            icon(path)
-                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                .flex_none()
-                .text_color(match tint {
-                    Some(tint) if !dimmed => tint,
-                    Some(tint) => tint.opacity(0.4),
-                    None if dimmed => subline.opacity(0.4),
-                    None => subline.opacity(0.8),
-                })
+            icon(path).size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE)).flex_none().text_color(match tint
+            {
+                Some(tint) if !dimmed => tint,
+                Some(tint) => tint.opacity(0.4),
+                None if dimmed => subline.opacity(0.4),
+                None => subline.opacity(0.8),
+            })
         };
         let program = compact.then(|| {
             div()
@@ -538,7 +537,12 @@ impl Shell {
         // every title ends at one edge; a cached row's slot says so instead.
         let mark_slot = compact.then(|| {
             let glyph = if let Some((device, why)) = turned_away.clone() {
-                Some(self.turned_away_badge(format!("chat-turned-away-{id}").into(), device, why, cx))
+                Some(self.turned_away_badge(
+                    format!("chat-turned-away-{id}").into(),
+                    device,
+                    why,
+                    cx,
+                ))
             } else if cached {
                 Some(
                     div()
@@ -656,9 +660,7 @@ impl Shell {
             None => title.clone(),
         };
         let search_query_none = search_query.is_none();
-        let rename_input = search_query_none
-            .then(|| self.rename_input_for(&id))
-            .flatten();
+        let rename_input = search_query_none.then(|| self.rename_input_for(&id)).flatten();
         let rolling_title = search_query_none
             .then(|| {
                 crate::roll_text::rolling(
@@ -674,18 +676,12 @@ impl Shell {
         let hover_card = (search_query_none
             && rename_input.is_none()
             && self.session_hover_card.shown() == Some(id.as_str()))
-        .then(|| {
-            self.render_session_hover_card(&id, cx)
-        })
+        .then(|| self.render_session_hover_card(&id, cx))
         .flatten();
         let card_id = id.clone();
         // Hover fades: the wash and the title's brightening ride the same 150ms blend.
         let fade_key = format!("{row_id}-hover");
-        let rest_bg = if selected {
-            selected_wash
-        } else {
-            crate::theme::wash(0.0)
-        };
+        let rest_bg = if selected { selected_wash } else { crate::theme::wash(0.0) };
         // A selected row must NOT drift toward the hover wash: in dark the two
         // fills are identical so the blend is a no-op, but light's hover sits
         // below its near-opaque selected fill, and blending toward it visibly
@@ -711,19 +707,11 @@ impl Shell {
                 let row_id = row_id.clone();
                 move || row_id.clone()
             })
-            .h(px(if compact {
-                SIDEBAR_ROW_HEIGHT
-            } else {
-                chat_row_height(branch.is_some())
-            }))
+            .h(px(if compact { SIDEBAR_ROW_HEIGHT } else { chat_row_height(branch.is_some()) }))
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .rounded(px(if search_query.is_some() {
-                popover::PALETTE_ITEM_RADIUS
-            } else {
-                8.0
-            }))
+            .rounded(px(if search_query.is_some() { popover::PALETTE_ITEM_RADIUS } else { 8.0 }))
             .px(px(Theme::SPACE_SM))
             .py(px(6.0))
             .text_color(motion::hover_blend(&fade_key, rest_text, text))
@@ -750,8 +738,13 @@ impl Shell {
                             // it moved from under a still pointer (an archived row, landing
                             // in the Archived section): its wash is let go here, or it stays
                             // lit there.
-                            if let Some(previous) = this.chat_status_hover.replace(hover_id.clone()) {
-                                motion::set_hover(&format!("{previous}-hover"), false, this.reduced_motion.get());
+                            if let Some(previous) = this.chat_status_hover.replace(hover_id.clone())
+                            {
+                                motion::set_hover(
+                                    &format!("{previous}-hover"),
+                                    false,
+                                    this.reduced_motion.get(),
+                                );
                             }
                             cx.notify();
                         }
@@ -764,9 +757,7 @@ impl Shell {
             .cursor_pointer()
             // The row is a button named by its title; its hover card (`session_hover_card`) carries
             // Slopty's facts.
-            .when(search_query_none, |el| {
-                el.role(gpui::Role::Button).aria_label(row_label.clone())
-            })
+            .when(search_query_none, |el| el.role(gpui::Role::Button).aria_label(row_label.clone()))
             // The list is one keyboard stop, its rows walked with Up and Down
             // (`spaces::SidebarKeys`); a press leaves the keyboard where it was.
             .when(search_query_none, |el| {
@@ -777,11 +768,13 @@ impl Shell {
                     .tab_stop(self.sidebar_keys.stops_at(&id))
                     .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                        if this.sidebar_row_key(&key_id, &event.keystroke, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    }))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if this.sidebar_row_key(&key_id, &event.keystroke, window, cx) {
+                                cx.stop_propagation();
+                            }
+                        },
+                    ))
             })
             // Pressing, scrolling or opening the menu puts the hover card
             // away: the row has the pointer's intent now.
@@ -810,28 +803,23 @@ impl Shell {
             // A row revealed for an inline rename reports where it painted,
             // frame by frame while its disclosure opens, so the list can
             // scroll it clear of the edges.
-            .when(
-                rename_input.is_some() && self.chat_rename_revealing(),
-                |el| {
-                    let shell = cx.weak_entity();
-                    el.child(
-                        gpui::canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, cx| {
-                                window.defer(cx, move |_, cx| {
-                                    shell
-                                        .update(cx, |this, cx| {
-                                            this.keep_rename_row_in_view(bounds, cx)
-                                        })
-                                        .ok();
-                                });
-                            },
-                        )
-                        .absolute()
-                        .inset_0(),
+            .when(rename_input.is_some() && self.chat_rename_revealing(), |el| {
+                let shell = cx.weak_entity();
+                el.child(
+                    gpui::canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, cx| {
+                            window.defer(cx, move |_, cx| {
+                                shell
+                                    .update(cx, |this, cx| this.keep_rename_row_in_view(bounds, cx))
+                                    .ok();
+                            });
+                        },
                     )
-                },
-            )
+                    .absolute()
+                    .inset_0(),
+                )
+            })
             .when(self.chat_hover_resync, |el| {
                 let shell = cx.weak_entity();
                 let row_id = row_id.clone();
@@ -951,7 +939,9 @@ impl Shell {
                                     div()
                                         // The heavier weight marks a result nobody has
                                         // seen.
-                                        .when(unread, |el| el.font_weight(gpui::FontWeight::SEMIBOLD))
+                                        .when(unread, |el| {
+                                            el.font_weight(gpui::FontWeight::SEMIBOLD)
+                                        })
                                         // A title the agent gives rises in over the old
                                         // (Amp's), on the house's roll.
                                         .child(rolling_title.unwrap_or_else(|| {
@@ -990,7 +980,9 @@ impl Shell {
                                     // A text-length hint ("Ctrl+1") keeps one column with
                                     // the others.
                                     .when(label.chars().count() > 3, |el| {
-                                        el.min_w(crate::typography::ui_rems(COMPACT_JUMP_HINT_WIDTH))
+                                        el.min_w(crate::typography::ui_rems(
+                                            COMPACT_JUMP_HINT_WIDTH,
+                                        ))
                                     })
                                     .whitespace_nowrap()
                                     .text_right()
@@ -1015,7 +1007,11 @@ impl Shell {
                                             .justify_center()
                                             // A button a screen reader names while it shows.
                                             .role(gpui::Role::Button)
-                                            .aria_label(if archived { "Unarchive" } else { "Archive" })
+                                            .aria_label(if archived {
+                                                "Unarchive"
+                                            } else {
+                                                "Archive"
+                                            })
                                             .cursor_pointer()
                                             .on_mouse_down(
                                                 MouseButton::Left,
@@ -1027,11 +1023,17 @@ impl Shell {
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 cx.stop_propagation();
                                                 this.chat_hover_resync = true;
-                                                this.set_chat_archived(archive_id.clone(), !archived, cx);
+                                                this.set_chat_archived(
+                                                    archive_id.clone(),
+                                                    !archived,
+                                                    cx,
+                                                );
                                             }))
                                             .tooltip(archive_tooltip(archived, selected))
                                             .tooltip_placement(gpui::TooltipPlacement::Above)
-                                            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+                                            .tooltip_show_delay(
+                                                crate::settings::widgets::TOOLTIP_DELAY,
+                                            )
                                             .child(
                                                 icon(if archived {
                                                     icons::ARCHIVE_UP_MINIMALISTIC
@@ -1051,31 +1053,23 @@ impl Shell {
             // Line 3 is structural, not reserved whitespace: a row without a branch
             // omits it completely.
             .when(!compact && shows_metadata, |row| {
-                row.child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .when_some(branch, |el, branch| {
-                            el.child(
-                                icon(icons::GIT_BRANCH)
-                                    .size(px(11.0))
-                                    .flex_none()
-                                    .text_color(subline),
-                            )
-                            .child(sidebar_faded_label(
-                                format!("chat-branch-{content_id}").into(),
-                                false,
-                                div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .line_height(px(14.0))
-                                    .text_color(subline)
-                                    .child(popover::search_highlight(branch, search_query, theme)),
-                            ))
-                        }),
-                )
+                row.child(div().w_full().flex().flex_row().items_center().gap(px(4.0)).when_some(
+                    branch,
+                    |el, branch| {
+                        el.child(
+                            icon(icons::GIT_BRANCH).size(px(11.0)).flex_none().text_color(subline),
+                        )
+                        .child(sidebar_faded_label(
+                            format!("chat-branch-{content_id}").into(),
+                            false,
+                            div()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .line_height(px(14.0))
+                                .text_color(subline)
+                                .child(popover::search_highlight(branch, search_query, theme)),
+                        ))
+                    },
+                ))
             })
             .into_any_element()
     }
@@ -1090,11 +1084,7 @@ impl Shell {
             S::Disabled | S::Connected => return None,
             S::Offline => (
                 "Offline — sends are saved".into(),
-                div()
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning)
-                    .into_any_element(),
+                div().size(px(5.0)).rounded_full().bg(theme.warning).into_any_element(),
             ),
             S::Reconnecting => (
                 "Reconnecting…".into(),
@@ -1132,7 +1122,11 @@ impl Shell {
         )
     }
 
-    pub(super) fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_chat_sidebar(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         // The rows note when their times next read differently, and the clock ticks
         // then (`spaces::Shell::tick_sidebar_clock`).
         self.reconcile_session_hover_card(cx);
@@ -1169,11 +1163,8 @@ impl Shell {
                 } else {
                     std::collections::HashMap::new()
                 };
-                let prev_keys: std::collections::HashSet<&str> = self
-                    .sidebar_prev_order
-                    .iter()
-                    .map(|(k, _)| k.as_str())
-                    .collect();
+                let prev_keys: std::collections::HashSet<&str> =
+                    self.sidebar_prev_order.iter().map(|(k, _)| k.as_str()).collect();
                 let new_keys: std::collections::HashSet<String> = order
                     .iter()
                     .filter(|(k, _)| !prev_keys.contains(k.as_str()))
@@ -1230,8 +1221,13 @@ impl Shell {
             // Before any project, the list says what fills it first, and offers no key
             // that cannot make a chat yet (the canvas offers Add a project).
             let no_projects = self.awaits_first_project(cx);
-            let combo = if compact || no_projects { "" } else { self.settings.keymap.get(ShortcutId::NewSession) };
-            let empty: &'static str = if no_projects { "No projects yet" } else { "No sessions yet" };
+            let combo = if compact || no_projects {
+                ""
+            } else {
+                self.settings.keymap.get(ShortcutId::NewSession)
+            };
+            let empty: &'static str =
+                if no_projects { "No projects yet" } else { "No sessions yet" };
             div()
                 .px(px(Theme::SPACE_SM))
                 .pb(px(Theme::SPACE_SM))
@@ -1306,9 +1302,7 @@ impl Shell {
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
             // appearing IS the signal.
-            .when_some(self.render_connection_pill(theme, cx), |el, pill| {
-                el.child(pill)
-            })
+            .when_some(self.render_connection_pill(theme, cx), |el, pill| el.child(pill))
             // A phone has no sidebar foot: Settings is a tab, the server its page's.
             .when(!self.compact(), |el| {
                 el.child(
@@ -1326,7 +1320,11 @@ impl Shell {
     /// The sidebar's bottom row: the server menu and the settings button. The chat sidebar
     /// and the settings page both render this exact row, so the footer holds still across the
     /// swap.
-    pub(super) fn render_sidebar_footer_row(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_sidebar_footer_row(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .id("sidebar-footer-row")
             .debug_selector(|| "sidebar-footer-row".into())
@@ -1334,16 +1332,15 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(SIDEBAR_FOOTER_ACTION_GAP))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(self.render_sidebar_footer(theme, cx)),
-            )
+            .child(div().flex_1().min_w_0().child(self.render_sidebar_footer(theme, cx)))
             .into_any_element()
     }
 
-    pub(super) fn render_sidebar_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_sidebar_footer(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let (user_line, menu_identity, online) = {
             let state = self.state.read(cx);
             sidebar_server_identity(state.connectivity.server.as_ref())
@@ -1403,7 +1400,8 @@ impl Shell {
     fn open_connect_phone(&mut self, cx: &mut Context<Self>) {
         self.open_settings(SettingsSection::Devices, cx);
         let state = self.state.clone();
-        let page = self.devices_page.get_or_insert_with(|| cx.new(|cx| DevicesPage::new(state, cx)));
+        let page =
+            self.devices_page.get_or_insert_with(|| cx.new(|cx| DevicesPage::new(state, cx)));
         page.update(cx, |page, cx| page.open_invite(cx));
     }
 
@@ -1536,11 +1534,8 @@ impl Shell {
                 .into_any_element();
             // Opens upward, left-aligned with the pill: the card is as wide as
             // the footer row, so it covers the row instead of the pane beside it.
-            trigger = trigger.child(popover::anchored_menu_above(
-                "user-menu-popover",
-                menu,
-                closing,
-            ));
+            trigger =
+                trigger.child(popover::anchored_menu_above("user-menu-popover", menu, closing));
         }
         // Settings is a toggle: while its page is up the button keeps the
         // hover wash + full-strength glyph, and a click returns to chat.
@@ -1554,82 +1549,76 @@ impl Shell {
             .justify_between()
             .gap(px(4.0))
             .child(trigger)
-            .child(
-                div()
+            .child(div().flex().flex_none().items_center().gap(px(2.0)).child({
+                // On a touch screen it takes presses over a finger's 44 pt
+                // around the button it draws (#23).
+                let reach = crate::surface_chrome::touch_reach(SIDEBAR_FOOTER_BUTTON_SIZE);
+                let drawn = div()
+                    .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+                    .rounded(px(8.0))
                     .flex()
-                    .flex_none()
                     .items_center()
-                    .gap(px(2.0))
-                    .child({
-                        // On a touch screen it takes presses over a finger's 44 pt
-                        // around the button it draws (#23).
-                        let reach = crate::surface_chrome::touch_reach(SIDEBAR_FOOTER_BUTTON_SIZE);
-                        let drawn = div()
-                            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
-                            .rounded(px(8.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(if settings_open {
-                                theme.glass_hover()
-                            } else {
-                                motion::hover_blend(
-                                    "settings-trigger",
-                                    theme.glass_hover().opacity(0.0),
-                                    theme.glass_hover(),
-                                )
-                            })
-                            .child(icon(icons::SETTINGS).size(px(15.0)).text_color(
-                                if settings_open {
-                                    theme.text
-                                } else {
-                                    motion::hover_blend(
-                                        "settings-trigger",
-                                        theme.text_muted,
-                                        theme.text,
-                                    )
-                                },
-                            ));
-                        div()
-                            .id("settings-trigger")
-                            .debug_selector(|| "settings-trigger".into())
-                            .role(gpui::Role::Button)
-                            .action_hint(settings_label, Keys::Action(Box::new(OpenSettings)), cx)
-                            .aria_toggled(if settings_open {
-                                gpui::Toggled::True
-                            } else {
-                                gpui::Toggled::False
-                            })
-                            .tab_index(0)
-                            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE + 2.0 * reach))
-                            .m(px(-reach))
-                            .flex_none()
-                            .rounded(px(8.0 + reach))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover_fade("settings-trigger")
-                            .map(|el| crate::surface_chrome::focus_ring_within(el, &theme, reach))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
-                            .child(drawn)
-                    }),
-            )
+                    .justify_center()
+                    .bg(if settings_open {
+                        theme.glass_hover()
+                    } else {
+                        motion::hover_blend(
+                            "settings-trigger",
+                            theme.glass_hover().opacity(0.0),
+                            theme.glass_hover(),
+                        )
+                    })
+                    .child(icon(icons::SETTINGS).size(px(15.0)).text_color(if settings_open {
+                        theme.text
+                    } else {
+                        motion::hover_blend("settings-trigger", theme.text_muted, theme.text)
+                    }));
+                div()
+                    .id("settings-trigger")
+                    .debug_selector(|| "settings-trigger".into())
+                    .role(gpui::Role::Button)
+                    .action_hint(settings_label, Keys::Action(Box::new(OpenSettings)), cx)
+                    .aria_toggled(if settings_open {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .tab_index(0)
+                    .size(px(SIDEBAR_FOOTER_BUTTON_SIZE + 2.0 * reach))
+                    .m(px(-reach))
+                    .flex_none()
+                    .rounded(px(8.0 + reach))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover_fade("settings-trigger")
+                    .map(|el| crate::surface_chrome::focus_ring_within(el, &theme, reach))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
+                    .child(drawn)
+            }))
             .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::accesskit::Role;
     use gpui::{TestAppContext, VisualTestContext};
 
-    use super::super::retention_tests::{DESKTOP, draw, find, find_starting, launch, session_row, space, tree};
+    use super::super::retention_tests::{
+        DESKTOP, draw, find, find_starting, launch, session_row, space, tree,
+    };
+    use super::*;
 
     #[test]
     fn sidebar_footer_names_the_server_and_its_link() {
-        let server = |online| slopty_view_proto::ServerPresence { name: "studio".into(), online, actions: Vec::new(), invite: None };
+        let server = |online| slopty_view_proto::ServerPresence {
+            name: "studio".into(),
+            online,
+            actions: Vec::new(),
+            invite: None,
+        };
         let up = server(true);
         let down = server(false);
         assert_eq!(
@@ -1734,7 +1723,8 @@ mod tests {
         assert_eq!(app.expanded, Some(true), "open: {app:?}");
         cx.simulate_click(app.bounds.center(), gpui::Modifiers::default());
         let nodes = tree(cx);
-        let app = find(&nodes, Role::Button, "app, 2, Working").expect("the header, saying what it wears");
+        let app = find(&nodes, Role::Button, "app, 2, Working")
+            .expect("the header, saying what it wears");
         assert_eq!(app.expanded, Some(false), "a press folds it: {app:?}");
     }
 
@@ -1748,7 +1738,8 @@ mod tests {
         let key = "folder:/work/app";
         let count = |cx: &mut VisualTestContext| {
             draw(cx);
-            cx.debug_bounds("sidebar-header-count-folder:/work/app").expect("the count holds its place")
+            cx.debug_bounds("sidebar-header-count-folder:/work/app")
+                .expect("the count holds its place")
         };
         let resting = count(cx);
         let header_key = format!("sidebar-header-{key}");
@@ -1757,7 +1748,9 @@ mod tests {
             crate::motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
         });
         assert_eq!(rest.a, 0.0, "unseen at rest");
-        let chevron = |cx: &mut VisualTestContext| cx.update(|_, _| spaces::sidebar_hover_reveal(&header_key));
+        let chevron = |cx: &mut VisualTestContext| {
+            cx.update(|_, _| spaces::sidebar_hover_reveal(&header_key))
+        };
         assert_eq!(chevron(cx), 0.0, "an open group's chevron rests unseen with it");
         // Settled at once, so the frame read is the faded-in one.
         cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
@@ -1777,7 +1770,10 @@ mod tests {
     #[gpui::test]
     fn a_chat_untouched_for_three_days_folds_into_inactive(cx: &mut TestAppContext) {
         let (shell, cx) = launch(cx, DESKTOP);
-        assert!(find_starting(&tree(cx), Role::Button, "Inactive").is_none(), "none rests: no Inactive");
+        assert!(
+            find_starting(&tree(cx), Role::Button, "Inactive").is_none(),
+            "none rests: no Inactive"
+        );
         // The finished chat goes untouched for three days: it leaves its project for Inactive.
         shell.update(cx, |shell, cx| {
             let now = Utc::now();
@@ -1801,8 +1797,8 @@ mod tests {
         assert!(row.top() > inactive.bounds.top(), "under its header");
     }
 
-    /// A row at rest wears no mark: only a state worth a glance does (one that waits on the person),
-    /// while its slot keeps the titles' ends on one edge.
+    /// A row at rest wears no mark: only a state worth a glance does (one that waits on the
+    /// person), while its slot keeps the titles' ends on one edge.
     #[gpui::test]
     fn a_row_at_rest_draws_no_dot(cx: &mut TestAppContext) {
         let (shell, cx) = launch(cx, DESKTOP);
@@ -1828,7 +1824,8 @@ mod tests {
         });
         draw(cx);
         assert!(cx.debug_bounds("chat-mark-a").is_some(), "the same mark, now working");
-        let (a, b) = (cx.debug_bounds("chat-status-a").unwrap(), cx.debug_bounds("chat-status-b").unwrap());
+        let (a, b) =
+            (cx.debug_bounds("chat-status-a").unwrap(), cx.debug_bounds("chat-status-b").unwrap());
         assert_eq!(a.left(), b.left(), "the slot stays");
         assert_eq!(a.size, b.size, "the slot stays");
     }
@@ -1846,7 +1843,9 @@ mod tests {
             assert!(shell.sidebar_keys.stops_at("a"), "Tab reaches the open chat's row");
             assert!(!shell.sidebar_keys.stops_at("b"), "and only it");
         });
-        let (a, b) = shell.update(cx, |shell, cx| (shell.sidebar_keys.focus("a", cx), shell.sidebar_keys.focus("b", cx)));
+        let (a, b) = shell.update(cx, |shell, cx| {
+            (shell.sidebar_keys.focus("a", cx), shell.sidebar_keys.focus("b", cx))
+        });
         cx.update(|window, cx| window.focus(&a, cx));
         draw(cx);
         cx.simulate_keystrokes("down");
@@ -1876,11 +1875,13 @@ mod tests {
             shell.state.update(cx, |state, _| state.spaces = vec![space("app")]);
         });
         let nodes = tree(cx);
-        let filter = find(&nodes, Role::Button, "Filter projects: All projects").expect("the filter");
+        let filter =
+            find(&nodes, Role::Button, "Filter projects: All projects").expect("the filter");
         assert_eq!(filter.expanded, Some(false), "shut: {filter:?}");
         cx.simulate_click(filter.bounds.center(), gpui::Modifiers::default());
         let nodes = tree(cx);
-        let filter = find(&nodes, Role::Button, "Filter projects: All projects").expect("the filter");
+        let filter =
+            find(&nodes, Role::Button, "Filter projects: All projects").expect("the filter");
         assert_eq!(filter.expanded, Some(true), "open: {filter:?}");
     }
 
@@ -1899,17 +1900,29 @@ mod tests {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
                 state.devices = vec![device("local"), device("studio")];
-                state.chats.iter_mut().find(|chat| chat.id == "b").unwrap().device_id = "studio".into();
+                state.chats.iter_mut().find(|chat| chat.id == "b").unwrap().device_id =
+                    "studio".into();
             });
             shell.toggle_machine_filter("studio".into(), cx);
         });
         let nodes = tree(cx);
-        assert!(find(&nodes, Role::Button, "Filter projects: All projects \u{b7} studio").is_some(), "it names the machine");
-        assert_eq!(shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)), ["b"], "its sessions alone");
+        assert!(
+            find(&nodes, Role::Button, "Filter projects: All projects \u{b7} studio").is_some(),
+            "it names the machine"
+        );
+        assert_eq!(
+            shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)),
+            ["b"],
+            "its sessions alone"
+        );
         assert!(cx.debug_bounds("chat-a").is_none(), "another machine's row is not drawn");
         shell.update(cx, |shell, cx| shell.toggle_machine_filter("studio".into(), cx));
         draw(cx);
-        assert_eq!(shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)), ["a", "b"], "every machine's again");
+        assert_eq!(
+            shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)),
+            ["a", "b"],
+            "every machine's again"
+        );
         assert!(shell.read_with(cx, |shell, _| shell.settings.machine_filter.is_none()));
     }
 
@@ -1931,22 +1944,32 @@ mod tests {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
                 state.devices = vec![device("local", None), device("studio", Some(why))];
-                state.chats.iter_mut().find(|chat| chat.id == "b").unwrap().device_id = "studio".into();
+                state.chats.iter_mut().find(|chat| chat.id == "b").unwrap().device_id =
+                    "studio".into();
             });
             cx.notify();
         });
         draw(cx);
         assert!(cx.debug_bounds("chat-turned-away-b").is_some(), "its row wears the badge");
-        assert!(cx.debug_bounds("chat-turned-away-a").is_none(), "a machine that lets it in does not");
+        assert!(
+            cx.debug_bounds("chat-turned-away-a").is_none(),
+            "a machine that lets it in does not"
+        );
         let nodes = tree(cx);
         let badge = find(&nodes, Role::Button, "Retry").expect("a button a screen reader hears");
         assert_eq!(badge.description.as_deref(), Some(why), "saying why");
         let card = shell.read_with(cx, |shell, cx| {
-            super::super::sidebar_status::chat_card(shell.state.read(cx), "b", Utc::now()).map(|card| card.status)
+            super::super::sidebar_status::chat_card(shell.state.read(cx), "b", Utc::now())
+                .map(|card| card.status)
         });
-        assert_eq!(card.as_deref(), Some("Cached \u{b7} studio is closed to this device by the tailnet policy"));
+        assert_eq!(
+            card.as_deref(),
+            Some("Cached \u{b7} studio is closed to this device by the tailnet policy")
+        );
         shell.update_in(cx, |shell, window, cx| shell.open_spaces_menu(window, cx));
-        let retries = tree(cx).into_values().filter(|node| node.role == Role::Button && node.label == "Retry");
+        let retries = tree(cx)
+            .into_values()
+            .filter(|node| node.role == Role::Button && node.label == "Retry");
         assert_eq!(retries.count(), 2, "its filter entry wears it too");
     }
 
@@ -1965,8 +1988,12 @@ mod tests {
         assert_eq!(f32::from(rail.size.width), SIDEBAR_RAIL_WIDTH, "its width");
         assert!(cx.debug_bounds("chat-a").is_none(), "no rows on the rail");
         let nodes = tree(cx);
-        let entry = find(&nodes, Role::Button, "app, 2, Working").expect("the project, its count and its state");
-        assert!(cx.debug_bounds("sidebar-rail-mark-folder:/work/app").is_some(), "its loudest mark");
+        let entry = find(&nodes, Role::Button, "app, 2, Working")
+            .expect("the project, its count and its state");
+        assert!(
+            cx.debug_bounds("sidebar-rail-mark-folder:/work/app").is_some(),
+            "its loudest mark"
+        );
         cx.simulate_click(entry.bounds.center(), gpui::Modifiers::default());
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone()).as_deref(),
@@ -2015,7 +2042,9 @@ mod tests {
                 let bare = |lines: &[String]| {
                     let mut bare: Vec<String> = lines
                         .iter()
-                        .map(|line| line.split_once(' ').map_or(line.clone(), |(_, rest)| rest.to_owned()))
+                        .map(|line| {
+                            line.split_once(' ').map_or(line.clone(), |(_, rest)| rest.to_owned())
+                        })
                         .collect();
                     bare.sort_unstable();
                     bare
@@ -2035,7 +2064,11 @@ mod tests {
                         .map(|line| line.chars().take(420).collect::<String>())
                         .collect::<Vec<_>>()
                 };
-                format!("shown only {:#?}\nscratch only {:#?}", only(&shown, &scratch), only(&scratch, &shown))
+                format!(
+                    "shown only {:#?}\nscratch only {:#?}",
+                    only(&shown, &scratch),
+                    only(&scratch, &shown)
+                )
             })
         })
     }

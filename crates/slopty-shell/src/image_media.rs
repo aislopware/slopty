@@ -1,10 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Bounded media decoding. SVG resources are resolved in memory, never on the UI host.
+use std::io::Cursor;
+use std::sync::{Arc, OnceLock};
+
 use gpui::{Image, ImageFormat};
-use std::{
-    io::Cursor,
-    sync::{Arc, OnceLock},
-};
 
 pub(crate) fn release_media(images: impl IntoIterator<Item = MediaImage>, cx: &mut gpui::App) {
     let images: Vec<_> = images.into_iter().map(|media| media.image).collect();
@@ -40,17 +39,12 @@ fn raster_size(
 ) -> (u32, u32) {
     let (w, h) = (width as f64, height as f64);
     let dpi = f64::from(dpi.clamp(1.0, 4.0));
-    let fit = (f64::from(viewport.0.max(1.0)) / w)
-        .min(f64::from(viewport.1.max(1.0)) / h)
-        .min(1.0);
+    let fit = (f64::from(viewport.0.max(1.0)) / w).min(f64::from(viewport.1.max(1.0)) / h).min(1.0);
     let scale = (fit * dpi)
         .min(MAX_RASTER_SIDE / w)
         .min(MAX_RASTER_SIDE / h)
         .min((pixels.max(1) as f64 / (w * h)).sqrt());
-    let mut size = (
-        (w * scale).floor().max(1.0) as u32,
-        (h * scale).floor().max(1.0) as u32,
-    );
+    let mut size = ((w * scale).floor().max(1.0) as u32, (h * scale).floor().max(1.0) as u32);
     if size.0 as usize * size.1 as usize > pixels.max(1) {
         if size.0 > size.1 {
             size.0 = (pixels.max(1) / size.1 as usize).max(1) as u32;
@@ -101,11 +95,7 @@ impl MediaImage {
     /// over budget.
     pub(crate) fn preview_within(&self, viewport: (f32, f32), dpi: f32, available: usize) -> Self {
         let next = self.preview_for_view(viewport, dpi);
-        if next.bytes > self.bytes && next.bytes > available {
-            self.clone()
-        } else {
-            next
-        }
+        if next.bytes > self.bytes && next.bytes > available { self.clone() } else { next }
     }
 
     pub(crate) fn preview_for_view(&self, viewport: (f32, f32), dpi: f32) -> Self {
@@ -142,7 +132,7 @@ pub(crate) fn preview_element(
     id: gpui::SharedString,
     on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
 ) -> gpui::AnyElement {
-    use gpui::{InteractiveElement as _, IntoElement as _, StyledImage as _, prelude::*};
+    use gpui::prelude::*;
     gpui::div()
         .id(id)
         .w_full()
@@ -157,11 +147,7 @@ pub(crate) fn preview_element(
             cx.stop_propagation();
             on_click(window, cx);
         })
-        .child(
-            gpui::img(loaded.image.clone())
-                .size_full()
-                .object_fit(gpui::ObjectFit::Contain),
-        )
+        .child(gpui::img(loaded.image.clone()).size_full().object_fit(gpui::ObjectFit::Contain))
         .into_any_element()
 }
 
@@ -237,10 +223,7 @@ pub(crate) fn decode_generated_image(
     max_bytes: usize,
 ) -> Result<MediaImage, String> {
     if bytes.len() > max_bytes
-        || !matches!(
-            mime,
-            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
-        )
+        || !matches!(mime, "image/png" | "image/jpeg" | "image/webp" | "image/gif")
     {
         return Err("Unsupported generated image".into());
     }
@@ -298,9 +281,7 @@ fn decode_raster_image_bounded(
     };
     let (width, height) = (decoded.width() as f32, decoded.height() as f32);
     let mut png = Cursor::new(Vec::new());
-    decoded
-        .write_to(&mut png, image::ImageFormat::Png)
-        .map_err(|e| e.to_string())?;
+    decoded.write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
     let bytes = png.into_inner();
     // GPUI retains decoded CPU pixels as well as the uploaded GPU texture.
     let retained = bytes.len() + decoded.width() as usize * decoded.height() as usize * 8;
@@ -340,12 +321,8 @@ mod tests {
             .image
             .to_image_data(gpui::SvgRenderer::new(Arc::new(crate::icons::Assets)))
             .unwrap();
-        let visible_pixels = raster
-            .as_bytes(0)
-            .unwrap()
-            .chunks_exact(4)
-            .filter(|pixel| pixel[3] > 128)
-            .count();
+        let visible_pixels =
+            raster.as_bytes(0).unwrap().chunks_exact(4).filter(|pixel| pixel[3] > 128).count();
         assert!(
             visible_pixels > 100,
             "{family}: text disappeared ({visible_pixels} visible pixels)"
@@ -393,10 +370,9 @@ mod tests {
             for dpi in [1.0, 2.0, 4.0] {
                 let thumbnail = media.preview_for_view((600.0, 480.0), dpi);
                 let enlarged = media.enlarged((1600.0, 1000.0), dpi, 32 * 1024 * 1024, None);
-                for (variant, limit) in [
-                    (&thumbnail, PREVIEW_PIXELS),
-                    (&enlarged, 2 * PREVIEW_PIXELS),
-                ] {
+                for (variant, limit) in
+                    [(&thumbnail, PREVIEW_PIXELS), (&enlarged, 2 * PREVIEW_PIXELS)]
+                {
                     let (w, h) = variant.raster_size.unwrap();
                     assert!(w <= 4096 && h <= 4096 && w as usize * h as usize <= limit);
                     assert!(
@@ -462,11 +438,8 @@ mod tests {
     #[test]
     fn encoded_input_and_decode_dimensions_are_bounded() {
         assert!(
-            decode_image(
-                "image/png",
-                vec![0; slopty_view_proto::MAX_WORKSPACE_IMAGE_BYTES + 1]
-            )
-            .is_err()
+            decode_image("image/png", vec![0; slopty_view_proto::MAX_WORKSPACE_IMAGE_BYTES + 1])
+                .is_err()
         );
         for (width, height) in [(4097, 1), (1, 4097)] {
             let mut png = Cursor::new(Vec::new());
@@ -489,13 +462,7 @@ mod tests {
         </svg>"#;
         let media = decode_image("image/svg+xml", source.to_vec()).unwrap();
         let sanitized = media.svg.unwrap();
-        for forbidden in [
-            "<script",
-            "foreignObject",
-            "unsafe-",
-            "data:image",
-            "<image",
-        ] {
+        for forbidden in ["<script", "foreignObject", "unsafe-", "data:image", "<image"] {
             assert!(!sanitized.contains(forbidden), "{forbidden}");
         }
         assert!(sanitized.contains("#ff0000"));
@@ -518,9 +485,7 @@ mod tests {
         }
         let media = decode_image("image/gif", encoded).unwrap();
         assert_eq!(media.image.format, ImageFormat::Png);
-        let decoded = image::load_from_memory(&media.image.bytes)
-            .unwrap()
-            .into_rgba8();
+        let decoded = image::load_from_memory(&media.image.bytes).unwrap().into_rgba8();
         assert_eq!(decoded.dimensions(), (2, 2));
         assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0, 255]);
     }

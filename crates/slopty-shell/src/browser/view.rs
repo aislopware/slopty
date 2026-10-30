@@ -1,11 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3d2f1e6), see THIRD_PARTY_NOTICES.md
-use super::{BrowserEvent, BrowserSurface};
-use crate::settings::widgets::ActionHint as _;
-use crate::{icons, motion::HoverFade as _, surface_chrome, theme::Theme};
+use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div,
-    prelude::*, px,
+    AnyElement, Context, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div, px,
 };
+
+use super::{BrowserEvent, BrowserSurface};
+use crate::motion::HoverFade as _;
+use crate::settings::widgets::ActionHint as _;
+use crate::theme::Theme;
+use crate::{icons, surface_chrome};
 
 fn button(
     id: &'static str,
@@ -26,17 +29,11 @@ fn button(
         }
         None => crate::files::toolbar_button(id, label, theme),
     }
-        // A control that cannot act is no keyboard stop (M8).
-        .when(!enabled, |el| {
-            el.cursor_default()
-                .tab_stop(false)
-                .opacity(crate::theme::DISABLED_OPACITY)
-        })
-        .child(
-            icons::icon(glyph)
-                .size(px(surface_chrome::ICON_SIZE))
-                .text_color(theme.text_muted),
-        )
+    // A control that cannot act is no keyboard stop (M8).
+    .when(!enabled, |el| {
+        el.cursor_default().tab_stop(false).opacity(crate::theme::DISABLED_OPACITY)
+    })
+    .child(icons::icon(glyph).size(px(surface_chrome::ICON_SIZE)).text_color(theme.text_muted))
 }
 
 impl BrowserSurface {
@@ -49,11 +46,7 @@ impl BrowserSurface {
         let address_focused = self.address.focus_handle(cx).is_focused(window);
         let key = event.keystroke.key.as_str();
         let mods = event.keystroke.modifiers;
-        let primary = if cfg!(target_os = "macos") {
-            mods.platform
-        } else {
-            mods.control
-        };
+        let primary = if cfg!(target_os = "macos") { mods.platform } else { mods.control };
         if address_focused && !primary && !mods.alt {
             match key {
                 "enter" if !mods.shift => self.submit(window, cx),
@@ -74,11 +67,7 @@ impl BrowserSurface {
 
     fn preview_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let snapshot = &self.previews;
-        let subtitle = if snapshot.remote {
-            "Running on your device"
-        } else {
-            "Running locally"
-        };
+        let subtitle = if snapshot.remote { "Running on your device" } else { "Running locally" };
         let mut content = div()
             .w_full()
             .max_w(px(280.0))
@@ -105,10 +94,7 @@ impl BrowserSurface {
             };
             content = content.child(
                 div()
-                    .id(gpui::SharedString::from(format!(
-                        "preview-row-{}",
-                        service.id
-                    )))
+                    .id(gpui::SharedString::from(format!("preview-row-{}", service.id)))
                     .w_full()
                     .h(px(56.0))
                     .px(px(14.0))
@@ -159,10 +145,7 @@ impl BrowserSurface {
                     )
                     .child(
                         div()
-                            .id(gpui::SharedString::from(format!(
-                                "open-preview-{}",
-                                service.id
-                            )))
+                            .id(gpui::SharedString::from(format!("open-preview-{}", service.id)))
                             .h(px(28.0))
                             .px(px(6.0))
                             .flex_shrink_0()
@@ -326,11 +309,7 @@ impl BrowserSurface {
                             .bg(theme.surface_raised)
                             .cursor_pointer()
                             .role(gpui::Role::Button)
-                            .aria_label(if has_error {
-                                "Try again"
-                            } else {
-                                "Enter an address"
-                            })
+                            .aria_label(if has_error { "Try again" } else { "Enter an address" })
                             // The hover fades a control step over the raised fill (M23).
                             .bg(crate::motion::hover_blend(
                                 "browser-empty-action-fade",
@@ -339,7 +318,8 @@ impl BrowserSurface {
                             ))
                             .hover_fade("browser-empty-action-fade")
                             .active({
-                                let pressed = theme.surface_raised.blend(crate::theme::pressed_wash());
+                                let pressed =
+                                    theme.surface_raised.blend(crate::theme::pressed_wash());
                                 move |style| style.bg(pressed)
                             })
                             // A keyboard stop with the shell's ring (M8).
@@ -356,11 +336,7 @@ impl BrowserSurface {
                                     this.focus_address(window, cx);
                                 }
                             }))
-                            .child(if has_error {
-                                "Try again"
-                            } else {
-                                "Enter an address"
-                            })
+                            .child(if has_error { "Try again" } else { "Enter an address" })
                             .when(!has_error, |el| {
                                 el.child(
                                     div()
@@ -425,14 +401,10 @@ impl Render for BrowserSurface {
             &theme,
             cx,
         )
-        .when(has_page, |el| {
-            el.on_click(cx.listener(|this, _, _, cx| this.reload(cx)))
-        });
+        .when(has_page, |el| el.on_click(cx.listener(|this, _, _, cx| this.reload(cx))));
         let address = surface_chrome::input()
             .id("browser-address")
-            .when(self.validation.is_some(), |el| {
-                el.border_1().border_color(theme.danger)
-            })
+            .when(self.validation.is_some(), |el| el.border_1().border_color(theme.danger))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| {
@@ -445,18 +417,10 @@ impl Render for BrowserSurface {
                 }),
             )
             .child(
-                icons::icon(icons::GLOBE)
-                    .size(px(12.0))
-                    .flex_none()
-                    .text_color(theme.text_faint),
+                icons::icon(icons::GLOBE).size(px(12.0)).flex_none().text_color(theme.text_faint),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h(px(16.0))
-                    .overflow_hidden()
-                    .child(self.address.clone()),
+                div().flex_1().min_w_0().h(px(16.0)).overflow_hidden().child(self.address.clone()),
             )
             .when(focused || self.address_edited, |el| {
                 // An 18 px mark in a 24 px target (M25); its tooltip names ⏎, which the
@@ -513,9 +477,7 @@ impl Render for BrowserSurface {
             &theme,
             cx,
         )
-        .when(has_page, |el| {
-            el.on_click(cx.listener(|this, _, _, cx| this.open_external(cx)))
-        });
+        .when(has_page, |el| el.on_click(cx.listener(|this, _, _, cx| this.open_external(cx))));
         let toolbar = surface_chrome::toolbar(&theme)
             .when(!external, |el| el.child(back).child(forward).child(reload))
             .child(address)

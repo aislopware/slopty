@@ -1,8 +1,9 @@
 //! An agent drives the person's window (`slopty ui`, the `ui_*` tools): it opens a
 //! shell, a file, a page or the changes in a pane beside the session (`docs/decisions/layout.md`,
 //! "No permanent right column"), shows or hides a region, puts a chat on screen, lays the panes
-//! at even shares, and reads what the window shows. Slopty's workspace hands each ask here through [`act`] once the shell's
-//! window is up ([`serve`]), and sends what [`act`] answers back to the agent.
+//! at even shares, and reads what the window shows. Slopty's workspace hands each ask here through
+//! [`act`] once the shell's window is up ([`serve`]), and sends what [`act`] answers back to the
+//! agent.
 //!
 //! The person stays in charge (`docs/decisions/agents.md`, "Agents drive the person's window
 //! through open verbs"). An ask never takes the keyboard: whatever had it has it after, and a
@@ -21,7 +22,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{AnyWindowHandle, App, AppContext as _, Context, FocusHandle, Global, WeakEntity, Window};
+use gpui::{
+    AnyWindowHandle, App, AppContext as _, Context, FocusHandle, Global, WeakEntity, Window,
+};
 use slopty_view_proto::TerminalSession;
 use slopty_view_rpc::methods;
 
@@ -312,7 +315,10 @@ fn chat_named<'a>(
                     .iter()
                     .map(|(id, title)| format!("{} ({id})", title.unwrap_or("untitled")))
                     .collect();
-                Some(fail(Code::Unknown, format!("{key} names several chats: {}", named.join(", "))))
+                Some(fail(
+                    Code::Unknown,
+                    format!("{key} names several chats: {}", named.join(", ")),
+                ))
             }
         }
     };
@@ -320,8 +326,9 @@ fn chat_named<'a>(
     if let Some(found) = by(prefixed) {
         return found;
     }
-    let titled =
-        chats.filter(|(_, title)| title.is_some_and(|t| t.trim().eq_ignore_ascii_case(key))).collect();
+    let titled = chats
+        .filter(|(_, title)| title.is_some_and(|t| t.trim().eq_ignore_ascii_case(key)))
+        .collect();
     by(titled).unwrap_or_else(|| fail(Code::Unknown, format!("no chat is called {key}")))
 }
 
@@ -343,7 +350,9 @@ const fn in_region(pane: Pane, region: &str) -> bool {
     match pane {
         Pane::View(view) => matches!(
             (view, region.as_bytes()),
-            (RightSurface::Files, b"files") | (RightSurface::Diff(_), b"changes") | (RightSurface::Inspector, b"inspector")
+            (RightSurface::Files, b"files")
+                | (RightSurface::Diff(_), b"changes")
+                | (RightSurface::Inspector, b"inspector")
         ),
         Pane::Shell(_) => matches!(region.as_bytes(), b"terminal"),
         Pane::Session => false,
@@ -440,7 +449,10 @@ impl Shell {
                         Some(Tab {
                             id: format!("terminal/{n}"),
                             kind: "terminal".to_owned(),
-                            title: shell.shown_title(cx).unwrap_or_else(|| "Shell".into()).to_string(),
+                            title: shell
+                                .shown_title(cx)
+                                .unwrap_or_else(|| "Shell".into())
+                                .to_string(),
                             region: "terminal".to_owned(),
                             selected,
                             terminal: shell.pane_terminal_id().map(str::to_owned),
@@ -451,9 +463,10 @@ impl Shell {
                         let (kind, n, region) = view_kind(view);
                         let target = match view {
                             RightSurface::File(id) => self.file_surface_paths.get(&id).cloned(),
-                            RightSurface::Browser(id) => {
-                                self.browsers.get(&id).and_then(|page| page.read(cx).url().map(str::to_owned))
-                            }
+                            RightSurface::Browser(id) => self
+                                .browsers
+                                .get(&id)
+                                .and_then(|page| page.read(cx).url().map(str::to_owned)),
                             _ => None,
                         };
                         Some(Tab {
@@ -474,7 +487,11 @@ impl Shell {
 
     /// Do `open` as an agent's ask does: what it opens beside the session stands there, and the
     /// keyboard, and the pane that has it, stay where they were.
-    fn agent_beside(&mut self, cx: &mut Context<Self>, open: impl FnOnce(&mut Self, &mut Context<Self>)) {
+    fn agent_beside(
+        &mut self,
+        cx: &mut Context<Self>,
+        open: impl FnOnce(&mut Self, &mut Context<Self>),
+    ) {
         let had = self.panes_now(cx).focused();
         open(self, cx);
         self.panes_mut(cx).focus(had);
@@ -542,7 +559,9 @@ impl Shell {
             }
             Target::Page(url) => {
                 self.agent_chat_here(None, cx)?;
-                self.agent_beside(cx, |this, cx| this.add_browser_surface(Some(url.clone()), window, cx));
+                self.agent_beside(cx, |this, cx| {
+                    this.add_browser_surface(Some(url.clone()), window, cx)
+                });
                 Ok(Some(format!("opened {url}")))
             }
             Target::Diff => {
@@ -586,7 +605,10 @@ impl Shell {
         let did = Some(format!("{} {named}", if show { "showed" } else { "hid" }));
         if region == "sidebar" {
             if show && !self.settings.sidebar_collapsed {
-                return fail(Code::Failed, "the window is too narrow for the sidebar beside the session");
+                return fail(
+                    Code::Failed,
+                    "the window is too narrow for the sidebar beside the session",
+                );
             }
             self.toggle_sidebar(cx);
             return Ok(did);
@@ -595,10 +617,17 @@ impl Shell {
             // A view closed opens again as it was; a shell's pane closing ends what runs in it,
             // which only the person decides.
             if region == "terminal" {
-                return fail(Code::Failed, "closing a shell ends what runs in it; the person closes their shells");
+                return fail(
+                    Code::Failed,
+                    "closing a shell ends what runs in it; the person closes their shells",
+                );
             }
-            let panes: Vec<Pane> =
-                self.panes_now(cx).panes().into_iter().filter(|pane| in_region(*pane, region)).collect();
+            let panes: Vec<Pane> = self
+                .panes_now(cx)
+                .panes()
+                .into_iter()
+                .filter(|pane| in_region(*pane, region))
+                .collect();
             if panes.iter().any(|pane| self.pane_holds_keyboard(*pane, window, cx)) {
                 return fail(Code::Busy, format!("the person is working in {named}"));
             }
@@ -619,7 +648,9 @@ impl Shell {
                 }
                 self.agent_beside(cx, |this, cx| this.show_changes(window, cx));
             }
-            "inspector" => self.agent_beside(cx, |this, cx| this.open_view(RightSurface::Inspector, cx)),
+            "inspector" => {
+                self.agent_beside(cx, |this, cx| this.open_view(RightSurface::Inspector, cx))
+            }
             _ => {
                 if !self.splits_here() {
                     return fail(Code::Failed, "this window is too narrow to split");
@@ -648,10 +679,7 @@ impl Shell {
                 }
                 (None, Some(own)) => own.to_owned(),
                 (None, None) => {
-                    return fail(
-                        Code::Unknown,
-                        "say which chat: you run in none the window lists",
-                    );
+                    return fail(Code::Unknown, "say which chat: you run in none the window lists");
                 }
             }
         };
@@ -692,7 +720,8 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Result<Option<String>, Failure> {
         self.agent_chat_here(None, cx)?;
-        let opened = target.map(|target| self.agent_open(target, device, window, cx)).transpose()?;
+        let opened =
+            target.map(|target| self.agent_open(target, device, window, cx)).transpose()?;
         if self.panes_now(cx).len() < 2 {
             return Ok(None);
         }
@@ -722,14 +751,17 @@ impl Shell {
             return answered(fail(Code::Failed, "this window is too narrow to split"), cx);
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return answered(fail(Code::Failed, "the window is not connected to its machines yet"), cx);
+            return answered(
+                fail(Code::Failed, "the window is not connected to its machines yet"),
+                cx,
+            );
         };
         let chat = self.state.read(cx).panel_session_key();
         let target = self.state.read(cx).terminal_target_device(&chat);
         let state = self.state.clone();
         let panel = cx.new(|cx| TerminalPanel::new(state, cx));
-        let key = panel
-            .update(cx, |panel, cx| panel.reserve_tab_for_chat(chat.clone(), "Terminal", cx));
+        let key =
+            panel.update(cx, |panel, cx| panel.reserve_tab_for_chat(chat.clone(), "Terminal", cx));
         let panes = self.panel_key(cx);
         let id = format!("terminal/{}", self.add_shell_beside(&panes, panel.clone(), cx));
         let mut params = serde_json::json!({ "chatId": chat });
@@ -786,7 +818,9 @@ impl Shell {
                         if cx.update(|cx| super::terminal_runs::send_line(&terminal, line, cx)) {
                             break Some(!super::terminal_runs::read_first(line));
                         }
-                        if cx.background_executor().now().saturating_duration_since(since) > SHELL_WITHIN {
+                        if cx.background_executor().now().saturating_duration_since(since)
+                            > SHELL_WITHIN
+                        {
                             break Some(false);
                         }
                         cx.background_executor().timer(ASK_EVERY).await;
@@ -843,7 +877,9 @@ mod tests {
     type Heard = Rc<RefCell<Vec<Result<Done, Failure>>>>;
 
     /// A shell on two chats of this machine, `a` on screen, its window serving agents' asks.
-    fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut VisualTestContext) {
+    fn setup(
+        cx: &mut TestAppContext,
+    ) -> (tempfile::TempDir, Entity<Shell>, &mut VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -893,7 +929,8 @@ mod tests {
     fn asked(cx: &mut VisualTestContext, ask: Ask) -> Result<Done, Failure> {
         let heard: Heard = Rc::default();
         let kept = Rc::clone(&heard);
-        cx.cx.update(|cx| act(ask, Box::new(move |outcome, _| kept.borrow_mut().push(outcome)), cx));
+        cx.cx
+            .update(|cx| act(ask, Box::new(move |outcome, _| kept.borrow_mut().push(outcome)), cx));
         cx.run_until_parked();
         let mut heard = heard.borrow_mut();
         assert_eq!(heard.len(), 1, "answered once: {heard:?}");
@@ -946,7 +983,11 @@ mod tests {
             ..ask(Act::Region { region: "sidebar".into(), change: Change::Toggle })
         };
         assert!(asked(cx, hide("a1")).unwrap().did.is_some());
-        assert_eq!(cx.update(|_, cx| crate::toast::said(cx)), Vec::<gpui::SharedString>::new(), "a1 is on screen");
+        assert_eq!(
+            cx.update(|_, cx| crate::toast::said(cx)),
+            Vec::<gpui::SharedString>::new(),
+            "a1 is on screen"
+        );
         assert!(asked(cx, hide("b2")).unwrap().did.is_some());
         let said = cx.update(|_, cx| crate::toast::said(cx));
         assert_eq!(said.len(), 1, "b2 is not: {said:?}");
@@ -972,13 +1013,20 @@ mod tests {
         assert_eq!(done.did.as_deref(), Some("showed the inspector"));
         assert!(region(&done, "inspector").shown, "{done:?}");
         let tab = done.window.tabs.iter().find(|tab| tab.kind == "inspector").cloned().unwrap();
-        assert_eq!((tab.id.as_str(), tab.region.as_str(), tab.selected), ("pane/inspector/0", "inspector", false));
+        assert_eq!(
+            (tab.id.as_str(), tab.region.as_str(), tab.selected),
+            ("pane/inspector/0", "inspector", false)
+        );
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell.panes_now(cx).focused()),
             Pane::Session,
             "the keyboard stays in the session"
         );
-        assert_eq!(asked(cx, ask(change("inspector", Change::Expand))).unwrap().did, None, "shown already");
+        assert_eq!(
+            asked(cx, ask(change("inspector", Change::Expand))).unwrap().did,
+            None,
+            "shown already"
+        );
         let done = asked(cx, ask(change("inspector", Change::Collapse))).unwrap();
         assert!(!region(&done, "inspector").shown);
         assert!(done.window.tabs.is_empty(), "{done:?}");

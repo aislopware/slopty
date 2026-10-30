@@ -5,8 +5,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, IntoElement, Render, ScrollHandle, SharedString,
-    Subscription, Task, Window, div, px,
+    AnyElement, App, Context, Entity, Focusable as _, IntoElement, Render, ScrollHandle,
+    SharedString, Subscription, Task, Window, div, px,
 };
 use serde::Deserialize;
 
@@ -169,7 +169,9 @@ impl ScreenSurface {
                 }
                 cx.notify();
             }
-            ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => this.choose_active(cx),
+            ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
+                this.choose_active(cx)
+            }
             ComposerInputEvent::MentionDismiss => {
                 this.search.update(cx, |search, cx| search.set_text("", cx));
             }

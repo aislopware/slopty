@@ -1,66 +1,60 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! The right-pane "Changes" content: a unified-diff viewer over `WatchCheckoutDiffs`.
 //!
-//! - pure patch parser: `diff --git` sections → file/hunk/line/notice rows,
-//!   with add/delete/rename/binary detection and per-file counts;
-//! - resolution: the shown diff matches the selected chat by `checkout_id`
-//!   first, then by device+cwd, then cwd alone;
-//! - states: *preparing* (no diff yet), *clean* (empty patch), *list*; a watch
-//!   error shows a banner while the last content stays;
-//! - virtualized with gpui `list()` at LINE granularity — every file header,
-//!   unchanged-lines row, and diff line is its own row (the flat model Zed's editor
-//!   uses for its project diff: only the visible slice materializes, and a
-//!   collapsed file's body rows are removed from the list outright, not
-//!   hidden); nowrap sections fold (`motion::fold_frame`) on a
-//!   clipped stand-in row (analytic heights, capped to what the clip can
-//!   reveal), while variable-height wrapped sections settle immediately;
-//! - syntax highlight reuses the markdown tokenizer per diff line, computed
-//!   time-sliced on the background executor and applied as paint-only run
-//!   colors (layout never changes);
-//! - scopes (t3code parity): *Working tree* rides the watch stream; *Branch
-//!   changes* (vs a selectable base ref, default branch preselected) fetches
-//!   one-shot `GetCheckoutDiff` captures, refreshed when the watch checksum
-//!   says the tree moved (slopty: no *Latest turn*);
-//! - two layouts ([`DiffMode`], toolbar toggle, persisted): *unified* stacks
-//!   old and new; *split* pairs each hunk's deletions against its additions
-//!   into one row with two columns. Split is a pure re-flatten of the same
-//!   parse — the row model, virtualization, folds, and highlights are shared.
-//!   slopty: no notes on lines; the pane is read-only toward the agent.
-//! - long-line wrapping is a persisted toolbar choice. It only changes the
-//!   code plane: gutters and sticky headers stay fixed,
-//!   while the virtual list measures each logical row's resulting height.
+//! - pure patch parser: `diff --git` sections → file/hunk/line/notice rows, with
+//!   add/delete/rename/binary detection and per-file counts;
+//! - resolution: the shown diff matches the selected chat by `checkout_id` first, then by
+//!   device+cwd, then cwd alone;
+//! - states: *preparing* (no diff yet), *clean* (empty patch), *list*; a watch error shows a banner
+//!   while the last content stays;
+//! - virtualized with gpui `list()` at LINE granularity — every file header, unchanged-lines row,
+//!   and diff line is its own row (the flat model Zed's editor uses for its project diff: only the
+//!   visible slice materializes, and a collapsed file's body rows are removed from the list
+//!   outright, not hidden); nowrap sections fold (`motion::fold_frame`) on a clipped stand-in row
+//!   (analytic heights, capped to what the clip can reveal), while variable-height wrapped sections
+//!   settle immediately;
+//! - syntax highlight reuses the markdown tokenizer per diff line, computed time-sliced on the
+//!   background executor and applied as paint-only run colors (layout never changes);
+//! - scopes (t3code parity): *Working tree* rides the watch stream; *Branch changes* (vs a
+//!   selectable base ref, default branch preselected) fetches one-shot `GetCheckoutDiff` captures,
+//!   refreshed when the watch checksum says the tree moved (slopty: no *Latest turn*);
+//! - two layouts ([`DiffMode`], toolbar toggle, persisted): *unified* stacks old and new; *split*
+//!   pairs each hunk's deletions against its additions into one row with two columns. Split is a
+//!   pure re-flatten of the same parse — the row model, virtualization, folds, and highlights are
+//!   shared. slopty: no notes on lines; the pane is read-only toward the agent.
+//! - long-line wrapping is a persisted toolbar choice. It only changes the code plane: gutters and
+//!   sticky headers stay fixed, while the virtual list measures each logical row's resulting
+//!   height.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListState,
-    SharedString, Subscription, Task, Window, div, font, list, prelude::*, px,
+    SharedString, Subscription, Task, Window, div, font, list, px,
 };
-use unicode_width::UnicodeWidthChar as _;
-
+use slopty_syntax::LanguageId as Lang;
 use slopty_view_proto::{Chat, CheckoutDiff};
 use slopty_view_rpc::methods;
+use unicode_width::UnicodeWidthChar as _;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
-
 use crate::markdown::render;
-use crate::motion::{self, AnimationExt as _, CHEVRON};
+use crate::motion::{self, AnimationExt as _, CHEVRON, HoverFade as _};
 use crate::popover::{self, Popup};
 use crate::settings::widgets::ActionHint as _;
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
-use slopty_syntax::LanguageId as Lang;
-use crate::motion::HoverFade as _;
 
 // Find in the diff, the whitespace filter and the changed files' tree.
 mod aids;
 mod review;
 mod words;
-pub use review::{DiffMatch, TreeRow, diff_tree, find_matches};
 use review::scoped_params;
+pub use review::{DiffMatch, TreeRow, diff_tree, find_matches};
 
 // The diff's find, whose keys the shell binds.
 gpui::actions!(changes, [FindInDiff, FindNextInDiff, FindPreviousInDiff, ToggleDiffTree]);
@@ -222,26 +216,19 @@ pub struct DiffHighlights {
 impl DiffHighlights {
     pub fn source_ref(&self, line: &DiffLine) -> Option<SourceLineRef> {
         match line.kind {
-            LineKind::Del => line.old_no.map(|line_number| SourceLineRef {
-                side: SourceSide::Old,
-                line_number,
-            }),
-            LineKind::Add => line.new_no.map(|line_number| SourceLineRef {
-                side: SourceSide::New,
-                line_number,
-            }),
+            LineKind::Del => {
+                line.old_no.map(|line_number| SourceLineRef { side: SourceSide::Old, line_number })
+            }
+            LineKind::Add => {
+                line.new_no.map(|line_number| SourceLineRef { side: SourceSide::New, line_number })
+            }
             LineKind::Context => line
                 .new_no
                 .filter(|_| self.new.is_some())
-                .map(|line_number| SourceLineRef {
-                    side: SourceSide::New,
-                    line_number,
-                })
+                .map(|line_number| SourceLineRef { side: SourceSide::New, line_number })
                 .or_else(|| {
-                    line.old_no.map(|line_number| SourceLineRef {
-                        side: SourceSide::Old,
-                        line_number,
-                    })
+                    line.old_no
+                        .map(|line_number| SourceLineRef { side: SourceSide::Old, line_number })
                 }),
             LineKind::Meta => None,
         }
@@ -338,10 +325,7 @@ impl DiffHorizontalGeometry {
             .max()
             .unwrap_or(0);
         let max_gutter_width = gutter_width(file);
-        Self {
-            max_code_columns,
-            max_gutter_width,
-        }
+        Self { max_code_columns, max_gutter_width }
     }
 }
 
@@ -359,20 +343,13 @@ fn max_shaped_text_width(
         .ch_advance(text_system.resolve_font(&mono), size)
         .unwrap_or(size * 0.6)
         .as_f32();
-    file.hunks
-        .iter()
-        .flat_map(|hunk| &hunk.lines)
-        .fold(0.0f32, |widest, line| {
-            let runs = line_runs(line, highlights, theme);
-            let shaped = text_system
-                .shape_line(line.text.clone().into(), size, &runs, None)
-                .width()
-                .as_f32();
-            // Preserve the old column estimate as a floor, including tab stops.
-            widest
-                .max(shaped)
-                .max(visual_columns(&line.text) as f32 * column_width)
-        })
+    file.hunks.iter().flat_map(|hunk| &hunk.lines).fold(0.0f32, |widest, line| {
+        let runs = line_runs(line, highlights, theme);
+        let shaped =
+            text_system.shape_line(line.text.clone().into(), size, &runs, None).width().as_f32();
+        // Preserve the old column estimate as a floor, including tab stops.
+        widest.max(shaped).max(visual_columns(&line.text) as f32 * column_width)
+    })
 }
 
 /// Count terminal-style display columns, including tab stops and wide
@@ -449,9 +426,7 @@ fn reset_horizontal_scroll(handle: &gpui::ScrollHandle) {
 }
 
 fn strip_git_prefix(path: &str) -> &str {
-    path.strip_prefix("a/")
-        .or_else(|| path.strip_prefix("b/"))
-        .unwrap_or(path)
+    path.strip_prefix("a/").or_else(|| path.strip_prefix("b/")).unwrap_or(path)
 }
 
 /// Split the tail of a `diff --git a/… b/…` line into (old, new) paths.
@@ -461,9 +436,7 @@ fn parse_git_paths(rest: &str) -> (String, String) {
     fn unquote(s: &str) -> String {
         let trimmed = s.trim();
         if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
-            trimmed[1..trimmed.len() - 1]
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\")
+            trimmed[1..trimmed.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\")
         } else {
             trimmed.to_string()
         }
@@ -471,10 +444,7 @@ fn parse_git_paths(rest: &str) -> (String, String) {
     if let Some(pos) = rest.rfind(" b/").or_else(|| rest.rfind(" \"b/")) {
         let old = unquote(&rest[..pos]);
         let new = unquote(&rest[pos + 1..]);
-        (
-            strip_git_prefix(&old).to_string(),
-            strip_git_prefix(&new).to_string(),
-        )
+        (strip_git_prefix(&old).to_string(), strip_git_prefix(&new).to_string())
     } else {
         let p = strip_git_prefix(&unquote(rest)).to_string();
         (p.clone(), p)
@@ -486,18 +456,12 @@ fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
     let rest = line.strip_prefix("@@")?;
     let minus = rest.find('-')?;
     let after_minus = &rest[minus + 1..];
-    let old: u32 = after_minus
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .next()?
-        .parse()
-        .ok()?;
+    let old: u32 =
+        after_minus.split(|c: char| c == ',' || c.is_whitespace()).next()?.parse().ok()?;
     let plus = rest.find('+')?;
     let after_plus = &rest[plus + 1..];
-    let new: u32 = after_plus
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .next()?
-        .parse()
-        .ok()?;
+    let new: u32 =
+        after_plus.split(|c: char| c == ',' || c.is_whitespace()).next()?.parse().ok()?;
     Some((old, new))
 }
 
@@ -602,10 +566,7 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
             if let Some((o, n)) = parse_hunk_header(raw) {
                 old_no = o;
                 new_no = n;
-                file.hunks.push(Hunk {
-                    header: raw.to_string(),
-                    lines: Vec::new(),
-                });
+                file.hunks.push(Hunk { header: raw.to_string(), lines: Vec::new() });
                 in_hunk = true;
             }
             continue;
@@ -664,10 +625,8 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
             if let Some(line) = line
                 && let Some(hunk) = file.hunks.last_mut()
             {
-                file.max_line = file
-                    .max_line
-                    .max(line.old_no.unwrap_or(0))
-                    .max(line.new_no.unwrap_or(0));
+                file.max_line =
+                    file.max_line.max(line.old_no.unwrap_or(0)).max(line.new_no.unwrap_or(0));
                 hunk.lines.push(line);
                 continue;
             }
@@ -690,8 +649,7 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
         } else if raw.starts_with("Binary files") || raw.starts_with("GIT binary patch") {
             file.binary = true;
         } else if let Some(mode) = raw.strip_prefix("new mode ") {
-            file.notices
-                .push(format!("Mode changed to {}", mode.trim()));
+            file.notices.push(format!("Mode changed to {}", mode.trim()));
         } else if let Some(new) = raw.strip_prefix("+++ ") {
             let new = new.trim();
             if new == "/dev/null" {
@@ -749,9 +707,7 @@ pub fn truncate_file_lines(file: &mut FileDiff, max_lines: usize) {
         budget -= hunk.lines.len();
         true
     });
-    file.notices.push(format!(
-        "Diff truncated — showing first {max_lines} of {total} lines"
-    ));
+    file.notices.push(format!("Diff truncated — showing first {max_lines} of {total} lines"));
     // The gutter fits what actually renders.
     file.max_line = file
         .hunks
@@ -1094,11 +1050,7 @@ pub fn default_base_ref(branches: &[String], current: Option<&str>) -> Option<St
             return Some(candidate.to_string());
         }
     }
-    branches
-        .iter()
-        .find(|b| current != Some(b.as_str()))
-        .or(Some(first))
-        .cloned()
+    branches.iter().find(|b| current != Some(b.as_str())).or(Some(first)).cloned()
 }
 
 // A clean diff says what fills it, as Claude desktop's empty panes do.
@@ -1214,11 +1166,7 @@ fn excerpt_side(
         if visible.is_empty() {
             continue;
         }
-        let source = visible
-            .iter()
-            .map(|(_, text)| *text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source = visible.iter().map(|(_, text)| *text).collect::<Vec<_>>().join("\n");
         let document = slopty_syntax::highlight(slopty_syntax::HighlightRequest {
             source: &source,
             path: Some(path),
@@ -1229,10 +1177,7 @@ fn excerpt_side(
             lines[number as usize - 1] = spans;
         }
     }
-    Some(Arc::new(slopty_syntax::HighlightedDocument {
-        language,
-        lines,
-    }))
+    Some(Arc::new(slopty_syntax::HighlightedDocument { language, lines }))
 }
 
 pub(crate) fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<DiffHighlights> {
@@ -1257,29 +1202,25 @@ pub(crate) fn excerpt_highlights(file: &FileDiff, language: Lang) -> Option<Diff
     Some(DiffHighlights { old, new })
 }
 
-fn sources_match_patch(file: &FileDiff, response: &slopty_view_proto::CheckoutFileDiffText) -> bool {
-    let old = response
-        .old_text
-        .as_deref()
-        .map(|source| source.lines().collect::<Vec<_>>());
-    let new = response
-        .new_text
-        .as_deref()
-        .map(|source| source.lines().collect::<Vec<_>>());
+fn sources_match_patch(
+    file: &FileDiff,
+    response: &slopty_view_proto::CheckoutFileDiffText,
+) -> bool {
+    let old = response.old_text.as_deref().map(|source| source.lines().collect::<Vec<_>>());
+    let new = response.new_text.as_deref().map(|source| source.lines().collect::<Vec<_>>());
     file.hunks.iter().flat_map(|hunk| &hunk.lines).all(|line| {
         let actual = match line.kind {
-            LineKind::Del => line
-                .old_no
-                .and_then(|number| old.as_ref()?.get(number as usize - 1).copied()),
-            LineKind::Add => line
-                .new_no
-                .and_then(|number| new.as_ref()?.get(number as usize - 1).copied()),
+            LineKind::Del => {
+                line.old_no.and_then(|number| old.as_ref()?.get(number as usize - 1).copied())
+            }
+            LineKind::Add => {
+                line.new_no.and_then(|number| new.as_ref()?.get(number as usize - 1).copied())
+            }
             LineKind::Context => line
                 .new_no
                 .and_then(|number| new.as_ref()?.get(number as usize - 1).copied())
                 .or_else(|| {
-                    line.old_no
-                        .and_then(|number| old.as_ref()?.get(number as usize - 1).copied())
+                    line.old_no.and_then(|number| old.as_ref()?.get(number as usize - 1).copied())
                 }),
             LineKind::Meta => return true,
         };
@@ -1325,10 +1266,7 @@ fn full_highlights(
         .map(Arc::new)
     };
     let old = match response.old_text.as_deref() {
-        Some(source) => Some(parse(
-            source,
-            file.old_path.as_deref().unwrap_or(&file.path),
-        )?),
+        Some(source) => Some(parse(source, file.old_path.as_deref().unwrap_or(&file.path))?),
         None => None,
     };
     let new = match response.new_text.as_deref() {
@@ -1395,12 +1333,8 @@ impl FileHorizontalState {
         let width = match cached.as_ref() {
             Some(kept) if current => kept.width,
             _ => {
-                let width = max_shaped_text_width(
-                    file,
-                    highlights.map(AsRef::as_ref),
-                    theme,
-                    text_system,
-                );
+                let width =
+                    max_shaped_text_width(file, highlights.map(AsRef::as_ref), theme, text_system);
                 *cached = Some(MeasuredDiffWidth { key, highlights: highlights.cloned(), width });
                 width
             }
@@ -1515,18 +1449,12 @@ pub fn body_row_count(file: &FileDiff) -> usize {
 pub fn body_rows(file_ix: u32, file: &FileDiff, mode: DiffMode) -> Vec<DiffRow> {
     let mut rows = Vec::with_capacity(body_row_count(file));
     for notice in 0..file_notices(file).len() {
-        rows.push(DiffRow::Notice {
-            file: file_ix,
-            notice: notice as u32,
-        });
+        rows.push(DiffRow::Notice { file: file_ix, notice: notice as u32 });
     }
     let mut hunk_flat = 0u32;
     for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
         if unchanged_before(file, hunk_ix) > 0 {
-            rows.push(DiffRow::Unchanged {
-                file: file_ix,
-                hunk: hunk_ix as u32,
-            });
+            rows.push(DiffRow::Unchanged { file: file_ix, hunk: hunk_ix as u32 });
         }
         match mode {
             DiffMode::Unified => {
@@ -1594,9 +1522,7 @@ fn sticky_file_header(
     item_ix: usize,
     offset_in_item: f32,
 ) -> Option<StickyFileHeader> {
-    let file_ix = row_ranges
-        .partition_point(|range| range.start <= item_ix)
-        .checked_sub(1)?;
+    let file_ix = row_ranges.partition_point(|range| range.start <= item_ix).checked_sub(1)?;
     let range = row_ranges.get(file_ix)?;
 
     // A reset can briefly leave ListState pointing past the replacement
@@ -1614,9 +1540,7 @@ fn sticky_file_header(
 
 /// Offset a sticky header upward as the next file header enters its slot.
 pub(crate) fn sticky_header_push_offset(next_header_y: Option<f32>) -> f32 {
-    next_header_y
-        .map(|y| (y - FILE_HEADER_HEIGHT).min(0.0))
-        .unwrap_or(0.0)
+    next_header_y.map(|y| (y - FILE_HEADER_HEIGHT).min(0.0)).unwrap_or(0.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1820,7 +1744,6 @@ pub struct Changes {
     _observe: Subscription,
 }
 
-
 /// Events the host (the right pane's surface strip) listens for.
 pub enum ChangesEvent {
     /// Open the post-change path in the workspace file browser.
@@ -1916,7 +1839,6 @@ impl Changes {
         self.scroll_to_file(ix, cx);
     }
 
-
     /// The surface-tab title. slopty: the pane's name; its scope ("Working tree", "Branch
     /// changes") is the picker's under the tab, said once (`docs/decisions/ui.md`, "The Changes
     /// pane names its scope once"). No History surface (ruled out).
@@ -1967,17 +1889,12 @@ impl Changes {
             loop {
                 let mut params = serde_json::Map::new();
                 if let Some(target) = &target {
-                    params.insert(
-                        "targetDeviceId".into(),
-                        serde_json::Value::String(target.clone()),
-                    );
+                    params
+                        .insert("targetDeviceId".into(), serde_json::Value::String(target.clone()));
                 }
                 let subscribed = engine
                     .client()
-                    .subscribe(
-                        methods::WATCH_CHECKOUT_DIFFS,
-                        serde_json::Value::Object(params),
-                    )
+                    .subscribe(methods::WATCH_CHECKOUT_DIFFS, serde_json::Value::Object(params))
                     .await;
                 match subscribed {
                     Ok(mut rx) => {
@@ -2045,7 +1962,6 @@ impl Changes {
             DiffScope::Branch => self.scoped.clone(),
         }
     }
-
 
     /// Scope discriminant folded into the parse key, so a scope or base
     /// switch re-parses even when checksums collide.
@@ -2139,11 +2055,7 @@ impl Changes {
             self.scoped_task = None;
             return;
         }
-        let Some(chat_id) = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone())
+        let Some(chat_id) = self.state.read(cx).selected_chat_row().map(|chat| chat.id.clone())
         else {
             return;
         };
@@ -2175,11 +2087,7 @@ impl Changes {
         {
             return;
         }
-        if self
-            .scoped_for
-            .as_deref()
-            .is_none_or(|prev| !prev.starts_with(&format!("{context}|")))
-        {
+        if self.scoped_for.as_deref().is_none_or(|prev| !prev.starts_with(&format!("{context}|"))) {
             self.scoped = None;
             self.scoped_error = None;
         }
@@ -2203,10 +2111,7 @@ impl Changes {
             }
             let result = engine
                 .client()
-                .call(
-                    methods::GET_CHECKOUT_DIFF,
-                    serde_json::Value::Object(params),
-                )
+                .call(methods::GET_CHECKOUT_DIFF, serde_json::Value::Object(params))
                 .await;
             this.update(cx, |changes, cx| {
                 if changes.scoped_inflight.as_deref() != Some(key.as_str()) {
@@ -2251,7 +2156,6 @@ impl Changes {
         cx.notify();
     }
 
-
     fn set_base_ref(&mut self, base: String, cx: &mut Context<Self>) {
         if self.base_ref.as_deref() != Some(base.as_str()) {
             self.base_ref = Some(base);
@@ -2295,7 +2199,9 @@ impl Changes {
     /// Tests: whether the find is open with the keyboard in it.
     #[cfg(test)]
     pub(crate) fn find_has_keyboard(&self, window: &Window, cx: &App) -> bool {
-        self.find.as_ref().is_some_and(|find| find.input.read(cx).focus_handle(cx).is_focused(window))
+        self.find
+            .as_ref()
+            .is_some_and(|find| find.input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     /// Reconcile parsed content with the currently-active diff.
@@ -2356,11 +2262,7 @@ impl Changes {
                 if current.as_deref() != Some(key.as_str()) {
                     return;
                 }
-                let file_count = if file_count > 0 {
-                    file_count
-                } else {
-                    files.len()
-                };
+                let file_count = if file_count > 0 { file_count } else { files.len() };
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
                 changes.folds.clear();
                 changes.highlights.clear();
@@ -2374,16 +2276,13 @@ impl Changes {
                         FileFold { collapsed: true, held: true, ..FileFold::default() },
                     );
                 }
-                let (rows, ranges) = flatten_rows(&files, changes.mode, |ix| {
-                    held.get(ix).copied().unwrap_or(false)
-                });
+                let (rows, ranges) =
+                    flatten_rows(&files, changes.mode, |ix| held.get(ix).copied().unwrap_or(false));
                 // The uniform hint keeps offsets for never-rendered rows
                 // sane (most rows ARE lines); real heights land as rows
                 // render.
                 let row_height = px(diff_line_height(Theme::of(cx)));
-                changes
-                    .list
-                    .reset_with_uniform_height(rows.len(), row_height);
+                changes.list.reset_with_uniform_height(rows.len(), row_height);
                 changes.rows = rows;
                 changes.row_ranges = ranges;
                 changes.parsed = Some(ParsedDiff {
@@ -2420,11 +2319,7 @@ impl Changes {
             let Some(old) = self.rows.get(body.clone()) else {
                 return;
             };
-            let prefix = old
-                .iter()
-                .zip(&new_body)
-                .take_while(|(a, b)| a == b)
-                .count();
+            let prefix = old.iter().zip(&new_body).take_while(|(a, b)| a == b).count();
             let suffix = old[prefix..]
                 .iter()
                 .rev()
@@ -2454,15 +2349,9 @@ impl Changes {
             return;
         };
         if self.wrap_lines {
-            let collapsed = !self
-                .folds
-                .get(&file.path)
-                .is_some_and(|fold| fold.collapsed);
-            let body = if collapsed {
-                Vec::new()
-            } else {
-                body_rows(file_ix as u32, file, self.mode)
-            };
+            let collapsed = !self.folds.get(&file.path).is_some_and(|fold| fold.collapsed);
+            let body =
+                if collapsed { Vec::new() } else { body_rows(file_ix as u32, file, self.mode) };
             let fold = self.folds.entry(file.path.clone()).or_default();
             fold.collapsed = collapsed;
             fold.held = false;
@@ -2474,16 +2363,8 @@ impl Changes {
         let expanded_height = body_height_with(file, self.mode, diff_line_height(Theme::of(cx)));
         let fold = self.folds.entry(file.path.clone()).or_default();
         let currently_collapsed = fold.collapsed;
-        fold.from = if currently_collapsed {
-            0.0
-        } else {
-            expanded_height
-        };
-        fold.to = if currently_collapsed {
-            expanded_height
-        } else {
-            0.0
-        };
+        fold.from = if currently_collapsed { 0.0 } else { expanded_height };
+        fold.to = if currently_collapsed { expanded_height } else { 0.0 };
         fold.collapsed = !currently_collapsed;
         fold.held = false;
         fold.epoch += 1;
@@ -2491,12 +2372,7 @@ impl Changes {
         // The body tweens as ONE clipped stand-in row; the settle sweep
         // swaps it for steady rows (all lines, or none) once the window
         // elapses.
-        self.replace_file_body(
-            file_ix,
-            vec![DiffRow::FoldingBody {
-                file: file_ix as u32,
-            }],
-        );
+        self.replace_file_body(file_ix, vec![DiffRow::FoldingBody { file: file_ix as u32 }]);
         self.ensure_fold_settle(cx);
     }
 
@@ -2509,15 +2385,12 @@ impl Changes {
         self.fold_settle = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(FOLD_TWEEN_WINDOW).await;
-                let more = this
-                    .update(cx, |changes, cx| changes.settle_folds(cx))
-                    .unwrap_or(false);
+                let more = this.update(cx, |changes, cx| changes.settle_folds(cx)).unwrap_or(false);
                 if !more {
                     break;
                 }
             }
-            this.update(cx, |changes, _| changes.fold_settle = None)
-                .ok();
+            this.update(cx, |changes, _| changes.fold_settle = None).ok();
         }));
     }
 
@@ -2532,9 +2405,7 @@ impl Changes {
         for file_ix in (0..self.row_ranges.len()).rev() {
             let range = &self.row_ranges[file_ix];
             let folding = self.rows.get(range.start + 1)
-                == Some(&DiffRow::FoldingBody {
-                    file: file_ix as u32,
-                });
+                == Some(&DiffRow::FoldingBody { file: file_ix as u32 });
             if !folding {
                 continue;
             }
@@ -2563,19 +2434,14 @@ impl Changes {
             return false;
         };
         !parsed.files.is_empty()
-            && parsed.files.iter().all(|file| {
-                self.folds
-                    .get(&file.path)
-                    .is_some_and(|fold| fold.collapsed)
-            })
+            && parsed
+                .files
+                .iter()
+                .all(|file| self.folds.get(&file.path).is_some_and(|fold| fold.collapsed))
     }
 
     fn fold_all_label(&self) -> &'static str {
-        if self.all_collapsed() {
-            "Expand all files"
-        } else {
-            "Collapse all files"
-        }
+        if self.all_collapsed() { "Expand all files" } else { "Collapse all files" }
     }
 
     /// Collapse every file section, or expand them all when everything is
@@ -2599,8 +2465,11 @@ impl Changes {
         for file_ix in (0..self.row_ranges.len().min(files.len())).rev() {
             let range = &self.row_ranges[file_ix];
             let body = range.start + 1..range.end;
-            let new_len =
-                if collapse { 0 } else { body_rows(file_ix as u32, &files[file_ix], self.mode).len() };
+            let new_len = if collapse {
+                0
+            } else {
+                body_rows(file_ix as u32, &files[file_ix], self.mode).len()
+            };
             if body.len() != new_len {
                 self.list.splice(body, new_len);
             }
@@ -2637,10 +2506,7 @@ impl Changes {
         // A folding stand-in has an analytic fixed-line height. Settle it
         // before switching to variable-height rows; steady rows can then be
         // measured by the virtual list at the current pane width.
-        let folding = self
-            .rows
-            .iter()
-            .any(|row| matches!(row, DiffRow::FoldingBody { .. }));
+        let folding = self.rows.iter().any(|row| matches!(row, DiffRow::FoldingBody { .. }));
         if folding {
             self.fold_settle = None;
             for fold in self.folds.values_mut() {
@@ -2660,17 +2526,10 @@ impl Changes {
         };
         let files = parsed.files.clone();
         let top = self.list.logical_scroll_top().item_ix;
-        let anchor_file = self
-            .row_ranges
-            .iter()
-            .position(|range| range.contains(&top));
+        let anchor_file = self.row_ranges.iter().position(|range| range.contains(&top));
         let collapsed: Vec<bool> = files
             .iter()
-            .map(|file| {
-                self.folds
-                    .get(&file.path)
-                    .is_some_and(|fold| fold.collapsed)
-            })
+            .map(|file| self.folds.get(&file.path).is_some_and(|fold| fold.collapsed))
             .collect();
         let (rows, ranges) =
             flatten_rows(&files, self.mode, |ix| collapsed.get(ix).copied().unwrap_or(false));
@@ -2678,10 +2537,7 @@ impl Changes {
         self.list.reset_with_uniform_height(rows.len(), row_height);
         self.rows = rows;
         self.row_ranges = ranges;
-        if let Some(start) = anchor_file
-            .and_then(|ix| self.row_ranges.get(ix))
-            .map(|r| r.start)
-        {
+        if let Some(start) = anchor_file.and_then(|ix| self.row_ranges.get(ix)).map(|r| r.start) {
             self.list.scroll_to_reveal_item(start);
         }
         self.land_wanted_file(cx); // a file asked for before it was listed
@@ -2814,11 +2670,7 @@ impl Changes {
         let diff = self.active_diff(cx)?;
         let engine = self.state.read(cx).engine().cloned()?;
         let target = self.desired_target(cx);
-        let chat_id = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone());
+        let chat_id = self.state.read(cx).selected_chat_row().map(|chat| chat.id.clone());
         let request = slopty_view_proto::GetCheckoutFileDiffTextRequest {
             checkout_id: diff.checkout_id,
             cwd: diff.cwd,
@@ -2874,7 +2726,8 @@ impl Changes {
                 return;
             };
             this.update(cx, |changes, cx| {
-                let Some(parsed) = changes.parsed.as_ref().filter(|parsed| parsed.key == key) else {
+                let Some(parsed) = changes.parsed.as_ref().filter(|parsed| parsed.key == key)
+                else {
                     return;
                 };
                 let Some(file) = parsed.files.get(file_ix).filter(|file| file.path == path) else {
@@ -2917,8 +2770,9 @@ impl Changes {
             horizontal.measured.replace(None);
         }
         let folded = self.folds.get(&file.path).is_some_and(|fold| fold.collapsed);
-        let tweening = self.row_ranges.get(file_ix).and_then(|range| self.rows.get(range.start + 1))
-            == Some(&DiffRow::FoldingBody { file: file_ix as u32 });
+        let tweening =
+            self.row_ranges.get(file_ix).and_then(|range| self.rows.get(range.start + 1))
+                == Some(&DiffRow::FoldingBody { file: file_ix as u32 });
         if !folded && !tweening {
             let body = body_rows(file_ix as u32, &file, self.mode);
             self.replace_file_body(file_ix, body);
@@ -2938,26 +2792,29 @@ impl Changes {
         theme: &Theme,
     ) -> Vec<(std::ops::Range<usize>, gpui::Hsla)> {
         let mut marks = self.find_marks(file, hunk, line, theme);
-        let words = match self.words.get(&(file, hunk)) {
-            Some(words) => words.clone(),
-            None => {
-                let Some(found) = self.parsed.as_ref().and_then(|parsed| {
-                    parsed.files.get(file as usize)?.hunks.get(hunk as usize)
-                }) else {
-                    return marks;
-                };
-                let words = Arc::new(words::hunk_words(found));
-                self.words.insert((file, hunk), words.clone());
-                words
-            }
-        };
+        let words =
+            match self.words.get(&(file, hunk)) {
+                Some(words) => words.clone(),
+                None => {
+                    let Some(found) = self.parsed.as_ref().and_then(|parsed| {
+                        parsed.files.get(file as usize)?.hunks.get(hunk as usize)
+                    }) else {
+                        return marks;
+                    };
+                    let words = Arc::new(words::hunk_words(found));
+                    self.words.insert((file, hunk), words.clone());
+                    words
+                }
+            };
         let Some(spans) = words.get(line as usize).filter(|spans| !spans.is_empty()) else {
             return marks;
         };
         let kind = self
             .parsed
             .as_ref()
-            .and_then(|parsed| parsed.files.get(file as usize)?.hunks.get(hunk as usize)?.lines.get(line as usize))
+            .and_then(|parsed| {
+                parsed.files.get(file as usize)?.hunks.get(hunk as usize)?.lines.get(line as usize)
+            })
             .map(|line| line.kind);
         let hue = match kind {
             Some(LineKind::Add) => add_color(theme),
@@ -3085,11 +2942,11 @@ impl Changes {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
-        let highlight = files
-            .get(row.file())
-            .and_then(|file| self.request_highlight(file, &parsed_key, cx));
+        let highlight =
+            files.get(row.file()).and_then(|file| self.request_highlight(file, &parsed_key, cx));
         // A row past the parse draws nothing.
-        let Some(horizontal) = self.parsed.as_ref().and_then(|parsed| parsed.horizontal.get(row.file()))
+        let Some(horizontal) =
+            self.parsed.as_ref().and_then(|parsed| parsed.horizontal.get(row.file()))
         else {
             return gpui::Empty.into_any_element();
         };
@@ -3161,27 +3018,18 @@ impl Changes {
                     }))
                     .into_any_element()
             }
-            DiffRow::Line {
-                file,
-                hunk,
-                line,
-                flat: _,
-            } => {
+            DiffRow::Line { file, hunk, line, flat: _ } => {
                 let line_ix = line; // the find marks lines by index.
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
-                let Some(line) = file_diff
-                    .hunks
-                    .get(hunk as usize)
-                    .and_then(|h| h.lines.get(line as usize))
+                let Some(line) =
+                    file_diff.hunks.get(hunk as usize).and_then(|h| h.lines.get(line as usize))
                 else {
                     return gpui::Empty.into_any_element();
                 };
-                let spans = highlight
-                    .as_deref()
-                    .map(|highlights| highlights.spans(line))
-                    .unwrap_or(&[]);
+                let spans =
+                    highlight.as_deref().map(|highlights| highlights.spans(line)).unwrap_or(&[]);
                 let gutter_px = gutter_width(file_diff);
                 let marks = self.line_marks(file, hunk, line_ix, &theme);
                 diff_line_row(
@@ -3194,12 +3042,7 @@ impl Changes {
                     &marks,
                 )
             }
-            DiffRow::SplitLine {
-                file,
-                hunk,
-                left,
-                right,
-            } => {
+            DiffRow::SplitLine { file, hunk, left, right } => {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
                 };
@@ -3211,22 +3054,18 @@ impl Changes {
                 // both columns.
                 let mirrored = left.is_some() && left == right;
                 // The find's marks on each column's line.
-                let left_marks = left
-                    .map(|slot| self.line_marks(file, hunk, slot, &theme))
-                    .unwrap_or_default();
-                let right_marks = right
-                    .map(|slot| self.line_marks(file, hunk, slot, &theme))
-                    .unwrap_or_default();
+                let left_marks =
+                    left.map(|slot| self.line_marks(file, hunk, slot, &theme)).unwrap_or_default();
+                let right_marks =
+                    right.map(|slot| self.line_marks(file, hunk, slot, &theme)).unwrap_or_default();
                 let left = left.and_then(|slot| lines.get(slot as usize));
                 let right = right.and_then(|slot| lines.get(slot as usize));
                 // `\ No newline at end of file` is not code on one side — it
                 // is a note about the row, so it spans both columns. Pairing
                 // never puts a marker opposite code, so either side having one
                 // means the whole row is the marker.
-                if let Some(line) = [left, right]
-                    .into_iter()
-                    .flatten()
-                    .find(|line| line.kind == LineKind::Meta)
+                if let Some(line) =
+                    [left, right].into_iter().flatten().find(|line| line.kind == LineKind::Meta)
                 {
                     return meta_line_row(&line.text, &theme, 2.0 * (ACCENT_BAR_WIDTH + gutter_px));
                 }
@@ -3340,31 +3179,22 @@ impl Changes {
         let dels = file.deletions;
         let sticky = presentation == FileHeaderPresentation::Sticky;
         let sticky_paint = sticky.then(|| sticky_file_header_paint(theme));
-        let rest_bg = if let Some(paint) = sticky_paint {
-            paint.rest_bg
-        } else {
-            theme.ink(0.025)
-        };
-        let hover_bg = if let Some(paint) = sticky_paint {
-            paint.hover_bg
-        } else {
-            theme.ink(0.05)
-        };
+        let rest_bg = if let Some(paint) = sticky_paint { paint.rest_bg } else { theme.ink(0.025) };
+        let hover_bg =
+            if let Some(paint) = sticky_paint { paint.hover_bg } else { theme.ink(0.05) };
 
         // Chevron (slopty checkout-diff-sidebar): chevron-right closed,
         // chevron-down open; gpui divs have no rotation transform at the
         // pinned rev, so the glyph swap crossfades over the same 200 ms.
-        let chevron_icon = if collapsed {
-            crate::icons::ALT_ARROW_RIGHT
-        } else {
-            crate::icons::ALT_ARROW_DOWN
-        };
+        let chevron_icon =
+            if collapsed { crate::icons::ALT_ARROW_RIGHT } else { crate::icons::ALT_ARROW_DOWN };
         // 12, as the scope trigger's chevron.
-        let chevron = div().flex_none().size(px(14.0)).flex().items_center().justify_center().child(
-            crate::icons::icon(chevron_icon)
-                .size(px(12.0))
-                .text_color(theme.text_muted.opacity(0.7)),
-        );
+        let chevron =
+            div().flex_none().size(px(14.0)).flex().items_center().justify_center().child(
+                crate::icons::icon(chevron_icon)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted.opacity(0.7)),
+            );
         let chevron: AnyElement = if fold.animating(crate::clock::now(cx)) {
             chevron
                 .with_animation(
@@ -3402,10 +3232,9 @@ impl Changes {
             .map(|el| crate::surface_chrome::key_stop_inset(el, theme))
             .w_full()
             .h(px(FILE_HEADER_HEIGHT))
-            .when(
-                presentation == FileHeaderPresentation::Row && ix > 0,
-                |el| el.border_t_1().border_color(crate::theme::hairline(0.04)),
-            )
+            .when(presentation == FileHeaderPresentation::Row && ix > 0, |el| {
+                el.border_t_1().border_color(crate::theme::hairline(0.04))
+            })
             .when(sticky, |el| {
                 el.border_b_1()
                     .border_color(sticky_paint.expect("sticky paint").border)
@@ -3510,9 +3339,7 @@ impl Changes {
         )?;
         debug_assert_eq!(
             self.rows.get(sticky.header_row),
-            Some(&DiffRow::FileHeader {
-                file: sticky.file_ix as u32,
-            })
+            Some(&DiffRow::FileHeader { file: sticky.file_ix as u32 })
         );
         let files = self.parsed.as_ref()?.files.clone();
         let file = files.get(sticky.file_ix)?;
@@ -3544,13 +3371,7 @@ impl Changes {
         let header = crate::frost::frosted(0.0, STICKY_FILE_HEADER_BLUR, header);
 
         Some(
-            div()
-                .absolute()
-                .top(px(top_offset))
-                .left_0()
-                .w_full()
-                .child(header)
-                .into_any_element(),
+            div().absolute().top(px(top_offset)).left_0().w_full().child(header).into_any_element(),
         )
     }
 
@@ -3599,18 +3420,13 @@ impl Changes {
     }
 
     fn wrap_toggle(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        Self::header_toggle(
-            "changes-wrap",
-            crate::icons::WRAP_TEXT,
-            self.wrap_lines,
-            theme,
-        )
-        .hint("Wrap long lines")
-        .on_click(cx.listener(|this, _, _, cx| {
-            cx.stop_propagation();
-            this.toggle_wrap(cx);
-        }))
-        .into_any_element()
+        Self::header_toggle("changes-wrap", crate::icons::WRAP_TEXT, self.wrap_lines, theme)
+            .hint("Wrap long lines")
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.toggle_wrap(cx);
+            }))
+            .into_any_element()
     }
 
     /// The pane-header controls: scope dropdown, `{branch} → {base ⌄}` ref
@@ -3684,12 +3500,7 @@ impl Changes {
             let menu = self.render_scope_menu(&theme, cx);
             scope_trigger
                 .relative()
-                .child(popover::anchored_menu_below_gap(
-                    "changes-scope-menu",
-                    menu,
-                    closing,
-                    10.0,
-                ))
+                .child(popover::anchored_menu_below_gap("changes-scope-menu", menu, closing, 10.0))
                 .into_any_element()
         } else {
             scope_trigger.into_any_element()
@@ -3973,10 +3784,7 @@ impl Changes {
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_ref_menu(cx)))
             .flex()
             .flex_col()
-            .child(popover::search_input_frame(
-                theme,
-                search.into_any_element(),
-            ))
+            .child(popover::search_input_frame(theme, search.into_any_element()))
             .child(list)
             .into_any_element()
     }
@@ -4007,22 +3815,20 @@ impl Changes {
                         ))),
                 )
                 // The totals in tabular figures, a zero total left out, as each file's.
-                .children(
-                    file_counts(parsed.additions, parsed.deletions, true).into_iter().map(
-                        |(text, kind)| {
-                            div()
-                                .font_family(theme.font_mono.clone())
-                                .font_features(crate::typography::tabular())
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(if kind == CountKind::Added {
-                                    add_color(theme)
-                                } else {
-                                    del_color(theme)
-                                })
-                                .child(SharedString::from(text))
-                        },
-                    ),
-                )
+                .children(file_counts(parsed.additions, parsed.deletions, true).into_iter().map(
+                    |(text, kind)| {
+                        div()
+                            .font_family(theme.font_mono.clone())
+                            .font_features(crate::typography::tabular())
+                            .text_size(crate::typography::ui_rems(11.0))
+                            .text_color(if kind == CountKind::Added {
+                                add_color(theme)
+                            } else {
+                                del_color(theme)
+                            })
+                            .child(SharedString::from(text))
+                    },
+                ))
                 .child(div().flex_1())
                 // Its tooltip says what is left out.
                 .when(parsed.truncated, |el| {
@@ -4087,11 +3893,8 @@ pub(crate) fn unchanged_row(
 ) -> gpui::Div {
     let (_, context) = split_hunk_header(header);
     let meta = diff_meta_ink(theme);
-    let label = if count == 1 {
-        "1 unchanged line".to_owned()
-    } else {
-        format!("{count} unchanged lines")
-    };
+    let label =
+        if count == 1 { "1 unchanged line".to_owned() } else { format!("{count} unchanged lines") };
     div()
         .h(px(UNCHANGED_HEIGHT))
         .w_full()
@@ -4157,13 +3960,10 @@ const UNCHANGED_GROUP: &str = "diff-unchanged";
 
 /// A hunk header's range (`@@ -1,4 +1,5 @@`) and the function context git writes after it.
 fn split_hunk_header(header: &str) -> (&str, &str) {
-    header
-        .strip_prefix("@@")
-        .and_then(|rest| rest.find("@@"))
-        .map_or((header.trim(), ""), |end| {
-            let (range, context) = header.split_at(end + 4);
-            (range.trim(), context.trim())
-        })
+    header.strip_prefix("@@").and_then(|rest| rest.find("@@")).map_or((header.trim(), ""), |end| {
+        let (range, context) = header.split_at(end + 4);
+        (range.trim(), context.trim())
+    })
 }
 
 /// The only part of a diff row allowed to exceed its viewport. The outer
@@ -4190,13 +3990,7 @@ fn code_text_viewport(
         .font_family(theme.font_mono.clone())
         .text_size(px(diff_text_size(theme)))
         .line_height(px(diff_line_height(theme)))
-        .map(|el| {
-            if wrapped {
-                el.whitespace_normal()
-            } else {
-                el.whitespace_nowrap()
-            }
-        })
+        .map(|el| if wrapped { el.whitespace_normal() } else { el.whitespace_nowrap() })
         .child(gpui::StyledText::new(text).with_runs(runs));
     let viewport = div()
         .flex_1()
@@ -4209,10 +4003,8 @@ fn code_text_viewport(
     }
     match scroll {
         Some(scroll) => {
-            let mut viewport = viewport
-                .id(scroll.id)
-                .overflow_x_scroll()
-                .track_scroll(&scroll.handle);
+            let mut viewport =
+                viewport.id(scroll.id).overflow_x_scroll().track_scroll(&scroll.handle);
             // Without this GPUI maps a vertical-only wheel delta onto x for
             // an x-only scroller, starving the virtualized list underneath.
             viewport.style().restrict_scroll_to_axis = Some(true);
@@ -4296,22 +4088,14 @@ fn diff_line_row(
         )
         .child(gutter_cell(
             line.old_no,
-            if line.kind == LineKind::Del {
-                number_color
-            } else {
-                theme.text_faint.opacity(0.8)
-            },
+            if line.kind == LineKind::Del { number_color } else { theme.text_faint.opacity(0.8) },
             None,
             gutter_px,
             theme,
         ))
         .child(gutter_cell(
             line.new_no,
-            if line.kind == LineKind::Add {
-                number_color
-            } else {
-                theme.text_faint.opacity(0.8)
-            },
+            if line.kind == LineKind::Add { number_color } else { theme.text_faint.opacity(0.8) },
             wrapped.then_some(line.text.as_str()),
             gutter_px,
             theme,
@@ -4497,11 +4281,7 @@ fn split_line_cell(
 /// line, and vice versa. A flat wash, quieter than either tint, reads as
 /// "nothing here" without competing with the code beside it.
 fn split_filler() -> gpui::Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .self_stretch()
-        .bg(crate::theme::ink(0.03))
+    div().flex_1().min_w_0().self_stretch().bg(crate::theme::ink(0.03))
 }
 
 /// Compose the two halves with the centre hairline.
@@ -4558,10 +4338,8 @@ pub(crate) fn render_file_body_with_syntax(
             );
         }
         for line in &hunk.lines {
-            let spans = highlights
-                .as_deref()
-                .map(|highlights| highlights.spans(line))
-                .unwrap_or(&[]);
+            let spans =
+                highlights.as_deref().map(|highlights| highlights.spans(line)).unwrap_or(&[]);
             children.push(diff_line_row(
                 line,
                 spans,
@@ -4573,12 +4351,7 @@ pub(crate) fn render_file_body_with_syntax(
             ));
         }
     }
-    div()
-        .flex()
-        .flex_col()
-        .pb(px(BODY_BOTTOM_PAD))
-        .children(children)
-        .into_any_element()
+    div().flex().flex_col().pb(px(BODY_BOTTOM_PAD)).children(children).into_any_element()
 }
 
 /// Build only rows that start above `max_px` so the fold tween's stand-in
@@ -4597,10 +4370,7 @@ fn render_file_body_upto(
     let gutter_px = gutter_width(file);
     let wrapped = matches!(code_width, DiffCodeWidth::Wrapped);
     let spans_for = |line: &DiffLine| {
-        highlight
-            .as_deref()
-            .map(|highlights| highlights.spans(line))
-            .unwrap_or(&[])
+        highlight.as_deref().map(|highlights| highlights.spans(line)).unwrap_or(&[])
     };
 
     'build: {
@@ -4651,9 +4421,8 @@ fn render_file_body_upto(
                     // arm breaks out of a lazy walk, so the split arm must not
                     // materialize the whole hunk first.
                     let budget = ((max_px - y) / diff_line_height(theme)).ceil().max(0.0) as usize;
-                    for (pair_ix, (left, right)) in split_pairs_upto(&hunk.lines, budget)
-                        .into_iter()
-                        .enumerate()
+                    for (pair_ix, (left, right)) in
+                        split_pairs_upto(&hunk.lines, budget).into_iter().enumerate()
                     {
                         if y >= max_px {
                             break 'build;
@@ -4699,12 +4468,7 @@ fn render_file_body_upto(
         }
     }
 
-    div()
-        .flex()
-        .flex_col()
-        .pb(px(BODY_BOTTOM_PAD))
-        .children(children)
-        .into_any_element()
+    div().flex().flex_col().pb(px(BODY_BOTTOM_PAD)).children(children).into_any_element()
 }
 
 impl Render for Changes {
@@ -4720,11 +4484,7 @@ impl Render for Changes {
         // With no session selected (new-chat canvas) there is nothing to
         // prepare — show the quiet empty state, not an endless spinner.
         let no_chat = self.state.read(cx).selected_chat_row().is_none();
-        let phase = if no_chat {
-            DiffPhase::Clean
-        } else {
-            diff_phase(active.as_ref())
-        };
+        let phase = if no_chat { DiffPhase::Clean } else { diff_phase(active.as_ref()) };
         let error = self.error.clone();
         // Scoped fetch failures replace the content area. "unknown
         // method" is version skew — the chat's host engine predates
@@ -4788,7 +4548,9 @@ impl Render for Changes {
                 .items_center()
                 .justify_center()
                 .when(preparing == crate::loaders::Delayed::Shown, |el| {
-                    el.child(crate::loaders::pending("changes-preparing", "Preparing diff…").at_once())
+                    el.child(
+                        crate::loaders::pending("changes-preparing", "Preparing diff…").at_once(),
+                    )
                 })
                 .into_any_element()
         } else {
@@ -4824,29 +4586,23 @@ impl Render for Changes {
                             .flex_col()
                             .children(self.render_header_strip(&theme))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .flex()
-                                    .flex_row()
-                                    .children(tree)
-                                    .child(
-                                        div()
-                                            .relative()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .h_full()
-                                            .overflow_hidden()
-                                            .child(
-                                                list(self.list.clone(), cx.processor(Self::render_row))
-                                                    .size_full()
-                                                    .with_sizing_behavior(
-                                                        gpui::ListSizingBehavior::Auto,
-                                                    ),
-                                            )
-                                            .when_some(sticky_header, |el, header| el.child(header))
-                                            .children(find),
-                                    ),
+                                div().flex_1().min_h_0().flex().flex_row().children(tree).child(
+                                    div()
+                                        .relative()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h_full()
+                                        .overflow_hidden()
+                                        .child(
+                                            list(self.list.clone(), cx.processor(Self::render_row))
+                                                .size_full()
+                                                .with_sizing_behavior(
+                                                    gpui::ListSizingBehavior::Auto,
+                                                ),
+                                        )
+                                        .when_some(sticky_header, |el, header| el.child(header))
+                                        .children(find),
+                                ),
                             )
                             .into_any_element()
                     } else {
@@ -4919,8 +4675,9 @@ impl Render for Changes {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::Utc;
+
+    use super::*;
 
     // The review aids' choices outlive the tab and the launch.
     #[gpui::test]
@@ -5076,11 +4833,7 @@ rename to new_name.rs
         assert_eq!(renamed.status, FileStatus::Renamed);
         assert_eq!(renamed.path, "new_name.rs");
         assert_eq!(renamed.old_path.as_deref(), Some("old_name.rs"));
-        assert!(
-            file_notices(renamed)
-                .iter()
-                .any(|n| n.contains("old_name.rs"))
-        );
+        assert!(file_notices(renamed).iter().any(|n| n.contains("old_name.rs")));
     }
 
     #[test]
@@ -5158,19 +4911,11 @@ rename to new_name.rs
         assert_eq!(sticky_file_header(&ranges, 0, 0.0), None);
         assert_eq!(
             sticky_file_header(&ranges, 0, 0.5),
-            Some(StickyFileHeader {
-                file_ix: 0,
-                header_row: 0,
-                next_header_row: Some(4),
-            })
+            Some(StickyFileHeader { file_ix: 0, header_row: 0, next_header_row: Some(4) })
         );
         assert_eq!(
             sticky_file_header(&ranges, 2, 0.0),
-            Some(StickyFileHeader {
-                file_ix: 0,
-                header_row: 0,
-                next_header_row: Some(4),
-            })
+            Some(StickyFileHeader { file_ix: 0, header_row: 0, next_header_row: Some(4) })
         );
 
         // Landing exactly on a new header hands ownership to that file; its
@@ -5178,20 +4923,12 @@ rename to new_name.rs
         assert_eq!(sticky_file_header(&ranges, 4, 0.0), None);
         assert_eq!(
             sticky_file_header(&ranges, 4, 1.0),
-            Some(StickyFileHeader {
-                file_ix: 1,
-                header_row: 4,
-                next_header_row: Some(5),
-            })
+            Some(StickyFileHeader { file_ix: 1, header_row: 4, next_header_row: Some(5) })
         );
         assert_eq!(sticky_file_header(&ranges, 5, 0.0), None);
         assert_eq!(
             sticky_file_header(&ranges, 8, 0.0),
-            Some(StickyFileHeader {
-                file_ix: 2,
-                header_row: 5,
-                next_header_row: None,
-            })
+            Some(StickyFileHeader { file_ix: 2, header_row: 5, next_header_row: None })
         );
         assert_eq!(sticky_file_header(&ranges, 10, 0.0), None);
     }
@@ -5201,10 +4938,7 @@ rename to new_name.rs
         assert_eq!(sticky_header_push_offset(None), 0.0);
         assert_eq!(sticky_header_push_offset(Some(80.0)), 0.0);
         assert_eq!(sticky_header_push_offset(Some(FILE_HEADER_HEIGHT)), 0.0);
-        assert_eq!(
-            sticky_header_push_offset(Some(FILE_HEADER_HEIGHT - 12.0)),
-            -12.0
-        );
+        assert_eq!(sticky_header_push_offset(Some(FILE_HEADER_HEIGHT - 12.0)), -12.0);
         assert_eq!(sticky_header_push_offset(Some(0.0)), -FILE_HEADER_HEIGHT);
     }
 
@@ -5249,11 +4983,7 @@ rename to new_name.rs
                     crate::theme::Appearance::Light => STICKY_FILE_HEADER_TINT_ALPHA_LIGHT,
                 };
                 let tint = frosted.bg.opacity(expected_alpha);
-                assert_eq!(
-                    frosted_paint.frost_tint,
-                    Some(tint),
-                    "{variant_id} content-plane tint"
-                );
+                assert_eq!(frosted_paint.frost_tint, Some(tint), "{variant_id} content-plane tint");
                 assert_ne!(
                     tint,
                     frosted.glass_overlay(),
@@ -5268,10 +4998,7 @@ rename to new_name.rs
             } else {
                 assert_eq!(frosted_paint.frost_tint, None, "{variant_id}");
             }
-            assert_eq!(
-                frosted_paint.border, frosted.border,
-                "{variant_id} frosted border"
-            );
+            assert_eq!(frosted_paint.border, frosted.border, "{variant_id} frosted border");
         }
     }
 
@@ -5282,12 +5009,7 @@ rename to new_name.rs
         // pairs across; the extra addition is stranded on the right.
         assert_eq!(
             split_pairs(&files[0].hunks[0].lines),
-            vec![
-                (Some(0), Some(0)),
-                (Some(1), Some(2)),
-                (None, Some(3)),
-                (Some(4), Some(4)),
-            ]
+            vec![(Some(0), Some(0)), (Some(1), Some(2)), (None, Some(3)), (Some(4), Some(4)),]
         );
         // A pure add: every row is right-only, including the trailing
         // no-newline Meta line — it belongs to the side it follows, and its
@@ -5302,22 +5024,10 @@ rename to new_name.rs
 
         // `-a +b -c +d` is two one-line edits, not one four-line one: a
         // deletion arriving after additions opens a new block.
-        let line = |kind| DiffLine {
-            kind,
-            old_no: Some(1),
-            new_no: Some(1),
-            text: String::new(),
-        };
-        let lines = [
-            line(LineKind::Del),
-            line(LineKind::Add),
-            line(LineKind::Del),
-            line(LineKind::Add),
-        ];
-        assert_eq!(
-            split_pairs(&lines),
-            vec![(Some(0), Some(1)), (Some(2), Some(3))]
-        );
+        let line = |kind| DiffLine { kind, old_no: Some(1), new_no: Some(1), text: String::new() };
+        let lines =
+            [line(LineKind::Del), line(LineKind::Add), line(LineKind::Del), line(LineKind::Add)];
+        assert_eq!(split_pairs(&lines), vec![(Some(0), Some(1)), (Some(2), Some(3))]);
     }
 
     #[test]
@@ -5340,10 +5050,7 @@ rename to new_name.rs
         );
         // One aligned old/new row, then the two markers on one row of their
         // own — four lines read as two rows, not four.
-        assert_eq!(
-            split_pairs(lines),
-            vec![(Some(0), Some(2)), (Some(1), Some(3))]
-        );
+        assert_eq!(split_pairs(lines), vec![(Some(0), Some(2)), (Some(1), Some(3))]);
         let full = split_pairs(lines);
         for cap in 0..=full.len() + 2 {
             assert_eq!(split_pairs_upto(lines, cap), full[..cap.min(full.len())]);
@@ -5378,21 +5085,11 @@ rename to new_name.rs
         assert_eq!(main_rows.len(), 1 + 1 + (4 + 2) + 1);
         assert_eq!(
             main_rows[1],
-            DiffRow::SplitLine {
-                file: 0,
-                hunk: 0,
-                left: Some(0),
-                right: Some(0),
-            }
+            DiffRow::SplitLine { file: 0, hunk: 0, left: Some(0), right: Some(0) }
         );
         assert_eq!(
             main_rows[3],
-            DiffRow::SplitLine {
-                file: 0,
-                hunk: 0,
-                left: None,
-                right: Some(3),
-            }
+            DiffRow::SplitLine { file: 0, hunk: 0, left: None, right: Some(3) }
         );
         assert_eq!(main_rows[5], DiffRow::Unchanged { file: 0, hunk: 1 });
         assert_eq!(*main_rows.last().unwrap(), DiffRow::BodyPad { file: 0 });
@@ -5428,10 +5125,7 @@ rename to new_name.rs
             .collect();
         let capped = split_pairs_upto(&many, 5);
         assert_eq!(capped.len(), 5);
-        assert!(
-            capped.capacity() < 100,
-            "capacity tracks the cap, not the hunk"
-        );
+        assert!(capped.capacity() < 100, "capacity tracks the cap, not the hunk");
         assert_eq!(capped[4], (Some(4), None));
     }
 
@@ -5440,8 +5134,9 @@ rename to new_name.rs
     #[test]
     fn a_large_diff_opens_with_files_past_the_budget_collapsed() {
         let patch_of = |name: &str, lines: usize| {
-            format!("diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -0,0 +1,{lines} @@\n")
-                + &"+x\n".repeat(lines)
+            format!(
+                "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -0,0 +1,{lines} @@\n"
+            ) + &"+x\n".repeat(lines)
         };
         let sizes = [10, LARGE_FILE_LINES + 1, 1_400, 1_400, 1_400, 900];
         let patch: String = sizes
@@ -5458,7 +5153,8 @@ rename to new_name.rs
         for (ix, range) in ranges.iter().enumerate() {
             assert_eq!(range.len() == 1, held[ix], "f{ix}: a held file is its header alone");
         }
-        let open: usize = files.iter().zip(&held).filter(|(_, h)| !**h).map(|(f, _)| diff_lines(f)).sum();
+        let open: usize =
+            files.iter().zip(&held).filter(|(_, h)| !**h).map(|(f, _)| diff_lines(f)).sum();
         assert!(open <= DIFF_LINE_BUDGET, "{open} lines open");
         assert!(rows.len() < open + 3 * files.len(), "{} rows", rows.len());
         // A diff within both budgets holds nothing back.
@@ -5476,11 +5172,7 @@ rename to new_name.rs
         let lines: usize = file.hunks.iter().map(|h| h.lines.len()).sum();
         assert_eq!(lines, 6);
         assert_eq!(file.hunks.len(), 2);
-        assert!(
-            file_notices(&file)
-                .iter()
-                .any(|n| n.contains("first 6 of 8 lines"))
-        );
+        assert!(file_notices(&file).iter().any(|n| n.contains("first 6 of 8 lines")));
         // body_height stays consistent with what actually renders.
         assert_eq!(
             body_height(&file),
@@ -5510,10 +5202,7 @@ rename to new_name.rs
             let w = gutter_width(&file);
             assert!(w >= GUTTER_WIDTH);
             let left_gap = w - (digits as f32 * 6.6 + 8.0);
-            assert!(
-                left_gap >= 6.0,
-                "{digits} digits: left gap {left_gap} < 6px"
-            );
+            assert!(left_gap >= 6.0, "{digits} digits: left gap {left_gap} < 6px");
         }
         // The floor holds three digits, so a file under a thousand lines keeps one
         // width as it grows, and the fourth digit is the first to widen it (item 11).
@@ -5555,21 +5244,15 @@ rename to new_name.rs
 
     #[test]
     fn horizontal_content_width_compensates_for_local_gutters() {
-        let metrics = DiffHorizontalMetrics {
-            max_text_width: 240.0,
-            max_gutter_width: 52.0,
-        };
+        let metrics = DiffHorizontalMetrics { max_text_width: 240.0, max_gutter_width: 52.0 };
         let narrow = 36.0;
         let wide = 52.0;
 
-        let unified_total = |gutter| {
-            ACCENT_BAR_WIDTH + 2.0 * gutter + metrics.unified_content_width(gutter)
-        };
+        let unified_total =
+            |gutter| ACCENT_BAR_WIDTH + 2.0 * gutter + metrics.unified_content_width(gutter);
         assert_eq!(unified_total(narrow), unified_total(wide));
 
-        let split_total = |gutter| {
-            ACCENT_BAR_WIDTH + gutter + metrics.split_content_width(gutter)
-        };
+        let split_total = |gutter| ACCENT_BAR_WIDTH + gutter + metrics.split_content_width(gutter);
         assert_eq!(split_total(narrow), split_total(wide));
     }
 
@@ -5602,10 +5285,8 @@ rename to new_name.rs
             )),
         });
         let mono = font(theme.font_mono.clone());
-        let column = text_system
-            .ch_advance(text_system.resolve_font(&mono), px(12.))
-            .unwrap()
-            .as_f32();
+        let column =
+            text_system.ch_advance(text_system.resolve_font(&mono), px(12.)).unwrap().as_f32();
         let line = &file.hunks[0].lines[0];
         let width = text_system
             .shape_line(wide.into(), px(12.), &line_runs(line, None, &theme), None)
@@ -5624,10 +5305,7 @@ rename to new_name.rs
             for highlights in [
                 None,
                 Some(highlight.clone()),
-                Some(Arc::new(DiffHighlights {
-                    old: None,
-                    new: highlight.new.clone(),
-                })),
+                Some(Arc::new(DiffHighlights { old: None, new: highlight.new.clone() })),
             ] {
                 let metrics = state.metrics(file, highlights.as_ref(), &theme, &text_system, 0);
                 for line in &file.hunks[0].lines {
@@ -5670,19 +5348,9 @@ rename to new_name.rs
         assert_eq!(states[0].geometry.max_code_columns, 5);
         assert_eq!(states[1].geometry.max_code_columns, 25);
 
-        let row = DiffRow::Line {
-            file: 0,
-            hunk: 0,
-            line: 0,
-            flat: 0,
-        };
+        let row = DiffRow::Line { file: 0, hunk: 0, line: 0, flat: 0 };
         let folding = DiffRow::FoldingBody { file: 0 };
-        let split = DiffRow::SplitLine {
-            file: 1,
-            hunk: 0,
-            left: Some(0),
-            right: Some(1),
-        };
+        let split = DiffRow::SplitLine { file: 1, hunk: 0, left: Some(0), right: Some(1) };
         let first = DiffCodeScrollContext {
             handle: states[row.file()].scroll.clone(),
             prefix: "first".into(),
@@ -5691,17 +5359,11 @@ rename to new_name.rs
             handle: states[split.file()].scroll.clone(),
             prefix: "second".into(),
         };
-        first
-            .slot("unified")
-            .handle
-            .set_offset(gpui::Point::new(px(-96.0), px(0.0)));
+        first.slot("unified").handle.set_offset(gpui::Point::new(px(-96.0), px(0.0)));
         assert_eq!(states[folding.file()].scroll.offset().x, px(-96.0));
         assert_eq!(second.slot("old").handle.offset(), gpui::Point::default());
 
-        second
-            .slot("old")
-            .handle
-            .set_offset(gpui::Point::new(px(-48.0), px(0.0)));
+        second.slot("old").handle.set_offset(gpui::Point::new(px(-48.0), px(0.0)));
         assert_eq!(second.slot("new").handle.offset().x, px(-48.0));
         assert_eq!(first.slot("unified").handle.offset().x, px(-96.0));
     }
@@ -5718,10 +5380,8 @@ rename to new_name.rs
 
     #[test]
     fn horizontal_scroll_slots_share_offset_but_keep_unique_ids() {
-        let context = DiffCodeScrollContext {
-            handle: gpui::ScrollHandle::new(),
-            prefix: "row-7".into(),
-        };
+        let context =
+            DiffCodeScrollContext { handle: gpui::ScrollHandle::new(), prefix: "row-7".into() };
         let old = context.slot("old");
         let new = context.slot("new");
 
@@ -5743,10 +5403,7 @@ rename to new_name.rs
         // Notices add height (added file: 1 notice + meta line inside hunk); its one hunk
         // has no `@@` row, the notice saying it.
         let added = &files[1];
-        assert_eq!(
-            body_height(added),
-            NOTICE_HEIGHT + 3.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD
-        );
+        assert_eq!(body_height(added), NOTICE_HEIGHT + 3.0 * DIFF_LINE_HEIGHT + BODY_BOTTOM_PAD);
     }
 
     // A wrapped line marks each row it wraps onto with `»` under its number, as many as
@@ -5755,8 +5412,16 @@ rename to new_name.rs
     fn a_wrapped_line_marks_its_continuation_rows() {
         assert_eq!(continuation_marks("short"), None);
         assert_eq!(continuation_marks(&"x".repeat(50)).as_deref(), Some("»\n»"));
-        assert_eq!(continuation_marks(&"\t".repeat(6)).as_deref(), Some("»"), "a tab is four columns");
-        assert_eq!(continuation_marks(&"字".repeat(12)).as_deref(), Some("»"), "a wide glyph is two");
+        assert_eq!(
+            continuation_marks(&"\t".repeat(6)).as_deref(),
+            Some("»"),
+            "a tab is four columns"
+        );
+        assert_eq!(
+            continuation_marks(&"字".repeat(12)).as_deref(),
+            Some("»"),
+            "a wide glyph is two"
+        );
         let marks = continuation_marks(&"y".repeat(100_000)).unwrap();
         assert_eq!(marks.matches('»').count(), 200, "bounded");
     }
@@ -5792,7 +5457,9 @@ rename to new_name.rs
         // The new side, line for line: the first hunk's four lines, line 5 (the patch's header
         // counts five), the five left out, then the second hunk's.
         let mut source: Vec<String> =
-            ["fn main() {", "    println!(\"new\");", "    let x = 1;", "}"].map(String::from).into();
+            ["fn main() {", "    println!(\"new\");", "    let x = 1;", "}"]
+                .map(String::from)
+                .into();
         source.extend((5..=10).map(|n| format!("line {n}")));
         source.extend(["// tail", "new_line"].map(String::from));
 
@@ -5814,7 +5481,10 @@ rename to new_name.rs
                 .any(|row| matches!(row, DiffRow::Unchanged { .. })),
             "a gap shown whole leaves no row"
         );
-        assert!(!reveal_unchanged(&mut files[0].clone(), 1, 5, &source[..8]), "a short source shows nothing");
+        assert!(
+            !reveal_unchanged(&mut files[0].clone(), 1, 5, &source[..8]),
+            "a short source shows nothing"
+        );
     }
 
     fn diff(checkout: &str, device: &str, cwd: &str, patch: &str) -> CheckoutDiff {
@@ -5859,10 +5529,8 @@ rename to new_name.rs
 
     #[test]
     fn diff_resolution_prefers_checkout_id_then_cwd() {
-        let diffs = vec![
-            diff("co-1", "dev-a", "/repo/one", "x"),
-            diff("co-2", "dev-b", "/repo/two", "y"),
-        ];
+        let diffs =
+            vec![diff("co-1", "dev-a", "/repo/one", "x"), diff("co-2", "dev-b", "/repo/two", "y")];
         // checkout_id match wins even when cwd points elsewhere.
         let c = chat(Some("co-2"), "dev-a", Some("/repo/one"));
         assert_eq!(resolve_diff(&diffs, &c).unwrap().checkout_id, "co-2");
@@ -5920,23 +5588,11 @@ rename to new_name.rs
 
     #[test]
     fn scope_labels_and_clean_messages() {
-        assert_eq!(
-            scope_label(DiffScope::WorkingTree, 2, None),
-            "2 uncommitted changes"
-        );
-        assert_eq!(
-            scope_label(DiffScope::Branch, 1, Some("main")),
-            "1 changed file vs main"
-        );
+        assert_eq!(scope_label(DiffScope::WorkingTree, 2, None), "2 uncommitted changes");
+        assert_eq!(scope_label(DiffScope::Branch, 1, Some("main")), "1 changed file vs main");
         assert_eq!(scope_label(DiffScope::Branch, 3, None), "3 changed files");
-        assert_eq!(
-            clean_message(DiffScope::WorkingTree, None),
-            "No uncommitted changes"
-        );
-        assert_eq!(
-            clean_message(DiffScope::Branch, Some("develop")),
-            "No changes vs develop"
-        );
+        assert_eq!(clean_message(DiffScope::WorkingTree, None), "No uncommitted changes");
+        assert_eq!(clean_message(DiffScope::Branch, Some("develop")), "No changes vs develop");
     }
 
     #[test]
@@ -5946,28 +5602,16 @@ rename to new_name.rs
         // Engine order puts the repo default first — take it when it isn't
         // the checked-out branch itself.
         let b = branches(&["main", "feature"]);
-        assert_eq!(
-            default_base_ref(&b, Some("feature")).as_deref(),
-            Some("main")
-        );
+        assert_eq!(default_base_ref(&b, Some("feature")).as_deref(), Some("main"));
         // No origin/HEAD: engine "default" is the current branch — fall
         // through to main/master.
         let b = branches(&["feature", "main"]);
-        assert_eq!(
-            default_base_ref(&b, Some("feature")).as_deref(),
-            Some("main")
-        );
+        assert_eq!(default_base_ref(&b, Some("feature")).as_deref(), Some("main"));
         let b = branches(&["feature", "master"]);
-        assert_eq!(
-            default_base_ref(&b, Some("feature")).as_deref(),
-            Some("master")
-        );
+        assert_eq!(default_base_ref(&b, Some("feature")).as_deref(), Some("master"));
         // No main/master: any branch that isn't the current one.
         let b = branches(&["feature", "develop"]);
-        assert_eq!(
-            default_base_ref(&b, Some("feature")).as_deref(),
-            Some("develop")
-        );
+        assert_eq!(default_base_ref(&b, Some("feature")).as_deref(), Some("develop"));
         // Checked out ON main: comparing main with itself is the honest
         // default (empty branch diff).
         let b = branches(&["main", "feature"]);
@@ -5996,38 +5640,23 @@ rename to new_name.rs
         let mut diffs = Vec::new();
         let one = diff("co-1", "d", "/w", "p1");
         // Single frame inserts.
-        assert!(apply_diff_frame(
-            &mut diffs,
-            serde_json::to_value(&one).unwrap()
-        ));
+        assert!(apply_diff_frame(&mut diffs, serde_json::to_value(&one).unwrap()));
         assert_eq!(diffs.len(), 1);
         // Identical frame is a no-op.
-        assert!(!apply_diff_frame(
-            &mut diffs,
-            serde_json::to_value(&one).unwrap()
-        ));
+        assert!(!apply_diff_frame(&mut diffs, serde_json::to_value(&one).unwrap()));
         // Same checkout upserts in place.
         let mut updated = one.clone();
         updated.patch = "p2".into();
-        assert!(apply_diff_frame(
-            &mut diffs,
-            serde_json::to_value(&updated).unwrap()
-        ));
+        assert!(apply_diff_frame(&mut diffs, serde_json::to_value(&updated).unwrap()));
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].patch, "p2");
         // List frame replaces wholesale.
         let two = diff("co-2", "d", "/x", "q");
-        assert!(apply_diff_frame(
-            &mut diffs,
-            serde_json::to_value(vec![two.clone()]).unwrap()
-        ));
+        assert!(apply_diff_frame(&mut diffs, serde_json::to_value(vec![two.clone()]).unwrap()));
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].checkout_id, "co-2");
         // Malformed frames change nothing.
-        assert!(!apply_diff_frame(
-            &mut diffs,
-            serde_json::json!({"nope": true})
-        ));
+        assert!(!apply_diff_frame(&mut diffs, serde_json::json!({"nope": true})));
         assert_eq!(diffs[0].checkout_id, "co-2");
     }
 
@@ -6045,10 +5674,8 @@ rename to new_name.rs
                 .unwrap(),
             )
         };
-        let highlights = DiffHighlights {
-            old: Some(parse(old_source)),
-            new: Some(parse(new_source)),
-        };
+        let highlights =
+            DiffHighlights { old: Some(parse(old_source)), new: Some(parse(new_source)) };
         let deleted = DiffLine {
             kind: LineKind::Del,
             old_no: Some(1),
@@ -6069,24 +5696,15 @@ rename to new_name.rs
         };
         assert_eq!(
             highlights.source_ref(&deleted),
-            Some(SourceLineRef {
-                side: SourceSide::Old,
-                line_number: 1
-            })
+            Some(SourceLineRef { side: SourceSide::Old, line_number: 1 })
         );
         assert_eq!(
             highlights.source_ref(&added),
-            Some(SourceLineRef {
-                side: SourceSide::New,
-                line_number: 1
-            })
+            Some(SourceLineRef { side: SourceSide::New, line_number: 1 })
         );
         assert_eq!(
             highlights.source_ref(&context),
-            Some(SourceLineRef {
-                side: SourceSide::New,
-                line_number: 2
-            })
+            Some(SourceLineRef { side: SourceSide::New, line_number: 2 })
         );
         assert!(
             highlights
@@ -6107,10 +5725,7 @@ rename to new_name.rs
     #[test]
     fn the_default_code_font_size_reproduces_the_historical_diff_size() {
         let theme = Theme::dark();
-        assert_eq!(
-            theme.code_font_size,
-            crate::typography::CODE_FONT_SIZE_DEFAULT
-        );
+        assert_eq!(theme.code_font_size, crate::typography::CODE_FONT_SIZE_DEFAULT);
         assert_eq!(diff_text_size(&theme), DIFF_TEXT_SIZE);
         assert_eq!(diff_line_height(&theme), DIFF_LINE_HEIGHT);
     }
@@ -6141,11 +5756,7 @@ rename to new_name.rs
                 "fun greet(name: String) = println(name)",
                 slopty_syntax::HighlightKind::Function,
             ),
-            (
-                "Dockerfile",
-                "RUN echo \"hello\"",
-                slopty_syntax::HighlightKind::Function,
-            ),
+            ("Dockerfile", "RUN echo \"hello\"", slopty_syntax::HighlightKind::Function),
         ] {
             let document = Arc::new(
                 slopty_syntax::highlight(slopty_syntax::HighlightRequest {
@@ -6155,10 +5766,7 @@ rename to new_name.rs
                 })
                 .unwrap(),
             );
-            let highlights = DiffHighlights {
-                old: Some(document.clone()),
-                new: Some(document),
-            };
+            let highlights = DiffHighlights { old: Some(document.clone()), new: Some(document) };
             for line in [
                 DiffLine {
                     kind: LineKind::Del,
@@ -6174,18 +5782,14 @@ rename to new_name.rs
                 },
             ] {
                 assert!(
-                    highlights
-                        .spans(&line)
-                        .iter()
-                        .any(|span| span.kind == required),
+                    highlights.spans(&line).iter().any(|span| span.kind == required),
                     "missing {required:?} for {path} on {:?}",
                     line.kind
                 );
                 let runs = line_runs(&line, Some(&highlights), &theme);
                 assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), source.len());
                 assert!(
-                    runs.iter()
-                        .any(|run| run.color == render::token_color(required, &theme)),
+                    runs.iter().any(|run| run.color == render::token_color(required, &theme)),
                     "split runs dropped {required:?} for {path} on {:?}",
                     line.kind
                 );

@@ -18,10 +18,11 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Context, DispatchPhase, FocusHandle, Hsla, KeyUpEvent, Keystroke,
     Modifiers, Pixels, PlatformInput, Point, Render, SharedString, Subscription, Task,
-    TouchDragEvent, TouchPhase, Window, canvas, div, prelude::*, px,
+    TouchDragEvent, TouchPhase, Window, canvas, div, px,
 };
 use slopty_view_proto::HarnessId;
 
@@ -127,7 +128,11 @@ impl Press {
     /// The keystroke as a keyboard would send it.
     pub(crate) fn keystroke(self) -> Keystroke {
         Keystroke {
-            modifiers: Modifiers { control: self.control, shift: self.shift, ..Modifiers::default() },
+            modifiers: Modifiers {
+                control: self.control,
+                shift: self.shift,
+                ..Modifiers::default()
+            },
             key: self.key.to_owned(),
             key_char: self.text.then(|| self.key.to_owned()),
         }
@@ -625,7 +630,12 @@ impl KeyRow {
 
     /// One step of a finger on the row (gpui's touch drag, claimed as it comes down): whether it
     /// was the row's.
-    fn touched(&mut self, event: &TouchDragEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn touched(
+        &mut self,
+        event: &TouchDragEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let ours = match event.phase {
             TouchPhase::Started => self.finger_down(event, window, cx),
             TouchPhase::Moved => {
@@ -641,7 +651,12 @@ impl KeyRow {
         ours
     }
 
-    fn finger_down(&mut self, event: &TouchDragEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn finger_down(
+        &mut self,
+        event: &TouchDragEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let (Some(bounds), Some(measure)) = (self.bounds.get(), self.shown) else { return false };
         if !bounds.contains(&event.start_position) {
             return false;
@@ -682,8 +697,14 @@ impl KeyRow {
         true
     }
 
-    fn finger_moved(&mut self, event: &TouchDragEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(mut touch), Some(bounds), Some(measure)) = (self.touch, self.bounds.get(), self.shown)
+    fn finger_moved(
+        &mut self,
+        event: &TouchDragEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(mut touch), Some(bounds), Some(measure)) =
+            (self.touch, self.bounds.get(), self.shown)
         else {
             return;
         };
@@ -699,7 +720,8 @@ impl KeyRow {
                 self.scroll = (origin - dx).clamp(0.0, laid.overflow);
             }
             Doing::Pressing | Doing::Flicking(_) => {
-                let holds = matches!(touch.doing, Doing::Flicking(progress) if progress > FLICK_HOLDS);
+                let holds =
+                    matches!(touch.doing, Doing::Flicking(progress) if progress > FLICK_HOLDS);
                 if touch.on_strip && !holds && dx.abs() >= SLOP && dx.abs() > dy.abs() {
                     // Sideways on the strip it scrolls, and the key under the finger goes unsent.
                     touch.doing = Doing::Scrolling(self.scroll + dx);
@@ -750,7 +772,8 @@ impl KeyRow {
     /// The joystick under a finger at `position`: the way it points now, its repeat started
     /// afresh when the way changes (Blink's), stopped in the dead zone.
     fn steer_at(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(mut touch), Some(bounds), Some(measure)) = (self.touch, self.bounds.get(), self.shown)
+        let (Some(mut touch), Some(bounds), Some(measure)) =
+            (self.touch, self.bounds.get(), self.shown)
         else {
             return;
         };
@@ -761,7 +784,8 @@ impl KeyRow {
             x: f32::from(bounds.origin.x) + touch.column + width / 2.0,
             y: f32::from(bounds.origin.y) + PLATE_TOP + plate.1 / 2.0,
         };
-        let offset = Point { x: f32::from(position.x) - centre.x, y: f32::from(position.y) - centre.y };
+        let offset =
+            Point { x: f32::from(position.x) - centre.x, y: f32::from(position.y) - centre.y };
         let now = steer(offset, plate);
         touch.doing = Doing::Steering(now);
         self.touch = Some(touch);
@@ -796,7 +820,9 @@ impl KeyRow {
             (Key::One { act: Act::Press(press), .. }, Doing::Pressing) if press.repeats() => {
                 (press, REPEAT_EVERY)
             }
-            (Key::Arrows, Doing::Steering(Some((arrow, pace)))) => (arrow.press(Self::layer(cx)), pace),
+            (Key::Arrows, Doing::Steering(Some((arrow, pace)))) => {
+                (arrow.press(Self::layer(cx)), pace)
+            }
             _ => return None,
         };
         touch.sent = true;
@@ -844,7 +870,9 @@ impl Render for KeyRow {
                     && !matches!(touch.doing, Doing::Scrolling(_))
             }),
             flick: match touch {
-                Some(Touch { key, doing: Doing::Flicking(progress), .. }) if key == placed.key => progress,
+                Some(Touch { key, doing: Doing::Flicking(progress), .. }) if key == placed.key => {
+                    progress
+                }
                 _ => 0.0,
             },
             steering: match touch {
@@ -853,20 +881,25 @@ impl Render for KeyRow {
             },
             layer,
         };
-        let key = |placed: &Placed, column: f32, cx: &mut Context<Self>| -> gpui::Stateful<gpui::Div> {
-            let pressed = placed.key;
-            let drawn = draw_key(placed.key, &look(placed, column), &ink);
-            if pressed == Key::Arrows {
-                // Its ways take their own presses.
-                drawn.child(arrow_presses(layer, cx))
-            } else {
-                drawn.on_click(cx.listener(move |_, _, window, cx| Self::clicked(pressed, window, cx)))
-            }
-        };
+        let key =
+            |placed: &Placed, column: f32, cx: &mut Context<Self>| -> gpui::Stateful<gpui::Div> {
+                let pressed = placed.key;
+                let drawn = draw_key(placed.key, &look(placed, column), &ink);
+                if pressed == Key::Arrows {
+                    // Its ways take their own presses.
+                    drawn.child(arrow_presses(layer, cx))
+                } else {
+                    drawn.on_click(
+                        cx.listener(move |_, _, window, cx| Self::clicked(pressed, window, cx)),
+                    )
+                }
+            };
         let left: Vec<AnyElement> = laid
             .left
             .iter()
-            .map(|placed| key(placed, placed.x, cx).absolute().left(px(placed.x)).top_0().into_any_element())
+            .map(|placed| {
+                key(placed, placed.x, cx).absolute().left(px(placed.x)).top_0().into_any_element()
+            })
             .collect();
         // From the right edge, so they stand right whatever width the row was laid out for.
         let right_width: f32 = laid.right.iter().map(|placed| placed.width).sum();
@@ -876,7 +909,11 @@ impl Render for KeyRow {
             .iter()
             .map(|placed| {
                 from_right -= placed.width;
-                key(placed, placed.x, cx).absolute().right(px(from_right)).top_0().into_any_element()
+                key(placed, placed.x, cx)
+                    .absolute()
+                    .right(px(from_right))
+                    .top_0()
+                    .into_any_element()
             })
             .collect();
         let (strip_left, _) = laid.strip;
@@ -886,12 +923,17 @@ impl Render for KeyRow {
             .iter()
             .map(|placed| {
                 let column = placed.x + strip_left - scroll;
-                key(placed, column, cx).absolute().left(px(placed.x - scroll)).top_0().into_any_element()
+                key(placed, column, cx)
+                    .absolute()
+                    .left(px(placed.x - scroll))
+                    .top_0()
+                    .into_any_element()
             })
             .collect();
         // A hairline at each end of the strip while there is more of it that way (Blink's).
         let edge = ink.text.opacity(0.18);
-        let hairline = |side: gpui::Div| side.absolute().top(px(10.0)).bottom(px(9.0)).w(px(1.0)).bg(edge);
+        let hairline =
+            |side: gpui::Div| side.absolute().top(px(10.0)).bottom(px(9.0)).w(px(1.0)).bg(edge);
         let strip = div()
             .id("key-row-strip")
             .debug_selector(|| "key-row-strip".into())
@@ -914,7 +956,8 @@ impl Render for KeyRow {
                     if phase != DispatchPhase::Bubble {
                         return;
                     }
-                    let ours = row.update(cx, |row, cx| row.touched(event, window, cx)).unwrap_or(false);
+                    let ours =
+                        row.update(cx, |row, cx| row.touched(event, window, cx)).unwrap_or(false);
                     if ours {
                         if event.phase == TouchPhase::Started {
                             window.prevent_default();
@@ -1033,7 +1076,16 @@ fn two_symbols(top: &'static str, below: &'static str, look: &Look, glyph: Hsla)
     let size = if top.len() > 1 { TEXT - 2.0 } else { SYMBOL };
     let travel = (look.measure.height - PLATE_TOP - PLATE_BOTTOM) * 0.3;
     let centred = |words: &'static str| {
-        div().absolute().left_0().right_0().top_0().bottom_0().flex().items_center().justify_center().child(words)
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top_0()
+            .bottom_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(words)
     };
     div()
         .relative()
@@ -1115,8 +1167,12 @@ fn arrow_presses(layer: bool, cx: &mut Context<KeyRow>) -> AnyElement {
             .role(gpui::Role::Button)
             .aria_label(name)
             .absolute()
-            .on_click(cx.listener(move |_, _, window, cx| KeyRow::send(arrow.press(layer), window, cx)));
-        let middle = |way: gpui::Stateful<gpui::Div>| way.left(gpui::relative(0.3)).right(gpui::relative(0.3));
+            .on_click(
+                cx.listener(move |_, _, window, cx| KeyRow::send(arrow.press(layer), window, cx)),
+            );
+        let middle = |way: gpui::Stateful<gpui::Div>| {
+            way.left(gpui::relative(0.3)).right(gpui::relative(0.3))
+        };
         ways.push(match arrow {
             Arrow::Left => way.left_0().top_0().bottom_0().w(gpui::relative(0.3)),
             Arrow::Right => way.right_0().top_0().bottom_0().w(gpui::relative(0.3)),
@@ -1131,7 +1187,9 @@ fn arrow_presses(layer: bool, cx: &mut Context<KeyRow>) -> AnyElement {
 mod tests {
     use std::cell::RefCell;
 
-    use gpui::{InputEvent as _, KeyDownEvent, TestAppContext, TouchEvent, TouchId, VisualTestContext};
+    use gpui::{
+        InputEvent as _, KeyDownEvent, TestAppContext, TouchEvent, TouchId, VisualTestContext,
+    };
 
     use super::*;
 
@@ -1142,10 +1200,26 @@ mod tests {
     #[test]
     fn the_row_takes_blinks_measure() {
         assert_eq!(measure(390.0, 844.0), PHONE, "a 6.1-inch phone upright");
-        assert_eq!(measure(430.0, 932.0), Measure { height: 44.0, key: 34.0, wide: 40.0 }, "6.7-inch");
-        assert_eq!(measure(844.0, 390.0), Measure { height: 38.0, key: 42.0, wide: 64.0 }, "on its side");
-        assert_eq!(measure(667.0, 375.0), Measure { height: 38.0, key: 36.0, wide: 51.5 }, "4.7-inch");
-        assert_eq!(measure(956.0, 440.0), Measure { height: 38.0, key: 47.0, wide: 68.0 }, "the largest");
+        assert_eq!(
+            measure(430.0, 932.0),
+            Measure { height: 44.0, key: 34.0, wide: 40.0 },
+            "6.7-inch"
+        );
+        assert_eq!(
+            measure(844.0, 390.0),
+            Measure { height: 38.0, key: 42.0, wide: 64.0 },
+            "on its side"
+        );
+        assert_eq!(
+            measure(667.0, 375.0),
+            Measure { height: 38.0, key: 36.0, wide: 51.5 },
+            "4.7-inch"
+        );
+        assert_eq!(
+            measure(956.0, 440.0),
+            Measure { height: 38.0, key: 47.0, wide: 68.0 },
+            "the largest"
+        );
         let (left, _) = sides(measure(844.0, 390.0));
         assert_eq!(left.first(), Some(&ESC_WIDE), "Esc widens on its side");
     }
@@ -1155,7 +1229,8 @@ mod tests {
     #[test]
     fn the_sides_stand_fixed_around_a_scrolling_strip() {
         let laid = lay_out(390.0, PHONE, &strip(running(Some(HarnessId::CLAUDE_CODE)), false));
-        let names = |placed: &[Placed]| placed.iter().map(|placed| placed.key.name()).collect::<Vec<_>>();
+        let names =
+            |placed: &[Placed]| placed.iter().map(|placed| placed.key.name()).collect::<Vec<_>>();
         assert_eq!(names(&laid.left), ["Escape", "Control", "Option"], "the left");
         assert_eq!(names(&laid.right), ["Arrows", "Hide keyboard", "Command"], "the right");
         let left: Vec<_> = laid.left.iter().map(|placed| placed.x).collect();
@@ -1164,7 +1239,11 @@ mod tests {
         assert_eq!(right, [(279.0, 39.0), (318.0, 33.0), (351.0, 39.0)], "flush right");
         assert_eq!(laid.strip, (99.0, 180.0), "the strip between");
         let keys: f32 = laid.keys.iter().map(|placed| placed.width).sum();
-        assert!((laid.overflow - (keys - 180.0)).abs() < 0.01, "it scrolls by what runs past: {}", laid.overflow);
+        assert!(
+            (laid.overflow - (keys - 180.0)).abs() < 0.01,
+            "it scrolls by what runs past: {}",
+            laid.overflow
+        );
     }
 
     /// The strip leads with the keys of what runs, from the session's records, then the symbols,
@@ -1173,7 +1252,11 @@ mod tests {
     fn the_strip_follows_what_runs() {
         let names = |keys: Vec<Key>| keys.iter().map(|key| key.name()).collect::<Vec<_>>();
         let claude = names(strip(running(Some(HarnessId::CLAUDE_CODE)), false));
-        assert_eq!(claude.get(..5), Some(&["Shift Tab", "Control C", "/", "@", "Up"][..]), "Claude Code");
+        assert_eq!(
+            claude.get(..5),
+            Some(&["Shift Tab", "Control C", "/", "@", "Up"][..]),
+            "Claude Code"
+        );
         let shell = names(strip(running(None), false));
         assert_eq!(shell.get(..4), Some(&["Tab", "Control R", "Control C", "Up"][..]), "a shell");
         let codex = names(strip(running(Some(HarnessId::CODEX)), false));
@@ -1192,7 +1275,9 @@ mod tests {
     #[test]
     fn a_finger_finds_its_key_as_the_strip_scrolls() {
         let laid = lay_out(390.0, PHONE, &strip(running(None), false));
-        let name = |x: f32, scroll: f32| key_at(&laid, x, scroll).map(|(placed, strip)| (placed.key.name(), strip));
+        let name = |x: f32, scroll: f32| {
+            key_at(&laid, x, scroll).map(|(placed, strip)| (placed.key.name(), strip))
+        };
         assert_eq!(name(10.0, 0.0), Some(("Escape", false)), "the left");
         assert_eq!(name(380.0, 0.0), Some(("Command", false)), "the right");
         assert_eq!(name(100.0, 0.0), Some(("Tab", true)), "the strip's first");
@@ -1253,7 +1338,9 @@ mod tests {
     }
 
     /// A phone upright with the soft keyboard up over a Claude Code session's terminal.
-    fn row(cx: &mut TestAppContext) -> (gpui::Entity<KeyRow>, Rc<RefCell<Vec<String>>>, &mut VisualTestContext) {
+    fn row(
+        cx: &mut TestAppContext,
+    ) -> (gpui::Entity<KeyRow>, Rc<RefCell<Vec<String>>>, &mut VisualTestContext) {
         FORCE_KEYBOARD.with(|force| force.set(true));
         cx.update(|cx| cx.set_global(Theme::default()));
         let sent = Rc::new(RefCell::new(Vec::new()));
@@ -1264,7 +1351,8 @@ mod tests {
             sent: kept,
         });
         cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
-        let (row, terminal) = host.read_with(cx, |host, _| (host.row.clone(), host.terminal.clone()));
+        let (row, terminal) =
+            host.read_with(cx, |host, _| (host.row.clone(), host.terminal.clone()));
         cx.update(|window, cx| {
             window.focus(&terminal, cx);
             row.update(cx, |row, cx| {
@@ -1340,12 +1428,16 @@ mod tests {
         finger(cx, TouchPhase::Started, control);
         for key in ["c", "d"] {
             cx.update(|window, cx| {
-                window.dispatch_keystroke(Keystroke { key: key.into(), ..Keystroke::default() }, cx);
+                window
+                    .dispatch_keystroke(Keystroke { key: key.into(), ..Keystroke::default() }, cx);
             });
         }
         finger(cx, TouchPhase::Ended, control);
         assert_eq!(sent(&keys), ["ctrl-c", "ctrl-d"], "each key while held");
-        assert!(!cx.update(|_, cx| armed::armed(cx).on(Modifier::Control)), "a chord leaves nothing armed");
+        assert!(
+            !cx.update(|_, cx| armed::armed(cx).on(Modifier::Control)),
+            "a chord leaves nothing armed"
+        );
     }
 
     /// A flick down a two-symbol key past three quarters of its travel gives the second symbol;
@@ -1375,7 +1467,10 @@ mod tests {
         finger(cx, TouchPhase::Ended, gpui::point(at.x - px(80.0), at.y));
         assert!(sent(&keys).is_empty(), "nothing sent");
         let scroll = row.read_with(cx, |row, _| row.scroll);
-        assert!((scroll - 60.0).abs() < 0.5, "the strip followed the finger past the slop: {scroll}");
+        assert!(
+            (scroll - 60.0).abs() < 0.5,
+            "the strip followed the finger past the slop: {scroll}"
+        );
     }
 
     /// A held Esc goes as the finger comes down, again after half a second, then every tenth;
@@ -1439,7 +1534,8 @@ mod tests {
         assert_eq!(shell.get(..3), Some(&["Tab", "Control R", "Control C"][..]), "a shell's");
         let heard = Rc::new(Cell::new(0));
         let counted = heard.clone();
-        let _watch = cx.update(|_, cx| armed::observe_bar(cx, move |_| counted.set(counted.get() + 1)));
+        let _watch =
+            cx.update(|_, cx| armed::observe_bar(cx, move |_| counted.set(counted.get() + 1)));
         cx.update(|_, cx| {
             armed::set_bar(claude.clone(), cx);
             armed::set_bar(claude.clone(), cx);
@@ -1470,7 +1566,10 @@ mod tests {
         cx.update(|_, cx| armed::set_hardware_keyboard(true, cx));
         draw(cx);
         assert!(cx.debug_bounds("key-row").is_none(), "a hardware keyboard stands in for it");
-        assert!(!cx.update(|_, cx| armed::armed(cx).on(Modifier::Control)), "what it armed goes off");
+        assert!(
+            !cx.update(|_, cx| armed::armed(cx).on(Modifier::Control)),
+            "what it armed goes off"
+        );
         assert_eq!(row.read_with(cx, |row, _| row.height()), 0.0, "it takes no room");
         cx.update(|_, cx| armed::set_hardware_keyboard(false, cx));
         draw(cx);

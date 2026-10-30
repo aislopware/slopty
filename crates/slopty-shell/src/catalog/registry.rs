@@ -12,7 +12,6 @@
 // itself, its harness slots and prefs file are the engine's, which is Slopty's.
 
 use serde::{Deserialize, Serialize};
-
 use slopty_view_proto::{HarnessId, ReasoningLevel, SteeringMode};
 
 /// What `ListHarnesses` reports per harness.
@@ -55,7 +54,5 @@ fn auto_enabled(id: HarnessId) -> bool {
 /// predating the setting — falls back to detection, the same rule new devices
 /// start from (see [`HarnessRegistry::enabled_set`]).
 pub fn descriptor_enabled(descriptor: &HarnessDescriptor) -> bool {
-    descriptor
-        .enabled
-        .unwrap_or_else(|| descriptor.installed && auto_enabled(descriptor.id))
+    descriptor.enabled.unwrap_or_else(|| descriptor.installed && auto_enabled(descriptor.id))
 }

@@ -7,12 +7,10 @@
 //! atlas tiles are released. Rapid toggling inside the grace reuses the
 //! texture instead of re-reading and re-decoding the file.
 
-use std::{
-    collections::HashMap,
-    io::Cursor,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::{Context, RenderImage, SharedString, Task};
 use slopty_view_proto::ToolCall;
@@ -33,9 +31,8 @@ const BUDGET_BYTES: usize = 64 * 1024 * 1024;
 /// and re-decoded them in a loop once the painted set outgrew the budget.
 const STALE_AFTER: Duration = Duration::from_secs(2);
 
-const IMAGE_EXTENSIONS: [&str; 9] = [
-    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff",
-];
+const IMAGE_EXTENSIONS: [&str; 9] =
+    ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff"];
 
 pub(crate) fn is_image_path(path: &str) -> bool {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
@@ -126,12 +123,9 @@ pub(crate) fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedS
         | ToolCall::EditFile { path, .. }
         | ToolCall::ApplyPatch { path: Some(path) } => push_path(&mut out, path),
         ToolCall::Exec { command } => push_text_paths(&mut out, command),
-        ToolCall::Mcp {
-            input: Some(input), ..
+        ToolCall::Mcp { input: Some(input), .. } | ToolCall::Unknown { input: Some(input), .. } => {
+            push_json_paths(&mut out, input)
         }
-        | ToolCall::Unknown {
-            input: Some(input), ..
-        } => push_json_paths(&mut out, input),
         _ => {}
     }
     if let Some(output) = output {
@@ -155,11 +149,7 @@ pub(crate) fn resolve_path(path: &str, cwd: Option<&str>) -> String {
             cwd.trim_end_matches(['/', '\\']),
             path.trim_start_matches("./").replace('/', "\\")
         ),
-        Some(cwd) => format!(
-            "{}/{}",
-            cwd.trim_end_matches('/'),
-            path.trim_start_matches("./")
-        ),
+        Some(cwd) => format!("{}/{}", cwd.trim_end_matches('/'), path.trim_start_matches("./")),
         None => path.to_owned(),
     }
 }
@@ -228,7 +218,6 @@ impl ToolImages {
         self.bytes
     }
 
-
     /// An expanded chip shows `keys`: cancel their release and start any
     /// missing loads. Returns one thumb per key.
     pub(crate) fn hold<V: 'static>(
@@ -250,17 +239,9 @@ impl ToolImages {
                 entry.release_at = None;
                 match &mut entry.state {
                     State::Loading(_, aspect) => Thumb::Loading { aspect: *aspect },
-                    State::Ready {
-                        image,
-                        aspect,
-                        painted,
-                        ..
-                    } => {
+                    State::Ready { image, aspect, painted, .. } => {
                         *painted = now;
-                        Thumb::Ready {
-                            image: image.clone(),
-                            aspect: *aspect,
-                        }
+                        Thumb::Ready { image: image.clone(), aspect: *aspect }
                     }
                     State::Failed => Thumb::Failed,
                 }
@@ -318,12 +299,8 @@ impl ToolImages {
         if self.holders.is_empty() {
             return;
         }
-        let chips: Vec<SharedString> = self
-            .holders
-            .keys()
-            .filter(|chip| chip_row(chip) == row)
-            .cloned()
-            .collect();
+        let chips: Vec<SharedString> =
+            self.holders.keys().filter(|chip| chip_row(chip) == row).cloned().collect();
         for chip in chips {
             self.release(&chip, get, cx);
         }
@@ -339,12 +316,8 @@ impl ToolImages {
         if self.holders.is_empty() {
             return;
         }
-        let gone: Vec<SharedString> = self
-            .holders
-            .keys()
-            .filter(|chip| !live(chip_row(chip)))
-            .cloned()
-            .collect();
+        let gone: Vec<SharedString> =
+            self.holders.keys().filter(|chip| !live(chip_row(chip))).cloned().collect();
         for chip in gone {
             self.release(&chip, get, cx);
         }
@@ -367,13 +340,7 @@ impl ToolImages {
         cx: &mut Context<V>,
     ) {
         let Some(engine) = loader.engine.clone() else {
-            self.entries.insert(
-                key,
-                Entry {
-                    state: State::Failed,
-                    release_at: None,
-                },
-            );
+            self.entries.insert(key, Entry { state: State::Failed, release_at: None });
             return;
         };
         let target = (loader.local_device.as_deref() != Some(key.device.as_str()))
@@ -382,7 +349,8 @@ impl ToolImages {
         let task = cx.spawn(async move |view, cx| {
             let executor = cx.background_executor().clone();
             // Its size from its first bytes, while the rest arrives.
-            let (sized_view, mut sized_cx, sized_key) = (view.clone(), cx.clone(), task_key.clone());
+            let (sized_view, mut sized_cx, sized_key) =
+                (view.clone(), cx.clone(), task_key.clone());
             let raw = crate::attachments::read_attachment_bytes_with(
                 &engine,
                 &executor,
@@ -405,9 +373,7 @@ impl ToolImages {
             .await;
             let decoded = match raw {
                 Some((_, mime, bytes)) => {
-                    executor
-                        .spawn(async move { decode_thumbnail(&mime, bytes) })
-                        .await
+                    executor.spawn(async move { decode_thumbnail(&mime, bytes) }).await
                 }
                 None => None,
             };
@@ -417,13 +383,7 @@ impl ToolImages {
             })
             .ok();
         });
-        self.entries.insert(
-            key,
-            Entry {
-                state: State::Loading(task, None),
-                release_at: None,
-            },
-        );
+        self.entries.insert(key, Entry { state: State::Loading(task, None), release_at: None });
     }
 
     /// A load's first bytes said its shape.
@@ -450,12 +410,7 @@ impl ToolImages {
             Some((image, aspect)) => {
                 let bytes = retained_bytes(&image);
                 self.bytes += bytes;
-                State::Ready {
-                    image,
-                    aspect,
-                    bytes,
-                    painted: cx.background_executor().now(),
-                }
+                State::Ready { image, aspect, bytes, painted: cx.background_executor().now() }
             }
             None => State::Failed,
         };
@@ -588,9 +543,7 @@ fn decode_thumbnail(mime: &str, bytes: Vec<u8>) -> Option<(Arc<RenderImage>, f32
             .ok()?;
         return Some((image, media.width / media.height.max(1.0)));
     }
-    let mut reader = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
+    let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
     // Shared preview bounds: several chips may decode at once.
     reader.limits(crate::image_media::raster_limits());
     let decoded = reader.decode().ok()?;
@@ -615,41 +568,21 @@ fn decode_thumbnail(mime: &str, bytes: Vec<u8>) -> Option<(Arc<RenderImage>, f32
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::AppContext as _;
 
+    use super::*;
+
     fn paths(call: ToolCall, output: Option<&str>) -> Vec<String> {
-        image_paths(&call, output)
-            .iter()
-            .map(|p| p.to_string())
-            .collect()
+        image_paths(&call, output).iter().map(|p| p.to_string()).collect()
     }
 
     #[test]
     fn finds_images_in_paths_commands_output_and_json() {
+        assert_eq!(paths(ToolCall::ReadFile { path: "shots/A.PNG".into() }, None), ["shots/A.PNG"]);
+        assert!(paths(ToolCall::ReadFile { path: "src/main.rs".into() }, None).is_empty());
         assert_eq!(
             paths(
-                ToolCall::ReadFile {
-                    path: "shots/A.PNG".into()
-                },
-                None
-            ),
-            ["shots/A.PNG"]
-        );
-        assert!(
-            paths(
-                ToolCall::ReadFile {
-                    path: "src/main.rs".into()
-                },
-                None
-            )
-            .is_empty()
-        );
-        assert_eq!(
-            paths(
-                ToolCall::Exec {
-                    command: "python plot.py --out=chart.png".into()
-                },
+                ToolCall::Exec { command: "python plot.py --out=chart.png".into() },
                 Some("Saved to /tmp/x/chart.png.\nsee https://a.b/c.png and **/*.jpg")
             ),
             ["chart.png", "/tmp/x/chart.png"]
@@ -666,10 +599,7 @@ mod tests {
             [r"C:\shots\home.webp"]
         );
         let many = (0..9).map(|i| format!("{i}.jpg ")).collect::<String>();
-        assert_eq!(
-            paths(ToolCall::Exec { command: many }, None).len(),
-            MAX_IMAGES_PER_TOOL
-        );
+        assert_eq!(paths(ToolCall::Exec { command: many }, None).len(), MAX_IMAGES_PER_TOOL);
     }
 
     #[test]
@@ -697,28 +627,15 @@ mod tests {
             "C:i.png",
         ]
         .join("\n");
-        let found = paths(
-            ToolCall::Exec {
-                command: "open ok.png".into(),
-            },
-            Some(&output),
-        );
+        let found = paths(ToolCall::Exec { command: "open ok.png".into() }, Some(&output));
         assert_eq!(found, ["ok.png"]);
         assert!(
-            paths(
-                ToolCall::ReadFile {
-                    path: r"\\attacker\share\a.png".into()
-                },
-                None
-            )
-            .is_empty()
+            paths(ToolCall::ReadFile { path: r"\\attacker\share\a.png".into() }, None).is_empty()
         );
         // Ordinary absolute paths in both styles still preview.
         assert_eq!(
             paths(
-                ToolCall::Exec {
-                    command: r"cp /tmp/a.png C:\shots\b.png D:/c.png".into()
-                },
+                ToolCall::Exec { command: r"cp /tmp/a.png C:\shots\b.png D:/c.png".into() },
                 None
             ),
             ["/tmp/a.png", r"C:\shots\b.png", "D:/c.png"]
@@ -740,9 +657,7 @@ mod tests {
         assert!(decode_thumbnail("image/png", b"nope".to_vec()).is_none());
         // Past the shared decoder bounds: refused, never fully allocated.
         let mut wide = Cursor::new(Vec::new());
-        image::GrayImage::new(4097, 1)
-            .write_to(&mut wide, image::ImageFormat::Png)
-            .unwrap();
+        image::GrayImage::new(4097, 1).write_to(&mut wide, image::ImageFormat::Png).unwrap();
         assert!(decode_thumbnail("image/png", wide.into_inner()).is_none());
     }
 
@@ -756,34 +671,20 @@ mod tests {
 
     #[gpui::test]
     fn collapse_spam_keeps_pixels_and_settled_collapse_frees_them(cx: &mut gpui::TestAppContext) {
-        let host = cx.new(|_| Host {
-            images: ToolImages::default(),
-        });
-        let key = ImageKey {
-            device: "d".into(),
-            path: "/w/a.png".into(),
-        };
+        let host = cx.new(|_| Host { images: ToolImages::default() });
+        let key = ImageKey { device: "d".into(), path: "/w/a.png".into() };
         let chip = SharedString::from("row#d0");
-        let loader = Loader {
-            engine: None,
-            local_device: None,
-        };
+        let loader = Loader { engine: None, local_device: None };
         host.update(cx, |host, cx| {
             let mut pixels = image::RgbaImage::new(100, 50);
             pixels.fill(1);
             host.images.entries.insert(
                 key.clone(),
-                Entry {
-                    state: State::Loading(Task::ready(()), None),
-                    release_at: None,
-                },
+                Entry { state: State::Loading(Task::ready(()), None), release_at: None },
             );
             host.images.finish(
                 key.clone(),
-                Some((
-                    Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
-                    2.0,
-                )),
+                Some((Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])), 2.0)),
                 cx,
             );
             assert_eq!(host.images.retained_bytes(), 100 * 50 * 4 * 2);
@@ -819,28 +720,17 @@ mod tests {
     fn shared_keys_stay_while_another_chip_holds_them_and_rows_release(
         cx: &mut gpui::TestAppContext,
     ) {
-        let host = cx.new(|_| Host {
-            images: ToolImages::default(),
-        });
-        let key = ImageKey {
-            device: "d".into(),
-            path: "/w/a.png".into(),
-        };
-        let loader = Loader {
-            engine: None,
-            local_device: None,
-        };
+        let host = cx.new(|_| Host { images: ToolImages::default() });
+        let key = ImageKey { device: "d".into(), path: "/w/a.png".into() };
+        let loader = Loader { engine: None, local_device: None };
         host.update(cx, |host, cx| {
-            host.images
-                .hold(&"r1#d0".into(), vec![key.clone()], &loader, get, cx);
-            host.images
-                .hold(&"r2#d3".into(), vec![key.clone()], &loader, get, cx);
+            host.images.hold(&"r1#d0".into(), vec![key.clone()], &loader, get, cx);
+            host.images.hold(&"r2#d3".into(), vec![key.clone()], &loader, get, cx);
             host.images.release(&"r1#d0".into(), get, cx);
             assert!(host.images.entries[&key].release_at.is_none());
             host.images.retain_rows(|row| row == "r1", get, cx);
             assert!(host.images.entries[&key].release_at.is_some());
-            host.images
-                .hold(&"r2#d3".into(), vec![key.clone()], &loader, get, cx);
+            host.images.hold(&"r2#d3".into(), vec![key.clone()], &loader, get, cx);
             host.images.release_row("r2", get, cx);
             assert!(host.images.holders.is_empty());
         });
@@ -851,22 +741,13 @@ mod tests {
 
     #[gpui::test]
     fn keys_dropped_from_a_held_chip_are_released(cx: &mut gpui::TestAppContext) {
-        let host = cx.new(|_| Host {
-            images: ToolImages::default(),
-        });
-        let key = |path: &str| ImageKey {
-            device: "d".into(),
-            path: path.into(),
-        };
+        let host = cx.new(|_| Host { images: ToolImages::default() });
+        let key = |path: &str| ImageKey { device: "d".into(), path: path.into() };
         let (a, b) = (key("/w/a.png"), key("/w/b.png"));
         let chip = SharedString::from("row#d0");
-        let loader = Loader {
-            engine: None,
-            local_device: None,
-        };
+        let loader = Loader { engine: None, local_device: None };
         host.update(cx, |host, cx| {
-            host.images
-                .hold(&chip, vec![a.clone(), b.clone()], &loader, get, cx);
+            host.images.hold(&chip, vec![a.clone(), b.clone()], &loader, get, cx);
             // The chip's output changed while expanded: `a` is gone from it.
             host.images.hold(&chip, vec![b.clone()], &loader, get, cx);
             assert!(host.images.entries[&a].release_at.is_some());
@@ -882,20 +763,12 @@ mod tests {
 
     #[gpui::test]
     fn budget_drops_only_previews_unpainted_for_a_while(cx: &mut gpui::TestAppContext) {
-        let host = cx.new(|_| Host {
-            images: ToolImages::default(),
-        });
+        let host = cx.new(|_| Host { images: ToolImages::default() });
         let insert = |host: &mut Host, i: usize, cx: &mut Context<Host>| {
-            let key = ImageKey {
-                device: "d".into(),
-                path: format!("/{i}.png"),
-            };
+            let key = ImageKey { device: "d".into(), path: format!("/{i}.png") };
             host.images.entries.insert(
                 key.clone(),
-                Entry {
-                    state: State::Loading(Task::ready(()), None),
-                    release_at: None,
-                },
+                Entry { state: State::Loading(Task::ready(()), None), release_at: None },
             );
             // 2048² BGRA = 16 MiB CPU + 16 MiB GPU per preview.
             let image =
@@ -914,10 +787,11 @@ mod tests {
         host.update(cx, |host, cx| {
             insert(host, 3, cx);
             assert!(host.images.retained_bytes() <= BUDGET_BYTES);
-            assert!(host.images.entries.contains_key(&ImageKey {
-                device: "d".into(),
-                path: "/3.png".into(),
-            }));
+            assert!(
+                host.images
+                    .entries
+                    .contains_key(&ImageKey { device: "d".into(), path: "/3.png".into() })
+            );
         });
     }
 }

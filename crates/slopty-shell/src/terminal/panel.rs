@@ -13,19 +13,18 @@ use std::collections::HashMap;
 
 use futures::FutureExt as _;
 use futures::channel::oneshot;
+use gpui::prelude::*;
 use gpui::{
     App, AsyncApp, Context, Entity, FocusHandle, IntoElement, Pixels, Render, SharedString, Size,
-    Subscription, Task, WeakEntity, Window, div, prelude::*, px,
+    Subscription, Task, WeakEntity, Window, div, px,
 };
-
 use slopty_view_proto::TerminalSession;
 use slopty_view_rpc::methods;
 
+use super::view::terminal_panel_bg;
 use crate::live::{self, TerminalLook};
 use crate::state::{AppState, EngineHandle};
 use crate::theme::Theme;
-
-use super::view::terminal_panel_bg;
 
 /// What the shown terminal says of itself that the window's chrome wears changed: its ground
 /// ([`TerminalPanel::shown_ground`]).
@@ -38,10 +37,7 @@ impl gpui::EventEmitter<ShownChanged> for TerminalPanel {}
 /// the connected engine's own device).
 fn with_target(mut params: serde_json::Value, target: &Option<String>) -> serde_json::Value {
     if let (Some(target), Some(object)) = (target, params.as_object_mut()) {
-        object.insert(
-            "targetDeviceId".into(),
-            serde_json::Value::String(target.clone()),
-        );
+        object.insert("targetDeviceId".into(), serde_json::Value::String(target.clone()));
     }
     params
 }
@@ -49,11 +45,7 @@ fn with_target(mut params: serde_json::Value, target: &Option<String>) -> serde_
 /// Active index after closing `closed` (given the new, shorter length).
 pub fn active_after_close(active: usize, closed: usize, len_after: usize) -> usize {
     let shifted = if closed < active { active - 1 } else { active };
-    if len_after == 0 {
-        0
-    } else {
-        shifted.min(len_after - 1)
-    }
+    if len_after == 0 { 0 } else { shifted.min(len_after - 1) }
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +242,10 @@ impl TerminalPanel {
     /// The terminal a shell's pane streams, once it is attached, whichever session is
     /// shown: what the pane opens again on the next launch, and what an agent hears it is.
     pub fn pane_terminal_id(&self) -> Option<&str> {
-        self.chats.values().flat_map(|chat| chat.tabs.iter()).find_map(|tab| tab.terminal_id.as_deref())
+        self.chats
+            .values()
+            .flat_map(|chat| chat.tabs.iter())
+            .find_map(|tab| tab.terminal_id.as_deref())
     }
 
     /// The background the shown terminal's program paints with, once its view said: the
@@ -438,11 +433,7 @@ impl TerminalPanel {
     }
 
     fn tab_mut(&mut self, chat: &str, key: u64) -> Option<&mut TerminalTab> {
-        self.chats
-            .get_mut(chat)?
-            .tabs
-            .iter_mut()
-            .find(|t| t.key == key)
+        self.chats.get_mut(chat)?.tabs.iter_mut().find(|t| t.key == key)
     }
 
     fn active_tab(&self, cx: &App) -> Option<&TerminalTab> {
@@ -457,10 +448,7 @@ impl TerminalPanel {
         let Some(engine) = self.engine(cx) else {
             return;
         };
-        let tab_no = self
-            .chats
-            .get(&chat)
-            .map_or(1, |entry| entry.tabs.len() + 1);
+        let tab_no = self.chats.get(&chat).map_or(1, |entry| entry.tabs.len() + 1);
         let key = self.reserve_tab_for_chat(chat.clone(), format!("Terminal {tab_no}"), cx);
         let target = self.chat_target(&chat, cx);
         let cwd = self.state.read(cx).terminal_open_cwd_for(&chat);
@@ -512,7 +500,10 @@ impl TerminalPanel {
     /// its own session; nothing is subscribed here. `again` names a terminal
     /// the tab showed when the app last ran, which it shows again, or closes
     /// when it has ended.
-    #[expect(clippy::too_many_arguments, reason = "an open's arguments plus the terminal to show again")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "an open's arguments plus the terminal to show again"
+    )]
     fn spawn_session(
         chat: String,
         key: u64,
@@ -573,7 +564,8 @@ impl TerminalPanel {
                                 }
                                 if let Some(tabs) = panel.chats.get_mut(&chat) {
                                     tabs.tabs.retain(|tab| tab.key != key);
-                                    tabs.active = tabs.active.min(tabs.tabs.len().saturating_sub(1));
+                                    tabs.active =
+                                        tabs.active.min(tabs.tabs.len().saturating_sub(1));
                                 }
                                 cx.notify();
                             });
@@ -606,10 +598,7 @@ impl TerminalPanel {
                     .client()
                     .call(
                         methods::CLOSE_TERMINAL,
-                        with_target(
-                            serde_json::json!({ "terminalId": terminal_id }),
-                            &target,
-                        ),
+                        with_target(serde_json::json!({ "terminalId": terminal_id }), &target),
                     )
                     .await;
             }
@@ -690,10 +679,10 @@ impl TerminalPanel {
         let hosted = live::terminal(&id, &look, cx);
         let shown = self.active_tab(cx).is_some_and(|tab| tab.key == key);
         if let Some(tab) = self.tab_mut(chat, key) {
-            let (title, ended, exit, progress, ground) = hosted.map_or(
-                (None, false, None, None, None),
-                |h| (h.title, h.ended, h.exit, h.progress, h.ground),
-            );
+            let (title, ended, exit, progress, ground) = hosted
+                .map_or((None, false, None, None, None), |h| {
+                    (h.title, h.ended, h.exit, h.progress, h.ground)
+                });
             tab.shown_title = title;
             tab.progress = progress;
             if tab.ground != ground {
@@ -778,11 +767,14 @@ impl Render for TerminalPanel {
         }
         // What a drop of files on the terminal does, as its view says.
         let drop = hosted.as_ref().and_then(|hosted| hosted.drop.clone());
-        let progress = self.active_tab(cx).and_then(|tab| tab.progress.map(|progress| (tab.key, progress)));
+        let progress =
+            self.active_tab(cx).and_then(|tab| tab.progress.map(|progress| (tab.key, progress)));
         // A figureless report sweeps on the loaders' 30 Hz clock, which parks once it goes.
         let view = cx.entity_id();
         let sweep = match progress {
-            Some((_, live::Progress::Busy)) => crate::motion::pulse_delta(&crate::motion::SLOPTY_PULSE, view, cx),
+            Some((_, live::Progress::Busy)) => {
+                crate::motion::pulse_delta(&crate::motion::SLOPTY_PULSE, view, cx)
+            }
             _ => 0.0,
         };
         let body = match (hosted, failure) {
@@ -843,7 +835,9 @@ impl Render for TerminalPanel {
                         .size_full(),
                     )
                     .children(drop.map(|words| drop_overlay(words, &theme)))
-                    .children(progress.map(|(key, progress)| progress_bar(key, progress, sweep, &theme))),
+                    .children(
+                        progress.map(|(key, progress)| progress_bar(key, progress, sweep, &theme)),
+                    ),
             )
             .into_any_element()
     }
@@ -870,7 +864,13 @@ fn progress_bar(key: u64, progress: live::Progress, sweep: f32, theme: &Theme) -
             (0.75 * crate::motion::EASE_IN_OUT.eval(leg), 0.25)
         }
     };
-    let fill = div().absolute().top_0().h_full().left(gpui::relative(left)).w(gpui::relative(width)).bg(hue);
+    let fill = div()
+        .absolute()
+        .top_0()
+        .h_full()
+        .left(gpui::relative(left))
+        .w(gpui::relative(width))
+        .bg(hue);
     let percent = progress.percent();
     let bar = div()
         .id(("terminal-progress", key))
@@ -885,7 +885,8 @@ fn progress_bar(key: u64, progress: live::Progress, sweep: f32, theme: &Theme) -
         .role(gpui::Role::ProgressIndicator)
         .aria_label("Progress")
         .when_some(percent, |el, percent| {
-            el.aria_numeric_value(f64::from(percent)).aria_value(SharedString::from(format!("{percent} %")))
+            el.aria_numeric_value(f64::from(percent))
+                .aria_value(SharedString::from(format!("{percent} %")))
         })
         .child(fill);
     crate::motion::fade_quick(("terminal-progress-in", key), bar).into_any_element()
@@ -1084,7 +1085,11 @@ mod progress_tests {
 
     #[async_trait::async_trait]
     impl slopty_view_rpc::RpcService for Asked {
-        async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<RpcReply, RpcError> {
             if method == methods::OPEN_TERMINAL {
                 self.0.lock().unwrap().push(params.clone());
             }
@@ -1124,7 +1129,9 @@ mod progress_tests {
         // The pane comes into a window already its size, as a split's pane comes into its place.
         let (_, cx) = cx.add_window_view(|_, cx| TerminalPanel::new(state.clone(), cx));
         cx.simulate_resize(gpui::size(gpui::px(360.0), gpui::px(400.0)));
-        let panel = cx.update(|window, cx| window.replace_root(cx, |_, cx| TerminalPanel::new_pane(state, cx)));
+        let panel = cx.update(|window, cx| {
+            window.replace_root(cx, |_, cx| TerminalPanel::new_pane(state, cx))
+        });
         let mut opened = None;
         for _ in 0..300 {
             cx.run_until_parked();
@@ -1142,13 +1149,18 @@ mod progress_tests {
         let fitted = panel.read_with(cx, |panel, _| panel.fitted.as_ref().map(|(.., grid)| *grid));
         let (cols, rows) = fitted.expect("the body measured");
         assert_eq!(cols, 45, "the body's width over the cell's");
-        assert_eq!((opened["cols"].as_u64(), opened["rows"].as_u64()), (Some(45), Some(rows.into())));
+        assert_eq!(
+            (opened["cols"].as_u64(), opened["rows"].as_u64()),
+            (Some(45), Some(rows.into()))
+        );
 
         let grid = Rc::new(RefCell::new(None));
         cx.update(|_, cx| {
             let (panel, grid) = (unshown.downgrade(), Rc::clone(&grid));
-            cx.spawn(async move |cx| *grid.borrow_mut() = Some(TerminalPanel::grid(&panel, cx).await))
-                .detach();
+            cx.spawn(async move |cx| {
+                *grid.borrow_mut() = Some(TerminalPanel::grid(&panel, cx).await)
+            })
+            .detach();
         });
         cx.run_until_parked();
         assert_eq!(*grid.borrow(), None, "waits for the body's first draw");

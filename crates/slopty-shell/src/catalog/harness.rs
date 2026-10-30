@@ -16,7 +16,9 @@ pub mod install {
             HarnessId::OPENCODE => "npm install -g @opencode/cli",
             HarnessId::PI => "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
             HarnessId::GROK => "npm install -g @xai-official/grok",
-            HarnessId::HERMES => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+            HarnessId::HERMES => {
+                "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
+            }
             HarnessId::DEVIN => "curl -fsSL https://cli.devin.ai/install.sh | bash",
             // Any other agent is installed as its own docs say.
             _ => return None,

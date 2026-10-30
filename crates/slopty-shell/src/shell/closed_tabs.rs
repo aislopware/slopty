@@ -24,7 +24,11 @@ impl Shell {
 
     /// Open the newest view closed beside the shown session again, with the keyboard: whether
     /// there was one.
-    pub(super) fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn reopen_closed_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.active_chat.is_empty() {
             return false;
         }

@@ -1,20 +1,20 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 1bb6259), see THIRD_PARTY_NOTICES.md
 //! Per-range hit targets share the text's shaped geometry, including wrapped links.
-use super::{
-    links::*,
-    render::{LinkUi, activate_link, range_rects},
-};
-use crate::{icons, popover, theme::Theme};
+use std::cell::{Cell, RefCell};
+use std::ops::Range;
+use std::rc::Rc;
+
+use gpui::prelude::*;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, ClickEvent, DispatchPhase, Element, ElementId,
     FocusHandle, GlobalElementId, InspectorElementId, LayoutId, MouseButton, Pixels, Point, Role,
-    ScrollEvent, SharedString, TextLayout, Window, div, prelude::*, px,
+    ScrollEvent, SharedString, TextLayout, Window, div, px,
 };
-use std::{
-    cell::{Cell, RefCell},
-    ops::Range,
-    rc::Rc,
-};
+
+use super::links::*;
+use super::render::{LinkUi, activate_link, range_rects};
+use crate::theme::Theme;
+use crate::{icons, popover};
 
 pub struct LinkRanges {
     pub id: SharedString,
@@ -37,12 +37,12 @@ struct Interaction {
 }
 impl IntoElement for LinkRanges {
     type Element = Self;
+
     fn into_element(self) -> Self {
         self
     }
 }
 impl Element for LinkRanges {
-    type RequestLayoutState = ();
     type PrepaintState = (
         Vec<AnyElement>,
         Rc<RefCell<Option<(usize, Point<Pixels>)>>>,
@@ -50,12 +50,16 @@ impl Element for LinkRanges {
         Rc<Cell<bool>>,
         Rc<Cell<Option<Bounds<Pixels>>>>,
     );
+    type RequestLayoutState = ();
+
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone().into())
     }
+
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
         None
     }
+
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -65,6 +69,7 @@ impl Element for LinkRanges {
     ) -> (LayoutId, ()) {
         (self.child.request_layout(window, cx), ())
     }
+
     fn prepaint(
         &mut self,
         id: Option<&GlobalElementId>,
@@ -77,13 +82,9 @@ impl Element for LinkRanges {
         self.child.prepaint(window, cx);
         window.with_element_state::<Interaction, _>(id.unwrap(), |previous, window| {
             let targets: Vec<_> = self.links.iter().map(|(_, t)| t.clone()).collect();
-            let mut state = previous
-                .filter(|s| s.targets == targets)
-                .unwrap_or_else(|| Interaction {
-                    focus: targets
-                        .iter()
-                        .map(|_| cx.focus_handle().tab_stop(true))
-                        .collect(),
+            let mut state =
+                previous.filter(|s| s.targets == targets).unwrap_or_else(|| Interaction {
+                    focus: targets.iter().map(|_| cx.focus_handle().tab_stop(true)).collect(),
                     targets,
                     menu_focus: std::array::from_fn(|_| cx.focus_handle().tab_stop(true)),
                     menu_focus_pending: Rc::default(),
@@ -99,10 +100,7 @@ impl Element for LinkRanges {
                 state.epoch.set(state.epoch.get().wrapping_add(1));
                 state.dismissed.set(true);
             }
-            let focused = state
-                .focus
-                .iter()
-                .position(|focus| focus.is_focused(window));
+            let focused = state.focus.iter().position(|focus| focus.is_focused(window));
             if focused != state.focused {
                 state.dismissed.set(false);
             }
@@ -112,9 +110,7 @@ impl Element for LinkRanges {
             let theme = Theme::of(cx).clone();
             let mut overlays = Vec::new();
             for (index, (range, target)) in self.links.iter().enumerate() {
-                for (part, rect) in range_rects(&self.layout, range, 0., 0.)
-                    .into_iter()
-                    .enumerate()
+                for (part, rect) in range_rects(&self.layout, range, 0., 0.).into_iter().enumerate()
                 {
                     let menu = state.menu.clone();
                     let keyboard_menu = menu.clone();
@@ -280,10 +276,8 @@ impl Element for LinkRanges {
                 // viewer, and the system-level rows mount only when the
                 // owning root lives on this device. The tab cycle visits
                 // only mounted rows.
-                let file = self
-                    .ui
-                    .as_ref()
-                    .and_then(|ui| ui.file_link(&state.targets[index].original));
+                let file =
+                    self.ui.as_ref().and_then(|ui| ui.file_link(&state.targets[index].original));
                 let cycle: &[usize] = match &file {
                     Some(file) if file.local => &[0, 1, 2, 3],
                     Some(_) => &[0, 3],
@@ -354,27 +348,23 @@ impl Element for LinkRanges {
                     let enabled = action == LinkAction::Copy
                         || target.navigation.is_ok()
                         || (action == LinkAction::Internal && file_resolved);
-                    popover::menu_row(
-                        &theme,
-                        false,
-                        format!("{}-link-{index}-{selector}", self.id),
-                    )
-                    .id(label)
-                    .debug_selector(move || selector.into())
-                    .child(icons::icon(icon).size(px(16.)).text_color(theme.text_muted))
-                    .child(label)
-                    .track_focus(&state.menu_focus[slot])
-                    .role(Role::Button)
-                    .aria_label(label)
-                    .when(!enabled, |el| el.opacity(0.45))
-                    .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
-                    .on_click(move |_, window, cx| {
-                        if enabled {
-                            activate_link(target.clone(), action, ui.as_ref(), window, cx);
-                        }
-                        menu.borrow_mut().take();
-                        window.refresh();
-                    })
+                    popover::menu_row(&theme, false, format!("{}-link-{index}-{selector}", self.id))
+                        .id(label)
+                        .debug_selector(move || selector.into())
+                        .child(icons::icon(icon).size(px(16.)).text_color(theme.text_muted))
+                        .child(label)
+                        .track_focus(&state.menu_focus[slot])
+                        .role(Role::Button)
+                        .aria_label(label)
+                        .when(!enabled, |el| el.opacity(0.45))
+                        .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
+                        .on_click(move |_, window, cx| {
+                            if enabled {
+                                activate_link(target.clone(), action, ui.as_ref(), window, cx);
+                            }
+                            menu.borrow_mut().take();
+                            window.refresh();
+                        })
                 };
                 let file_row = |label: &'static str,
                                 icon: &'static str,
@@ -382,33 +372,25 @@ impl Element for LinkRanges {
                                 selector: &'static str,
                                 act: Rc<dyn Fn(&mut App)>| {
                     let menu = state.menu.clone();
-                    popover::menu_row(
-                        &theme,
-                        false,
-                        format!("{}-link-{index}-{selector}", self.id),
-                    )
-                    .id(label)
-                    .debug_selector(move || selector.into())
-                    .child(icons::icon(icon).size(px(16.)).text_color(theme.text_muted))
-                    .child(label)
-                    .track_focus(&state.menu_focus[slot])
-                    .role(Role::Button)
-                    .aria_label(label)
-                    .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
-                    .on_click(move |_, window, cx| {
-                        act(cx);
-                        menu.borrow_mut().take();
-                        window.refresh();
-                    })
+                    popover::menu_row(&theme, false, format!("{}-link-{index}-{selector}", self.id))
+                        .id(label)
+                        .debug_selector(move || selector.into())
+                        .child(icons::icon(icon).size(px(16.)).text_color(theme.text_muted))
+                        .child(label)
+                        .track_focus(&state.menu_focus[slot])
+                        .role(Role::Button)
+                        .aria_label(label)
+                        .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
+                        .on_click(move |_, window, cx| {
+                            act(cx);
+                            menu.borrow_mut().take();
+                            window.refresh();
+                        })
                 };
                 card = card.child(action_row(
                     LinkAction::Internal,
                     "Open in Slopty",
-                    if file_resolved {
-                        icons::DOCUMENT
-                    } else {
-                        icons::GLOBE
-                    },
+                    if file_resolved { icons::DOCUMENT } else { icons::GLOBE },
                     0,
                     "link-menu-open-slopty",
                 ));
@@ -532,6 +514,7 @@ impl Element for LinkRanges {
             )
         })
     }
+
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -548,9 +531,7 @@ impl Element for LinkRanges {
         let tooltip_bounds = paint.4.clone();
         window.on_mouse_event(move |event: &ScrollEvent, phase, window, _| {
             if phase == DispatchPhase::Capture
-                && !tooltip_bounds
-                    .get()
-                    .is_some_and(|rect| rect.contains(&event.position))
+                && !tooltip_bounds.get().is_some_and(|rect| rect.contains(&event.position))
             {
                 menu.borrow_mut().take();
                 epoch.set(epoch.get().wrapping_add(1));
@@ -577,8 +558,9 @@ fn click_is_activation(event: &ClickEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::{MouseClickEvent, MouseDownEvent, MouseUpEvent, TestAppContext, point};
+
+    use super::*;
     #[test]
     fn selection_drags_and_secondary_clicks_do_not_navigate() {
         let mut event = MouseClickEvent {
@@ -636,4 +618,3 @@ mod tests {
             .unwrap();
     }
 }
-

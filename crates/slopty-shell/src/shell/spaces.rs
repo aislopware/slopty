@@ -9,18 +9,20 @@
 //! management (add via the palette; rename/delete via row context menus).
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
-use super::*;
+use std::collections::HashSet;
+
+use gpui::{FocusHandle, Window};
+use slopty_view_proto::{
+    Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch, HomeFolderSearchResult,
+    SearchHomeFoldersRequest, Space,
+};
+
 use super::sidebar::SIDEBAR_ROW_HEIGHT;
+use super::*;
 use crate::pickers::{
     breadcrumbs, browser_rows, completion_prefix_len, escape_typed_path, folder_path_key,
     is_windows_path, parent_path, resolve_typed_path, same_folder_path, split_typed_leaf,
     unescape_typed_path,
-};
-use gpui::{FocusHandle, Window};
-use std::collections::HashSet;
-use slopty_view_proto::{
-    Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
-    HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
 };
 
 // The filter is let go only while every machine is reached: a project on one out of reach is
@@ -28,7 +30,10 @@ use slopty_view_proto::{
 /// Whether every device the workspace knows is reached now, so what the lists leave out is gone.
 pub(super) fn every_device_reached(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> bool {
     !state.devices.is_empty()
-        && state.devices.iter().all(|device| !super::sidebar_status::out_of_reach(state, &device.id, now))
+        && state
+            .devices
+            .iter()
+            .all(|device| !super::sidebar_status::out_of_reach(state, &device.id, now))
 }
 
 #[cfg(test)]
@@ -117,12 +122,7 @@ mod sidebar_row_tests {
             // The engine round-trip lands; the next row slides up under the
             // unmoved pointer.
             state.update(cx, |state, cx| {
-                state
-                    .chats
-                    .iter_mut()
-                    .find(|chat| chat.id == archived)
-                    .unwrap()
-                    .archived = true;
+                state.chats.iter_mut().find(|chat| chat.id == archived).unwrap().archived = true;
                 cx.notify();
             });
             cx.run_until_parked();
@@ -133,7 +133,9 @@ mod sidebar_row_tests {
             });
             cx.run_until_parked();
             // The row's fade out, run to its end on the test's clock.
-            cx.executor().advance_clock(crate::motion::HOVER_FADE.total().mul_f32(crate::motion::speed_scale()));
+            cx.executor().advance_clock(
+                crate::motion::HOVER_FADE.total().mul_f32(crate::motion::speed_scale()),
+            );
             cx.run_until_parked();
             // Its Archived-section copy shares the row key and must not stay lit. The row's fade is
             // in its last frame here, not lit.
@@ -338,7 +340,12 @@ pub(super) fn sidebar_disclosure_header(
 
 /// What a shut group's header wears at its end: how many rows it holds, and its loudest
 /// row's mark (`marks::loudest`), so "which one needs me" has an answer with the group shut.
-fn group_rollup(key: &str, count: usize, loudest: Option<&super::marks::Mark>, theme: &Theme) -> AnyElement {
+fn group_rollup(
+    key: &str,
+    count: usize,
+    loudest: Option<&super::marks::Mark>,
+    theme: &Theme,
+) -> AnyElement {
     let count_id = format!("sidebar-group-count-{key}");
     div()
         .flex_none()
@@ -565,10 +572,8 @@ fn typed_path_location(
     {
         return (drive.name.clone(), Some(drive.path.clone()));
     }
-    let root = breadcrumbs(path)
-        .into_iter()
-        .next()
-        .map_or_else(|| "/".to_string(), |(_, root)| root);
+    let root =
+        breadcrumbs(path).into_iter().next().map_or_else(|| "/".to_string(), |(_, root)| root);
     (root.clone(), Some(root))
 }
 
@@ -613,10 +618,7 @@ fn request_home_folders(
     generation: Option<u64>,
     cx: &mut Context<Shell>,
 ) -> Task<()> {
-    let request = SearchHomeFoldersRequest {
-        query,
-        limit: Some(HOME_FOLDER_RESULTS),
-    };
+    let request = SearchHomeFoldersRequest { query, limit: Some(HOME_FOLDER_RESULTS) };
     cx.spawn(async move |this, cx| {
         let mut params = match serde_json::to_value(&request) {
             Ok(serde_json::Value::Object(params)) => params,
@@ -626,10 +628,7 @@ fn request_home_folders(
         let params = serde_json::Value::Object(params);
         let mut delay = HOME_FOLDER_INDEX_RETRY;
         loop {
-            let result = engine
-                .client()
-                .call(methods::SEARCH_HOME_FOLDERS, params.clone())
-                .await;
+            let result = engine.client().call(methods::SEARCH_HOME_FOLDERS, params.clone()).await;
             let retry = this
                 .update(cx, |shell, cx| {
                     let selected = shell
@@ -649,8 +648,9 @@ fn request_home_folders(
                     if generation.is_none()
                         && untyped
                         && !search.unsupported
-                        && let Ok(Ok(found)) =
-                            result.as_ref().map(|v| serde_json::from_value::<HomeFolderSearchResult>(v.clone()))
+                        && let Ok(Ok(found)) = result
+                            .as_ref()
+                            .map(|v| serde_json::from_value::<HomeFolderSearchResult>(v.clone()))
                     {
                         search.visited = found.matches;
                         cx.notify();
@@ -685,10 +685,8 @@ fn request_home_folders(
                     let retry = search.indexing;
                     // New partial results may reorder the rows under the cursor.
                     if let Some(selected) = selected
-                        && let Some(active) = shell
-                            .add_space_folder_rows(cx)
-                            .iter()
-                            .position(|row| row == &selected)
+                        && let Some(active) =
+                            shell.add_space_folder_rows(cx).iter().position(|row| row == &selected)
                         && let Some(flow) = shell.add_space.as_mut()
                     {
                         flow.active = active;
@@ -738,10 +736,7 @@ fn add_space_target(
     if let Some(target) = device_id
         && local != Some(target)
     {
-        params.insert(
-            "targetDeviceId".into(),
-            serde_json::Value::String(target.to_owned()),
-        );
+        params.insert("targetDeviceId".into(), serde_json::Value::String(target.to_owned()));
     }
 }
 
@@ -758,15 +753,13 @@ fn looks_like_repo_url(url: &str) -> bool {
     if url.is_empty() || url.chars().any(char::is_whitespace) {
         return false;
     }
-    let scheme = ["https://", "http://", "ssh://", "git://", "git+ssh://"]
-        .iter()
-        .any(|scheme| {
-            url.get(..scheme.len()).is_some_and(|head| head.eq_ignore_ascii_case(scheme))
-                && url.len() > scheme.len()
-        });
-    let scp = url.split_once(':').is_some_and(|(host, path)| {
-        host.contains('@') && !host.contains('/') && !path.is_empty()
+    let scheme = ["https://", "http://", "ssh://", "git://", "git+ssh://"].iter().any(|scheme| {
+        url.get(..scheme.len()).is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+            && url.len() > scheme.len()
     });
+    let scp = url
+        .split_once(':')
+        .is_some_and(|(host, path)| host.contains('@') && !host.contains('/') && !path.is_empty());
     (scheme || scp) && clone_repo_name(url).is_some()
 }
 
@@ -805,9 +798,7 @@ fn home_folders_header(theme: &Theme, status: Option<&'static str>) -> gpui::Div
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted)
         .child("In Home")
-        .when_some(status, |header, status| {
-            header.child(div().opacity(0.7).child(status))
-        })
+        .when_some(status, |header, status| header.child(div().opacity(0.7).child(status)))
 }
 
 /// A folder from under home: its name (query highlighted), then where it
@@ -826,12 +817,7 @@ fn home_folder_row(
     let (path, is_repo) = (found.path.clone(), found.is_repo);
     row.role(gpui::Role::Button) // read as a button
         .aria_label(SharedString::from(format!("{name} in {parent}")))
-        .child(
-            icon(icons::FOLDER)
-                .size(px(16.0))
-                .flex_none()
-                .text_color(theme.text_muted),
-        )
+        .child(icon(icons::FOLDER).size(px(16.0)).flex_none().text_color(theme.text_muted))
         .child(
             div()
                 .flex_1()
@@ -855,10 +841,7 @@ fn home_folder_row(
         )
         .when(is_repo, |el| {
             el.child(
-                icon(icons::GIT_BRANCH)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(theme.text_muted),
+                icon(icons::GIT_BRANCH).size(px(14.0)).flex_none().text_color(theme.text_muted),
             )
         })
         .on_click(
@@ -877,9 +860,7 @@ fn fold_crumb_folders<T>(folders: &mut Vec<T>) -> Vec<T> {
     if folders.len() <= CRUMB_FOLDERS_MAX {
         return Vec::new();
     }
-    folders
-        .drain(..folders.len() - CRUMB_FOLDERS_TAIL)
-        .collect()
+    folders.drain(..folders.len() - CRUMB_FOLDERS_TAIL).collect()
 }
 
 struct Crumb {
@@ -912,9 +893,7 @@ pub(super) fn device_glyph(platform: &str) -> &'static str {
 /// `/media/ab`); a root base covers everything. Either separator counts, so
 /// Windows drive paths (`D:\` under `D:\`) work too.
 fn path_under(path: &str, base: &str) -> bool {
-    folder_path_key(base)
-        .trim_end_matches(['/', '\\'])
-        .is_empty()
+    folder_path_key(base).trim_end_matches(['/', '\\']).is_empty()
         || path_rest(path, base).is_some()
 }
 
@@ -960,7 +939,6 @@ pub(super) struct RenameSpaceDialog {
     pub focus_pending: bool,
     pub _events: Subscription,
 }
-
 
 // Handle-based rail host for the spaces dropdown: its list is a plain
 // tracked scroller, so the trait's default metrics/press/drag (off the live
@@ -1025,10 +1003,8 @@ impl Shell {
             .map(|motion| motion.current(now))
             .unwrap_or(resting_height);
         let epoch = previous.map_or(1, |motion| motion.epoch + 1);
-        self.sidebar_disclosure_motion.insert(
-            key.to_owned(),
-            SidebarDisclosureMotion::new(epoch, from, target_height, now),
-        );
+        self.sidebar_disclosure_motion
+            .insert(key.to_owned(), SidebarDisclosureMotion::new(epoch, from, target_height, now));
     }
 
     pub(super) fn render_sidebar_disclosure_body(
@@ -1072,16 +1048,17 @@ impl Shell {
         theme: &Theme,
     ) -> AnyElement {
         let resting_reveal = if open { 1.0 } else { 0.0 };
-        let chevron = icon(icons::ALT_ARROW_RIGHT)
-            .size(px(12.0))
-            .text_color(sidebar_header_glyph(theme));
+        let chevron =
+            icon(icons::ALT_ARROW_RIGHT).size(px(12.0)).text_color(sidebar_header_glyph(theme));
         if let Some(tween) = self
             .sidebar_disclosure_motion
             .get(key)
             .copied()
             // Only an opening or a shutting turns it; an open body that grows or shrinks leaves it
             // open.
-            .filter(|motion| motion.animating(self.now()) && (motion.from == 0.0 || motion.to == 0.0))
+            .filter(|motion| {
+                motion.animating(self.now()) && (motion.from == 0.0 || motion.to == 0.0)
+            })
         {
             let denominator = tween.from.max(tween.to).max(1.0);
             let from = (tween.from / denominator).clamp(0.0, 1.0);
@@ -1104,14 +1081,13 @@ impl Shell {
             div()
                 .flex_none()
                 .size(px(12.0))
-                .child(
-                    chevron.with_transformation(gpui::Transformation::rotate(gpui::percentage(
-                        resting_reveal * 0.25,
-                    ))),
-                )
+                .child(chevron.with_transformation(gpui::Transformation::rotate(gpui::percentage(
+                    resting_reveal * 0.25,
+                ))))
                 .into_any_element()
         }
     }
+
     // ---- space filter ----
 
     /// Set the sidebar's session filter (`None` = All spaces). On the
@@ -1122,8 +1098,7 @@ impl Shell {
         if let Some(space_id) = filter
             && self.state.read(cx).selected_chat.is_none()
         {
-            self.state
-                .update(cx, |s, cx| s.select_space(Some(space_id), cx));
+            self.state.update(cx, |s, cx| s.select_space(Some(space_id), cx));
         }
         self.close_spaces_menu(cx);
         self.schedule_save(cx);
@@ -1199,7 +1174,8 @@ impl Shell {
         // The machines after the projects, while there is more than one to tell apart:
         // the machine is a filter, not a level (`docs/decisions/layout.md`).
         if state.devices.len() > 1 {
-            let machines: Vec<String> = state.devices.iter().map(|device| device.name.clone()).collect();
+            let machines: Vec<String> =
+                state.devices.iter().map(|device| device.name.clone()).collect();
             rows.extend(
                 popover::filter_indices(&query, &machines)
                     .into_iter()
@@ -1212,8 +1188,9 @@ impl Shell {
     /// Narrow the sidebar to machine `device_id`'s sessions, or to every machine's
     /// again when it is the one already shown.
     pub(super) fn toggle_machine_filter(&mut self, device_id: String, cx: &mut Context<Self>) {
-        self.settings.machine_filter =
-            (self.settings.machine_filter.as_deref() != Some(device_id.as_str())).then_some(device_id);
+        self.settings.machine_filter = (self.settings.machine_filter.as_deref()
+            != Some(device_id.as_str()))
+        .then_some(device_id);
         self.close_spaces_menu(cx);
         self.schedule_save(cx);
         cx.notify();
@@ -1225,9 +1202,7 @@ impl Shell {
         let state = self.state.read(cx);
         let id = self.settings.space_filter.as_deref()?;
         Some(
-            state
-                .space_row(id)
-                .map_or_else(|| id.to_owned(), slopty_view_proto::view::project_key),
+            state.space_row(id).map_or_else(|| id.to_owned(), slopty_view_proto::view::project_key),
         )
     }
 
@@ -1372,11 +1347,7 @@ impl Shell {
                     let members = state.project_members(space);
                     let (_, offline) = state.project_device_tag(&members, crate::clock::utc(cx));
                     (
-                        state
-                            .representative_space(space)
-                            .display_name()
-                            .to_string()
-                            .into(),
+                        state.representative_space(space).display_name().to_string().into(),
                         Some(space.clone()),
                         offline,
                     )
@@ -1389,7 +1360,8 @@ impl Shell {
             Some(id) => {
                 let state = self.state.read(cx);
                 let name = state.device_name(id).unwrap_or("?");
-                let reached = !super::sidebar_status::out_of_reach(state, id, crate::clock::utc(cx));
+                let reached =
+                    !super::sidebar_status::out_of_reach(state, id, crate::clock::utc(cx));
                 (SharedString::from(format!("{label} \u{b7} {name}")), offline || !reached)
             }
             None => (label, offline),
@@ -1397,13 +1369,11 @@ impl Shell {
         let art = match &space {
             Some(space) => {
                 let profile = self.active_profile_key(cx);
-                self.project_icons
-                    .render(&self.state, Some(space), profile, false, cx)
+                self.project_icons.render(&self.state, Some(space), profile, false, cx)
             }
-            None => icon(icons::FOLDER)
-                .size(px(16.0))
-                .text_color(theme.text_muted)
-                .into_any_element(),
+            None => {
+                icon(icons::FOLDER).size(px(16.0)).text_color(theme.text_muted).into_any_element()
+            }
         };
         let open = self.spaces_menu.is_open();
         // A caret says the row opens a menu (T3's select triggers, Claude desktop's
@@ -1442,11 +1412,7 @@ impl Shell {
             .px(px(Theme::SPACE_SM))
             .text_size(crate::typography::ui_rems(13.0))
             .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(motion::hover_blend(
-                "spaces-filter",
-                theme.text.opacity(0.8),
-                theme.text,
-            ))
+            .text_color(motion::hover_blend("spaces-filter", theme.text.opacity(0.8), theme.text))
             .bg(if open {
                 theme.glass_hover()
             } else {
@@ -1539,7 +1505,9 @@ impl Shell {
                 let order = self.sidebar_visible_order(cx);
                 let Some(at) = order.iter().position(|id| id == chat) else { return false };
                 let next = if key.key == "up" { at.checked_sub(1) } else { Some(at + 1) };
-                if let Some(focus) = next.and_then(|ix| order.get(ix)).and_then(|id| self.sidebar_keys.drawn(id)) {
+                if let Some(focus) =
+                    next.and_then(|ix| order.get(ix)).and_then(|id| self.sidebar_keys.drawn(id))
+                {
                     window.focus(&focus, cx);
                 }
                 true
@@ -1579,12 +1547,7 @@ impl Shell {
             let Some(menu) = self.spaces_menu.get() else {
                 return div().into_any_element();
             };
-            (
-                menu.search.clone(),
-                menu.active,
-                menu.focus.clone(),
-                menu.list_scroll.clone(),
-            )
+            (menu.search.clone(), menu.active, menu.focus.clone(), menu.list_scroll.clone())
         };
         let rows = self.spaces_menu_rows(cx);
         let scrollbar = popover::rail(self, "spaces-menu-scrollbar", theme, cx);
@@ -1609,10 +1572,14 @@ impl Shell {
                     SpacesMenuRow::Machine(id) => {
                         let device = state.devices.iter().find(|device| device.id == id);
                         MenuDetail {
-                            label: SharedString::from(device.map_or("?", |device| device.name.as_str()).to_owned()),
+                            label: SharedString::from(
+                                device.map_or("?", |device| device.name.as_str()).to_owned(),
+                            ),
                             offline: super::sidebar_status::out_of_reach(state, &id, now),
                             selected: machine.as_deref() == Some(id.as_str()),
-                            glyph: Some(device_glyph(device.map_or("", |device| device.platform.as_str()))),
+                            glyph: Some(device_glyph(
+                                device.map_or("", |device| device.platform.as_str()),
+                            )),
                             turned_away: super::sidebar_status::turned_away(state, &id)
                                 .map(|why| SharedString::from(why.to_owned())),
                             row: SpacesMenuRow::Machine(id),
@@ -1626,7 +1593,11 @@ impl Shell {
                             let (_, offline) = state.project_device_tag(&members, now);
                             MenuDetail {
                                 row: SpacesMenuRow::Space(id),
-                                label: state.representative_space(space).display_name().to_string().into(),
+                                label: state
+                                    .representative_space(space)
+                                    .display_name()
+                                    .to_string()
+                                    .into(),
                                 space: Some(space.clone()),
                                 offline,
                                 selected: filter_key.as_deref() == Some(key.as_str()),
@@ -1660,10 +1631,9 @@ impl Shell {
                     detail.selected,
                     cx,
                 ),
-                (None, Some(glyph)) => icon(glyph)
-                    .size(px(14.0))
-                    .text_color(theme.text_muted)
-                    .into_any_element(),
+                (None, Some(glyph)) => {
+                    icon(glyph).size(px(14.0)).text_color(theme.text_muted).into_any_element()
+                }
                 (None, None) => icon(icons::FOLDER)
                     .size(px(14.0))
                     .text_color(theme.text_muted)
@@ -1756,10 +1726,7 @@ impl Shell {
             }))
             .flex()
             .flex_col()
-            .child(popover::search_input_frame(
-                theme,
-                search.into_any_element(),
-            ))
+            .child(popover::search_input_frame(theme, search.into_any_element()))
             .child(
                 div()
                     .flex()
@@ -1823,7 +1790,8 @@ impl Shell {
             self.note_sidebar_change(next);
         }
         let selected = state.selected_chat.as_deref();
-        for group in groups.iter_mut().filter(|group| group.key == super::sidebar_status::INACTIVE) {
+        for group in groups.iter_mut().filter(|group| group.key == super::sidebar_status::INACTIVE)
+        {
             let shown = self
                 .sidebar_group_shown
                 .get(&group.key)
@@ -1867,16 +1835,14 @@ impl Shell {
     pub(super) fn reveal_sidebar_chat(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
         let group = {
             let state = self.state.read(cx);
-            let (groups, _) = super::sidebar_status::list(state, self.sidebar_filter(), self.sidebar_clock);
+            let (groups, _) =
+                super::sidebar_status::list(state, self.sidebar_filter(), self.sidebar_clock);
             groups
                 .into_iter()
                 .find(|group| group.rows.iter().any(|row| row.chat.id == chat_id))
                 .map(|group| group.key)
         };
-        let archived = self
-            .archived_sidebar_chats(cx)
-            .iter()
-            .position(|chat| chat.id == chat_id);
+        let archived = self.archived_sidebar_chats(cx).iter().position(|chat| chat.id == chat_id);
         if group.is_none() && archived.is_none() {
             self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t rename this session here. Clear the sidebar\u{2019}s filter, then rename it.", cx);
             return false;
@@ -1945,11 +1911,13 @@ impl Shell {
             return;
         };
         // Nothing else moves with the clock: a session or machine going quiet is the
-        // state's own transition, which draws the sidebar again (`AppState::next_clock_transition`).
+        // state's own transition, which draws the sidebar again
+        // (`AppState::next_clock_transition`).
         if self.sidebar_clock_tick.as_ref().is_some_and(|(due, _)| *due <= at) {
             return;
         }
-        let wait = (at - crate::clock::utc(cx)).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
+        let wait = (at - crate::clock::utc(cx)).to_std().unwrap_or_default()
+            + std::time::Duration::from_millis(5);
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
@@ -1976,7 +1944,9 @@ impl Shell {
             let selected = self.state.read(cx).selected_chat.clone();
             let mut rows = groups.iter().flat_map(|group| &group.rows);
             let first = rows.next().map(|row| row.chat.id.clone());
-            let listed = |id: &String| groups.iter().flat_map(|group| &group.rows).any(|row| &row.chat.id == id);
+            let listed = |id: &String| {
+                groups.iter().flat_map(|group| &group.rows).any(|row| &row.chat.id == id)
+            };
             self.sidebar_keys.stop = selected.filter(listed).or(first);
             let state = self.state.read(cx);
             self.sidebar_keys
@@ -2003,7 +1973,9 @@ impl Shell {
             let super::sidebar_status::Group { key, label, rows, hidden } = group;
             // A shut group speaks for its rows with the loudest mark among those still
             // heard (a cached row's is the last word from a machine out of reach).
-            let loudest = super::marks::loudest(rows.iter().filter(|row| !row.cached).map(|row| &row.mark)).cloned();
+            let loudest =
+                super::marks::loudest(rows.iter().filter(|row| !row.cached).map(|row| &row.mark))
+                    .cloned();
             let row_count = rows.len() + hidden;
             let shown_rows = rows.len();
             let motion_key = format!("group:{key}");
@@ -2011,7 +1983,10 @@ impl Shell {
             // A shut group builds no rows while no motion shows them, so neither the frame
             // nor a screen reader holds rows that are not on screen.
             let draws = !collapsed
-                || self.sidebar_disclosure_motion.get(&motion_key).is_some_and(|motion| motion.animating(self.now()));
+                || self
+                    .sidebar_disclosure_motion
+                    .get(&motion_key)
+                    .is_some_and(|motion| motion.animating(self.now()));
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for row in rows.into_iter().filter(|_| draws) {
                 let super::sidebar_status::Row { chat, status, hint, .. } = row;
@@ -2180,11 +2155,7 @@ impl Shell {
         let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
             + visible_count as f32 * SIDEBAR_ROW_HEIGHT
             + visible_count.saturating_sub(1) as f32 * SIDEBAR_LIST_GAP
-            + if has_more {
-                more_height + SIDEBAR_LIST_GAP
-            } else {
-                0.0
-            };
+            + if has_more { more_height + SIDEBAR_LIST_GAP } else { 0.0 };
         self.begin_queued_sidebar_reveal("archived", open, body_height);
         // Match Pinned: a muted label with a right-aligned disclosure chevron, its count shown
         // under the pointer.
@@ -2201,18 +2172,18 @@ impl Shell {
             open,
             None,
         )
-            .debug_selector(|| "archived-toggle".into())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let was_open = this.archived_open;
-                this.begin_sidebar_disclosure_motion(
-                    "archived",
-                    if was_open { body_height } else { 0.0 },
-                    if was_open { 0.0 } else { body_height },
-                );
-                this.archived_open = !was_open;
-                this.archived_shown = INITIAL;
-                cx.notify();
-            }));
+        .debug_selector(|| "archived-toggle".into())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let was_open = this.archived_open;
+            this.begin_sidebar_disclosure_motion(
+                "archived",
+                if was_open { body_height } else { 0.0 },
+                if was_open { 0.0 } else { body_height },
+            );
+            this.archived_open = !was_open;
+            this.archived_shown = INITIAL;
+            cx.notify();
+        }));
         let section = div().flex().flex_col().child(header);
         let body = {
             let selected = self.state.read(cx).selected_chat.clone();
@@ -2271,11 +2242,7 @@ impl Shell {
                             this.archived_shown = this.archived_shown.max(INITIAL) + PAGE;
                             cx.notify();
                         }))
-                        .child(
-                            crate::icons::icon(crate::icons::PLUS)
-                                .size(px(14.0))
-                                .flex_none(),
-                        )
+                        .child(crate::icons::icon(crate::icons::PLUS).size(px(14.0)).flex_none())
                         .child(SharedString::from(format!("Show {remaining} more"))),
                 );
             }
@@ -2410,9 +2377,7 @@ impl Shell {
         }
         search.loading = true;
         let generation = Some(search.generation);
-        search.task = Some(request_home_folders(
-            engine, device_id, local, query, generation, cx,
-        ));
+        search.task = Some(request_home_folders(engine, device_id, local, query, generation, cx));
     }
 
     /// Tell the host the picker is done with its home index (it stays when a
@@ -2437,10 +2402,7 @@ impl Shell {
         cx.spawn(async move |_, _| {
             if let Err(error) = engine
                 .client()
-                .call(
-                    methods::RELEASE_HOME_FOLDER_SEARCH,
-                    serde_json::Value::Object(params),
-                )
+                .call(methods::RELEASE_HOME_FOLDER_SEARCH, serde_json::Value::Object(params))
                 .await
             {
                 tracing::debug!(%error, "home folder search release failed");
@@ -2593,15 +2555,10 @@ impl Shell {
             if let (Some(target), local) = (&device_id, &local)
                 && local.as_deref() != Some(target.as_str())
             {
-                params.insert(
-                    "targetDeviceId".into(),
-                    serde_json::Value::String(target.clone()),
-                );
+                params.insert("targetDeviceId".into(), serde_json::Value::String(target.clone()));
             }
-            let result = engine
-                .client()
-                .call(methods::LIST_DRIVES, serde_json::Value::Object(params))
-                .await;
+            let result =
+                engine.client().call(methods::LIST_DRIVES, serde_json::Value::Object(params)).await;
             this.update(cx, |shell, cx| {
                 if let Some(flow) = shell.add_space.as_mut() {
                     flow.drives = match result {
@@ -2633,10 +2590,7 @@ impl Shell {
         let dirs = browser_rows(listing);
         let query = flow.search.read(cx).text().to_string();
         let names: Vec<&str> = dirs.iter().map(|e| e.name.as_str()).collect();
-        popover::filter_indices(&query, &names)
-            .into_iter()
-            .map(|ix| dirs[ix].clone())
-            .collect()
+        popover::filter_indices(&query, &names).into_iter().map(|ix| dirs[ix].clone()).collect()
     }
 
     /// The Folders step's rows: the open folder's matching subfolders, then
@@ -2657,17 +2611,10 @@ impl Shell {
                     .collect()
             })
             .unwrap_or_default();
-        let home = if self.add_space_in_home() {
-            flow.home_search.results.as_slice()
-        } else {
-            &[]
-        };
+        let home = if self.add_space_in_home() { flow.home_search.results.as_slice() } else { &[] };
         // With nothing typed, the folders gone to most lead and the home's own follow.
-        let gone_to = if self.add_space_in_home() {
-            flow.home_search.visited.as_slice()
-        } else {
-            &[]
-        };
+        let gone_to =
+            if self.add_space_in_home() { flow.home_search.visited.as_slice() } else { &[] };
         if flow.search.read(cx).text().trim().is_empty() && !gone_to.is_empty() {
             let keys: HashSet<String> =
                 gone_to.iter().map(|found| folder_path_key(&found.path)).collect();
@@ -2815,10 +2762,7 @@ impl Shell {
             let dirs = browser_rows(listing);
             let names: Vec<&str> = dirs.iter().map(|e| e.name.as_str()).collect();
             crate::pickers::segment_target(&names, query).map(|ix| {
-                (
-                    crate::pickers::child_path(&listing.path, &dirs[ix].name),
-                    dirs[ix].is_repo,
-                )
+                (crate::pickers::child_path(&listing.path, &dirs[ix].name), dirs[ix].is_repo)
             })
         };
         let Some((full, is_repo)) = target else {
@@ -2842,10 +2786,7 @@ impl Shell {
         let entry = rows
             .get(flow.active)
             .filter(|e| completion_prefix_len(&e.name, &query).is_some())
-            .or_else(|| {
-                rows.iter()
-                    .find(|e| completion_prefix_len(&e.name, &query).is_some())
-            })?;
+            .or_else(|| rows.iter().find(|e| completion_prefix_len(&e.name, &query).is_some()))?;
         let len = completion_prefix_len(&entry.name, &query)?;
         if len >= entry.name.len() {
             return None;
@@ -3203,11 +3144,7 @@ impl Shell {
     fn add_space_windows_paths(&self) -> bool {
         self.add_space.as_ref().is_some_and(|flow| {
             flow.open_folder().map_or_else(
-                || {
-                    flow.device
-                        .as_ref()
-                        .is_some_and(|device| device.platform == "windows")
-                },
+                || flow.device.as_ref().is_some_and(|device| device.platform == "windows"),
                 |path| is_windows_path(&path),
             )
         })
@@ -3253,11 +3190,7 @@ impl Shell {
         }
         let input = cx.new(|cx| {
             ComposerInput::new(
-                if windows {
-                    r"Folder path, like C:\code"
-                } else {
-                    "Folder path, like ~/code"
-                },
+                if windows { r"Folder path, like C:\code" } else { "Folder path, like ~/code" },
                 cx,
             )
             .with_text_metrics(12.0, 16.0)
@@ -3288,10 +3221,7 @@ impl Shell {
                         // already lists another folder.
                         let key = folder_path_key(&listing.path);
                         if let Some(edit) = flow.path_edit.as_mut()
-                            && edit
-                                .siblings
-                                .as_ref()
-                                .is_none_or(|(known, _)| *known == key)
+                            && edit.siblings.as_ref().is_none_or(|(known, _)| *known == key)
                         {
                             let folders = browser_rows(&listing).into_iter().cloned().collect();
                             edit.siblings = Some((key, Loadable::Ready(folders)));
@@ -3342,11 +3272,7 @@ impl Shell {
     /// The path field's text changed: a fresh attempt (an answer for the
     /// old text must not open it), and ⇥ follows the folder being typed in.
     fn add_space_path_edited(&mut self, cx: &mut Context<Self>) {
-        if let Some(edit) = self
-            .add_space
-            .as_mut()
-            .and_then(|flow| flow.path_edit.as_mut())
-        {
+        if let Some(edit) = self.add_space.as_mut().and_then(|flow| flow.path_edit.as_mut()) {
             edit.error = None;
             edit.opening = false;
             edit.open_task = None;
@@ -3383,11 +3309,7 @@ impl Shell {
             return;
         };
         let key = folder_path_key(&parent);
-        if edit
-            .siblings
-            .as_ref()
-            .is_some_and(|(known, _)| *known == key)
-        {
+        if edit.siblings.as_ref().is_some_and(|(known, _)| *known == key) {
             return;
         }
         if let Some(listing) = open.filter(|listing| same_folder_path(&listing.path, &parent)) {
@@ -3465,11 +3387,7 @@ impl Shell {
         let Some((text, _)) = self.add_space_path_completion(cx) else {
             return;
         };
-        if let Some(edit) = self
-            .add_space
-            .as_ref()
-            .and_then(|flow| flow.path_edit.as_ref())
-        {
+        if let Some(edit) = self.add_space.as_ref().and_then(|flow| flow.path_edit.as_ref()) {
             let input = edit.input.clone();
             input.update(cx, |input, cx| input.set_text(text, cx));
         }
@@ -3553,10 +3471,7 @@ impl Shell {
                     .map_err(|error| path_open_error(&tilde_path(&target, home.as_deref()), &error))
             }
             .await;
-            this.update(cx, |shell, cx| {
-                shell.add_space_finish_typed_path(home, result, cx)
-            })
-            .ok();
+            this.update(cx, |shell, cx| shell.add_space_finish_typed_path(home, result, cx)).ok();
         }));
         cx.notify();
     }
@@ -3599,10 +3514,8 @@ impl Shell {
         // Outside Home its folder index goes, as when picking a drive.
         let leaves_home = location.1.is_some();
         // The open folder's git seed holds while that folder stays open.
-        flow.browser_repo &= flow
-            .browser
-            .ready()
-            .is_some_and(|open| same_folder_path(&open.path, &listing.path));
+        flow.browser_repo &=
+            flow.browser.ready().is_some_and(|open| same_folder_path(&open.path, &listing.path));
         flow.path_edit = None;
         flow.focus_pending = true;
         flow.step = ProjectStep::Folders;
@@ -3647,11 +3560,7 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
-        if self
-            .add_space
-            .as_ref()
-            .is_some_and(|flow| flow.path_edit.is_some())
-        {
+        if self.add_space.as_ref().is_some_and(|flow| flow.path_edit.is_some()) {
             match keystroke.key.as_str() {
                 "tab" if !keystroke.modifiers.modified() => {
                     self.add_space_accept_path_completion(cx)
@@ -3732,10 +3641,7 @@ impl Shell {
             }
             popover::MenuKey::ModEnter => self.submit_add_space(cx),
             popover::MenuKey::Backspace => {
-                let empty = self
-                    .add_space
-                    .as_ref()
-                    .is_some_and(|f| f.search.read(cx).is_empty());
+                let empty = self.add_space.as_ref().is_some_and(|f| f.search.read(cx).is_empty());
                 if empty {
                     self.add_space_go_up(cx);
                 }
@@ -3763,12 +3669,7 @@ impl Shell {
             let full = full.clone();
             popover::menu_row(theme, false, format!("project-crumb-menu-{ix}"))
                 .id(("project-crumb-menu", ix))
-                .child(
-                    icon(icons::FOLDER)
-                        .size(px(16.0))
-                        .flex_none()
-                        .text_color(theme.text_muted),
-                )
+                .child(icon(icons::FOLDER).size(px(16.0)).flex_none().text_color(theme.text_muted))
                 .child(div().min_w_0().truncate().child(name.clone()))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.project_crumb_menu = popover::Popup::default();
@@ -3809,9 +3710,7 @@ impl Shell {
             // search field puts the crumbs back.
             let field = edit.input.focus_handle(cx);
             if std::mem::take(&mut edit.focus_pending)
-                || window
-                    .focused(cx)
-                    .is_none_or(|focused| focused == flow.focus)
+                || window.focused(cx).is_none_or(|focused| focused == flow.focus)
             {
                 window.focus(&field, cx);
             } else if flow.search.focus_handle(cx).is_focused(window) {
@@ -3853,16 +3752,12 @@ impl Shell {
             .path_edit
             .as_ref()
             .map(|edit| (edit.input.clone(), edit.opening, edit.error.clone()));
-        let ghost = self
-            .add_space_completion(cx)
-            .map(|(_, suffix)| SharedString::from(suffix));
+        let ghost = self.add_space_completion(cx).map(|(_, suffix)| SharedString::from(suffix));
         search.update(cx, |input, cx| {
             input.set_ghost(ghost, cx);
         });
         if let Some((input, ..)) = &path_field {
-            let ghost = self
-                .add_space_path_completion(cx)
-                .and_then(|(_, ghost)| ghost);
+            let ghost = self.add_space_path_completion(cx).and_then(|(_, ghost)| ghost);
             input.update(cx, |input, cx| input.set_ghost(ghost, cx));
         }
         let can_edit_path = matches!(step, ProjectStep::Locations | ProjectStep::Folders);
@@ -3887,10 +3782,7 @@ impl Shell {
                 }))
         };
         let glyph_el = |glyph: &'static str| {
-            icon(glyph)
-                .size(px(16.0))
-                .flex_none()
-                .text_color(theme.text_muted)
+            icon(glyph).size(px(16.0)).flex_none().text_color(theme.text_muted)
         };
         let label_el = |label: String| {
             div().flex_1().min_w_0().child(popover::search_highlight(
@@ -3905,7 +3797,8 @@ impl Shell {
         match step {
             ProjectStep::Devices => {
                 for (ix, device) in self.add_space_devices(cx).into_iter().enumerate() {
-                    let online = self.state.read(cx).device_online(&device.id, crate::clock::utc(cx));
+                    let online =
+                        self.state.read(cx).device_online(&device.id, crate::clock::utc(cx));
                     let name = device.name.clone();
                     // A screen reader reads each row as the button it is, the dot's
                     // state in words.
@@ -3916,17 +3809,11 @@ impl Shell {
                             .aria_label(SharedString::from(said))
                             .child(glyph_el(device_glyph(&device.platform)))
                             .child(label_el(name))
-                            .child(
-                                div()
-                                    .size(px(5.0))
-                                    .flex_none()
-                                    .rounded_full()
-                                    .bg(if online {
-                                        theme.success
-                                    } else {
-                                        theme.text_faint
-                                    }),
-                            )
+                            .child(div().size(px(5.0)).flex_none().rounded_full().bg(if online {
+                                theme.success
+                            } else {
+                                theme.text_faint
+                            }))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.add_space_pick_device(device.clone(), cx)
                             }))
@@ -3936,11 +3823,7 @@ impl Shell {
             }
             ProjectStep::Locations => {
                 for (ix, (name, path)) in self.add_space_locations(cx).into_iter().enumerate() {
-                    let glyph = if path.is_none() {
-                        icons::HOME
-                    } else {
-                        icons::HARD_DRIVE
-                    };
+                    let glyph = if path.is_none() { icons::HOME } else { icons::HARD_DRIVE };
                     let label = name.clone();
                     rows.push(
                         row(ix)
@@ -4103,16 +3986,14 @@ impl Shell {
                 cx,
             )));
         } else if let Some(message) = load_error.filter(|_| step == ProjectStep::Folders) {
-            results = results.child(
-                popover::error_row(&theme, &message).p(px(16.0)).child(
-                    popover::btn_ghost(&theme, "Retry", "project-retry")
-                        .id("project-retry")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let path = this.add_space.as_ref().and_then(|f| f.browser_path.clone());
-                            this.load_space_folders(path, cx);
-                        })),
+            results = results.child(popover::error_row(&theme, &message).p(px(16.0)).child(
+                popover::btn_ghost(&theme, "Retry", "project-retry").id("project-retry").on_click(
+                    cx.listener(|this, _, _, cx| {
+                        let path = this.add_space.as_ref().and_then(|f| f.browser_path.clone());
+                        this.load_space_folders(path, cx);
+                    }),
                 ),
-            );
+            ));
         } else if count == clone_rows // the clone row is no folder
             && !cloning
             && !(step == ProjectStep::Locations && drives_loading)
@@ -4187,11 +4068,8 @@ impl Shell {
             let root = path.clone().or(home.clone());
             // While a descend loads, keep showing the REQUESTED path so the
             // trail doesn't collapse to the location and pop back.
-            let open_path = listing
-                .as_ref()
-                .map(|l| l.path.clone())
-                .or(browser_path)
-                .or(root.clone());
+            let open_path =
+                listing.as_ref().map(|l| l.path.clone()).or(browser_path).or(root.clone());
             let at_root = open_path.is_none()
                 || open_path
                     .as_deref()
@@ -4200,11 +4078,7 @@ impl Shell {
             crumb_key.push_str(&name);
             specs.push(Crumb {
                 name: name.clone().into(),
-                glyph: Some(if path.is_none() {
-                    icons::HOME
-                } else {
-                    icons::HARD_DRIVE
-                }),
+                glyph: Some(if path.is_none() { icons::HOME } else { icons::HARD_DRIVE }),
                 current: at_root,
                 target: CrumbTarget::Location(name, path),
             });
@@ -4252,11 +4126,8 @@ impl Shell {
             }
             let group: SharedString = format!("project-crumb-{ix}").into();
             let more = matches!(spec.target, CrumbTarget::More);
-            let color = if spec.current || (more && menu_open) {
-                theme.text
-            } else {
-                theme.text_muted
-            };
+            let color =
+                if spec.current || (more && menu_open) { theme.text } else { theme.text_muted };
             let long = spec.name.chars().count() > 26;
             let mut el = div()
                 .id(group.clone())
@@ -4481,11 +4352,7 @@ impl Shell {
         };
         // ← mirrors the Left key: up one level, and back to Cmd+K from the
         // first step.
-        let back_label = if step == ProjectStep::Devices {
-            "Back to commands"
-        } else {
-            "Back"
-        };
+        let back_label = if step == ProjectStep::Devices { "Back to commands" } else { "Back" };
         let crumbs = div()
             .h(px(36.0))
             .flex_none()
@@ -4723,12 +4590,8 @@ impl Shell {
                 this.submit_rename_space(cx);
             }
         });
-        self.rename_space_dialog = Some(RenameSpaceDialog {
-            space_id,
-            input,
-            focus_pending: true,
-            _events: events,
-        });
+        self.rename_space_dialog =
+            Some(RenameSpaceDialog { space_id, input, focus_pending: true, _events: events });
         cx.notify();
     }
 
@@ -4748,10 +4611,7 @@ impl Shell {
 
     pub(super) fn delete_space(&mut self, space_id: String, cx: &mut Context<Self>) {
         self.delete_space_confirm = None;
-        self.mutate(
-            serde_json::json!({ "op": "deleteSpace", "spaceId": space_id }),
-            cx,
-        );
+        self.mutate(serde_json::json!({ "op": "deleteSpace", "spaceId": space_id }), cx);
         cx.notify();
     }
 
@@ -4805,12 +4665,7 @@ impl Shell {
                         .child(SharedString::from("Remove…")),
                 )
                 .into_any_element();
-            overlays.push(popover::menu_at(
-                "space-context-menu",
-                position,
-                menu,
-                closing,
-            ));
+            overlays.push(popover::menu_at("space-context-menu", position, menu, closing));
         }
 
         if let Some(dialog) = &mut self.rename_space_dialog {
@@ -4827,11 +4682,7 @@ impl Shell {
                     }
                 }))
                 .child(popover::dialog_title(&theme, "Rename project"))
-                .child(
-                    div()
-                        .mt(px(12.0))
-                        .child(popover::dialog_field(input.into_any_element())),
-                )
+                .child(div().mt(px(12.0)).child(popover::dialog_field(input.into_any_element())))
                 .child(
                     div()
                         .mt(px(16.0))
@@ -4852,9 +4703,7 @@ impl Shell {
                                 popover::btn_primary(&theme, "Rename").id("rename-space-save"),
                                 "Rename",
                             )
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.submit_rename_space(cx)),
-                                ),
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_rename_space(cx))),
                         ),
                 )
                 .into_any_element();
@@ -4892,32 +4741,32 @@ impl Shell {
                     });
                 },
             )
-                .child(popover::dialog_title(&theme, "Remove project?"))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, copy)))
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "delete-space-cancel")
-                                .id("delete-space-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.delete_space_confirm = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            popover::btn_danger(&theme, "Remove")
-                                .id("delete-space-confirm")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_space(space_id.clone(), cx)
-                                })),
+            .child(popover::dialog_title(&theme, "Remove project?"))
+            .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, copy)))
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(
+                        popover::btn_ghost(&theme, "Cancel", "delete-space-cancel")
+                            .id("delete-space-cancel")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.delete_space_confirm = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        popover::btn_danger(&theme, "Remove").id("delete-space-confirm").on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.delete_space(space_id.clone(), cx)
+                            }),
                         ),
-                )
-                .into_any_element();
+                    ),
+            )
+            .into_any_element();
             overlays.push(popover::modal("delete-space-dialog", viewport, card));
         }
 
@@ -5071,10 +4920,7 @@ mod project_flow_tests {
                 truncated: false,
             });
             shell.add_space_go_up(cx);
-            assert_eq!(
-                shell.add_space.as_ref().unwrap().step,
-                ProjectStep::Locations
-            );
+            assert_eq!(shell.add_space.as_ref().unwrap().step, ProjectStep::Locations);
             assert!(shell.add_space.as_ref().unwrap().browser.ready().is_none());
             shell.add_space_go_up(cx);
             let flow = shell.add_space.as_ref().unwrap();
@@ -5091,8 +4937,9 @@ mod project_flow_tests {
 
 #[cfg(test)]
 mod home_folder_search_tests {
-    use super::*;
     use gpui::TestAppContext;
+
+    use super::*;
 
     /// The engine side of a shell under test. ListFolders answers with
     /// `listing`; methods not being awaited answer `{}`.
@@ -5158,15 +5005,14 @@ mod home_folder_search_tests {
         cx: &mut TestAppContext,
         device_id: &str,
     ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let (out, requests) = tokio::sync::mpsc::channel(64);
         let (replies, inbound) = tokio::sync::mpsc::channel(64);
         let engine = {
             let _guard = runtime.enter();
-            crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(out, inbound))
+            crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(
+                out, inbound,
+            ))
         };
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -5212,9 +5058,7 @@ mod home_folder_search_tests {
 
     fn go_home(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) {
         window
-            .update(cx, |shell, _, cx| {
-                shell.add_space_goto_location("Home".into(), None, cx)
-            })
+            .update(cx, |shell, _, cx| shell.add_space_goto_location("Home".into(), None, cx))
             .unwrap();
     }
 
@@ -5228,9 +5072,7 @@ mod home_folder_search_tests {
     }
 
     fn rows(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Vec<FolderRow> {
-        window
-            .read_with(cx, |shell, cx| shell.add_space_folder_rows(cx))
-            .unwrap()
+        window.read_with(cx, |shell, cx| shell.add_space_folder_rows(cx)).unwrap()
     }
 
     fn found(path: &str, relative: &str, is_repo: bool) -> serde_json::Value {
@@ -5239,20 +5081,12 @@ mod home_folder_search_tests {
 
     fn begin_home_search(
         cx: &mut TestAppContext,
-    ) -> (
-        gpui::WindowHandle<Shell>,
-        tempfile::TempDir,
-        FakeEngine,
-        serde_json::Value,
-    ) {
+    ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine, serde_json::Value) {
         let (window, dir, mut engine) = picker(cx, "remote");
         go_home(window, cx);
         let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
         assert_eq!(warm.len(), 1);
-        engine.reply(
-            &warm[0],
-            serde_json::json!({ "matches": [], "indexing": true }),
-        );
+        engine.reply(&warm[0], serde_json::json!({ "matches": [], "indexing": true }));
         cx.run_until_parked();
         // Merely warming Home must not start polling an empty query.
         cx.executor().advance_clock(Duration::from_secs(10));
@@ -5268,16 +5102,12 @@ mod home_folder_search_tests {
         cx: &mut TestAppContext,
     ) {
         let (window, _dir, mut engine, first) = begin_home_search(cx);
-        engine.reply(
-            &first,
-            serde_json::json!({ "matches": [], "indexing": true }),
-        );
+        engine.reply(&first, serde_json::json!({ "matches": [], "indexing": true }));
         cx.run_until_parked();
         assert!(rows(window, cx).is_empty());
         let comet = found("/home/me/dev/comet", "dev/comet", true);
         for (round, millis) in [500, 1000, 2000, 2000].into_iter().enumerate() {
-            cx.executor()
-                .advance_clock(Duration::from_millis(millis - 1));
+            cx.executor().advance_clock(Duration::from_millis(millis - 1));
             assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
             cx.executor().advance_clock(Duration::from_millis(1));
             let requests = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
@@ -5292,10 +5122,7 @@ mod home_folder_search_tests {
             let matches = if round == 0 {
                 vec![comet.clone()]
             } else {
-                vec![
-                    found("/home/me/new/comet", "new/comet", true),
-                    comet.clone(),
-                ]
+                vec![found("/home/me/new/comet", "new/comet", true), comet.clone()]
             };
             engine.reply(
                 &requests[0],
@@ -5326,10 +5153,7 @@ mod home_folder_search_tests {
     fn home_search_cancels_retries_on_edits_navigation_and_close(cx: &mut TestAppContext) {
         for action in ["clear", "short", "path", "drive", "device", "close"] {
             let (window, _dir, mut engine, first) = begin_home_search(cx);
-            engine.reply(
-                &first,
-                serde_json::json!({ "matches": [], "indexing": true }),
-            );
+            engine.reply(&first, serde_json::json!({ "matches": [], "indexing": true }));
             cx.run_until_parked();
             match action {
                 "clear" => type_query(window, "", cx),
@@ -5352,17 +5176,11 @@ mod home_folder_search_tests {
                     .unwrap(),
             }
             cx.executor().advance_clock(Duration::from_secs(10));
-            assert!(
-                engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(),
-                "{action}"
-            );
+            assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(), "{action}");
             window
                 .read_with(cx, |shell, _| {
                     assert!(
-                        !shell
-                            .add_space
-                            .as_ref()
-                            .is_some_and(|flow| flow.home_search.indexing)
+                        !shell.add_space.as_ref().is_some_and(|flow| flow.home_search.indexing)
                     );
                 })
                 .unwrap();
@@ -5372,10 +5190,7 @@ mod home_folder_search_tests {
     #[gpui::test]
     fn new_home_query_resets_backoff_and_ignores_in_flight_answers(cx: &mut TestAppContext) {
         let (window, _dir, mut engine, first) = begin_home_search(cx);
-        engine.reply(
-            &first,
-            serde_json::json!({ "matches": [], "indexing": true }),
-        );
+        engine.reply(&first, serde_json::json!({ "matches": [], "indexing": true }));
         cx.run_until_parked();
         cx.executor().advance_clock(HOME_FOLDER_INDEX_RETRY);
         let stale = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
@@ -5384,10 +5199,7 @@ mod home_folder_search_tests {
         let updated = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
         assert_eq!(updated.len(), 1);
         assert_eq!(updated[0]["params"]["query"], "updated");
-        engine.reply(
-            &updated[0],
-            serde_json::json!({ "matches": [], "indexing": true }),
-        );
+        engine.reply(&updated[0], serde_json::json!({ "matches": [], "indexing": true }));
         engine.reply(
             &stale[0],
             serde_json::json!({
@@ -5396,17 +5208,13 @@ mod home_folder_search_tests {
         );
         cx.run_until_parked();
         assert!(rows(window, cx).is_empty());
-        cx.executor()
-            .advance_clock(HOME_FOLDER_INDEX_RETRY - Duration::from_millis(1));
+        cx.executor().advance_clock(HOME_FOLDER_INDEX_RETRY - Duration::from_millis(1));
         assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
         cx.executor().advance_clock(Duration::from_millis(1));
         let retry = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
         assert_eq!(retry.len(), 1);
         assert_eq!(retry[0]["params"], updated[0]["params"]);
-        engine.reply(
-            &retry[0],
-            serde_json::json!({ "matches": [], "indexing": false }),
-        );
+        engine.reply(&retry[0], serde_json::json!({ "matches": [], "indexing": false }));
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(10));
         assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
@@ -5416,10 +5224,7 @@ mod home_folder_search_tests {
     fn home_search_stops_retrying_after_errors(cx: &mut TestAppContext) {
         for error in ["failed", "unsupported", "decode"] {
             let (window, _dir, mut engine, first) = begin_home_search(cx);
-            engine.reply(
-                &first,
-                serde_json::json!({ "matches": [], "indexing": true }),
-            );
+            engine.reply(&first, serde_json::json!({ "matches": [], "indexing": true }));
             cx.run_until_parked();
             cx.executor().advance_clock(HOME_FOLDER_INDEX_RETRY);
             let retry = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
@@ -5439,10 +5244,7 @@ mod home_folder_search_tests {
                 })
                 .unwrap();
             cx.executor().advance_clock(Duration::from_secs(10));
-            assert!(
-                engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(),
-                "{error}"
-            );
+            assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(), "{error}");
         }
     }
 
@@ -5454,10 +5256,7 @@ mod home_folder_search_tests {
         assert_eq!(warm.len(), 1);
         assert_eq!(warm[0]["params"]["query"], "");
         assert!(warm[0]["params"].get("targetDeviceId").is_none());
-        engine.reply(
-            &warm[0],
-            serde_json::json!({ "matches": [], "indexing": true }),
-        );
+        engine.reply(&warm[0], serde_json::json!({ "matches": [], "indexing": true }));
 
         type_query(window, "c", cx);
         assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
@@ -5523,10 +5322,7 @@ mod home_folder_search_tests {
             engine.listing["path"] = home.into();
             go_home(window, cx);
             let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
-            engine.reply(
-                &warm[0],
-                serde_json::json!({ "matches": [], "indexing": false }),
-            );
+            engine.reply(&warm[0], serde_json::json!({ "matches": [], "indexing": false }));
             type_query(window, "co", cx);
             let search = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
             let code = format!("{extended_home}\\code");
@@ -5561,9 +5357,7 @@ mod home_folder_search_tests {
                 }),
             );
             cx.run_until_parked();
-            window
-                .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
-                .unwrap();
+            window.update(cx, |shell, _, cx| shell.add_space_open_active(cx)).unwrap();
             let child = engine.take(methods::LIST_FOLDERS, cx);
             assert_eq!(child[0]["params"]["path"], format!("{comet}\\src"));
             engine.reply(
@@ -5571,15 +5365,10 @@ mod home_folder_search_tests {
                 serde_json::json!({ "path": format!("{comet}\\src"), "entries": [] }),
             );
             cx.run_until_parked();
-            window
-                .update(cx, |shell, _, cx| shell.add_space_go_up(cx))
-                .unwrap();
+            window.update(cx, |shell, _, cx| shell.add_space_go_up(cx)).unwrap();
             let parent = engine.take(methods::LIST_FOLDERS, cx);
             assert_eq!(parent[0]["params"]["path"], comet);
-            engine.reply(
-                &parent[0],
-                serde_json::json!({ "path": comet, "entries": [] }),
-            );
+            engine.reply(&parent[0], serde_json::json!({ "path": comet, "entries": [] }));
             cx.run_until_parked();
             window.update(cx, |shell, _, cx| {
                 shell.state.update(cx, |state, _| {
@@ -5612,9 +5401,7 @@ mod home_folder_search_tests {
             }),
         );
         cx.run_until_parked();
-        window
-            .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
-            .unwrap();
+        window.update(cx, |shell, _, cx| shell.add_space_open_active(cx)).unwrap();
         let browse = engine.take(methods::LIST_FOLDERS, cx);
         assert_eq!(browse[0]["params"]["path"], "/home/me/dev/comet");
         window
@@ -5654,12 +5441,16 @@ mod home_folder_search_tests {
         ] {
             assert!(!looks_like_repo_url(url), "{url:?}");
         }
-        assert_eq!(clone_repo_name("https://github.com/zeronsh/zeron.git").as_deref(), Some("zeron"));
+        assert_eq!(
+            clone_repo_name("https://github.com/zeronsh/zeron.git").as_deref(),
+            Some("zeron")
+        );
         assert_eq!(clone_repo_name("git@github.com:owner/repo.git").as_deref(), Some("repo"));
         assert_eq!(clone_repo_name("https://example.com/a/b/").as_deref(), Some("b"));
         assert_eq!(clone_repo_name("/srv/git/origin.git").as_deref(), Some("origin"));
         assert_eq!(clone_repo_name("https://example.com/.git"), None);
-        let answer = serde_json::json!({ "spaceId": "s", "deviceId": "d", "path": "/home/me/zeron" });
+        let answer =
+            serde_json::json!({ "spaceId": "s", "deviceId": "d", "path": "/home/me/zeron" });
         assert_eq!(
             cloned_space(&answer),
             Some(("s".to_owned(), "d".to_owned(), "/home/me/zeron".to_owned()))
@@ -5706,9 +5497,7 @@ mod home_folder_search_tests {
                 );
             })
             .unwrap();
-        window
-            .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
-            .unwrap();
+        window.update(cx, |shell, _, cx| shell.add_space_open_active(cx)).unwrap();
         let asked = engine.take(methods::CLONE_REPO, cx);
         assert_eq!(asked.len(), 1);
         let params = &asked[0]["params"];
@@ -5732,7 +5521,10 @@ mod home_folder_search_tests {
             .read_with(cx, |shell, cx| {
                 let state = shell.state.read(cx);
                 let space = state.spaces.iter().find(|s| s.id == "cloned").unwrap();
-                assert_eq!((space.device_id.as_str(), space.path.as_str()), ("remote", "/home/me/zeron"));
+                assert_eq!(
+                    (space.device_id.as_str(), space.path.as_str()),
+                    ("remote", "/home/me/zeron")
+                );
                 assert_eq!(state.selected_space.as_deref(), Some("cloned"));
                 assert!(crate::toast::messages(cx).is_empty(), "the notice is taken down");
             })
@@ -5743,9 +5535,7 @@ mod home_folder_search_tests {
     #[gpui::test]
     fn a_failed_clone_says_why_and_adds_nothing(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = clone_typed(cx, "local", "git@example.com:srv/origin.git");
-        window
-            .update(cx, |shell, _, cx| shell.add_space_open_active(cx))
-            .unwrap();
+        window.update(cx, |shell, _, cx| shell.add_space_open_active(cx)).unwrap();
         let asked = engine.take(methods::CLONE_REPO, cx);
         assert!(asked[0]["params"].get("targetDeviceId").is_none(), "this machine's own");
         engine.fail(&asked[0], "fatal: repository not found");
@@ -5758,7 +5548,11 @@ mod home_folder_search_tests {
                 assert_eq!(said.len(), 1);
                 assert!(said[0].starts_with("Couldn\u{2019}t clone origin."), "{said:?}");
                 let why = crate::toast::details(cx);
-                assert_eq!(why[0].as_deref(), Some("fatal: repository not found"), "why, behind Copy error");
+                assert_eq!(
+                    why[0].as_deref(),
+                    Some("fatal: repository not found"),
+                    "why, behind Copy error"
+                );
             })
             .unwrap();
     }
@@ -5802,22 +5596,11 @@ mod home_folder_search_tests {
 
         go_home(window, cx);
         engine.take(methods::SEARCH_HOME_FOLDERS, cx);
-        window
-            .update(cx, |shell, _, cx| shell.close_add_space(cx))
-            .unwrap();
-        assert_eq!(
-            engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx).len(),
-            1
-        );
+        window.update(cx, |shell, _, cx| shell.close_add_space(cx)).unwrap();
+        assert_eq!(engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx).len(), 1);
         // Nothing left to release.
-        window
-            .update(cx, |shell, _, cx| shell.close_add_space(cx))
-            .unwrap();
-        assert!(
-            engine
-                .take(methods::RELEASE_HOME_FOLDER_SEARCH, cx)
-                .is_empty()
-        );
+        window.update(cx, |shell, _, cx| shell.close_add_space(cx)).unwrap();
+        assert!(engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx).is_empty());
     }
 
     #[gpui::test]
@@ -5829,14 +5612,8 @@ mod home_folder_search_tests {
         cx.run_until_parked();
         type_query(window, "comet", cx);
         assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
-        window
-            .update(cx, |shell, _, cx| shell.close_add_space(cx))
-            .unwrap();
-        assert!(
-            engine
-                .take(methods::RELEASE_HOME_FOLDER_SEARCH, cx)
-                .is_empty()
-        );
+        window.update(cx, |shell, _, cx| shell.close_add_space(cx)).unwrap();
+        assert!(engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx).is_empty());
     }
 
     /// The platform's ⌘ (Ctrl elsewhere), as the key handlers read it.
@@ -5854,11 +5631,7 @@ mod home_folder_search_tests {
             .update(cx, |shell, _, cx| {
                 shell.add_space_key(
                     &gpui::KeyDownEvent {
-                        keystroke: gpui::Keystroke {
-                            modifiers,
-                            key: key.into(),
-                            key_char: None,
-                        },
+                        keystroke: gpui::Keystroke { modifiers, key: key.into(), key_char: None },
                         is_held: false,
                         prefer_character_input: false,
                     },
@@ -5876,11 +5649,7 @@ mod home_folder_search_tests {
         window
             .read_with(cx, |shell, _| {
                 let flow = shell.add_space.as_ref().unwrap();
-                flow.path_edit
-                    .as_ref()
-                    .expect("path field open")
-                    .input
-                    .clone()
+                flow.path_edit.as_ref().expect("path field open").input.clone()
             })
             .unwrap()
     }
@@ -5911,10 +5680,7 @@ mod home_folder_search_tests {
                 found = Some(request);
             } else {
                 let listed = request["params"]["path"].clone();
-                engine.reply(
-                    &request,
-                    serde_json::json!({ "path": listed, "entries": [] }),
-                );
+                engine.reply(&request, serde_json::json!({ "path": listed, "entries": [] }));
             }
         }
         found.unwrap_or_else(|| panic!("no ListFolders for {path}"))
@@ -5927,18 +5693,12 @@ mod home_folder_search_tests {
         engine.take(methods::SEARCH_HOME_FOLDERS, cx);
         // ⌘L: the trail becomes the open folder's path, ready to replace.
         press(window, "l", secondary(cx), cx);
-        assert_eq!(
-            path_input(window, cx).read_with(cx, |input, _| input.text().to_owned()),
-            "~/"
-        );
+        assert_eq!(path_input(window, cx).read_with(cx, |input, _| input.text().to_owned()), "~/");
 
         type_path(window, "~/code/../notes", cx);
         submit_path(window, cx);
         let missing = listing_request(&mut engine, "/home/me/notes", cx);
-        engine.fail(
-            &missing,
-            "could not read that folder: No such file or directory (os error 2)",
-        );
+        engine.fail(&missing, "could not read that folder: No such file or directory (os error 2)");
         cx.run_until_parked();
         window
             .read_with(cx, |shell, _| {
@@ -5954,13 +5714,7 @@ mod home_folder_search_tests {
         type_path(window, "/srv/data", cx);
         window
             .read_with(cx, |shell, _| {
-                let edit = shell
-                    .add_space
-                    .as_ref()
-                    .unwrap()
-                    .path_edit
-                    .as_ref()
-                    .unwrap();
+                let edit = shell.add_space.as_ref().unwrap().path_edit.as_ref().unwrap();
                 assert!(edit.error.is_none(), "an edit clears the error");
             })
             .unwrap();
@@ -6002,10 +5756,8 @@ mod home_folder_search_tests {
         press(window, "enter", secondary(cx), cx);
         let request = listing_request(&mut engine, "/home/me/code/My App", cx);
         assert_eq!(request["params"]["targetDeviceId"], "remote");
-        engine.reply(
-            &request,
-            serde_json::json!({ "path": "/home/me/code/My App", "entries": [] }),
-        );
+        engine
+            .reply(&request, serde_json::json!({ "path": "/home/me/code/My App", "entries": [] }));
         let created = engine.take(methods::MUTATE, cx);
         assert_eq!(created.len(), 1);
         assert_eq!(created[0]["params"]["op"], "createSpace");
@@ -6025,9 +5777,7 @@ mod home_folder_search_tests {
     fn mod_l_on_the_device_list_types_a_path_with_tab_completion(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = picker(cx, "local");
         window
-            .update(cx, |shell, _, cx| {
-                shell.add_space_back_to(ProjectStep::Devices, cx)
-            })
+            .update(cx, |shell, _, cx| shell.add_space_back_to(ProjectStep::Devices, cx))
             .unwrap();
         press(window, "l", secondary(cx), cx);
         window
@@ -6052,10 +5802,7 @@ mod home_folder_search_tests {
         type_path(window, "~/CO", cx);
         window
             .read_with(cx, |shell, cx| {
-                assert_eq!(
-                    shell.add_space.as_ref().unwrap().home.as_deref(),
-                    Some("/home/me")
-                );
+                assert_eq!(shell.add_space.as_ref().unwrap().home.as_deref(), Some("/home/me"));
                 assert_eq!(
                     shell.add_space_path_completion(cx),
                     Some(("~/code/".into(), Some("de".into())))
@@ -6103,8 +5850,7 @@ mod home_folder_search_tests {
     fn draw(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) {
         cx.run_until_parked();
         // The window, not the Shell: drawing updates the Shell itself.
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
     }
 
     fn focused(
@@ -6112,10 +5858,8 @@ mod home_folder_search_tests {
         input: &Entity<ComposerInput>,
         cx: &mut TestAppContext,
     ) -> bool {
-        cx.update_window(window.into(), |_, window, cx| {
-            input.focus_handle(cx).is_focused(window)
-        })
-        .unwrap()
+        cx.update_window(window.into(), |_, window, cx| input.focus_handle(cx).is_focused(window))
+            .unwrap()
     }
 
     #[gpui::test]
@@ -6140,9 +5884,7 @@ mod home_folder_search_tests {
         // Esc again closes the palette as before.
         draw(window, cx);
         cx.simulate_keystrokes(window.into(), "escape");
-        window
-            .read_with(cx, |shell, _| assert!(shell.add_space.is_none()))
-            .unwrap();
+        window.read_with(cx, |shell, _| assert!(shell.add_space.is_none())).unwrap();
     }
 
     #[gpui::test]
@@ -6153,9 +5895,7 @@ mod home_folder_search_tests {
         go_home(window, cx);
         engine.take(methods::SEARCH_HOME_FOLDERS, cx);
         let search = window
-            .read_with(cx, |shell, _| {
-                shell.add_space.as_ref().unwrap().search.clone()
-            })
+            .read_with(cx, |shell, _| shell.add_space.as_ref().unwrap().search.clone())
             .unwrap();
         draw(window, cx);
         assert!(focused(window, &search, cx));
@@ -6189,10 +5929,7 @@ mod home_folder_search_tests {
             .filter(|request| request["params"]["path"] == "/home/me/code")
             .collect();
         assert_eq!(opens.len(), 1, "↵ doesn't start the open over");
-        engine.reply(
-            opens[0],
-            serde_json::json!({ "path": "/home/me/code", "entries": [] }),
-        );
+        engine.reply(opens[0], serde_json::json!({ "path": "/home/me/code", "entries": [] }));
         let created = engine.take(methods::MUTATE, cx);
         assert_eq!(created.len(), 1);
         assert_eq!(created[0]["params"]["path"], "/home/me/code");
@@ -6213,15 +5950,10 @@ mod home_folder_search_tests {
         press(window, "l", secondary(cx), cx);
         let completion = |text: &str, cx: &mut TestAppContext| {
             type_path(window, text, cx);
-            window
-                .read_with(cx, |shell, cx| shell.add_space_path_completion(cx))
-                .unwrap()
+            window.read_with(cx, |shell, cx| shell.add_space_path_completion(cx)).unwrap()
         };
         assert_eq!(completion("~/code", cx), Some(("~/code/".into(), None)));
-        assert_eq!(
-            completion("~/co", cx),
-            Some(("~/Code/".into(), Some("de".into())))
-        );
+        assert_eq!(completion("~/co", cx), Some(("~/Code/".into(), Some("de".into()))));
     }
 
     #[gpui::test]
@@ -6229,9 +5961,7 @@ mod home_folder_search_tests {
         let (window, _dir, mut engine) = picker(cx, "remote");
         // ⌘L on the device list: nothing has listed the device's home yet.
         window
-            .update(cx, |shell, _, cx| {
-                shell.add_space_back_to(ProjectStep::Devices, cx)
-            })
+            .update(cx, |shell, _, cx| shell.add_space_back_to(ProjectStep::Devices, cx))
             .unwrap();
         press(window, "l", secondary(cx), cx);
         type_path(window, "/home/me/code", cx);
@@ -6241,15 +5971,9 @@ mod home_folder_search_tests {
             .iter()
             .find(|request| request["params"]["path"] == "/home/me/code")
             .expect("the typed path listed");
-        engine.reply(
-            open,
-            serde_json::json!({ "path": "/home/me/code", "entries": [] }),
-        );
+        engine.reply(open, serde_json::json!({ "path": "/home/me/code", "entries": [] }));
         cx.run_until_parked();
-        for home in requests
-            .iter()
-            .filter(|request| request["params"].get("path").is_none())
-        {
+        for home in requests.iter().filter(|request| request["params"].get("path").is_none()) {
             engine.reply(home, engine.listing.clone());
         }
         cx.run_until_parked();
@@ -6269,9 +5993,7 @@ mod home_folder_search_tests {
         engine.take(methods::SEARCH_HOME_FOLDERS, cx);
         // Into ~/code, whose listing hasn't answered.
         window
-            .update(cx, |shell, _, cx| {
-                shell.load_space_folders(Some("/home/me/code".into()), cx)
-            })
+            .update(cx, |shell, _, cx| shell.load_space_folders(Some("/home/me/code".into()), cx))
             .unwrap();
         press(window, "l", secondary(cx), cx);
         assert_eq!(
@@ -6286,20 +6008,11 @@ mod home_folder_search_tests {
     #[test]
     fn typed_paths_open_under_home_the_deepest_drive_or_their_root() {
         let drives = [
-            DriveEntry {
-                name: "Macintosh HD".into(),
-                path: "/".into(),
-            },
-            DriveEntry {
-                name: "Data".into(),
-                path: "/Volumes/Data".into(),
-            },
+            DriveEntry { name: "Macintosh HD".into(), path: "/".into() },
+            DriveEntry { name: "Data".into(), path: "/Volumes/Data".into() },
         ];
         let home = Some("/Users/ana");
-        assert_eq!(
-            typed_path_location("/Users/ana/code", home, &drives),
-            ("Home".into(), None)
-        );
+        assert_eq!(typed_path_location("/Users/ana/code", home, &drives), ("Home".into(), None));
         assert_eq!(
             typed_path_location("/Volumes/Data/work", home, &drives),
             ("Data".into(), Some("/Volumes/Data".into()))
@@ -6345,10 +6058,7 @@ mod home_folder_search_tests {
             "No folder at /x"
         );
         assert_eq!(
-            path_open_error(
-                "/x",
-                "could not read that folder: Not a directory (os error 20)"
-            ),
+            path_open_error("/x", "could not read that folder: Not a directory (os error 20)"),
             // `/x` itself, or a folder on its way, is a file.
             "/x isn't a folder"
         );

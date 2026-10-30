@@ -28,10 +28,11 @@ pub mod file_icons;
 pub mod files;
 pub mod frost;
 pub mod icons;
-pub mod inspector; // the read-only inspector of an agent session, in the right pane
-pub mod keys; // how a key reads in tooltips, menus, the palette and the a11y tree
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
+pub mod inspector; // the read-only inspector of an agent session, in the right pane
+pub mod invariants; // what the shell's state must hold, checked as it runs
+pub mod keys; // how a key reads in tooltips, menus, the palette and the a11y tree
 pub mod links;
 mod lit; // the person's message as a faintly lit surface
 pub mod live; // Slopty's terminals and remote screens in the shell's chrome
@@ -39,7 +40,6 @@ pub mod loaders;
 pub mod markdown;
 pub mod motion;
 mod notice;
-pub mod invariants; // what the shell's state must hold, checked as it runs
 pub mod overscroll;
 pub mod page; // a page an agent shows inline, as its card
 pub mod pickers;
@@ -55,9 +55,9 @@ pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
-pub(crate) mod tool_images;
 pub mod theme;
 pub mod toast;
+pub(crate) mod tool_images;
 pub mod transcript;
 pub mod typography;
 pub mod visuals;
@@ -68,9 +68,8 @@ use std::path::PathBuf;
 
 use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
-
-pub use state::EngineBootConfig;
 pub use slopty_view_proto::HarnessId;
+pub use state::EngineBootConfig;
 
 /// Everything the headed binary passes in (config/env resolution lives in
 /// `apps/slopty`, not here).
@@ -91,10 +90,7 @@ pub struct UiConfig {
 
 impl UiConfig {
     fn boot(&self) -> EngineBootConfig {
-        EngineBootConfig {
-            data_dir: self.data_dir.clone(),
-            default_harness: self.default_harness,
-        }
+        EngineBootConfig { data_dir: self.data_dir.clone(), default_harness: self.default_harness }
     }
 }
 
@@ -242,10 +238,7 @@ pub fn start(
         })
         .detach();
 
-        cx.set_global(ReopenState {
-            state: state.clone(),
-            boot: config.boot(),
-        });
+        cx.set_global(ReopenState { state: state.clone(), boot: config.boot() });
         let window = open_main_window(state, config.boot(), cx);
         // Native menu bar — macOS gets the standard app menu (About/Services/
         // Hide/Quit ⌘Q), Edit clipboard verbs routed to the focused input, and
@@ -303,10 +296,7 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
     if !state.read(cx).chat_listed(&target) {
         return;
     }
-    let shell = cx
-        .windows()
-        .into_iter()
-        .find_map(|window| window.downcast::<shell::Shell>());
+    let shell = cx.windows().into_iter().find_map(|window| window.downcast::<shell::Shell>());
     match shell {
         Some(shell) => {
             let _ = shell.update(cx, |shell, window, cx| {
@@ -327,11 +317,7 @@ fn restored_main_window_bounds(cx: &App) -> (Bounds<gpui::Pixels>, Option<gpui::
     let displays = cx.displays();
     let primary = cx
         .primary_display()
-        .and_then(|primary| {
-            displays
-                .iter()
-                .position(|display| display.id() == primary.id())
-        })
+        .and_then(|primary| displays.iter().position(|display| display.id() == primary.id()))
         .unwrap_or(0);
     let geometries: Vec<_> = displays
         .iter()
@@ -343,9 +329,7 @@ fn restored_main_window_bounds(cx: &App) -> (Bounds<gpui::Pixels>, Option<gpui::
         .collect();
     saved
         .restore(&geometries, primary)
-        .map_or(fallback, |(index, geometry)| {
-            (geometry.bounds(), Some(displays[index].id()))
-        })
+        .map_or(fallback, |(index, geometry)| (geometry.bounds(), Some(displays[index].id())))
 }
 
 fn save_main_window_geometry(window: &gpui::Window, cx: &mut App) {
@@ -370,9 +354,7 @@ fn save_window_geometry(window: &gpui::Window, query_display: bool, cx: &mut App
     geometry.display_uuid = if query_display {
         window.display(cx).and_then(|display| display.uuid().ok())
     } else {
-        settings::current(cx)
-            .window_geometry
-            .and_then(|saved| saved.display_uuid)
+        settings::current(cx).window_geometry.and_then(|saved| saved.display_uuid)
     };
     if geometry.is_valid() {
         settings::update(settings::SavePolicy::Debounced, cx, |settings| {
@@ -490,4 +472,3 @@ fn open_main_window(
     appearance::reapply_window_background(cx);
     handle
 }
-

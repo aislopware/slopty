@@ -9,10 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gpui::{
-    AnyElement, FontWeight, ObjectFit, RenderImage, SharedString, StyledImage as _, div, img,
-    prelude::*, px,
-};
+use gpui::prelude::*;
+use gpui::{AnyElement, FontWeight, ObjectFit, RenderImage, SharedString, div, img, px};
 
 use crate::markdown::render::{
     MD_LINE_HEIGHT, MD_TEXT_SIZE, TABLE_CELL_PADDING, TABLE_DIVIDER, TABLE_HEADER_WEIGHT,
@@ -93,14 +91,14 @@ pub struct PageTable {
 }
 
 impl PageTable {
-    /// The most records kept, the header aside.
-    pub const MAX_ROWS: usize = 10_000;
-    /// The most columns kept.
-    pub const MAX_COLUMNS: usize = 64;
-    /// The most characters a cell keeps.
-    pub const MAX_CELL: usize = 400;
     /// The records the card shows; the pane shows them all.
     pub const INLINE_ROWS: usize = 12;
+    /// The most characters a cell keeps.
+    pub const MAX_CELL: usize = 400;
+    /// The most columns kept.
+    pub const MAX_COLUMNS: usize = 64;
+    /// The most records kept, the header aside.
+    pub const MAX_ROWS: usize = 10_000;
 
     /// The delimiter a file's name says its records use: `,` for `.csv`, a tab for `.tsv`.
     #[must_use]
@@ -139,7 +137,9 @@ impl PageTable {
             records.push(
                 done.into_iter()
                     .take(Self::MAX_COLUMNS)
-                    .map(|cell| SharedString::from(cell.chars().take(Self::MAX_CELL).collect::<String>()))
+                    .map(|cell| {
+                        SharedString::from(cell.chars().take(Self::MAX_CELL).collect::<String>())
+                    })
                     .collect(),
             );
         };
@@ -263,11 +263,7 @@ pub fn page_image(
     match picture {
         Some(picture) => frame
             .aria_value("drawn")
-            .child(
-                img(gpui::ImageSource::Render(picture))
-                    .size_full()
-                    .object_fit(ObjectFit::Fill),
-            )
+            .child(img(gpui::ImageSource::Render(picture)).size_full().object_fit(ObjectFit::Fill))
             .into_any_element(),
         None => frame.aria_value("loading").bg(theme.ink(0.04)).into_any_element(),
     }
@@ -387,7 +383,10 @@ mod tests {
         let table = PageTable::parse(&text, ',');
         assert_eq!(table.rows.len(), PageTable::MAX_ROWS);
         assert_eq!(table.more, 5);
-        assert_eq!(more_rows_words(&table, 12), Some(format!("{} more rows", PageTable::MAX_ROWS - 12 + 5)));
+        assert_eq!(
+            more_rows_words(&table, 12),
+            Some(format!("{} more rows", PageTable::MAX_ROWS - 12 + 5))
+        );
         let small = PageTable::parse("a\n1\n", ',');
         assert_eq!(more_rows_words(&small, 12), None);
         assert_eq!(small.to_tsv(), "a\n1");

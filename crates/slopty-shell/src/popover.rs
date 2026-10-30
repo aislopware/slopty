@@ -14,18 +14,18 @@
 
 mod contained;
 mod hover_intent;
-pub(crate) use contained::{MenuAlign, contained_menu};
-pub use hover_intent::{HoverAction, HoverIntent};
-
-use gpui::{
-    Anchor, AnyElement, Context, Div, ElementId, IntoElement, MouseButton, MouseDownEvent,
-    MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, Window, div, prelude::*, px,
-};
 use std::time::{Duration, Instant};
 
-use crate::motion::{self, SLOPTY_PULSE};
+pub(crate) use contained::{MenuAlign, contained_menu};
+use gpui::prelude::*;
+use gpui::{
+    Anchor, AnyElement, Context, Div, ElementId, IntoElement, MouseButton, MouseDownEvent,
+    MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, Stateful, Window, div, px,
+};
+pub use hover_intent::{HoverAction, HoverIntent};
+
+use crate::motion::{self, HoverFade as _, SLOPTY_PULSE};
 use crate::theme::{Theme, hairline, ink};
-use crate::motion::HoverFade as _;
 
 // ---------------------------------------------------------------------------
 // Loadable — async slot state shared by pickers/settings pages
@@ -86,11 +86,7 @@ pub struct Popup<T> {
 
 impl<T> Default for Popup<T> {
     fn default() -> Self {
-        Self {
-            inner: None,
-            pressed_while_open: false,
-            return_focus: None,
-        }
+        Self { inner: None, pressed_while_open: false, return_focus: None }
     }
 }
 
@@ -206,7 +202,8 @@ impl<T> Popup<T> {
     /// newer phase's own reap handles it.
     pub fn finish_close(&mut self, now: std::time::Instant) {
         if let Some((_, Some(since))) = &self.inner
-            && now.saturating_duration_since(*since) >= motion::MENU_OUT.total().mul_f32(motion::speed_scale())
+            && now.saturating_duration_since(*since)
+                >= motion::MENU_OUT.total().mul_f32(motion::speed_scale())
         {
             self.inner = None;
         }
@@ -413,11 +410,7 @@ pub fn menu_scroll_host(id: &'static str) -> Stateful<Div> {
 /// re-padded scroller itself. Chain the height budget (`.max_h`), layout
 /// (`.flex().flex_col()`), and row children.
 pub fn menu_scroll_list(id: &'static str, scroll: &ScrollHandle) -> Stateful<Div> {
-    div()
-        .id(id)
-        .px(px(CARD_INSET))
-        .overflow_y_scroll()
-        .track_scroll(scroll)
+    div().id(id).px(px(CARD_INSET)).overflow_y_scroll().track_scroll(scroll)
 }
 
 /// Completion surfaces share the picker card, inset and scroll fade. Keep
@@ -470,9 +463,7 @@ pub fn completion_row_content(
             div()
                 .flex_none()
                 .when(detail.is_empty(), |label| label.flex_1().min_w_0())
-                .when(!detail.is_empty(), |label| {
-                    label.max_w(gpui::relative(0.55))
-                })
+                .when(!detail.is_empty(), |label| label.max_w(gpui::relative(0.55)))
                 .overflow_hidden()
                 .truncate()
                 .text_size(crate::typography::ui_rems(13.0))
@@ -500,13 +491,7 @@ pub fn completion_row_content(
 /// trigger would vertically center the whole floating layer). A zero-size
 /// absolutely-inset wrapper fixes the origin at the corner.
 fn pinned_layer(layer: AnyElement) -> AnyElement {
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_0()
-        .child(layer)
-        .into_any_element()
+    div().absolute().top_0().left_0().size_0().child(layer).into_any_element()
 }
 
 /// A [`Popup`]'s exit phase at the moment of the frame drawing it
@@ -521,10 +506,7 @@ pub struct Closing {
 /// frame drawing it. Monotonic by construction — unlike the animation
 /// element's own clock, it can never replay from 0 mid-exit.
 fn exit_progress(closing: Closing) -> f32 {
-    let total = motion::MENU_OUT
-        .total()
-        .mul_f32(motion::speed_scale())
-        .as_secs_f32();
+    let total = motion::MENU_OUT.total().mul_f32(motion::speed_scale()).as_secs_f32();
     let raw = if total <= 0.0 {
         1.0
     } else {
@@ -557,11 +539,7 @@ fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
     crate::frost::frosted(
         CARD_RADIUS,
         blur,
-        div()
-            .relative()
-            .child(guard)
-            .child(content)
-            .into_any_element(),
+        div().relative().child(guard).child(content).into_any_element(),
     )
     .into_any_element()
 }
@@ -623,11 +601,7 @@ pub fn anchored_menu(
             gpui::anchored()
                 .anchor(Anchor::TopLeft)
                 .snap_to_window_with_margin(px(8.0))
-                .child(menu_motion(
-                    id.into(),
-                    exit,
-                    div().occlude().pt(px(6.0)).child(content),
-                )),
+                .child(menu_motion(id.into(), exit, div().occlude().pt(px(6.0)).child(content))),
         )
         .priority(1)
         .into_any_element(),
@@ -722,11 +696,7 @@ pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool)
         .child(
             gpui::deferred(
                 gpui::anchored()
-                    .anchor(if left {
-                        Anchor::TopRight
-                    } else {
-                        Anchor::TopLeft
-                    })
+                    .anchor(if left { Anchor::TopRight } else { Anchor::TopLeft })
                     .snap_to_window_with_margin(px(8.0))
                     .child(menu_motion(id.into(), None, div().occlude().child(content))),
             )
@@ -765,15 +735,14 @@ pub fn anchored_menu_below_layer(
         .size_0()
         .child(
             gpui::deferred(
-                gpui::anchored()
-                    .anchor(Anchor::TopLeft)
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(menu_motion_from(
+                gpui::anchored().anchor(Anchor::TopLeft).snap_to_window_with_margin(px(8.0)).child(
+                    menu_motion_from(
                         id.into(),
                         exit,
                         div().occlude().pt(px(gap)).child(content),
                         -MENU_TRAVEL,
-                    )),
+                    ),
+                ),
             )
             .priority(priority)
             .into_any_element(),
@@ -793,15 +762,14 @@ pub fn anchored_menu_above(
     let content = frosted_menu(exit, content);
     pinned_layer(
         gpui::deferred(
-            gpui::anchored()
-                .anchor(Anchor::BottomLeft)
-                .snap_to_window_with_margin(px(8.0))
-                .child(menu_motion_from(
+            gpui::anchored().anchor(Anchor::BottomLeft).snap_to_window_with_margin(px(8.0)).child(
+                menu_motion_from(
                     id.into(),
                     exit,
                     div().occlude().pb(px(6.0)).child(content),
                     MENU_TRAVEL,
-                )),
+                ),
+            ),
         )
         .priority(1)
         .into_any_element(),
@@ -961,21 +929,19 @@ pub fn modal_top(
     let card = crate::frost::frosted(16.0, crate::frost::MENU_BLUR, card).into_any_element();
     let top = modal_top_edge(viewport.height);
     gpui::deferred(
-        gpui::anchored()
-            .position(gpui::point(px(0.0), px(0.0)))
-            .child(
-                div()
-                    .occlude()
-                    .on_scroll(|_, _, cx| cx.stop_propagation())
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .bg(scrim_alpha(0.35))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .pt(top)
-                    .child(motion::dialog_in(id, div().child(card))),
-            ),
+        gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
+            div()
+                .occlude()
+                .on_scroll(|_, _, cx| cx.stop_propagation())
+                .w(viewport.width)
+                .h(viewport.height)
+                .bg(scrim_alpha(0.35))
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(top)
+                .child(motion::dialog_in(id, div().child(card))),
+        ),
     )
     .priority(2)
     .into_any_element()
@@ -991,20 +957,18 @@ fn modal_with(
     let card =
         crate::frost::frosted(corner_radius, crate::frost::MENU_BLUR, card).into_any_element();
     gpui::deferred(
-        gpui::anchored()
-            .position(gpui::point(px(0.0), px(0.0)))
-            .child(
-                div()
-                    .occlude()
-                    .on_scroll(|_, _, cx| cx.stop_propagation())
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .bg(scrim_alpha(scrim))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(motion::dialog_in(id, div().child(card))),
-            ),
+        gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
+            div()
+                .occlude()
+                .on_scroll(|_, _, cx| cx.stop_propagation())
+                .w(viewport.width)
+                .h(viewport.height)
+                .bg(scrim_alpha(scrim))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(motion::dialog_in(id, div().child(card))),
+        ),
     )
     .priority(2)
     .into_any_element()
@@ -1028,16 +992,11 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
         .text_size(crate::typography::ui_rems(13.0))
         .cursor_pointer();
     if active {
-        row.bg(crate::theme::card_selected_bg())
-            .text_color(theme.text)
+        row.bg(crate::theme::card_selected_bg()).text_color(theme.text)
     } else {
         let fade_key = fade_key.into();
         let mut row = row
-            .text_color(motion::hover_blend(
-                &fade_key,
-                theme.text.opacity(0.9),
-                theme.text,
-            ))
+            .text_color(motion::hover_blend(&fade_key, theme.text.opacity(0.9), theme.text))
             .bg(motion::hover_blend(
                 &fade_key,
                 crate::theme::wash(0.0),
@@ -1045,9 +1004,8 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
             ));
         // Imperative form — the caller's `.id(...)` makes the element stateful
         // (hover listeners need element state, `.on_hover` needs `Stateful`).
-        row.interactivity()
-        .on_hover(motion::hover_listener(fade_key.clone()));
-    row.child(motion::fade_driver(fade_key))
+        row.interactivity().on_hover(motion::hover_listener(fade_key.clone()));
+        row.child(motion::fade_driver(fade_key))
     }
 }
 
@@ -1063,8 +1021,7 @@ pub fn menu_row_nav(
 ) -> gpui::Div {
     let row = menu_row(theme, selected, fade_key);
     if !selected && highlighted {
-        row.bg(crate::theme::card_selected_bg())
-            .text_color(theme.text)
+        row.bg(crate::theme::card_selected_bg()).text_color(theme.text)
     } else {
         row
     }
@@ -1093,11 +1050,7 @@ pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
 pub fn menu_separator() -> gpui::Div {
     // Full-bleed: negative margins cancel the card's inset so the hairline
     // runs border to border (user request).
-    div()
-        .h(px(1.0))
-        .mx(px(-CARD_INSET))
-        .my(px(MENU_GAP))
-        .bg(hairline(0.07))
+    div().h(px(1.0)).mx(px(-CARD_INSET)).my(px(MENU_GAP)).bg(hairline(0.07))
 }
 
 /// The recessed band tone for a palette/picker header or footer strip — a
@@ -1131,17 +1084,11 @@ pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> gpui::D
 
 /// A compact search glyph with the same 16px slot as palette action icons.
 pub fn palette_search_icon(theme: &Theme) -> gpui::Div {
-    div()
-        .size(px(16.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            crate::icons::icon(crate::icons::PALETTE_SEARCH)
-                .size(px(16.0))
-                .text_color(theme.text_muted),
-        )
+    div().size(px(16.0)).flex_none().flex().items_center().justify_center().child(
+        crate::icons::icon(crate::icons::PALETTE_SEARCH)
+            .size(px(16.0))
+            .text_color(theme.text_muted),
+    )
 }
 
 /// One footer key-cap (22px, rounded-5, `white/[0.05]`) holding arbitrary
@@ -1179,11 +1126,8 @@ pub fn key_hint(theme: &Theme, icon_path: &'static str, label: &'static str) -> 
         .items_center()
         .gap(px(5.0))
         .child(
-            key_cap(theme).child(
-                crate::icons::icon(icon_path)
-                    .size(px(12.5))
-                    .text_color(theme.text_muted),
-            ),
+            key_cap(theme)
+                .child(crate::icons::icon(icon_path).size(px(12.5)).text_color(theme.text_muted)),
         )
         .child(key_hint_label(theme, label))
 }
@@ -1223,17 +1167,9 @@ pub fn key_hint_pair(
         .gap(px(5.0))
         .child(
             key_cap(theme)
-                .child(
-                    crate::icons::icon(first)
-                        .size(px(12.5))
-                        .text_color(theme.text_muted),
-                )
+                .child(crate::icons::icon(first).size(px(12.5)).text_color(theme.text_muted))
                 .child(div().w(px(1.0)).h(px(11.0)).bg(hairline(0.10)))
-                .child(
-                    crate::icons::icon(second)
-                        .size(px(12.5))
-                        .text_color(theme.text_muted),
-                ),
+                .child(crate::icons::icon(second).size(px(12.5)).text_color(theme.text_muted)),
         )
         .child(key_hint_label(theme, label))
 }
@@ -1329,12 +1265,11 @@ pub fn find_card(theme: &Theme) -> Div {
 }
 
 /// A [`find_card`] frosted at the card's radius and entering with [`motion::menu_in`].
-pub fn find_card_in(key: impl Into<ElementId>, card: impl IntoElement + Styled + 'static) -> crate::frost::Frosted {
-    crate::frost::frosted(
-        CARD_RADIUS,
-        crate::frost::MENU_BLUR,
-        motion::menu_in(key, card),
-    )
+pub fn find_card_in(
+    key: impl Into<ElementId>,
+    card: impl IntoElement + Styled + 'static,
+) -> crate::frost::Frosted {
+    crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, motion::menu_in(key, card))
 }
 
 /// A find card's step or close button: 24 square, a 14 glyph, a faded hover. A step with no
@@ -1357,15 +1292,9 @@ pub fn find_step(
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            crate::icons::icon(icon)
-                .size(px(14.0))
-                .text_color(theme.text_muted),
-        );
+        .child(crate::icons::icon(icon).size(px(14.0)).text_color(theme.text_muted));
     if !enabled {
-        return step
-            .opacity(crate::theme::DISABLED_OPACITY)
-            .cursor_default();
+        return step.opacity(crate::theme::DISABLED_OPACITY).cursor_default();
     }
     let step = crate::surface_chrome::focus_ring(step.tab_index(0), theme)
         .cursor_pointer()
@@ -1419,8 +1348,7 @@ pub fn picker_row(
     }
     let fade_key = fade_key.into();
     let mut row = row.bg(motion::hover_blend(&fade_key, ink(0.0), ink(0.05)));
-    row.interactivity()
-        .on_hover(motion::hover_listener(fade_key.clone()));
+    row.interactivity().on_hover(motion::hover_listener(fade_key.clone()));
     let row = row.child(motion::fade_driver(fade_key));
     if highlighted { row.bg(ink(0.05)) } else { row }
 }
@@ -1428,23 +1356,12 @@ pub fn picker_row(
 /// A picker row's leading slot: a project's artwork, or a glyph centred in
 /// the same square, so every label starts at one edge.
 pub fn picker_icon_slot(art: AnyElement) -> gpui::Div {
-    div()
-        .size(px(16.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(art)
+    div().size(px(16.0)).flex_none().flex().items_center().justify_center().child(art)
 }
 
 /// A full-bleed hairline between a picker's list and its pinned action rows.
 pub fn picker_divider() -> gpui::Div {
-    div()
-        .flex_none()
-        .h(px(1.0))
-        .my(px(2.0))
-        .mx(px(-CARD_INSET))
-        .bg(hairline(0.08))
+    div().flex_none().h(px(1.0)).my(px(2.0)).mx(px(-CARD_INSET)).bg(hairline(0.08))
 }
 
 /// A bordered trailing menu section (a picker's action group: `mt-1 flex flex-col gap-0.5 border-t
@@ -1526,15 +1443,10 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
         .rounded(px(8.0))
         .text_size(crate::typography::ui_rems(13.0))
         .text_color(motion::hover_blend(&fade_key, theme.text_muted, theme.text))
-        .bg(motion::hover_blend(
-            &fade_key,
-            crate::theme::wash(0.0),
-            ink(0.06),
-        ))
+        .bg(motion::hover_blend(&fade_key, crate::theme::wash(0.0), ink(0.06)))
         .cursor_pointer()
         .child(SharedString::from(label.to_string()));
-    btn.interactivity()
-        .on_hover(motion::hover_listener(fade_key.clone()));
+    btn.interactivity().on_hover(motion::hover_listener(fade_key.clone()));
     btn.child(motion::fade_driver(fade_key))
 }
 
@@ -1839,7 +1751,9 @@ impl MenuScrollbarState {
     fn scroll_countdown_for(&self, now: Instant, reduced: bool) -> bool {
         self.last_scroll_at.is_some()
             && self.fade_from.is_none_or(|from| {
-                !reduced && now.saturating_duration_since(from) < Duration::from_millis(MENU_SCROLLBAR_FADE_MS)
+                !reduced
+                    && now.saturating_duration_since(from)
+                        < Duration::from_millis(MENU_SCROLLBAR_FADE_MS)
             })
     }
 
@@ -1858,6 +1772,7 @@ impl MenuScrollbarState {
             current_scroll,
         )
     }
+
     /// Whether the rail paints at all: a drag or a track-hover holds it
     /// open, otherwise **recent scroll motion** does — hovering the list
     /// alone shows nothing, scrolling shows it even with the pointer
@@ -1893,7 +1808,11 @@ impl MenuScrollbarState {
     /// unless newer motion came or a drag or the pointer on the track holds the rail (letting
     /// go is motion of its own). Whether it began.
     fn linger_ended(&mut self, motion: Instant, now: Instant) -> bool {
-        if self.last_scroll_at != Some(motion) || self.fade_from.is_some() || self.grab.is_some() || self.bar_hovered {
+        if self.last_scroll_at != Some(motion)
+            || self.fade_from.is_some()
+            || self.grab.is_some()
+            || self.bar_hovered
+        {
             return false;
         }
         self.fade_from = Some(now);
@@ -2000,11 +1919,7 @@ impl MenuScrollbarState {
         let grab_offset = self.grab?;
         let pointer_in_track = Self::pointer_in_track_at(track_top, pointer_y);
         let thumb_top = (pointer_in_track - grab_offset).clamp(0.0, metrics.travel());
-        Some(if metrics.travel() <= 0.0 {
-            0.0
-        } else {
-            thumb_top / metrics.travel()
-        })
+        Some(if metrics.travel() <= 0.0 { 0.0 } else { thumb_top / metrics.travel() })
     }
 
     /// The press ended anywhere: drop the drag; the rail stays armed only
@@ -2044,11 +1959,8 @@ impl MenuScrollbarState {
             return None;
         }
         let active = self.active();
-        let thumb_width = if active {
-            MENU_SCROLLBAR_HOVER_THUMB_WIDTH
-        } else {
-            MENU_SCROLLBAR_THUMB_WIDTH
-        };
+        let thumb_width =
+            if active { MENU_SCROLLBAR_HOVER_THUMB_WIDTH } else { MENU_SCROLLBAR_THUMB_WIDTH };
         Some(
             div()
                 .absolute()
@@ -2152,8 +2064,7 @@ pub trait ScrollRailHost: 'static {
     /// [`MenuScrollbarState::begin_press_in`] and apply the initial
     /// [`MenuScrollbarState::drag_target_in`] target themselves.
     fn rail_press(&mut self, pointer_y: Pixels) -> bool {
-        self.rail_scroll()
-            .is_some_and(|scroll| self.rail_bar().begin_press(&scroll, pointer_y))
+        self.rail_scroll().is_some_and(|scroll| self.rail_bar().begin_press(&scroll, pointer_y))
     }
 
     /// An engaged drag moved to window-y `pointer_y`; `true` when it moved
@@ -2161,8 +2072,7 @@ pub trait ScrollRailHost: 'static {
     /// handle-less owners apply [`MenuScrollbarState::drag_target_in`]
     /// themselves.
     fn rail_drag_to(&mut self, pointer_y: Pixels) -> bool {
-        self.rail_scroll()
-            .is_some_and(|scroll| self.rail_bar().drag_to(&scroll, pointer_y))
+        self.rail_scroll().is_some_and(|scroll| self.rail_bar().drag_to(&scroll, pointer_y))
     }
 }
 
@@ -2625,10 +2535,7 @@ mod tests {
 
     #[test]
     fn horizontal_scrollbar_hides_without_overflow_and_clamps_position() {
-        assert_eq!(
-            HorizontalScrollbarMetrics::from_viewport(300.0, 0.0, 0.0),
-            None
-        );
+        assert_eq!(HorizontalScrollbarMetrics::from_viewport(300.0, 0.0, 0.0), None);
         let m = HorizontalScrollbarMetrics::from_viewport(100.0, 9900.0, 99_999.0).unwrap();
         assert_eq!(m.thumb_left, 92.0 - MENU_SCROLLBAR_MIN_THUMB);
         let m = HorizontalScrollbarMetrics::from_viewport(100.0, 9900.0, -3.0).unwrap();
@@ -2650,25 +2557,16 @@ mod tests {
         // half the thumb, so the pointer 104px into the track targets the
         // far end.
         bar.begin_press_in(&metrics, track_top, pointer(250.0));
-        assert_eq!(
-            bar.drag_target_in(&metrics, track_top, pointer(250.0)),
-            Some(1.0)
-        );
+        assert_eq!(bar.drag_target_in(&metrics, track_top, pointer(250.0)), Some(1.0));
         // Dragging past the top clamps to the very top.
-        assert_eq!(
-            bar.drag_target_in(&metrics, track_top, pointer(-100.0)),
-            Some(0.0)
-        );
+        assert_eq!(bar.drag_target_in(&metrics, track_top, pointer(-100.0)), Some(0.0));
 
         // Pressing the thumb keeps its relative position under the pointer:
         // grabbing the thumb's middle and dragging half its travel lands
         // mid-scroll.
         let mut bar = MenuScrollbarState::default();
         bar.begin_press_in(&metrics, track_top, pointer(73.0));
-        assert_eq!(
-            bar.drag_target_in(&metrics, track_top, pointer(146.0)),
-            Some(0.5)
-        );
+        assert_eq!(bar.drag_target_in(&metrics, track_top, pointer(146.0)), Some(0.5));
     }
 
     /// The linger asks for one wake per motion, and the fade begins only as that wake
@@ -2722,7 +2620,10 @@ mod tests {
         );
         assert!(!bar.linger_ended(t1, later), "a drag holds it");
         bar.end_press();
-        assert!(bar.fading().is_none() && bar.arm_linger_wake(later).is_some(), "letting go lingers anew");
+        assert!(
+            bar.fading().is_none() && bar.arm_linger_wake(later).is_some(),
+            "letting go lingers anew"
+        );
     }
 
     #[test]
@@ -2730,10 +2631,7 @@ mod tests {
         // Content extent + offset instead of a max-scroll distance (the
         // terminal's emulator geometry).
         let from_parts = MenuScrollbarMetrics::from_parts(300.0, 600.0, 150.0);
-        assert_eq!(
-            from_parts,
-            MenuScrollbarMetrics::from_viewport(300.0, 300.0, 150.0)
-        );
+        assert_eq!(from_parts, MenuScrollbarMetrics::from_viewport(300.0, 300.0, 150.0));
         // Content that fits the viewport stays rail-less.
         assert_eq!(MenuScrollbarMetrics::from_parts(300.0, 200.0, 0.0), None);
     }
@@ -2777,13 +2675,7 @@ pub(crate) fn search_highlight_ranges(
         return text.into_any_element();
     }
     let styled = gpui::StyledText::new(text).with_highlights(badges.iter().cloned().map(|range| {
-        (
-            range,
-            gpui::HighlightStyle {
-                color: Some(theme.code_text),
-                ..Default::default()
-            },
-        )
+        (range, gpui::HighlightStyle { color: Some(theme.code_text), ..Default::default() })
     }));
     let layout = styled.layout().clone();
     let wash = theme.code_wash;
@@ -2811,11 +2703,7 @@ pub(crate) fn search_highlight_ranges(
     )
     .absolute()
     .size_full();
-    div()
-        .relative()
-        .child(underlay)
-        .child(styled)
-        .into_any_element()
+    div().relative().child(underlay).child(styled).into_any_element()
 }
 
 fn valid_highlight_ranges(
@@ -2886,24 +2774,15 @@ mod search_highlight_tests {
 
     #[test]
     fn highlights_repeated_case_insensitive_and_overlapping_words() {
-        assert_eq!(
-            search_match_ranges("New chat, new project", "NEW"),
-            vec![0..3, 10..13]
-        );
-        assert_eq!(
-            search_match_ranges("authentication", "auth authentication"),
-            vec![0..14]
-        );
+        assert_eq!(search_match_ranges("New chat, new project", "NEW"), vec![0..3, 10..13]);
+        assert_eq!(search_match_ranges("authentication", "auth authentication"), vec![0..14]);
         assert!(search_match_ranges("New chat", "  ").is_empty());
         assert!(search_match_ranges("New chat", "settings").is_empty());
     }
 
     #[test]
     fn preserves_original_unicode_boundaries_after_lowercase_expansion() {
-        assert_eq!(
-            search_match_ranges("İstanbul café", "i CAFÉ"),
-            vec![0..2, 10..15]
-        );
+        assert_eq!(search_match_ranges("İstanbul café", "i CAFÉ"), vec![0..2, 10..15]);
         assert_eq!(search_match_ranges("🚀 CAFÉ", "café"), vec![5..10]);
     }
 }
@@ -2920,10 +2799,7 @@ pub fn menu_geometry(top: f32, bottom: f32, viewport_height: f32) -> MenuGeometr
     let above = (top - 14.0).max(0.0);
     let below = (viewport_height - bottom - 14.0).max(0.0);
     let flip = above < 180.0 && below > above;
-    MenuGeometry {
-        height: (if flip { below } else { above }).min(640.0),
-        below: flip,
-    }
+    MenuGeometry { height: (if flip { below } else { above }).min(640.0), below: flip }
 }
 
 #[cfg(test)]
@@ -2933,18 +2809,9 @@ mod adaptive_menu_tests {
     fn budget_tracks_trigger_and_flips_when_needed() {
         assert_eq!(
             menu_geometry(300.0, 320.0, 500.0),
-            MenuGeometry {
-                height: 286.0,
-                below: false
-            }
+            MenuGeometry { height: 286.0, below: false }
         );
-        assert_eq!(
-            menu_geometry(80.0, 100.0, 500.0),
-            MenuGeometry {
-                height: 386.0,
-                below: true
-            }
-        );
+        assert_eq!(menu_geometry(80.0, 100.0, 500.0), MenuGeometry { height: 386.0, below: true });
         assert_eq!(menu_geometry(900.0, 920.0, 1000.0).height, 640.0);
     }
 }

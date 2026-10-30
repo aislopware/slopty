@@ -13,7 +13,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gpui::{AnyElement, ClickEvent, Context, KeyboardButton, SharedString, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, ClickEvent, Context, KeyboardButton, SharedString, div, px};
 use slopty_view_doc::{SubagentProgress, SubagentStatus};
 
 use super::{ToolItem, Transcript, subagent_tab_title};
@@ -81,7 +82,10 @@ fn status_swap(
             let from = std::mem::replace(&mut entry.0, text.clone());
             entry.1 = (!reduced).then_some((from, now));
         }
-        let ms = entry.1.as_ref().map(|(_, at)| now.saturating_duration_since(*at).as_secs_f32() * 1_000.0);
+        let ms = entry
+            .1
+            .as_ref()
+            .map(|(_, at)| now.saturating_duration_since(*at).as_secs_f32() * 1_000.0);
         match ms {
             Some(ms) if !reduced && ms < STATUS_IN.duration_ms as f32 => {
                 entry.1.as_ref().map(|(from, _)| (from.clone(), ms))
@@ -95,7 +99,12 @@ fn status_swap(
 }
 
 /// `text` as the row's status word, swapping in from the one it last said.
-fn status_word(key: SharedString, text: SharedString, view: gpui::EntityId, cx: &mut gpui::App) -> gpui::Div {
+fn status_word(
+    key: SharedString,
+    text: SharedString,
+    view: gpui::EntityId,
+    cx: &mut gpui::App,
+) -> gpui::Div {
     let (reduced, now) = (cx.reduce_motion(), crate::clock::now(cx));
     let Some((from, ms)) = status_swap(&key, &text, reduced, now) else {
         return div().min_w_0().truncate().child(text);
@@ -197,7 +206,8 @@ pub(crate) fn model_words(id: &str) -> String {
         .take_while(|part| part.len() <= 2 && part.chars().all(|c| c.is_ascii_digit()))
         .collect();
     let mut chars = family.chars();
-    let name: String = chars.next().map(|c| c.to_ascii_uppercase()).into_iter().chain(chars).collect();
+    let name: String =
+        chars.next().map(|c| c.to_ascii_uppercase()).into_iter().chain(chars).collect();
     if version.is_empty() { name } else { format!("{name} {}", version.join(".")) }
 }
 
@@ -330,7 +340,9 @@ impl Run {
     pub fn mark(&self) -> Option<crate::loaders::status_mark::MarkState> {
         use crate::loaders::status_mark::MarkState;
         match self.state.as_str() {
-            _ if self.needs_you.is_some() || self.state == SubagentProgress::NEEDS_YOU => Some(MarkState::Waiting),
+            _ if self.needs_you.is_some() || self.state == SubagentProgress::NEEDS_YOU => {
+                Some(MarkState::Waiting)
+            }
             _ if self.running => Some(MarkState::Working),
             SubagentProgress::DONE => Some(MarkState::Done),
             SubagentProgress::FAILED => Some(MarkState::Failed),
@@ -359,9 +371,9 @@ pub(super) fn batch_words(runs: &[Run], now: i64) -> String {
             .filter_map(|run| Some(run.started_at? + i64::try_from(run.duration_ms?).ok()?))
             .max()
     };
-    let span = start
-        .zip(end)
-        .map(|(start, end)| slopty_view_doc::duration_words(u64::try_from(end.saturating_sub(start)).unwrap_or(0)));
+    let span = start.zip(end).map(|(start, end)| {
+        slopty_view_doc::duration_words(u64::try_from(end.saturating_sub(start)).unwrap_or(0))
+    });
     let head = if working > 0 {
         format!("{} {noun} · {working} working", runs.len())
     } else {
@@ -376,7 +388,12 @@ pub(super) fn batch_words(runs: &[Run], now: i64) -> String {
 
 /// The words that started a run: its brief, as its parent's agent wrote it, quiet, and cut to
 /// `lines` until pressed ([`TASK_LINES`]; the whole of it in a drilled-in trace).
-pub(super) fn task_words(row: &SharedString, text: &SharedString, lines: Option<usize>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+pub(super) fn task_words(
+    row: &SharedString,
+    text: &SharedString,
+    lines: Option<usize>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     let words = div()
         .id(SharedString::from(format!("{row}-task")))
         .role(gpui::Role::Paragraph)
@@ -437,7 +454,9 @@ impl Transcript {
     /// The row of the subagent whose run is chat `chat`, where this transcript shows one.
     pub(crate) fn spawn_row_of(&self, chat: &str) -> Option<SharedString> {
         self.rows.iter().find_map(|row| match &row.kind {
-            super::RowKind::Spawn { tool } if Run::of(tool).chat.as_deref() == Some(chat) => Some(row.id.clone()),
+            super::RowKind::Spawn { tool } if Run::of(tool).chat.as_deref() == Some(chat) => {
+                Some(row.id.clone())
+            }
             _ => None,
         })
     }
@@ -577,7 +596,11 @@ impl Transcript {
         let now = self.clock.timestamp_millis();
         let facts = run.facts_at(now);
         let hover = format!("{row_id}-hover");
-        let shown = crate::motion::revealed_by_hover(&hover).max(if crate::shell::touch_screen() { 1.0 } else { 0.0 });
+        let shown = crate::motion::revealed_by_hover(&hover).max(if crate::shell::touch_screen() {
+            1.0
+        } else {
+            0.0
+        });
         let step = match (&run.needs_you, &run.step) {
             (Some(ask), _) => Some(format!("Needs you · {ask}")),
             (None, step) => step.clone(),
@@ -592,46 +615,59 @@ impl Transcript {
         let view = cx.entity_id();
         // Its chevron's gutter, kept when it has no run to open so its icon lines up with its
         // neighbours'.
-        let chevron = div().w(px(NEST_INDENT)).h(px(18.0)).flex_none().relative().children(run.chat.is_some().then(|| {
-            crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                .absolute()
-                .left(px(super::ACTIVITY_TRUNK_X - 7.0))
-                .top(px(2.0))
-                .size(px(14.0))
-                .with_transformation(gpui::Transformation::rotate(gpui::radians(if open {
-                    0.0
-                } else {
-                    -std::f32::consts::FRAC_PI_2
-                })))
-                .text_color(theme.text_muted)
-                .opacity(shown.max(if open { 1.0 } else { 0.0 }))
-        }));
+        let chevron = div().w(px(NEST_INDENT)).h(px(18.0)).flex_none().relative().children(
+            run.chat.is_some().then(|| {
+                crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                    .absolute()
+                    .left(px(super::ACTIVITY_TRUNK_X - 7.0))
+                    .top(px(2.0))
+                    .size(px(14.0))
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(if open {
+                        0.0
+                    } else {
+                        -std::f32::consts::FRAC_PI_2
+                    })))
+                    .text_color(theme.text_muted)
+                    .opacity(shown.max(if open { 1.0 } else { 0.0 }))
+            }),
+        );
         let drill = run.chat.clone().map(|chat| {
             let fade = format!("{row_id}-open-hover");
             let row = row_id.clone();
-            crate::surface_chrome::press_target(SharedString::from(format!("{row_id}-open")), QUIET_FOOTPRINT)
-                .role(gpui::Role::Button)
-                .aria_label("Open subagent")
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .opacity(shown)
-                .tab_index(0)
-                .focus_visible({
-                    let ring = crate::surface_chrome::ring(theme, crate::surface_chrome::RING_OFFSET);
-                    move |s| s.opacity(1.0).outline_ring(ring)
-                })
-                .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
-                .hover_fade(fade)
-                .tooltip(crate::settings::widgets::text_tooltip("Open subagent"))
-                .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-                .child(crate::icons::icon(crate::icons::ARROW_UP_RIGHT).size(px(12.0)).text_color(theme.text_muted))
-                // A press drills in and gives this control no keyboard: it goes with the trace it
-                // is in (the inspector moves the keyboard to its way back instead).
-                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
-                .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                    cx.stop_propagation();
-                    cx.emit(super::SubagentDrill { chat_id: chat.clone(), row: row.clone() });
-                }))
+            crate::surface_chrome::press_target(
+                SharedString::from(format!("{row_id}-open")),
+                QUIET_FOOTPRINT,
+            )
+            .role(gpui::Role::Button)
+            .aria_label("Open subagent")
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .opacity(shown)
+            .tab_index(0)
+            .focus_visible({
+                let ring = crate::surface_chrome::ring(theme, crate::surface_chrome::RING_OFFSET);
+                move |s| s.opacity(1.0).outline_ring(ring)
+            })
+            .bg(crate::motion::hover_blend(
+                &fade,
+                gpui::transparent_black(),
+                crate::theme::wash(0.11),
+            ))
+            .hover_fade(fade)
+            .tooltip(crate::settings::widgets::text_tooltip("Open subagent"))
+            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+            .child(
+                crate::icons::icon(crate::icons::ARROW_UP_RIGHT)
+                    .size(px(12.0))
+                    .text_color(theme.text_muted),
+            )
+            // A press drills in and gives this control no keyboard: it goes with the trace it
+            // is in (the inspector moves the keyboard to its way back instead).
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                cx.emit(super::SubagentDrill { chat_id: chat.clone(), row: row.clone() });
+            }))
         });
         let mark = run.mark().map(|state| {
             StatusMark::new(SharedString::from(format!("subagent-mark-{row_id}")), state)
@@ -665,17 +701,25 @@ impl Transcript {
                 let Some(chat) = chat else { return };
                 cx.stop_propagation();
                 // Enter drills in, as a trace viewer's does; a press or Space opens it in place.
-                if matches!(event, ClickEvent::Keyboard(key) if key.button == KeyboardButton::Enter) {
+                if matches!(event, ClickEvent::Keyboard(key) if key.button == KeyboardButton::Enter)
+                {
                     cx.emit(super::SubagentDrill { chat_id: chat, row });
                 } else {
                     this.toggle_spawn(row, chat, cx);
                 }
             }))
             .child(chevron)
-            .child(crate::icons::icon(crate::icons::BOT).size(px(13.0)).flex_none().text_color(theme.text_muted))
-            .children(run.kind.clone().map(|kind| {
-                div().flex_none().text_color(theme.text_faint).child(kind)
-            }))
+            .child(
+                crate::icons::icon(crate::icons::BOT)
+                    .size(px(13.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .children(
+                run.kind
+                    .clone()
+                    .map(|kind| div().flex_none().text_color(theme.text_faint).child(kind)),
+            )
             .child(
                 div()
                     .min_w_0()
@@ -730,7 +774,12 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .child(div().w(px(NEST_INDENT)).flex_none())
-            .child(crate::icons::icon(crate::icons::BOT).size(px(13.0)).flex_none().text_color(theme.text_muted))
+            .child(
+                crate::icons::icon(crate::icons::BOT)
+                    .size(px(13.0))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
             .child(
                 div()
                     .min_w_0()
@@ -744,9 +793,10 @@ impl Transcript {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use slopty_view_doc::ToolFacts;
     use slopty_view_proto::ToolCall;
+
+    use super::*;
 
     fn spawn(progress: Option<SubagentProgress>) -> ToolItem {
         ToolItem {
@@ -810,11 +860,19 @@ mod tests {
         // Done, it says what it answered (#23): the view model's outcome is the report's
         // first line where the call carries no result, as Claude Code's spawn calls do.
         assert_eq!(settled.step.as_deref(), Some("4"));
-        assert_eq!(settled.facts_at(999_999), "Haiku 5.5 · 12 tools · 41k tokens · 1m 5s", "no quiet once done");
-        assert_eq!(settled.summary_at(999_999), "Explore · Haiku 5.5 · Done · 12 tools · 41k tokens · 1m 5s");
+        assert_eq!(
+            settled.facts_at(999_999),
+            "Haiku 5.5 · 12 tools · 41k tokens · 1m 5s",
+            "no quiet once done"
+        );
+        assert_eq!(
+            settled.summary_at(999_999),
+            "Explore · Haiku 5.5 · Done · 12 tools · 41k tokens · 1m 5s"
+        );
         let mut answered = spawn(Some(progress.clone()));
-        answered.detail = super::super::tool_detail(Some("\n## **4** lines\n\nagentId: a1\n"), None, None)
-            .map(std::sync::Arc::new);
+        answered.detail =
+            super::super::tool_detail(Some("\n## **4** lines\n\nagentId: a1\n"), None, None)
+                .map(std::sync::Arc::new);
         assert_eq!(Run::of(&answered).step.as_deref(), Some("4 lines"));
         // A run that failed or was stopped still says so.
         progress.state = SubagentProgress::FAILED.into();
@@ -866,9 +924,14 @@ mod tests {
             heard_at: None,
             needs_you: None,
         };
-        let live = [run("Explore", true, false, 0, 0), run("Explore", true, false, 2_000, 0), run("Explore", false, false, 1_000, 5_000)];
+        let live = [
+            run("Explore", true, false, 0, 0),
+            run("Explore", true, false, 2_000, 0),
+            run("Explore", false, false, 1_000, 5_000),
+        ];
         assert_eq!(batch_words(&live, 72_000), "3 Explore agents · 2 working · 1m 12s");
-        let done = [run("Explore", false, false, 0, 125_000), run("Plan", false, true, 1_000, 10_000)];
+        let done =
+            [run("Explore", false, false, 0, 125_000), run("Plan", false, true, 1_000, 10_000)];
         assert_eq!(batch_words(&done, 999_999), "2 agents finished · 1 failed · 2m 5s");
     }
 
@@ -882,7 +945,8 @@ mod tests {
         assert_eq!(status_swap(&key, &"Thinking".into(), false, start), None, "first sight");
         let swap = status_swap(&key, &"Running tools".into(), false, at(10));
         assert_eq!(swap, Some(("Thinking".into(), 0.0)), "it swaps from the last word");
-        let mid = status_swap(&key, &"Running tools".into(), false, at(110)).expect("still swapping");
+        let mid =
+            status_swap(&key, &"Running tools".into(), false, at(110)).expect("still swapping");
         assert!((mid.1 - 100.0).abs() < 0.5, "{mid:?}");
         assert_eq!(status_swap(&key, &"Running tools".into(), false, at(10 + 350)), None, "landed");
         assert_eq!(status_swap(&key, &"Thinking".into(), true, at(400)), None, "reduced: at once");

@@ -90,7 +90,10 @@ impl PaneArea {
         self
     }
 
-    pub(crate) fn on_ratio(mut self, f: impl Fn(&[bool], f32, &mut Window, &mut App) + 'static) -> Self {
+    pub(crate) fn on_ratio(
+        mut self,
+        f: impl Fn(&[bool], f32, &mut Window, &mut App) + 'static,
+    ) -> Self {
         self.on_ratio = Rc::new(f);
         self
     }
@@ -130,8 +133,8 @@ fn ratio_at(axis: Axis, span: Bounds<Pixels>, at: gpui::Point<Pixels>) -> f32 {
 }
 
 impl Element for PaneArea {
-    type RequestLayoutState = ();
     type PrepaintState = Prepainted;
+    type RequestLayoutState = ();
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -189,7 +192,9 @@ impl Element for PaneArea {
             let Some(at) = laid.of(pane) else { continue };
             if let Some((_, on_hold)) = &self.glide {
                 let then = narrower.as_ref().and_then(|narrower| narrower.of(pane));
-                let held = then.map_or(Pixels::ZERO, |then| (at.size.width - then.size.width).max(Pixels::ZERO));
+                let held = then.map_or(Pixels::ZERO, |then| {
+                    (at.size.width - then.size.width).max(Pixels::ZERO)
+                });
                 on_hold(pane, held, cx);
             }
             element.layout_as_root(at.size.into(), window, cx);
@@ -202,7 +207,10 @@ impl Element for PaneArea {
             .dividers
             .iter()
             .map(|divider| {
-                (divider.clone(), window.insert_hitbox(divider.grab(), HitboxBehavior::BlockMouseExceptScroll))
+                (
+                    divider.clone(),
+                    window.insert_hitbox(divider.grab(), HitboxBehavior::BlockMouseExceptScroll),
+                )
             })
             .collect();
         Prepainted { laid, children, grabs, dragging }
@@ -298,8 +306,9 @@ impl Element for PaneArea {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::point;
+
+    use super::*;
 
     /// The pointer's share of a split's room, from the split's leading edge, along its axis.
     #[test]

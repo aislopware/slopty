@@ -1,6 +1,7 @@
 //! A call the person waits on that runs past ten seconds says so in one toast ("Waiting
 //! on studio · List folders"), which goes when the call answers. Calls meant to run long
-//! (watches, streams, clones, installs, updates, attachment reads, a device being set up) never raise it.
+//! (watches, streams, clones, installs, updates, attachment reads, a device being set up) never
+//! raise it.
 //!
 //! The watch wraps the engine's service, so every call the shell makes passes through it,
 //! whatever view made it; the toast is kept by a task on the app's side.
@@ -197,8 +198,9 @@ fn said(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use futures::StreamExt;
+
+    use super::*;
 
     /// Answers after its delay, or at once.
     struct Held(Duration);
@@ -245,7 +247,8 @@ mod tests {
     fn a_dropped_call_answers_too() {
         runtime().block_on(async {
             let after = Duration::from_millis(10);
-            let (held, mut events) = SlowCallWatch::wrap(Arc::new(Held(Duration::from_secs(60))), after);
+            let (held, mut events) =
+                SlowCallWatch::wrap(Arc::new(Held(Duration::from_secs(60))), after);
             let call = held.handle(methods::LIST_BRANCHES, serde_json::json!({}));
             let _timed_out = tokio::time::timeout(after * 5, call).await;
             assert!(matches!(events.next().await, Some(SlowCall::Slow { id: 1, .. })));
@@ -282,7 +285,10 @@ mod tests {
         cx.update(|cx| {
             cx.set_global(crate::theme::Theme::dark());
             slow.apply(
-                SlowCall::Slow { id: 1, call: call("ListRefs", serde_json::json!({ "chatId": "c1" })) },
+                SlowCall::Slow {
+                    id: 1,
+                    call: call("ListRefs", serde_json::json!({ "chatId": "c1" })),
+                },
                 &state,
                 cx,
             );

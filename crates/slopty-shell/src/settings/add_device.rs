@@ -4,9 +4,10 @@
 //! checklist with each line's fix, the servers to choose between, and what was added. A look on
 //! the tailnet (`LookOnTailnet`) offers the servers and machines that answer.
 
+use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, Focusable, SharedString, Subscription, Task, Window,
-    div, prelude::*, px,
+    AnyElement, App, Context, Entity, EventEmitter, Focusable, SharedString, Subscription, Task,
+    Window, div, px,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 use serde::Deserialize;
@@ -280,8 +281,10 @@ impl AddDeviceDialog {
     fn look_on_tailnet(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else { return };
         self.look = Some(cx.spawn(async move |this, cx| {
-            let subscribed =
-                engine.client().subscribe_checked(methods::LOOK_ON_TAILNET, serde_json::json!({})).await;
+            let subscribed = engine
+                .client()
+                .subscribe_checked(methods::LOOK_ON_TAILNET, serde_json::json!({}))
+                .await;
             let Ok(mut stream) = subscribed else { return };
             while let Some(value) = stream.recv().await {
                 let Ok(found) = serde_json::from_value::<Found>(value) else { continue };
@@ -402,9 +405,10 @@ impl AddDeviceDialog {
         }
         let (kind, typed) = match self.choice {
             Choice::ThisMac => ("thisMac", String::new()),
-            Choice::Ssh => {
-                (if self.serve { "serveSsh" } else { "ssh" }, self.target.read(cx).value().to_string())
-            }
+            Choice::Ssh => (
+                if self.serve { "serveSsh" } else { "ssh" },
+                self.target.read(cx).value().to_string(),
+            ),
             Choice::Server => ("server", self.address.read(cx).value().to_string()),
         };
         let typed = typed.trim().to_owned();
@@ -423,7 +427,13 @@ impl AddDeviceDialog {
     }
 
     /// Start a run of `kind` against `target`, following its stream until it ends.
-    fn start(&mut self, kind: &'static str, target: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn start(
+        &mut self,
+        kind: &'static str,
+        target: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.hold_keyboard(window, cx);
         let Some(engine) = self.state.read(cx).engine().cloned() else { return };
         self.note = None;
@@ -490,13 +500,25 @@ impl AddDeviceDialog {
     }
 
     /// A step's fix, or a server chosen, for the run that asked.
-    fn answer_with(&mut self, key: &'static str, value: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn answer_with(
+        &mut self,
+        key: &'static str,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let run = self.progress.as_ref().map_or(0, |p| p.run);
         self.answer(serde_json::json!({ "run": run, key: value }), window, cx);
     }
 
     /// A node the tailnet offered, pressed: a server is connected to, a machine installed on.
-    fn press_found(&mut self, server: bool, at: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn press_found(
+        &mut self,
+        server: bool,
+        at: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (field, choice) =
             if server { (&self.address, Choice::Server) } else { (&self.target, Choice::Ssh) };
         let field = field.clone();
@@ -507,7 +529,12 @@ impl AddDeviceDialog {
         self.go(window, cx);
     }
 
-    fn render_tabs(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tabs(
+        &self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let offered = Choice::offered();
         if offered.len() < 2 {
             return div().into_any_element();
@@ -522,12 +549,8 @@ impl AddDeviceDialog {
             .role(gpui::Role::TabList);
         for (ix, choice) in offered.iter().copied().enumerate() {
             let selected = self.choice == choice;
-            let t = widgets::tab_selection_t(
-                window,
-                format!("add-device-tab-{ix}"),
-                selected,
-                reduced,
-            );
+            let t =
+                widgets::tab_selection_t(window, format!("add-device-tab-{ix}"), selected, reduced);
             row = row.child(
                 widgets::section_tab(
                     theme,
@@ -565,7 +588,11 @@ impl AddDeviceDialog {
         } else if !found.running {
             Some("Tailscale is not running on this Mac, so type an address.")
         } else if nodes.is_empty() {
-            Some(if server { "No Slopty server found on your tailnet yet." } else { "No other machine with Slopty found on your tailnet." })
+            Some(if server {
+                "No Slopty server found on your tailnet yet."
+            } else {
+                "No other machine with Slopty found on your tailnet."
+            })
         } else {
             None
         };
@@ -591,22 +618,26 @@ impl AddDeviceDialog {
             let glyph = if server { crate::icons::REMOTE_SERVER } else { crate::icons::MONITOR };
             // zeron's picker row: the whole row acts, its hover fading in; a node that cannot be
             // joined says why and does not act.
-            let mut row = popover::picker_row(theme, false, false, format!("add-device-found-{ix}"))
-                .id(("add-device-found", ix))
-                .debug_selector(move || format!("add-device-found-{ix}"))
-                .child(popover::picker_icon_slot(
-                    crate::icons::icon(glyph).size(px(14.0)).text_color(theme.text_muted).into_any_element(),
-                ))
-                .child(div().flex_none().max_w(px(180.0)).truncate().child(node.name.clone()))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .child(detail),
-                );
+            let mut row =
+                popover::picker_row(theme, false, false, format!("add-device-found-{ix}"))
+                    .id(("add-device-found", ix))
+                    .debug_selector(move || format!("add-device-found-{ix}"))
+                    .child(popover::picker_icon_slot(
+                        crate::icons::icon(glyph)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted)
+                            .into_any_element(),
+                    ))
+                    .child(div().flex_none().max_w(px(180.0)).truncate().child(node.name.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(detail),
+                    );
             if node.ready {
                 row = row
                     .tab_index(0)
@@ -636,7 +667,12 @@ impl AddDeviceDialog {
         Some(list.into_any_element())
     }
 
-    fn render_steps(&self, theme: &Theme, progress: &Progress, cx: &mut Context<Self>) -> AnyElement {
+    fn render_steps(
+        &self,
+        theme: &Theme,
+        progress: &Progress,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let waits = self.open;
         let mut list = div().mt(px(16.0)).flex().flex_col().gap(px(2.0));
         for (ix, step) in progress.steps.iter().enumerate() {
@@ -718,12 +754,14 @@ impl AddDeviceDialog {
                                     .text_color(if quiet { theme.text_muted } else { theme.text })
                                     .child(step.title.clone()),
                             )
-                            .children(step.detail.clone().filter(|d| !d.is_empty()).map(|detail| {
-                                div()
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.text_muted)
-                                    .child(detail)
-                            })),
+                            .children(step.detail.clone().filter(|d| !d.is_empty()).map(
+                                |detail| {
+                                    div()
+                                        .text_size(crate::typography::ui_rems(12.0))
+                                        .text_color(theme.text_muted)
+                                        .child(detail)
+                                },
+                            )),
                     )
                     .children(fix),
             );
@@ -821,14 +859,16 @@ impl AddDeviceDialog {
                     "{who} asks for a password. It is used for this install only, and your key is added there so it does not ask again."
                 )
             };
-            block = block
-                .child(popover::dialog_body(theme, said))
-                .child(text_field(&self.password, "Password", true, cx));
+            block = block.child(popover::dialog_body(theme, said)).child(text_field(
+                &self.password,
+                "Password",
+                true,
+                cx,
+            ));
         }
         Some(block.into_any_element())
     }
 }
-
 
 impl Render for AddDeviceDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -852,8 +892,11 @@ impl Render for AddDeviceDialog {
         });
         let serve_toggle = (self.choice == Choice::Ssh && !running).then(|| {
             let serve = self.serve;
-            let label =
-                if serve { "Install a machine there instead" } else { "Set up the server there instead" };
+            let label = if serve {
+                "Install a machine there instead"
+            } else {
+                "Set up the server there instead"
+            };
             // A link in the accent, underlined under the pointer, its words on the
             // body's edge: muted words alone did not read as something to press.
             div().mt(px(8.0)).flex().child(
@@ -1015,7 +1058,12 @@ impl Render for AddDeviceDialog {
 // reader reads, and the keyboard on the field inside is announced on it.
 /// One of the dialog's fields in the dialog's frame, named for a screen reader and saying its
 /// words, the password's never.
-fn text_field(input: &Entity<InputState>, label: &'static str, masked: bool, cx: &App) -> AnyElement {
+fn text_field(
+    input: &Entity<InputState>,
+    label: &'static str,
+    masked: bool,
+    cx: &App,
+) -> AnyElement {
     let value = input.read(cx).value();
     div()
         .id(label)
@@ -1049,7 +1097,9 @@ mod tests {
         Node { name: name.to_owned(), at: at.to_owned(), ready, note }
     }
 
-    fn dialog(cx: &mut gpui::TestAppContext) -> (Entity<AddDeviceDialog>, &mut gpui::VisualTestContext) {
+    fn dialog(
+        cx: &mut gpui::TestAppContext,
+    ) -> (Entity<AddDeviceDialog>, &mut gpui::VisualTestContext) {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
@@ -1169,7 +1219,8 @@ mod tests {
             dialog.go(window, cx);
             // What the run's stream brings: under way, then failed.
             dialog.open = true;
-            dialog.progress = Some(Progress { steps: vec![step(Mark::Running)], ..Progress::default() });
+            dialog.progress =
+                Some(Progress { steps: vec![step(Mark::Running)], ..Progress::default() });
             cx.notify();
         });
         assert_eq!(focused(cx), (gpui::Role::Dialog, "Add device".to_owned()), "the card holds it");
@@ -1177,7 +1228,10 @@ mod tests {
             dialog.open = false;
             dialog.progress = Some(Progress {
                 steps: vec![step(Mark::Failed)],
-                failure: Some(Failure { title: "Could not reach nohost".to_owned(), ..Failure::default() }),
+                failure: Some(Failure {
+                    title: "Could not reach nohost".to_owned(),
+                    ..Failure::default()
+                }),
                 ..Progress::default()
             });
             cx.notify();
@@ -1216,7 +1270,10 @@ mod tests {
     }
 
     /// Counts the times `dialog` says it is done.
-    fn closes(dialog: &Entity<AddDeviceDialog>, cx: &mut gpui::VisualTestContext) -> std::rc::Rc<std::cell::Cell<u32>> {
+    fn closes(
+        dialog: &Entity<AddDeviceDialog>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> std::rc::Rc<std::cell::Cell<u32>> {
         let closed = std::rc::Rc::new(std::cell::Cell::new(0));
         let seen = closed.clone();
         cx.update(|_, cx| {
@@ -1248,7 +1305,8 @@ mod tests {
         dialog.update_in(cx, |dialog, window, cx| {
             window.focus(&dialog.go_focus, cx);
             dialog.open = true;
-            dialog.progress = Some(Progress { steps: vec![step(Mark::Running)], ..Progress::default() });
+            dialog.progress =
+                Some(Progress { steps: vec![step(Mark::Running)], ..Progress::default() });
             cx.notify();
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));

@@ -18,13 +18,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseDownEvent, ObjectFit, ParentElement as _, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription, Task, WeakEntity, Window,
-    canvas, div, img, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseDownEvent, ObjectFit,
+    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, Subscription, Task, WeakEntity, Window, canvas, div, img, px,
 };
-use slopty_view_doc::{MessagePart, MessageRole, PromptBox, PromptImage, SessionMessageEntry, WorkRow, WorkTray, calls};
+use slopty_view_doc::{
+    MessagePart, MessageRole, PromptBox, PromptImage, SessionMessageEntry, WorkRow, WorkTray, calls,
+};
 use slopty_view_proto::{ChatIndicator, TodoItem, TodoStatus, ToolCall};
 
 use crate::attachments::{AttachmentKey, AttachmentSnapshot, PreviewImage};
@@ -119,7 +122,8 @@ fn in_folder<'a>(path: &'a str, cwd: Option<&str>) -> &'a str {
     let Some(cwd) = cwd.map(|cwd| cwd.trim_end_matches('/')).filter(|cwd| !cwd.is_empty()) else {
         return path;
     };
-    let inside = |root: &str| path.strip_prefix(root)?.strip_prefix('/').filter(|rest| !rest.is_empty());
+    let inside =
+        |root: &str| path.strip_prefix(root)?.strip_prefix('/').filter(|rest| !rest.is_empty());
     match cwd.strip_prefix('~') {
         Some(under_home) => ["/Users/", "/home/"]
             .iter()
@@ -150,12 +154,19 @@ pub(crate) fn latest_tasks(entries: &[SessionMessageEntry]) -> Option<Vec<TodoIt
 /// What the Now line says of `tasks` (the list the agent wrote last) and `running` (its
 /// subagents and commands at work): "Tasks 2/4 · Write the tests" and "2 running", each when
 /// there is any.
-pub(crate) fn now_words(tasks: Option<&[TodoItem]>, running: usize) -> (Option<String>, Option<String>) {
+pub(crate) fn now_words(
+    tasks: Option<&[TodoItem]>,
+    running: usize,
+) -> (Option<String>, Option<String>) {
     let tasks = tasks.map(|items| {
         let done = items.iter().filter(|item| item.status() == TodoStatus::Completed).count();
         let doing = items.iter().find(|item| item.status() == TodoStatus::InProgress);
         match doing {
-            Some(item) => format!("Tasks {done}/{} · {}", items.len(), crate::transcript::single_line(&item.text)),
+            Some(item) => format!(
+                "Tasks {done}/{} · {}",
+                items.len(),
+                crate::transcript::single_line(&item.text)
+            ),
             None => format!("Tasks {done}/{}", items.len()),
         }
     });
@@ -265,7 +276,11 @@ pub struct Inspector {
 impl EventEmitter<InspectorEvent> for Inspector {}
 
 impl Inspector {
-    pub fn new(state: Entity<AppState>, transcript: Entity<Transcript>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        transcript: Entity<Transcript>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| {
             this.sync_watch(cx);
             this.clock = crate::clock::utc(cx);
@@ -273,10 +288,12 @@ impl Inspector {
         });
         let weak = cx.weak_entity();
         let mirror = cx.new(|_| PromptMirror::new(state.clone(), weak));
-        transcript.update(cx, |transcript, cx| transcript.set_footer(Some(mirror.clone().into()), cx));
-        let drills = cx.subscribe(&transcript, |this: &mut Self, from, event: &SubagentDrill, cx| {
-            this.drill(from, event.chat_id.clone(), Some(event.row.clone()), None, cx);
-        });
+        transcript
+            .update(cx, |transcript, cx| transcript.set_footer(Some(mirror.clone().into()), cx));
+        let drills =
+            cx.subscribe(&transcript, |this: &mut Self, from, event: &SubagentDrill, cx| {
+                this.drill(from, event.chat_id.clone(), Some(event.row.clone()), None, cx);
+            });
         let mut inspector = Self {
             state,
             transcript,
@@ -328,7 +345,11 @@ impl Inspector {
             return;
         }
         let run = row.as_ref().and_then(|row| from.read(cx).spawn_run(row));
-        let title = run.as_ref().map(|run| run.title.clone()).or(title).unwrap_or_else(|| "Subagent".into());
+        let title = run
+            .as_ref()
+            .map(|run| run.title.clone())
+            .or(title)
+            .unwrap_or_else(|| "Subagent".into());
         let running = run.as_ref().is_none_or(|run| run.running);
         self.state.update(cx, |state, cx| state.watch_subagent_doc(chat.clone(), cx));
         let (state, doc) = (self.state.clone(), chat.clone());
@@ -338,9 +359,10 @@ impl Inspector {
             transcript.set_depth(depth, cx);
             transcript
         });
-        let drills = cx.subscribe(&transcript, |this: &mut Self, from, event: &SubagentDrill, cx| {
-            this.drill(from, event.chat_id.clone(), Some(event.row.clone()), None, cx);
-        });
+        let drills =
+            cx.subscribe(&transcript, |this: &mut Self, from, event: &SubagentDrill, cx| {
+                this.drill(from, event.chat_id.clone(), Some(event.row.clone()), None, cx);
+            });
         let mirror = self.mirror.clone();
         self.shown().clone().update(cx, |shown, cx| {
             shown.set_footer(None, cx);
@@ -421,14 +443,21 @@ impl Inspector {
             .items_center()
             .gap(px(2.0))
             .children(Depth::ALL.into_iter().map(|depth| {
-                crate::surface_chrome::tab(SharedString::from(format!("inspector-depth-{}", depth.name())), depth == shown, theme)
-                    .px(px(6.0))
-                    .aria_label(depth.name())
-                    .tooltip(crate::settings::widgets::text_tooltip(format!("{} · [ and ] step the depth", depth.name())))
-                    .child(depth.name())
-                    // A press here keeps the keyboard where it was.
-                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_depth(depth, cx)))
+                crate::surface_chrome::tab(
+                    SharedString::from(format!("inspector-depth-{}", depth.name())),
+                    depth == shown,
+                    theme,
+                )
+                .px(px(6.0))
+                .aria_label(depth.name())
+                .tooltip(crate::settings::widgets::text_tooltip(format!(
+                    "{} · [ and ] step the depth",
+                    depth.name()
+                )))
+                .child(depth.name())
+                // A press here keeps the keyboard where it was.
+                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+                .on_click(cx.listener(move |this, _, _, cx| this.set_depth(depth, cx)))
             }))
             .into_any_element()
     }
@@ -442,7 +471,11 @@ impl Inspector {
     /// shown, or to the session's trace: what held it went with the trace it was in.
     fn refocus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.holds_keyboard(window, cx) {
-            let to = if self.stack.is_empty() { self.transcript.read(cx).keys_handle() } else { self.back.clone() };
+            let to = if self.stack.is_empty() {
+                self.transcript.read(cx).keys_handle()
+            } else {
+                self.back.clone()
+            };
             window.focus(&to, cx);
         }
     }
@@ -481,7 +514,9 @@ impl Inspector {
                             return;
                         }
                         if method == calls::WATCH_DOCK {
-                            if let Ok(dock) = serde_json::from_value::<slopty_view_doc::ChatDock>(value) {
+                            if let Ok(dock) =
+                                serde_json::from_value::<slopty_view_doc::ChatDock>(value)
+                            {
                                 this.mirror.update(cx, |mirror, cx| mirror.show(dock.prompt, cx));
                             }
                         } else if let Ok(tray) = serde_json::from_value::<WorkTray>(value) {
@@ -551,7 +586,13 @@ impl Inspector {
 
     /// One of the fixed lines: `id`, its height [`LINE`] whatever it says, truncating, never
     /// wrapping; a press opens `card` when there is one, and the line keeps where it was drawn.
-    fn line(&self, id: &'static str, card: Option<Card>, theme: &Theme, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn line(
+        &self,
+        id: &'static str,
+        card: Option<Card>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let open = card.is_some_and(|card| self.card == Some(card));
         let at = card.map(|card| self.lines[card as usize].clone());
         div()
@@ -579,7 +620,9 @@ impl Inspector {
                         hover_blend(&fade, gpui::transparent_black(), theme.ink(ROW_WASH))
                     })
                     .hover_fade(fade)
-                    .on_click(cx.listener(move |this, _, window, cx| this.toggle_card(card, window, cx)))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.toggle_card(card, window, cx)),
+                    )
             })
             .children(at.map(|at| {
                 canvas(move |bounds, _, _| at.set(bounds), |_, _, _, _| ()).absolute().inset_0()
@@ -608,7 +651,13 @@ impl Inspector {
 
     /// The card `card` opens to, under its line: the keyboard's while open, shut by Esc or a
     /// press outside it (a press on its own line shuts it through the line).
-    fn card(&self, card: Card, content: Vec<AnyElement>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn card(
+        &self,
+        card: Card,
+        content: Vec<AnyElement>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let line = self.lines[card as usize].clone();
         let body = crate::popover::popover_card(theme)
             .id(match card {
@@ -639,7 +688,12 @@ impl Inspector {
                     .overflow_y_scroll()
                     .children(content),
             );
-        crate::popover::anchored_menu_below_gap("inspector-card", body.into_any_element(), None, 0.0)
+        crate::popover::anchored_menu_below_gap(
+            "inspector-card",
+            body.into_any_element(),
+            None,
+            0.0,
+        )
     }
 
     /// The session's status and branch, on one line that is always drawn; drilled into a run,
@@ -651,7 +705,9 @@ impl Inspector {
         }
         let state = self.state.read(cx);
         let chat = state.selected_chat_row().cloned();
-        let status = chat.as_ref().map_or(ChatIndicator::Idle, |chat| state.display_status_for(chat, self.clock));
+        let status = chat
+            .as_ref()
+            .map_or(ChatIndicator::Idle, |chat| state.display_status_for(chat, self.clock));
         // The one state vocabulary, its need's own glyph included (`layout.md`, "A state
         // is a glyph").
         let session = chat.as_ref().and_then(|chat| state.session_for(&chat.id));
@@ -679,8 +735,20 @@ impl Inspector {
                     .min_w_0()
                     .items_center()
                     .gap(px(3.0))
-                    .child(icon(icons::GIT_BRANCH).size(px(11.0)).flex_none().text_color(theme.text_faint))
-                    .child(div().min_w_0().truncate().text_size(ui_rems(12.0)).text_color(theme.text_muted).child(branch))
+                    .child(
+                        icon(icons::GIT_BRANCH)
+                            .size(px(11.0))
+                            .flex_none()
+                            .text_color(theme.text_faint),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(ui_rems(12.0))
+                            .text_color(theme.text_muted)
+                            .child(branch),
+                    )
             }))
             .child(div().flex_1())
             .child(self.render_depth(theme, cx))
@@ -696,7 +764,9 @@ impl Inspector {
             _ => self.stack[depth - 2].title.clone(),
         };
         let run = self.drilled_run(cx);
-        let title = run.as_ref().map_or_else(|| self.stack[depth - 1].title.clone(), |run| run.title.clone());
+        let title = run
+            .as_ref()
+            .map_or_else(|| self.stack[depth - 1].title.clone(), |run| run.title.clone());
         let back_ink = hover_blend("inspector-back", theme.text_muted, theme.text);
         let back = div()
             .id("inspector-back")
@@ -742,7 +812,16 @@ impl Inspector {
                     }))
                     .into_any_element()
             })
-            .flat_map(|crumb| [crumb, div().flex_none().text_color(theme.text_faint).child("\u{203A}").into_any_element()])
+            .flat_map(|crumb| {
+                [
+                    crumb,
+                    div()
+                        .flex_none()
+                        .text_color(theme.text_faint)
+                        .child("\u{203A}")
+                        .into_any_element(),
+                ]
+            })
             .collect();
         self.line("inspector-header", None, theme, cx)
             .gap(px(6.0))
@@ -761,7 +840,11 @@ impl Inspector {
                     .truncate()
                     .text_size(ui_rems(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(if run.as_ref().is_some_and(|run| run.failed) { theme.danger } else { theme.text })
+                    .text_color(if run.as_ref().is_some_and(|run| run.failed) {
+                        theme.danger
+                    } else {
+                        theme.text
+                    })
                     .child(crate::transcript::single_line(&title)),
             )
             .children(run.as_ref().and_then(Run::mark).map(|mark| {
@@ -778,10 +861,14 @@ impl Inspector {
         let run = self.drilled_run(cx);
         let now = self.clock.timestamp_millis();
         let (said, tint) = match &run {
-            Some(run) if run.needs_you.is_some() => {
-                (format!("Needs you · {}", run.needs_you.clone().unwrap_or_default()), theme.warning)
-            }
-            Some(run) => (run.step.clone().unwrap_or_default(), if run.failed { theme.danger } else { theme.text }),
+            Some(run) if run.needs_you.is_some() => (
+                format!("Needs you · {}", run.needs_you.clone().unwrap_or_default()),
+                theme.warning,
+            ),
+            Some(run) => (
+                run.step.clone().unwrap_or_default(),
+                if run.failed { theme.danger } else { theme.text },
+            ),
             None => (String::new(), theme.text),
         };
         let facts = run.as_ref().map(|run| run.summary_at(now)).unwrap_or_default();
@@ -816,18 +903,24 @@ impl Inspector {
 
     /// What the session is doing now, on one line ("Tasks 2/4 · Write the tests", "2
     /// running"), opening to its task list and its running work.
-    fn render_now(&self, tasks: Option<&[TodoItem]>, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_now(
+        &self,
+        tasks: Option<&[TodoItem]>,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if !self.stack.is_empty() {
             return self.render_drilled_now(theme, cx);
         }
-        let working = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .is_some_and(|chat| self.state.read(cx).display_status_for(chat, self.clock) == ChatIndicator::Working);
+        let working = self.state.read(cx).selected_chat_row().is_some_and(|chat| {
+            self.state.read(cx).display_status_for(chat, self.clock) == ChatIndicator::Working
+        });
         // A list all done leaves once the turn ends, as the TUI's own does.
-        let tasks = tasks.filter(|items| working || items.iter().any(|item| item.status() != TodoStatus::Completed));
-        let running: &[WorkRow] = self.tray.as_ref().map(|tray| tray.rows.as_slice()).unwrap_or_default();
+        let tasks = tasks.filter(|items| {
+            working || items.iter().any(|item| item.status() != TodoStatus::Completed)
+        });
+        let running: &[WorkRow] =
+            self.tray.as_ref().map(|tray| tray.rows.as_slice()).unwrap_or_default();
         let (said, at_work) = now_words(tasks, running.len());
         let has = tasks.is_some() || !running.is_empty();
         let open = has && self.card == Some(Card::Now);
@@ -846,7 +939,9 @@ impl Inspector {
                     .truncate()
                     .text_size(ui_rems(12.0))
                     .text_color(if said.is_some() { theme.text } else { theme.text_faint })
-                    .child(said.clone().unwrap_or_else(|| if at_work.is_some() { String::new() } else { "Nothing".to_owned() })),
+                    .child(said.clone().unwrap_or_else(|| {
+                        if at_work.is_some() { String::new() } else { "Nothing".to_owned() }
+                    })),
             )
             .children(at_work.map(|words| {
                 div().flex_none().text_size(ui_rems(11.0)).text_color(theme.text_muted).child(words)
@@ -885,7 +980,9 @@ impl Inspector {
                                 .truncate()
                                 .text_size(ui_rems(12.0))
                                 .text_color(text)
-                                .when(item.status() == TodoStatus::Completed, |el| el.line_through())
+                                .when(item.status() == TodoStatus::Completed, |el| {
+                                    el.line_through()
+                                })
                                 .child(crate::transcript::single_line(&words)),
                         )
                         .into_any_element(),
@@ -950,11 +1047,17 @@ impl Inspector {
 
     /// The files the session changed, on one line ("Changes 3 files +12 −4"), opening to the
     /// files, each a press away from its diff.
-    fn render_changes(&self, files: &[ChangedFile], theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_changes(
+        &self,
+        files: &[ChangedFile],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let count = files.len();
         let has = count > 0;
         let open = has && self.card == Some(Card::Changes);
-        let (adds, dels) = files.iter().fold((0, 0), |(a, d), file| (a + file.additions, d + file.deletions));
+        let (adds, dels) =
+            files.iter().fold((0, 0), |(a, d), file| (a + file.additions, d + file.deletions));
         let counts = |additions: u64, deletions: u64| {
             div()
                 .flex()
@@ -962,8 +1065,12 @@ impl Inspector {
                 .gap(px(4.0))
                 .font_family(theme.font_mono.clone())
                 .text_size(ui_rems(11.0))
-                .when(additions > 0, |el| el.child(div().text_color(theme.diff_add).child(format!("+{additions}"))))
-                .when(deletions > 0, |el| el.child(div().text_color(theme.diff_del).child(format!("\u{2212}{deletions}"))))
+                .when(additions > 0, |el| {
+                    el.child(div().text_color(theme.diff_add).child(format!("+{additions}")))
+                })
+                .when(deletions > 0, |el| {
+                    el.child(div().text_color(theme.diff_del).child(format!("\u{2212}{deletions}")))
+                })
         };
         let said = match count {
             0 => "None".to_owned(),
@@ -1014,9 +1121,12 @@ impl Inspector {
                     .hover_fade(fade)
                     .aria_label(SharedString::from(format!("Open the diff of {said}")))
                     .child(
-                        crate::file_icons::icon(crate::file_icons::FileIconIdentity::file(&file.path), theme.appearance)
-                            .size(px(12.0))
-                            .flex_none(),
+                        crate::file_icons::icon(
+                            crate::file_icons::FileIconIdentity::file(&file.path),
+                            theme.appearance,
+                        )
+                        .size(px(12.0))
+                        .flex_none(),
                     )
                     .child(
                         div()
@@ -1025,9 +1135,20 @@ impl Inspector {
                             .flex()
                             .gap(px(6.0))
                             .overflow_hidden()
-                            .child(div().flex_none().text_size(ui_rems(12.0)).text_color(theme.text).child(name))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(ui_rems(12.0))
+                                    .text_color(theme.text)
+                                    .child(name),
+                            )
                             .children(dir.map(|dir| {
-                                div().min_w_0().truncate().text_size(ui_rems(11.0)).text_color(theme.text_faint).child(dir)
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(ui_rems(11.0))
+                                    .text_color(theme.text_faint)
+                                    .child(dir)
                             })),
                     )
                     .child(counts(file.additions, file.deletions))
@@ -1077,13 +1198,19 @@ impl PromptMirror {
         use crate::attachments::{attachment_snapshot_for, begin_load_for};
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
-        let Some(device) = state.selected_chat_row().map(|chat| chat.device_id.clone()).or_else(|| local.clone())
+        let Some(device) =
+            state.selected_chat_row().map(|chat| chat.device_id.clone()).or_else(|| local.clone())
         else {
             return AttachmentSnapshot::Error { retry_in: std::time::Duration::MAX };
         };
         let key = AttachmentKey::new(&device, path, None);
         if begin_load_for(&key) {
-            self.load_picture(key.clone(), path, (local.as_deref() != Some(device.as_str())).then_some(device), cx);
+            self.load_picture(
+                key.clone(),
+                path,
+                (local.as_deref() != Some(device.as_str())).then_some(device),
+                cx,
+            );
         }
         let snapshot = attachment_snapshot_for(&key);
         if let AttachmentSnapshot::Error { retry_in } = snapshot
@@ -1094,7 +1221,9 @@ impl PromptMirror {
             self.picture_loads.insert(
                 wake.clone(),
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(retry_in + std::time::Duration::from_millis(60)).await;
+                    cx.background_executor()
+                        .timer(retry_in + std::time::Duration::from_millis(60))
+                        .await;
                     let _gone = this.update(cx, |this, cx| {
                         this.picture_loads.remove(&wake);
                         cx.notify();
@@ -1106,8 +1235,16 @@ impl PromptMirror {
     }
 
     /// Read the picture `key` names, from `target` when it is another device's.
-    fn load_picture(&mut self, key: AttachmentKey, path: &str, target: Option<String>, cx: &mut Context<Self>) {
-        use crate::attachments::{AttachmentLoadGuard, read_attachment_image, store_error_for, store_loaded_for};
+    fn load_picture(
+        &mut self,
+        key: AttachmentKey,
+        path: &str,
+        target: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::attachments::{
+            AttachmentLoadGuard, read_attachment_image, store_error_for, store_loaded_for,
+        };
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             store_error_for(&key);
             return;
@@ -1116,7 +1253,15 @@ impl PromptMirror {
         let read = path.clone();
         let task = cx.spawn(async move |this, cx| {
             let _claim = claim;
-            match read_attachment_image(&engine, cx.background_executor(), target.as_deref(), &read, None).await {
+            match read_attachment_image(
+                &engine,
+                cx.background_executor(),
+                target.as_deref(),
+                &read,
+                None,
+            )
+            .await
+            {
                 Some(loaded) => store_loaded_for(&key, loaded.name.into(), loaded.image),
                 None => store_error_for(&key),
             }
@@ -1131,10 +1276,22 @@ impl PromptMirror {
     /// A picture pasted into the prompt box, as a thumbnail: once its bytes are here, a press
     /// opens it in the inspector's lightbox; until then, a still wash; one that cannot be read,
     /// a dashed frame.
-    fn render_picture(&self, picture: &PromptImage, snapshot: AttachmentSnapshot, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_picture(
+        &self,
+        picture: &PromptImage,
+        snapshot: AttachmentSnapshot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let name = SharedString::from(format!("Image #{}", picture.number));
         let id = SharedString::from(format!("inspector-picture-{}", picture.path));
-        let frame = div().id(id.clone()).flex_none().size(px(THUMB)).rounded(px(6.0)).overflow_hidden().border_1();
+        let frame = div()
+            .id(id.clone())
+            .flex_none()
+            .size(px(THUMB))
+            .rounded(px(6.0))
+            .overflow_hidden()
+            .border_1();
         match snapshot {
             AttachmentSnapshot::Loaded(image) => {
                 let preview = PreviewImage::new(name.clone(), image.image.clone());
@@ -1148,9 +1305,16 @@ impl PromptMirror {
                     .tooltip(crate::settings::widgets::text_tooltip(format!("Open {name}")))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let preview = preview.clone();
-                        let _gone = this.inspector.update(cx, |inspector, cx| inspector.show_picture(preview, window, cx));
+                        let _gone = this.inspector.update(cx, |inspector, cx| {
+                            inspector.show_picture(preview, window, cx)
+                        });
                     }))
-                    .child(img(image.image).size(px(THUMB - 2.0)).rounded(px(5.0)).object_fit(ObjectFit::Cover))
+                    .child(
+                        img(image.image)
+                            .size(px(THUMB - 2.0))
+                            .rounded(px(5.0))
+                            .object_fit(ObjectFit::Cover),
+                    )
                     .into_any_element()
             }
             AttachmentSnapshot::Loading => frame
@@ -1218,7 +1382,11 @@ impl gpui::Render for PromptMirror {
         let later = prompt.queued.len().saturating_sub(QUEUED_SHOWN);
         if later > 0 {
             section = section.child(
-                div().pl(px(14.0)).text_size(ui_rems(11.0)).text_color(theme.text_faint).child(format!("{later} more")),
+                div()
+                    .pl(px(14.0))
+                    .text_size(ui_rems(11.0))
+                    .text_color(theme.text_faint)
+                    .child(format!("{later} more")),
             );
         }
         let text = prompt.text.trim_end();
@@ -1254,7 +1422,10 @@ impl gpui::Render for PromptMirror {
 impl gpui::Render for Inspector {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        if std::mem::take(&mut self.focus_back) && !self.stack.is_empty() && self.holds_keyboard(window, cx) {
+        if std::mem::take(&mut self.focus_back)
+            && !self.stack.is_empty()
+            && self.holds_keyboard(window, cx)
+        {
             window.focus(&self.back, cx);
         }
         // A running run's time moves on in the header, once a second.
@@ -1294,17 +1465,20 @@ impl gpui::Render for Inspector {
                     // `[` and `]` step the fold depth of the whole trace.
                     key @ ("[" | "]") if plain && this.keys_here(window, cx) => {
                         cx.stop_propagation();
-                        let depth = this.shown().read(cx).depth().step(if key == "[" { -1 } else { 1 });
+                        let depth =
+                            this.shown().read(cx).depth().step(if key == "[" { -1 } else { 1 });
                         this.set_depth(depth, cx);
                     }
                     _ => {}
                 }
             }))
             // ⌥ held where the inspector holds the keyboard shows when every step began.
-            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
-                let held = event.modifiers.alt;
-                this.shown().clone().update(cx, |shown, cx| shown.hold_alt(held, cx));
-            }))
+            .on_modifiers_changed(cx.listener(
+                |this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                    let held = event.modifiers.alt;
+                    this.shown().clone().update(cx, |shown, cx| shown.hold_alt(held, cx));
+                },
+            ))
             .child(header)
             .child(now)
             .child(changes)
@@ -1405,14 +1579,20 @@ mod tests {
         assert_eq!(in_folder("/Users/me/app/src/a.rs", Some("/Users/me/app")), "src/a.rs");
         assert_eq!(in_folder("/Users/me/app/src/a.rs", Some("~/app/")), "src/a.rs");
         assert_eq!(in_folder("/home/me/app/a.rs", Some("~/app")), "a.rs");
-        assert_eq!(in_folder("/Users/me/apples/a.rs", Some("/Users/me/app")), "/Users/me/apples/a.rs");
+        assert_eq!(
+            in_folder("/Users/me/apples/a.rs", Some("/Users/me/app")),
+            "/Users/me/apples/a.rs"
+        );
         assert_eq!(in_folder("/srv/a.rs", None), "/srv/a.rs");
         assert_eq!(in_folder("src/a.rs", Some("/Users/me/app")), "src/a.rs");
     }
 
     #[test]
     fn a_file_changed_twice_is_one_row_with_its_counts_summed() {
-        let entries = [assistant(vec![edit("a.rs", 2, 1), edit("b.rs", 5, 0)]), assistant(vec![edit("a.rs", 3, 4)])];
+        let entries = [
+            assistant(vec![edit("a.rs", 2, 1), edit("b.rs", 5, 0)]),
+            assistant(vec![edit("a.rs", 3, 4)]),
+        ];
         let files = changed_files(&entries);
         assert_eq!(
             files,
@@ -1524,7 +1704,11 @@ mod tests {
     }
 
     fn says(id: &str, parts: Vec<MessagePart>) -> SessionMessageEntry {
-        SessionMessageEntry { id: id.to_owned(), status: Some(slopty_view_doc::MessageStatus::Complete), ..assistant(parts) }
+        SessionMessageEntry {
+            id: id.to_owned(),
+            status: Some(slopty_view_doc::MessageStatus::Complete),
+            ..assistant(parts)
+        }
     }
 
     fn words(id: &str, text: &str) -> MessagePart {
@@ -1532,7 +1716,9 @@ mod tests {
     }
 
     /// The last frame's accessibility tree, as (role, label, centre) of each node.
-    fn draw(cx: &mut gpui::VisualTestContext) -> Vec<(gpui::accesskit::Role, String, gpui::Point<Pixels>)> {
+    fn draw(
+        cx: &mut gpui::VisualTestContext,
+    ) -> Vec<(gpui::accesskit::Role, String, gpui::Point<Pixels>)> {
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.set_a11y_active(true);
@@ -1555,7 +1741,10 @@ mod tests {
         })
     }
 
-    fn at(nodes: &[(gpui::accesskit::Role, String, gpui::Point<Pixels>)], label: &str) -> Option<gpui::Point<Pixels>> {
+    fn at(
+        nodes: &[(gpui::accesskit::Role, String, gpui::Point<Pixels>)],
+        label: &str,
+    ) -> Option<gpui::Point<Pixels>> {
         nodes.iter().find(|(_, said, _)| said == label).map(|(_, _, centre)| *centre)
     }
 
@@ -1586,16 +1775,28 @@ mod tests {
             ];
             state.selected_chat = Some("chat".into());
             state.transcript_replayed = true;
-            state.transcript = vec![says("reply", vec![words("lead", "Sending a scout."), spawn("spawn", "child", "Count lines")])];
+            state.transcript = vec![says(
+                "reply",
+                vec![words("lead", "Sending a scout."), spawn("spawn", "child", "Count lines")],
+            )];
             state.transcript_revision += 1;
         });
         let snapshots = |state: &Entity<AppState>, cx: &mut gpui::VisualTestContext| {
             state.update(cx, |state, _| {
                 state.set_subagent_snapshot(
                     "child".into(),
-                    vec![says("c", vec![words("c-lead", "Counting in the child."), spawn("inner", "grand", "Read parser")])],
+                    vec![says(
+                        "c",
+                        vec![
+                            words("c-lead", "Counting in the child."),
+                            spawn("inner", "grand", "Read parser"),
+                        ],
+                    )],
                 );
-                state.set_subagent_snapshot("grand".into(), vec![says("g", vec![words("g-lead", "Reading in the grandchild.")])]);
+                state.set_subagent_snapshot(
+                    "grand".into(),
+                    vec![says("g", vec![words("g-lead", "Reading in the grandchild.")])],
+                );
             });
         };
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
@@ -1617,10 +1818,15 @@ mod tests {
                     .collect::<Vec<_>>()
             })
         };
-        let depth = |cx: &mut gpui::VisualTestContext| inspector.read_with(cx, |inspector, _| inspector.stack.len());
-        let (back, home) =
-            inspector.read_with(cx, |inspector, cx| (inspector.back.clone(), inspector.transcript.read(cx).keys_handle()));
-        let holds = |handle: &FocusHandle, cx: &mut gpui::VisualTestContext| cx.update(|window, _| handle.is_focused(window));
+        let depth = |cx: &mut gpui::VisualTestContext| {
+            inspector.read_with(cx, |inspector, _| inspector.stack.len())
+        };
+        let (back, home) = inspector.read_with(cx, |inspector, cx| {
+            (inspector.back.clone(), inspector.transcript.read(cx).keys_handle())
+        });
+        let holds = |handle: &FocusHandle, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| handle.is_focused(window))
+        };
 
         // Asked while the terminal holds the keyboard, a drill leaves it there.
         cx.update(|window, cx| window.focus(&terminal, cx));
@@ -1631,30 +1837,50 @@ mod tests {
             inspector.drill(from, "child".into(), row, None, cx);
         });
         let nodes = draw(cx);
-        assert!(at(&nodes, "Counting in the child.").is_some(), "its trace takes the timeline's place");
+        assert!(
+            at(&nodes, "Counting in the child.").is_some(),
+            "its trace takes the timeline's place"
+        );
         assert!(holds(&terminal, cx), "the terminal keeps the keyboard");
         inspector.update(cx, |inspector, cx| inspector.pop_to(0, cx));
         snapshots(&state, cx);
 
         // A press on its Open: the pane takes the keyboard, and the drill puts it on the way back.
         let nodes = draw(cx);
-        assert!(at(&nodes, "Counting in the child.").is_none(), "the child's steps wait for a drill");
+        assert!(
+            at(&nodes, "Counting in the child.").is_none(),
+            "the child's steps wait for a drill"
+        );
         let open = at(&nodes, "Open subagent").expect("the run's Open");
         cx.simulate_click(open, gpui::Modifiers::default());
         let nodes = draw(cx);
-        assert!(at(&nodes, "Counting in the child.").is_some(), "its trace takes the timeline's place");
+        assert!(
+            at(&nodes, "Counting in the child.").is_some(),
+            "its trace takes the timeline's place"
+        );
         assert!(at(&nodes, "Sending a scout.").is_none(), "the session's own steps are under it");
         assert!(at(&nodes, "Back to the session").is_some(), "a way back");
         assert!(at(&nodes, "Count lines").is_some(), "its task heads it");
-        assert_eq!(state.read_with(cx, |state, _| state.selected_chat.clone()).as_deref(), Some("chat"), "the selection stays");
+        assert_eq!(
+            state.read_with(cx, |state, _| state.selected_chat.clone()).as_deref(),
+            Some("chat"),
+            "the selection stays"
+        );
         assert!(holds(&back, cx), "the keyboard is on the way back, so Esc never reaches the TUI");
-        assert_eq!(footers(cx), [false, true], "the prompt box's mirror moves under the trace shown");
+        assert_eq!(
+            footers(cx),
+            [false, true],
+            "the prompt box's mirror moves under the trace shown"
+        );
 
         let open = at(&nodes, "Open subagent").expect("the grandchild's Open");
         cx.simulate_click(open, gpui::Modifiers::default());
         let nodes = draw(cx);
         assert!(at(&nodes, "Reading in the grandchild.").is_some(), "a level deeper");
-        assert!(at(&nodes, "Back to Count lines").is_some(), "the way back names the run it leads to");
+        assert!(
+            at(&nodes, "Back to Count lines").is_some(),
+            "the way back names the run it leads to"
+        );
         assert_eq!(footers(cx), [false, false, true]);
         assert!(holds(&back, cx));
 
@@ -1673,7 +1899,10 @@ mod tests {
         assert!(at(&nodes, "Sending a scout.").is_some(), "the session's timeline again");
         assert_eq!(footers(cx), [true], "the mirror is under the session's timeline again");
         assert!(holds(&home, cx), "the keyboard waits on the session's trace");
-        assert!(state.read_with(cx, |state, _| state.sub_transcript("child").is_empty()), "the run's feed is let go");
+        assert!(
+            state.read_with(cx, |state, _| state.sub_transcript("child").is_empty()),
+            "the run's feed is let go"
+        );
 
         // A crumb goes back to its level.
         snapshots(&state, cx);
@@ -1692,7 +1921,11 @@ mod tests {
             draw(cx);
             cx.update(|window, _| {
                 let update = window.a11y_tree()?;
-                update.nodes.iter().find(|(id, _)| *id == update.focus).and_then(|(_, node)| node.label().map(str::to_owned))
+                update
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == update.focus)
+                    .and_then(|(_, node)| node.label().map(str::to_owned))
             })
             .unwrap_or_default()
         };

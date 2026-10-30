@@ -14,8 +14,8 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 
-use crate::theme::Theme;
 use crate::motion::HoverFade as _;
+use crate::theme::Theme;
 
 /// A toolbar control's side: zeron's icon buttons, fields and chips are this tall.
 pub const CONTROL_SIZE: f32 = crate::surface_chrome::CONTROL_SIZE;
@@ -25,7 +25,8 @@ pub const CONTROL_RADIUS: f32 = crate::surface_chrome::CONTROL_RADIUS;
 pub const ICON_SIZE: f32 = crate::surface_chrome::ICON_SIZE;
 /// The room between a toolbar's controls.
 pub const CONTROL_GAP: f32 = crate::surface_chrome::CONTROL_GAP;
-/// The shell's keyboard focus ring (2 px of the accent, 2 px clear), for Slopty's own controls.
+/// The shell's keyboard focus ring (2 px of the accent, 2 px clear), for Slopty's own
+/// controls.
 pub use crate::surface_chrome::focus_ring;
 
 thread_local! {
@@ -80,9 +81,7 @@ pub fn icon_button(
     use crate::settings::widgets::ActionHint as _;
     let id: SharedString = id.into();
     let selector = id.to_string();
-    crate::surface_chrome::icon_button(id, icon, theme)
-        .debug_selector(move || selector)
-        .hint(label)
+    crate::surface_chrome::icon_button(id, icon, theme).debug_selector(move || selector).hint(label)
 }
 
 /// How loud a [`button`] is: the shell's dialog buttons.
@@ -142,10 +141,7 @@ pub fn pill_glyph(icon: &'static str, popup: &Theme) -> AnyElement {
 /// A [`floating_pill`]'s words: 13 pt in the popup's text.
 #[must_use]
 pub fn pill_words(words: impl Into<SharedString>, popup: &Theme) -> Div {
-    div()
-        .text_size(crate::typography::ui_rems(13.0))
-        .text_color(popup.text)
-        .child(words.into())
+    div().text_size(crate::typography::ui_rems(13.0)).text_color(popup.text).child(words.into())
 }
 
 /// A surface with nothing to show yet saying so in its middle: 13 pt in `text_muted` (a remote
@@ -390,12 +386,8 @@ pub fn tooltip_frame(
 /// A tooltip's keys, each drawn as its own cap (opencode's keybind: 14 px tall, at least as wide,
 /// 4 px each side, radius 2, a faint fill, the glyph at 11 px in the system face so ⇧ ⌥ ⏎ draw).
 pub fn tooltip_keys(theme: &Theme, keys: SharedString) -> Div {
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(2.0))
-        .children(key_caps(&keys).into_iter().map(|cap| {
+    div().flex_none().flex().items_center().gap(px(2.0)).children(key_caps(&keys).into_iter().map(
+        |cap| {
             div()
                 .h(px(KEY_CAP_SIZE))
                 .min_w(px(KEY_CAP_SIZE))
@@ -411,7 +403,8 @@ pub fn tooltip_keys(theme: &Theme, keys: SharedString) -> Div {
                 .text_size(crate::typography::ui_rems(11.0))
                 .text_color(theme.text_muted)
                 .child(cap)
-        }))
+        },
+    ))
 }
 
 /// A key cap's height and least width.
@@ -562,7 +555,11 @@ mod tests {
     struct Empty;
 
     impl Render for Empty {
-        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
             let theme = theme(cx).clone();
             div().size_full().child(empty_state(
                 "empty",
@@ -604,14 +601,22 @@ mod tests {
     struct Floats;
 
     impl Render for Floats {
-        fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
             let theme = theme(cx).clone();
             div()
                 .flex()
                 .items_start()
                 .gap(px(8.0))
                 .child(icon_button("float-close", crate::icons::CLOSE, "Close", &theme))
-                .child(chip("float-chip", false, &theme).debug_selector(|| "float-chip".into()).child("W"))
+                .child(
+                    chip("float-chip", false, &theme)
+                        .debug_selector(|| "float-chip".into())
+                        .child("W"),
+                )
                 .child(button("float-ok", "OK", Tone::Ghost, &theme))
                 .child(floating_pill(
                     "float-pill",
@@ -646,7 +651,11 @@ mod tests {
     }
 
     impl Render for Footer {
-        fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
             let cap = div().h(px(22.0)).w(px(30.0)).debug_selector(|| "arrows-cap".into());
             track_held_keys(div().track_focus(&self.focus).size_full().p(px(10.0)))
                 .child(pressable_cap(cap, "↑ ↓", 0.05, window, cx))

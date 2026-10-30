@@ -17,10 +17,9 @@ pub(super) fn image_sources(tree: &BlockTree) -> Vec<String> {
             Block::Paragraph { runs: r } | Block::Heading { runs: r, .. } => runs(r, out),
             Block::BlockQuote { children } => children.iter().for_each(|b| block(b, out)),
             Block::List { items, .. } => items.iter().flatten().for_each(|b| block(b, out)),
-            Block::Table { header, rows, .. } => header
-                .iter()
-                .chain(rows.iter().flatten())
-                .for_each(|r| runs(r, out)),
+            Block::Table { header, rows, .. } => {
+                header.iter().chain(rows.iter().flatten()).for_each(|r| runs(r, out))
+            }
             _ => {}
         }
     }
@@ -35,9 +34,7 @@ pub(super) fn diagram_sources(tree: &BlockTree) -> Vec<String> {
     fn visit(block: &Block, out: &mut Vec<String>) {
         match block {
             Block::CodeBlock { language, code }
-                if language
-                    .as_deref()
-                    .is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) =>
+                if language.as_deref().is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) =>
             {
                 if !out.contains(code) {
                     out.push(code.clone());

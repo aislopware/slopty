@@ -14,7 +14,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui::{AnyElement, Context, SharedString, div, img, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, SharedString, div, img, px};
 
 use super::Transcript;
 use crate::markdown::parser::InlineImage;
@@ -79,9 +80,8 @@ pub(super) fn resolve(source: &str, folder: Option<&str>) -> Resolved {
         return Resolved::Refused;
     };
     let root = root.trim_end_matches(separator);
-    let inside = path
-        .strip_prefix(root)
-        .is_some_and(|rest| rest.starts_with(separator) && rest.len() > 1);
+    let inside =
+        path.strip_prefix(root).is_some_and(|rest| rest.starts_with(separator) && rest.len() > 1);
     if inside { Resolved::Path(path) } else { Resolved::Refused }
 }
 
@@ -177,11 +177,7 @@ fn placeholder(
     theme: &Theme,
 ) -> AnyElement {
     let id_key = id.clone();
-    let base = div()
-        .id(id)
-        .role(gpui::Role::Image)
-        .aria_label(label)
-        .aria_value("loading");
+    let base = div().id(id).role(gpui::Role::Image).aria_label(label).aria_value("loading");
     let sized = match aspect {
         Some(aspect) => {
             let aspect = aspect.max(0.05);
@@ -209,7 +205,12 @@ fn placeholder(
 impl Transcript {
     /// Hold the images the row just drawn showed, reading any not read yet; draw again when one
     /// the row showed loading is already here.
-    pub(super) fn hold_md_images(&mut self, row_id: &SharedString, markdown: bool, cx: &mut Context<Self>) {
+    pub(super) fn hold_md_images(
+        &mut self,
+        row_id: &SharedString,
+        markdown: bool,
+        cx: &mut Context<Self>,
+    ) {
         let wanted = std::mem::take(&mut self.md_images.borrow_mut().wanted);
         let chip = SharedString::from(format!("{row_id}#dmd"));
         if wanted.is_empty() {

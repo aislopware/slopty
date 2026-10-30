@@ -152,7 +152,11 @@ impl ChatWordsQuery {
 // A chat words match's second line: who said it, then the words in `text_faint` with
 // the match in `text`, one line, cut at the row's end.
 /// "Agent: …the words…", the match lit.
-pub(super) fn chat_words_line(who: &'static str, found: &ChatWordsMatch, theme: &Theme) -> gpui::Div {
+pub(super) fn chat_words_line(
+    who: &'static str,
+    found: &ChatWordsMatch,
+    theme: &Theme,
+) -> gpui::Div {
     let lead = who.len() + 1;
     let line: SharedString = format!("{who} {}", found.excerpt).into();
     let mut highlights = vec![(
@@ -193,10 +197,7 @@ impl Shell {
             .filter_map(|chat| {
                 let fields = thread_search::ThreadFields {
                     title: chat.title.as_deref().unwrap_or("New session"),
-                    project: state
-                        .space_for_chat(chat)
-                        .map(|s| s.display_name())
-                        .unwrap_or(""),
+                    project: state.space_for_chat(chat).map(|s| s.display_name()).unwrap_or(""),
                     branch: super::sidebar_status::branch_of(chat).unwrap_or(""),
                     device: state.device_name(&chat.device_id).unwrap_or(""),
                     archived: chat.archived,
@@ -215,7 +216,13 @@ pub(super) mod tests {
     use super::*;
 
     // The chats' words: a match each, after the pause, from the answer's shape.
-    pub(in crate::shell) fn words(chat: &str, role: &str, excerpt: &str, start: usize, end: usize) -> serde_json::Value {
+    pub(in crate::shell) fn words(
+        chat: &str,
+        role: &str,
+        excerpt: &str,
+        start: usize,
+        end: usize,
+    ) -> serde_json::Value {
         serde_json::json!({
             "chatId": chat, "role": role, "excerpt": excerpt,
             "matchStart": start, "matchEnd": end,
@@ -238,8 +245,9 @@ pub(super) mod tests {
         assert!(!found[1].agent);
         assert!(found[1].range.is_empty(), "inside a character: no highlight, still a match");
         assert!(found[2].range.is_empty(), "past the excerpt");
-        let wrapped =
-            ChatWordsMatch::parse_all(&serde_json::json!({ "matches": [words("d", "agent", "x", 0, 1)] }));
+        let wrapped = ChatWordsMatch::parse_all(
+            &serde_json::json!({ "matches": [words("d", "agent", "x", 0, 1)] }),
+        );
         assert_eq!(wrapped.len(), 1);
         assert!(ChatWordsMatch::parse_all(&serde_json::json!({})).is_empty());
     }

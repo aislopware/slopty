@@ -92,7 +92,9 @@ impl Shell {
     /// a sheet over the session, it goes when put away rather than staying behind it.
     pub(super) fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
         // A plain terminal has nothing to inspect.
-        if !self.inspector_shown(cx) && !crate::inspector::inspects(self.state.read(cx), &self.active_chat) {
+        if !self.inspector_shown(cx)
+            && !crate::inspector::inspects(self.state.read(cx), &self.active_chat)
+        {
             return;
         }
         if self.compact() && self.inspector_shown(cx) {
@@ -121,7 +123,11 @@ impl Shell {
     /// Changes by its key (⌘R): the session's changes already beside it, or new ones, where its
     /// folder has git.
     pub(super) fn summon_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shown = self.panes_now(cx).views().into_iter().find(|view| matches!(view, RightSurface::Diff(_)));
+        let shown = self
+            .panes_now(cx)
+            .views()
+            .into_iter()
+            .find(|view| matches!(view, RightSurface::Diff(_)));
         match shown {
             Some(view) => self.summon_view(view, cx),
             None if self.space_git_detected(cx) => self.show_changes(window, cx),
@@ -134,7 +140,11 @@ impl Shell {
         if self.active_chat.is_empty() {
             return;
         }
-        let shown = self.panes_now(cx).views().into_iter().find(|view| matches!(view, RightSurface::Diff(_)));
+        let shown = self
+            .panes_now(cx)
+            .views()
+            .into_iter()
+            .find(|view| matches!(view, RightSurface::Diff(_)));
         let view = match shown {
             Some(view) => view,
             None => {
@@ -171,7 +181,12 @@ impl Shell {
     }
 
     /// A file's close went through (saved, or its edits let go): its pane closes.
-    pub(super) fn complete_file_close(&mut self, view: RightSurface, key: &str, cx: &mut Context<Self>) {
+    pub(super) fn complete_file_close(
+        &mut self,
+        view: RightSurface,
+        key: &str,
+        cx: &mut Context<Self>,
+    ) {
         self.remember_closed_tab(key, view, cx); // ⇧⌘T opens it again
         self.pending_file_closes.remove(&view);
         self.drop_view(view, key, cx);
@@ -229,7 +244,12 @@ impl Shell {
     /// keyboard nowhere inside gives the view its keyboard as its key would ([`Self::focus_view`]:
     /// a diff its own keys, a file its editor), and the pane focused has it. The copy key there
     /// copies a transcript's selection (the inspector's) once nothing inside took it.
-    pub(super) fn view_pane(&mut self, view: RightSurface, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn view_pane(
+        &mut self,
+        view: RightSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let handle = self.view_handle(view, cx);
         let held = handle.clone();
         div()
@@ -249,7 +269,12 @@ impl Shell {
     }
 
     /// What `view`'s pane shows. Files keeps its git state live only while it is laid out.
-    pub(super) fn view_content(&mut self, view: RightSurface, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn view_content(
+        &mut self,
+        view: RightSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let body = match view {
             RightSurface::File(id) => match self.file_surfaces.get(&id).cloned() {
@@ -264,7 +289,8 @@ impl Shell {
                     // Idempotent — also covers a view kept open across launches.
                     changes.update(cx, |changes, cx| changes.ensure_content(cx));
                     // The diff's options (scope, base, fold all) stand over it.
-                    let controls = changes.update(cx, |changes, cx| changes.render_header_controls(cx));
+                    let controls =
+                        changes.update(cx, |changes, cx| changes.render_header_controls(cx));
                     div()
                         .size_full()
                         .flex()
@@ -304,7 +330,12 @@ impl Shell {
 
     /// Give `view` the keyboard: a file its editor, Files its tree, a page its address while it
     /// has none, the changes their own keys, a remote window its stream; the rest, their pane.
-    pub(super) fn focus_view(&mut self, view: RightSurface, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_view(
+        &mut self,
+        view: RightSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match view {
             RightSurface::File(id) => {
                 if let Some(file) = self.file_surfaces.get(&id).cloned() {
@@ -344,12 +375,20 @@ impl Shell {
 
     /// The focus `view`'s pane holds, around what it shows: where its keyboard goes when it has
     /// none of its own, and how the shell knows the pane holds the keyboard.
-    pub(super) fn view_handle(&mut self, view: RightSurface, cx: &mut Context<Self>) -> FocusHandle {
+    pub(super) fn view_handle(
+        &mut self,
+        view: RightSurface,
+        cx: &mut Context<Self>,
+    ) -> FocusHandle {
         self.view_handles.entry(view).or_insert_with(|| cx.focus_handle()).clone()
     }
 
     /// What `view`'s pane header names: its glyph and its title.
-    pub(super) fn view_identity(&self, view: RightSurface, cx: &App) -> (&'static str, SharedString) {
+    pub(super) fn view_identity(
+        &self,
+        view: RightSurface,
+        cx: &App,
+    ) -> (&'static str, SharedString) {
         match view {
             RightSurface::Files => (icons::FOLDER_TREE, "Files".into()),
             RightSurface::File(id) => {
@@ -362,20 +401,27 @@ impl Shell {
             // The pane's name; its scope is the picker's.
             RightSurface::Diff(id) => (
                 icons::FILE_DIFF,
-                self.diffs.get(&id).map_or_else(|| "Changes".into(), |changes| changes.read(cx).tab_title()),
+                self.diffs
+                    .get(&id)
+                    .map_or_else(|| "Changes".into(), |changes| changes.read(cx).tab_title()),
             ),
             // Steps in time, as a trace reads; the eye is the inbox's.
             RightSurface::Inspector => (icons::SORT_BY_TIME, "Inspector".into()),
             RightSurface::Browser(id) => (
                 icons::GLOBE,
-                self.browsers.get(&id).map_or_else(|| "Browser".into(), |browser| browser.read(cx).title()),
+                self.browsers
+                    .get(&id)
+                    .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title()),
             ),
             RightSurface::Screen(id) => {
                 let chosen = self.screen_surface_chosen(id, cx).map(|(screen, _)| screen);
-                let title = self.screen_surface_title(id, cx).unwrap_or_else(|| "Remote window".into());
+                let title =
+                    self.screen_surface_title(id, cx).unwrap_or_else(|| "Remote window".into());
                 (screen_chip_glyph(chosen.as_deref()), title)
             }
-            RightSurface::Page(id) => (icons::GLOBE, self.page_pane_title(id, cx).unwrap_or_else(|| "Page".into())),
+            RightSurface::Page(id) => {
+                (icons::GLOBE, self.page_pane_title(id, cx).unwrap_or_else(|| "Page".into()))
+            }
         }
     }
 
@@ -398,38 +444,49 @@ impl Shell {
             )
         });
         let owner = key.clone();
-        let sub = cx.subscribe_in(&files, window, move |this: &mut Self, source, event, window, cx| match event {
-            FilesEvent::HoldMutation { origin, paths } => {
-                let surfaces = this
-                    .files
-                    .values()
-                    .chain(this.file_surfaces.values())
-                    .filter(|s| s.read(cx).shares_workspace(origin))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for surface in surfaces {
-                    surface.update(cx, |files, cx| files.hold_mutation(paths.clone(), cx));
+        let sub =
+            cx.subscribe_in(&files, window, move |this: &mut Self, source, event, window, cx| {
+                match event {
+                    FilesEvent::HoldMutation { origin, paths } => {
+                        let surfaces = this
+                            .files
+                            .values()
+                            .chain(this.file_surfaces.values())
+                            .filter(|s| s.read(cx).shares_workspace(origin))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        for surface in surfaces {
+                            surface.update(cx, |files, cx| files.hold_mutation(paths.clone(), cx));
+                        }
+                    }
+                    FilesEvent::Mutate(intent)
+                        if this.accepts_file_navigation(&owner, source, cx) =>
+                    {
+                        this.start_file_mutation(source.clone(), intent.clone(), cx);
+                    }
+                    FilesEvent::MutateMany(intents)
+                        if this.accepts_file_navigation(&owner, source, cx) =>
+                    {
+                        this.start_file_mutations(source.clone(), intents.clone(), cx);
+                    }
+                    FilesEvent::OpenFile(path)
+                        if this.accepts_file_navigation(&owner, source, cx) =>
+                    {
+                        this.add_file_surface(path.clone(), window, cx);
+                    }
+                    FilesEvent::OpenWebLink(activation) => {
+                        if let crate::markdown::render::LinkOutcome::External(url) =
+                            this.activate_session_link(activation, window, cx)
+                        {
+                            cx.open_url(&url);
+                        }
+                    }
+                    FilesEvent::ShowAllFilesChanged(show_all) => {
+                        this.set_files_show_all(*show_all, cx)
+                    }
+                    _ => cx.notify(),
                 }
-            }
-            FilesEvent::Mutate(intent) if this.accepts_file_navigation(&owner, source, cx) => {
-                this.start_file_mutation(source.clone(), intent.clone(), cx);
-            }
-            FilesEvent::MutateMany(intents) if this.accepts_file_navigation(&owner, source, cx) => {
-                this.start_file_mutations(source.clone(), intents.clone(), cx);
-            }
-            FilesEvent::OpenFile(path) if this.accepts_file_navigation(&owner, source, cx) => {
-                this.add_file_surface(path.clone(), window, cx);
-            }
-            FilesEvent::OpenWebLink(activation) => {
-                if let crate::markdown::render::LinkOutcome::External(url) =
-                    this.activate_session_link(activation, window, cx)
-                {
-                    cx.open_url(&url);
-                }
-            }
-            FilesEvent::ShowAllFilesChanged(show_all) => this.set_files_show_all(*show_all, cx),
-            _ => cx.notify(),
-        });
+            });
         self.files.insert(key.clone(), files);
         self.files_subs.insert(key, sub);
     }

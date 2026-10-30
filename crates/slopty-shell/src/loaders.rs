@@ -17,17 +17,17 @@ use gpui::{
     Styled, Window, canvas, div, point, px,
 };
 
-pub mod status_mark; // the one mark a run's state morphs through
-pub mod copy_glyph; // a copy control's glyph, its check drawn as the copy lands
-
-use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, SLOPTY_PULSE};
-use crate::theme::{GlyphPalette, Theme};
+pub mod copy_glyph;
+pub mod status_mark; // the one mark a run's state morphs through // a copy control's glyph, its check drawn as the copy lands
 
 // Shared with the terminal viewport (`slopty_view_proto::motion`) so both animate the
 // same loaders from the same numbers.
 pub use slopty_view_proto::motion::{
     MARK_CELLS, MARK_SPREAD, MATRIX_SIDE, SLOPTY_CELLS, mark_cell_stagger,
 };
+
+use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SLOPTY_PULSE, SPLASH_OUT};
+use crate::theme::{GlyphPalette, Theme};
 
 /// The animated Slopty mark: the full logo pixel grid with a light wave sweeping tail→head. Each
 /// cell rests dim (opacity 0.08, scale 0.9) and flares to full as the crest passes; per-cell
@@ -45,11 +45,8 @@ pub fn slopty_mark_loader(
     let scale = height_px / 940.0;
     let cell = 100.0 * scale;
     let delta = motion::pulse_delta(&SLOPTY_PULSE, view, cx);
-    div()
-        .relative()
-        .w(px(820.0 * scale))
-        .h(px(height_px))
-        .children(MARK_CELLS.iter().map(move |&(x, y)| {
+    div().relative().w(px(820.0 * scale)).h(px(height_px)).children(MARK_CELLS.iter().map(
+        move |&(x, y)| {
             let stagger = mark_cell_stagger(x, y);
             // Fixed slot; the animated cell breathes inside it (paint-local).
             div()
@@ -69,7 +66,8 @@ pub fn slopty_mark_loader(
                         .opacity(lift_floor(motion::pulse_opacity(phase), floor))
                         .size(px(cell * motion::pulse_scale(phase)))
                 })
-        }))
+        },
+    ))
 }
 
 /// The slopty wave loader: a row of cells pulsing opacity 0.08→1 / scale 0.9→1
@@ -88,27 +86,19 @@ pub fn slopty_loader(
     let floor = theme.spinner_floor(PULSE_FLOOR); // a light floor that keeps its shape
     let slot = cell_px;
     let delta = motion::pulse_delta(&SLOPTY_PULSE, view, cx);
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(slot / 2.0))
-        .children((0..SLOPTY_CELLS).map(move |i| {
+    div().flex().flex_row().items_center().gap(px(slot / 2.0)).children((0..SLOPTY_CELLS).map(
+        move |i| {
             // Fixed slot; the animated cell breathes inside it.
-            div()
-                .size(px(slot))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child({
-                    let phase = motion::staggered_phase(delta, i, PULSE_STAGGER);
-                    div()
-                        .rounded(px(slot / 4.0))
-                        .bg(color)
-                        .opacity(lift_floor(motion::pulse_opacity(phase), floor))
-                        .size(px(slot * motion::pulse_scale(phase)))
-                })
-        }))
+            div().size(px(slot)).flex().items_center().justify_center().child({
+                let phase = motion::staggered_phase(delta, i, PULSE_STAGGER);
+                div()
+                    .rounded(px(slot / 4.0))
+                    .bg(color)
+                    .opacity(lift_floor(motion::pulse_opacity(phase), floor))
+                    .size(px(slot * motion::pulse_scale(phase)))
+            })
+        },
+    ))
 }
 
 pub use slopty_view_proto::motion::{GSPIN_DIM, GSPIN_ROW_TINTS};
@@ -131,28 +121,20 @@ pub fn gradient_spinner(
     // and the cells rest higher (`Theme::spinner_ink`, `Theme::spinner_floor`).
     let tints = gradient_tints(theme);
     let floor = theme.spinner_floor(GSPIN_DIM);
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(cell_px / 2.0))
-        .children((0..MATRIX_SIDE).map(move |row| {
-            let tint = tints[row];
+    div().flex().flex_col().gap(px(cell_px / 2.0)).children((0..MATRIX_SIDE).map(move |row| {
+        let tint = tints[row];
+        div().flex().flex_row().gap(px(cell_px / 2.0)).children((0..MATRIX_SIDE).map(move |col| {
+            // Distance of this cell from the wave origin, normalized
+            // into a phase offset (gradient-spin's `--gspin-phase`).
+            let d = MATRIX_SIDE as f32 - 1.0 - row as f32 + (col as f32 - center).abs();
+            let phase = if max == 0.0 { 0.0 } else { d / (max + 1.0) };
             div()
-                .flex()
-                .flex_row()
-                .gap(px(cell_px / 2.0))
-                .children((0..MATRIX_SIDE).map(move |col| {
-                    // Distance of this cell from the wave origin, normalized
-                    // into a phase offset (gradient-spin's `--gspin-phase`).
-                    let d = MATRIX_SIDE as f32 - 1.0 - row as f32 + (col as f32 - center).abs();
-                    let phase = if max == 0.0 { 0.0 } else { d / (max + 1.0) };
-                    div()
-                        .size(px(cell_px))
-                        .rounded(px(cell_px / 2.0))
-                        .bg(tint)
-                        .opacity(pulse.opacity(phase, floor))
-                }))
+                .size(px(cell_px))
+                .rounded(px(cell_px / 2.0))
+                .bg(tint)
+                .opacity(pulse.opacity(phase, floor))
         }))
+    }))
 }
 
 /// The resting opacity of the slopty wave and mark loaders (`motion::pulse_opacity`'s low end).
@@ -248,9 +230,7 @@ impl RenderOnce for MiniSpinner {
             })
         });
         view.cached(
-            gpui::StyleRefinement::default()
-                .w(px(self.cell_px * 2.5))
-                .h(px(self.cell_px * 4.0)),
+            gpui::StyleRefinement::default().w(px(self.cell_px * 2.5)).h(px(self.cell_px * 4.0)),
         )
     }
 }
@@ -281,30 +261,22 @@ fn mini_spinner_cells(
     const RING: [[usize; COLS]; ROWS] = [[0, 1], [5, 2], [4, 3]];
     const RING_LEN: f32 = (COLS * ROWS) as f32;
     let pulse = motion::activity_pulse(view, cx);
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(cell_px / 2.0))
-        .children((0..ROWS).map(move |row| {
-            let tint = row_tints[row];
+    div().flex().flex_col().gap(px(cell_px / 2.0)).children((0..ROWS).map(move |row| {
+        let tint = row_tints[row];
+        div().flex().flex_row().gap(px(cell_px / 2.0)).children((0..COLS).map(move |col| {
+            let phase = RING[row][col] as f32 / RING_LEN;
             div()
-                .flex()
-                .flex_row()
-                .gap(px(cell_px / 2.0))
-                .children((0..COLS).map(move |col| {
-                    let phase = RING[row][col] as f32 / RING_LEN;
-                    div()
-                        .size(px(cell_px))
-                        .rounded(px(cell_px / 2.0))
-                        .bg(tint)
-                        .opacity(pulse.opacity(phase, floor))
-                }))
+                .size(px(cell_px))
+                .rounded(px(cell_px / 2.0))
+                .bg(tint)
+                .opacity(pulse.opacity(phase, floor))
         }))
+    }))
 }
 
 /// A rounded fill that breathes on the slopty pulse clock between `floor` and
-/// `peak` opacity, filling whatever positioned box it is placed in. Like [`pulse_dot`] it repaints from its own cached
-/// view, so the surrounding chrome stays still.
+/// `peak` opacity, filling whatever positioned box it is placed in. Like [`pulse_dot`] it repaints
+/// from its own cached view, so the surrounding chrome stays still.
 pub fn pulse_glow(
     key: impl Into<SharedString>,
     radius: f32,
@@ -312,15 +284,7 @@ pub fn pulse_glow(
     floor: f32,
     peak: f32,
 ) -> impl IntoElement {
-    PulseGlow {
-        key: key.into(),
-        style: GlowStyle {
-            radius,
-            tint,
-            floor,
-            peak,
-        },
-    }
+    PulseGlow { key: key.into(), style: GlowStyle { radius, tint, floor, peak } }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -370,20 +334,11 @@ struct PulseGlowView {
 
 impl Render for PulseGlowView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let GlowStyle {
-            radius,
-            tint,
-            floor,
-            peak,
-        } = self.style;
+        let GlowStyle { radius, tint, floor, peak } = self.style;
         let delta = motion::pulse_delta_slow(&SLOPTY_PULSE, cx.entity_id(), cx);
         // pulse_opacity spans 0.08..1; renormalise to 0..1 before mapping.
         let wave = (motion::pulse_opacity(delta) - 0.08) / 0.92;
-        div()
-            .size_full()
-            .rounded(px(radius))
-            .bg(tint)
-            .opacity(motion::lerp(floor, peak, wave))
+        div().size_full().rounded(px(radius)).bg(tint).opacity(motion::lerp(floor, peak, wave))
     }
 }
 
@@ -430,10 +385,7 @@ fn progress_arc(
                     // Clockwise from 12 o'clock.
                     let theta = -std::f32::consts::FRAC_PI_2
                         + std::f32::consts::TAU * sweep * (i as f32 / steps as f32);
-                    point(
-                        center.x + px(radius * theta.cos()),
-                        center.y + px(radius * theta.sin()),
-                    )
+                    point(center.x + px(radius * theta.cos()), center.y + px(radius * theta.sin()))
                 };
                 let mut builder = PathBuilder::stroke(px(RING_STROKE));
                 builder.move_to(at(0));
@@ -473,13 +425,7 @@ pub fn splash_overlay(theme: &Theme, fading: bool, view: EntityId, cx: &mut App)
         .gap(px(12.0))
         // Cell 2.5 — the size every other surface runs this spinner at (the
         // "Sending…" strip, the transcript working trailer).
-        .child(gradient_spinner(
-            "boot-splash-spinner",
-            theme,
-            2.5,
-            view,
-            cx,
-        ))
+        .child(gradient_spinner("boot-splash-spinner", theme, 2.5, view, cx))
         .child(
             div()
                 .text_size(crate::typography::ui_rems(12.0))
@@ -511,11 +457,7 @@ pub const PENDING_HOLD: std::time::Duration = std::time::Duration::from_millis(4
 /// "Loading file…" and its like: the mono spinner and muted words, shown only once the load has
 /// run [`PENDING_GRACE`]. `key` names the load, so a new one waits its own grace.
 pub fn pending(key: impl Into<SharedString>, text: impl Into<SharedString>) -> Pending {
-    Pending {
-        key: key.into(),
-        text: text.into(),
-        wait: true,
-    }
+    Pending { key: key.into(), text: text.into(), wait: true }
 }
 
 #[derive(IntoElement)]
@@ -551,7 +493,12 @@ pub enum Delayed {
 /// Whether the place `key` names shows its loader while `loading`: blank for the first
 /// [`PENDING_GRACE`], then the loader, held at least [`PENDING_HOLD`] once shown. Ask it every
 /// time the place draws, loading or not, so it knows when its load ends.
-pub fn delayed(key: impl Into<SharedString>, loading: bool, window: &mut Window, cx: &mut App) -> Delayed {
+pub fn delayed(
+    key: impl Into<SharedString>,
+    loading: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Delayed {
     let key: SharedString = key.into();
     let state = window.use_keyed_state(
         gpui::ElementId::Name(format!("delayed-{key}").into()),
@@ -646,8 +593,9 @@ impl RenderOnce for Pending {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     /// What the window last painted, sorted.
     fn painted(window: &Window) -> Vec<String> {
@@ -669,9 +617,13 @@ mod tests {
 
     impl Render for Host {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .size_full()
-                .child(mini_mono_spinner("spin", 4.0, gpui::black(), cx.entity_id(), cx))
+            div().size_full().child(mini_mono_spinner(
+                "spin",
+                4.0,
+                gpui::black(),
+                cx.entity_id(),
+                cx,
+            ))
         }
     }
 
@@ -709,10 +661,7 @@ mod tests {
         // Every logo cell stays inside [0, SPREAD].
         for &(x, y) in &MARK_CELLS {
             let s = mark_cell_stagger(x, y);
-            assert!(
-                (0.0..=MARK_SPREAD + 1e-6).contains(&s),
-                "cell ({x},{y}) stagger {s}"
-            );
+            assert!((0.0..=MARK_SPREAD + 1e-6).contains(&s), "cell ({x},{y}) stagger {s}");
         }
     }
 

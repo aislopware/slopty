@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Isolated native Mermaid adapter. Call only on a background executor.
-use crate::theme::Theme;
 use std::sync::Mutex;
+
+use crate::theme::Theme;
 
 pub const ENGINE_VERSION: &str = "merman/0.9"; // merman draws the diagrams.
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024;
@@ -48,11 +49,7 @@ impl Palette {
         let canvas = Self::plate(theme);
         // Nodes are cards lifted off the fence: white in light, one ink step
         // up in dark, where the panel is already the deepest plane.
-        let node = if dark {
-            canvas.blend(theme.ink(0.06))
-        } else {
-            theme.bg
-        };
+        let node = if dark { canvas.blend(theme.ink(0.06)) } else { theme.bg };
         Self {
             dark,
             font: theme.font_sans.to_string(),
@@ -82,9 +79,7 @@ impl Palette {
 pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
     if source.len() > MAX_SOURCE_BYTES
         || source.lines().count() > 256
-        || source
-            .split(|c: char| c.is_whitespace() || matches!(c, ';' | '>' | '{' | '}'))
-            .count()
+        || source.split(|c: char| c.is_whitespace() || matches!(c, ';' | '>' | '{' | '}')).count()
             > 2048
     {
         return Err("Diagram exceeds preview complexity limit".into());
@@ -109,11 +104,7 @@ pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
             ..Default::default()
         };
         let output = renderer
-            .render(merman::RenderRequest::svg(
-                source,
-                merman::OperationControl::new(),
-                request,
-            ))
+            .render(merman::RenderRequest::svg(source, merman::OperationControl::new(), request))
             .map_err(|e| e.to_string())?;
         let merman::RenderOutput::Svg(Some(svg)) = output else {
             return Err("Not a Mermaid diagram".to_owned());
@@ -189,10 +180,8 @@ fn site_config(palette: &Palette) -> merman::MermaidConfig {
         ("pieStrokeColor", p.border.as_str()),
         ("pieOuterStrokeColor", p.border.as_str()),
     ];
-    let mut variables: serde_json::Map<String, serde_json::Value> = colors
-        .into_iter()
-        .map(|(name, value)| (name.to_owned(), value.into()))
-        .collect();
+    let mut variables: serde_json::Map<String, serde_json::Value> =
+        colors.into_iter().map(|(name, value)| (name.to_owned(), value.into())).collect();
     variables.insert("darkMode".to_owned(), p.dark.into());
     merman::MermaidConfig::from_value(serde_json::json!({
         "theme": "base",
@@ -297,9 +286,7 @@ fn text_width(text: &str, size: f64, mono: bool, bold: bool) -> f64 {
     let Some(face) = face else {
         return text.chars().count() as f64 * 0.6 * size;
     };
-    text.chars()
-        .map(|c| face.advances.get(&c).copied().unwrap_or(face.fallback))
-        .sum::<f64>()
+    text.chars().map(|c| face.advances.get(&c).copied().unwrap_or(face.fallback)).sum::<f64>()
         * size
 }
 
@@ -307,30 +294,12 @@ fn text_width(text: &str, size: f64, mono: bool, bold: bool) -> f64 {
 mod tests {
     use super::*;
     const CORPUS: &[(&str, &str)] = &[
-        (
-            "flowchart",
-            include_str!("../../fixtures/markdown-preview/flowchart.mmd"),
-        ),
-        (
-            "sequence",
-            include_str!("../../fixtures/markdown-preview/sequence.mmd"),
-        ),
-        (
-            "class",
-            include_str!("../../fixtures/markdown-preview/class.mmd"),
-        ),
-        (
-            "state",
-            include_str!("../../fixtures/markdown-preview/state.mmd"),
-        ),
-        (
-            "er",
-            include_str!("../../fixtures/markdown-preview/er.mmd"),
-        ),
-        (
-            "gantt",
-            include_str!("../../fixtures/markdown-preview/gantt.mmd"),
-        ),
+        ("flowchart", include_str!("../../fixtures/markdown-preview/flowchart.mmd")),
+        ("sequence", include_str!("../../fixtures/markdown-preview/sequence.mmd")),
+        ("class", include_str!("../../fixtures/markdown-preview/class.mmd")),
+        ("state", include_str!("../../fixtures/markdown-preview/state.mmd")),
+        ("er", include_str!("../../fixtures/markdown-preview/er.mmd")),
+        ("gantt", include_str!("../../fixtures/markdown-preview/gantt.mmd")),
     ];
     #[test]
     fn corpus_renders_through_gpui_in_both_themes() {

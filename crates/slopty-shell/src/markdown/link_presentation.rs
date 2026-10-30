@@ -1,9 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Width-dependent presentation; selection offsets always refer to original text.
-use super::render::FlatText;
-use gpui::{SharedString, TextRun};
 use std::ops::Range;
+
+use gpui::{SharedString, TextRun};
 use unicode_segmentation::UnicodeSegmentation;
+
+use super::render::FlatText;
 
 /// Maps offsets between a stage's input text and its shown text. `omissions`
 /// pairs `(input range, shown range)` in order; the shown span can be SHORTER
@@ -34,6 +36,7 @@ impl OffsetMap {
         }
         displayed.saturating_add_signed(shift)
     }
+
     /// This stage only: shown offset for an input-text offset.
     fn local_displayed(&self, original: usize) -> usize {
         let mut shift: isize = 0;
@@ -48,6 +51,7 @@ impl OffsetMap {
         }
         original.saturating_add_signed(-shift)
     }
+
     /// This stage only: shown range for an input range — an input range that
     /// overlaps a replaced span expands to cover the replacement.
     pub(crate) fn local_displayed_range(&self, range: Range<usize>) -> Range<usize> {
@@ -60,21 +64,19 @@ impl OffsetMap {
         }
         result
     }
+
     /// Shown offset → source-text offset (all stages).
     pub fn original(&self, displayed: usize) -> usize {
         let local = self.local_original(displayed);
-        self.prior
-            .as_ref()
-            .map_or(local, |prior| prior.original(local))
+        self.prior.as_ref().map_or(local, |prior| prior.original(local))
     }
+
     /// Source-text offset → shown offset (all stages).
     pub fn displayed(&self, original: usize) -> usize {
-        let mid = self
-            .prior
-            .as_ref()
-            .map_or(original, |prior| prior.displayed(original));
+        let mid = self.prior.as_ref().map_or(original, |prior| prior.displayed(original));
         self.local_displayed(mid)
     }
+
     /// Source-text range → shown range (all stages).
     pub fn displayed_range(&self, range: Range<usize>) -> Range<usize> {
         let mid = match &self.prior {
@@ -168,19 +170,12 @@ pub fn truncate(
     runs.extend(slice_runs(&flat.runs, at..flat.text.len()));
     // This stage's ranges are in `flat.text` coordinates — map them locally;
     // `prior` then chains through any earlier substitution to the source.
-    offsets.prior = flat
-        .original
-        .as_ref()
-        .map(|original| Box::new(original.offsets.clone()));
+    offsets.prior = flat.original.as_ref().map(|original| Box::new(original.offsets.clone()));
     let shown = |range: &Range<usize>| offsets.local_displayed_range(range.clone());
     FlatText {
         text: text.into(),
         runs,
-        links: flat
-            .links
-            .iter()
-            .map(|(r, url)| (shown(r), url.clone()))
-            .collect(),
+        links: flat.links.iter().map(|(r, url)| (shown(r), url.clone())).collect(),
         code_ranges: flat.code_ranges.iter().map(shown).collect(),
         file_glyphs: flat.file_glyphs.iter().map(shown).collect(),
         // A formula cut away with its label leaves no slot to paint over.
@@ -188,15 +183,9 @@ pub fn truncate(
             .math
             .iter()
             .filter(|slot| {
-                !offsets
-                    .omissions
-                    .iter()
-                    .any(|(omitted, _)| omitted.contains(&slot.range.start))
+                !offsets.omissions.iter().any(|(omitted, _)| omitted.contains(&slot.range.start))
             })
-            .map(|slot| super::math::MathSlot {
-                range: shown(&slot.range),
-                ..slot.clone()
-            })
+            .map(|slot| super::math::MathSlot { range: shown(&slot.range), ..slot.clone() })
             .collect(),
         original: Some(OriginalText {
             text: flat
@@ -213,9 +202,7 @@ fn inside_slot(flat: &FlatText, at: usize) -> bool {
     // Slots are in text order and disjoint: the first ending past `at` is the
     // only one that can hold it (asked per character, so no scan).
     let i = flat.math.partition_point(|slot| slot.range.end <= at);
-    flat.math
-        .get(i)
-        .is_some_and(|slot| slot.range.start < at && at < slot.range.end)
+    flat.math.get(i).is_some_and(|slot| slot.range.start < at && at < slot.range.end)
 }
 
 /// The run an ellipsis standing for `omitted` is styled with: the first
@@ -235,14 +222,16 @@ fn ellipsis_run(flat: &FlatText, omitted: Range<usize>) -> TextRun {
     run
 }
 
-use super::render::{INLINE_CODE_INSET_Y, RenderOptions, range_rects};
-use crate::theme::Theme;
+use std::rc::Rc;
+
+use gpui::prelude::*;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId,
-    InspectorElementId, LayoutId, Pixels, Size, TextLayout, Window, div, point, prelude::*, px,
-    size,
+    InspectorElementId, LayoutId, Pixels, Size, TextLayout, Window, div, point, px, size,
 };
-use std::rc::Rc;
+
+use super::render::{INLINE_CODE_INSET_Y, RenderOptions, range_rects};
+use crate::theme::Theme;
 
 pub struct ResponsiveText {
     pub flat: Rc<FlatText>,
@@ -263,10 +252,7 @@ pub(super) fn present(
             .text_system()
             .shape_text(text.to_owned().into(), font_size, runs, None, None)
             .map(|lines| {
-                lines
-                    .iter()
-                    .map(|line| f32::from(line.size(font_size).width))
-                    .fold(0., f32::max)
+                lines.iter().map(|line| f32::from(line.size(font_size).width)).fold(0., f32::max)
             })
             .unwrap_or(f32::INFINITY)
     })
@@ -304,18 +290,10 @@ fn with_file_link_glyphs(flat: &FlatText, opts: &RenderOptions) -> FlatText {
     // point itself resolves to its "before" side so a range ending on it
     // never swallows its own slot.
     let shift_before = |offset: usize| -> usize {
-        insertions
-            .iter()
-            .filter(|at| **at < offset)
-            .map(|_| FILE_GLYPH_SLOT.len())
-            .sum()
+        insertions.iter().filter(|at| **at < offset).map(|_| FILE_GLYPH_SLOT.len()).sum()
     };
     let shift_through = |offset: usize| -> usize {
-        insertions
-            .iter()
-            .filter(|at| **at <= offset)
-            .map(|_| FILE_GLYPH_SLOT.len())
-            .sum()
+        insertions.iter().filter(|at| **at <= offset).map(|_| FILE_GLYPH_SLOT.len()).sum()
     };
     let map_range = |range: &Range<usize>| {
         range.start + shift_through(range.start)..range.end + shift_before(range.end)
@@ -347,35 +325,23 @@ fn with_file_link_glyphs(flat: &FlatText, opts: &RenderOptions) -> FlatText {
         let start = text.len();
         text.push_str(FILE_GLYPH_SLOT);
         runs.push(slot_runs[ix].clone());
-        offsets
-            .omissions
-            .push((*insert_at..*insert_at, start..text.len()));
+        offsets.omissions.push((*insert_at..*insert_at, start..text.len()));
         glyphs.push(start..text.len());
         at = *insert_at;
     }
     text.push_str(&flat.text[at..]);
     runs.extend(slice_runs(&flat.runs, at..flat.text.len()));
-    offsets.prior = flat
-        .original
-        .as_ref()
-        .map(|original| Box::new(original.offsets.clone()));
+    offsets.prior = flat.original.as_ref().map(|original| Box::new(original.offsets.clone()));
     FlatText {
         text: text.into(),
         runs,
-        links: flat
-            .links
-            .iter()
-            .map(|(range, url)| (map_range(range), url.clone()))
-            .collect(),
+        links: flat.links.iter().map(|(range, url)| (map_range(range), url.clone())).collect(),
         code_ranges: flat.code_ranges.iter().map(&map_range).collect(),
         file_glyphs: glyphs,
         math: flat
             .math
             .iter()
-            .map(|slot| super::math::MathSlot {
-                range: map_range(&slot.range),
-                ..slot.clone()
-            })
+            .map(|slot| super::math::MathSlot { range: map_range(&slot.range), ..slot.clone() })
             .collect(),
         original: Some(OriginalText {
             text: flat
@@ -402,19 +368,23 @@ fn paragraph_is_sole_file_link(flat: &FlatText, workspace_root: Option<&str>) ->
 }
 impl IntoElement for ResponsiveText {
     type Element = Self;
+
     fn into_element(self) -> Self {
         self
     }
 }
 impl Element for ResponsiveText {
-    type RequestLayoutState = ();
     type PrepaintState = AnyElement;
+    type RequestLayoutState = ();
+
     fn id(&self) -> Option<ElementId> {
         None
     }
+
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
         None
     }
+
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -424,11 +394,8 @@ impl Element for ResponsiveText {
     ) -> (LayoutId, ()) {
         let style = window.text_style();
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line_height = window.pixel_snap(
-            style
-                .line_height
-                .to_pixels(font_size.into(), window.rem_size()),
-        );
+        let line_height =
+            window.pixel_snap(style.line_height.to_pixels(font_size.into(), window.rem_size()));
         let flat = self.flat.clone();
         let opts = self.opts.clone();
         let id = window.request_measured_layout(
@@ -459,6 +426,7 @@ impl Element for ResponsiveText {
         );
         (id, ())
     }
+
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -480,6 +448,7 @@ impl Element for ResponsiveText {
         );
         child
     }
+
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -506,14 +475,15 @@ pub(crate) struct FileLinkGlyphs {
 
 impl IntoElement for FileLinkGlyphs {
     type Element = Self;
+
     fn into_element(self) -> Self {
         self
     }
 }
 
 impl Element for FileLinkGlyphs {
-    type RequestLayoutState = ();
     type PrepaintState = Vec<AnyElement>;
+    type RequestLayoutState = ();
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone().into())
@@ -546,9 +516,8 @@ impl Element for FileLinkGlyphs {
         let theme = Theme::of(cx).clone();
         let mut overlays = Vec::new();
         for slot in &self.slots {
-            let Some(rect) = range_rects(&self.layout, slot, 0.0, INLINE_CODE_INSET_Y)
-                .first()
-                .copied()
+            let Some(rect) =
+                range_rects(&self.layout, slot, 0.0, INLINE_CODE_INSET_Y).first().copied()
             else {
                 continue;
             };
@@ -594,10 +563,8 @@ impl Element for FileLinkGlyphs {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        parser::{InlineRun, InlineStyle},
-        render::flatten_runs,
-    };
+    use super::super::parser::{InlineRun, InlineStyle};
+    use super::super::render::flatten_runs;
     use super::*;
     fn link(text: &str) -> InlineRun {
         InlineRun {
@@ -617,10 +584,7 @@ mod tests {
         use super::super::render::{LinkOutcome, LinkUi};
         let run = |text: &str, link: Option<&str>| InlineRun {
             text: text.into(),
-            style: InlineStyle {
-                link: link.map(str::to_owned),
-                ..Default::default()
-            },
+            style: InlineStyle { link: link.map(str::to_owned), ..Default::default() },
         };
         let flat = flatten_runs(
             &[
@@ -662,11 +626,7 @@ mod tests {
 
         // A paragraph that is nothing but one file link stays the sole-file
         // row (icon tile), never the trailing glyph.
-        let sole = flatten_runs(
-            &[run("src/lib.rs", Some("src/lib.rs"))],
-            &Theme::dark(),
-            false,
-        );
+        let sole = flatten_runs(&[run("src/lib.rs", Some("src/lib.rs"))], &Theme::dark(), false);
         assert!(with_file_link_glyphs(&sole, &opts).file_glyphs.is_empty());
 
         // Without a root snapshot no link grows a glyph (previews, web-only
@@ -678,11 +638,7 @@ mod tests {
             file_roots: None,
             handler: Rc::new(|_, _, _| LinkOutcome::Rejected),
         });
-        assert!(
-            with_file_link_glyphs(&flat, &no_roots)
-                .file_glyphs
-                .is_empty()
-        );
+        assert!(with_file_link_glyphs(&flat, &no_roots).file_glyphs.is_empty());
     }
     #[test]
     fn truncation_preserves_graphemes_destinations_and_original_selection() {
@@ -695,10 +651,7 @@ mod tests {
             assert_eq!(original.text.as_ref(), label);
             assert_eq!(original.offsets.original(shown.text.len()), label.len());
             assert_eq!(shown.links[0].1, flat.links[0].1);
-            assert_eq!(
-                shown.runs.iter().map(|r| r.len).sum::<usize>(),
-                shown.text.len()
-            );
+            assert_eq!(shown.runs.iter().map(|r| r.len).sum::<usize>(), shown.text.len());
             for (i, _) in shown.text.char_indices() {
                 assert!(label.is_char_boundary(original.offsets.original(i)));
             }
@@ -712,10 +665,7 @@ mod tests {
         let flat = flatten_runs(
             &[
                 link(source),
-                InlineRun {
-                    text: " between ".into(),
-                    style: Default::default(),
-                },
+                InlineRun { text: " between ".into(), style: Default::default() },
                 link("https://second.example/long/path/to/resource"),
             ],
             &Theme::dark(),
@@ -725,10 +675,7 @@ mod tests {
         let map = &shown.original.as_ref().unwrap().offsets;
         assert_eq!(map.omissions.len(), 2);
         let first = &shown.links[0].0;
-        assert_eq!(
-            &flat.text[map.original(first.start)..map.original(first.end)],
-            source
-        );
+        assert_eq!(&flat.text[map.original(first.start)..map.original(first.end)], source);
         assert_eq!(&flat.text[map.original(0)..map.original(5)], "https");
         let end = map.original(shown.text.len());
         let spans = super::super::selection::resolve_spans(
@@ -736,25 +683,15 @@ mod tests {
             (0, 0),
             (1, 4),
         );
-        let copied = spans
-            .iter()
-            .map(|span| &span.text[span.range.clone()])
-            .collect::<Vec<_>>()
-            .join("\n");
+        let copied =
+            spans.iter().map(|span| &span.text[span.range.clone()]).collect::<Vec<_>>().join("\n");
         assert_eq!(copied, format!("{}\nnext", &flat.text[..end]));
         let omission = &map.omissions[0];
-        assert_eq!(
-            map.displayed_range(omission.0.start + 1..omission.0.end - 1),
-            omission.1
-        );
+        assert_eq!(map.displayed_range(omission.0.start + 1..omission.0.end - 1), omission.1);
     }
     #[test]
     fn widening_and_streaming_recompute_presentation_without_stale_offsets() {
-        let flat = flatten_runs(
-            &[link("https://example.com/a/long/link")],
-            &Theme::dark(),
-            false,
-        );
+        let flat = flatten_runs(&[link("https://example.com/a/long/link")], &Theme::dark(), false);
         let narrow = truncate(&flat, 15., measured);
         let wide = truncate(&flat, 1000., measured);
         assert!(narrow.text.ends_with('…'));
@@ -766,10 +703,7 @@ mod tests {
             false,
         );
         let next = truncate(&growing, 15., measured);
-        assert_eq!(
-            next.original.unwrap().offsets.original(next.text.len()),
-            growing.text.len()
-        );
+        assert_eq!(next.original.unwrap().offsets.original(next.text.len()), growing.text.len());
     }
     #[test]
     fn styled_link_runs_are_trimmed_without_corrupting_offsets() {
@@ -779,9 +713,6 @@ mod tests {
         let shown = truncate(&flat, 24., measured);
         assert_eq!(shown.links.len(), 1);
         assert!(shown.runs.last().unwrap().font.weight.0 >= gpui::FontWeight::SEMIBOLD.0);
-        assert_eq!(
-            shown.runs.iter().map(|r| r.len).sum::<usize>(),
-            shown.text.len()
-        );
+        assert_eq!(shown.runs.iter().map(|r| r.len).sum::<usize>(), shown.text.len());
     }
 }

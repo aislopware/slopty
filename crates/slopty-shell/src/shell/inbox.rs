@@ -10,10 +10,10 @@
 use std::cell::Cell;
 
 use chrono::{DateTime, Utc};
-use gpui::Focusable as _;
+use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, Context, Entity, FocusHandle, Pixels, Point, SharedString, Subscription,
-    Window, div, prelude::*, px,
+    AnyElement, Bounds, Context, Entity, FocusHandle, Focusable as _, Pixels, Point, SharedString,
+    Subscription, Window, div, px,
 };
 use slopty_view_proto::Chat;
 
@@ -56,7 +56,9 @@ pub(super) fn entries(state: &AppState, now: DateTime<Utc>) -> Vec<Entry> {
             let mark = Mark::of(status, session, now);
             let since = match &mark {
                 Mark::AtRest => return None,
-                Mark::NeedsYou(_) | Mark::AtWork => session.and_then(|session| session.status_since),
+                Mark::NeedsYou(_) | Mark::AtWork => {
+                    session.and_then(|session| session.status_since)
+                }
                 Mark::Failed | Mark::DoneUnseen => None,
             }
             .unwrap_or_else(|| touched(chat));
@@ -79,7 +81,10 @@ pub(super) fn entries(state: &AppState, now: DateTime<Utc>) -> Vec<Entry> {
             };
             Some(Entry {
                 chat_id: chat.id.clone(),
-                title: crate::transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
+                title: crate::transcript::single_line(
+                    chat.title.as_deref().unwrap_or("New session"),
+                )
+                .into(),
                 line,
                 mark,
                 since,
@@ -135,7 +140,8 @@ thread_local! {
 
 /// Under the eye, its right edge the inbox's: the eye stands at the titlebar's trailing end.
 fn under_eye() -> Option<Point<Pixels>> {
-    EYE.with(Cell::get).map(|bounds| gpui::point(bounds.right() - px(INBOX_WIDTH), bounds.bottom() + px(4.0)))
+    EYE.with(Cell::get)
+        .map(|bounds| gpui::point(bounds.right() - px(INBOX_WIDTH), bounds.bottom() + px(4.0)))
 }
 
 /// The inbox's width (Rex's eye popover stands 300 to 360 pt wide).
@@ -175,7 +181,12 @@ impl Shell {
     /// The rows the inbox shows at the shell's clock, filtered by what is typed in it.
     fn inbox_rows(&self, cx: &gpui::App) -> Vec<Entry> {
         let all = entries(self.state.read(cx), crate::clock::utc(cx));
-        let typed = self.inbox.open.as_ref().map(|open| open.search.read(cx).text().to_owned()).unwrap_or_default();
+        let typed = self
+            .inbox
+            .open
+            .as_ref()
+            .map(|open| open.search.read(cx).text().to_owned())
+            .unwrap_or_default();
         filtered(all, &typed)
     }
 
@@ -193,7 +204,8 @@ impl Shell {
         }
         self.command_palette = None;
         crate::live::chrome::release_held_keys(cx);
-        let search = cx.new(|cx| ComposerInput::with_context("Filter\u{2026}", "PaletteSearch", cx));
+        let search =
+            cx.new(|cx| ComposerInput::with_context("Filter\u{2026}", "PaletteSearch", cx));
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 if let Some(open) = this.inbox.open.as_mut() {
@@ -248,10 +260,15 @@ impl Shell {
     /// The titlebar's eye: the inbox's door, with a dot in the loudest calling row's hue while
     /// anything calls. `ink` is the titlebar's theme, inked for the ground under the row; H's
     /// row places it at its trailing end.
-    pub(super) fn render_inbox_button(&mut self, ink: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_inbox_button(
+        &mut self,
+        ink: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let calls = entries(self.state.read(cx), crate::clock::utc(cx));
         let calling = |entry: &&Entry| entry.mark.urgency() > Mark::AtWork.urgency();
-        let loudest = super::marks::loudest(calls.iter().filter(calling).map(|entry| &entry.mark)).cloned();
+        let loudest =
+            super::marks::loudest(calls.iter().filter(calling).map(|entry| &entry.mark)).cloned();
         let waiting = calls.iter().filter(calling).count();
         let dot = loudest.as_ref().and_then(|mark| mark.hue(ink)).map(|hue| {
             div()
@@ -286,7 +303,11 @@ impl Shell {
     }
 
     /// The inbox under the eye, while it is up.
-    pub(super) fn render_inbox(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_inbox(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         // Under the eye; where no eye is drawn (a phone's list), under the titlebar's end.
         let position = under_eye().unwrap_or_else(|| {
@@ -309,7 +330,9 @@ impl Shell {
             let hover_id = row.chat_id.clone();
             children.push(
                 inbox_row(row, ix == active, &typed, now, &theme)
-                    .on_click(cx.listener(move |this, _, _, cx| this.land_from_inbox(id.clone(), cx)))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.land_from_inbox(id.clone(), cx)),
+                    )
                     .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
                         if let Some(open) = this.inbox.open.as_mut()
                             && open.active.as_deref() != Some(hover_id.as_str())
@@ -361,7 +384,9 @@ impl Shell {
                 }
                 cx.stop_propagation();
             }))
-            .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_inbox(Some(window), cx)))
+            .on_mouse_down_out(
+                cx.listener(|this, _, window, cx| this.close_inbox(Some(window), cx)),
+            )
             .child(body)
             // The filter at its foot, as Rex's.
             .child(
@@ -375,7 +400,13 @@ impl Shell {
                     .border_t_1()
                     .border_color(crate::theme::hairline(0.06))
                     .child(popover::palette_search_icon(&theme))
-                    .child(div().flex_1().min_w_0().text_size(crate::typography::ui_rems(13.0)).child(search)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(crate::typography::ui_rems(13.0))
+                            .child(search),
+                    ),
             )
             .into_any_element();
         Some(popover::menu_at("inbox-menu", position, card, None))
@@ -384,9 +415,17 @@ impl Shell {
 
 /// One row of the inbox: the program's mark, the title over the need or last line, and the
 /// state's mark over its age.
-fn inbox_row(row: &Entry, active: bool, typed: &str, now: DateTime<Utc>, theme: &Theme) -> gpui::Stateful<gpui::Div> {
-    let brand = row.harness.map(crate::pickers::harness_brand_icon).unwrap_or((icons::TERMINAL, None));
-    let program = icon(brand.0).size(px(14.0)).flex_none().text_color(brand.1.unwrap_or(theme.text_muted));
+fn inbox_row(
+    row: &Entry,
+    active: bool,
+    typed: &str,
+    now: DateTime<Utc>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    let brand =
+        row.harness.map(crate::pickers::harness_brand_icon).unwrap_or((icons::TERMINAL, None));
+    let program =
+        icon(brand.0).size(px(14.0)).flex_none().text_color(brand.1.unwrap_or(theme.text_muted));
     let age: SharedString = crate::state::format_time_ago(row.since, now).into();
     let mark = super::marks::mark_element(
         SharedString::from(format!("inbox-mark-{}", row.chat_id)),
@@ -395,11 +434,17 @@ fn inbox_row(row: &Entry, active: bool, typed: &str, now: DateTime<Utc>, theme: 
         crate::loaders::status_mark::MARK_SMALL,
         theme.bg,
     );
-    let said = [Some(row.title.to_string()), row.mark.word().map(str::to_owned), row.line.as_ref().map(ToString::to_string), row.place.as_ref().map(ToString::to_string), Some(age.to_string())]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(", ");
+    let said = [
+        Some(row.title.to_string()),
+        row.mark.word().map(str::to_owned),
+        row.line.as_ref().map(ToString::to_string),
+        row.place.as_ref().map(ToString::to_string),
+        Some(age.to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ");
     let words = (!typed.trim().is_empty()).then_some(typed);
     popover::menu_row(theme, active, format!("inbox-row-{}", row.chat_id))
         .id(SharedString::from(format!("inbox-row-{}", row.chat_id)))
@@ -420,7 +465,11 @@ fn inbox_row(row: &Entry, active: bool, typed: &str, now: DateTime<Utc>, theme: 
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
-                .child(div().truncate().child(popover::search_highlight(row.title.clone(), words, theme)))
+                .child(div().truncate().child(popover::search_highlight(
+                    row.title.clone(),
+                    words,
+                    theme,
+                )))
                 .children(row.line.clone().map(|line| {
                     div()
                         .truncate()
@@ -430,28 +479,22 @@ fn inbox_row(row: &Entry, active: bool, typed: &str, now: DateTime<Utc>, theme: 
                 })),
         )
         .child(
-            div()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .items_end()
-                .gap(px(4.0))
-                .children(mark)
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .font_features(crate::typography::tabular())
-                        .text_color(theme.text_faint)
-                        .child(age),
-                ),
+            div().flex_none().flex().flex_col().items_end().gap(px(4.0)).children(mark).child(
+                div()
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .font_features(crate::typography::tabular())
+                    .text_color(theme.text_faint)
+                    .child(age),
+            ),
         )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::TimeDelta;
     use slopty_view_proto::{Session, SessionStatus, SessionWait};
+
+    use super::*;
 
     fn chat(id: &str, device: &str, touched: i64, seen: bool, now: DateTime<Utc>) -> Chat {
         let last = now - TimeDelta::minutes(touched);
@@ -490,7 +533,10 @@ mod tests {
             chat("ask-old", "local", 1, true, now),
         ];
         let mut old = session("ask-old", SessionStatus::AwaitingInput, 9, now);
-        old.waiting_on = Some(SessionWait { kind: SessionWait::APPROVAL.into(), summary: Some("run cargo test".into()) });
+        old.waiting_on = Some(SessionWait {
+            kind: SessionWait::APPROVAL.into(),
+            summary: Some("run cargo test".into()),
+        });
         state.apply_sessions(vec![
             session("work", SessionStatus::Working, 5, now),
             session("ask-new", SessionStatus::AwaitingInput, 2, now),
@@ -507,7 +553,11 @@ mod tests {
         let rows = entries(&state(now), now);
         let ids: Vec<&str> = rows.iter().map(|row| row.chat_id.as_str()).collect();
         assert_eq!(ids, ["ask-old", "ask-new", "done", "work"]);
-        assert!(rows[0].line.as_deref().is_some_and(|line| line.contains("run cargo test")), "{:?}", rows[0].line);
+        assert!(
+            rows[0].line.as_deref().is_some_and(|line| line.contains("run cargo test")),
+            "{:?}",
+            rows[0].line
+        );
         assert_eq!(rows[2].line.as_deref(), Some("done said this"));
         assert_eq!(rows[2].mark, Mark::DoneUnseen);
     }

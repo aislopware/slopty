@@ -61,8 +61,8 @@ impl WindowGround {
 #[cfg(test)]
 mod tests {
     use gpui::{Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext};
-    use tempfile::TempDir;
     use slopty_shell_theme::{AccentSelection, SurfacePreference, ThemeSelection};
+    use tempfile::TempDir;
 
     use super::*;
     use crate::appearance::{self, AppearanceMode};
@@ -91,14 +91,24 @@ mod tests {
 
     /// The app in `mode`, and a window over no session; the settings the mode is written to
     /// live in the directory, kept for as long as the test runs.
-    fn start(mode: AppearanceMode, cx: &mut TestAppContext) -> (TempDir, Entity<Grounded>, &mut VisualTestContext) {
+    fn start(
+        mode: AppearanceMode,
+        cx: &mut TestAppContext,
+    ) -> (TempDir, Entity<Grounded>, &mut VisualTestContext) {
         let dir = tempfile::tempdir().expect("a settings directory");
         cx.update(|cx| {
             gpui_base::init(cx);
             crate::settings::init(Default::default(), dir.path(), cx);
-            appearance::init(mode, ThemeSelection::default(), AccentSelection::default(), SurfacePreference::Opaque, cx);
+            appearance::init(
+                mode,
+                ThemeSelection::default(),
+                AccentSelection::default(),
+                SurfacePreference::Opaque,
+                cx,
+            );
         });
-        let (view, cx) = cx.add_window_view(|_, _| Grounded { ground: None, worn: WindowGround::default() });
+        let (view, cx) =
+            cx.add_window_view(|_, _| Grounded { ground: None, worn: WindowGround::default() });
         (dir, view, cx)
     }
 
@@ -126,7 +136,11 @@ mod tests {
         show(&view, Some(base03()), cx);
         assert_eq!(window_appearance(cx), Appearance::Dark, "the window wears the program's dark");
         assert_eq!(theme(cx), Appearance::Light, "the theme stays the app's");
-        assert_eq!(cx.update(|_, cx| crate::appearance::app(cx)), Appearance::Light, "so does the app");
+        assert_eq!(
+            cx.update(|_, cx| crate::appearance::app(cx)),
+            Appearance::Light,
+            "so does the app"
+        );
 
         let own_ground = cx.update(|_, cx| Theme::of(cx).terminal.background);
         show(&view, Some(own_ground), cx);
@@ -168,7 +182,10 @@ mod tests {
         cx.update(|_, cx| appearance::set_mode(AppearanceMode::Light, cx));
         cx.run_until_parked();
         assert_eq!((theme(cx), window_appearance(cx)), (Appearance::Light, Appearance::Dark));
-        assert_eq!(view.read_with(cx, |view, _| view.worn.worn), Some(Some(WindowAppearance::Dark)));
+        assert_eq!(
+            view.read_with(cx, |view, _| view.worn.worn),
+            Some(Some(WindowAppearance::Dark))
+        );
 
         // Following the system again is the system's dark.
         cx.update(|_, cx| appearance::set_mode(AppearanceMode::System, cx));
@@ -186,9 +203,15 @@ mod tests {
         assert_eq!(of_ground(gpui::rgb(0x0000ff).into()), Appearance::Dark);
         // Pure yellow's luma is 0.886.
         assert_eq!(of_ground(gpui::rgb(0xffff00).into()), Appearance::Light);
-        assert_eq!(own(Some(base03()), Appearance::Light, Appearance::Light), Some(WindowAppearance::Dark));
+        assert_eq!(
+            own(Some(base03()), Appearance::Light, Appearance::Light),
+            Some(WindowAppearance::Dark)
+        );
         assert_eq!(own(Some(base03()), Appearance::Dark, Appearance::Dark), None);
-        assert_eq!(own(Some(base3()), Appearance::Dark, Appearance::Dark), Some(WindowAppearance::Light));
+        assert_eq!(
+            own(Some(base3()), Appearance::Dark, Appearance::Dark),
+            Some(WindowAppearance::Light)
+        );
         assert_eq!(own(None, Appearance::Light, Appearance::Light), None);
         assert_eq!(
             own(None, Appearance::Light, Appearance::Dark),

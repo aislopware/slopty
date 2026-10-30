@@ -1,7 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Destination disclosure is local text only. Never fetch link previews.
+use gpui::prelude::*;
+use gpui::{AnyElement, App, Context, Render, SharedString, Window, div, px};
+
 use crate::theme::Theme;
-use gpui::{AnyElement, App, Context, Render, SharedString, Window, div, prelude::*, px};
 
 pub struct Destination(
     pub String,
@@ -13,10 +15,7 @@ impl Render for Destination {
     }
 }
 fn viewport_limits(width: f32, height: f32) -> (f32, f32) {
-    (
-        (width - 24.).clamp(1., 360.),
-        (height - 80.).clamp(1., 160.),
-    )
+    ((width - 24.).clamp(1., 360.), (height - 80.).clamp(1., 160.))
 }
 /// Invisible break opportunities let even a single long path segment wrap.
 /// This presentation string never replaces the original link destination.
@@ -31,21 +30,14 @@ pub fn destination_card(
     cx: &App,
 ) -> AnyElement {
     let theme = Theme::of(cx);
-    let (max_width, height) = viewport_limits(
-        window.viewport_size().width.into(),
-        window.viewport_size().height.into(),
-    );
+    let (max_width, height) =
+        viewport_limits(window.viewport_size().width.into(), window.viewport_size().height.into());
     let text: SharedString = breakable_url(url).into();
     // GPUI measures hover tooltips with min-content constraints. Use the
     // shaped text width so short URLs stay on one line despite wrap points.
     let natural_width = window
         .text_system()
-        .shape_line(
-            text.clone(),
-            px(11.),
-            &[window.text_style().to_run(text.len())],
-            None,
-        )
+        .shape_line(text.clone(), px(11.), &[window.text_style().to_run(text.len())], None)
         .width();
     let width = (f32::from(natural_width).ceil() + 14.).min(max_width);
     div()
@@ -70,13 +62,7 @@ pub fn destination_card(
         .text_color(theme.text)
         .flex()
         .flex_col()
-        .child(
-            div()
-                .id("web-destination-scroll")
-                .max_h(px(height))
-                .overflow_y_scroll()
-                .child(text),
-        )
+        .child(div().id("web-destination-scroll").max_h(px(height)).overflow_y_scroll().child(text))
         .into_any_element()
 }
 #[cfg(test)]

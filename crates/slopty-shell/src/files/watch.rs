@@ -1,10 +1,13 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
+use std::time::Duration;
 
 use gpui::Context;
 use slopty_view_proto::{WorkspaceFileChangeKind, WorkspaceFileChanges};
 
-use super::{FilesEvent, FilesSurface, client::WorkspaceFilesClient, model::parent_path};
+use super::client::WorkspaceFilesClient;
+use super::model::parent_path;
+use super::{FilesEvent, FilesSurface};
 
 impl FilesSurface {
     pub(super) fn ensure_watch(&mut self, cx: &mut Context<Self>) {
@@ -33,8 +36,10 @@ impl FilesSurface {
                                     Ok(frame) => surface.apply_workspace_changes(frame, cx),
                                     Err(error) => {
                                         tracing::warn!(%error, "workspace file update undecodable");
-                                        surface.watch_error =
-                                            Some("Couldn't read a file update; refresh to catch up".into());
+                                        surface.watch_error = Some(
+                                            "Couldn't read a file update; refresh to catch up"
+                                                .into(),
+                                        );
                                         cx.notify();
                                     }
                                 })
@@ -82,10 +87,7 @@ impl FilesSurface {
             let (affected, independent): (Vec<_>, Vec<_>) =
                 frame.changes.into_iter().partition(|change| {
                     intent.affects(&change.path)
-                        || change
-                            .old_path
-                            .as_deref()
-                            .is_some_and(|old| intent.affects(old))
+                        || change.old_path.as_deref().is_some_and(|old| intent.affects(old))
                 });
             if !affected.is_empty() || frame.resync_required {
                 self.deferred_file_changes.push(WorkspaceFileChanges {
@@ -183,10 +185,8 @@ impl FilesSurface {
         for parent in &parents {
             self.tree.invalidate_directory(parent);
         }
-        let reload = parents
-            .into_iter()
-            .filter(|parent| self.tree.is_expanded(parent))
-            .collect::<Vec<_>>();
+        let reload =
+            parents.into_iter().filter(|parent| self.tree.is_expanded(parent)).collect::<Vec<_>>();
         self.sync_tree_list();
         for parent in reload {
             self.load_directory(parent, None, cx);
@@ -201,20 +201,19 @@ pub(super) fn sequence_needs_resync(previous: Option<u64>, next: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::AppContext;
+
+    use super::*;
 
     #[gpui::test]
     fn completed_save_refreshes_revision_before_the_next_mutation(cx: &mut gpui::TestAppContext) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let _guard = runtime.enter();
         let (out, mut requests) = tokio::sync::mpsc::channel(16);
         let (replies, inbound) = tokio::sync::mpsc::channel(16);
-        let engine =
-            crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(out, inbound));
+        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(
+            out, inbound,
+        ));
         let state = cx.new(|_| {
             let mut state = super::super::test_support::state();
             state.set_test_engine(engine);
@@ -224,9 +223,7 @@ mod tests {
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|cx| {
-            cx.subscribe(&files, move |_, event, _| {
-                recorded.borrow_mut().push(event.clone())
-            })
+            cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
         files.update(cx, |files, cx| {
             files.apply_workspace_changes(
@@ -245,15 +242,10 @@ mod tests {
         });
         cx.run_until_parked();
         let request: serde_json::Value = serde_json::from_str(
-            &requests
-                .try_recv()
-                .expect("Modified must reload the containing directory"),
+            &requests.try_recv().expect("Modified must reload the containing directory"),
         )
         .unwrap();
-        assert_eq!(
-            request["method"],
-            slopty_view_rpc::methods::LIST_WORKSPACE_DIRECTORY
-        );
+        assert_eq!(request["method"], slopty_view_rpc::methods::LIST_WORKSPACE_DIRECTORY);
         assert_eq!(request["params"]["directory"], "");
         let mut entry =
             super::super::test_support::entry("a.txt", slopty_view_proto::WorkspaceEntryKind::File);
@@ -283,13 +275,7 @@ mod tests {
         cx.run_until_parked();
         files.update(cx, |files, cx| {
             assert_eq!(
-                files
-                    .tree
-                    .node("a.txt")
-                    .unwrap()
-                    .entry
-                    .mutation_revision
-                    .as_deref(),
+                files.tree.node("a.txt").unwrap().entry.mutation_revision.as_deref(),
                 Some("after-save")
             );
             files.request_mutation("a.txt", Some("renamed.txt".into()), cx);

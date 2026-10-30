@@ -2,7 +2,8 @@
 //! phone"): the link the app gives (`ServerInvite`) drawn as a QR code, with the address it
 //! carries and how to use it, or why there is none.
 
-use gpui::{AnyElement, Hsla, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, Hsla, div, px};
 use slopty_view_proto::ServerInvite;
 
 use crate::popover;

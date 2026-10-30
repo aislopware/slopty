@@ -6,15 +6,16 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use gpui::{AnyElement, ClipboardItem, Context, SharedString, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, ClipboardItem, Context, SharedString, div, px};
 use slopty_view_doc::{MessagePart, MessageStatus, SessionMessageEntry};
 use slopty_view_proto::ToolCall;
 
 use super::{Row, RowKind, Transcript, fnv1a};
 use crate::markdown::parser::BlockTree;
+use crate::motion::HoverFade as _;
 use crate::notice::notice_chip;
 use crate::theme::Theme;
-use crate::motion::HoverFade as _;
 
 /// A plan shows this many source lines before it folds.
 pub const PLAN_FOLD_LINES: usize = 20;
@@ -81,30 +82,19 @@ pub fn plan_rows(
     rows.push(row(
         format!("{key}#head"),
         fnv1a(text.as_bytes()),
-        RowKind::PlanHeader {
-            copy: text.to_owned().into(),
-        },
+        RowKind::PlanHeader { copy: text.to_owned().into() },
     ));
     let fold: SharedString = format!("{key}#fold").into();
     let total_lines = text.trim_end().lines().count();
     let mut folded = false;
     for (block_ix, top) in tree.blocks.iter().enumerate() {
         let end = top.range.end.min(text.len());
-        let bytes = text
-            .as_bytes()
-            .get(top.range.start.min(end)..end)
-            .unwrap_or_default();
+        let bytes = text.as_bytes().get(top.range.start.min(end)..end).unwrap_or_default();
         let version = (fnv1a(bytes) << 1) | streaming as u64;
         let kind = if streaming {
-            RowKind::LiveMarkdown {
-                tree: tree.clone(),
-                block_ix,
-            }
+            RowKind::LiveMarkdown { tree: tree.clone(), block_ix }
         } else {
-            RowKind::Markdown {
-                tree: tree.clone(),
-                block_ix,
-            }
+            RowKind::Markdown { tree: tree.clone(), block_ix }
         };
         let mut block = row(format!("{key}.{block_ix}"), version, kind);
         // A block that starts past the fold line hides with the fold; the first block
@@ -126,10 +116,7 @@ pub fn plan_rows(
         rows.push(row(
             fold.to_string(),
             hidden_lines as u64,
-            RowKind::PlanFold {
-                fold: fold.clone(),
-                hidden_lines,
-            },
+            RowKind::PlanFold { fold: fold.clone(), hidden_lines },
         ));
     }
 }
@@ -215,7 +202,9 @@ pub(super) fn update_needed_row(
 
 /// The words of the update banner: what the machine `host` has and what Slopty drives.
 pub(super) fn update_words(host: &str, least: &str, have: &str) -> String {
-    format!("Claude Code on {host} is {have}. Slopty drives {least} or later: update it there, then send again.")
+    format!(
+        "Claude Code on {host} is {have}. Slopty drives {least} or later: update it there, then send again."
+    )
 }
 
 /// What updates Claude Code where it runs.
@@ -238,11 +227,7 @@ pub fn marker_row(entry_id: &str, part_id: &str, text: &str) -> Row {
 
 /// A path's last component.
 fn file_name(path: &str) -> &str {
-    path.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|name| !name.is_empty())
-        .unwrap_or(path)
+    path.trim_end_matches('/').rsplit('/').next().filter(|name| !name.is_empty()).unwrap_or(path)
 }
 
 /// `text` clamped to [`STEP_MAX_CHARS`], on one line.
@@ -274,13 +259,7 @@ pub fn step_words(call: &ToolCall) -> String {
         ToolCall::Search { pattern, .. } => format!("Searching for {pattern}"),
         ToolCall::Glob { pattern } => format!("Finding {pattern}"),
         ToolCall::WebFetch { url, .. } => {
-            let host = url
-                .split("://")
-                .nth(1)
-                .unwrap_or(url)
-                .split('/')
-                .next()
-                .unwrap_or(url);
+            let host = url.split("://").nth(1).unwrap_or(url).split('/').next().unwrap_or(url);
             format!("Fetching {host}")
         }
         ToolCall::WebSearch { query } => format!("Searching the web for {query}"),
@@ -311,11 +290,7 @@ pub fn working_step(entry: &SessionMessageEntry) -> Option<String> {
         return None;
     }
     let live_call = entry.parts.iter().rev().find_map(|part| match part {
-        MessagePart::Tool {
-            call,
-            resolved: false,
-            ..
-        } => Some(call),
+        MessagePart::Tool { call, resolved: false, .. } => Some(call),
         _ => None,
     });
     if let Some(call) = live_call {
@@ -362,7 +337,9 @@ impl Transcript {
             RowKind::ErrorCard { message, detail } => {
                 self.render_error_card(row, message, detail.as_ref(), theme, cx)
             }
-            RowKind::UpdateNeeded { least, have } => self.render_update_needed(row, least, have, theme, cx),
+            RowKind::UpdateNeeded { least, have } => {
+                self.render_update_needed(row, least, have, theme, cx)
+            }
             RowKind::Marker { text } => marker(text.clone(), theme),
             RowKind::PlanHeader { copy } => self.render_plan_header(row, copy, theme, cx),
             RowKind::PlanFold { fold, hidden_lines } => {
@@ -404,8 +381,16 @@ impl Transcript {
                 .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .text_size(crate::typography::ui_rems(12.0))
                 // The faded hover, at the control strength.
-                .text_color(crate::motion::mix(theme.text_muted, theme.text, crate::motion::hover_t(&fade)))
-                .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
+                .text_color(crate::motion::mix(
+                    theme.text_muted,
+                    theme.text,
+                    crate::motion::hover_t(&fade),
+                ))
+                .bg(crate::motion::hover_blend(
+                    &fade,
+                    gpui::transparent_black(),
+                    crate::theme::wash(0.11),
+                ))
                 .hover_fade(fade)
                 .child(SharedString::from(label))
         };
@@ -436,9 +421,9 @@ impl Transcript {
                 // What it copies, for the screen reader.
                 .aria_label(if copied { "Copied" } else { "Copy error" })
                 .on_click(move |_, _, cx| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
-                crate::motion::copy_feedback(copy_key.clone(), cx);
-            }),
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                    crate::motion::copy_feedback(copy_key.clone(), cx);
+                }),
         );
         // A long detail scrolls in its box rather than being cut (T51).
         let detail_block = detail.filter(|_| open).map(|detail| {
@@ -473,7 +458,11 @@ impl Transcript {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(crate::icons::icon(crate::icons::DANGER_TRIANGLE).size(px(12.0)).text_color(muted.opacity(0.8))),
+                    .child(
+                        crate::icons::icon(crate::icons::DANGER_TRIANGLE)
+                            .size(px(12.0))
+                            .text_color(muted.opacity(0.8)),
+                    ),
             )
             .child(
                 div()
@@ -504,7 +493,12 @@ impl Transcript {
                     .text_size(crate::typography::ui_rems(12.0))
                     .child(head)
                     .children(sentence.map(|sentence| {
-                        div().min_w_0().w_full().pl(px(28.0)).text_color(theme.text.opacity(0.8)).child(sentence)
+                        div()
+                            .min_w_0()
+                            .w_full()
+                            .pl(px(28.0))
+                            .text_color(theme.text.opacity(0.8))
+                            .child(sentence)
                     }))
                     .children(detail_block)
                     .child(actions.pl(px(28.0))),
@@ -553,8 +547,16 @@ impl Transcript {
             .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .text_size(crate::typography::ui_rems(12.0))
-            .text_color(crate::motion::mix(theme.text_muted, theme.text, crate::motion::hover_t(&fade)))
-            .bg(crate::motion::hover_blend(&fade, gpui::transparent_black(), crate::theme::wash(0.11)))
+            .text_color(crate::motion::mix(
+                theme.text_muted,
+                theme.text,
+                crate::motion::hover_t(&fade),
+            ))
+            .bg(crate::motion::hover_blend(
+                &fade,
+                gpui::transparent_black(),
+                crate::theme::wash(0.11),
+            ))
             .hover_fade(fade)
             .on_click(move |_, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(UPDATE_COMMAND.to_owned()));
@@ -626,9 +628,17 @@ impl Transcript {
                     // A tab stop with the shared ring.
                     .tab_index(0)
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
-                    .bg(crate::motion::hover_blend(&plan_copy_hover, gpui::transparent_black(), crate::theme::ink(0.08)))
+                    .bg(crate::motion::hover_blend(
+                        &plan_copy_hover,
+                        gpui::transparent_black(),
+                        crate::theme::ink(0.08),
+                    ))
                     .hover_fade(plan_copy_hover.clone())
-                    .tooltip(crate::settings::widgets::text_tooltip(if copied { "Copied" } else { "Copy plan" }))
+                    .tooltip(crate::settings::widgets::text_tooltip(if copied {
+                        "Copied"
+                    } else {
+                        "Copy plan"
+                    }))
                     .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_extra(id.clone(), text.clone(), cx)
@@ -653,10 +663,7 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let open = self
-            .folds
-            .get(fold)
-            .is_some_and(|state| state.open == Some(true));
+        let open = self.folds.get(fold).is_some_and(|state| state.open == Some(true));
         let label: SharedString = if open {
             "Show less".into()
         } else {
@@ -701,9 +708,9 @@ impl Transcript {
                         crate::theme::wash(0.11),
                     ))
                     .hover_fade(format!("{fold}-toggle"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_plan_fold(fold.clone(), cx)
-                    }))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_plan_fold(fold.clone(), cx)),
+                    )
                     .child(label)
                     .child(
                         crate::icons::icon(if open {
@@ -788,12 +795,7 @@ pub(super) fn command_body(
     selection_key: &str,
     theme: &Theme,
 ) -> Option<AnyElement> {
-    let super::ToolDetail::Output {
-        lines,
-        truncated_by,
-        ..
-    } = detail
-    else {
+    let super::ToolDetail::Output { lines, truncated_by, .. } = detail else {
         return None;
     };
     let mono = gpui::font(theme.font_mono.clone());
@@ -808,12 +810,8 @@ pub(super) fn command_body(
             .font_family(theme.font_mono.clone())
             .text_size(px(super::TOOL_TEXT_SIZE))
             .children(lines.iter().enumerate().map(|(line_ix, line)| {
-                let row = div()
-                    .h(px(super::OUTPUT_LINE_HEIGHT))
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .items_center();
+                let row =
+                    div().h(px(super::OUTPUT_LINE_HEIGHT)).w_full().min_w_0().flex().items_center();
                 if line.is_empty() {
                     return row;
                 }
@@ -825,19 +823,14 @@ pub(super) fn command_body(
                     theme.text_muted,
                     theme,
                 );
-                row.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(crate::markdown::render::selectable_text_element(
-                            format!("{selection_key}-{line_ix}").into(),
-                            line.clone(),
-                            runs,
-                            theme.selection,
-                        )),
-                )
+                row.child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().child(
+                    crate::markdown::render::selectable_text_element(
+                        format!("{selection_key}-{line_ix}").into(),
+                        line.clone(),
+                        runs,
+                        theme.selection,
+                    ),
+                ))
             }))
             .when(*truncated_by > 0, |block| {
                 block.child(super::more_lines_row(*truncated_by, theme))
@@ -875,8 +868,9 @@ fn marker(text: SharedString, theme: &Theme) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use slopty_view_doc::{MessageRole, ToolDiffStat};
+
+    use super::*;
 
     fn entry(parts: Vec<MessagePart>, status: MessageStatus) -> SessionMessageEntry {
         SessionMessageEntry {
@@ -894,11 +888,7 @@ mod tests {
     fn edit(id: &str, path: &str, additions: u64, deletions: u64, resolved: bool) -> MessagePart {
         MessagePart::Tool {
             id: id.into(),
-            call: ToolCall::EditFile {
-                path: path.into(),
-                old_string: None,
-                new_string: None,
-            },
+            call: ToolCall::EditFile { path: path.into(), old_string: None, new_string: None },
             is_error: false,
             resolved,
             output: None,
@@ -906,11 +896,7 @@ mod tests {
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
-            diff_stats: Some(vec![ToolDiffStat {
-                path: path.into(),
-                additions,
-                deletions,
-            }]),
+            diff_stats: Some(vec![ToolDiffStat { path: path.into(), additions, deletions }]),
             subagent_ref: None,
             subagent_status: None,
             facts: None,
@@ -924,8 +910,13 @@ mod tests {
         // A refused start keeps the worker's words after its own.
         let start = format!("It did not start: {said}");
         assert_eq!(claude_too_old(&start), Some(("2.1.301".to_owned(), "2.0.14".to_owned())));
-        assert_eq!(too_old_of("The turn failed. Try again.", Some(said)).map(|v| v.1), Some("2.0.14".to_owned()));
-        for other in ["The turn failed. Try again.", "Update Claude Code on this machine to 2.1.301", ""] {
+        assert_eq!(
+            too_old_of("The turn failed. Try again.", Some(said)).map(|v| v.1),
+            Some("2.0.14".to_owned())
+        );
+        for other in
+            ["The turn failed. Try again.", "Update Claude Code on this machine to 2.1.301", ""]
+        {
             assert_eq!(claude_too_old(other), None, "{other}");
         }
         let turn = entry(
@@ -939,7 +930,12 @@ mod tests {
             rows.iter().any(|row| matches!(&row.kind, RowKind::UpdateNeeded { least, have } if least == "2.1.301" && have == "2.0.14")),
             "a banner, not a raw error"
         );
-        assert!(!rows.iter().any(|row| matches!(row.kind, RowKind::ErrorChip { .. } | RowKind::ErrorCard { .. })));
+        assert!(
+            !rows.iter().any(|row| matches!(
+                row.kind,
+                RowKind::ErrorChip { .. } | RowKind::ErrorCard { .. }
+            ))
+        );
         assert_eq!(
             update_words("studio", "2.1.301", "2.0.14"),
             "Claude Code on studio is 2.0.14. Slopty drives 2.1.301 or later: update it there, then send again."
@@ -974,9 +970,7 @@ mod tests {
         assert_eq!(working_step(&thinking).as_deref(), Some("Checking the layout"));
         let settled = entry(vec![edit("t1", "/a", 1, 0, false)], MessageStatus::Complete);
         assert_eq!(working_step(&settled), None);
-        let long = ToolCall::Exec {
-            command: "x".repeat(200),
-        };
+        let long = ToolCall::Exec { command: "x".repeat(200) };
         assert_eq!(step_words(&long).chars().count(), STEP_MAX_CHARS);
     }
 
@@ -987,10 +981,7 @@ mod tests {
         let plan = SessionMessageEntry {
             id: "plan-card:t".into(),
             role: MessageRole::Assistant,
-            parts: vec![MessagePart::Text {
-                id: "plan:t".into(),
-                text: text.clone(),
-            }],
+            parts: vec![MessagePart::Text { id: "plan:t".into(), text: text.clone() }],
             created_at: 1,
             device_id: "d".into(),
             status: Some(MessageStatus::Complete),
@@ -1000,7 +991,12 @@ mod tests {
         let mut rows = Vec::new();
         plan_rows(&mut rows, &plan, "plan-card:t#plan:t", &text, &tree, false);
         assert!(matches!(rows[0].kind, RowKind::PlanHeader { .. }));
-        let shown = rows.iter().filter(|row| matches!(row.kind, RowKind::Markdown { .. }) && row.compact_fold.is_none()).count();
+        let shown = rows
+            .iter()
+            .filter(|row| {
+                matches!(row.kind, RowKind::Markdown { .. }) && row.compact_fold.is_none()
+            })
+            .count();
         assert_eq!(shown, 10, "20 source lines are 10 one-line paragraphs");
         let RowKind::PlanFold { hidden_lines, .. } = rows.last().unwrap().kind else {
             panic!("a fold row ends a long plan");
@@ -1039,7 +1035,10 @@ mod tests {
                 Some("Fix the hook, then try again.".to_owned())
             )
         );
-        assert_eq!(words("Couldn't start the agent"), ("Couldn't start the agent".to_owned(), None));
+        assert_eq!(
+            words("Couldn't start the agent"),
+            ("Couldn't start the agent".to_owned(), None)
+        );
         let long = "exit status 101\nthread 'main' panicked at src/main.rs:3:5";
         assert_eq!(words(long), ("Something went wrong".to_owned(), Some(long.to_owned())));
     }

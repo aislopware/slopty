@@ -48,7 +48,10 @@ impl Shell {
     /// Where a lost focus comes back to, and where it goes with nothing focused: Settings' own
     /// focus there; on a session's page the pane with the keyboard, its view or its terminal;
     /// on a touch screen with the session in front, nowhere a software keyboard would rise.
-    pub(super) fn navigation_focus_fallback(&mut self, cx: &mut Context<Self>) -> (FocusHandle, FocusHandle) {
+    pub(super) fn navigation_focus_fallback(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> (FocusHandle, FocusHandle) {
         if matches!(self.route, Route::Settings(_)) {
             return (self.settings_focus.clone(), self.unfocused.clone());
         }
@@ -57,7 +60,9 @@ impl Shell {
                 let handle = self.view_handle(view, cx);
                 return (handle.clone(), handle);
             }
-            super::panes::Pane::Shell(n) => self.pane_shells.get(&n).map(|shell| shell.read(cx).focus_handle()),
+            super::panes::Pane::Shell(n) => {
+                self.pane_shells.get(&n).map(|shell| shell.read(cx).focus_handle())
+            }
             super::panes::Pane::Session => None,
         };
         if let Some(shell) = shell {
@@ -75,8 +80,9 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    use super::*;
 
     struct FocusHost {
         root: FocusHandle,

@@ -1,16 +1,16 @@
 //! Moving through the trace (`docs/decisions/inspector.md`, "One fold depth for the
 //! whole trace", "Keys and find").
 //!
-//! - **One fold depth.** Prompts shows each turn's root row and its last reply; Steps, the
-//!   default, shows groups folded and narration and subagent rows as they are; All opens every
-//!   group. A depth sets what a fold is when the person never pressed it: the folds the person
-//!   pressed keep their way at every depth, a depth change reorders nothing, and nothing opens or
-//!   closes by itself.
-//! - **Keys.** Where the trace holds the keyboard, ↑ and ↓ move a cursor over the steps shown
-//!   (each row, and each step of an open group), scrolling only as far as it needs; ← folds what
-//!   the cursor is on or goes up to its group, → opens it, Enter opens it or drills into a
-//!   subagent, and E goes to the next failure (⇧E the one before) in the whole trace, opening
-//!   what hides it (the depth, its group) to land on it. Esc is the inspector's: it goes back.
+//! - **One fold depth.** Prompts shows each turn's root row and its last reply; Steps, the default,
+//!   shows groups folded and narration and subagent rows as they are; All opens every group. A
+//!   depth sets what a fold is when the person never pressed it: the folds the person pressed keep
+//!   their way at every depth, a depth change reorders nothing, and nothing opens or closes by
+//!   itself.
+//! - **Keys.** Where the trace holds the keyboard, ↑ and ↓ move a cursor over the steps shown (each
+//!   row, and each step of an open group), scrolling only as far as it needs; ← folds what the
+//!   cursor is on or goes up to its group, → opens it, Enter opens it or drills into a subagent,
+//!   and E goes to the next failure (⇧E the one before) in the whole trace, opening what hides it
+//!   (the depth, its group) to land on it. Esc is the inspector's: it goes back.
 
 use gpui::{Context, KeyDownEvent, SharedString, Window};
 
@@ -67,7 +67,8 @@ pub(super) fn prompts_only(rows: Vec<Row>, depth_of: impl Fn(&Row) -> usize) -> 
             keep[start] = true;
         }
         // The turn's last words, back from its last one to the first row that is not its words.
-        let words = |row: &Row| matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
+        let words =
+            |row: &Row| matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
         if let Some(last) = (start..end).rev().find(|ix| words(&own[*ix])) {
             let entry = own[last].entry_id.clone();
             for ix in (start..=last).rev() {
@@ -98,7 +99,8 @@ impl Cursor {
 /// Whether step `tool` ended badly: for the key to the next failure, and find's filter.
 pub(super) fn failed(tool: &ToolItem) -> bool {
     super::step_failed(tool)
-        || (tool.subagent_ref.is_some() && matches!(tool.subagent_status, Some(slopty_view_doc::SubagentStatus::Failed)))
+        || (tool.subagent_ref.is_some()
+            && matches!(tool.subagent_status, Some(slopty_view_doc::SubagentStatus::Failed)))
 }
 
 impl Transcript {
@@ -129,7 +131,12 @@ impl Transcript {
             if self.group_shows_steps(row)
                 && let RowKind::ToolGroup { tools, .. } = &row.kind
             {
-                stops.extend(tools.iter().map(|tool| Cursor { row: row.id.clone(), step: Some(tool.part_id.clone()) }));
+                stops.extend(
+                    tools.iter().map(|tool| Cursor {
+                        row: row.id.clone(),
+                        step: Some(tool.part_id.clone()),
+                    }),
+                );
             }
         }
         stops
@@ -160,16 +167,22 @@ impl Transcript {
 
     /// Open what hides `target`: the depth, its group, and its detail when `detail`; put the
     /// cursor on it and say its row's place, for the caller to bring it into view.
-    pub(super) fn open_to(&mut self, target: Cursor, detail: bool, cx: &mut Context<Self>) -> Option<usize> {
+    pub(super) fn open_to(
+        &mut self,
+        target: Cursor,
+        detail: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
         // A row the depth hides shows at Steps.
         if self.depth == Depth::Prompts && !self.rows.iter().any(|row| row.id == target.row) {
             self.set_depth(Depth::Steps, cx);
         }
         let ix = self.rows.iter().position(|row| row.id == target.row)?;
         let shape = match (&self.rows[ix].kind, &target.step) {
-            (RowKind::ToolGroup { tools, .. }, Some(step)) => {
-                Some((super::group_shape(tools), tools.iter().position(|tool| &tool.part_id == step)))
-            }
+            (RowKind::ToolGroup { tools, .. }, Some(step)) => Some((
+                super::group_shape(tools),
+                tools.iter().position(|tool| &tool.part_id == step),
+            )),
             _ => None,
         };
         let mut cursor = Cursor::row(&target.row);
@@ -184,7 +197,10 @@ impl Transcript {
                 cursor.step = target.step;
             }
             if let Some(at) = at.filter(|_| detail) {
-                let fold = self.tool_details.entry(SharedString::from(format!("{}#d{at}", target.row))).or_default();
+                let fold = self
+                    .tool_details
+                    .entry(SharedString::from(format!("{}#d{at}", target.row)))
+                    .or_default();
                 if fold.open != Some(true) {
                     fold.open = Some(true);
                     fold.epoch += 1;
@@ -203,11 +219,13 @@ impl Transcript {
         if stops.is_empty() {
             return;
         }
-        let at = self.cursor.as_ref().and_then(|cursor| stops.iter().position(|stop| stop == cursor));
+        let at =
+            self.cursor.as_ref().and_then(|cursor| stops.iter().position(|stop| stop == cursor));
         let to = match at {
             Some(at) => at.saturating_add_signed(delta).min(stops.len() - 1),
             None => {
-                let top = self.list.logical_scroll_top().item_ix.min(self.rows.len().saturating_sub(1));
+                let top =
+                    self.list.logical_scroll_top().item_ix.min(self.rows.len().saturating_sub(1));
                 let first = self.rows.get(top).map(|row| row.id.clone());
                 stops.iter().position(|stop| Some(&stop.row) == first.as_ref()).unwrap_or(0)
             }
@@ -220,7 +238,9 @@ impl Transcript {
         let cursor = self.cursor.as_ref()?;
         let row = self.rows.iter().find(|row| row.id == cursor.row)?.clone();
         let step = match (&row.kind, &cursor.step) {
-            (RowKind::ToolGroup { tools, .. }, Some(step)) => tools.iter().position(|tool| &tool.part_id == step),
+            (RowKind::ToolGroup { tools, .. }, Some(step)) => {
+                tools.iter().position(|tool| &tool.part_id == step)
+            }
             _ => None,
         };
         Some((row, step))
@@ -238,7 +258,8 @@ impl Transcript {
                 match step {
                     Some(ix) => {
                         let key = SharedString::from(format!("{}#d{ix}", row.id));
-                        let shown = self.tool_details.get(&key).and_then(|fold| fold.open).unwrap_or(false);
+                        let shown =
+                            self.tool_details.get(&key).and_then(|fold| fold.open).unwrap_or(false);
                         if shown != open {
                             let fold = self.tool_details.entry(key).or_default();
                             fold.open = Some(open);
@@ -251,7 +272,9 @@ impl Transcript {
                             self.cursor = Some(Cursor::row(&row.id));
                         }
                     }
-                    None if self.group_shows_steps(&row) != open => self.toggle_fold(row.id.clone(), 0.0, cx),
+                    None if self.group_shows_steps(&row) != open => {
+                        self.toggle_fold(row.id.clone(), 0.0, cx)
+                    }
                     None => {}
                 }
             }
@@ -266,7 +289,9 @@ impl Transcript {
                 // Inside a subagent opened in place, ← goes up to its row.
                 let ix = self.rows.iter().position(|r| r.id == row.id).unwrap_or(0);
                 let depth = self.depth_of(&row.id);
-                if let Some(up) = self.rows[..ix].iter().rev().find(|r| self.depth_of(&r.id) < depth) {
+                if let Some(up) =
+                    self.rows[..ix].iter().rev().find(|r| self.depth_of(&r.id) < depth)
+                {
                     self.cursor = Some(Cursor::row(&up.id));
                 }
             }
@@ -332,13 +357,19 @@ impl Transcript {
                     .collect(),
                 _ => Vec::new(),
             };
-            failures.extend(targets.into_iter().filter_map(|target| Some((order(rows, &target)?, target))));
+            failures.extend(
+                targets.into_iter().filter_map(|target| Some((order(rows, &target)?, target))),
+            );
         }
         let here = self.cursor.as_ref().and_then(|cursor| order(rows, cursor));
         let target = if delta >= 0 {
             failures.iter().find(|(at, _)| here.is_none_or(|here| *at > here)).or(failures.first())
         } else {
-            failures.iter().rev().find(|(at, _)| here.is_none_or(|here| *at < here)).or(failures.last())
+            failures
+                .iter()
+                .rev()
+                .find(|(at, _)| here.is_none_or(|here| *at < here))
+                .or(failures.last())
         }
         .map(|(_, target)| target.clone());
         let Some(target) = target else { return };
@@ -349,12 +380,18 @@ impl Transcript {
 
     /// The trace's own keys, where it holds the keyboard: ↑ ↓ move, ← → fold and open, Enter
     /// opens or drills, E and ⇧E go to the next and the previous failure.
-    pub(super) fn trace_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn trace_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.keys.is_focused(window) {
             return;
         }
         let modifiers = event.keystroke.modifiers;
-        let shift_only = modifiers.shift && !modifiers.control && !modifiers.alt && !modifiers.platform;
+        let shift_only =
+            modifiers.shift && !modifiers.control && !modifiers.alt && !modifiers.platform;
         match (event.keystroke.key.as_str(), modifiers.modified()) {
             ("up", false) => self.move_cursor(-1),
             ("down", false) => self.move_cursor(1),
@@ -427,16 +464,29 @@ mod tests {
         row(
             id,
             id,
-            RowKind::User { text: "Do it".into(), markdown: None, attachments: Arc::default(), turn: None },
+            RowKind::User {
+                text: "Do it".into(),
+                markdown: None,
+                attachments: Arc::default(),
+                turn: None,
+            },
         )
     }
 
     fn words(id: &str, entry: &str) -> Row {
-        row(id, entry, RowKind::Markdown { tree: Arc::new(crate::markdown::parse_full("Done.")), block_ix: 0 })
+        row(
+            id,
+            entry,
+            RowKind::Markdown { tree: Arc::new(crate::markdown::parse_full("Done.")), block_ix: 0 },
+        )
     }
 
     fn group(id: &str, entry: &str) -> Row {
-        row(id, entry, RowKind::ToolGroup { summary: "Ran 2 commands".into(), tools: Arc::default() })
+        row(
+            id,
+            entry,
+            RowKind::ToolGroup { summary: "Ran 2 commands".into(), tools: Arc::default() },
+        )
     }
 
     /// Prompts shows each prompt and its turn's last words: not the work, not the words said
@@ -455,8 +505,10 @@ mod tests {
             words("nested", "child"),
             prompt("p3"),
         ];
-        let kept: Vec<String> =
-            prompts_only(rows, |row| usize::from(row.id == "nested")).iter().map(|row| row.id.to_string()).collect();
+        let kept: Vec<String> = prompts_only(rows, |row| usize::from(row.id == "nested"))
+            .iter()
+            .map(|row| row.id.to_string())
+            .collect();
         assert_eq!(kept, ["p1", "a1:1", "a1:2", "p2", "a2:0", "p3"]);
     }
 

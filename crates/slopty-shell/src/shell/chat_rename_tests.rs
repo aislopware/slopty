@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Inline chat renames on the sidebar row, without booting an engine.
-use super::*;
 use gpui::{AppContext, Modifiers, TestAppContext, VisualTestContext};
+
+use super::*;
 
 struct SidebarHost(Entity<Shell>);
 
@@ -25,10 +26,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
         settings::init(UiSettings::default(), dir.path(), cx);
-        apply_keymap(
-            cx,
-            &KeymapConfig::default(),
-        );
+        apply_keymap(cx, &KeymapConfig::default());
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         SidebarHost(cx.new(|cx| {
@@ -142,13 +140,8 @@ fn double_click_edits_a_sidebar_title_in_place(cx: &mut TestAppContext) {
     // Typing replaces the selected name; Enter commits it.
     double_click(cx, row.center());
     cx.simulate_input("Renamed");
-    let input = shell.read_with(cx, |shell, _| {
-        shell.chat_rename.as_ref().unwrap().input.clone()
-    });
-    assert_eq!(
-        input.read_with(cx, |input, _| input.text().to_string()),
-        "Renamed"
-    );
+    let input = shell.read_with(cx, |shell, _| shell.chat_rename.as_ref().unwrap().input.clone());
+    assert_eq!(input.read_with(cx, |input, _| input.text().to_string()), "Renamed");
     cx.simulate_keystrokes("enter");
     redraw(cx);
     assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_none()));
@@ -178,12 +171,7 @@ fn rename(shell: &Entity<Shell>, cx: &mut VisualTestContext, chat_id: &str) {
 }
 
 fn editing(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
-    shell.read_with(cx, |shell, _| {
-        shell
-            .chat_rename
-            .as_ref()
-            .map(|rename| rename.chat_id.clone())
-    })
+    shell.read_with(cx, |shell, _| shell.chat_rename.as_ref().map(|rename| rename.chat_id.clone()))
 }
 
 fn add_chats(shell: &Entity<Shell>, cx: &mut VisualTestContext, ids: &[&str], archived: bool) {
@@ -226,12 +214,7 @@ fn rename_opens_collapsed_sessions_groups_and_the_sidebar(cx: &mut TestAppContex
 fn rename_pages_the_archived_shelf_to_its_row(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     let ids: Vec<String> = (0..14).map(|ix| format!("archived-{ix:02}")).collect();
-    add_chats(
-        &shell,
-        cx,
-        &ids.iter().map(String::as_str).collect::<Vec<_>>(),
-        true,
-    );
+    add_chats(&shell, cx, &ids.iter().map(String::as_str).collect::<Vec<_>>(), true);
     shell.update(cx, |shell, cx| {
         shell.archived_open = false;
         cx.notify();
@@ -251,12 +234,7 @@ fn rename_pages_the_archived_shelf_to_its_row(cx: &mut TestAppContext) {
 fn rename_scrolls_a_far_row_into_view(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
     let ids: Vec<String> = (0..40).map(|ix| format!("chat-{ix:02}")).collect();
-    add_chats(
-        &shell,
-        cx,
-        &ids.iter().map(String::as_str).collect::<Vec<_>>(),
-        false,
-    );
+    add_chats(&shell, cx, &ids.iter().map(String::as_str).collect::<Vec<_>>(), false);
     rename(&shell, cx, "chat-39");
     for _ in 0..4 {
         cx.run_until_parked();

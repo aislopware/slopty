@@ -86,9 +86,7 @@ fn local_file_address(text: &str) -> bool {
         || text.starts_with("./")
         || text.starts_with("../")
         || drive
-        || text
-            .get(..5)
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+        || text.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
 }
 
 pub fn normalize_address(input: &str) -> Result<String, &'static str> {
@@ -110,12 +108,9 @@ pub fn normalize_address(input: &str) -> Result<String, &'static str> {
         .is_some_and(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()));
     let explicit =
         text.contains("://") || (text.contains(':') && !host_port && !text.starts_with('['));
-    let mut parsed = url::Url::parse(&if explicit {
-        text.to_owned()
-    } else {
-        format!("https://{text}")
-    })
-    .map_err(|_| "Enter a valid website or localhost address.")?;
+    let mut parsed =
+        url::Url::parse(&if explicit { text.to_owned() } else { format!("https://{text}") })
+            .map_err(|_| "Enter a valid website or localhost address.")?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("Only http and https addresses are supported.");
     }

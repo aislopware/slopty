@@ -3,10 +3,8 @@
 //! setChatArchived false).
 //! A session's record is its agent's own, so Slopty archives and never deletes.
 
-use gpui::{
-    AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
-};
-
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, px};
 use slopty_view_proto::Chat;
 use slopty_view_rpc::methods;
 
@@ -72,11 +70,14 @@ impl ArchivedPage {
         let now = self.clock;
         let next = archived_chats(&self.state.read(cx).chats)
             .into_iter()
-            .filter_map(|chat| crate::state::time_ago_changes(chat.last_message_at.unwrap_or(chat.created_at), now))
+            .filter_map(|chat| {
+                crate::state::time_ago_changes(chat.last_message_at.unwrap_or(chat.created_at), now)
+            })
             .min();
         self.clock_tick = next.map(|at| {
             // A hair past the change, so the clock taken then reads it.
-            let wait = (at - now).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
+            let wait =
+                (at - now).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
             cx.spawn(async move |page, cx| {
                 cx.background_executor().timer(wait).await;
                 page.update(cx, |page, cx| {
@@ -149,17 +150,8 @@ impl Render for ArchivedPage {
                 self.page = page;
                 self.scroll.reset();
             }
-            let rows = archived
-                .into_iter()
-                .skip(self.page * 40)
-                .take(40)
-                .cloned()
-                .collect();
-            let names = state
-                .devices
-                .iter()
-                .map(|d| (d.id.clone(), d.name.clone()))
-                .collect();
+            let rows = archived.into_iter().skip(self.page * 40).take(40).cloned().collect();
+            let names = state.devices.iter().map(|d| (d.id.clone(), d.name.clone())).collect();
             (rows, names, count)
         };
         let busy = self.busy.clone();
@@ -168,11 +160,8 @@ impl Render for ArchivedPage {
             .into_iter()
             .enumerate()
             .map(|(ix, chat)| {
-                let title: SharedString = chat
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "Untitled session".into())
-                    .into();
+                let title: SharedString =
+                    chat.title.clone().unwrap_or_else(|| "Untitled session".into()).into();
                 // Unknown device → no fragment at all (slopty renders the
                 // device span only when the name resolves).
                 let device: Option<SharedString> =
@@ -181,7 +170,8 @@ impl Render for ArchivedPage {
                 let time_ago: SharedString = crate::state::format_time_ago(at, now).into();
                 // Where it ran as the app says it everywhere ("project @ device"), then
                 // its branch, as one meta line.
-                let place: Option<SharedString> = place_of(&chat, device.as_deref()).map(Into::into);
+                let place: Option<SharedString> =
+                    place_of(&chat, device.as_deref()).map(Into::into);
                 let branch: Option<SharedString> = chat
                     .branch
                     .as_deref()
@@ -206,7 +196,9 @@ impl Render for ArchivedPage {
                             .flex_1()
                             .min_w_0()
                             .child(widgets::row_title(&theme, title).truncate())
-                            .when(!meta.is_empty(), |el| el.child(widgets::meta_line(&theme, meta))),
+                            .when(!meta.is_empty(), |el| {
+                                el.child(widgets::meta_line(&theme, meta))
+                            }),
                     )
                     // Tabular figures, and the full date on hover (M39).
                     .child(
@@ -385,7 +377,10 @@ fn place_of(chat: &slopty_view_proto::Chat, device: Option<&str>) -> Option<Stri
 
 // When a relative time was, in full, for its tooltip: "Oct 16, 14:05", with the year when
 // it is not this one (M39).
-pub(crate) fn absolute_time(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+pub(crate) fn absolute_time(
+    then: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     absolute_time_in(then, &chrono::Local, now)
 }
 
@@ -409,8 +404,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::Utc;
+
+    use super::*;
 
     fn chat(id: &str, archived: bool) -> Chat {
         Chat {
@@ -461,9 +457,17 @@ mod tests {
         };
         assert_eq!(says(cx), "now");
         cx.executor().advance_clock(std::time::Duration::from_secs(29));
-        assert_eq!((says(cx), drawn.get()), ("now".to_owned(), 0), "nothing moves before the minute");
+        assert_eq!(
+            (says(cx), drawn.get()),
+            ("now".to_owned(), 0),
+            "nothing moves before the minute"
+        );
         cx.executor().advance_clock(std::time::Duration::from_secs(2));
-        assert_eq!((says(cx), drawn.get()), ("1m".to_owned(), 1), "the minute turned, and the page drew");
+        assert_eq!(
+            (says(cx), drawn.get()),
+            ("1m".to_owned(), 1),
+            "the minute turned, and the page drew"
+        );
     }
 
     // An archived chat says where it ran as the sidebar and the palette do, "project @
@@ -501,10 +505,7 @@ mod tests {
         let mut side = chat("side", true);
         side.parent_chat_id = Some("main".into());
         let chats = vec![chat("main", false), side];
-        let ids: Vec<&str> = archived_chats(&chats)
-            .iter()
-            .map(|c| c.id.as_str())
-            .collect();
+        let ids: Vec<&str> = archived_chats(&chats).iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["side"]);
     }
 
@@ -519,7 +520,10 @@ mod tests {
         } else {
             ("2:05 PM", "7:30 AM")
         };
-        assert_eq!(absolute_time_in(at("2026-10-16T14:05:00Z"), &Utc, now), format!("Oct 16, {afternoon}"));
+        assert_eq!(
+            absolute_time_in(at("2026-10-16T14:05:00Z"), &Utc, now),
+            format!("Oct 16, {afternoon}")
+        );
         assert_eq!(
             absolute_time_in(at("2025-03-02T07:30:00Z"), &Utc, now),
             format!("Mar 2 2025, {morning}")

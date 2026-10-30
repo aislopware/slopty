@@ -8,12 +8,13 @@
 //! The person's prompt is held nowhere (2026-10-20): Amp, T3 Code and opencode hold none, and
 //! Claude desktop keeps its peek behind a flag; find goes back to a prompt.
 
-use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, SharedString, Window, div, px};
 
 use super::{RowKind, Transcript};
 use crate::motion;
-use crate::theme::Theme;
 use crate::motion::HoverFade as _;
+use crate::theme::Theme;
 
 /// The group band's height, at least: opencode's 28 pt trigger, or a finger's row where the
 /// header it holds stands that tall.
@@ -97,10 +98,13 @@ impl Transcript {
         cx.notify();
     }
 
-
     /// What the transcript holds at its top: the open group's band, and a watch that
     /// draws the transcript again when the next frame's layout holds another.
-    pub(super) fn render_sticky_group(&self, _window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_sticky_group(
+        &self,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let group = self.sticky_group();
         let view = cx.weak_entity();
         let watch = gpui::canvas(
@@ -187,17 +191,11 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .child(
-                div()
-                    .w(px(22.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                            .size(px(14.0))
-                            .text_color(motion::mix(theme.text_faint, theme.text_muted, hover)),
-                    ),
+                div().w(px(22.0)).flex_none().flex().items_center().justify_center().child(
+                    crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
+                        .size(px(14.0))
+                        .text_color(motion::mix(theme.text_faint, theme.text_muted, hover)),
+                ),
             )
             .child(
                 div()
@@ -292,7 +290,9 @@ mod tests {
                         role: slopty_view_doc::MessageRole::Assistant,
                         parts: vec![slopty_view_doc::MessagePart::Tool {
                             id: format!("call-{n}"),
-                            call: slopty_view_proto::ToolCall::Exec { command: format!("cargo test -p crate{n}") },
+                            call: slopty_view_proto::ToolCall::Exec {
+                                command: format!("cargo test -p crate{n}"),
+                            },
                             is_error: false,
                             resolved: true,
                             output: None,
@@ -313,7 +313,9 @@ mod tests {
                     },
                     &mut |_, text| Arc::new(crate::markdown::parser::parse_full(text)),
                 );
-                let Some(RowKind::ToolGroup { tools, .. }) = entry.into_iter().next().map(|row| row.kind) else {
+                let Some(RowKind::ToolGroup { tools, .. }) =
+                    entry.into_iter().next().map(|row| row.kind)
+                else {
                     panic!("a call's group");
                 };
                 tools[0].clone()
@@ -324,13 +326,19 @@ mod tests {
                 .map(|ix| match ix {
                     5 => row(ix, Some("Fix the flaky upload test")),
                     10 => Row {
-                        kind: RowKind::ToolGroup { summary: "Ran 30 commands".into(), tools: Arc::new(runs.clone()) },
+                        kind: RowKind::ToolGroup {
+                            summary: "Ran 30 commands".into(),
+                            tools: Arc::new(runs.clone()),
+                        },
                         ..row(ix, None)
                     },
                     _ => row(ix, None),
                 })
                 .collect();
-            this.folds.insert(group.clone(), super::super::FoldState { open: Some(true), ..Default::default() });
+            this.folds.insert(
+                group.clone(),
+                super::super::FoldState { open: Some(true), ..Default::default() },
+            );
             this.list.reset(40);
             this.pinned = false;
             this.list.set_follow_mode(gpui::FollowMode::Normal);
@@ -361,7 +369,10 @@ mod tests {
         });
         let said = cx.update(|window, _| {
             window.a11y_tree().map(|tree| {
-                tree.nodes.iter().filter_map(|(_, node)| node.label().map(str::to_owned)).collect::<Vec<_>>()
+                tree.nodes
+                    .iter()
+                    .filter_map(|(_, node)| node.label().map(str::to_owned))
+                    .collect::<Vec<_>>()
             })
         });
         assert!(
@@ -371,7 +382,8 @@ mod tests {
         let band = cx.debug_bounds("sticky-group").expect("the band");
         cx.simulate_click(band.center(), gpui::Modifiers::default());
         cx.run_until_parked();
-        let open = transcript.read_with(cx, |this, _| this.folds.get(&group).and_then(|fold| fold.open));
+        let open =
+            transcript.read_with(cx, |this, _| this.folds.get(&group).and_then(|fold| fold.open));
         assert_eq!(open, Some(false), "a press folds it");
     }
 }

@@ -135,9 +135,8 @@ impl FileDocument {
                 .map(|line| SharedString::from(line.to_string()))
                 .collect(),
         );
-        self.phase = read_only_reason(&file)
-            .map(DocumentPhase::ReadOnly)
-            .unwrap_or(DocumentPhase::Ready);
+        self.phase =
+            read_only_reason(&file).map(DocumentPhase::ReadOnly).unwrap_or(DocumentPhase::Ready);
         self.loaded_hash = hash.clone();
         self.saved_hash = hash;
         self.revision = 0;
@@ -170,10 +169,7 @@ impl FileDocument {
         self.is_editable()
             && self.is_dirty()
             && self.pending_save.is_none()
-            && matches!(
-                self.phase,
-                DocumentPhase::Ready | DocumentPhase::SaveFailed(_)
-            )
+            && matches!(self.phase, DocumentPhase::Ready | DocumentPhase::SaveFailed(_))
     }
 
     pub fn can_autosave(&self) -> bool {
@@ -261,9 +257,8 @@ impl FileDocument {
         self.line_ending = writable_line_ending(file.line_ending);
         self.loaded_hash = hash.clone();
         self.saved_hash = hash;
-        self.phase = read_only_reason(&file)
-            .map(DocumentPhase::ReadOnly)
-            .unwrap_or(DocumentPhase::Ready);
+        self.phase =
+            read_only_reason(&file).map(DocumentPhase::ReadOnly).unwrap_or(DocumentPhase::Ready);
         self.file = Some(file);
     }
 
@@ -287,9 +282,8 @@ impl FileDocument {
         self.loaded_hash = hash.clone();
         self.saved_hash = hash;
         self.saved_revision = self.revision;
-        self.phase = read_only_reason(&file)
-            .map(DocumentPhase::ReadOnly)
-            .unwrap_or(DocumentPhase::Ready);
+        self.phase =
+            read_only_reason(&file).map(DocumentPhase::ReadOnly).unwrap_or(DocumentPhase::Ready);
         self.pending_external_reload = None;
         self.file = Some(file);
     }
@@ -308,11 +302,8 @@ impl FileDocument {
     }
 
     pub fn estimated_retained_bytes(&self) -> usize {
-        let file_text_bytes = self
-            .file
-            .as_ref()
-            .and_then(|file| file.text.as_ref())
-            .map_or(0, String::capacity);
+        let file_text_bytes =
+            self.file.as_ref().and_then(|file| file.text.as_ref()).map_or(0, String::capacity);
         let pending_reload_bytes = self
             .pending_external_reload
             .as_ref()
@@ -323,19 +314,10 @@ impl FileDocument {
             .capacity()
             .saturating_mul(std::mem::size_of::<SharedString>())
             .saturating_add(
-                self.lines
-                    .iter()
-                    .fold(0usize, |total, line| total.saturating_add(line.len())),
+                self.lines.iter().fold(0usize, |total, line| total.saturating_add(line.len())),
             );
-        let pending_save_bytes = self
-            .pending_save
-            .as_ref()
-            .map_or(0, |save| save.text.capacity());
-        let editor_text_bytes = self
-            .editor
-            .is_some()
-            .then_some(file_text_bytes)
-            .unwrap_or(0);
+        let pending_save_bytes = self.pending_save.as_ref().map_or(0, |save| save.text.capacity());
+        let editor_text_bytes = self.editor.is_some().then_some(file_text_bytes).unwrap_or(0);
 
         std::mem::size_of::<Self>()
             .saturating_add(file_text_bytes)
@@ -379,8 +361,9 @@ fn writable_line_ending(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use slopty_view_proto::WorkspaceTextEncoding;
+
+    use super::*;
 
     fn key(path: &str) -> DocumentKey {
         DocumentKey {
@@ -495,10 +478,7 @@ mod tests {
         document.mark_user_edit();
         assert!(matches!(document.phase, DocumentPhase::Ready));
         assert!(document.can_autosave());
-        let revision = document
-            .begin_save("changed again".into())
-            .unwrap()
-            .revision;
+        let revision = document.begin_save("changed again".into()).unwrap().revision;
         assert!(document.conflict_save(revision, Some("disk-hash".into())));
         assert!(document.is_dirty());
         assert!(matches!(

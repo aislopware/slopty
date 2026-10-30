@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Stable device-local browser storage, independent of chats and repositories.
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 use slopty_view_proto::WorkspaceScope;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -33,9 +34,7 @@ impl BrowserProfile {
             std::path::absolute(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
         });
         Self {
-            root: data_dir
-                .join("browser")
-                .join(data_encoding::HEXLOWER.encode(&hash.finalize())),
+            root: data_dir.join("browser").join(data_encoding::HEXLOWER.encode(&hash.finalize())),
         }
     }
 

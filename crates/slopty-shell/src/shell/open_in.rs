@@ -5,9 +5,10 @@
 //! here are offered, Finder for a folder on this Mac. Every open goes through [`launch`], which an
 //! end-to-end run points at a file (`SLOPTY_E2E_OPEN_LOG`) so nothing is launched.
 
+use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, IntoElement, ParentElement, Pixels, Point, SharedString, Window,
-    Styled, div, prelude::*, px,
+    AnyElement, App, Context, IntoElement, ParentElement, Pixels, Point, SharedString, Styled,
+    Window, div, px,
 };
 
 use super::Shell;
@@ -18,8 +19,9 @@ use crate::theme::Theme;
 /// The menu's top-left under the titlebar's identity in `window`, where the session picker hangs;
 /// `None` while the row names no session.
 fn under_identity(window: &Window) -> Option<Point<Pixels>> {
-    super::picker::identity_bounds(window)
-        .map(|bounds| gpui::point((bounds.left() - px(8.0)).max(px(8.0)), bounds.bottom() + px(6.0)))
+    super::picker::identity_bounds(window).map(|bounds| {
+        gpui::point((bounds.left() - px(8.0)).max(px(8.0)), bounds.bottom() + px(6.0))
+    })
 }
 
 /// Whether `host` names this machine: a worker reached over loopback runs here, where Finder and
@@ -145,7 +147,9 @@ pub(crate) fn launch(what: &Open, cx: &mut App) {
             if let Err(error) = spawned {
                 crate::toast::error_with_detail(
                     cx,
-                    format!("Couldn\u{2019}t open {app}. Check that it is installed, then try again."),
+                    format!(
+                        "Couldn\u{2019}t open {app}. Check that it is installed, then try again."
+                    ),
                     error.to_string(),
                 );
             }
@@ -243,7 +247,8 @@ impl Shell {
         let closing = self.open_in.closing_at(crate::clock::now(cx));
         let theme = Theme::of(cx).for_popup();
         let choices = self.open_in_choices(&chat_id, cx);
-        let mut list = div().flex().flex_col().gap(px(2.0)).child(popover::menu_heading(&theme, "Open in"));
+        let mut list =
+            div().flex().flex_col().gap(px(2.0)).child(popover::menu_heading(&theme, "Open in"));
         if choices.is_empty() {
             list = list.child(
                 div()
@@ -348,10 +353,7 @@ mod tests {
 
     #[test]
     fn what_a_run_reads_back() {
-        assert_eq!(
-            Open::App { app: "Zed", path: "/a b".into() }.said(),
-            "open -a Zed /a b"
-        );
+        assert_eq!(Open::App { app: "Zed", path: "/a b".into() }.said(), "open -a Zed /a b");
         assert_eq!(Open::Url("zed://ssh/h/p".into()).said(), "zed://ssh/h/p");
     }
 }

@@ -18,9 +18,10 @@ pub mod screen;
 
 use std::rc::Rc;
 
-use gpui::{AnyView, App, FocusHandle, Global, Hsla, Pixels, SharedString, Size, Subscription, Window};
-
 pub use chrome::floating_pill;
+use gpui::{
+    AnyView, App, FocusHandle, Global, Hsla, Pixels, SharedString, Size, Subscription, Window,
+};
 
 /// One of Slopty's views, as the shell places it.
 #[derive(Clone)]
@@ -291,7 +292,10 @@ impl Global for Fit {}
 
 /// Install how a terminal's grid fits a size: `fit` gives the columns and rows a terminal view
 /// draws in it, in the look [`terminal`] gives it.
-pub fn serve_fit(cx: &mut App, fit: impl Fn(Size<Pixels>, &mut Window, &mut App) -> (u16, u16) + 'static) {
+pub fn serve_fit(
+    cx: &mut App,
+    fit: impl Fn(Size<Pixels>, &mut Window, &mut App) -> (u16, u16) + 'static,
+) {
     cx.set_global(Fit(Rc::new(fit)));
 }
 
@@ -311,7 +315,10 @@ impl Global for GridOf {}
 
 /// Install how a terminal's cell is known: `grid` gives the cell a terminal view draws, in the
 /// look [`terminal`] gives it, and the inset around its grid on each side.
-pub fn serve_grid(cx: &mut App, grid: impl Fn(&mut Window, &mut App) -> (Size<Pixels>, Pixels) + 'static) {
+pub fn serve_grid(
+    cx: &mut App,
+    grid: impl Fn(&mut Window, &mut App) -> (Size<Pixels>, Pixels) + 'static,
+) {
     cx.set_global(GridOf(Rc::new(grid)));
 }
 
@@ -572,11 +579,7 @@ pub fn serve_pages(
     act: impl Fn(&str, PageAct, &mut App) + 'static,
     watch: impl Fn(&str, Box<dyn FnMut(&mut App)>, &mut App) -> Option<Subscription> + 'static,
 ) {
-    cx.set_global(Pages {
-        page: Rc::new(page),
-        act: Rc::new(act),
-        watch: Rc::new(watch),
-    });
+    cx.set_global(Pages { page: Rc::new(page), act: Rc::new(act), watch: Rc::new(watch) });
 }
 
 /// The page `key` as it stands in `window`; `None` with no host, or none for that key.

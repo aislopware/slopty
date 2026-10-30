@@ -73,7 +73,12 @@ impl Shell {
 
     /// Put `shell` in a pane beside the focused one, toward `toward`, with the keyboard once it
     /// draws.
-    pub(super) fn add_pane_shell(&mut self, shell: Entity<TerminalPanel>, toward: Direction, cx: &mut Context<Self>) {
+    pub(super) fn add_pane_shell(
+        &mut self,
+        shell: Entity<TerminalPanel>,
+        toward: Direction,
+        cx: &mut Context<Self>,
+    ) {
         self.pane_seq += 1;
         let pane = Pane::Shell(self.pane_seq);
         self.pane_shells.insert(self.pane_seq, shell);
@@ -85,7 +90,12 @@ impl Shell {
     /// A pane for `shell`, beside the focused pane of the view of `key` (a session's panes), where
     /// there is most room on screen, the keyboard staying where it is: a project action's run,
     /// or an agent's shell. Its number.
-    pub(super) fn add_shell_beside(&mut self, key: &str, shell: Entity<TerminalPanel>, cx: &mut Context<Self>) -> u64 {
+    pub(super) fn add_shell_beside(
+        &mut self,
+        key: &str,
+        shell: Entity<TerminalPanel>,
+        cx: &mut Context<Self>,
+    ) -> u64 {
         let toward = if key == self.panel_key(cx) {
             let laid = self.laid_panes(cx);
             self.panes_now(cx).roomiest(&laid)
@@ -123,7 +133,8 @@ impl Shell {
     /// What a summoned view takes of the session's room: the person's last width for a side
     /// view, as a share of the view's room, within [`VIEW_SHARE`].
     pub(super) fn view_share(&self) -> f32 {
-        let room = self.pane_area_at.get().map_or(self.viewport_width, |at| f32::from(at.size.width));
+        let room =
+            self.pane_area_at.get().map_or(self.viewport_width, |at| f32::from(at.size.width));
         (self.settings.right_pane_width / room.max(1.0)).clamp(VIEW_SHARE.0, VIEW_SHARE.1)
     }
 
@@ -153,12 +164,17 @@ impl Shell {
     /// Whether the keyboard is in `pane`.
     pub(super) fn pane_holds_keyboard(&self, pane: Pane, window: &Window, cx: &App) -> bool {
         match pane {
-            Pane::Session => self.session_terminal.read(cx).focus_handle().contains_focused(window, cx),
+            Pane::Session => {
+                self.session_terminal.read(cx).focus_handle().contains_focused(window, cx)
+            }
             Pane::Shell(n) => self
                 .pane_shells
                 .get(&n)
                 .is_some_and(|shell| shell.read(cx).focus_handle().contains_focused(window, cx)),
-            Pane::View(view) => self.view_handles.get(&view).is_some_and(|handle| handle.contains_focused(window, cx)),
+            Pane::View(view) => self
+                .view_handles
+                .get(&view)
+                .is_some_and(|handle| handle.contains_focused(window, cx)),
         }
     }
 
@@ -219,7 +235,9 @@ impl Shell {
         if panes.focused() != pane && panes.focus(pane) {
             cx.notify();
             cx.defer_in(window, move |this, window, cx| {
-                if this.panes_now(cx).focused() == pane && !this.pane_holds_keyboard(pane, window, cx) {
+                if this.panes_now(cx).focused() == pane
+                    && !this.pane_holds_keyboard(pane, window, cx)
+                {
                     this.put_keyboard_in(pane, window, cx);
                 }
             });
@@ -234,7 +252,8 @@ impl Shell {
         let state = self.state.read(cx);
         let chat = state.selected_chat_row()?;
         let now = crate::clock::utc(cx);
-        let mark = marks::Mark::of(state.display_status_for(chat, now), state.session_for(&chat.id), now);
+        let mark =
+            marks::Mark::of(state.display_status_for(chat, now), state.session_for(&chat.id), now);
         matches!(mark, marks::Mark::NeedsYou(_)).then(|| mark.hue(Theme::of(cx))).flatten()
     }
 
@@ -284,22 +303,25 @@ impl Shell {
         let ground = self.shown_ground(cx);
         let shell = cx.weak_entity();
         let equalize = cx.weak_entity();
-        let mut area = PaneArea::new("panes", panes.clone(), self.pane_grid, self.pane_area_at.clone())
-            .divider(divider_over(ground))
-            .on_ratio(move |path, ratio, _, cx| {
-                let _gone = shell.update(cx, |this, cx| {
-                    this.panes_mut(cx).set_ratio(path, ratio);
-                    cx.notify();
+        let mut area =
+            PaneArea::new("panes", panes.clone(), self.pane_grid, self.pane_area_at.clone())
+                .divider(divider_over(ground))
+                .on_ratio(move |path, ratio, _, cx| {
+                    let _gone = shell.update(cx, |this, cx| {
+                        this.panes_mut(cx).set_ratio(path, ratio);
+                        cx.notify();
+                    });
+                })
+                .on_equalize(move |_, cx| {
+                    let _gone = equalize.update(cx, |this, cx| {
+                        this.panes_mut(cx).equalize();
+                        cx.notify();
+                    });
                 });
-            })
-            .on_equalize(move |_, cx| {
-                let _gone = equalize.update(cx, |this, cx| {
-                    this.panes_mut(cx).equalize();
-                    cx.notify();
-                });
-            });
-        // A glide of the sidebar beside the panes reflows each terminal in them once (`glide_hold`).
-        let (session_terminal, pane_shells) = (self.session_terminal.clone(), self.pane_shells.clone());
+        // A glide of the sidebar beside the panes reflows each terminal in them once
+        // (`glide_hold`).
+        let (session_terminal, pane_shells) =
+            (self.session_terminal.clone(), self.pane_shells.clone());
         area = area.glide(self.glide_hold(), move |pane, by, cx| {
             let terminal = match pane {
                 Pane::Session => Some(session_terminal.clone()),
@@ -356,7 +378,13 @@ impl Shell {
 
     /// A pane's header: its program's icon, its title, and where it runs, quiet; zoom and close
     /// on the focused pane and the one under the pointer.
-    fn render_pane_header(&mut self, pane: Pane, focused: bool, ground: Hsla, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pane_header(
+        &mut self,
+        pane: Pane,
+        focused: bool,
+        ground: Hsla,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let ink = tabs::ink_for(ground, Theme::of(cx));
         let (glyph, tint, title, place) = self.pane_identity(pane, cx);
         let name = pane_name(pane);
@@ -377,7 +405,11 @@ impl Shell {
                 });
             },
         )
-        .action_hint(if zoomed { "Put the panes back" } else { "Fill the view" }, Keys::Action(Box::new(ZoomPane)), cx);
+        .action_hint(
+            if zoomed { "Put the panes back" } else { "Fill the view" },
+            Keys::Action(Box::new(ZoomPane)),
+            cx,
+        );
         let shell = cx.weak_entity();
         let controls = div()
             .flex()
@@ -389,10 +421,19 @@ impl Shell {
             // Named by what it closes, so a screen reader tells one pane's from another's.
             .when(pane != Pane::Session, |el| {
                 el.child(
-                    window_control_button(format!("pane-close-{name}"), icons::CLOSE, &ink, move |_, _, cx| {
-                        let _gone = shell.update(cx, |this, cx| this.close_pane(pane, cx));
-                    })
-                    .action_hint(format!("Close {title}"), Keys::Action(Box::new(crate::app_menus::CloseTab)), cx),
+                    window_control_button(
+                        format!("pane-close-{name}"),
+                        icons::CLOSE,
+                        &ink,
+                        move |_, _, cx| {
+                            let _gone = shell.update(cx, |this, cx| this.close_pane(pane, cx));
+                        },
+                    )
+                    .action_hint(
+                        format!("Close {title}"),
+                        Keys::Action(Box::new(crate::app_menus::CloseTab)),
+                        cx,
+                    ),
                 )
             });
         let title_ink = if focused { ink.text } else { ink.text_muted };
@@ -405,7 +446,11 @@ impl Shell {
                 .aria_label("Page icon")
                 .child(gpui::img(favicon).size(px(13.0)))
                 .into_any_element(),
-            None => icon(glyph).size(px(13.0)).flex_none().text_color(tint.unwrap_or(title_ink)).into_any_element(),
+            None => icon(glyph)
+                .size(px(13.0))
+                .flex_none()
+                .text_color(tint.unwrap_or(title_ink))
+                .into_any_element(),
         };
         div()
             .id(SharedString::from(format!("pane-header-{name}")))
@@ -458,8 +503,10 @@ impl Shell {
         });
         match pane {
             Pane::Session => {
-                let harness = chat.and_then(|chat| chat.config.as_ref().map(|config| config.harness));
-                let (glyph, tint) = harness.map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
+                let harness =
+                    chat.and_then(|chat| chat.config.as_ref().map(|config| config.harness));
+                let (glyph, tint) =
+                    harness.map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
                 let title = chat.and_then(|chat| chat.title.as_deref()).unwrap_or("New session");
                 (glyph, tint, transcript::single_line(title).into(), place)
             }

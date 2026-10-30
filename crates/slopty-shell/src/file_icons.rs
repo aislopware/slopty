@@ -7,11 +7,9 @@
 //! authored SVG colors are preserved in light mode; dark mode lifts the
 //! palette's darker accents without replacing polychrome artwork with a tint.
 
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    sync::LazyLock,
-};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use gpui::{AssetSource, Img, Result, SharedString, Styled as _, img};
 use rust_embed::RustEmbed;
@@ -35,9 +33,7 @@ fn dark_icon_svg(svg: &str) -> String {
         ("#8B5CF6", "#A78BFA"),
         ("#A855F7", "#C084FC"),
     ] {
-        svg = svg
-            .replace(original, brighter)
-            .replace(&original.to_ascii_lowercase(), brighter);
+        svg = svg.replace(original, brighter).replace(&original.to_ascii_lowercase(), brighter);
     }
     svg
 }
@@ -178,10 +174,7 @@ static MANIFEST: LazyLock<Manifest> = LazyLock::new(|| {
 });
 
 fn lowercase_keys(values: HashMap<String, String>) -> HashMap<String, String> {
-    values
-        .into_iter()
-        .map(|(key, value)| (key.to_ascii_lowercase(), value))
-        .collect()
+    values.into_iter().map(|(key, value)| (key.to_ascii_lowercase(), value)).collect()
 }
 
 /// Resolve an identity to the asset path registered with gpui.
@@ -191,11 +184,7 @@ pub fn asset_path(identity: FileIconIdentity<'_>, appearance: Appearance) -> Sha
         FileIconKind::Directory => resolve_directory(&name, identity.expanded),
         FileIconKind::File | FileIconKind::Symlink => resolve_file(&name, identity),
     };
-    let variant = if appearance == Appearance::Dark {
-        "dark/"
-    } else {
-        ""
-    };
+    let variant = if appearance == Appearance::Dark { "dark/" } else { "" };
     SharedString::from(format!("{ASSET_PREFIX}{variant}{asset}"))
 }
 
@@ -232,11 +221,7 @@ fn definition_asset(definition: &str) -> Option<&'static str> {
         "yml" => "yaml",
         definition => definition,
     };
-    MANIFEST
-        .icon_definitions
-        .get(definition)?
-        .icon_path
-        .strip_prefix("./icons/")
+    MANIFEST.icon_definitions.get(definition)?.icon_path.strip_prefix("./icons/")
 }
 
 fn resolve_directory(name: &str, _expanded: bool) -> &'static str {
@@ -249,10 +234,8 @@ fn resolve_directory(name: &str, _expanded: bool) -> &'static str {
 }
 
 fn resolve_file(name: &str, identity: FileIconIdentity<'_>) -> &'static str {
-    if let Some(asset) = MANIFEST
-        .file_names
-        .get(name)
-        .and_then(|definition| definition_asset(definition))
+    if let Some(asset) =
+        MANIFEST.file_names.get(name).and_then(|definition| definition_asset(definition))
     {
         return asset;
     }
@@ -273,11 +256,7 @@ fn resolve_file(name: &str, identity: FileIconIdentity<'_>) -> &'static str {
 }
 
 fn generic_file_asset() -> &'static str {
-    MANIFEST
-        .file
-        .as_deref()
-        .and_then(definition_asset)
-        .unwrap_or("files/document.svg")
+    MANIFEST.file.as_deref().and_then(definition_asset).unwrap_or("files/document.svg")
 }
 
 fn compound_extensions(name: &str) -> impl Iterator<Item = &str> {
@@ -318,10 +297,7 @@ fn language_asset(language: Option<LanguageId>) -> Option<&'static str> {
         LanguageId::Nix => "nix",
         LanguageId::Make => "makefile",
     };
-    MANIFEST
-        .language_ids
-        .get(language_id)
-        .and_then(|definition| definition_asset(definition))
+    MANIFEST.language_ids.get(language_id).and_then(|definition| definition_asset(definition))
 }
 
 fn mime_asset(mime_type: Option<&str>) -> Option<&'static str> {
@@ -359,20 +335,14 @@ mod tests {
             assert_ne!(light, dark, "{name} needs a brighter dark palette");
             assert!(std::str::from_utf8(&dark).unwrap().contains("<svg"));
         }
-        assert_eq!(
-            dark_icon_svg("#ffffff #000000 none #FBBF24"),
-            "#ffffff #000000 none #FBBF24"
-        );
+        assert_eq!(dark_icon_svg("#ffffff #000000 none #FBBF24"), "#ffffff #000000 none #FBBF24");
     }
 
     #[test]
     fn asset_source_preserves_authored_icon_bytes() {
         let path = "files/ts.svg";
         let embedded = EmbeddedFileIcons::get(path).unwrap();
-        let loaded = Assets
-            .load(&format!("{ASSET_PREFIX}{path}"))
-            .unwrap()
-            .unwrap();
+        let loaded = Assets.load(&format!("{ASSET_PREFIX}{path}")).unwrap().unwrap();
         assert_eq!(loaded.as_ref(), embedded.data.as_ref());
     }
 
@@ -386,14 +356,8 @@ mod tests {
             path(FileIconIdentity::file("folder.css/unknown")),
             "file-icons/files/document.svg"
         );
-        assert_eq!(
-            path(FileIconIdentity::file("config/.env.local")),
-            "file-icons/files/gear.svg"
-        );
-        assert_eq!(
-            path(FileIconIdentity::file("docs/claude.md")),
-            "file-icons/files/claude.svg"
-        );
+        assert_eq!(path(FileIconIdentity::file("config/.env.local")), "file-icons/files/gear.svg");
+        assert_eq!(path(FileIconIdentity::file("docs/claude.md")), "file-icons/files/claude.svg");
     }
 
     #[test]
@@ -406,10 +370,7 @@ mod tests {
             path(FileIconIdentity::file("model.schema.json")),
             "file-icons/files/brackets-yellow.svg"
         );
-        assert_eq!(
-            path(FileIconIdentity::file("model.freezed.dart")),
-            "file-icons/files/dart.svg"
-        );
+        assert_eq!(path(FileIconIdentity::file("model.freezed.dart")), "file-icons/files/dart.svg");
     }
 
     #[test]
@@ -446,18 +407,12 @@ mod tests {
 
     #[test]
     fn symlinks_and_unknown_files_fall_back_cleanly() {
-        assert_eq!(
-            path(FileIconIdentity::symlink("README.md")),
-            "file-icons/files/markdown.svg"
-        );
+        assert_eq!(path(FileIconIdentity::symlink("README.md")), "file-icons/files/markdown.svg");
         assert_eq!(
             path(FileIconIdentity::file("unknown.unrecognized")),
             "file-icons/files/document.svg"
         );
-        assert_eq!(
-            path(FileIconIdentity::file("")),
-            "file-icons/files/document.svg"
-        );
+        assert_eq!(path(FileIconIdentity::file("")), "file-icons/files/document.svg");
         assert!(has_specific_file_icon("src/component.test.tsx"));
         assert!(has_specific_file_icon("config/.env.local"));
         assert!(!has_specific_file_icon("version.unknown"));
@@ -499,11 +454,7 @@ mod tests {
     #[test]
     fn complete_theme_bundle_is_registered() {
         let assets = Assets.list(ASSET_PREFIX).unwrap();
-        assert!(
-            assets.len() >= 350,
-            "unexpectedly small icon bundle: {}",
-            assets.len()
-        );
+        assert!(assets.len() >= 350, "unexpectedly small icon bundle: {}", assets.len());
         for asset in EmbeddedFileIcons::iter().filter(|asset| asset.ends_with(".svg")) {
             let bytes = EmbeddedFileIcons::get(&asset)
                 .unwrap_or_else(|| panic!("listed asset is missing: {asset}"));

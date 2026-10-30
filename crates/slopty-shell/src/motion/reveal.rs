@@ -7,9 +7,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ElementId, Global, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, px,
 };
 
 use super::{COLLAPSE, FoldFrame, fold_frame, lerp, reduced_motion, speed_scale};
@@ -42,7 +43,8 @@ pub fn copy_feedback(key: impl Into<SharedString>, cx: &mut App) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(delay).await;
         cx.update(|cx| {
-            if cx.try_global::<CopiedMarks>().and_then(|marks| marks.marks.get(&key)) == Some(&mark) {
+            if cx.try_global::<CopiedMarks>().and_then(|marks| marks.marks.get(&key)) == Some(&mark)
+            {
                 cx.global_mut::<CopiedMarks>().marks.remove(&key);
             }
         });
@@ -69,12 +71,7 @@ pub fn reveal_height(
     open: bool,
     child: impl IntoElement,
 ) -> RevealHeight {
-    RevealHeight {
-        key: key.into(),
-        open,
-        fold: false,
-        child: child.into_any_element(),
-    }
+    RevealHeight { key: key.into(), open, fold: false, child: child.into_any_element() }
 }
 
 #[derive(IntoElement)]
@@ -114,7 +111,8 @@ impl RevealState {
         {
             let frame = fold_frame(self.open, now.saturating_duration_since(started), false);
             let share = if self.open { frame.height } else { 1.0 - frame.height };
-            let landed = share >= 1.0 && (if self.open { frame.opacity >= 1.0 } else { frame.opacity <= 0.0 });
+            let landed = share >= 1.0
+                && (if self.open { frame.opacity >= 1.0 } else { frame.opacity <= 0.0 });
             if !landed {
                 return (Some(lerp(from, target, share)), frame, true);
             }
@@ -130,7 +128,8 @@ impl RevealState {
             && !reduced
         {
             let total = COLLAPSE.total().mul_f32(speed_scale()).as_secs_f32();
-            let raw = now.saturating_duration_since(started).as_secs_f32() / total.max(f32::EPSILON);
+            let raw =
+                now.saturating_duration_since(started).as_secs_f32() / total.max(f32::EPSILON);
             if raw < 1.0 {
                 return (Some(lerp(from, target, COLLAPSE.progress(raw))), true);
             }
@@ -164,7 +163,7 @@ impl RenderOnce for RevealHeight {
                 }
             };
             if state.open != open {
-                let (drawn, _, _) = at(state);
+                let (drawn, ..) = at(state);
                 let drawn = drawn.unwrap_or_else(|| state.natural.get());
                 state.tween = Some((drawn, now));
                 state.open = open;
@@ -270,10 +269,17 @@ mod tests {
     #[test]
     fn a_fold_opens_its_height_before_its_contents() {
         let start = Instant::now();
-        let mut state = RevealState { open: true, natural: Rc::new(Cell::new(40.0)), tween: Some((0.0, start)) };
+        let mut state = RevealState {
+            open: true,
+            natural: Rc::new(Cell::new(40.0)),
+            tween: Some((0.0, start)),
+        };
         let (height, frame, running) = state.fold(start + Duration::from_millis(60), false);
         assert!(running);
-        assert!(height.is_some_and(|h| h > 10.0 && h < 40.0), "the height is on its way: {height:?}");
+        assert!(
+            height.is_some_and(|h| h > 10.0 && h < 40.0),
+            "the height is on its way: {height:?}"
+        );
         assert!(frame.opacity == 0.0 && frame.rise > 0.0, "the contents wait, below their place");
         let (_, frame, _) = state.fold(start + Duration::from_millis(200), false);
         assert!(frame.opacity > 0.0 && frame.opacity < 1.0, "then fade in");

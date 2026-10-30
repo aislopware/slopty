@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, Bounds, ContentMask, DispatchPhase, Element, ElementId, GlobalElementId,
     Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, ListState, Pixels, Point,
-    ScrollDelta, ScrollHandle, ScrollEvent, TouchPhase, Window, point, px,
+    ScrollDelta, ScrollEvent, ScrollHandle, TouchPhase, Window, point, px,
 };
 
 /// Apple's UIScrollView coefficient: travel `x` past the end of a `d`-tall
@@ -58,11 +58,7 @@ pub fn overscroll(
     source: OverscrollSource,
     child: impl IntoElement,
 ) -> Overscroll {
-    Overscroll {
-        id: id.into(),
-        source,
-        child: child.into_any_element(),
-    }
+    Overscroll { id: id.into(), source, child: child.into_any_element() }
 }
 
 /// The scroll state the band reads the container's ends from.
@@ -77,10 +73,7 @@ impl OverscrollSource {
         match self {
             Self::Handle(handle) => {
                 let scrolled = -f32::from(handle.offset().y);
-                Room {
-                    top: scrolled,
-                    bottom: f32::from(handle.max_offset().y) - scrolled,
-                }
+                Room { top: scrolled, bottom: f32::from(handle.max_offset().y) - scrolled }
             }
             Self::List(list) => {
                 // The final item's box includes any tail reservation, so its
@@ -93,10 +86,7 @@ impl OverscrollSource {
                         f32::from(item.bottom() - list.viewport_bounds().bottom())
                     }),
                 };
-                Room {
-                    top: -f32::from(list.scroll_px_offset_for_scrollbar().y),
-                    bottom,
-                }
+                Room { top: -f32::from(list.scroll_px_offset_for_scrollbar().y), bottom }
             }
         }
     }
@@ -110,10 +100,7 @@ struct Room {
 }
 
 impl Room {
-    const UNKNOWN: Self = Self {
-        top: f32::INFINITY,
-        bottom: f32::INFINITY,
-    };
+    const UNKNOWN: Self = Self { top: f32::INFINITY, bottom: f32::INFINITY };
 
     /// Room in the direction of a gpui wheel delta (positive scrolls up).
     fn toward(self, dy: f32) -> f32 {
@@ -181,10 +168,7 @@ impl Band {
     /// Feed one trackpad event. Returns whether it must not reach the
     /// container (it unwound the stretch instead of scrolling).
     fn wheel(&mut self, phase: TouchPhase, delta: Point<f32>, room: Room, now: Instant) -> bool {
-        let gap = self
-            .last_event
-            .replace(now)
-            .map(|last| now.saturating_duration_since(last));
+        let gap = self.last_event.replace(now).map(|last| now.saturating_duration_since(last));
         match phase {
             TouchPhase::Started => {
                 self.touching = true;
@@ -211,16 +195,9 @@ impl Band {
             self.fling_velocity = 0.0;
         }
         // Dominantly horizontal travel belongs to nested x-scrollers.
-        let dy = if delta.y.abs() >= delta.x.abs() {
-            delta.y
-        } else {
-            0.0
-        };
-        let consumed = if self.touching {
-            self.drag(dy, room)
-        } else {
-            self.fling(dy, room, gap, now)
-        };
+        let dy = if delta.y.abs() >= delta.x.abs() { delta.y } else { 0.0 };
+        let consumed =
+            if self.touching { self.drag(dy, room) } else { self.fling(dy, room, gap, now) };
         if phase == TouchPhase::Ended {
             self.release(now);
             self.momentum = true;
@@ -276,16 +253,10 @@ impl Band {
                 return false;
             };
             self.offset = rubber_band(next, self.viewport);
-            self.spring = Some(Spring {
-                from: self.offset,
-                velocity: 0.0,
-                start: now,
-            });
+            self.spring = Some(Spring { from: self.offset, velocity: 0.0, start: now });
             return true;
         }
-        let dt = gap
-            .map_or(1.0 / 60.0, |gap| gap.as_secs_f32())
-            .clamp(1.0 / 240.0, 1.0 / 30.0);
+        let dt = gap.map_or(1.0 / 60.0, |gap| gap.as_secs_f32()).clamp(1.0 / 240.0, 1.0 / 30.0);
         let velocity = dy / dt;
         self.fling_velocity =
             if self.fling_velocity != 0.0 && velocity.signum() == self.fling_velocity.signum() {
@@ -316,11 +287,7 @@ impl Band {
         // The momentum that follows a stretched release must not bounce again.
         self.fling_bounced = self.offset != 0.0;
         if self.offset != 0.0 && self.spring.is_none() {
-            self.spring = Some(Spring {
-                from: self.offset,
-                velocity: 0.0,
-                start: now,
-            });
+            self.spring = Some(Spring { from: self.offset, velocity: 0.0, start: now });
         }
     }
 
@@ -340,10 +307,7 @@ impl Band {
     }
 
     fn reset(&mut self) {
-        *self = Self {
-            viewport: self.viewport,
-            ..Self::default()
-        };
+        *self = Self { viewport: self.viewport, ..Self::default() };
     }
 }
 
@@ -359,8 +323,8 @@ pub struct OverscrollPrepaint {
 }
 
 impl Element for Overscroll {
-    type RequestLayoutState = ();
     type PrepaintState = OverscrollPrepaint;
+    type RequestLayoutState = ();
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -480,19 +444,15 @@ impl IntoElement for Overscroll {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use gpui::{Context, Modifiers, Render, Styled, canvas, div, prelude::*};
+    use gpui::prelude::*;
+    use gpui::{Context, Modifiers, Render, Styled, canvas, div};
 
-    const AT_TOP: Room = Room {
-        top: 0.0,
-        bottom: 500.0,
-    };
+    use super::*;
+
+    const AT_TOP: Room = Room { top: 0.0, bottom: 500.0 };
 
     fn band() -> Band {
-        Band {
-            viewport: 400.0,
-            ..Band::default()
-        }
+        Band { viewport: 400.0, ..Band::default() }
     }
 
     fn dy(y: f32) -> Point<f32> {
@@ -575,10 +535,7 @@ mod tests {
         let now = Instant::now();
         let mut band = band();
         band.wheel(TouchPhase::Started, dy(0.0), AT_TOP, now);
-        let room = Room {
-            top: 500.0,
-            bottom: 10.0,
-        };
+        let room = Room { top: 500.0, bottom: 10.0 };
         assert!(!band.wheel(TouchPhase::Moved, dy(-30.0), room, now));
         assert_eq!(band.stretch, -20.0);
         assert!(band.offset < 0.0);
@@ -609,10 +566,7 @@ mod tests {
     fn momentum_reaching_an_end_bounces_once() {
         let mut now = Instant::now();
         let mut band = band();
-        let room = Room {
-            top: 50.0,
-            bottom: 500.0,
-        };
+        let room = Room { top: 50.0, bottom: 500.0 };
         band.wheel(TouchPhase::Started, dy(0.0), room, now);
         band.wheel(TouchPhase::Moved, dy(20.0), room, now);
         band.wheel(TouchPhase::Ended, dy(0.0), room, now);
@@ -687,10 +641,8 @@ mod tests {
         }
         let scroll = ScrollHandle::new();
         let top = Rc::new(RefCell::new(0.0));
-        let (_, cx) = cx.add_window_view(|_, _| Fixture {
-            scroll: scroll.clone(),
-            top: top.clone(),
-        });
+        let (_, cx) =
+            cx.add_window_view(|_, _| Fixture { scroll: scroll.clone(), top: top.clone() });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let mut wheel = |y: f32, phase| {
             cx.simulate_event(ScrollEvent {
@@ -712,11 +664,7 @@ mod tests {
         assert_eq!(scroll.offset().y, px(0.0), "unwinding must not scroll");
         assert!(*top.borrow() < stretched);
         wheel(-100.0, TouchPhase::Moved);
-        assert_eq!(
-            scroll.offset().y,
-            px(-100.0),
-            "a swipe past the band scrolls"
-        );
+        assert_eq!(scroll.offset().y, px(-100.0), "a swipe past the band scrolls");
         assert_eq!(*top.borrow(), -100.0);
         wheel(-30.0, TouchPhase::Moved);
         assert_eq!(scroll.offset().y, px(-130.0));

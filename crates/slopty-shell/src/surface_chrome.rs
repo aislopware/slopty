@@ -1,10 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Shared metrics for sidebar surface toolbars and their controls.
 
-use gpui::{Div, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{Div, div, px};
 
-use crate::theme::Theme;
 use crate::motion::HoverFade as _;
+use crate::theme::Theme;
 
 pub(crate) const HEADER_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT;
 pub(crate) const CONTROL_SIZE: f32 = 24.0;
@@ -53,11 +54,11 @@ pub(crate) fn icon_toggle(
 ) -> gpui::Stateful<Div> {
     icon_button_frame(id, on, theme)
         .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
-        .child(
-            crate::icons::icon(glyph)
-                .size(px(ICON_SIZE))
-                .text_color(if on { theme.text } else { theme.text_muted }),
-        )
+        .child(crate::icons::icon(glyph).size(px(ICON_SIZE)).text_color(if on {
+            theme.text
+        } else {
+            theme.text_muted
+        }))
 }
 
 /// The frame [`icon_button`] and [`icon_toggle`] share, for a caller-drawn glyph: a keyboard
@@ -104,11 +105,7 @@ pub(crate) fn toolbar(theme: &Theme) -> Div {
         .border_t_1()
         .border_b_1()
         .border_color(theme.border)
-        .bg(if theme.is_glass() {
-            theme.surface.opacity(0.26)
-        } else {
-            theme.surface
-        })
+        .bg(if theme.is_glass() { theme.surface.opacity(0.26) } else { theme.surface })
 }
 
 // One keyboard ring for every control (M8): 2 px of the accent drawn 2 px clear of the
@@ -122,11 +119,7 @@ pub const RING_OFFSET: f32 = 2.0;
 /// The shell's keyboard ring in `theme`'s accent, clear of the control by `offset`.
 #[must_use]
 pub fn ring(theme: &Theme, offset: f32) -> gpui::Outline {
-    gpui::Outline {
-        color: theme.accent,
-        width: px(RING_WIDTH),
-        offset: px(offset),
-    }
+    gpui::Outline { color: theme.accent, width: px(RING_WIDTH), offset: px(offset) }
 }
 
 /// Gives `el` the shell's focus ring. The control also needs a `tab_index` to take focus.
@@ -161,10 +154,8 @@ pub fn key_stop<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
 
 /// [`key_stop`] with [`focus_ring_inset`], for a row that fills a clipped list.
 pub fn key_stop_inset<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E {
-    focus_ring_inset(el.tab_index(0), theme).on_mouse_down(
-        gpui::MouseButton::Left,
-        |_, window, _| window.prevent_default(),
-    )
+    focus_ring_inset(el.tab_index(0), theme)
+        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
 }
 
 /// Neutral navigation chip shared by the right-panel strip and PR navigation.
@@ -186,11 +177,7 @@ pub(crate) fn tab_frame(
         .aria_selected(selected)
         .tab_index(0)
         .text_size(crate::typography::ui_rems(12.0))
-        .text_color(if selected {
-            theme.text
-        } else {
-            theme.text_muted
-        })
+        .text_color(if selected { theme.text } else { theme.text_muted })
         // A ring that never widens the chip (`focus_ring`).
         .map(|el| focus_ring(el, theme))
         .when(selected, |el| el.bg(crate::theme::selected_wash()))
@@ -258,16 +245,14 @@ pub(crate) fn modal_card(
     title: &'static str,
     close: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<Div> {
-    card.id(id)
-        .track_focus(focus)
-        .role(gpui::Role::Dialog)
-        .aria_label(title)
-        .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+    card.id(id).track_focus(focus).role(gpui::Role::Dialog).aria_label(title).on_key_down(
+        move |event: &gpui::KeyDownEvent, window, cx| {
             if event.keystroke.key == "escape" {
                 close(window, cx);
                 cx.stop_propagation();
             }
-        })
+        },
+    )
 }
 
 // A small control takes presses past what it draws (M25).
@@ -291,7 +276,11 @@ pub(crate) fn touch_row_height(drawn: f32) -> f32 {
 
 /// [`focus_ring`] for a hit area reaching `reach` past the control it draws
 /// ([`touch_reach`]): the ring stands around the control, not around the hit area.
-pub(crate) fn focus_ring_within<E: InteractiveElement + Styled>(el: E, theme: &Theme, reach: f32) -> E {
+pub(crate) fn focus_ring_within<E: InteractiveElement + Styled>(
+    el: E,
+    theme: &Theme,
+    reach: f32,
+) -> E {
     let ring = ring(theme, RING_OFFSET - reach);
     el.focus_visible(move |style| style.outline_ring(ring))
 }
@@ -365,11 +354,7 @@ mod tests {
                 .child(first)
                 .child(div().w(px(40.0)).h(px(20.0)).bg(BLUE))
                 .child(
-                    div()
-                        .id("holder")
-                        .track_focus(&self.holder)
-                        .size(px(10.0))
-                        .bg(gpui::green()),
+                    div().id("holder").track_focus(&self.holder).size(px(10.0)).bg(gpui::green()),
                 )
         }
     }
@@ -436,7 +421,8 @@ mod tests {
         let (_, _, cx) = stops(Wear::Ring, cx);
         let (quads, scale) = draw(cx);
         assert!(ring(&quads, scale).is_none(), "no ring at rest");
-        let (red, blue) = (filled(&quads, RED, scale).unwrap(), filled(&quads, BLUE, scale).unwrap());
+        let (red, blue) =
+            (filled(&quads, RED, scale).unwrap(), filled(&quads, BLUE, scale).unwrap());
         tab_in(cx);
         let (quads, scale) = draw(cx);
         let (ring, width) = ring(&quads, scale).expect("the keyboard rings the stop");
@@ -491,9 +477,7 @@ mod tests {
         tab_in(cx);
         for key in ["enter", "space"] {
             cx.simulate_keystrokes(key);
-            cx.simulate_event(gpui::KeyUpEvent {
-                keystroke: gpui::Keystroke::parse(key).unwrap(),
-            });
+            cx.simulate_event(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse(key).unwrap() });
         }
         assert_eq!(presses.get(), 2, "Enter and Space each press once");
 

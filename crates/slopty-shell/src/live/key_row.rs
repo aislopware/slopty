@@ -63,7 +63,11 @@ impl Slot {
             return;
         }
         let off = self.used || self.was_latched;
-        *self = Self { arm: if off { Arm::Off } else { Arm::Latched }, used: false, was_latched: false };
+        *self = Self {
+            arm: if off { Arm::Off } else { Arm::Latched },
+            used: false,
+            was_latched: false,
+        };
     }
 
     const fn spend(&mut self) -> bool {
@@ -136,7 +140,11 @@ impl Armed {
     /// A key went: which modifiers go with it. Each latched one is spent, and each held one
     /// stays for the next key.
     pub const fn spend(&mut self) -> Spent {
-        Spent { control: self.control.spend(), alt: self.alt.spend(), command: self.command.spend() }
+        Spent {
+            control: self.control.spend(),
+            alt: self.alt.spend(),
+            command: self.command.spend(),
+        }
     }
 
     /// Spend `modifier` alone, for what only it means (⌘ on a tap opens the link under it):
@@ -245,7 +253,10 @@ pub fn set_hardware_keyboard(attached: bool, cx: &mut App) {
 }
 
 /// Call `changed` whenever a hardware keyboard comes or goes.
-pub fn observe_hardware_keyboard(cx: &mut App, mut changed: impl FnMut(&mut App) + 'static) -> Subscription {
+pub fn observe_hardware_keyboard(
+    cx: &mut App,
+    mut changed: impl FnMut(&mut App) + 'static,
+) -> Subscription {
     cx.observe_global::<HardwareKeyboard>(move |cx| changed(cx))
 }
 
@@ -398,7 +409,11 @@ mod tests {
         armed.down(Modifier::Command);
         armed.up(Modifier::Command);
         armed.down(CONTROL);
-        assert_eq!(armed.spend(), Spent { control: true, alt: true, command: true }, "all three go");
+        assert_eq!(
+            armed.spend(),
+            Spent { control: true, alt: true, command: true },
+            "all three go"
+        );
         assert!(!armed.on(Modifier::Alt) && !armed.on(Modifier::Command), "the latched are spent");
         assert!(armed.on(CONTROL), "the held stays");
         assert!(armed.spend_one(CONTROL), "spent alone");

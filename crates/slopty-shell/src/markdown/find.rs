@@ -114,8 +114,12 @@ pub fn block_texts(block: &Block, out: &mut Vec<String>) {
     match block {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => out.push(runs_text(runs)),
         // Terminal output paints its text, its escapes taken out.
-        Block::CodeBlock { language, code } if super::ansi::is_ansi_fence(language.as_deref(), code) => {
-            out.extend(super::ansi::parse(language.as_deref(), code).into_iter().map(|line| line.text));
+        Block::CodeBlock { language, code }
+            if super::ansi::is_ansi_fence(language.as_deref(), code) =>
+        {
+            out.extend(
+                super::ansi::parse(language.as_deref(), code).into_iter().map(|line| line.text),
+            );
         }
         Block::CodeBlock { code, .. } => out.extend(code.split('\n').map(str::to_owned)),
         Block::BlockQuote { children } => {
@@ -176,10 +180,8 @@ pub(crate) fn paint(
         first
     });
     for (nth, range) in found.into_iter().enumerate() {
-        let active = find
-            .active
-            .as_ref()
-            .is_some_and(|(at, place)| at == row && *place == first + nth);
+        let active =
+            find.active.as_ref().is_some_and(|(at, place)| at == row && *place == first + nth);
         let wash = if active { find.washes.1 } else { find.washes.0 };
         for rect in super::render::range_rects(layout, &displayed(range), 0.0, 0.0) {
             window.paint_quad(quad(

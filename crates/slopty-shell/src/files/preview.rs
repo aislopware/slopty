@@ -1,15 +1,13 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ daf047b), see THIRD_PARTY_NOTICES.md
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    rc::Rc,
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
 
+use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, Entity, FocusHandle, Focusable as _, ListAlignment, ListOffset,
-    ListSizingBehavior, ListState, ScrollHandle, SharedString, Window, div, font, list, point,
-    prelude::*, px,
+    ListSizingBehavior, ListState, ScrollHandle, SharedString, Window, div, font, list, point, px,
 };
 use gpui_base::input::RopeExt as _;
 use slopty_view_proto::{
@@ -17,24 +15,23 @@ use slopty_view_proto::{
     WriteWorkspaceFileRequest,
 };
 
+use super::client::{FilesRequestContext, WorkspaceFilesClient};
+use super::document::{DocumentKey, DocumentPhase, FileDocument};
 use super::{
-    FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface,
-    client::{FilesRequestContext, WorkspaceFilesClient},
-    document::{DocumentKey, DocumentPhase, FileDocument},
-    toolbar, toolbar_button, toolbar_toggle_keyed,
+    FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface, toolbar, toolbar_button,
+    toolbar_toggle_keyed,
 };
-use crate::{
-    icons::{self, icon},
-    syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache},
-    theme::Theme,
-};
+use crate::icons::{self, icon};
 use crate::motion::HoverFade as _;
+use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
+use crate::theme::Theme;
 
 // One code size for the pane (the diff's, the editor's and a read-only file's), the
 // `code_font_size` setting on a 20 px line at its default: opening a file from its diff, or a
 // file that cannot be edited, no longer moves its text 1 or 1.5 px.
 const PREVIEW_LINE_HEIGHT: f32 = 20.0;
-const PREVIEW_LINE_HEIGHT_RATIO: f32 = PREVIEW_LINE_HEIGHT / crate::typography::CODE_FONT_SIZE_DEFAULT;
+const PREVIEW_LINE_HEIGHT_RATIO: f32 =
+    PREVIEW_LINE_HEIGHT / crate::typography::CODE_FONT_SIZE_DEFAULT;
 // A read response is capped at 8 MiB and editable files at 1 MiB. The byte
 // budget bounds large previews while the entry cap bounds many tiny editors.
 // Protected documents may exceed either limit rather than risk losing work.
@@ -119,11 +116,9 @@ impl FilePreviewState {
         let documents = self.documents.values().fold(0usize, |total, document| {
             total.saturating_add(document.estimated_retained_bytes())
         });
-        self.highlights
-            .values()
-            .fold(documents, |total, highlight| {
-                total.saturating_add(estimated_highlighted_file_bytes(highlight))
-            })
+        self.highlights.values().fold(documents, |total, highlight| {
+            total.saturating_add(estimated_highlighted_file_bytes(highlight))
+        })
     }
 
     fn document_is_evictable(&self, path: &str, protected_paths: &HashSet<String>) -> bool {
@@ -295,8 +290,7 @@ fn estimated_highlighted_file_bytes(highlight: &HighlightedFile) -> usize {
         )
         .saturating_add(document.lines.iter().fold(0usize, |total, line| {
             total.saturating_add(
-                line.capacity()
-                    .saturating_mul(std::mem::size_of::<slopty_syntax::HighlightSpan>()),
+                line.capacity().saturating_mul(std::mem::size_of::<slopty_syntax::HighlightSpan>()),
             )
         }))
 }
@@ -336,8 +330,7 @@ fn renamed_document_path(path: &str, old_path: &str, new_path: &str) -> Option<S
     if path == old_path {
         Some(new_path.to_string())
     } else {
-        path.strip_prefix(&format!("{old_path}/"))
-            .map(|suffix| format!("{new_path}/{suffix}"))
+        path.strip_prefix(&format!("{old_path}/")).map(|suffix| format!("{new_path}/{suffix}"))
     }
 }
 
@@ -408,10 +401,8 @@ impl FilesSurface {
         }
         self.line_navigation_generation = self.line_navigation_generation.wrapping_add(1);
         self.pending_line_navigation = Some((line, column));
-        if let Some(document) = self
-            .editor_path
-            .as_ref()
-            .and_then(|path| self.preview.documents.get_mut(path))
+        if let Some(document) =
+            self.editor_path.as_ref().and_then(|path| self.preview.documents.get_mut(path))
         {
             // Source line numbers do not map to the rendered Markdown blocks.
             if document.show_markdown {
@@ -437,12 +428,7 @@ impl FilesSurface {
         let Some(document) = self.preview.documents.get(path) else {
             return;
         };
-        if document
-            .file
-            .as_ref()
-            .and_then(|file| file.text.as_ref())
-            .is_none()
-        {
+        if document.file.as_ref().and_then(|file| file.text.as_ref()).is_none() {
             if !matches!(document.phase, DocumentPhase::Loading) {
                 self.pending_line_navigation = None;
             }
@@ -506,11 +492,8 @@ impl FilesSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(document) = self
-            .preview
-            .active
-            .as_deref()
-            .and_then(|path| self.preview.documents.get(path))
+        let Some(document) =
+            self.preview.active.as_deref().and_then(|path| self.preview.documents.get(path))
         else {
             return true;
         };
@@ -520,15 +503,13 @@ impl FilesSurface {
                 let cursor = state.cursor();
                 let bounds = state.range_to_bounds(&(cursor..cursor));
                 let viewport = state.input_bounds();
-                bounds
-                    .filter(|_| viewport.size.height > px(0.0))
-                    .map(|bounds| {
-                        (
-                            state.scroll_offset(),
-                            viewport.origin.y + viewport.size.height / 2.0,
-                            bounds.origin.y + bounds.size.height / 2.0,
-                        )
-                    })
+                bounds.filter(|_| viewport.size.height > px(0.0)).map(|bounds| {
+                    (
+                        state.scroll_offset(),
+                        viewport.origin.y + viewport.size.height / 2.0,
+                        bounds.origin.y + bounds.size.height / 2.0,
+                    )
+                })
             };
             let Some((offset, target_y, line_y)) = target else {
                 // A newly mounted editor has no layout when the cursor is first
@@ -553,14 +534,9 @@ impl FilesSurface {
         if viewport.size.height <= px(0.0) {
             return false;
         }
-        let row = (line as usize)
-            .saturating_sub(1)
-            .min(document.lines.len().saturating_sub(1));
+        let row = (line as usize).saturating_sub(1).min(document.lines.len().saturating_sub(1));
         let Some(bounds) = self.preview.list.bounds_for_item(row) else {
-            self.preview.list.scroll_to(ListOffset {
-                item_ix: row,
-                offset_in_item: px(0.0),
-            });
+            self.preview.list.scroll_to(ListOffset { item_ix: row, offset_in_item: px(0.0) });
             cx.notify();
             return false;
         };
@@ -587,12 +563,7 @@ impl FilesSurface {
                 }
             }
         }
-        if self
-            .preview
-            .documents
-            .get(&path)
-            .is_some_and(|d| !d.show_markdown)
-        {
+        if self.preview.documents.get(&path).is_some_and(|d| !d.show_markdown) {
             self.focus_editor(window, cx);
         }
         cx.notify();
@@ -601,11 +572,8 @@ impl FilesSurface {
     /// Where the header's keys resolve: whatever holds focus in the open document (its image,
     /// its Markdown preview or its editor), else the tree.
     pub(super) fn keys_focus(&self, cx: &gpui::App) -> FocusHandle {
-        let document = self
-            .preview
-            .active
-            .as_ref()
-            .and_then(|path| self.preview.documents.get(path));
+        let document =
+            self.preview.active.as_ref().and_then(|path| self.preview.documents.get(path));
         if let Some(view) = document.and_then(|d| d.image.clone()) {
             return view.read(cx).focus.clone();
         }
@@ -657,12 +625,7 @@ impl FilesSurface {
     }
 
     pub(super) fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
-        if self
-            .preview
-            .active
-            .as_ref()
-            .is_some_and(|active| active != &path)
-        {
+        if self.preview.active.as_ref().is_some_and(|active| active != &path) {
             self.suspend_images(cx);
             if let Some(view) = self
                 .preview
@@ -675,11 +638,8 @@ impl FilesSurface {
             }
         }
 
-        let leaving_reload_confirmation = self
-            .preview
-            .reload_confirmation
-            .as_deref()
-            .is_some_and(|pending| pending != path);
+        let leaving_reload_confirmation =
+            self.preview.reload_confirmation.as_deref().is_some_and(|pending| pending != path);
         if leaving_reload_confirmation {
             self.cancel_reload_confirmation(cx);
         }
@@ -689,10 +649,9 @@ impl FilesSurface {
             let Some(context) = self.request_context.as_ref() else {
                 return;
             };
-            self.preview.documents.insert(
-                path.clone(),
-                FileDocument::loading(document_key(context, path.clone())),
-            );
+            self.preview
+                .documents
+                .insert(path.clone(), FileDocument::loading(document_key(context, path.clone())));
             self.read_file(path, cx);
         } else if self.preview.documents.get(&path).is_some_and(|d| {
             d.image.is_none()
@@ -728,10 +687,8 @@ impl FilesSurface {
         let key = document_key(&context, path.clone());
         document.key = key.clone();
         let generation = document.begin_load();
-        let request = ReadWorkspaceFileRequest {
-            target: context.target.clone(),
-            path: path.clone(),
-        };
+        let request =
+            ReadWorkspaceFileRequest { target: context.target.clone(), path: path.clone() };
         let client = WorkspaceFilesClient::new(engine, context.clone());
         let task_path = path.clone();
         let task_key = key.clone();
@@ -843,21 +800,12 @@ impl FilesSurface {
         };
         let key = DocumentHighlightKey::new(language, &source);
         if let Some(document) = self.preview.syntax_cache.get(&key) {
-            if let Some(editor) = self
-                .preview
-                .documents
-                .get(&path)
-                .and_then(|file| file.editor.clone())
+            if let Some(editor) =
+                self.preview.documents.get(&path).and_then(|file| file.editor.clone())
             {
                 super::editor_adapter::install_highlighter(&editor, source, document.clone(), cx);
             }
-            self.preview.highlights.insert(
-                path,
-                HighlightedFile {
-                    content_hash,
-                    document,
-                },
-            );
+            self.preview.highlights.insert(path, HighlightedFile { content_hash, document });
             cx.notify();
             return;
         }
@@ -879,11 +827,8 @@ impl FilesSurface {
                 })
                 .await;
             let _ = this.update(cx, |surface, cx| {
-                let still_current = surface
-                    .preview
-                    .documents
-                    .get_mut(&highlight_path)
-                    .is_some_and(|document| {
+                let still_current =
+                    surface.preview.documents.get_mut(&highlight_path).is_some_and(|document| {
                         let current = file_highlight_result_is_current(
                             document,
                             &task_document_key,
@@ -914,13 +859,10 @@ impl FilesSurface {
                             cx,
                         );
                     }
-                    surface.preview.highlights.insert(
-                        highlight_path.clone(),
-                        HighlightedFile {
-                            content_hash,
-                            document,
-                        },
-                    );
+                    surface
+                        .preview
+                        .highlights
+                        .insert(highlight_path.clone(), HighlightedFile { content_hash, document });
                     cx.notify();
                 }
                 surface.trim_document_cache();
@@ -934,11 +876,8 @@ impl FilesSurface {
     }
 
     pub(super) fn on_editor_change(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(editor) = self
-            .preview
-            .documents
-            .get(path)
-            .and_then(|document| document.editor.clone())
+        let Some(editor) =
+            self.preview.documents.get(path).and_then(|document| document.editor.clone())
         else {
             return;
         };
@@ -978,9 +917,7 @@ impl FilesSurface {
         let task_path = path.clone();
         let task_document_key = document_key.clone();
         let task = cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(120))
-                .await;
+            cx.background_executor().timer(Duration::from_millis(120)).await;
             let request_path = task_path.clone();
             let source_for_parse = source.clone();
             let highlighted = cx
@@ -1010,10 +947,7 @@ impl FilesSurface {
                     return;
                 };
                 let editor = document.editor.clone();
-                surface
-                    .preview
-                    .syntax_cache
-                    .insert(cache_key, highlighted.clone());
+                surface.preview.syntax_cache.insert(cache_key, highlighted.clone());
                 if let Some(editor) = editor {
                     super::editor_adapter::install_highlighter(&editor, source, highlighted, cx);
                 }
@@ -1051,15 +985,11 @@ impl FilesSurface {
             let _ = this.update(cx, |surface, cx| {
                 let still_current = surface.preview.autosave_enabled
                     && !surface.preview.autosave_paused_for_reload(&task_path)
-                    && surface
-                        .preview
-                        .documents
-                        .get(&task_path)
-                        .is_some_and(|document| {
-                            document.accepts(&key, generation)
-                                && document.revision == revision
-                                && document.can_autosave()
-                        });
+                    && surface.preview.documents.get(&task_path).is_some_and(|document| {
+                        document.accepts(&key, generation)
+                            && document.revision == revision
+                            && document.can_autosave()
+                    });
                 if still_current {
                     surface.save_document(task_path, cx);
                 }
@@ -1086,11 +1016,8 @@ impl FilesSurface {
             cx.notify();
             return;
         };
-        let Some(editor) = self
-            .preview
-            .documents
-            .get(&path)
-            .and_then(|document| document.editor.clone())
+        let Some(editor) =
+            self.preview.documents.get(&path).and_then(|document| document.editor.clone())
         else {
             return;
         };
@@ -1099,9 +1026,7 @@ impl FilesSurface {
             self.preview.documents.get_mut(&path).and_then(|document| {
                 let key = document.key.clone();
                 let generation = document.generation;
-                document
-                    .begin_save(text)
-                    .map(|pending| (key, generation, pending))
+                document.begin_save(text).map(|pending| (key, generation, pending))
             })
         else {
             return;
@@ -1192,39 +1117,22 @@ impl FilesSurface {
             return FilesCloseDisposition::Allow;
         }
         self.preview.close_requested = true;
-        let blocked = dirty_paths.iter().any(|path| {
-            self.preview
-                .documents
-                .get(path)
-                .is_some_and(document_blocks_lifecycle)
-        });
+        let blocked = dirty_paths
+            .iter()
+            .any(|path| self.preview.documents.get(path).is_some_and(document_blocks_lifecycle));
         for path in dirty_paths {
-            if self
-                .preview
-                .documents
-                .get(&path)
-                .is_some_and(FileDocument::can_autosave)
-            {
+            if self.preview.documents.get(&path).is_some_and(FileDocument::can_autosave) {
                 self.save_document(path, cx);
             }
         }
         cx.notify();
-        if blocked {
-            FilesCloseDisposition::Blocked
-        } else {
-            FilesCloseDisposition::Pending
-        }
+        if blocked { FilesCloseDisposition::Blocked } else { FilesCloseDisposition::Pending }
     }
 
     fn retry_pending_close(&mut self, cx: &mut Context<Self>) {
         let paths = self.preview.dirty_paths();
         for path in paths {
-            if self
-                .preview
-                .documents
-                .get(&path)
-                .is_some_and(FileDocument::can_save)
-            {
+            if self.preview.documents.get(&path).is_some_and(FileDocument::can_save) {
                 self.save_document(path, cx);
             }
         }
@@ -1272,11 +1180,8 @@ impl FilesSurface {
             if self.preview.documents.contains_key(&path) {
                 if self.preview.images_visible && self.preview.active.as_deref() == Some(&path) {
                     self.read_image_file(path, cx);
-                } else if let Some(view) = self
-                    .preview
-                    .documents
-                    .get(&path)
-                    .and_then(|d| d.image.clone())
+                } else if let Some(view) =
+                    self.preview.documents.get(&path).and_then(|d| d.image.clone())
                 {
                     view.update(cx, |view, cx| view.suspend(cx));
                 }
@@ -1298,10 +1203,8 @@ impl FilesSurface {
         }
         let key = document.key.clone();
         let generation = document.generation;
-        let request = ReadWorkspaceFileRequest {
-            target: context.target.clone(),
-            path: path.clone(),
-        };
+        let request =
+            ReadWorkspaceFileRequest { target: context.target.clone(), path: path.clone() };
         let client = WorkspaceFilesClient::new(engine, context.clone());
         let task_path = path.clone();
         let task_key = key.clone();
@@ -1488,21 +1391,13 @@ impl FilesSurface {
             self.preview.document_recency.retain(|recent_path| {
                 recent_path != old_document_path && recent_path != new_document_path
             });
-            self.preview
-                .document_recency
-                .push_back(new_document_path.clone());
-            self.preview
-                .documents
-                .insert(new_document_path.clone(), document);
+            self.preview.document_recency.push_back(new_document_path.clone());
+            self.preview.documents.insert(new_document_path.clone(), document);
         }
         for (_, path) in &renames {
             if image_renames.contains(path)
                 && self.preview.active.as_deref() == Some(path)
-                && !self
-                    .preview
-                    .documents
-                    .get(path)
-                    .is_some_and(FileDocument::is_dirty)
+                && !self.preview.documents.get(path).is_some_and(FileDocument::is_dirty)
             {
                 self.read_file(path.clone(), cx);
             } else if let Some(document) = self.preview.documents.get(path) {
@@ -1540,11 +1435,7 @@ impl FilesSurface {
         };
         let text = file.text.clone();
         let hash = file.content_hash.clone();
-        let editor = self
-            .preview
-            .documents
-            .get(path)
-            .and_then(|document| document.editor.clone());
+        let editor = self.preview.documents.get(path).and_then(|document| document.editor.clone());
         if let (Some(editor), Some(text)) = (editor, text.clone()) {
             super::editor::replace_file_contents(&editor, text, window, cx);
         }
@@ -1565,9 +1456,7 @@ impl FilesSurface {
             .and_then(|path| self.preview.documents.get(path))
             .map(|document| document.lines.len())
             .unwrap_or(0);
-        self.preview
-            .list
-            .reset_with_uniform_height(count, self.preview.line_height());
+        self.preview.list.reset_with_uniform_height(count, self.preview.line_height());
     }
 
     fn request_reload_active_document(&mut self, cx: &mut Context<Self>) {
@@ -1594,11 +1483,7 @@ impl FilesSurface {
     fn cancel_reload_confirmation(&mut self, cx: &mut Context<Self>) {
         let pending = self.preview.reload_confirmation.take();
         if let Some(path) = pending
-            && self
-                .preview
-                .documents
-                .get(&path)
-                .is_some_and(FileDocument::can_autosave)
+            && self.preview.documents.get(&path).is_some_and(FileDocument::can_autosave)
         {
             self.schedule_autosave(path, cx);
         }
@@ -1612,9 +1497,7 @@ impl FilesSurface {
         if let Some(document) = self.preview.documents.get_mut(&path)
             && let DocumentPhase::ExternallyModified { disk_hash } = &document.phase
         {
-            document.phase = DocumentPhase::Conflict {
-                disk_hash: disk_hash.clone(),
-            };
+            document.phase = DocumentPhase::Conflict { disk_hash: disk_hash.clone() };
         }
         self.preview.reload_confirmation = None;
         cx.notify();
@@ -1651,12 +1534,8 @@ impl FilesSurface {
         });
         let confirming_reload = self.preview.reload_confirmation.as_deref() == Some(&active);
         let lifecycle_pending = self.preview.close_requested || self.target_change_pending;
-        let lifecycle_blocked = lifecycle_pending
-            && self
-                .preview
-                .documents
-                .values()
-                .any(document_blocks_lifecycle);
+        let lifecycle_blocked =
+            lifecycle_pending && self.preview.documents.values().any(document_blocks_lifecycle);
         let body = self.render_document_body(&active, &theme, window, cx);
         div()
             .size_full()
@@ -1739,104 +1618,109 @@ impl FilesSurface {
                         }),
                 )
             })
-            .when(
-                (external || confirming_reload) && !lifecycle_pending,
-                |element| {
-                    element.child(
-                        div()
-                            .min_h(px(32.0))
-                            .py(px(6.0))
-                            .flex_none()
-                            .px(px(10.0))
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(8.0))
-                            .border_b_1()
-                            .border_color(theme.warning.opacity(0.25))
-                            .bg(theme.warning.opacity(0.055))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.warning_muted)
-                            .child(div().min_w_0().max_w_full().whitespace_normal().child(
-                                if confirming_reload {
-                                    "Discard unsaved changes?"
-                                } else {
-                                    "This file changed outside Slopty."
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .ml_auto()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .when(!confirming_reload, |actions| {
-                                        actions
-                                            .child(
-                                                div()
-                                                    .id("files-keep-external-edits")
-                                                    .role(gpui::Role::Button)
-                                                    .rounded(px(4.0))
-                                                    // A keyboard stop with the shell's ring (M8).
-                                                    .map(|el| crate::surface_chrome::key_stop(el, &theme))
-                                                    .cursor_pointer()
-                                                    .text_color(theme.text_muted)
-                                                    .child("Keep editing")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.keep_external_edits(cx)
-                                                    })),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("files-reload-external")
-                                                    .role(gpui::Role::Button)
-                                                    .rounded(px(4.0))
-                                                    // A keyboard stop with the shell's ring (M8).
-                                                    .map(|el| crate::surface_chrome::key_stop(el, &theme))
-                                                    .cursor_pointer()
-                                                    .text_color(theme.text)
-                                                    .child("Reload from disk")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.request_reload_active_document(cx)
-                                                    })),
-                                            )
-                                    })
-                                    .when(confirming_reload, |actions| {
-                                        actions
-                                            .child(
-                                                div()
-                                                    .id("files-cancel-reload")
-                                                    .role(gpui::Role::Button)
-                                                    .rounded(px(4.0))
-                                                    // A keyboard stop with the shell's ring (M8).
-                                                    .map(|el| crate::surface_chrome::key_stop(el, &theme))
-                                                    .cursor_pointer()
-                                                    .text_color(theme.text_muted)
-                                                    .child("Cancel")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.cancel_reload_confirmation(cx)
-                                                    })),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("files-confirm-reload")
-                                                    .role(gpui::Role::Button)
-                                                    .rounded(px(4.0))
-                                                    // A keyboard stop with the shell's ring (M8).
-                                                    .map(|el| crate::surface_chrome::key_stop(el, &theme))
-                                                    .cursor_pointer()
-                                                    .text_color(theme.text)
-                                                    .child("Discard and reload")
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.confirm_reload_active_document(cx)
-                                                    })),
-                                            )
-                                    }),
-                            ),
-                    )
-                },
-            )
+            .when((external || confirming_reload) && !lifecycle_pending, |element| {
+                element.child(
+                    div()
+                        .min_h(px(32.0))
+                        .py(px(6.0))
+                        .flex_none()
+                        .px(px(10.0))
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.0))
+                        .border_b_1()
+                        .border_color(theme.warning.opacity(0.25))
+                        .bg(theme.warning.opacity(0.055))
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.warning_muted)
+                        .child(div().min_w_0().max_w_full().whitespace_normal().child(
+                            if confirming_reload {
+                                "Discard unsaved changes?"
+                            } else {
+                                "This file changed outside Slopty."
+                            },
+                        ))
+                        .child(
+                            div()
+                                .ml_auto()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap(px(8.0))
+                                .when(!confirming_reload, |actions| {
+                                    actions
+                                        .child(
+                                            div()
+                                                .id("files-keep-external-edits")
+                                                .role(gpui::Role::Button)
+                                                .rounded(px(4.0))
+                                                // A keyboard stop with the shell's ring (M8).
+                                                .map(|el| {
+                                                    crate::surface_chrome::key_stop(el, &theme)
+                                                })
+                                                .cursor_pointer()
+                                                .text_color(theme.text_muted)
+                                                .child("Keep editing")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.keep_external_edits(cx)
+                                                })),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("files-reload-external")
+                                                .role(gpui::Role::Button)
+                                                .rounded(px(4.0))
+                                                // A keyboard stop with the shell's ring (M8).
+                                                .map(|el| {
+                                                    crate::surface_chrome::key_stop(el, &theme)
+                                                })
+                                                .cursor_pointer()
+                                                .text_color(theme.text)
+                                                .child("Reload from disk")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.request_reload_active_document(cx)
+                                                })),
+                                        )
+                                })
+                                .when(confirming_reload, |actions| {
+                                    actions
+                                        .child(
+                                            div()
+                                                .id("files-cancel-reload")
+                                                .role(gpui::Role::Button)
+                                                .rounded(px(4.0))
+                                                // A keyboard stop with the shell's ring (M8).
+                                                .map(|el| {
+                                                    crate::surface_chrome::key_stop(el, &theme)
+                                                })
+                                                .cursor_pointer()
+                                                .text_color(theme.text_muted)
+                                                .child("Cancel")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cancel_reload_confirmation(cx)
+                                                })),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("files-confirm-reload")
+                                                .role(gpui::Role::Button)
+                                                .rounded(px(4.0))
+                                                // A keyboard stop with the shell's ring (M8).
+                                                .map(|el| {
+                                                    crate::surface_chrome::key_stop(el, &theme)
+                                                })
+                                                .cursor_pointer()
+                                                .text_color(theme.text)
+                                                .child("Discard and reload")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.confirm_reload_active_document(cx)
+                                                })),
+                                        )
+                                }),
+                        ),
+                )
+            })
             .child(body)
             .into_any_element()
     }
@@ -1867,63 +1751,44 @@ impl FilesSurface {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let markdown = super::markdown_preview::is_markdown(path);
-        let showing_markdown = self
-            .preview
-            .documents
-            .get(path)
-            .is_some_and(|d| d.show_markdown);
+        let showing_markdown = self.preview.documents.get(path).is_some_and(|d| d.show_markdown);
         // Outside paths are absolute: the empty crumb before their leading
         // slash is not a segment.
-        let parts = path
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>();
+        let parts = path.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
         let reveal_path = path.to_string();
         let system_path = self.system_open_path(path);
         let tooltip_path: SharedString = path.to_string().into();
         let can_save = !self.target_change_pending
-            && self
-                .preview
-                .documents
-                .get(path)
-                .is_some_and(FileDocument::can_save);
+            && self.preview.documents.get(path).is_some_and(FileDocument::can_save);
         let save_status =
-            self.preview
-                .documents
-                .get(path)
-                .and_then(|document| match &document.phase {
-                    DocumentPhase::SaveFailed(error) => Some((
-                        "Save failed",
-                        theme.danger_muted,
-                        can_save,
-                        Some(error.clone()),
+            self.preview.documents.get(path).and_then(|document| match &document.phase {
+                DocumentPhase::SaveFailed(error) => {
+                    Some(("Save failed", theme.danger_muted, can_save, Some(error.clone())))
+                }
+                DocumentPhase::Conflict { .. } => Some((
+                    "Save conflict",
+                    theme.warning_muted,
+                    false,
+                    Some(SharedString::from(
+                        "The file changed on disk. Your editor buffer was preserved.",
                     )),
-                    DocumentPhase::Conflict { .. } => Some((
-                        "Save conflict",
-                        theme.warning_muted,
-                        false,
-                        Some(SharedString::from(
-                            "The file changed on disk. Your editor buffer was preserved.",
-                        )),
+                )),
+                DocumentPhase::DeletedOnDisk => Some((
+                    "Deleted on disk",
+                    theme.warning_muted,
+                    false,
+                    Some(SharedString::from(
+                        "The file was removed on disk. Your editor buffer was preserved.",
                     )),
-                    DocumentPhase::DeletedOnDisk => Some((
-                        "Deleted on disk",
-                        theme.warning_muted,
-                        false,
-                        Some(SharedString::from(
-                            "The file was removed on disk. Your editor buffer was preserved.",
-                        )),
-                    )),
-                    DocumentPhase::ExternallyModified { .. } => Some((
-                        "Changed on disk",
-                        theme.warning_muted,
-                        false,
-                        Some(SharedString::from(
-                            "The file changed on disk. Review it before saving.",
-                        )),
-                    )),
-                    _ => None,
-                });
+                )),
+                DocumentPhase::ExternallyModified { .. } => Some((
+                    "Changed on disk",
+                    theme.warning_muted,
+                    false,
+                    Some(SharedString::from("The file changed on disk. Review it before saving.")),
+                )),
+                _ => None,
+            });
         let mut crumbs = div()
             .id("files-breadcrumb-path")
             .min_w_0()
@@ -1974,11 +1839,7 @@ impl FilesSurface {
                 element.child(
                     toolbar_toggle_keyed(
                         "files-toggle-markdown",
-                        if showing_markdown {
-                            "Show Markdown code"
-                        } else {
-                            "Preview Markdown"
-                        },
+                        if showing_markdown { "Show Markdown code" } else { "Preview Markdown" },
                         showing_markdown,
                         Box::new(super::ToggleMarkdownPreview),
                         keys_focus.clone(),
@@ -1989,13 +1850,13 @@ impl FilesSurface {
                         this.toggle_markdown_preview(window, cx);
                     }))
                     .child(
-                        icon(if showing_markdown {
-                            icons::FILE_CODE
-                        } else {
-                            icons::EYE
-                        })
-                        .size(px(crate::surface_chrome::ICON_SIZE))
-                        .text_color(if showing_markdown { theme.text } else { theme.text_muted }),
+                        icon(if showing_markdown { icons::FILE_CODE } else { icons::EYE })
+                            .size(px(crate::surface_chrome::ICON_SIZE))
+                            .text_color(if showing_markdown {
+                                theme.text
+                            } else {
+                                theme.text_muted
+                            }),
                     ),
                 )
             })
@@ -2088,13 +1949,9 @@ impl FilesSurface {
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_word_wrap(window, cx)))
                 .child(
                     // The set's wrap glyph, as the diff's wrap toggle wears.
-                    icon(icons::WRAP_TEXT)
-                        .size(px(crate::surface_chrome::ICON_SIZE))
-                        .text_color(if self.preview.word_wrap() {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        }),
+                    icon(icons::WRAP_TEXT).size(px(crate::surface_chrome::ICON_SIZE)).text_color(
+                        if self.preview.word_wrap() { theme.text } else { theme.text_muted },
+                    ),
                 ),
             )
             .into_any_element()
@@ -2125,11 +1982,7 @@ impl FilesSurface {
             return None;
         }
         let document = self.preview.documents.get_mut(path).unwrap();
-        let version = (
-            document.generation,
-            document.revision,
-            document.loaded_hash.clone(),
-        );
+        let version = (document.generation, document.revision, document.loaded_hash.clone());
         let view = document
             .markdown
             .get_or_insert_with(|| {
@@ -2149,20 +2002,17 @@ impl FilesSurface {
                 })
             })
             .clone();
-        let media_client = self
-            .request_context
-            .clone()
-            .zip(self.state.read(cx).engine().cloned())
-            .map(|(context, engine)| {
-                (
-                    WorkspaceFilesClient::new(engine, context),
-                    document.file.as_ref().unwrap().checkout_id.clone(),
-                )
-            });
+        let media_client =
+            self.request_context.clone().zip(self.state.read(cx).engine().cloned()).map(
+                |(context, engine)| {
+                    (
+                        WorkspaceFilesClient::new(engine, context),
+                        document.file.as_ref().unwrap().checkout_id.clone(),
+                    )
+                },
+            );
         let location = (
-            self.request_context
-                .as_ref()
-                .and_then(|context| context.target_device_id.clone()),
+            self.request_context.as_ref().and_then(|context| context.target_device_id.clone()),
             document.file.as_ref().unwrap().checkout_id.clone(),
         );
         view.update(cx, |view, cx| {
@@ -2171,14 +2021,9 @@ impl FilesSurface {
             view.activate(path, &location, cx);
         });
         if view.read(cx).version.as_ref() != Some(&version) {
-            let source = editor
-                .map(|editor| editor.read(cx).value().to_string())
-                .unwrap_or_else(|| {
-                    document
-                        .file
-                        .as_ref()
-                        .and_then(|f| f.text.clone())
-                        .unwrap_or_default()
+            let source =
+                editor.map(|editor| editor.read(cx).value().to_string()).unwrap_or_else(|| {
+                    document.file.as_ref().and_then(|f| f.text.clone()).unwrap_or_default()
                 });
             let truncated = document.file.as_ref().is_some_and(|f| f.truncated);
             view.update(cx, |view, cx| {
@@ -2203,12 +2048,7 @@ impl FilesSurface {
             );
         }
         self.preview.images_visible = true;
-        if let Some(view) = self
-            .preview
-            .documents
-            .get(path)
-            .and_then(|d| d.image.clone())
-        {
+        if let Some(view) = self.preview.documents.get(path).and_then(|d| d.image.clone()) {
             view.update(cx, |view, cx| view.activate(cx));
             return view.into_any_element();
         }
@@ -2236,13 +2076,7 @@ impl FilesSurface {
                     .flex()
                     .flex_col()
                     .child(outside_read_only_row(theme))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .min_w_0()
-                            .child(view.into_any_element()),
-                    )
+                    .child(div().flex_1().min_h_0().min_w_0().child(view.into_any_element()))
                     .into_any_element()
             } else {
                 view.into_any_element()
@@ -2306,21 +2140,12 @@ impl FilesSurface {
         let truncated = file.truncated;
         let word_wrap = self.preview.word_wrap();
         let code_scroll = if word_wrap {
-            div()
-                .id("files-preview-code-scroll")
-                .flex_1()
-                .min_w_0()
-                .min_h_0()
-                .flex()
-                .child(
-                    list(
-                        self.preview.list.clone(),
-                        cx.processor(Self::render_preview_line),
-                    )
+            div().id("files-preview-code-scroll").flex_1().min_w_0().min_h_0().flex().child(
+                list(self.preview.list.clone(), cx.processor(Self::render_preview_line))
                     .flex_1()
                     .min_h_0()
                     .with_sizing_behavior(ListSizingBehavior::Auto),
-                )
+            )
         } else {
             let mut scroll = div()
                 .id("files-preview-code-scroll")
@@ -2332,12 +2157,9 @@ impl FilesSurface {
                 .track_scroll(&self.preview.horizontal_scroll)
                 .child(
                     div().flex_none().min_w_full().h_full().child(
-                        list(
-                            self.preview.list.clone(),
-                            cx.processor(Self::render_preview_line),
-                        )
-                        .h_full()
-                        .with_sizing_behavior(ListSizingBehavior::Infer),
+                        list(self.preview.list.clone(), cx.processor(Self::render_preview_line))
+                            .h_full()
+                            .with_sizing_behavior(ListSizingBehavior::Infer),
                     ),
                 );
             // GPUI otherwise maps a vertical wheel gesture to X for an x-only
@@ -2351,14 +2173,9 @@ impl FilesSurface {
             .min_h_0()
             .flex()
             .flex_col()
-            .when(outside, |element| {
-                element.child(outside_read_only_row(theme))
-            })
+            .when(outside, |element| element.child(outside_read_only_row(theme)))
             .when(truncated, |element| {
-                element.child(info_row(
-                    theme,
-                    "Large file: the preview shows its start, read-only",
-                ))
+                element.child(info_row(theme, "Large file: the preview shows its start, read-only"))
             })
             .child(code_scroll)
             .into_any_element()
@@ -2398,10 +2215,7 @@ impl FilesSurface {
             if document.content_hash() != Some(highlight.content_hash.as_str()) {
                 return None;
             }
-            Some((
-                document.file.as_ref()?.text.clone()?,
-                highlight.document.clone(),
-            ))
+            Some((document.file.as_ref()?.text.clone()?, highlight.document.clone()))
         });
         if let Some((source, highlighted)) = syntax {
             super::editor_adapter::install_highlighter(&editor, source, highlighted, cx);
@@ -2453,9 +2267,7 @@ impl FilesSurface {
             .flex_none()
             .flex()
             .when(word_wrap, |element| element.w_full().items_stretch())
-            .when(!word_wrap, |element| {
-                element.h(row_height).min_w_full().items_center()
-            })
+            .when(!word_wrap, |element| element.h(row_height).min_w_full().items_center())
             .child(
                 div()
                     .w(px(48.0))
@@ -2508,10 +2320,7 @@ fn centered_state(message: impl Into<SharedString>, color: gpui::Hsla) -> AnyEle
 /// The read-only line an outside file shows above its content — text or
 /// rendered Markdown — matching the truncated-preview row's shape.
 fn outside_read_only_row(theme: &Theme) -> AnyElement {
-    info_row(
-        theme,
-        read_only_message(Some(WorkspaceReadOnlyReason::OutsideWorkspace)),
-    )
+    info_row(theme, read_only_message(Some(WorkspaceReadOnlyReason::OutsideWorkspace)))
 }
 
 // A note over a file, an amber strip with the info glyph.
@@ -2528,12 +2337,7 @@ pub(super) fn info_row(theme: &Theme, text: impl Into<SharedString>) -> AnyEleme
         .items_center()
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.warning_muted)
-        .child(
-            icon(icons::INFO_CIRCLE)
-                .size(px(12.0))
-                .flex_none()
-                .text_color(theme.warning_muted),
-        )
+        .child(icon(icons::INFO_CIRCLE).size(px(12.0)).flex_none().text_color(theme.warning_muted))
         .child(div().min_w_0().truncate().child(text.into()))
         .into_any_element()
 }
@@ -2562,7 +2366,9 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
         Some(WorkspaceReadOnlyReason::MixedLineEndings) => {
             "Files with mixed line endings are read-only."
         }
-        Some(WorkspaceReadOnlyReason::OutsideWorkspace) => "Read-only: outside this session's folder.",
+        Some(WorkspaceReadOnlyReason::OutsideWorkspace) => {
+            "Read-only: outside this session's folder."
+        }
         Some(WorkspaceReadOnlyReason::NotRegularFile) | None => "This file cannot be previewed.",
     }
     .into()
@@ -2570,8 +2376,9 @@ fn read_only_message(reason: Option<WorkspaceReadOnlyReason>) -> SharedString {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::TestAppContext;
+
+    use super::*;
 
     #[gpui::test]
     fn renaming_markdown_to_text_keeps_dirty_editor_and_undo(cx: &mut TestAppContext) {
@@ -2610,11 +2417,7 @@ mod tests {
             files.preview.active = Some("note.md".into());
             files.editor_path = Some("note.md".into());
             files.presentation = super::super::FilesPresentation::Editor;
-            assert!(
-                files
-                    .prepare_markdown_preview("note.md", Some(&editor), cx)
-                    .is_some()
-            );
+            assert!(files.prepare_markdown_preview("note.md", Some(&editor), cx).is_some());
             files.apply_semantic_mutation(
                 &slopty_view_proto::WorkspaceFileChange {
                     operation_id: Some("rename-md".into()),
@@ -2635,11 +2438,7 @@ mod tests {
             assert_eq!(editor.read(cx).value().as_ref(), "# Original unsaved");
             assert_eq!(editor.read(cx).selected_range(), 2..10);
             assert_eq!(document.saved_hash.as_deref(), Some("saved-hash"));
-            assert!(
-                files
-                    .prepare_markdown_preview("note.txt", Some(&editor), cx)
-                    .is_none()
-            );
+            assert!(files.prepare_markdown_preview("note.txt", Some(&editor), cx).is_none());
             editor.update(cx, |editor, cx| editor.focus(window, cx));
             editor
         });
@@ -2649,10 +2448,7 @@ mod tests {
             window.dispatch_action(Box::new(gpui_base::input::Undo), cx);
         });
         cx.run_until_parked();
-        assert_eq!(
-            editor.read_with(cx, |editor, _| editor.value().to_string()),
-            "# Original"
-        );
+        assert_eq!(editor.read_with(cx, |editor, _| editor.value().to_string()), "# Original");
     }
 
     #[gpui::test]
@@ -2687,23 +2483,14 @@ mod tests {
             );
             files.rename_documents("note.rs", "note.md".into(), cx);
             assert!(files.preview.documents["note.md"].show_markdown);
-            files
-                .preview
-                .documents
-                .get_mut("note.md")
-                .unwrap()
-                .show_markdown = false;
+            files.preview.documents.get_mut("note.md").unwrap().show_markdown = false;
             files.rename_documents("note.md", "renamed.md".into(), cx);
             assert!(
                 !files.preview.documents["renamed.md"].show_markdown,
                 "renaming within Markdown must preserve the user's code view choice"
             );
             files.rename_documents("renamed.md", "renamed.txt".into(), cx);
-            assert!(
-                files.preview.documents["renamed.txt"]
-                    .highlight_task
-                    .is_none()
-            );
+            assert!(files.preview.documents["renamed.txt"].highlight_task.is_none());
             assert!(!files.preview.highlights.contains_key("renamed.txt"));
         });
     }
@@ -2719,10 +2506,8 @@ mod tests {
             SharedString::from("File not found.")
         );
         assert_eq!(
-            read_error_message(&crate::files::client::FilesClientError::Transport(
-                "gone".into()
-            ))
-            .to_string(),
+            read_error_message(&crate::files::client::FilesClientError::Transport("gone".into()))
+                .to_string(),
             "workspace connection unavailable: gone"
         );
         assert_eq!(
@@ -2799,11 +2584,7 @@ mod tests {
                 path: "private.env".into(),
             }),
         );
-        preview
-            .documents
-            .get_mut("private.env")
-            .unwrap()
-            .mark_external(None);
+        preview.documents.get_mut("private.env").unwrap().mark_external(None);
 
         preview.reset();
 
@@ -2816,9 +2597,7 @@ mod tests {
         let mut preview = FilePreviewState::new(false, 900, false, 11.5);
         for index in 0..18 {
             let path = format!("src/{index}.rs");
-            preview
-                .documents
-                .insert(path.clone(), cached_document(&path, "fn main() {}"));
+            preview.documents.insert(path.clone(), cached_document(&path, "fn main() {}"));
             preview.touch_document(&path);
         }
         preview.active = Some("src/0.rs".into());
@@ -2841,9 +2620,7 @@ mod tests {
     fn document_cache_uses_retained_bytes_not_only_entry_count() {
         let mut preview = FilePreviewState::new(false, 900, false, 11.5);
         for path in ["old.rs", "active.rs"] {
-            preview
-                .documents
-                .insert(path.into(), cached_document(path, &"x".repeat(4 * 1024)));
+            preview.documents.insert(path.into(), cached_document(path, &"x".repeat(4 * 1024)));
             preview.touch_document(path);
         }
         preview.active = Some("active.rs".into());
@@ -2864,9 +2641,7 @@ mod tests {
     fn document_eviction_cleans_path_scoped_companion_state() {
         let mut preview = FilePreviewState::new(false, 900, false, 11.5);
         for path in ["old.rs", "active.rs"] {
-            preview
-                .documents
-                .insert(path.into(), cached_document(path, "fn main() {}"));
+            preview.documents.insert(path.into(), cached_document(path, "fn main() {}"));
             preview.touch_document(path);
         }
         preview.active = Some("active.rs".into());
@@ -2880,10 +2655,7 @@ mod tests {
         );
         preview.highlights.insert(
             "old.rs".into(),
-            HighlightedFile {
-                content_hash: "hash".into(),
-                document: highlighted,
-            },
+            HighlightedFile { content_hash: "hash".into(), document: highlighted },
         );
 
         let evicted = preview.trim_document_cache_to(&HashSet::new(), 1, usize::MAX);
@@ -3001,18 +2773,12 @@ mod tests {
         document.revision = 1;
         preview.documents.insert(path.into(), document);
 
-        assert_eq!(
-            preview.request_reload(path),
-            ReloadDecision::AwaitDiscardConfirmation
-        );
+        assert_eq!(preview.request_reload(path), ReloadDecision::AwaitDiscardConfirmation);
         assert_eq!(preview.reload_confirmation.as_deref(), Some(path));
         assert!(preview.documents[path].is_dirty());
 
         // Repeated toolbar clicks must not bypass the explicit confirmation.
-        assert_eq!(
-            preview.request_reload(path),
-            ReloadDecision::AwaitDiscardConfirmation
-        );
+        assert_eq!(preview.request_reload(path), ReloadDecision::AwaitDiscardConfirmation);
     }
 
     #[test]
@@ -3055,10 +2821,7 @@ mod tests {
             renamed_document_path("src/files/mod.rs", "src", "crates/ui/src"),
             Some("crates/ui/src/files/mod.rs".into())
         );
-        assert_eq!(
-            renamed_document_path("src-old/lib.rs", "src", "crates/ui/src"),
-            None
-        );
+        assert_eq!(renamed_document_path("src-old/lib.rs", "src", "crates/ui/src"), None);
     }
 
     #[test]
@@ -3067,7 +2830,6 @@ mod tests {
         assert!(path_is_same_or_descendant("src/files/mod.rs", "src"));
         assert!(!path_is_same_or_descendant("src-old/lib.rs", "src"));
     }
-
 }
 
 #[cfg(test)]
@@ -3090,8 +2852,9 @@ impl FilesSurface {
 
 #[cfg(test)]
 mod markdown_buffer_tests {
-    use super::*;
     use gpui::{AppContext, TestAppContext};
+
+    use super::*;
 
     #[gpui::test]
     fn content_search_byte_columns_place_cursor_at_match_after_unicode(cx: &mut TestAppContext) {
@@ -3114,14 +2877,8 @@ mod markdown_buffer_tests {
                 cx,
             )
         });
-        for prefix in [
-            "plain ",
-            "café ",
-            "🦀 ",
-            "café 🦀 ",
-            "\u{2003}\tcafé 🦀 ",
-            "cafe\u{301} ",
-        ] {
+        for prefix in ["plain ", "café ", "🦀 ", "café 🦀 ", "\u{2003}\tcafé 🦀 ", "cafe\u{301} "]
+        {
             let source = format!("first line\n{prefix}needle suffix\nlast line");
             window
                 .update(cx, |surface, window, cx| {
@@ -3192,10 +2949,8 @@ mod markdown_buffer_tests {
             cx.set_global(Theme::dark());
         });
         let path = "README.md";
-        let source = (1..=180)
-            .map(|line| format!("line {line} content"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source =
+            (1..=180).map(|line| format!("line {line} content")).collect::<Vec<_>>().join("\n");
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
             FilesSurface::new_editor(
@@ -3270,10 +3025,7 @@ mod markdown_buffer_tests {
                 let document = &surface.preview.documents[path];
                 assert!(!document.show_markdown);
                 let editor = document.editor.as_ref().unwrap().read(cx);
-                assert_eq!(
-                    editor.cursor_position(),
-                    gpui_base::input::Position::new(89, 5)
-                );
+                assert_eq!(editor.cursor_position(), gpui_base::input::Position::new(89, 5));
                 let cursor = editor.cursor();
                 let line_bounds = editor.range_to_bounds(&(cursor..cursor)).unwrap_or_else(|| {
                     panic!(
@@ -3293,9 +3045,7 @@ mod markdown_buffer_tests {
             })
             .unwrap();
 
-        window
-            .update(cx, |surface, _, cx| surface.navigate_to_line(180, None, cx))
-            .unwrap();
+        window.update(cx, |surface, _, cx| surface.navigate_to_line(180, None, cx)).unwrap();
         for _ in 0..5 {
             cx.update_window(window.into(), |_, window, cx| {
                 window.refresh();
@@ -3306,15 +3056,8 @@ mod markdown_buffer_tests {
         }
         window
             .update(cx, |surface, _, cx| {
-                let editor = surface.preview.documents[path]
-                    .editor
-                    .as_ref()
-                    .unwrap()
-                    .read(cx);
-                assert_eq!(
-                    editor.cursor_position(),
-                    gpui_base::input::Position::new(179, 0)
-                );
+                let editor = surface.preview.documents[path].editor.as_ref().unwrap().read(cx);
+                assert_eq!(editor.cursor_position(), gpui_base::input::Position::new(179, 0));
                 let cursor = editor.cursor();
                 let line_bounds = editor.range_to_bounds(&(cursor..cursor)).unwrap();
                 let viewport = editor.input_bounds();
@@ -3334,10 +3077,7 @@ mod markdown_buffer_tests {
             cx.set_global(Theme::dark());
         });
         let path = "src/lib.rs";
-        let source = (1..=180)
-            .map(|line| format!("line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source = (1..=180).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
             FilesSurface::new_editor(
@@ -3397,9 +3137,7 @@ mod markdown_buffer_tests {
         }
         let resting_top = first_line_top(cx).expect("first line laid out");
 
-        window
-            .update(cx, |surface, _, cx| surface.navigate_to_line(3, None, cx))
-            .unwrap();
+        window.update(cx, |surface, _, cx| surface.navigate_to_line(3, None, cx)).unwrap();
         for _ in 0..5 {
             draw(cx);
             if let Some(top) = first_line_top(cx) {
@@ -3408,15 +3146,8 @@ mod markdown_buffer_tests {
         }
         window
             .update(cx, |surface, _, cx| {
-                let editor = surface.preview.documents[path]
-                    .editor
-                    .as_ref()
-                    .unwrap()
-                    .read(cx);
-                assert_eq!(
-                    editor.cursor_position(),
-                    gpui_base::input::Position::new(2, 0)
-                );
+                let editor = surface.preview.documents[path].editor.as_ref().unwrap().read(cx);
+                assert_eq!(editor.cursor_position(), gpui_base::input::Position::new(2, 0));
             })
             .unwrap();
     }
@@ -3483,10 +3214,7 @@ mod markdown_buffer_tests {
             cx.set_global(Theme::dark());
         });
         let path = "large.txt";
-        let source = (1..=180)
-            .map(|line| format!("line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source = (1..=180).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
             FilesSurface::new_editor(
@@ -3635,10 +3363,7 @@ mod markdown_buffer_tests {
                 document.editor = Some(editor.clone());
                 document.mark_user_edit();
                 surface.preview.active = Some("drawing.txt".into());
-                surface
-                    .preview
-                    .documents
-                    .insert("drawing.txt".into(), document);
+                surface.preview.documents.insert("drawing.txt".into(), document);
                 surface.rename_documents("drawing.txt", "drawing.svg".into(), cx);
                 surface.open_file("drawing.svg".into(), cx);
                 surface.reconcile_document("drawing.svg".into(), cx);
@@ -3647,10 +3372,7 @@ mod markdown_buffer_tests {
                 assert!(document.is_editable());
                 assert_eq!(document.editor.as_ref(), Some(&editor));
                 assert!(document.image.is_none());
-                assert!(matches!(
-                    document.phase,
-                    DocumentPhase::ExternallyModified { .. }
-                ));
+                assert!(matches!(document.phase, DocumentPhase::ExternallyModified { .. }));
                 // After resolving the external-change warning, saving still uses
                 // the original buffer and cannot be cancelled by preview creation.
                 document.phase = DocumentPhase::Ready;
@@ -3666,8 +3388,9 @@ mod markdown_buffer_tests {
 
     #[gpui::test]
     fn markdown_preview_web_links_keep_the_file_session_and_full_target(cx: &mut TestAppContext) {
-        use crate::markdown::render::{self, LinkAction, LinkTarget};
         use std::cell::RefCell;
+
+        use crate::markdown::render::{self, LinkAction, LinkTarget};
 
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -3698,17 +3421,10 @@ mod markdown_buffer_tests {
                 });
                 document.show_markdown = true;
                 surface.preview.active = Some("README.md".into());
-                surface
-                    .preview
-                    .documents
-                    .insert("README.md".into(), document);
-                let preview = surface
-                    .prepare_markdown_preview("README.md", None, cx)
-                    .unwrap();
+                surface.preview.documents.insert("README.md".into(), document);
+                let preview = surface.prepare_markdown_preview("README.md", None, cx).unwrap();
                 // Changing the selected chat must not rewrite this file's owner.
-                surface
-                    .state
-                    .update(cx, |state, _| state.selected_chat = Some("other".into()));
+                surface.state.update(cx, |state, _| state.selected_chat = Some("other".into()));
                 (cx.entity(), preview)
             })
             .unwrap();
@@ -3728,17 +3444,11 @@ mod markdown_buffer_tests {
             })
         });
         let ui = preview.update(cx, |preview, cx| preview.link_ui(cx));
-        assert!(
-            ui.source_session.is_none(),
-            "file preview labels are not truncated"
-        );
+        assert!(ui.source_session.is_none(), "file preview labels are not truncated");
         let target = LinkTarget::new("Different label", "https://example.com/docs?q=%C3%B1#full");
-        for action in [
-            LinkAction::Primary,
-            LinkAction::Internal,
-            LinkAction::External,
-            LinkAction::Copy,
-        ] {
+        for action in
+            [LinkAction::Primary, LinkAction::Internal, LinkAction::External, LinkAction::Copy]
+        {
             cx.update_window(window.into(), |_, window, cx| {
                 render::activate_link(target.clone(), action, Some(&ui), window, cx);
             })
@@ -3747,11 +3457,9 @@ mod markdown_buffer_tests {
         cx.run_until_parked();
         let events = received.borrow();
         assert_eq!(events.len(), 3);
-        for (event, action) in events.iter().zip([
-            LinkAction::Primary,
-            LinkAction::Internal,
-            LinkAction::External,
-        ]) {
+        for (event, action) in
+            events.iter().zip([LinkAction::Primary, LinkAction::Internal, LinkAction::External])
+        {
             assert_eq!(event.target, target);
             assert_eq!(event.action, action);
             assert_eq!(event.source_session.as_deref(), Some("owner"));
@@ -3763,10 +3471,7 @@ mod markdown_buffer_tests {
                 Some(target.original.as_str())
             )
         });
-        assert!(
-            cx.opened_url().is_none(),
-            "only the shell may open web destinations"
-        );
+        assert!(cx.opened_url().is_none(), "only the shell may open web destinations");
         for url in [
             "javascript:alert(1)",
             "https://user:secret@example.com",
@@ -3844,14 +3549,9 @@ mod markdown_buffer_tests {
                 document.mark_user_edit();
                 document.show_markdown = true;
                 surface.preview.active = Some("README.md".into());
-                surface
-                    .preview
-                    .documents
-                    .insert("README.md".into(), document);
+                surface.preview.documents.insert("README.md".into(), document);
                 let editor = surface.preview.documents["README.md"].editor.clone();
-                surface
-                    .prepare_markdown_preview("README.md", editor.as_ref(), cx)
-                    .unwrap();
+                surface.prepare_markdown_preview("README.md", editor.as_ref(), cx).unwrap();
                 let document = &surface.preview.documents["README.md"];
                 assert!(document.is_dirty());
                 assert!(document.save_task.is_none());
@@ -3889,10 +3589,12 @@ mod markdown_buffer_tests {
 /// the frame that applies the reload has been drawn.
 #[cfg(test)]
 mod reload_highlight_tests {
+    use std::ops::Range;
+
+    use gpui::{AppContext, TestAppContext};
+
     use super::super::editor_adapter::probe;
     use super::*;
-    use gpui::{AppContext, TestAppContext};
-    use std::ops::Range;
 
     const RELOAD_PATH: &str = "repro-unicode.json";
     const RELOAD_BEFORE: &str = r#"{"": 1}"#;
@@ -4032,10 +3734,7 @@ mod reload_highlight_tests {
             .update(cx, |surface, _, cx| {
                 let document = &surface.preview.documents[path];
                 let editor = document.editor.as_ref().expect("editor created");
-                (
-                    document.highlight_task.is_some(),
-                    editor.read(cx).value().to_string(),
-                )
+                (document.highlight_task.is_some(), editor.read(cx).value().to_string())
             })
             .unwrap();
 
@@ -4054,30 +3753,19 @@ mod reload_highlight_tests {
 
     /// The character of `text` whose UTF-8 encoding contains `byte`.
     fn char_around(text: &str, byte: usize) -> String {
-        let (start, ch) = text
-            .char_indices()
-            .take_while(|(start, _)| *start <= byte)
-            .last()
-            .unwrap();
+        let (start, ch) =
+            text.char_indices().take_while(|(start, _)| *start <= byte).last().unwrap();
         format!("{ch:?} (bytes {start}..{})", start + ch.len_utf8())
     }
 
     fn range_violation(text: &str, range: &Range<usize>) -> Option<String> {
         if range.start > range.end || range.end > text.len() {
-            return Some(format!(
-                "{range:?} is not inside the {}-byte text",
-                text.len()
-            ));
+            return Some(format!("{range:?} is not inside the {}-byte text", text.len()));
         }
         [range.start, range.end]
             .into_iter()
             .find(|edge| !text.is_char_boundary(*edge))
-            .map(|edge| {
-                format!(
-                    "{range:?} has edge {edge} inside {}",
-                    char_around(text, edge)
-                )
-            })
+            .map(|edge| format!("{range:?} has edge {edge} inside {}", char_around(text, edge)))
     }
 
     /// Every way the adapter's events break the contract with the text the
@@ -4092,11 +3780,7 @@ mod reload_highlight_tests {
                 probe::Event::FactoryBuilt { source } => {
                     stale_build = (source != text).then_some((index, source));
                 }
-                probe::Event::Updated {
-                    edit,
-                    new_end,
-                    spans,
-                } => {
+                probe::Event::Updated { edit, new_end, spans } => {
                     if let Some((built, source)) = stale_build.take()
                         && !spans.is_empty()
                     {
@@ -4159,10 +3843,7 @@ mod reload_highlight_tests {
             "the original text was never drawn with more than one style: {:#?}",
             trace.loaded
         );
-        assert_eq!(
-            adapter_contract_violations(before, &trace.loaded),
-            Vec::<String>::new()
-        );
+        assert_eq!(adapter_contract_violations(before, &trace.loaded), Vec::<String>::new());
     }
 
     #[gpui::test]

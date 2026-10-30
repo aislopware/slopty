@@ -23,11 +23,7 @@ pub const MENU_BLUR: f32 = 16.0;
 /// Frost `child` (a popover card): backdrop-blurred on glass, pass-through on
 /// opaque platforms. `corner_radius` must match the card's rounding.
 pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) -> Frosted {
-    Frosted {
-        corner_radius,
-        blur_radius,
-        child: child.into_any_element(),
-    }
+    Frosted { corner_radius, blur_radius, child: child.into_any_element() }
 }
 
 pub struct Frosted {
@@ -37,8 +33,8 @@ pub struct Frosted {
 }
 
 impl Element for Frosted {
-    type RequestLayoutState = ();
     type PrepaintState = ();
+    type RequestLayoutState = ();
 
     fn id(&self) -> Option<gpui::ElementId> {
         None
@@ -114,9 +110,7 @@ impl IntoElement for Frosted {
 /// circle painted "after" a thumbnail still shows up UNDER the image. A
 /// nested layer restores the intended stacking.
 pub fn layered(child: impl IntoElement) -> Layered {
-    Layered {
-        child: child.into_any_element(),
-    }
+    Layered { child: child.into_any_element() }
 }
 
 pub struct Layered {
@@ -124,8 +118,8 @@ pub struct Layered {
 }
 
 impl Element for Layered {
-    type RequestLayoutState = ();
     type PrepaintState = ();
+    type RequestLayoutState = ();
 
     fn id(&self) -> Option<gpui::ElementId> {
         None

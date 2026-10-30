@@ -1,9 +1,10 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Dropdown placement within a dialog, measured after layout.
 
+use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Bounds, Element, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    Pixels, Point, Position, SharedString, Size, Style, Window, div, point, prelude::*, px,
+    Pixels, Point, Position, SharedString, Size, Style, Window, div, point, px,
 };
 
 /// Which trigger edge the menu lines up with: `End` grows leftward from the
@@ -27,9 +28,8 @@ pub(crate) fn contained_menu(
     let exit = closing.map(super::exit_progress);
     // Half the usable height guarantees room on at least one side, even
     // when the trigger sits in the middle of a small dialog.
-    let max_height = ((f32::from(limits.size.height) - trigger_height) / 2.0 - 6.0)
-        .max(1.0)
-        .min(320.0);
+    let max_height =
+        ((f32::from(limits.size.height) - trigger_height) / 2.0 - 6.0).max(1.0).min(320.0);
     let card = content
         .id(SharedString::from(format!("{id}-scroll")))
         .debug_selector(|| "contained-menu-scroll".into())
@@ -41,10 +41,7 @@ pub(crate) fn contained_menu(
     let content = super::menu_motion(
         id,
         exit,
-        div()
-            .occlude()
-            .on_scroll(|_, _, cx| cx.stop_propagation())
-            .child(card),
+        div().occlude().on_scroll(|_, _, cx| cx.stop_propagation()).child(card),
     );
     div()
         .absolute()
@@ -54,15 +51,7 @@ pub(crate) fn contained_menu(
             MenuAlign::End => el.right_0(),
         })
         .size_0()
-        .child(
-            gpui::deferred(ContainedMenu {
-                content,
-                limits,
-                trigger_height,
-                align,
-            })
-            .priority(1),
-        )
+        .child(gpui::deferred(ContainedMenu { content, limits, trigger_height, align }).priority(1))
         .into_any_element()
 }
 
@@ -76,24 +65,14 @@ fn menu_origin(
     let gap = px(6.0);
     let below = anchor.y + gap;
     let above = anchor.y - trigger_height - gap - size.height;
-    let y = if below + size.height <= limits.bottom() {
-        below
-    } else {
-        above
-    };
+    let y = if below + size.height <= limits.bottom() { below } else { above };
     let x = match align {
         MenuAlign::Start => anchor.x,
         MenuAlign::End => anchor.x - size.width,
     };
     point(
-        x.clamp(
-            limits.left(),
-            (limits.right() - size.width).max(limits.left()),
-        ),
-        y.clamp(
-            limits.top(),
-            (limits.bottom() - size.height).max(limits.top()),
-        ),
+        x.clamp(limits.left(), (limits.right() - size.width).max(limits.left())),
+        y.clamp(limits.top(), (limits.bottom() - size.height).max(limits.top())),
     )
 }
 
@@ -106,18 +85,20 @@ struct ContainedMenu {
 
 impl IntoElement for ContainedMenu {
     type Element = Self;
+
     fn into_element(self) -> Self {
         self
     }
 }
 
 impl Element for ContainedMenu {
-    type RequestLayoutState = LayoutId;
     type PrepaintState = ();
+    type RequestLayoutState = LayoutId;
 
     fn id(&self) -> Option<gpui::ElementId> {
         None
     }
+
     fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
         None
     }
@@ -131,10 +112,7 @@ impl Element for ContainedMenu {
     ) -> (LayoutId, LayoutId) {
         let child = self.content.request_layout(window, cx);
         let layout = window.request_layout(
-            Style {
-                position: Position::Absolute,
-                ..Style::default()
-            },
+            Style { position: Position::Absolute, ..Style::default() },
             [child],
             cx,
         );
@@ -151,13 +129,8 @@ impl Element for ContainedMenu {
         cx: &mut App,
     ) {
         let size = window.layout_bounds(*child).size;
-        let origin = menu_origin(
-            bounds.origin,
-            size,
-            px(self.trigger_height),
-            self.limits,
-            self.align,
-        );
+        let origin =
+            menu_origin(bounds.origin, size, px(self.trigger_height), self.limits, self.align);
         window.with_element_offset(origin - bounds.origin, |window| {
             self.content.prepaint(window, cx)
         });
@@ -179,8 +152,9 @@ impl Element for ContainedMenu {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::size;
+
+    use super::*;
 
     #[test]
     fn dropdown_stays_in_dialog_without_covering_trigger() {
@@ -200,22 +174,12 @@ mod tests {
     fn start_aligned_dropdown_grows_rightward_within_dialog() {
         let limits = Bounds::new(point(px(100.0), px(80.0)), size(px(800.0), px(600.0)));
         let menu = size(px(260.0), px(200.0));
-        let origin = menu_origin(
-            point(px(300.0), px(200.0)),
-            menu,
-            px(34.0),
-            limits,
-            MenuAlign::Start,
-        );
+        let origin =
+            menu_origin(point(px(300.0), px(200.0)), menu, px(34.0), limits, MenuAlign::Start);
         assert_eq!(origin.x, px(300.0));
         // Near the right edge it slides back inside rather than overflowing.
-        let origin = menu_origin(
-            point(px(800.0), px(200.0)),
-            menu,
-            px(34.0),
-            limits,
-            MenuAlign::Start,
-        );
+        let origin =
+            menu_origin(point(px(800.0), px(200.0)), menu, px(34.0), limits, MenuAlign::Start);
         assert_eq!(origin.x, limits.right() - menu.width);
     }
 
@@ -247,11 +211,8 @@ mod tests {
                         .debug_selector(|| "test-menu-trigger".into())
                         .child(contained_menu(
                             "test-contained-menu".into(),
-                            super::super::popover_card(theme)
-                                .w(px(260.0))
-                                .flex()
-                                .flex_col()
-                                .child(crate::settings::widgets::dropdown_rows(
+                            super::super::popover_card(theme).w(px(260.0)).flex().flex_col().child(
+                                crate::settings::widgets::dropdown_rows(
                                     "fixture-rows",
                                     (0..30usize).map(|ix| {
                                         div()
@@ -265,7 +226,8 @@ mod tests {
                                     }),
                                     34.0,
                                     8.0,
-                                )),
+                                ),
+                            ),
                             None,
                             34.0,
                             Bounds::new(point(px(100.0), px(80.0)), size(px(600.0), px(400.0))),
@@ -282,9 +244,7 @@ mod tests {
             cx.set_global(crate::theme::Theme::default());
         });
         let background = gpui::ScrollHandle::new();
-        let (_, cx) = cx.add_window_view(|_, _| MenuFixture {
-            background: background.clone(),
-        });
+        let (_, cx) = cx.add_window_view(|_, _| MenuFixture { background: background.clone() });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let trigger = cx.debug_bounds("test-menu-trigger").unwrap();
         let menu = cx.debug_bounds("contained-menu-scroll").unwrap();

@@ -5,7 +5,8 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{AnyElement, Context, Entity, SharedString, Window, div, prelude::*};
+use gpui::prelude::*;
+use gpui::{AnyElement, Context, Entity, SharedString, Window, div};
 use slopty_view_doc::PageCard;
 
 use super::{Row, Transcript};
@@ -57,8 +58,13 @@ impl Transcript {
                 chat: chat.clone(),
             };
             Some(
-                crate::page::FenceChart { key, fence, engine: engine.clone(), cards: cards.clone() }
-                    .into_any_element(),
+                crate::page::FenceChart {
+                    key,
+                    fence,
+                    engine: engine.clone(),
+                    cards: cards.clone(),
+                }
+                .into_any_element(),
             )
         })
     }

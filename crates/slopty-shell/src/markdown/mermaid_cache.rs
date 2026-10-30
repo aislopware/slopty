@@ -9,9 +9,11 @@
 //! an evicted diagram simply renders again when its row returns. Diagrams
 //! painted in the latest two passes are never evicted, so the budget is soft
 //! only when more diagrams than it admits are on screen at once.
-use crate::image_media::MediaImage;
-use gpui::SharedString;
 use std::collections::{HashMap, HashSet};
+
+use gpui::SharedString;
+
+use crate::image_media::MediaImage;
 
 pub(crate) const MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ENTRIES: usize = 64;
@@ -49,9 +51,7 @@ pub(crate) struct MermaidCache {
 
 /// The renderer keys a diagram frame `"{row_key}-mermaid-{ix}"`.
 pub(crate) fn frame_row(frame_id: &str) -> &str {
-    frame_id
-        .rsplit_once("-mermaid-")
-        .map_or(frame_id, |(row, _)| row)
+    frame_id.rsplit_once("-mermaid-").map_or(frame_id, |(row, _)| row)
 }
 
 impl MermaidCache {
@@ -184,11 +184,7 @@ impl MermaidCache {
             else {
                 break;
             };
-            if let Some(Entry {
-                state: State::Ready(media),
-                ..
-            }) = self.entries.remove(&code)
-            {
+            if let Some(Entry { state: State::Ready(media), .. }) = self.entries.remove(&code) {
                 released.push(media);
             }
         }
@@ -232,8 +228,7 @@ impl MermaidCache {
 
     /// Keep source toggles only for frames whose row still exists.
     pub(crate) fn retain_rows(&mut self, rows: &HashSet<&str>) {
-        self.source_visible
-            .retain(|frame_id| rows.contains(frame_row(frame_id)));
+        self.source_visible.retain(|frame_id| rows.contains(frame_row(frame_id)));
     }
 }
 
@@ -256,24 +251,15 @@ mod tests {
     fn requests_queue_once_and_track_their_rows() {
         let mut cache = MermaidCache::default();
         assert!(cache.begin_frame(1).is_empty());
-        assert!(matches!(
-            cache.request("graph TD; A-->B", "chat#p.0-mermaid-3"),
-            Lookup::Pending
-        ));
-        assert!(matches!(
-            cache.request("graph TD; A-->B", "chat#p.2-mermaid-0"),
-            Lookup::Pending
-        ));
+        assert!(matches!(cache.request("graph TD; A-->B", "chat#p.0-mermaid-3"), Lookup::Pending));
+        assert!(matches!(cache.request("graph TD; A-->B", "chat#p.2-mermaid-0"), Lookup::Pending));
         assert!(cache.take_new_requests());
         assert!(!cache.take_new_requests());
         let code = cache.next_job().unwrap();
         let (rows, released) = cache.finish(code, 1, Ok(media(80))).unwrap();
         assert_eq!(rows, ["chat#p.0", "chat#p.2"]);
         assert!(released.is_empty());
-        assert!(matches!(
-            cache.request("graph TD; A-->B", "chat#p.0-mermaid-3"),
-            Lookup::Ready(_)
-        ));
+        assert!(matches!(cache.request("graph TD; A-->B", "chat#p.0-mermaid-3"), Lookup::Ready(_)));
         assert!(!cache.take_new_requests());
         assert!(cache.next_job().is_none());
     }
@@ -292,10 +278,7 @@ mod tests {
         assert_eq!(cache.next_job().as_deref(), Some("b"));
         cache.finish("b".into(), 1, Err("bad".into()));
         assert!(cache.next_job().is_none());
-        assert!(matches!(
-            cache.request("b", "row2-mermaid-0"),
-            Lookup::Failed(_)
-        ));
+        assert!(matches!(cache.request("b", "row2-mermaid-0"), Lookup::Failed(_)));
     }
 
     #[test]
@@ -305,15 +288,9 @@ mod tests {
         cache.request("a", "row-mermaid-0");
         cache.finish("a".into(), 1, Ok(media(80)));
         assert_eq!(cache.begin_frame(2).len(), 1);
-        assert!(matches!(
-            cache.request("a", "row-mermaid-0"),
-            Lookup::Pending
-        ));
+        assert!(matches!(cache.request("a", "row-mermaid-0"), Lookup::Pending));
         assert!(cache.finish("a".into(), 1, Ok(media(80))).is_none());
-        assert!(matches!(
-            cache.request("a", "row-mermaid-0"),
-            Lookup::Pending
-        ));
+        assert!(matches!(cache.request("a", "row-mermaid-0"), Lookup::Pending));
     }
 
     #[test]

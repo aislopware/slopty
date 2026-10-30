@@ -76,9 +76,7 @@ pub(crate) fn gliding() -> bool {
 
 /// Wrap a window's root so wheel notches anywhere in it glide.
 pub fn smooth_scroll(child: impl IntoElement) -> SmoothScroll {
-    SmoothScroll {
-        child: child.into_any_element(),
-    }
+    SmoothScroll { child: child.into_any_element() }
 }
 
 /// Whether notches glide: the preference, unless motion is reduced.
@@ -210,11 +208,7 @@ fn duration(delta: Point<f32>) -> f64 {
 
 /// The larger axis, with its sign (Chrome's `MaximumDimension`).
 fn major(delta: Point<f32>) -> f32 {
-    if delta.x.abs() > delta.y.abs() {
-        delta.x
-    } else {
-        delta.y
-    }
+    if delta.x.abs() > delta.y.abs() { delta.x } else { delta.y }
 }
 
 /// One leg of a glide: `delta` lines from `start`, over `duration` seconds.
@@ -239,13 +233,7 @@ impl Segment {
     ) -> Self {
         let [x1, y1, x2, y2] = points;
         let y1 = slope.map_or(y1, |slope| x1 * slope.clamp(-1000.0, 1000.0));
-        Self {
-            delta,
-            start,
-            duration,
-            points,
-            ease: Bezier::new(x1, y1, x2, y2),
-        }
+        Self { delta, start, duration, points, ease: Bezier::new(x1, y1, x2, y2) }
     }
 
     fn from_rest(delta: Point<f32>, start: Instant) -> Self {
@@ -317,14 +305,7 @@ impl Bezier {
     fn new(x1: f64, y1: f64, x2: f64, y2: f64) -> Self {
         let (cx, cy) = (3.0 * x1, 3.0 * y1);
         let (bx, by) = (3.0 * (x2 - x1) - cx, 3.0 * (y2 - y1) - cy);
-        Self {
-            ax: 1.0 - cx - bx,
-            bx,
-            cx,
-            ay: 1.0 - cy - by,
-            by,
-            cy,
-        }
+        Self { ax: 1.0 - cx - bx, bx, cx, ay: 1.0 - cy - by, by, cy }
     }
 
     fn x(&self, t: f64) -> f64 {
@@ -395,9 +376,7 @@ fn intercept(root: &Rc<RefCell<Root>>, event: &ScrollEvent, window: &mut Window,
     let lines = match event.delta {
         // Nothing to glide, and nothing to interrupt one in flight.
         ScrollDelta::Lines(lines) if lines == Point::default() => return,
-        ScrollDelta::Lines(lines)
-            if notch(lines) && !commanded(event.modifiers) && enabled(cx) =>
-        {
+        ScrollDelta::Lines(lines) if notch(lines) && !commanded(event.modifiers) && enabled(cx) => {
             lines
         }
         _ => {
@@ -428,11 +407,7 @@ fn frame(root: Rc<RefCell<Root>>, window: &mut Window, cx: &mut App) {
             state.glide.stop();
             return;
         }
-        let slice = if enabled(cx) {
-            state.glide.advance(now(cx))
-        } else {
-            state.glide.finish()
-        };
+        let slice = if enabled(cx) { state.glide.advance(now(cx)) } else { state.glide.finish() };
         state.replaying = true;
         slice
     };
@@ -462,8 +437,8 @@ pub struct SmoothScroll {
 }
 
 impl Element for SmoothScroll {
-    type RequestLayoutState = ();
     type PrepaintState = ();
+    type RequestLayoutState = ();
 
     /// None: the wrapper must not change the global ids beneath it.
     fn id(&self) -> Option<ElementId> {
@@ -542,12 +517,15 @@ impl IntoElement for SmoothScroll {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
+    use gpui::prelude::*;
     use gpui::{
         Context, ModifiersChangedEvent, MouseButton, Render, ScrollHandle, TestAppContext,
-        VisualTestContext, div, prelude::*, px,
+        VisualTestContext, div, px,
     };
-    use std::time::Duration;
+
+    use super::*;
 
     thread_local! {
         pub(super) static CLOCK: std::cell::Cell<Option<Instant>> =
@@ -569,9 +547,7 @@ mod tests {
     }
 
     fn total(slices: &[Point<f32>]) -> Point<f32> {
-        slices.iter().fold(Point::default(), |sum, slice| {
-            point(sum.x + slice.x, sum.y + slice.y)
-        })
+        slices.iter().fold(Point::default(), |sum, slice| point(sum.x + slice.x, sum.y + slice.y))
     }
 
     #[test]
@@ -591,9 +567,7 @@ mod tests {
         // Slow, fast, slow: slices grow to the middle frame, then shrink
         // (give or take the grid).
         let speeds: Vec<f32> = slices.iter().map(|slice| -slice.y).collect();
-        let peak = (0..speeds.len())
-            .max_by(|a, b| speeds[*a].total_cmp(&speeds[*b]))
-            .unwrap();
+        let peak = (0..speeds.len()).max_by(|a, b| speeds[*a].total_cmp(&speeds[*b])).unwrap();
         assert!((11..=13).contains(&peak), "fastest at frame {peak}");
         let mut rising = speeds[..=peak].windows(2);
         assert!(rising.all(|pair| pair[1] >= pair[0] - GRID_LINES));
@@ -605,13 +579,8 @@ mod tests {
 
     #[test]
     fn longer_moves_take_less_time_as_in_chrome() {
-        for (lines, ms) in [
-            (1.0, 200.0),
-            (3.0, 200.0),
-            (7.5, 150.0),
-            (12.0, 100.0),
-            (40.0, 100.0),
-        ] {
+        for (lines, ms) in [(1.0, 200.0), (3.0, 200.0), (7.5, 150.0), (12.0, 100.0), (40.0, 100.0)]
+        {
             let took = duration(point(0.0, -lines)) * 1000.0;
             assert!((took - ms).abs() < 1e-9, "{lines} lines took {took}ms");
         }
@@ -699,10 +668,7 @@ mod tests {
         };
         let at_60hz = position(Duration::from_millis(16), 3);
         let at_120hz = position(FRAME, 6);
-        assert!(
-            (at_60hz - at_120hz).abs() < 0.002,
-            "{at_60hz} vs {at_120hz}"
-        );
+        assert!((at_60hz - at_120hz).abs() < 0.002, "{at_60hz} vs {at_120hz}");
     }
 
     #[test]
@@ -754,9 +720,7 @@ mod tests {
 
     fn open(cx: &mut TestAppContext) -> (ScrollHandle, &mut VisualTestContext) {
         let scroll = ScrollHandle::new();
-        let (_, cx) = cx.add_window_view(|_, _| Fixture {
-            scroll: scroll.clone(),
-        });
+        let (_, cx) = cx.add_window_view(|_, _| Fixture { scroll: scroll.clone() });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         (scroll, cx)
     }
@@ -782,11 +746,7 @@ mod tests {
     }
 
     fn notch(cx: &mut VisualTestContext) {
-        wheel(
-            cx,
-            ScrollDelta::Lines(point(0.0, -3.0)),
-            Modifiers::default(),
-        );
+        wheel(cx, ScrollDelta::Lines(point(0.0, -3.0)), Modifiers::default());
     }
 
     /// One frame later: run the queued frame callbacks and draw. Returns how
@@ -835,11 +795,7 @@ mod tests {
         let first = top(&scroll);
         assert!(first < 0.0 && first > jump * 0.5, "{first} of {jump}");
         settle(cx);
-        assert!(
-            (top(&scroll) - jump).abs() < 0.01,
-            "{} vs {jump}",
-            top(&scroll)
-        );
+        assert!((top(&scroll) - jump).abs() < 0.01, "{} vs {jump}", top(&scroll));
     }
 
     #[gpui::test]
@@ -854,11 +810,7 @@ mod tests {
             assert_eq!(next_frame(cx), 0, "{delta:?} {modifiers:?} queued a glide");
         };
         let notch = ScrollDelta::Lines(point(0.0, -3.0));
-        expect_instant(
-            cx,
-            ScrollDelta::Pixels(point(px(0.0), px(-40.0))),
-            Modifiers::default(),
-        );
+        expect_instant(cx, ScrollDelta::Pixels(point(px(0.0), px(-40.0))), Modifiers::default());
         // Gestures that mean something else keep their discrete steps; the
         // div itself still scrolls on them.
         for modifiers in [Modifiers::control(), Modifiers::alt(), Modifiers::command()] {
@@ -866,11 +818,7 @@ mod tests {
         }
         // A touchpad's stream, or a high-resolution wheel's.
         #[cfg(not(target_os = "macos"))]
-        expect_instant(
-            cx,
-            ScrollDelta::Lines(point(0.0, -0.37)),
-            Modifiers::default(),
-        );
+        expect_instant(cx, ScrollDelta::Lines(point(0.0, -0.37)), Modifiers::default());
         cx.update(|_, cx| cx.set_reduce_motion(true));
         expect_instant(cx, notch, Modifiers::default());
     }
@@ -879,11 +827,7 @@ mod tests {
     fn an_empty_notch_queues_no_frames(cx: &mut TestAppContext) {
         let _dir = init(cx);
         let (_, cx) = open(cx);
-        wheel(
-            cx,
-            ScrollDelta::Lines(point(0.0, 0.0)),
-            Modifiers::default(),
-        );
+        wheel(cx, ScrollDelta::Lines(point(0.0, 0.0)), Modifiers::default());
         assert_eq!(next_frame(cx), 0);
     }
 
@@ -901,13 +845,7 @@ mod tests {
                     first_mouse: false,
                 })
             },
-            &|cx| {
-                wheel(
-                    cx,
-                    ScrollDelta::Pixels(point(px(0.0), px(0.0))),
-                    Modifiers::default(),
-                )
-            },
+            &|cx| wheel(cx, ScrollDelta::Pixels(point(px(0.0), px(0.0))), Modifiers::default()),
             &|cx| {
                 cx.simulate_event(ModifiersChangedEvent {
                     modifiers: Modifiers::control(),

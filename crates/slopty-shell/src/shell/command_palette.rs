@@ -6,14 +6,15 @@
 //! recently opened and changed files before anything is typed; and, as the query asks,
 //! sessions by their titles and by what was said in them (`session_search`) and the workspace's
 //! files by name and by content. Results are grouped in sections.
-use super::session_search::{ChatWordsMatch, ChatWordsQuery, chat_words_line};
-use super::*;
-use crate::appearance::AppearanceMode;
-use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
 use slopty_view_proto::{
     SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest, WorkspaceContentMatch,
     WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState, WorkspaceTarget,
 };
+
+use super::session_search::{ChatWordsMatch, ChatWordsQuery, chat_words_line};
+use super::*;
+use crate::appearance::AppearanceMode;
+use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
 
 /// Key context of the palette card.
 pub(super) const KEY_CONTEXT: &str = "CommandPalette";
@@ -87,10 +88,7 @@ impl<T: Default> WorkspaceQuery<T> {
     /// Forget everything, cancelling any request in flight.
     fn clear(&mut self) {
         self.generation += 1;
-        *self = Self {
-            generation: self.generation,
-            ..Self::default()
-        };
+        *self = Self { generation: self.generation, ..Self::default() };
     }
 
     /// Start a request; the returned generation identifies its answer.
@@ -167,15 +165,14 @@ fn palette_workspace(shell: &Shell, cx: &App) -> Option<WorkspaceFilesClient> {
 fn search_error_message(error: &FilesClientError, what: &str) -> SharedString {
     match error {
         FilesClientError::Unsupported(_) => {
-            let subject = if what == "content" {
-                "file contents"
-            } else {
-                "files"
-            };
+            let subject = if what == "content" { "file contents" } else { "files" };
             format!("Couldn\u{2019}t search its {subject}: the session\u{2019}s machine runs an older Slopty. Update it there.")
                 .into()
         }
-        FilesClientError::Transport(_) => "Couldn\u{2019}t reach the session\u{2019}s machine. Check that it is on and online.".into(),
+        FilesClientError::Transport(_) => {
+            "Couldn\u{2019}t reach the session\u{2019}s machine. Check that it is on and online."
+                .into()
+        }
         FilesClientError::Encode(_)
         | FilesClientError::Decode(_)
         | FilesClientError::Request(_) => "Couldn\u{2019}t search. Try again.".into(),
@@ -349,10 +346,7 @@ impl PaletteSection {
     fn new(section: Section, kinds: impl IntoIterator<Item = RowKind>) -> Self {
         Self {
             section,
-            rows: kinds
-                .into_iter()
-                .map(|kind| PaletteRow::new(section, kind))
-                .collect(),
+            rows: kinds.into_iter().map(|kind| PaletteRow::new(section, kind)).collect(),
             status: None,
         }
     }
@@ -550,8 +544,8 @@ impl Shell {
         let query = palette.search.read(cx).text().trim().to_owned();
         // An empty query lists the workspace's recent files (the default
         // Files list); a single character is too broad to search.
-        let Some(client) =
-            workspace.filter(|_| query.is_empty() || query.chars().count() >= MIN_WORKSPACE_QUERY_CHARS)
+        let Some(client) = workspace
+            .filter(|_| query.is_empty() || query.chars().count() >= MIN_WORKSPACE_QUERY_CHARS)
         else {
             palette.files.clear();
             palette.content.clear();
@@ -590,10 +584,7 @@ impl Shell {
                         false
                     };
                     ready = probe && !indexing;
-                    names
-                        .search(request.clone())
-                        .await
-                        .map(|found| (found, indexing))
+                    names.search(request.clone()).await.map(|found| (found, indexing))
                 }
                 .await;
                 probe &= !ready;
@@ -700,9 +691,7 @@ impl Shell {
         let threads = |limit| {
             PaletteSection::new(
                 Section::Threads,
-                self.thread_matches(&query, limit, cx)
-                    .into_iter()
-                    .map(RowKind::Chat),
+                self.thread_matches(&query, limit, cx).into_iter().map(RowKind::Chat),
             )
         };
         // Files opened here first, then the workspace's recently changed
@@ -729,28 +718,17 @@ impl Shell {
         let files = |limit| {
             PaletteSection::new(
                 Section::Files,
-                palette
-                    .files
-                    .results
-                    .iter()
-                    .take(limit)
-                    .map(|found| RowKind::File {
-                        path: found.path.clone(),
-                        is_dir: found.kind == WorkspaceEntryKind::Directory,
-                    }),
+                palette.files.results.iter().take(limit).map(|found| RowKind::File {
+                    path: found.path.clone(),
+                    is_dir: found.kind == WorkspaceEntryKind::Directory,
+                }),
             )
             .with_status(palette.files.status())
         };
         let in_files = |limit| {
             PaletteSection::new(
                 Section::InFiles,
-                palette
-                    .content
-                    .results
-                    .iter()
-                    .take(limit)
-                    .cloned()
-                    .map(RowKind::Content),
+                palette.content.results.iter().take(limit).cloned().map(RowKind::Content),
             )
             .with_status(palette.content.status())
         };
@@ -796,10 +774,7 @@ impl Shell {
             let words = in_threads(SESSIONS_SHOWN, &titled(&threads));
             vec![commands, threads, words, files(FILES_SHOWN), in_files(CONTENT_SHOWN)]
         };
-        sections
-            .into_iter()
-            .filter(|section| !section.is_empty())
-            .collect()
+        sections.into_iter().filter(|section| !section.is_empty()).collect()
     }
 
     /// Pointer motion moves the highlight, so hover and keyboard never light
@@ -826,20 +801,14 @@ impl Shell {
             return;
         }
         let current = palette.active_position(&rows);
-        let next = if down {
-            (current + 1) % count
-        } else {
-            (current + count - 1) % count
-        };
+        let next = if down { (current + 1) % count } else { (current + count - 1) % count };
         palette.set_active(&rows, next);
         // A section's first row brings its header along, and the very first
         // row returns to the top, so a header never hides above the edge.
         if next == 0 {
             palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
         } else {
-            palette
-                .scroll
-                .scroll_to_item(scroll_child_index(&sections, next));
+            palette.scroll.scroll_to_item(scroll_child_index(&sections, next));
         }
         cx.notify();
     }
@@ -928,21 +897,23 @@ impl Shell {
         match command {
             Command::Theme(mode) => on(crate::appearance::mode(cx) == *mode),
             Command::Settings => CommandState::Value(self.settings.settings_section.label().into()),
-            Command::ArchiveThread => self
-                .state
-                .read(cx)
-                .selected_chat_row()
-                .map_or(CommandState::None, |chat| {
+            Command::ArchiveThread => {
+                self.state.read(cx).selected_chat_row().map_or(CommandState::None, |chat| {
                     let title = chat.title.as_deref().unwrap_or("New session");
                     CommandState::Value(transcript::single_line(title).into())
-                }),
+                })
+            }
             Command::Window(command) => {
                 let action = (command.action)();
                 let is = |of: &dyn Action| action.partial_eq(of);
                 if is(&ToggleSidebar) {
                     on(!self.settings.sidebar_collapsed)
                 } else if is(&ToggleChanges) {
-                    on(self.panes_now(cx).views().into_iter().any(|view| matches!(view, RightSurface::Diff(_))))
+                    on(self
+                        .panes_now(cx)
+                        .views()
+                        .into_iter()
+                        .any(|view| matches!(view, RightSurface::Diff(_))))
                 } else if is(&ToggleFiles) {
                     on(self.view_open(RightSurface::Files, cx))
                 } else if is(&chrome_keys::ToggleInspector) {
@@ -983,9 +954,7 @@ impl Shell {
         };
         let combo = self.settings.keymap.get(id);
         let valid = crate::settings::parse_combo(combo).is_ok();
-        Some(
-            crate::keys::combo_text(if valid { combo } else { id.default_combo() }).to_string(),
-        )
+        Some(crate::keys::combo_text(if valid { combo } else { id.default_combo() }).to_string())
     }
 
     fn render_palette_row(
@@ -1047,16 +1016,14 @@ impl Shell {
                     })
                     // A toggle that is on wears a ✓ after its key, in a slot every row keeps so
                     // the keys stand in one column.
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(COMMAND_TICK))
-                            .when(state == CommandState::On, |slot| {
-                                slot.child(
-                                    icon(icons::CHECK).size(px(COMMAND_TICK)).text_color(theme.text),
-                                )
-                            }),
-                    )
+                    .child(div().flex_none().w(px(COMMAND_TICK)).when(
+                        state == CommandState::On,
+                        |slot| {
+                            slot.child(
+                                icon(icons::CHECK).size(px(COMMAND_TICK)).text_color(theme.text),
+                            )
+                        },
+                    ))
                     .into_any_element()
             }
             RowKind::File { path, is_dir } => {
@@ -1214,8 +1181,11 @@ impl Shell {
                     id.clone(),
                     transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
                     None,
-                    format_time_ago(chat.last_message_at.unwrap_or(chat.created_at), crate::clock::utc(cx))
-                        .into(),
+                    format_time_ago(
+                        chat.last_message_at.unwrap_or(chat.created_at),
+                        crate::clock::utc(cx),
+                    )
+                    .into(),
                     folder.into(),
                     branch,
                     harness,
@@ -1242,10 +1212,7 @@ impl Shell {
         if std::mem::take(&mut palette.focus_pending) {
             window.focus(&palette.search.focus_handle(cx), cx);
         }
-        let row_count = sections
-            .iter()
-            .map(|section| section.rows.len())
-            .sum::<usize>();
+        let row_count = sections.iter().map(|section| section.rows.len()).sum::<usize>();
         let active = palette.active_position(&flat_rows(&sections));
         let search = palette.search.clone();
         let query = search.read(cx).text().to_string();
@@ -1257,9 +1224,7 @@ impl Shell {
         for (section_ix, section) in sections.iter().enumerate() {
             // End spacing belongs to the content, so it scrolls out of the
             // fade instead of leaving a permanent gutter beside the chrome.
-            let mut header = div()
-                .flex_none()
-                .when(section_ix == 0, |header| header.pt(px(8.0)));
+            let mut header = div().flex_none().when(section_ix == 0, |header| header.pt(px(8.0)));
             // Groups stand 16 apart with no rule between them (opencode's command
             // dialog), the space alone parting them.
             if section_ix > 0 {
@@ -1315,33 +1280,31 @@ impl Shell {
         let body = palette_results_fade(body, &scroll);
         let card = palette_card("command-palette", &focus, viewport, &theme)
             .key_context(KEY_CONTEXT)
-            .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                    let keys = &event.keystroke;
-                    match keys.key.as_str() {
-                        "up" | "down" => this.move_palette_selection(keys.key == "down", cx),
-                        // Ghostty's ⌃N and ⌃P, and Tab and ⇧Tab, step as ↓ and ↑ do.
-                        "n" | "p" if keys.modifiers.control && !keys.modifiers.platform => {
-                            this.move_palette_selection(keys.key == "n", cx)
-                        }
-                        "tab" => this.move_palette_selection(!keys.modifiers.shift, cx),
-                        "enter" => {
-                            let activate = this
-                                .command_palette
-                                .as_mut()
-                                .is_some_and(|palette| palette.enter_press.press(event.is_held));
-                            if !activate {
-                                cx.stop_propagation();
-                                return;
-                            }
-                            this.activate_palette_selection(window, cx);
-                        }
-                        "escape" => this.close_command_palette(window, cx),
-                        _ => return,
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                let keys = &event.keystroke;
+                match keys.key.as_str() {
+                    "up" | "down" => this.move_palette_selection(keys.key == "down", cx),
+                    // Ghostty's ⌃N and ⌃P, and Tab and ⇧Tab, step as ↓ and ↑ do.
+                    "n" | "p" if keys.modifiers.control && !keys.modifiers.platform => {
+                        this.move_palette_selection(keys.key == "n", cx)
                     }
-                    cx.stop_propagation();
-                }),
-            )
+                    "tab" => this.move_palette_selection(!keys.modifiers.shift, cx),
+                    "enter" => {
+                        let activate = this
+                            .command_palette
+                            .as_mut()
+                            .is_some_and(|palette| palette.enter_press.press(event.is_held));
+                        if !activate {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        this.activate_palette_selection(window, cx);
+                    }
+                    "escape" => this.close_command_palette(window, cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
             .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
                 if event.keystroke.key == "enter" {
                     if let Some(palette) = this.command_palette.as_mut() {
@@ -1444,9 +1407,8 @@ pub(super) fn palette_card(
         // top, its footer at its foot. A touch screen has no footer of keys to hold there: the
         // card hugs its rows.
         .when(!crate::shell::touch_screen(), |card| {
-            card.min_h(px(PALETTE_MIN_HEIGHT.min(
-                f32::from(viewport.height - palette_top(viewport.height)) - 16.0,
-            )))
+            card.min_h(px(PALETTE_MIN_HEIGHT
+                .min(f32::from(viewport.height - palette_top(viewport.height)) - 16.0)))
         })
         .max_h(px(PALETTE_MAX_HEIGHT))
         .flex()
@@ -1471,13 +1433,7 @@ pub(super) fn palette_header(theme: &Theme, search: AnyElement, hint: gpui::Div)
         .border_b_1()
         .border_color(crate::theme::hairline(0.06))
         .child(popover::palette_search_icon(theme))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(crate::typography::ui_rems(14.0))
-                .child(search),
-        )
+        .child(div().flex_1().min_w_0().text_size(crate::typography::ui_rems(14.0)).child(search))
         // A key to press, where there are keys.
         .when(!crate::shell::touch_screen(), |header| header.child(hint))
 }
@@ -1533,26 +1489,27 @@ pub(super) fn palette_top(height: Pixels) -> Pixels {
 // results change. It stands whole on the frame its key opens it, scrim and all, as Raycast's
 // does: what a key opens many times a day never makes the person wait on its entrance
 // (`docs/decisions/ui.md`, "What a key opens is there at once").
-pub(super) fn palette_overlay(viewport: gpui::Size<Pixels>, card: gpui::Stateful<gpui::Div>) -> AnyElement {
+pub(super) fn palette_overlay(
+    viewport: gpui::Size<Pixels>,
+    card: gpui::Stateful<gpui::Div>,
+) -> AnyElement {
     // Match the composer's 16px backdrop blur, including its opaque fallback.
     let card = crate::frost::frosted(16.0, crate::frost::MENU_BLUR, card);
     gpui::deferred(
-        gpui::anchored()
-            .position(gpui::point(px(0.0), px(0.0)))
-            .child(
-                div()
-                    .occlude()
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .pt(palette_top(viewport.height))
-                    .child(card)
-                    // Match glass modals: quiet the background while
-                    // preserving its color through the frosted palette.
-                    .bg(popover::scrim_alpha(0.35)),
-            ),
+        gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
+            div()
+                .occlude()
+                .w(viewport.width)
+                .h(viewport.height)
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt(palette_top(viewport.height))
+                .child(card)
+                // Match glass modals: quiet the background while
+                // preserving its color through the frosted palette.
+                .bg(popover::scrim_alpha(0.35)),
+        ),
     )
     .priority(2)
     .into_any_element()
@@ -1570,18 +1527,15 @@ pub(super) fn command_key_hint(
     window: &mut Window,
     cx: &gpui::App,
 ) -> gpui::Div {
-    let glyph = |path: &'static str| {
-        crate::icons::icon(path)
-            .size(px(12.5))
-            .text_color(theme.text_muted)
-    };
+    let glyph =
+        |path: &'static str| crate::icons::icon(path).size(px(12.5)).text_color(theme.text_muted);
     let cap = popover::key_cap(theme);
     let cap = match keys {
         "⏎" | "↵" => cap.child(glyph(crate::icons::RETURN)),
         "←" => cap.child(glyph(crate::icons::ARROW_LEFT)),
-        "↑ ↓" => cap
-            .child(glyph(crate::icons::ARROW_UP))
-            .child(glyph(crate::icons::ARROW_DOWN)),
+        "↑ ↓" => {
+            cap.child(glyph(crate::icons::ARROW_UP)).child(glyph(crate::icons::ARROW_DOWN))
+        }
         _ => cap
             .font_family(popover::KEY_GLYPH_FONT)
             .text_size(crate::typography::ui_rems(11.0))
@@ -1591,26 +1545,19 @@ pub(super) fn command_key_hint(
     let selector = format!("key-cap-{keys}");
     let cap = crate::live::chrome::pressable_cap(cap, keys, 0.05, window, cx)
         .debug_selector(move || selector);
-    div()
-        .flex()
-        .items_center()
-        .gap(px(5.0))
-        .child(cap)
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(10.0))
-                .text_color(theme.text_muted)
-                .child(label),
-        )
+    div().flex().items_center().gap(px(5.0)).child(cap).child(
+        div().text_size(crate::typography::ui_rems(10.0)).text_color(theme.text_muted).child(label),
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use gpui::{AppContext, TestAppContext};
+
     use super::super::session_search::tests::words;
     use super::super::session_search::{CHAT_WORDS_DEBOUNCE, CHAT_WORDS_LIMIT};
     use super::*;
     use crate::appearance::AppearanceMode;
-    use gpui::{AppContext, TestAppContext};
 
     fn palette_window(cx: &mut TestAppContext) -> (gpui::WindowHandle<Shell>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -1644,14 +1591,9 @@ mod tests {
     }
 
     fn search_chats(shell: &Shell, query: &str, cx: &mut Context<Shell>) -> Vec<String> {
-        shell
-            .command_palette
-            .as_ref()
-            .unwrap()
-            .search
-            .update(cx, |input, cx| {
-                input.set_text(query, cx);
-            });
+        shell.command_palette.as_ref().unwrap().search.update(cx, |input, cx| {
+            input.set_text(query, cx);
+        });
         shell
             .palette_sections(cx)
             .into_iter()
@@ -1743,22 +1685,16 @@ mod tests {
                 shell.toggle_command_palette(window, cx);
                 // Sessions are found by typing; nothing lists them before.
                 assert!(search_chats(shell, "", cx).is_empty());
-                for query in [
-                    "manual-sidechat",
-                    "mcp-worker",
-                    "archived-sidechat",
-                    "orphan-sidechat",
-                ] {
+                for query in
+                    ["manual-sidechat", "mcp-worker", "archived-sidechat", "orphan-sidechat"]
+                {
                     assert!(
                         search_chats(shell, query, cx).is_empty(),
                         "{query} must stay out of global history"
                     );
                 }
                 assert_eq!(search_chats(shell, "main-session", cx), ["main-session"]);
-                assert_eq!(
-                    search_chats(shell, "archived-session", cx),
-                    ["archived-session"]
-                );
+                assert_eq!(search_chats(shell, "archived-session", cx), ["archived-session"]);
             })
             .unwrap();
     }
@@ -1778,8 +1714,7 @@ mod tests {
                     state.apply_chats(children.chain(sessions).collect());
                 });
                 shell.toggle_command_palette(window, cx);
-                let expected: Vec<_> =
-                    (0..SESSIONS_SHOWN).map(|ix| format!("task-{ix}")).collect();
+                let expected: Vec<_> = (0..SESSIONS_SHOWN).map(|ix| format!("task-{ix}")).collect();
                 assert_eq!(search_chats(shell, "task", cx), expected);
                 let oldest = format!("task-{SESSIONS_SHOWN}");
                 assert_eq!(search_chats(shell, &oldest, cx), [oldest]);
@@ -1792,10 +1727,7 @@ mod tests {
             .palette_sections(cx)
             .into_iter()
             .map(|section| {
-                (
-                    section.section,
-                    section.rows.into_iter().map(|row| row.kind).collect(),
-                )
+                (section.section, section.rows.into_iter().map(|row| row.kind).collect())
             })
             .collect()
     }
@@ -1869,17 +1801,10 @@ mod tests {
                 shell.toggle_command_palette(window, cx);
                 let sections = sections(shell, cx);
                 assert_eq!(
-                    sections
-                        .iter()
-                        .map(|(section, _)| *section)
-                        .collect::<Vec<_>>(),
+                    sections.iter().map(|(section, _)| *section).collect::<Vec<_>>(),
                     [Section::Commands]
                 );
-                assert!(
-                    !sections[0]
-                        .1
-                        .contains(&RowKind::Command(Command::ArchiveThread))
-                );
+                assert!(!sections[0].1.contains(&RowKind::Command(Command::ArchiveThread)));
             })
             .unwrap();
     }
@@ -1906,21 +1831,11 @@ mod tests {
                 shell.note_recent_file("newer", "elsewhere.rs");
                 shell.toggle_command_palette(window, cx);
                 let sections = sections(shell, cx);
-                let file = |path: &str| RowKind::File {
-                    path: path.into(),
-                    is_dir: false,
-                };
+                let file = |path: &str| RowKind::File { path: path.into(), is_dir: false };
                 assert_eq!(sections[0].0, Section::RecentFiles);
-                assert_eq!(
-                    sections[0].1,
-                    [file("docs/b.md"), file("src/a.rs"), file("README.md")]
-                );
+                assert_eq!(sections[0].1, [file("docs/b.md"), file("src/a.rs"), file("README.md")]);
                 assert_eq!(sections[1].0, Section::Commands);
-                assert!(
-                    sections[1]
-                        .1
-                        .contains(&RowKind::Command(Command::ArchiveThread))
-                );
+                assert!(sections[1].1.contains(&RowKind::Command(Command::ArchiveThread)));
                 assert_eq!(sections.len(), 2, "sessions are the picker's: none listed untyped");
             })
             .unwrap();
@@ -1955,10 +1870,7 @@ mod tests {
 
     #[test]
     fn file_rows_split_name_and_parent_folder() {
-        assert_eq!(
-            split_path("src/shell/palette.rs"),
-            ("palette.rs", "src/shell")
-        );
+        assert_eq!(split_path("src/shell/palette.rs"), ("palette.rs", "src/shell"));
         assert_eq!(split_path("README.md"), ("README.md", ""));
         assert_eq!(split_path("crates/ui/"), ("ui", "crates"));
     }
@@ -2028,15 +1940,14 @@ mod tests {
         cx: &mut TestAppContext,
         focused: bool,
     ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let (out, requests) = tokio::sync::mpsc::channel(64);
         let (replies, inbound) = tokio::sync::mpsc::channel(64);
         let engine = {
             let _guard = runtime.enter();
-            crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(out, inbound))
+            crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(
+                out, inbound,
+            ))
         };
         let (window, dir) = palette_window(cx);
         window
@@ -2058,11 +1969,7 @@ mod tests {
                 shell.toggle_command_palette(window, cx);
             })
             .unwrap();
-        let fake = FakeEngine {
-            runtime,
-            requests,
-            replies,
-        };
+        let fake = FakeEngine { runtime, requests, replies };
         (window, dir, fake)
     }
 
@@ -2086,10 +1993,7 @@ mod tests {
     ) -> Option<PaletteSection> {
         window
             .read_with(cx, |shell, cx| {
-                shell
-                    .palette_sections(cx)
-                    .into_iter()
-                    .find(|found| found.section == section)
+                shell.palette_sections(cx).into_iter().find(|found| found.section == section)
             })
             .unwrap()
     }
@@ -2137,10 +2041,8 @@ mod tests {
             let request: serde_json::Value = serde_json::from_str(&request).unwrap();
             let method = request["method"].as_str().unwrap().to_owned();
             match method.as_str() {
-                methods::WARM_WORKSPACE_SEARCH if warm == "unsupported" => engine.fail(
-                    &request,
-                    &format!("unknown method: {}", methods::WARM_WORKSPACE_SEARCH),
-                ),
+                methods::WARM_WORKSPACE_SEARCH if warm == "unsupported" => engine
+                    .fail(&request, &format!("unknown method: {}", methods::WARM_WORKSPACE_SEARCH)),
                 methods::WARM_WORKSPACE_SEARCH => {
                     engine.reply(&request, serde_json::json!({ "state": warm }))
                 }
@@ -2159,7 +2061,10 @@ mod tests {
     }
 
     /// The `SearchChats` requests sent once typing paused.
-    fn chat_word_requests(engine: &mut FakeEngine, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
+    fn chat_word_requests(
+        engine: &mut FakeEngine,
+        cx: &mut TestAppContext,
+    ) -> Vec<serde_json::Value> {
         cx.executor().advance_clock(CHAT_WORDS_DEBOUNCE);
         engine.take(methods::SEARCH_CHATS, cx)
     }
@@ -2224,7 +2129,9 @@ mod tests {
                 let sections = shell.palette_sections(cx);
                 let rows = flat_rows(&sections);
                 let at = shell.command_palette.as_ref().unwrap().active_position(&rows);
-                assert!(matches!(&rows[at].kind, RowKind::ChatWords(found) if found.chat_id == "quiet"));
+                assert!(
+                    matches!(&rows[at].kind, RowKind::ChatWords(found) if found.chat_id == "quiet")
+                );
             })
             .unwrap();
         // Cleared below two characters.
@@ -2292,10 +2199,7 @@ mod tests {
     #[gpui::test]
     fn a_ready_index_skips_the_probe_until_the_palette_reopens(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = file_search_palette(cx);
-        let probed = [
-            methods::WARM_WORKSPACE_SEARCH,
-            methods::SEARCH_WORKSPACE_FILES,
-        ];
+        let probed = [methods::WARM_WORKSPACE_SEARCH, methods::SEARCH_WORKSPACE_FILES];
         type_query(window, "ne", cx);
         assert_eq!(answer_all(&mut engine, "ready", cx), probed);
         for query in ["nee", "need"] {
@@ -2325,10 +2229,7 @@ mod tests {
         type_query(window, "nee", cx);
         assert_eq!(
             answer_all(&mut engine, "ready", cx),
-            [
-                methods::WARM_WORKSPACE_SEARCH,
-                methods::SEARCH_WORKSPACE_FILES
-            ]
+            [methods::WARM_WORKSPACE_SEARCH, methods::SEARCH_WORKSPACE_FILES]
         );
     }
 
@@ -2338,16 +2239,10 @@ mod tests {
         type_query(window, "ne", cx);
         assert_eq!(
             answer_all(&mut engine, "unsupported", cx),
-            [
-                methods::WARM_WORKSPACE_SEARCH,
-                methods::SEARCH_WORKSPACE_FILES
-            ]
+            [methods::WARM_WORKSPACE_SEARCH, methods::SEARCH_WORKSPACE_FILES]
         );
         type_query(window, "nee", cx);
-        assert_eq!(
-            answer_all(&mut engine, "unsupported", cx),
-            [methods::SEARCH_WORKSPACE_FILES]
-        );
+        assert_eq!(answer_all(&mut engine, "unsupported", cx), [methods::SEARCH_WORKSPACE_FILES]);
     }
 
     #[gpui::test]
@@ -2365,10 +2260,7 @@ mod tests {
         cx.executor().advance_clock(FILE_INDEX_RETRY);
         let second = answer_file_index(&mut engine, "building", cx);
         assert_eq!(second["params"], first["params"]);
-        engine.reply(
-            &second,
-            serde_json::json!([name_match("needle.rs", "file")]),
-        );
+        engine.reply(&second, serde_json::json!([name_match("needle.rs", "file")]));
         cx.run_until_parked();
         let partial = palette_section(window, Section::Files, cx).unwrap();
         assert_eq!(partial.rows.len(), 1);
@@ -2421,10 +2313,7 @@ mod tests {
         cx.executor().advance_clock(FILE_INDEX_RETRY);
         let updated = answer_file_index(&mut engine, "ready", cx);
         assert_eq!(updated["params"]["query"], "updated");
-        engine.reply(
-            &updated,
-            serde_json::json!([name_match("updated.rs", "file")]),
-        );
+        engine.reply(&updated, serde_json::json!([name_match("updated.rs", "file")]));
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(10));
         assert!(engine.take(methods::WARM_WORKSPACE_SEARCH, cx).is_empty());
@@ -2463,10 +2352,7 @@ mod tests {
         engine.fail(&warm[0], "unknown method: WarmWorkspaceSearch");
         let search = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
         assert_eq!(search.len(), 1);
-        engine.reply(
-            &search[0],
-            serde_json::json!([name_match("needle.rs", "file")]),
-        );
+        engine.reply(&search[0], serde_json::json!([name_match("needle.rs", "file")]));
         cx.run_until_parked();
         let files = palette_section(window, Section::Files, cx).unwrap();
         assert_eq!(files.rows.len(), 1);
@@ -2533,20 +2419,10 @@ mod tests {
         let files = palette_section(window, Section::Files, cx).unwrap();
         assert_eq!(files.status, None);
         assert_eq!(
-            files
-                .rows
-                .into_iter()
-                .map(|row| row.kind)
-                .collect::<Vec<_>>(),
+            files.rows.into_iter().map(|row| row.kind).collect::<Vec<_>>(),
             [
-                RowKind::File {
-                    path: "src/composer.rs".into(),
-                    is_dir: false
-                },
-                RowKind::File {
-                    path: "src".into(),
-                    is_dir: true
-                },
+                RowKind::File { path: "src/composer.rs".into(), is_dir: false },
+                RowKind::File { path: "src".into(), is_dir: true },
             ]
         );
     }
@@ -2558,24 +2434,14 @@ mod tests {
         let first = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
         type_query(window, "abc", cx);
         let second = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
-        engine.reply(
-            &second[0],
-            serde_json::json!([name_match("abc.rs", "file")]),
-        );
+        engine.reply(&second[0], serde_json::json!([name_match("abc.rs", "file")]));
         cx.run_until_parked();
         engine.reply(&first[0], serde_json::json!([name_match("ab.rs", "file")]));
         cx.run_until_parked();
         let files = palette_section(window, Section::Files, cx).unwrap();
         assert_eq!(
-            files
-                .rows
-                .into_iter()
-                .map(|row| row.kind)
-                .collect::<Vec<_>>(),
-            [RowKind::File {
-                path: "abc.rs".into(),
-                is_dir: false
-            }]
+            files.rows.into_iter().map(|row| row.kind).collect::<Vec<_>>(),
+            [RowKind::File { path: "abc.rs".into(), is_dir: false }]
         );
     }
 
@@ -2585,21 +2451,14 @@ mod tests {
         type_query(window, "deploy", cx);
         let requests = engine.take(methods::SEARCH_WORKSPACE_FILES, cx);
         // Select the thread; the Files section then lands below it.
-        window
-            .update(cx, |shell, _, cx| shell.move_palette_selection(false, cx))
-            .unwrap();
+        window.update(cx, |shell, _, cx| shell.move_palette_selection(false, cx)).unwrap();
         let selected = |cx: &mut TestAppContext| {
             window
-                .read_with(cx, |shell, _| {
-                    shell.command_palette.as_ref().unwrap().active.clone()
-                })
+                .read_with(cx, |shell, _| shell.command_palette.as_ref().unwrap().active.clone())
                 .unwrap()
         };
         let before = selected(cx);
-        engine.reply(
-            &requests[0],
-            serde_json::json!([name_match("deploy.md", "file")]),
-        );
+        engine.reply(&requests[0], serde_json::json!([name_match("deploy.md", "file")]));
         cx.run_until_parked();
         assert_eq!(selected(cx), before);
         assert!(before.is_some());
@@ -2612,19 +2471,11 @@ mod tests {
             .update(cx, |shell, window, cx| {
                 let row = PaletteRow::new(
                     Section::Files,
-                    RowKind::File {
-                        path: "src/composer.rs".into(),
-                        is_dir: false,
-                    },
+                    RowKind::File { path: "src/composer.rs".into(), is_dir: false },
                 );
                 shell.activate_palette_row(row, window, cx);
                 assert!(shell.command_palette.is_none());
-                assert!(
-                    shell
-                        .file_surface_paths
-                        .values()
-                        .any(|path| path == "src/composer.rs")
-                );
+                assert!(shell.file_surface_paths.values().any(|path| path == "src/composer.rs"));
                 assert_eq!(
                     shell.recent_files("focused").next().map(String::as_str),
                     Some("src/composer.rs")
@@ -2656,9 +2507,7 @@ mod tests {
         assert_eq!(params["limit"], CONTENT_SHOWN);
         assert_eq!(params["perFileLimit"], CONTENT_MATCHES_PER_FILE);
 
-        let matches = (1..=8)
-            .map(|line| content_match("src/lib.rs", line))
-            .collect();
+        let matches = (1..=8).map(|line| content_match("src/lib.rs", line)).collect();
         engine.reply(&requests[0], content_answer(matches, false));
         cx.run_until_parked();
         let in_files = palette_section(window, Section::InFiles, cx).unwrap();
@@ -2678,10 +2527,7 @@ mod tests {
         engine.reply(&requests[0], content_answer(Vec::new(), true));
         cx.run_until_parked();
         assert_eq!(
-            palette_section(window, Section::InFiles, cx)
-                .unwrap()
-                .status
-                .as_deref(),
+            palette_section(window, Section::InFiles, cx).unwrap().status.as_deref(),
             Some("Indexing…")
         );
 
@@ -2699,20 +2545,13 @@ mod tests {
         let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
         engine.reply(&first[0], content_answer(Vec::new(), true));
         cx.run_until_parked();
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
+        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
 
         cx.executor().advance_clock(CONTENT_INDEX_RETRY);
         let second = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0]["params"], first[0]["params"]);
-        engine.reply(
-            &second[0],
-            content_answer(vec![content_match("src/lib.rs", 2)], true),
-        );
+        engine.reply(&second[0], content_answer(vec![content_match("src/lib.rs", 2)], true));
         cx.run_until_parked();
         let partial = palette_section(window, Section::InFiles, cx).unwrap();
         assert_eq!(partial.rows.len(), 1);
@@ -2732,10 +2571,7 @@ mod tests {
         engine.reply(
             &third[0],
             content_answer(
-                vec![
-                    content_match("src/lib.rs", 1),
-                    content_match("src/lib.rs", 2),
-                ],
+                vec![content_match("src/lib.rs", 1), content_match("src/lib.rs", 2)],
                 false,
             ),
         );
@@ -2752,11 +2588,7 @@ mod tests {
             })
             .unwrap();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
+        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
     }
 
     #[gpui::test]
@@ -2772,9 +2604,7 @@ mod tests {
             // the wait, then cross it.
             cx.executor().advance_clock(wait - early);
             assert!(
-                engine
-                    .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                    .is_empty(),
+                engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty(),
                 "refreshed before {wait:?}"
             );
             cx.executor().advance_clock(early);
@@ -2784,11 +2614,7 @@ mod tests {
         engine.reply(&pending[0], content_answer(Vec::new(), false));
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
+        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
     }
 
     #[gpui::test]
@@ -2808,11 +2634,7 @@ mod tests {
         engine.reply(&updated[0], content_answer(Vec::new(), false));
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
+        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
     }
 
     #[gpui::test]
@@ -2822,17 +2644,9 @@ mod tests {
         let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
         engine.reply(&first[0], content_answer(Vec::new(), true));
         cx.run_until_parked();
-        window
-            .update(cx, |shell, window, cx| {
-                shell.close_command_palette(window, cx)
-            })
-            .unwrap();
+        window.update(cx, |shell, window, cx| shell.close_command_palette(window, cx)).unwrap();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
+        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
     }
 
     #[gpui::test]
@@ -2850,11 +2664,7 @@ mod tests {
         let section = palette_section(window, Section::InFiles, cx).unwrap();
         assert_eq!(section.status.as_deref(), Some("Couldn\u{2019}t search. Try again."));
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(
-            engine
-                .take(methods::SEARCH_WORKSPACE_CONTENT, cx)
-                .is_empty()
-        );
+        assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
     }
 
     #[gpui::test]
@@ -2885,12 +2695,7 @@ mod tests {
                     window,
                     cx,
                 );
-                assert!(
-                    shell
-                        .file_surface_paths
-                        .values()
-                        .any(|path| path == "src/lib.rs")
-                );
+                assert!(shell.file_surface_paths.values().any(|path| path == "src/lib.rs"));
             })
             .unwrap();
     }
@@ -2903,10 +2708,7 @@ mod tests {
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
             crate::composer::init(cx);
-            apply_keymap(
-                cx,
-                &KeymapConfig::default(),
-            );
+            apply_keymap(cx, &KeymapConfig::default());
         });
         let (window, _) = palette_window(cx);
         window
@@ -2942,9 +2744,7 @@ mod tests {
     }
 
     fn selected_chat(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Option<String> {
-        window
-            .read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
-            .unwrap()
+        window.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone()).unwrap()
     }
 
     #[gpui::test]
@@ -2957,8 +2757,7 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
 
         cx.simulate_keystrokes(window.into(), &platform_combo("mod-2"));
         assert!(!palette_open(window, cx));
@@ -2970,14 +2769,9 @@ mod tests {
     #[gpui::test]
     fn tab_and_control_n_step_the_highlight(cx: &mut TestAppContext) {
         let (window, _dir) = keyed_palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.toggle_command_palette(window, cx)
-            })
-            .unwrap();
+        window.update(cx, |shell, window, cx| shell.toggle_command_palette(window, cx)).unwrap();
         cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
 
         assert_eq!(highlighted(window, cx), 0);
         cx.simulate_keystrokes(window.into(), "tab");
@@ -2992,10 +2786,7 @@ mod tests {
     #[test]
     fn selection_follows_its_row_when_rows_arrive_above_it() {
         let chats = |ids: &[&str]| {
-            PaletteSection::new(
-                Section::Threads,
-                ids.iter().map(|id| RowKind::Chat((*id).into())),
-            )
+            PaletteSection::new(Section::Threads, ids.iter().map(|id| RowKind::Chat((*id).into())))
         };
         let before = [chats(&["a", "b", "c"])];
         let active = flat_rows(&before)[2].key();
@@ -3040,7 +2831,10 @@ mod tests {
         assert!(!enter.press(true));
     }
 
-    fn labels(query: &str, uses: &std::collections::BTreeMap<String, settings::PaletteUse>) -> Vec<&'static str> {
+    fn labels(
+        query: &str,
+        uses: &std::collections::BTreeMap<String, settings::PaletteUse>,
+    ) -> Vec<&'static str> {
         commands_for(query, false, uses, DAY_MS * 30).iter().map(Command::label).collect()
     }
 
@@ -3074,7 +2868,8 @@ mod tests {
     #[test]
     fn commands_run_often_and_lately_lead() {
         let now = DAY_MS * 30;
-        let used = |count, days_ago: i64| settings::PaletteUse { count, last_ms: now - days_ago * DAY_MS };
+        let used =
+            |count, days_ago: i64| settings::PaletteUse { count, last_ms: now - days_ago * DAY_MS };
         let uses = std::collections::BTreeMap::from([
             ("Settings".to_owned(), used(4, 28)),
             ("Toggle sidebar".to_owned(), used(2, 1)),
@@ -3084,7 +2879,10 @@ mod tests {
         assert_eq!(ranked[..3], ["Toggle sidebar", "Appearance: Dark", "Settings"], "{ranked:?}");
         assert_eq!(ranked[3], "New session", "then the table's order");
         assert!(frecency(used(4, 28), now) < frecency(used(1, 0), now));
-        assert!((frecency(used(2, 7), now) - 1.0).abs() < 0.01, "two runs a week back count as one");
+        assert!(
+            (frecency(used(2, 7), now) - 1.0).abs() < 0.01,
+            "two runs a week back count as one"
+        );
         assert!(frecency(used(1, -1), now) <= 1.0, "a clock that went back counts as now");
     }
 
@@ -3164,10 +2962,7 @@ mod tests {
 
     #[test]
     fn search_matches_words_across_chat_metadata() {
-        assert!(matches_query(
-            "mac auth",
-            "Fix authentication Slopty @ MacBook main"
-        ));
+        assert!(matches_query("mac auth", "Fix authentication Slopty @ MacBook main"));
         assert!(matches_query("  ", "Any chat"));
         assert!(!matches_query("mac windows", "Slopty @ MacBook"));
     }

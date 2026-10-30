@@ -4,10 +4,10 @@
 //!
 //! 1. [`AppearanceMode`] — the persisted choice: follow the system, or pin one.
 //! 2. [`AppearanceState`] — a gpui global holding that choice and the theme's.
-//! 3. The application's appearance (`App::window_appearance`): Slopty pins it to a
-//!    pinned mode and clears it to follow the system, so it is the appearance the
-//!    theme takes; `App::on_window_appearance_change` tells when it moves, the
-//!    system turning dark at sunset included, and [`apply`] follows.
+//! 3. The application's appearance (`App::window_appearance`): Slopty pins it to a pinned mode and
+//!    clears it to follow the system, so it is the appearance the theme takes;
+//!    `App::on_window_appearance_change` tells when it moves, the system turning dark at sunset
+//!    included, and [`apply`] follows.
 //!
 //! The theme follows the application, never a window: a window wears the
 //! appearance of its terminal's ground ([`crate::window_appearance`]), so a dark
@@ -43,6 +43,8 @@ pub enum AppearanceMode {
 }
 
 impl AppearanceMode {
+    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
     /// Menu/label text.
     pub fn label(self) -> &'static str {
         match self {
@@ -60,8 +62,6 @@ impl AppearanceMode {
             Self::Dark => crate::icons::MOON,
         }
     }
-
-    pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
 }
 
 /// Global state behind the current theme: what the person chose, and the
@@ -98,13 +98,7 @@ pub fn init(
 ) {
     cx.set_window_appearance(app_appearance(mode));
     let app = Appearance::from_window(cx.window_appearance());
-    cx.set_global(AppearanceState {
-        mode,
-        app,
-        themes: themes.clone(),
-        accent,
-        surface,
-    });
+    cx.set_global(AppearanceState { mode, app, themes: themes.clone(), accent, surface });
     // For as long as the app runs.
     cx.on_window_appearance_change(follow_app).detach();
     let appearance = resolve(mode, app);
@@ -128,27 +122,19 @@ pub fn app(cx: &App) -> Appearance {
 
 /// The mode currently in effect (defaults to `System` before [`init`]).
 pub fn mode(cx: &App) -> AppearanceMode {
-    cx.try_global::<AppearanceState>()
-        .map(|s| s.mode)
-        .unwrap_or_default()
+    cx.try_global::<AppearanceState>().map(|s| s.mode).unwrap_or_default()
 }
 
 pub fn themes(cx: &App) -> ThemeSelection {
-    cx.try_global::<AppearanceState>()
-        .map(|state| state.themes.clone())
-        .unwrap_or_default()
+    cx.try_global::<AppearanceState>().map(|state| state.themes.clone()).unwrap_or_default()
 }
 
 pub fn accent(cx: &App) -> AccentSelection {
-    cx.try_global::<AppearanceState>()
-        .map(|state| state.accent)
-        .unwrap_or_default()
+    cx.try_global::<AppearanceState>().map(|state| state.accent).unwrap_or_default()
 }
 
 pub fn surface(cx: &App) -> SurfacePreference {
-    cx.try_global::<AppearanceState>()
-        .map(|state| state.surface)
-        .unwrap_or_default()
+    cx.try_global::<AppearanceState>().map(|state| state.surface).unwrap_or_default()
 }
 
 /// Change the user's preference, repaint if that changed the palette, and write
@@ -179,9 +165,7 @@ pub fn set_theme(appearance: Appearance, variant_id: impl Into<String>, cx: &mut
     if state.themes.variant_id(model_appearance(appearance)) == variant_id {
         return;
     }
-    state
-        .themes
-        .set_variant(model_appearance(appearance), variant_id);
+    state.themes.set_variant(model_appearance(appearance), variant_id);
     let themes = state.themes.clone();
     apply(cx);
     settings::update(SavePolicy::Immediate, cx, |settings| {
@@ -331,9 +315,7 @@ pub fn reapply_window_background(cx: &mut App) {
 }
 
 fn apply_window_background(cx: &mut App) {
-    let Some(wanted) = cx
-        .try_global::<Theme>()
-        .map(|theme| theme.window_background_appearance())
+    let Some(wanted) = cx.try_global::<Theme>().map(|theme| theme.window_background_appearance())
     else {
         return;
     };
@@ -352,14 +334,8 @@ mod tests {
 
     #[test]
     fn system_mode_follows_the_os() {
-        assert_eq!(
-            resolve(AppearanceMode::System, Appearance::Light),
-            Appearance::Light
-        );
-        assert_eq!(
-            resolve(AppearanceMode::System, Appearance::Dark),
-            Appearance::Dark
-        );
+        assert_eq!(resolve(AppearanceMode::System, Appearance::Light), Appearance::Light);
+        assert_eq!(resolve(AppearanceMode::System, Appearance::Dark), Appearance::Dark);
     }
 
     #[test]

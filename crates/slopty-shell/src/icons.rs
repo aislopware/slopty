@@ -4,10 +4,10 @@
 //! - Most glyphs come from the **Solar Icons** set (Linear weight) by 480 Design.
 //!   Solar Icons is licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/);
 //!   attribution: "Solar Icons by 480 Design".
-//! - The terminal tab glyphs (`terminal`, `plus`, `close`) and the stop square are hand-drawn
-//!   in the same style.
-//! - The harness brand marks (`claude-mark`, `openai-mark`, `cursor-mark`): gpui tints SVGs
-//!   with the text color, so the Claude mark's brand orange is applied at the call site
+//! - The terminal tab glyphs (`terminal`, `plus`, `close`) and the stop square are hand-drawn in
+//!   the same style.
+//! - The harness brand marks (`claude-mark`, `openai-mark`, `cursor-mark`): gpui tints SVGs with
+//!   the text color, so the Claude mark's brand orange is applied at the call site
 //!   ([`CLAUDE_BRAND`]).
 //!
 //! Icons render via [`icon`]: `icon(icons::PAPERCLIP).size(px(16.)).text_color(…)`.
@@ -253,7 +253,7 @@ impl AssetSource for Assets {
 /// The Claude mark's brand orange (`#D97757`) — slopty keeps it even on the
 /// monochrome surface.
 pub fn claude_brand() -> Hsla {
-    gpui::rgb(0xD97757).into()
+    gpui::rgb(0xd97757).into()
 }
 
 /// An icon element for an embedded asset path. Size and colour are set by the
@@ -293,17 +293,8 @@ pub fn sidebar_glyph(open: f32, right: bool, size: f32, color: Hsla) -> Div {
         .h(px(9.0 * s))
         .rounded(px(0.875 * s))
         .bg(color);
-    let panel = if right {
-        panel.right(inset)
-    } else {
-        panel.left(inset)
-    };
-    div()
-        .relative()
-        .flex_none()
-        .size(px(size))
-        .child(frame)
-        .child(panel)
+    let panel = if right { panel.right(inset) } else { panel.left(inset) };
+    div().relative().flex_none().size(px(size)).child(frame).child(panel)
 }
 
 /// The frame every panel toggle shares (`<rect x=3 y=4 w=18 h=16 rx=4
@@ -337,12 +328,7 @@ pub fn corner_card_glyph(size: f32, color: Hsla) -> Div {
         .h(px(4.5 * s))
         .rounded(px(0.875 * s))
         .bg(color);
-    div()
-        .relative()
-        .flex_none()
-        .size(px(size))
-        .child(frame)
-        .child(panel)
+    div().relative().flex_none().size(px(size)).child(frame).child(panel)
 }
 
 #[cfg(test)]
@@ -380,11 +366,7 @@ mod tests {
             let bytes = Assets.load(path).unwrap().unwrap();
             let image = renderer.render_single_frame(&bytes, 1.0).unwrap();
             assert!(
-                image
-                    .as_bytes(0)
-                    .unwrap()
-                    .chunks_exact(4)
-                    .any(|pixel| pixel[3] != 0),
+                image.as_bytes(0).unwrap().chunks_exact(4).any(|pixel| pixel[3] != 0),
                 "{path} rasterizes to an empty image"
             );
         }
@@ -394,10 +376,8 @@ mod tests {
     fn every_registered_icon_loads_and_parses() {
         let assets = Assets;
         for path in assets.list("icons/").unwrap() {
-            let bytes = assets
-                .load(&path)
-                .unwrap()
-                .unwrap_or_else(|| panic!("missing asset {path}"));
+            let bytes =
+                assets.load(&path).unwrap().unwrap_or_else(|| panic!("missing asset {path}"));
             let text = std::str::from_utf8(&bytes).expect("icon svg is utf-8");
             assert!(text.contains("<svg"), "{path} is not an svg");
             assert!(text.contains("viewBox"), "{path} lacks a viewBox");
@@ -440,7 +420,10 @@ mod tests {
             let root = &text[..text.find('>').unwrap()];
             for attribute in ["stroke-linecap", "stroke-linejoin"] {
                 assert_eq!(values(root, attribute), ["round"], "{path}: {attribute} on its root");
-                assert!(values(text, attribute).iter().all(|v| v == "round"), "{path}: {attribute}");
+                assert!(
+                    values(text, attribute).iter().all(|v| v == "round"),
+                    "{path}: {attribute}"
+                );
             }
         }
         assert!(stroked > 100, "the stroked set is the control icons ({stroked})");

@@ -1,24 +1,21 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Native, virtualized preview of a file's current Markdown buffer.
-use crate::image_media::release_media;
-use crate::{
-    markdown::{
-        parser::{self, Block, BlockTree, InlineRun},
-        render::{self, LinkUi, RenderCache, RenderOptions},
-    },
-    theme::Theme,
-};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
+
+use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, FocusHandle, ListAlignment, ListOffset, ListSizingBehavior, ListState,
-    Render, SharedString, Task, Window, div, list, prelude::*, px,
+    Render, SharedString, Task, Window, div, list, px,
 };
-use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    rc::Rc,
-    sync::Arc,
-    time::Duration,
-};
+
+use crate::image_media::release_media;
+use crate::markdown::parser::{self, Block, BlockTree, InlineRun};
+use crate::markdown::render::{self, LinkUi, RenderCache, RenderOptions};
+use crate::theme::Theme;
 
 const MAX_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MEDIA_ENTRIES: usize = 32;
@@ -34,19 +31,12 @@ fn strip_outside_links(block: &mut Block) {
     fn strip_runs(runs: &mut [InlineRun]) {
         for run in runs {
             if run.style.image.is_none()
-                && run
-                    .style
-                    .link
-                    .as_deref()
-                    .is_some_and(|target| !web_target(target))
+                && run.style.link.as_deref().is_some_and(|target| !web_target(target))
             {
                 run.style.link = None;
             }
             if let Some(image) = &mut run.style.image
-                && image
-                    .link
-                    .as_deref()
-                    .is_some_and(|target| !web_target(target))
+                && image.link.as_deref().is_some_and(|target| !web_target(target))
             {
                 image.link = None;
             }
@@ -95,9 +85,8 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
     if target.starts_with('/') || target.contains(':') || target.contains('\\') {
         return None;
     }
-    let (path, anchor) = target
-        .split_once('#')
-        .map_or((target, None), |(p, a)| (p, Some(a.to_string())));
+    let (path, anchor) =
+        target.split_once('#').map_or((target, None), |(p, a)| (p, Some(a.to_string())));
     let decode = |s: &str| -> Option<String> {
         let mut bytes = Vec::new();
         let mut chars = s.as_bytes().iter().copied();
@@ -203,11 +192,7 @@ impl MarkdownPreview {
         let viewport = window.viewport_size();
         let panel_width = self.list.viewport_bounds().size.width;
         let target = (
-            (f32::from(if panel_width > px(0.0) {
-                panel_width
-            } else {
-                viewport.width
-            }) - 48.0)
+            (f32::from(if panel_width > px(0.0) { panel_width } else { viewport.width }) - 48.0)
                 .clamp(1.0, MAX_PREVIEW_CONTENT_WIDTH),
             480.0,
         );
@@ -249,10 +234,7 @@ impl MarkdownPreview {
                 .map(|m| m.bytes)
                 .sum();
             let next = source.enlarged(
-                (
-                    f32::from(viewport.width) * 0.9,
-                    f32::from(viewport.height) * 0.85,
-                ),
+                (f32::from(viewport.width) * 0.9, f32::from(viewport.height) * 0.85),
                 window.scale_factor(),
                 MAX_MEDIA_BYTES.saturating_sub(used),
                 self.zoom_render.as_ref(),
@@ -267,6 +249,7 @@ impl MarkdownPreview {
             self.zoom_render = Some(next);
         }
     }
+
     pub fn new(
         path: String,
         open_file: Rc<dyn Fn(String, &mut gpui::App)>,
@@ -354,9 +337,7 @@ impl MarkdownPreview {
         // Outside documents render their local links as plain text.
         let outside = super::path_is_outside(&self.path);
         self.parse_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(120))
-                .await;
+            cx.background_executor().timer(Duration::from_millis(120)).await;
             let (tree, highlights, anchors) = cx
                 .background_executor()
                 .spawn(async move {
@@ -426,8 +407,7 @@ impl MarkdownPreview {
                             .map(move |ix| SharedString::from(format!("{scope}{top_ix}#code{ix}")))
                     })
                     .collect();
-                view.code_fences
-                    .retain(|key, _| active_code_fences.contains(key));
+                view.code_fences.retain(|key, _| active_code_fences.contains(key));
                 view.parsed_source = parsed_source;
                 view.highlights = highlights;
                 view.anchors = anchors;
@@ -448,12 +428,8 @@ impl MarkdownPreview {
         use futures::{StreamExt as _, stream};
         let sources = super::markdown_media::image_sources(&self.tree);
         self.image_allowed = Rc::new(sources.iter().take(MAX_MEDIA_ENTRIES).cloned().collect());
-        let removed: Vec<_> = self
-            .images
-            .keys()
-            .filter(|source| !sources.contains(source))
-            .cloned()
-            .collect();
+        let removed: Vec<_> =
+            self.images.keys().filter(|source| !sources.contains(source)).cloned().collect();
         release_media(
             removed
                 .into_iter()
@@ -543,25 +519,16 @@ impl MarkdownPreview {
         self.media_dirty = true;
         let sources = super::markdown_media::diagram_sources(&self.tree);
         self.diagram_allowed = Rc::new(sources.iter().take(MAX_MEDIA_ENTRIES).cloned().collect());
-        let removed: Vec<_> = self
-            .diagrams
-            .keys()
-            .filter(|code| !sources.contains(code))
-            .cloned()
-            .collect();
+        let removed: Vec<_> =
+            self.diagrams.keys().filter(|code| !sources.contains(code)).cloned().collect();
         release_media(
-            removed
-                .into_iter()
-                .filter_map(|code| self.diagrams.remove(&code).and_then(Result::ok)),
+            removed.into_iter().filter_map(|code| self.diagrams.remove(&code).and_then(Result::ok)),
             cx,
         );
         let style = crate::theme::style_generation();
         if self.diagram_style != style {
             self.close_media_preview(cx);
-            release_media(
-                self.diagrams.drain().filter_map(|(_, result)| result.ok()),
-                cx,
-            );
+            release_media(self.diagrams.drain().filter_map(|(_, result)| result.ok()), cx);
             self.diagram_style = style;
         }
         let palette = crate::markdown::mermaid::Palette::from_theme(Theme::of(cx));
@@ -634,10 +601,7 @@ impl MarkdownPreview {
             self.image_generation = self.image_generation.wrapping_add(1);
             self.image_task = None;
             self.close_media_preview(cx);
-            release_media(
-                self.images.drain().filter_map(|(_, result)| result.ok()),
-                cx,
-            );
+            release_media(self.images.drain().filter_map(|(_, result)| result.ok()), cx);
             self.media_dirty = true;
         }
         if self.suspended {
@@ -675,10 +639,7 @@ impl MarkdownPreview {
         self.cache.borrow_mut().clear();
         render::clear_selection_surface(&self.scope);
         release_media(
-            self.images
-                .drain()
-                .chain(self.diagrams.drain())
-                .filter_map(|(_, result)| result.ok()),
+            self.images.drain().chain(self.diagrams.drain()).filter_map(|(_, result)| result.ok()),
             cx,
         );
     }
@@ -698,13 +659,11 @@ impl MarkdownPreview {
             .collect();
         // Include pending loads in invalidation: a watcher can arrive before the first response.
         let affected = changed.is_none_or(|changed| {
-            super::markdown_media::image_sources(&self.tree)
-                .iter()
-                .any(|source| {
-                    relative_target(&self.path, source).is_some_and(|(path, _)| {
-                        path == changed || path.starts_with(&format!("{changed}/"))
-                    })
+            super::markdown_media::image_sources(&self.tree).iter().any(|source| {
+                relative_target(&self.path, source).is_some_and(|(path, _)| {
+                    path == changed || path.starts_with(&format!("{changed}/"))
                 })
+            })
         });
         if !affected {
             return;
@@ -757,9 +716,7 @@ impl MarkdownPreview {
             return;
         }
         self.selection_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(16))
-                .await;
+            cx.background_executor().timer(Duration::from_millis(16)).await;
             let _ = this.update(cx, |view, cx| {
                 view.selection_task = None;
                 if !view.owns_selection() || !crate::markdown::selection::is_dragging() {
@@ -769,11 +726,10 @@ impl MarkdownPreview {
                     return;
                 };
                 render::update_drag_at(position);
-                view.list
-                    .scroll_by(px(crate::transcript::selection_scroll_step(
-                        view.list.viewport_bounds(),
-                        position,
-                    )));
+                view.list.scroll_by(px(crate::transcript::selection_scroll_step(
+                    view.list.viewport_bounds(),
+                    position,
+                )));
                 cx.notify();
                 view.schedule_selection_scroll(cx);
             });
@@ -781,23 +737,17 @@ impl MarkdownPreview {
     }
 
     fn copy_ui_for(&self, row_id: &SharedString, cx: &mut Context<Self>) -> render::CopyUi {
-        let copied_ix = self
-            .copied_code
-            .as_ref()
-            .filter(|(id, _)| id == row_id)
-            .map(|(_, ix)| *ix);
+        let copied_ix = self.copied_code.as_ref().filter(|(id, _)| id == row_id).map(|(_, ix)| *ix);
         let row_key = row_id.clone();
         let entity = cx.weak_entity();
-        let handler = Rc::new(
-            move |ix, code: SharedString, _window: &mut Window, cx: &mut gpui::App| {
+        let handler =
+            Rc::new(move |ix, code: SharedString, _window: &mut Window, cx: &mut gpui::App| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
                 let row_key = row_key.clone();
                 let _ = entity.update(cx, |view, cx| {
                     view.copied_code = Some((row_key, ix));
                     view.copied_clear = Some(cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(1200))
-                            .await;
+                        cx.background_executor().timer(Duration::from_millis(1200)).await;
                         let _ = this.update(cx, |view, cx| {
                             view.copied_code = None;
                             view.copied_clear = None;
@@ -806,8 +756,7 @@ impl MarkdownPreview {
                     }));
                     cx.notify();
                 });
-            },
-        );
+            });
         render::CopyUi { handler, copied_ix }
     }
 
@@ -819,12 +768,7 @@ impl MarkdownPreview {
     ) -> render::CodeUi {
         let key: SharedString = format!("{row_id}#code{block_ix}").into();
         let runtime = self.code_fences.entry(key.clone()).or_default();
-        render::code_ui_for(
-            key,
-            runtime,
-            cx.weak_entity(),
-            |view| &mut view.code_fences,
-        )
+        render::code_ui_for(key, runtime, cx.weak_entity(), |view| &mut view.code_fences)
     }
 
     fn code_uis_for(
@@ -835,12 +779,8 @@ impl MarkdownPreview {
         cx: &mut Context<Self>,
     ) -> Option<HashMap<usize, render::CodeUi>> {
         let indices = render::code_block_indices(block, block_ix);
-        (!indices.is_empty()).then(|| {
-            indices
-                .into_iter()
-                .map(|ix| (ix, self.code_ui_for(row_id, ix, cx)))
-                .collect()
-        })
+        (!indices.is_empty())
+            .then(|| indices.into_iter().map(|ix| (ix, self.code_ui_for(row_id, ix, cx))).collect())
     }
 
     fn media_element(
@@ -911,10 +851,8 @@ impl MarkdownPreview {
                     };
                     if path == view.path {
                         if let Some(ix) = anchor.as_ref().and_then(|a| view.anchors.get(a)) {
-                            view.list.scroll_to(ListOffset {
-                                item_ix: *ix,
-                                offset_in_item: px(0.0),
-                            });
+                            view.list
+                                .scroll_to(ListOffset { item_ix: *ix, offset_in_item: px(0.0) });
                             cx.notify();
                         }
                     } else {
@@ -938,7 +876,10 @@ impl MarkdownPreview {
         range
             .filter_map(|ix| {
                 let top = self.tree.blocks.get(ix)?.clone();
-                let mut opts = RenderOptions::settled(format!("{}{ix}", self.scope).into(), crate::clock::now(cx));
+                let mut opts = RenderOptions::settled(
+                    format!("{}{ix}", self.scope).into(),
+                    crate::clock::now(cx),
+                );
                 opts.code = self.code_uis_for(&opts.row_key, &top.block, ix, cx);
                 let editor = self.editor.as_ref().and_then(|editor| editor.upgrade());
                 let source = self.parsed_source.clone();
@@ -1095,14 +1036,14 @@ impl MarkdownPreview {
                                             .role(gpui::Role::Link)
                                             .map(|el| crate::surface_chrome::key_stop(el, theme))
                                             .on_click(move |_, window, cx| {
-                                            render::activate_link(
-                                                render::LinkTarget::new(&target, &target),
-                                                render::LinkAction::Primary,
-                                                Some(&link),
-                                                window,
-                                                cx,
-                                            );
-                                        })
+                                                render::activate_link(
+                                                    render::LinkTarget::new(&target, &target),
+                                                    render::LinkAction::Primary,
+                                                    Some(&link),
+                                                    window,
+                                                    cx,
+                                                );
+                                            })
                                     })
                                     .into_any_element()
                             }
@@ -1150,9 +1091,7 @@ impl Render for MarkdownPreview {
             window.focus(&self.focus, cx);
         }
         self.resize_media(window, cx);
-        self.cache
-            .borrow_mut()
-            .retain_rows(&std::mem::take(&mut self.visible_rows));
+        self.cache.borrow_mut().retain_rows(&std::mem::take(&mut self.visible_rows));
         if self.diagram_style != crate::theme::style_generation() {
             self.load_diagrams(cx);
         }
@@ -1279,10 +1218,7 @@ mod tests {
         );
         assert_eq!(relative_target("readme.md", "../secret"), None);
         assert_eq!(relative_target("docs/readme.md", "%2Fetc/passwd"), None);
-        assert_eq!(
-            relative_target("docs/readme.md", "https://example.com"),
-            None
-        );
+        assert_eq!(relative_target("docs/readme.md", "https://example.com"), None);
         assert_eq!(
             relative_target("docs/readme.md", "#hello"),
             Some(("docs/readme.md".into(), Some("hello".into())))
@@ -1308,14 +1244,9 @@ mod tests {
             .collect();
         assert_eq!(links, ["https://example.com/", "mailto:reader@example.com"]);
         let text: String = runs.iter().map(|run| run.text.as_str()).collect();
+        assert!(text.contains("local"), "the label stays as plain text: {text}");
         assert!(
-            text.contains("local"),
-            "the label stays as plain text: {text}"
-        );
-        assert!(
-            !runs
-                .iter()
-                .any(|run| run.style.link.as_deref() == Some("other.md")),
+            !runs.iter().any(|run| run.style.link.as_deref() == Some("other.md")),
             "a local target must lose its link styling"
         );
         for run in runs {
@@ -1327,4 +1258,3 @@ mod tests {
         }
     }
 }
-

@@ -16,8 +16,7 @@
 use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
 
 use crate::appearance::{self, AppearanceMode};
-use crate::composer;
-use crate::shell;
+use crate::{composer, shell};
 
 actions!(
     slopty,
@@ -87,9 +86,7 @@ fn prepare_quit(cx: &mut App) {
     let mut ready = true;
     for window in cx.windows() {
         if let Some(window) = window.downcast::<shell::Shell>() {
-            ready &= window
-                .update(cx, |shell, _, cx| shell.prepare_quit(cx))
-                .unwrap_or(false);
+            ready &= window.update(cx, |shell, _, cx| shell.prepare_quit(cx)).unwrap_or(false);
         }
     }
     if ready {
@@ -130,9 +127,7 @@ fn close_active_window(pane_first: bool, cx: &mut App) {
                 })
                 .ok();
         } else {
-            window
-                .update(cx, |_, window, _| window.remove_window())
-                .ok();
+            window.update(cx, |_, window, _| window.remove_window()).ok();
         }
     }
 }
@@ -210,9 +205,8 @@ macro_rules! command {
 }
 
 /// The File menu's view commands.
-pub(crate) const TAB_COMMANDS: [WindowCommand; 1] = [
-    command!("Reopen closed view", crate::icons::WINDOW_RESTORE, shell::ReopenClosedTab),
-];
+pub(crate) const TAB_COMMANDS: [WindowCommand; 1] =
+    [command!("Reopen closed view", crate::icons::WINDOW_RESTORE, shell::ReopenClosedTab)];
 
 /// The View menu: the sidebar, a session's panes and the views summoned beside it
 /// (`docs/decisions/layout.md`, "One session per view, splits on demand").
@@ -272,8 +266,15 @@ pub(crate) fn title_case(label: &str) -> String {
 
 /// The Go menu's rows for the sidebar's first nine chats (⌘1…⌘9).
 const JUMP_TITLES: [&str; crate::settings::JUMP_SLOTS] = [
-    "Session 1", "Session 2", "Session 3", "Session 4", "Session 5", "Session 6", "Session 7",
-    "Session 8", "Session 9",
+    "Session 1",
+    "Session 2",
+    "Session 3",
+    "Session 4",
+    "Session 5",
+    "Session 6",
+    "Session 7",
+    "Session 8",
+    "Session 9",
 ];
 
 /// The slopty menu bar. macOS renders this natively; mac-only entries are gated
@@ -339,18 +340,30 @@ pub fn app_menus() -> Vec<Menu> {
         ]),
     ];
     // Appearance lives under View on every platform, after the panes.
-    menus.push(Menu::new("View").items(VIEW_COMMANDS.iter().map(WindowCommand::menu_item).chain([
-        MenuItem::separator(),
-        MenuItem::action("Command Palette", shell::ToggleCommandPalette),
-        MenuItem::separator(),
-        MenuItem::submenu(Menu::new("Appearance").items([
-            MenuItem::action("System", AppearanceSystem),
-            MenuItem::action("Light", AppearanceLight),
-            MenuItem::action("Dark", AppearanceDark),
-        ])),
-    ])));
-    let [back, forward, sessions, directory, next_pane, previous_pane, next, previous, needs_you, inbox] =
-        GO_COMMANDS.map(|command| command.menu_item());
+    menus.push(Menu::new("View").items(VIEW_COMMANDS.iter().map(WindowCommand::menu_item).chain(
+        [
+            MenuItem::separator(),
+            MenuItem::action("Command Palette", shell::ToggleCommandPalette),
+            MenuItem::separator(),
+            MenuItem::submenu(Menu::new("Appearance").items([
+                MenuItem::action("System", AppearanceSystem),
+                MenuItem::action("Light", AppearanceLight),
+                MenuItem::action("Dark", AppearanceDark),
+            ])),
+        ],
+    )));
+    let [
+        back,
+        forward,
+        sessions,
+        directory,
+        next_pane,
+        previous_pane,
+        next,
+        previous,
+        needs_you,
+        inbox,
+    ] = GO_COMMANDS.map(|command| command.menu_item());
     let mut go = vec![
         back,
         forward,
@@ -367,9 +380,12 @@ pub fn app_menus() -> Vec<Menu> {
         inbox,
         MenuItem::separator(),
     ];
-    go.extend(JUMP_TITLES.iter().enumerate().map(|(slot, title)| {
-        MenuItem::action(*title, shell::JumpSession(slot))
-    }));
+    go.extend(
+        JUMP_TITLES
+            .iter()
+            .enumerate()
+            .map(|(slot, title)| MenuItem::action(*title, shell::JumpSession(slot))),
+    );
     menus.push(Menu::new("Go").items(go));
     if macos {
         // Standard Window menu; macOS appends the open-window list itself.
@@ -386,8 +402,9 @@ pub fn app_menus() -> Vec<Menu> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gpui::Keystroke;
+
+    use super::*;
 
     fn action_names(menu: &Menu) -> Vec<&'static str> {
         menu.items
@@ -436,10 +453,7 @@ mod tests {
     #[test]
     fn edit_menu_uses_composer_clipboard_os_actions() {
         let menus = app_menus();
-        let edit = menus
-            .iter()
-            .find(|m| m.name.as_ref() == "Edit")
-            .expect("Edit menu present");
+        let edit = menus.iter().find(|m| m.name.as_ref() == "Edit").expect("Edit menu present");
         // `OsAction` has no `Debug` impl at the pinned rev, so compare
         // per-field.
         let expect = [
@@ -452,11 +466,9 @@ mod tests {
             .items
             .iter()
             .filter_map(|item| match item {
-                MenuItem::Action {
-                    action,
-                    os_action: Some(os_action),
-                    ..
-                } => Some((action.name(), *os_action)),
+                MenuItem::Action { action, os_action: Some(os_action), .. } => {
+                    Some((action.name(), *os_action))
+                }
                 _ => None,
             })
             .collect();
@@ -470,10 +482,7 @@ mod tests {
     #[test]
     fn view_menu_offers_all_three_appearance_modes() {
         let menus = app_menus();
-        let view = menus
-            .iter()
-            .find(|m| m.name.as_ref() == "View")
-            .expect("View menu present");
+        let view = menus.iter().find(|m| m.name.as_ref() == "View").expect("View menu present");
         let appearance = view
             .items
             .iter()
@@ -484,11 +493,7 @@ mod tests {
             .expect("Appearance under View");
         assert_eq!(
             action_names(appearance),
-            vec![
-                AppearanceSystem.name(),
-                AppearanceLight.name(),
-                AppearanceDark.name()
-            ]
+            vec![AppearanceSystem.name(), AppearanceLight.name(), AppearanceDark.name()]
         );
     }
 
@@ -510,7 +515,10 @@ mod tests {
             assert!(names.contains(&title_case(command.label).as_str()), "{}", command.label);
         }
         let go = menus.iter().find(|m| m.name.as_ref() == "Go").expect("Go menu");
-        assert_eq!(action_names(go)[..2], [shell::NavigateBack.name(), shell::NavigateForward.name()]);
+        assert_eq!(
+            action_names(go)[..2],
+            [shell::NavigateBack.name(), shell::NavigateForward.name()]
+        );
     }
 
     #[test]
@@ -518,23 +526,13 @@ mod tests {
         // `KeyBinding::new` panics on unparseable combos, so constructing the
         // table is itself the parse check.
         let find = |bindings: &[KeyBinding], name: &str| {
-            bindings
-                .iter()
-                .find(|binding| binding.action().name() == name)
-                .map(|binding| {
-                    binding
-                        .keystrokes()
-                        .iter()
-                        .map(|ks| ks.inner().clone())
-                        .collect::<Vec<_>>()
-                })
+            bindings.iter().find(|binding| binding.action().name() == name).map(|binding| {
+                binding.keystrokes().iter().map(|ks| ks.inner().clone()).collect::<Vec<_>>()
+            })
         };
         let combo = |source: &'static str| vec![Keystroke::parse(source).unwrap()];
         let macos = app_key_bindings(true, true);
-        assert_eq!(
-            find(&macos, shell::OpenSettings.name()),
-            Some(combo("cmd-,"))
-        );
+        assert_eq!(find(&macos, shell::OpenSettings.name()), Some(combo("cmd-,")));
         assert_eq!(find(&macos, Quit.name()), Some(combo("cmd-q")));
         // ⌘W closes the focused pane, ⇧⌘W the window.
         assert_eq!(find(&macos, CloseTab.name()), Some(combo("cmd-w")));
@@ -547,10 +545,7 @@ mod tests {
         assert_eq!(find(&ipad, Quit.name()), None);
 
         let other = app_key_bindings(false, false);
-        assert_eq!(
-            find(&other, shell::OpenSettings.name()),
-            Some(combo("ctrl-,"))
-        );
+        assert_eq!(find(&other, shell::OpenSettings.name()), Some(combo("ctrl-,")));
         assert_eq!(find(&other, Quit.name()), None);
     }
 }
@@ -614,12 +609,14 @@ mod native_quit {
 
     #[cfg(not(test))]
     mod hook {
-        use super::super::{App, request_quit};
-        use super::ALLOWED;
+        use std::cell::RefCell;
+
         // objc2; objc 0.2 is banned in the workspace (deny.toml).
         use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
         use objc2::{class, msg_send, sel};
-        use std::cell::RefCell;
+
+        use super::super::{App, request_quit};
+        use super::ALLOWED;
 
         thread_local! {
             static REQUEST: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
@@ -666,10 +663,7 @@ mod native_quit {
                     >(should_terminate),
                     c"Q@:@".as_ptr(),
                 );
-                assert!(
-                    added.as_bool(),
-                    "GPUI termination delegate contract changed"
-                );
+                assert!(added.as_bool(), "GPUI termination delegate contract changed");
             }
         }
     }

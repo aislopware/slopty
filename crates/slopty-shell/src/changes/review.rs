@@ -39,10 +39,7 @@ pub fn line_matches(text: &str, query: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut i = 0;
     while i + needle.len() <= hay.len() {
-        let hit = needle
-            .iter()
-            .enumerate()
-            .all(|(k, c)| fold(hay[i + k].1, folding) == *c);
+        let hit = needle.iter().enumerate().all(|(k, c)| fold(hay[i + k].1, folding) == *c);
         if hit {
             let start = hay[i].0;
             let end = hay.get(i + needle.len()).map_or(text.len(), |(at, _)| *at);
@@ -140,9 +137,8 @@ fn piece(
 ) -> gpui::TextRun {
     let mut piece = run.clone();
     piece.len = end - start;
-    if let Some((_, color)) = marks
-        .iter()
-        .find(|(range, _)| range.start <= start && end <= range.end && start < end)
+    if let Some((_, color)) =
+        marks.iter().find(|(range, _)| range.start <= start && end <= range.end && start < end)
     {
         piece.background_color = Some(*color);
     }
@@ -155,7 +151,10 @@ fn piece(
 
 /// What a scoped `GetCheckoutDiff` adds to say that whitespace does not count
 /// (`ignoreWhitespace`, `git diff -w`).
-pub fn scoped_params(params: &mut serde_json::Map<String, serde_json::Value>, ignore_whitespace: bool) {
+pub fn scoped_params(
+    params: &mut serde_json::Map<String, serde_json::Value>,
+    ignore_whitespace: bool,
+) {
     if ignore_whitespace {
         params.insert("ignoreWhitespace".into(), serde_json::Value::Bool(true));
     }
@@ -166,9 +165,7 @@ pub fn scoped_params(params: &mut serde_json::Map<String, serde_json::Value>, ig
 // ---------------------------------------------------------------------------
 
 fn same_but_space(a: &str, b: &str) -> bool {
-    a.chars()
-        .filter(|c| !c.is_whitespace())
-        .eq(b.chars().filter(|c| !c.is_whitespace()))
+    a.chars().filter(|c| !c.is_whitespace()).eq(b.chars().filter(|c| !c.is_whitespace()))
 }
 
 /// `files` as `git diff -w` reads them: a deletion and the addition it pairs with that differ
@@ -181,9 +178,7 @@ pub fn ignore_whitespace(files: &mut Vec<FileDiff>) {
             hunk.lines = fold_block_pairs(std::mem::take(&mut hunk.lines));
         }
         file.hunks.retain(|hunk| {
-            hunk.lines
-                .iter()
-                .any(|line| matches!(line.kind, LineKind::Add | LineKind::Del))
+            hunk.lines.iter().any(|line| matches!(line.kind, LineKind::Add | LineKind::Del))
         });
         file.additions = count(file, LineKind::Add);
         file.deletions = count(file, LineKind::Del);
@@ -197,11 +192,7 @@ pub fn ignore_whitespace(files: &mut Vec<FileDiff>) {
 }
 
 fn count(file: &FileDiff, kind: LineKind) -> u32 {
-    file.hunks
-        .iter()
-        .flat_map(|hunk| &hunk.lines)
-        .filter(|line| line.kind == kind)
-        .count() as u32
+    file.hunks.iter().flat_map(|hunk| &hunk.lines).filter(|line| line.kind == kind).count() as u32
 }
 
 /// One hunk's lines with each run of deletions and the run of additions after it paired in
@@ -226,9 +217,8 @@ fn fold_block_pairs(lines: Vec<DiffLine>) -> Vec<DiffLine> {
         let dels = &lines[dels_start..adds_start];
         let adds = &lines[adds_start..ix];
         let paired = dels.len().min(adds.len());
-        let same: Vec<bool> = (0..paired)
-            .map(|k| same_but_space(&dels[k].text, &adds[k].text))
-            .collect();
+        let same: Vec<bool> =
+            (0..paired).map(|k| same_but_space(&dels[k].text, &adds[k].text)).collect();
         // Deletions first, then additions, as the patch had them; a pair that is the same
         // but for whitespace leaves both and comes back as one line in the additions' place.
         for (k, del) in dels.iter().enumerate() {
@@ -411,7 +401,10 @@ diff --git a/src/ui/b.rs b/src/ui/b.rs
         scoped_params(&mut params, false);
         assert!(params.is_empty(), "whitespace counted: nothing added");
         scoped_params(&mut params, true);
-        assert_eq!(serde_json::Value::Object(params), serde_json::json!({ "ignoreWhitespace": true }));
+        assert_eq!(
+            serde_json::Value::Object(params),
+            serde_json::json!({ "ignoreWhitespace": true })
+        );
     }
 
     #[test]

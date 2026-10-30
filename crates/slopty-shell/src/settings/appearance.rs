@@ -2,12 +2,14 @@
 //! Settings → Appearance: system behavior, independent light/dark variants,
 //! and the optional interactive accent overlay.
 
+use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
-    KeyDownEvent, Render, SharedString, Subscription, Window, div, prelude::*, px,
+    KeyDownEvent, Render, SharedString, Subscription, Window, div, px,
 };
 use slopty_shell_theme::{
-    AccentPreset, AccentSelection, SurfacePreference, SurfaceTreatment, ThemeRegistry, ThemeSelection,
+    AccentPreset, AccentSelection, SurfacePreference, SurfaceTreatment, ThemeRegistry,
+    ThemeSelection,
 };
 
 use crate::appearance::{self, AppearanceMode};
@@ -133,10 +135,7 @@ impl FontKind {
     fn size_labels(self) -> Vec<SharedString> {
         match self {
             Self::Ui => UiFontSize::ALL.iter().map(|size| size.label()).collect(),
-            _ => MONO_FONT_SIZES
-                .iter()
-                .map(|size| SharedString::from(format_px(*size)))
-                .collect(),
+            _ => MONO_FONT_SIZES.iter().map(|size| SharedString::from(format_px(*size))).collect(),
         }
     }
 
@@ -253,7 +252,9 @@ impl AppearancePage {
                 current == ConversationWidth::default(),
                 theme,
                 cx,
-                |_, _, cx| crate::settings::set_conversation_width(ConversationWidth::default(), cx),
+                |_, _, cx| {
+                    crate::settings::set_conversation_width(ConversationWidth::default(), cx)
+                },
             ))
             .child(control)
             .into_any_element()
@@ -415,17 +416,12 @@ impl AppearancePage {
         availability: &FontAvailability,
         cx: &gpui::App,
     ) -> Vec<UiFontFamily> {
-        filter_families(
-            self.font_search.read(cx).text(),
-            kind.choices_for(availability),
-        )
+        filter_families(self.font_search.read(cx).text(), kind.choices_for(availability))
     }
 
     /// The kind whose menu is open, if any. Opening one closes the others.
     fn open_font_kind(&self) -> Option<FontKind> {
-        FontKind::ALL
-            .into_iter()
-            .find(|kind| self.font_menu(*kind).is_open())
+        FontKind::ALL.into_iter().find(|kind| self.font_menu(*kind).is_open())
     }
 
     fn on_font_search_edited(&mut self, cx: &mut Context<Self>) {
@@ -486,17 +482,16 @@ impl AppearancePage {
 
     fn toggle_font_menu(&mut self, kind: FontKind, window: &mut Window, cx: &mut Context<Self>) {
         self.close_other_menus(Some(kind), None, cx);
-        let just_dismissed = self
-            .font_dismissed_at(kind)
-            .take()
-            .is_some_and(|at| crate::clock::now(cx).saturating_duration_since(at) < std::time::Duration::from_millis(400));
+        let just_dismissed = self.font_dismissed_at(kind).take().is_some_and(|at| {
+            crate::clock::now(cx).saturating_duration_since(at)
+                < std::time::Duration::from_millis(400)
+        });
         if self.font_menu(kind).is_open() {
             self.close_font_menu(kind, cx);
         } else if !just_dismissed {
             // Clear before opening: the resulting `Edited` finds no open menu,
             // so it cannot clobber the highlight we anchor on the next line.
-            self.font_search
-                .update(cx, |input, cx| input.set_text("", cx));
+            self.font_search.update(cx, |input, cx| input.set_text("", cx));
             let effective = kind.effective(cx);
             self.set_selected_font(kind, effective);
             // Every open starts at the top, and the rail's baseline with it —
@@ -523,10 +518,8 @@ impl AppearancePage {
         if !self.font_menu(kind).is_open() {
             // Closed: any list key opens the menu, and the filter takes over
             // from there — no stepping through hundreds of rows by hand.
-            if matches!(
-                key,
-                "up" | "down" | "left" | "right" | "home" | "end" | "enter" | "space"
-            ) {
+            if matches!(key, "up" | "down" | "left" | "right" | "home" | "end" | "enter" | "space")
+            {
                 *self.font_dismissed_at(kind) = None;
                 self.toggle_font_menu(kind, window, cx);
                 return true;
@@ -539,10 +532,7 @@ impl AppearancePage {
         let availability = typography::availability(cx);
         let choices = self.visible_choices(kind, &availability, cx);
         let modifiers = event.keystroke.modifiers;
-        let next = match (
-            key,
-            popover::classify_key(key, modifiers.platform, modifiers.control),
-        ) {
+        let next = match (key, popover::classify_key(key, modifiers.platform, modifiers.control)) {
             (_, popover::MenuKey::Up) => {
                 step_font(self.selected_font(kind), -1, &choices, kind, &availability)
             }
@@ -624,10 +614,7 @@ fn step_font(
     if choices.is_empty() {
         return current.clone();
     }
-    let current = choices
-        .iter()
-        .position(|family| family == current)
-        .unwrap_or_default() as isize;
+    let current = choices.iter().position(|family| family == current).unwrap_or_default() as isize;
     let mut ix = current + delta.signum();
     while (0..choices.len() as isize).contains(&ix) {
         let candidate = &choices[ix as usize];
@@ -647,10 +634,7 @@ fn filter_families(query: &str, choices: &[UiFontFamily]) -> Vec<UiFontFamily> {
         return choices.to_vec();
     }
     let labels: Vec<&str> = choices.iter().map(UiFontFamily::label).collect();
-    popover::filter_indices(query, &labels)
-        .into_iter()
-        .map(|ix| choices[ix].clone())
-        .collect()
+    popover::filter_indices(query, &labels).into_iter().map(|ix| choices[ix].clone()).collect()
 }
 
 fn first_available(
@@ -696,11 +680,7 @@ fn format_px(size: f32) -> String {
 }
 
 fn bar(fraction: f32, tone: Hsla) -> gpui::Div {
-    div()
-        .h(px(5.0))
-        .w(gpui::relative(fraction))
-        .rounded(px(3.0))
-        .bg(tone)
+    div().h(px(5.0)).w(gpui::relative(fraction)).rounded(px(3.0)).bg(tone)
 }
 
 /// A swatch's name in its tooltip and to assistive tech; the default says so.
@@ -824,20 +804,8 @@ fn miniature_split(
         .size_full()
         .flex()
         .flex_row()
-        .child(
-            div()
-                .w_1_2()
-                .h_full()
-                .overflow_hidden()
-                .child(miniature(&light, Corners::Left)),
-        )
-        .child(
-            div()
-                .w_1_2()
-                .h_full()
-                .overflow_hidden()
-                .child(miniature(&dark, Corners::Right)),
-        )
+        .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&light, Corners::Left)))
+        .child(div().w_1_2().h_full().overflow_hidden().child(miniature(&dark, Corners::Right)))
         .into_any_element()
 }
 
@@ -902,27 +870,9 @@ fn accent_swatch(
             .items_center()
             .justify_center()
             .gap(px(2.0))
-            .child(
-                div()
-                    .w(px(4.0))
-                    .h(px(13.0))
-                    .rounded(px(2.0))
-                    .bg(swatch_theme.glyph.light),
-            )
-            .child(
-                div()
-                    .w(px(4.0))
-                    .h(px(16.0))
-                    .rounded(px(2.0))
-                    .bg(swatch_theme.glyph.mid),
-            )
-            .child(
-                div()
-                    .w(px(4.0))
-                    .h(px(11.0))
-                    .rounded(px(2.0))
-                    .bg(swatch_theme.glyph.deep),
-            ),
+            .child(div().w(px(4.0)).h(px(13.0)).rounded(px(2.0)).bg(swatch_theme.glyph.light))
+            .child(div().w(px(4.0)).h(px(16.0)).rounded(px(2.0)).bg(swatch_theme.glyph.mid))
+            .child(div().w(px(4.0)).h(px(11.0)).rounded(px(2.0)).bg(swatch_theme.glyph.deep)),
         AccentSelection::Preset(_) => div().size_full().rounded(px(6.0)).bg(swatch_theme.accent),
     };
     div()
@@ -935,11 +885,7 @@ fn accent_swatch(
         .h(px(34.0))
         .pb(px(4.0))
         .border_b_2()
-        .border_color(if selected {
-            swatch_theme.accent
-        } else {
-            gpui::transparent_black()
-        })
+        .border_color(if selected { swatch_theme.accent } else { gpui::transparent_black() })
         .cursor_pointer()
         .child(
             div()
@@ -947,11 +893,7 @@ fn accent_swatch(
                 .p(px(2.0))
                 .rounded(px(8.0))
                 .border_1()
-                .border_color(if selected {
-                    page_theme.border_strong
-                } else {
-                    page_theme.border
-                })
+                .border_color(if selected { page_theme.border_strong } else { page_theme.border })
                 .bg(page_theme.surface_raised.opacity(0.42))
                 .child(sample),
         )
@@ -971,16 +913,12 @@ impl AppearancePage {
         // The scroll helpers key off `&'static str`, so the ids are spelled
         // out rather than formatted from the slug.
         let (host_id, list_id, rail_id) = match kind {
-            FontKind::Ui => (
-                "interface-font-host",
-                "interface-font-scroll",
-                "interface-font-scrollbar",
-            ),
-            FontKind::Terminal => (
-                "terminal-font-host",
-                "terminal-font-scroll",
-                "terminal-font-scrollbar",
-            ),
+            FontKind::Ui => {
+                ("interface-font-host", "interface-font-scroll", "interface-font-scrollbar")
+            }
+            FontKind::Terminal => {
+                ("terminal-font-host", "terminal-font-scroll", "terminal-font-scrollbar")
+            }
             FontKind::Code => ("code-font-host", "code-font-scroll", "code-font-scrollbar"),
         };
         let effective = kind.effective(cx);
@@ -1000,11 +938,7 @@ impl AppearancePage {
                     .id(SharedString::from(format!("{slug}-font-option-{ix}")))
                     .role(gpui::Role::MenuItemRadio)
                     .aria_label(label.clone())
-                    .aria_toggled(if active {
-                        gpui::Toggled::True
-                    } else {
-                        gpui::Toggled::False
-                    })
+                    .aria_toggled(if active { gpui::Toggled::True } else { gpui::Toggled::False })
                     .when(available, |row| {
                         row.on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -1028,11 +962,7 @@ impl AppearancePage {
                 .py(px(6.0))
                 .text_size(px(12.0))
                 .text_color(theme.for_popup().text_faint)
-                .child(SharedString::from(if filtered {
-                    "No matching fonts"
-                } else {
-                    "No fonts"
-                }))
+                .child(SharedString::from(if filtered { "No matching fonts" } else { "No fonts" }))
                 .into_any_element()
         } else {
             // Card-bleed scroll host (see [`popover::menu_scroll_host`]): the
@@ -1079,10 +1009,7 @@ impl AppearancePage {
             }))
             .flex()
             .flex_col()
-            .child(popover::search_input_frame(
-                theme,
-                self.font_search.clone().into_any_element(),
-            ))
+            .child(popover::search_input_frame(theme, self.font_search.clone().into_any_element()))
             .child(list);
 
         let open = self.font_menu(kind).is_open();
@@ -1136,13 +1063,10 @@ impl AppearancePage {
             move |page: &mut Self| page.size_select_mut(kind),
         )
         .options(
-            kind.size_labels()
-                .into_iter()
-                .enumerate()
-                .map(move |(ix, label)| {
-                    widgets::SelectOption::new(label)
-                        .standing(widgets::Standing::of(ix == kind.default_size_ix(), false))
-                }),
+            kind.size_labels().into_iter().enumerate().map(move |(ix, label)| {
+                widgets::SelectOption::new(label)
+                    .standing(widgets::Standing::of(ix == kind.default_size_ix(), false))
+            }),
             kind.size_ix(cx),
         )
         .width(128.0)
@@ -1160,21 +1084,15 @@ impl AppearancePage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let registry = ThemeRegistry::builtin();
-        let selected_id = selections
-            .variant_id(model_appearance(appearance_kind))
-            .to_owned();
+        let selected_id = selections.variant_id(model_appearance(appearance_kind)).to_owned();
         let surface = theme.surface_preference;
         let variants: Vec<_> = registry
             .variants_for(model_appearance(appearance_kind))
             .map(|variant| (variant.id.clone(), variant.name.clone()))
             .collect();
-        let selected = variants
-            .iter()
-            .position(|(id, _)| *id == selected_id)
-            .unwrap_or_default();
-        let default_id = ThemeSelection::default()
-            .variant_id(model_appearance(appearance_kind))
-            .to_owned();
+        let selected = variants.iter().position(|(id, _)| *id == selected_id).unwrap_or_default();
+        let default_id =
+            ThemeSelection::default().variant_id(model_appearance(appearance_kind)).to_owned();
         let options = variants.iter().map(|(id, name)| {
             let sample =
                 Theme::for_selection(appearance_kind, id, AccentSelection::ThemeDefault, surface);
@@ -1188,15 +1106,12 @@ impl AppearancePage {
         } else {
             ("dark", "Dark theme", "Dark themes")
         };
-        widgets::select(
-            format!("{slug}-theme-selector"),
-            label,
-            theme,
-            move |page: &mut Self| match appearance_kind {
+        widgets::select(format!("{slug}-theme-selector"), label, theme, move |page: &mut Self| {
+            match appearance_kind {
                 Appearance::Light => &mut page.light_theme_select,
                 Appearance::Dark => &mut page.dark_theme_select,
-            },
-        )
+            }
+        })
         .options(options, selected)
         .width(218.0)
         .menu_width(260.0)
@@ -1230,63 +1145,57 @@ impl Render for AppearancePage {
         let current_accent = appearance::accent(cx);
         let current_surface = appearance::surface(cx);
         let reduced_motion = crate::motion::reduced_motion(cx);
-        let cards = AppearanceMode::ALL
-            .into_iter()
-            .map(|mode| {
-                let selected = mode == current_mode;
-                let selection_t = widgets::tab_selection_t(
-                    window,
-                    format!("appearance-mode-{}-selection", mode.label()),
-                    selected,
-                    reduced_motion,
-                );
-                widgets::option_card(
-                    &theme,
-                    mode.icon(),
-                    mode.label(),
-                    selected,
-                    selection_t,
-                    preview(mode, &current_themes, current_accent, current_surface),
-                )
-                // The default card says so, on a line every card keeps (M10).
-                .child(
-                    div()
-                        .h(px(14.0))
-                        .flex()
-                        .justify_center()
-                        .children((mode == AppearanceMode::default()).then(|| {
+        let cards =
+            AppearanceMode::ALL
+                .into_iter()
+                .map(|mode| {
+                    let selected = mode == current_mode;
+                    let selection_t = widgets::tab_selection_t(
+                        window,
+                        format!("appearance-mode-{}-selection", mode.label()),
+                        selected,
+                        reduced_motion,
+                    );
+                    widgets::option_card(
+                        &theme,
+                        mode.icon(),
+                        mode.label(),
+                        selected,
+                        selection_t,
+                        preview(mode, &current_themes, current_accent, current_surface),
+                    )
+                    // The default card says so, on a line every card keeps (M10).
+                    .child(div().h(px(14.0)).flex().justify_center().children(
+                        (mode == AppearanceMode::default()).then(|| {
                             widgets::standing_note(&theme, widgets::Standing::Default).ml_0()
-                        })),
-                )
-                .id(SharedString::from(format!("appearance-{}", mode.label())))
-                .tab_index(0)
-                .role(gpui::Role::Button)
-                .aria_label(mode.label())
-                .aria_selected(selected)
-                .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
-                .on_click(cx.listener(move |_, _, _, cx| {
-                    appearance::set_mode(mode, cx);
-                    cx.notify();
-                }))
-            })
-            .collect::<Vec<_>>();
+                        }),
+                    ))
+                    .id(SharedString::from(format!("appearance-{}", mode.label())))
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label(mode.label())
+                    .aria_selected(selected)
+                    .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        appearance::set_mode(mode, cx);
+                        cx.notify();
+                    }))
+                })
+                .collect::<Vec<_>>();
 
         let mut theme_rows = Vec::new();
-        for (index, appearance_kind) in [Appearance::Light, Appearance::Dark]
-            .into_iter()
-            .enumerate()
+        for (index, appearance_kind) in
+            [Appearance::Light, Appearance::Dark].into_iter().enumerate()
         {
-            let label = if appearance_kind.is_light() {
-                "Light theme"
-            } else {
-                "Dark theme"
-            };
+            let label = if appearance_kind.is_light() { "Light theme" } else { "Dark theme" };
             let selector = self.render_theme_selector(appearance_kind, &current_themes, &theme, cx);
-            let default_id = ThemeSelection::default()
-                .variant_id(model_appearance(appearance_kind))
-                .to_owned();
+            let default_id =
+                ThemeSelection::default().variant_id(model_appearance(appearance_kind)).to_owned();
             let reset = self.reset_row(
-                format!("{}-theme-reset", if appearance_kind.is_light() { "light" } else { "dark" }),
+                format!(
+                    "{}-theme-reset",
+                    if appearance_kind.is_light() { "light" } else { "dark" }
+                ),
                 label,
                 current_themes.variant_id(model_appearance(appearance_kind)) == default_id,
                 &theme,
@@ -1567,9 +1476,7 @@ impl Render for AppearancePage {
         let terminal_size = self.render_size_picker(FontKind::Terminal, &theme, fixed.clone(), cx);
         let code_size = self.render_size_picker(FontKind::Code, &theme, fixed.clone(), cx);
 
-        let mut font_rows = widgets::section_card(&theme)
-            .mt_0()
-            .font_family(fixed.clone());
+        let mut font_rows = widgets::section_card(&theme).mt_0().font_family(fixed.clone());
         for (ix, (kind, picker, size_control)) in [
             (FontKind::Ui, ui_picker, ui_size),
             (FontKind::Terminal, terminal_picker, terminal_size),
@@ -1578,8 +1485,8 @@ impl Render for AppearancePage {
         .into_iter()
         .enumerate()
         {
-            let font_default =
-                kind.requested(cx) == kind.default_family() && kind.size_ix(cx) == kind.default_size_ix();
+            let font_default = kind.requested(cx) == kind.default_family()
+                && kind.size_ix(cx) == kind.default_size_ix();
             let reset = self.reset_row(
                 format!("{}-font-reset", kind.slug()),
                 kind.label(),
@@ -1673,9 +1580,7 @@ impl Render for AppearancePage {
                                     .gap(px(12.0)),
                                 )
                                 .child(
-                                    widgets::section_card(&theme)
-                                        .children(color_rows)
-                                        .mt(px(16.0)),
+                                    widgets::section_card(&theme).children(color_rows).mt(px(16.0)),
                                 )
                                 .child(widgets::section(
                                     &theme,
@@ -1729,16 +1634,8 @@ mod tests {
     #[test]
     fn registry_offers_a_curated_few_for_each_appearance() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(
-            registry
-                .variants_for(slopty_shell_theme::Appearance::Light)
-                .count(),
-            3
-        );
-        assert_eq!(
-            registry.variants_for(slopty_shell_theme::Appearance::Dark).count(),
-            6
-        );
+        assert_eq!(registry.variants_for(slopty_shell_theme::Appearance::Light).count(), 3);
+        assert_eq!(registry.variants_for(slopty_shell_theme::Appearance::Dark).count(), 6);
     }
 
     // Each theme row reads the chosen theme's one line, and choosing another theme
@@ -1795,14 +1692,8 @@ mod tests {
 
     #[test]
     fn accent_helper_names_the_selected_accent() {
-        assert_eq!(
-            accent_helper(AccentSelection::ThemeDefault),
-            "Theme default"
-        );
-        assert_eq!(
-            accent_helper(AccentSelection::Preset(AccentPreset::Pink)),
-            "Pink"
-        );
+        assert_eq!(accent_helper(AccentSelection::ThemeDefault), "Theme default");
+        assert_eq!(accent_helper(AccentSelection::Preset(AccentPreset::Pink)), "Pink");
     }
 
     #[test]
@@ -1830,10 +1721,7 @@ mod tests {
         let catalog = FontAvailability::all();
         let labels: Vec<_> = catalog.choices().iter().map(UiFontFamily::label).collect();
         assert_eq!(labels.len(), 5);
-        assert_eq!(
-            labels,
-            ["Geist", "Geist Mono", "System UI", "Arial", "Menlo"]
-        );
+        assert_eq!(labels, ["Geist", "Geist Mono", "System UI", "Arial", "Menlo"]);
         let unique = labels.into_iter().collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), 5);
     }
@@ -1841,11 +1729,8 @@ mod tests {
     #[test]
     fn only_the_terminal_catalog_is_narrowed_to_fixed_width() {
         let all = FontAvailability::all();
-        let terminal: Vec<_> = FontKind::Terminal
-            .choices_for(&all)
-            .iter()
-            .map(UiFontFamily::label)
-            .collect();
+        let terminal: Vec<_> =
+            FontKind::Terminal.choices_for(&all).iter().map(UiFontFamily::label).collect();
         assert_eq!(terminal, ["Geist Mono", "Menlo"]);
 
         for kind in [FontKind::Ui, FontKind::Code] {
@@ -1853,20 +1738,15 @@ mod tests {
             assert!(kind.is_available_for(&all, &UiFontFamily::System));
             assert!(kind.is_available_for(&all, &UiFontFamily::Installed("Arial".into())));
         }
-        for proportional in [
-            UiFontFamily::System,
-            UiFontFamily::Geist,
-            UiFontFamily::Installed("Arial".into()),
-        ] {
+        for proportional in
+            [UiFontFamily::System, UiFontFamily::Geist, UiFontFamily::Installed("Arial".into())]
+        {
             assert!(!FontKind::Terminal.is_available_for(&all, &proportional));
         }
         assert!(FontKind::Terminal.is_available_for(&all, &UiFontFamily::GeistMono));
         // A query that only matches proportional families leaves the terminal
         // highlight on the bundled mono face rather than on System UI.
-        assert_eq!(
-            first_available(&[], FontKind::Terminal, &all),
-            UiFontFamily::GeistMono
-        );
+        assert_eq!(first_available(&[], FontKind::Terminal, &all), UiFontFamily::GeistMono);
     }
 
     #[test]
@@ -1878,24 +1758,12 @@ mod tests {
             UiFontFamily::Geist
         );
         assert_eq!(
-            step_font(
-                &UiFontFamily::Installed("Menlo".into()),
-                1,
-                &choices,
-                FontKind::Ui,
-                &all
-            ),
+            step_font(&UiFontFamily::Installed("Menlo".into()), 1, &choices, FontKind::Ui, &all),
             UiFontFamily::Installed("Menlo".into())
         );
         let without_arial = all.without(&UiFontFamily::Installed("Arial".into()));
         assert_eq!(
-            step_font(
-                &UiFontFamily::System,
-                1,
-                &choices,
-                FontKind::Ui,
-                &without_arial
-            ),
+            step_font(&UiFontFamily::System, 1, &choices, FontKind::Ui, &without_arial),
             UiFontFamily::Installed("Menlo".into())
         );
     }
@@ -1933,27 +1801,15 @@ mod tests {
             first_available(&matches, FontKind::Ui, &all),
             UiFontFamily::Installed("Menlo".into())
         );
-        assert_eq!(
-            last_available(&matches, FontKind::Ui, &all),
-            UiFontFamily::System
-        );
+        assert_eq!(last_available(&matches, FontKind::Ui, &all), UiFontFamily::System);
     }
 
     #[test]
     fn each_font_kind_gets_distinct_labels_and_element_ids() {
         let slugs: Vec<_> = FontKind::ALL.iter().map(|kind| kind.slug()).collect();
         let labels: Vec<_> = FontKind::ALL.iter().map(|kind| kind.label()).collect();
-        assert_eq!(
-            slugs.iter().collect::<std::collections::HashSet<_>>().len(),
-            3
-        );
-        assert_eq!(
-            labels
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            3
-        );
+        assert_eq!(slugs.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        assert_eq!(labels.iter().collect::<std::collections::HashSet<_>>().len(), 3);
     }
 
     #[test]
@@ -1980,10 +1836,8 @@ mod tests {
     #[test]
     fn mono_size_ladder_keeps_both_defaults_exactly_reachable() {
         assert!(MONO_FONT_SIZES.windows(2).all(|pair| pair[0] < pair[1]));
-        for default in [
-            typography::TERMINAL_FONT_SIZE_DEFAULT,
-            typography::CODE_FONT_SIZE_DEFAULT,
-        ] {
+        for default in [typography::TERMINAL_FONT_SIZE_DEFAULT, typography::CODE_FONT_SIZE_DEFAULT]
+        {
             assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(default)], default);
         }
         // Off-ladder values (older settings, hand-edited files) snap, never drop.
@@ -2019,14 +1873,10 @@ mod tests {
         });
         let (_page, cx) = cx.add_window_view(|_, cx| AppearancePage::new(cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        let trigger = cx
-            .debug_bounds("appearance-surface")
-            .expect("glass trigger");
+        let trigger = cx.debug_bounds("appearance-surface").expect("glass trigger");
         cx.simulate_click(trigger.center(), gpui::Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        let frosted = cx
-            .debug_bounds("appearance-surface-option-1")
-            .expect("frosted option");
+        let frosted = cx.debug_bounds("appearance-surface-option-1").expect("frosted option");
         cx.simulate_click(frosted.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         cx.update(|_, cx| {

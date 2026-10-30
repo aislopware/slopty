@@ -1,10 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! The notice chip: the tinted warning card the transcript draws.
 
-use gpui::{App, Div, FontWeight, Hsla, SharedString, Window, div, prelude::*, px};
+use gpui::prelude::*;
+use gpui::{App, Div, FontWeight, Hsla, SharedString, Window, div, px};
 
-use crate::theme::Theme;
 use crate::motion::HoverFade as _;
+use crate::theme::Theme;
 
 /// The warning notice the transcript draws: a tinted rounded chip (`border <accent>/[0.16]` over
 /// a `<accent>/[0.05]` wash, in the amber palette, never a bare stroke) with a header row and the
@@ -50,7 +51,12 @@ pub fn notice_chip(theme: &Theme, label: &'static str, message: impl Into<Shared
                 .items_center()
                 .gap(px(8.0))
                 .child(header_icon)
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(muted.opacity(0.8)).child(label))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(muted.opacity(0.8))
+                        .child(label),
+                )
                 .child(div().flex_1())
                 .child({
                     // The copy swaps to a check for the house's span and says "Copied", keeping
@@ -71,7 +77,11 @@ pub fn notice_chip(theme: &Theme, label: &'static str, message: impl Into<Shared
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .bg(crate::motion::hover_blend(&hover, gpui::transparent_black(), accent.opacity(0.12)))
+                        .bg(crate::motion::hover_blend(
+                            &hover,
+                            gpui::transparent_black(),
+                            accent.opacity(0.12),
+                        ))
                         .hover_fade(hover)
                         // A tab stop with the shell's ring.
                         .tab_index(0)
@@ -85,7 +95,11 @@ pub fn notice_chip(theme: &Theme, label: &'static str, message: impl Into<Shared
                             crate::motion::copy_feedback(click_key.clone(), cx);
                         })
                         .tooltip(move |window, cx| {
-                            let words = if crate::motion::copied(&tip_key, cx) { "Copied" } else { "Copy message" };
+                            let words = if crate::motion::copied(&tip_key, cx) {
+                                "Copied"
+                            } else {
+                                "Copy message"
+                            };
                             crate::settings::widgets::text_tooltip(words)(window, cx)
                         })
                         .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)

@@ -1,19 +1,19 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Workspace file browsing surface.
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
+use std::time::Duration;
 
+use gpui::prelude::*;
 use gpui::{
     Context, Entity, EventEmitter, FocusHandle, ListAlignment, ListState, Pixels, Point, Render,
-    SharedString, Subscription, Task, Window, div, prelude::*, px,
+    SharedString, Subscription, Task, Window, div, px,
 };
 use slopty_view_proto::ListWorkspaceDirectoryRequest;
 
-use crate::{
-    composer::{ComposerInput, ComposerInputEvent},
-    motion::HoverFade as _,
-    state::AppState,
-};
+use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::motion::HoverFade as _;
+use crate::state::AppState;
 
 pub mod client;
 mod context_menu;
@@ -108,7 +108,12 @@ pub(crate) const TREE_KEY_CONTEXT: &str = "FileTree";
 pub(crate) fn bind_keys(cx: &mut gpui::App) {
     use crate::settings::platform_combo;
     cx.bind_keys([
-        crate::keys::binding(&platform_combo("mod-shift-."), ToggleHiddenFiles, Some(KEY_CONTEXT), cx),
+        crate::keys::binding(
+            &platform_combo("mod-shift-."),
+            ToggleHiddenFiles,
+            Some(KEY_CONTEXT),
+            cx,
+        ),
         crate::keys::binding(
             &platform_combo("mod-shift-v"),
             ToggleMarkdownPreview,
@@ -441,12 +446,7 @@ impl WorkspacePathDrag {
             [only] => &only.path,
             items => return format!("{} items", items.len()).into(),
         };
-        path.trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(&self.path)
-            .to_string()
-            .into()
+        path.trim_end_matches('/').rsplit('/').next().unwrap_or(&self.path).to_string().into()
     }
 }
 
@@ -480,9 +480,7 @@ impl Render for WorkspacePathDragGhost {
                 } else {
                     crate::file_icons::FileIconIdentity::file(&first.path)
                 };
-                crate::file_icons::icon(identity, theme.appearance)
-                    .size(px(14.0))
-                    .flex_none()
+                crate::file_icons::icon(identity, theme.appearance).size(px(14.0)).flex_none()
             })
             .child(div().min_w_0().truncate().child(self.payload.title()))
     }
@@ -622,10 +620,7 @@ impl Render for FilesSurface {
         };
         let editor_context_menu = self.render_editor_context_menu(&theme, cx);
         div()
-            .id(SharedString::from(format!(
-                "files-surface-{}",
-                self.chat_id
-            )))
+            .id(SharedString::from(format!("files-surface-{}", self.chat_id)))
             .role(gpui::Role::Group)
             .aria_label("Workspace files")
             .key_context(KEY_CONTEXT)
@@ -662,22 +657,20 @@ impl FilesSurface {
     ) -> gpui::Div {
         let projectless_root = {
             let state = self.state.read(cx);
-            state
-                .chats
-                .iter()
-                .find(|chat| chat.id == self.chat_id && chat.space_id.is_none())
-                .map(|chat| {
-                    let device = state
-                        .device_name(&chat.device_id)
-                        .unwrap_or(&chat.device_id);
+            state.chats.iter().find(|chat| chat.id == self.chat_id && chat.space_id.is_none()).map(
+                |chat| {
+                    let device = state.device_name(&chat.device_id).unwrap_or(&chat.device_id);
                     // A projectless chat's folder is an implementation detail.
                     match chat.cwd.as_deref() {
-                        Some(cwd) if !slopty_view_proto::projectless::is_projectless_cwd(Some(cwd)) => {
+                        Some(cwd)
+                            if !slopty_view_proto::projectless::is_projectless_cwd(Some(cwd)) =>
+                        {
                             format!("Files in {cwd} · {device}")
                         }
                         _ => format!("Files · {device}"),
                     }
-                })
+                },
+            )
         };
         let phase = self.tree.node("").map(|root| root.load.clone());
         let content = if !self.search_state.query.is_empty() {
@@ -711,10 +704,7 @@ impl FilesSurface {
         {
             // The tree's focus waits here while its folder loads, so the
             // explorer opened by Cmd-E keeps it rather than losing it to the window.
-            div()
-                .flex_1()
-                .track_focus(&self.tree_focus)
-                .into_any_element()
+            div().flex_1().track_focus(&self.tree_focus).into_any_element()
         } else {
             self.render_tree(cx)
         };
@@ -892,7 +882,9 @@ impl FilesSurface {
         });
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Edited => this.on_search_edited(cx),
-            ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => this.activate_search_result(cx),
+            ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
+                this.activate_search_result(cx)
+            }
             ComposerInputEvent::MentionNavigate(delta) => {
                 let len = this.search_state.visible_len();
                 if len > 0 {
@@ -901,8 +893,7 @@ impl FilesSurface {
                     } else {
                         (this.search_state.active + 1).min(len - 1)
                     };
-                    this.search_list
-                        .scroll_to_reveal_item(this.search_state.active);
+                    this.search_list.scroll_to_reveal_item(this.search_state.active);
                     cx.notify();
                 }
             }
@@ -921,8 +912,7 @@ impl FilesSurface {
         let tree_list = ListState::new(0, ListAlignment::Top, px(560.0));
         let weak = cx.entity().downgrade();
         tree_list.set_scroll_handler(move |_, _, cx| {
-            weak.update(cx, |this: &mut Self, cx| this.on_tree_scrolled(cx))
-                .ok();
+            weak.update(cx, |this: &mut Self, cx| this.on_tree_scrolled(cx)).ok();
         });
         let mut surface = Self {
             surface_id: cx.entity_id(),
@@ -988,11 +978,7 @@ impl FilesSurface {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        self.editor_context_menu.open(EditorContextMenu {
-            editor,
-            position,
-            availability,
-        });
+        self.editor_context_menu.open(EditorContextMenu { editor, position, availability });
         cx.notify();
     }
 
@@ -1091,12 +1077,7 @@ impl FilesSurface {
             ))
             .into_any_element();
 
-        Some(crate::popover::menu_at(
-            "files-editor-context-menu",
-            position,
-            card,
-            closing,
-        ))
+        Some(crate::popover::menu_at("files-editor-context-menu", position, card, closing))
     }
 
     pub fn set_autosave_delay_ms(&mut self, delay_ms: u64, cx: &mut Context<Self>) {
@@ -1173,10 +1154,9 @@ impl FilesSurface {
         self.load_directory(String::new(), None, cx);
         // Opening the tree is a strong hint a search follows; start the
         // host's index now.
-        if let (Some(engine), Some(context)) = (
-            self.state.read(cx).engine().cloned(),
-            self.request_context.clone(),
-        ) {
+        if let (Some(engine), Some(context)) =
+            (self.state.read(cx).engine().cloned(), self.request_context.clone())
+        {
             let client = WorkspaceFilesClient::new(engine, context);
             cx.spawn(async move |_, _| {
                 client.hint_search_warm().await;
@@ -1260,9 +1240,7 @@ impl FilesSurface {
     }
 
     fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
-        cx.emit(FilesEvent::ShowAllFilesChanged(
-            !self.tree.include_ignored(),
-        ));
+        cx.emit(FilesEvent::ShowAllFilesChanged(!self.tree.include_ignored()));
     }
 
     fn apply_show_all_files(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
@@ -1296,10 +1274,7 @@ impl FilesSurface {
         };
         let generation = self.tree.generation();
         let cached_paths = if cursor.is_none() {
-            self.tree
-                .node(&directory)
-                .map(|node| node.children.clone())
-                .unwrap_or_default()
+            self.tree.node(&directory).map(|node| node.children.clone()).unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -1323,13 +1298,9 @@ impl FilesSurface {
         };
         let client = WorkspaceFilesClient::new(engine, request_context);
         let task = cx.spawn(async move |this, cx| {
-            let mut result = client
-                .list_directory_snapshot(request.clone(), &cached_paths)
-                .await;
+            let mut result = client.list_directory_snapshot(request.clone(), &cached_paths).await;
             if result.as_ref().is_err_and(|error| error.retryable()) {
-                cx.background_executor()
-                    .timer(Duration::from_millis(250))
-                    .await;
+                cx.background_executor().timer(Duration::from_millis(250)).await;
                 result = client.list_directory_snapshot(request, &cached_paths).await;
             }
             let _ = this.update(cx, |surface, cx| {
@@ -1352,9 +1323,7 @@ impl FilesSurface {
                         if directory.is_empty() {
                             surface.error = Some(message.clone().into());
                         }
-                        surface
-                            .tree
-                            .fail_load(&directory, cursor, message, generation);
+                        surface.tree.fail_load(&directory, cursor, message, generation);
                     }
                 }
                 surface.sync_tree_list();
@@ -1412,10 +1381,7 @@ impl FilesSurface {
 
     fn apply_target(&mut self, next: Option<FilesRequestContext>, cx: &mut Context<Self>) {
         if let Some(dialog) = self.tree_delete.take() {
-            cx.emit(FilesEvent::HoldMutation {
-                origin: dialog.origin,
-                paths: Vec::new(),
-            });
+            cx.emit(FilesEvent::HoldMutation { origin: dialog.origin, paths: Vec::new() });
         }
         self.tree_rename = None;
         self.tree_drag = drag::TreeDrag::default();
@@ -1449,11 +1415,7 @@ impl FilesSurface {
         self.search_state.error = None;
         self.reset_search_results();
         self.sync_tree_list();
-        self.error = if next.is_none() {
-            Some(NO_FOLDER.into())
-        } else {
-            None
-        };
+        self.error = if next.is_none() { Some(NO_FOLDER.into()) } else { None };
         self.request_context = next;
         self.started = false;
         if !self.search.read(cx).text().trim().is_empty() {
@@ -1473,11 +1435,7 @@ impl FilesSurface {
             );
             self.tree_list_generation = self.tree.generation();
         } else {
-            tree::sync_list_rows(
-                &self.tree_list,
-                &self.tree_list_rows,
-                self.tree.visible_rows(),
-            );
+            tree::sync_list_rows(&self.tree_list, &self.tree_list_rows, self.tree.visible_rows());
         }
         self.tree_list_rows = self.tree.visible_rows().to_vec();
     }
@@ -1533,22 +1491,12 @@ impl FilesSurface {
                             .flex_none()
                             .text_color(theme.text_faint),
                     )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .child(self.search.clone()),
-                    ),
+                    .child(div().min_w_0().flex_1().overflow_hidden().child(self.search.clone())),
             )
             .child(
                 toolbar_toggle_keyed(
                     "files-toggle-ignored",
-                    if include_ignored {
-                        "Hide hidden files"
-                    } else {
-                        "Show hidden files"
-                    },
+                    if include_ignored { "Hide hidden files" } else { "Show hidden files" },
                     include_ignored,
                     Box::new(ToggleHiddenFiles),
                     self.tree_focus.clone(),
@@ -1580,9 +1528,12 @@ impl FilesSurface {
 
 #[cfg(test)]
 mod explorer_tests {
-    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use gpui::{AppContext, TestAppContext};
-    use std::{cell::RefCell, rc::Rc};
+
+    use super::*;
 
     #[gpui::test]
     fn explorer_header_search_and_visibility_toggle(cx: &mut TestAppContext) {
@@ -1617,10 +1568,7 @@ mod explorer_tests {
         cx.simulate_click(padding, Modifiers::default());
         cx.simulate_input("a very long filename\nwith another line.rs");
         files.read_with(cx, |files, cx| {
-            assert_eq!(
-                files.search.read(cx).text(),
-                "a very long filename with another line.rs"
-            );
+            assert_eq!(files.search.read(cx).text(), "a very long filename with another line.rs");
         });
         cx.update(|window, cx| {
             assert!(files.read(cx).search.focus_handle(cx).is_focused(window));
@@ -1662,7 +1610,10 @@ mod explorer_tests {
     }
 
     /// An explorer with nothing listed yet, drawn under a pointer or (`touch`) a finger.
-    fn bare_explorer(cx: &mut TestAppContext, touch: bool) -> (Entity<FilesSurface>, &mut gpui::VisualTestContext) {
+    fn bare_explorer(
+        cx: &mut TestAppContext,
+        touch: bool,
+    ) -> (Entity<FilesSurface>, &mut gpui::VisualTestContext) {
         crate::shell::force_touch(touch);
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -1694,8 +1645,9 @@ mod explorer_tests {
     // draws, inside its reach, still acts.
     #[gpui::test]
     fn on_touch_the_explorers_controls_take_a_fingers_press(cx: &mut TestAppContext) {
-        use crate::surface_chrome::TOUCH_TARGET;
         use gpui::{Modifiers, point};
+
+        use crate::surface_chrome::TOUCH_TARGET;
 
         let (files, cx) = bare_explorer(cx, true);
         let shown = Rc::new(RefCell::new(None));
@@ -1710,9 +1662,16 @@ mod explorer_tests {
         let header = cx.debug_bounds("files-explorer-header").unwrap();
         let eye = cx.debug_bounds("files-toggle-ignored").unwrap();
         let search = cx.debug_bounds("files-search").unwrap();
-        assert_eq!(header.size.height, px(TOUCH_TARGET + 2.0), "a finger's press inside its hairlines");
+        assert_eq!(
+            header.size.height,
+            px(TOUCH_TARGET + 2.0),
+            "a finger's press inside its hairlines"
+        );
         assert_eq!((eye.size.width, eye.size.height), (px(TOUCH_TARGET), px(TOUCH_TARGET)));
-        assert!(eye.top() >= header.top() && eye.bottom() <= header.bottom(), "{eye:?} in {header:?}");
+        assert!(
+            eye.top() >= header.top() && eye.bottom() <= header.bottom(),
+            "{eye:?} in {header:?}"
+        );
         assert!(search.right() <= eye.left(), "the eye's press clear of the field");
         // 3 pt in from the press's corner: 7 pt outside the 24 the eye draws.
         cx.simulate_click(eye.origin + point(px(3.0), px(3.0)), Modifiers::default());
@@ -1732,8 +1691,9 @@ mod explorer_tests {
     // A failure's "Try again" and "Copy error" take a finger's press each, side by side.
     #[gpui::test]
     fn on_touch_a_failures_buttons_take_presses_side_by_side(cx: &mut TestAppContext) {
-        use crate::surface_chrome::TOUCH_TARGET;
         use gpui::{Modifiers, point};
+
+        use crate::surface_chrome::TOUCH_TARGET;
 
         crate::shell::force_touch(true);
         cx.update(|cx| {
@@ -1749,9 +1709,15 @@ mod explorer_tests {
         for (name, bounds) in [("Try again", retry), ("Copy error", copy)] {
             assert_eq!(bounds.size.height, px(TOUCH_TARGET), "{name}: a finger's press");
         }
-        assert!(retry.right() <= copy.left(), "{retry:?} and {copy:?} side by side, not over each other");
+        assert!(
+            retry.right() <= copy.left(),
+            "{retry:?} and {copy:?} side by side, not over each other"
+        );
         // 2 pt in from the press's lower right: outside the box "Try again" draws.
-        cx.simulate_click(point(retry.right() - px(2.0), retry.bottom() - px(2.0)), Modifiers::default());
+        cx.simulate_click(
+            point(retry.right() - px(2.0), retry.bottom() - px(2.0)),
+            Modifiers::default(),
+        );
         assert_eq!(tries.get(), 1, "a press in the reach tries again");
         crate::shell::force_touch(false);
     }

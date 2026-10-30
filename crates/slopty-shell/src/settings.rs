@@ -193,9 +193,7 @@ pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
 
 /// Latest settings, including mutations still inside the debounce window.
 pub fn current(cx: &App) -> UiSettings {
-    cx.try_global::<SettingsStore>()
-        .map(|store| store.current.clone())
-        .unwrap_or_default()
+    cx.try_global::<SettingsStore>().map(|store| store.current.clone()).unwrap_or_default()
 }
 
 pub fn update(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut UiSettings)) -> bool {
@@ -216,8 +214,7 @@ pub fn replace(settings: UiSettings, policy: SavePolicy, cx: &mut App) -> bool {
 /// Read on every wheel notch, so without cloning the settings. Without a
 /// store (not the app) wheel input is left alone.
 pub fn smooth_scrolling(cx: &App) -> bool {
-    cx.try_global::<SettingsStore>()
-        .is_some_and(|store| store.current.smooth_scrolling)
+    cx.try_global::<SettingsStore>().is_some_and(|store| store.current.smooth_scrolling)
 }
 
 /// The format the person chose for the output of steps of kind `kind`, read on every
@@ -248,9 +245,7 @@ fn schedule(policy: SavePolicy, cx: &mut App) {
         SavePolicy::Immediate => flush(cx),
         SavePolicy::Debounced => {
             let task = cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(SAVE_DEBOUNCE_MS))
-                    .await;
+                cx.background_executor().timer(Duration::from_millis(SAVE_DEBOUNCE_MS)).await;
                 cx.update(flush_latest);
             });
             cx.global_mut::<SettingsStore>().save_task = Some(task);
@@ -299,9 +294,7 @@ pub struct WindowGeometry {
 
 impl WindowGeometry {
     pub fn is_valid(self) -> bool {
-        [self.x, self.y, self.width, self.height]
-            .into_iter()
-            .all(f32::is_finite)
+        [self.x, self.y, self.width, self.height].into_iter().all(f32::is_finite)
             && self.width > 0.0
             && self.height > 0.0
     }
@@ -326,12 +319,7 @@ impl WindowGeometry {
                 .position(|display| display.is_valid() && display.display_uuid == Some(uuid))
         });
         let index = matched
-            .or_else(|| {
-                displays
-                    .get(primary)
-                    .filter(|display| display.is_valid())
-                    .map(|_| primary)
-            })
+            .or_else(|| displays.get(primary).filter(|display| display.is_valid()).map(|_| primary))
             .or_else(|| displays.iter().position(|display| display.is_valid()))?;
         let display = displays[index];
         let mut geometry = self.fit(display);
@@ -557,9 +545,8 @@ impl Default for UiSettings {
 pub const JUMP_SLOTS: usize = 9;
 
 /// Default combo per jump slot, and the label the shortcuts table shows.
-const JUMP_DEFAULTS: [&str; JUMP_SLOTS] = [
-    "mod-1", "mod-2", "mod-3", "mod-4", "mod-5", "mod-6", "mod-7", "mod-8", "mod-9",
-];
+const JUMP_DEFAULTS: [&str; JUMP_SLOTS] =
+    ["mod-1", "mod-2", "mod-3", "mod-4", "mod-5", "mod-6", "mod-7", "mod-8", "mod-9"];
 // One noun for what an agent works in everywhere: session (TUI-first, `docs/decisions/ui.md`,
 // "A session is its terminal, its inspector beside it").
 const JUMP_LABELS: [&str; JUMP_SLOTS] = [
@@ -592,7 +579,7 @@ pub enum ShortcutId {
     // The right pane's last closed tab.
     ReopenClosedTab,
     NextNeedsYou, // the next chat waiting on the person (`shell::sidebar_status`)
-    Inbox, // what needs the person, across sessions and machines (`shell::inbox`)
+    Inbox,        // what needs the person, across sessions and machines (`shell::inbox`)
     JumpSession(usize),
 }
 
@@ -737,7 +724,7 @@ pub struct KeymapConfig {
     // The right pane's last closed tab.
     pub reopen_closed_tab: String,
     pub next_needs_you: String, // the next chat waiting on the person
-    pub inbox: String, // what needs the person
+    pub inbox: String,          // what needs the person
     /// One combo per jump slot, in slot order; [`Self::heal_jump_slots`] keeps its length.
     pub jump_session: Vec<String>,
 }
@@ -754,9 +741,7 @@ impl From<StoredKeymap> for KeymapConfig {
     /// chord the person gave another action: that shortcut arrives unbound instead.
     fn from(StoredKeymap(stored): StoredKeymap) -> Self {
         let chosen = |id: ShortcutId| {
-            stored
-                .get(id.stored_key().as_ref())
-                .and_then(serde_json::Value::as_str)
+            stored.get(id.stored_key().as_ref()).and_then(serde_json::Value::as_str)
         };
         let mut keymap = Self::default();
         for id in ShortcutId::ALL {
@@ -834,11 +819,9 @@ impl KeymapConfig {
             ShortcutId::ReopenClosedTab => &self.reopen_closed_tab,
             ShortcutId::NextNeedsYou => &self.next_needs_you,
             ShortcutId::Inbox => &self.inbox,
-            ShortcutId::JumpSession(slot) => self
-                .jump_session
-                .get(slot)
-                .map(String::as_str)
-                .unwrap_or(""),
+            ShortcutId::JumpSession(slot) => {
+                self.jump_session.get(slot).map(String::as_str).unwrap_or("")
+            }
         }
     }
 
@@ -878,8 +861,7 @@ impl KeymapConfig {
     pub fn heal_jump_slots(&mut self) {
         self.jump_session.truncate(JUMP_SLOTS);
         while self.jump_session.len() < JUMP_SLOTS {
-            self.jump_session
-                .push(JUMP_DEFAULTS[self.jump_session.len()].to_string());
+            self.jump_session.push(JUMP_DEFAULTS[self.jump_session.len()].to_string());
         }
     }
 }
@@ -910,10 +892,7 @@ pub fn combo_from_keystroke_on(
 ) -> Option<String> {
     let key = key.trim().to_lowercase();
     if key.is_empty()
-        || matches!(
-            key.as_str(),
-            "ctrl" | "control" | "alt" | "shift" | "cmd" | "platform" | "fn"
-        )
+        || matches!(key.as_str(), "ctrl" | "control" | "alt" | "shift" | "cmd" | "platform" | "fn")
     {
         return None;
     }
@@ -957,11 +936,7 @@ pub fn conflicted_shortcuts(keymap: &KeymapConfig) -> Vec<ShortcutId> {
 pub fn combo_modifiers(combo: &str) -> (bool, bool, bool) {
     let mut parts: Vec<&str> = combo.split('-').collect();
     parts.pop();
-    (
-        parts.contains(&"mod"),
-        parts.contains(&"alt"),
-        parts.contains(&"shift"),
-    )
+    (parts.contains(&"mod"), parts.contains(&"alt"), parts.contains(&"shift"))
 }
 
 /// Whether the sidebar should show its jump hints for the currently held
@@ -1034,9 +1009,9 @@ pub(crate) fn set_bound_key_equivalents(equivalents: KeyEquivalents) {
 pub fn localize_key<'a>(key: &'a str, equivalents: &KeyEquivalents) -> Cow<'a, str> {
     let mut chars = key.chars();
     match (chars.next(), chars.next()) {
-        (Some(us), None) => equivalents
-            .get(&us)
-            .map_or(Cow::Borrowed(key), |here| Cow::Owned(here.to_string())),
+        (Some(us), None) => {
+            equivalents.get(&us).map_or(Cow::Borrowed(key), |here| Cow::Owned(here.to_string()))
+        }
         _ => Cow::Borrowed(key),
     }
 }
@@ -1052,11 +1027,8 @@ pub fn canonical_key(key: &str, equivalents: &KeyEquivalents) -> Option<String> 
     let (Some(here), None) = (chars.next(), chars.next()) else {
         return Some(key.to_string());
     };
-    if let Some(us) = equivalents
-        .iter()
-        .filter(|&(_, &target)| target == here)
-        .map(|(&us, _)| us)
-        .min()
+    if let Some(us) =
+        equivalents.iter().filter(|&(_, &target)| target == here).map(|(&us, _)| us).min()
     {
         return Some(us.to_string());
     }
@@ -1197,12 +1169,8 @@ impl UiSettings {
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
     pub fn clamped(mut self) -> Self {
         self.window_geometry = self.window_geometry.filter(|geometry| geometry.is_valid());
-        self.sidebar_width = clamp_or(
-            self.sidebar_width,
-            SIDEBAR_MIN,
-            SIDEBAR_MAX,
-            SIDEBAR_DEFAULT,
-        );
+        self.sidebar_width =
+            clamp_or(self.sidebar_width, SIDEBAR_MIN, SIDEBAR_MAX, SIDEBAR_DEFAULT);
         // The right pane has no persisted upper bound: its live drag clamps
         // against the current window, which is unavailable while loading.
         self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
@@ -1333,28 +1301,25 @@ pub fn announce_set_aside(cx: &mut App) -> bool {
     let words = match set_aside {
         Some(backup) => format!(
             "Couldn\u{2019}t read your settings, so Slopty started from its defaults. The old file is kept as {}.",
-            backup.file_name().map_or_else(|| backup.display().to_string(), |name| name.to_string_lossy().into_owned()),
+            backup.file_name().map_or_else(
+                || backup.display().to_string(),
+                |name| name.to_string_lossy().into_owned()
+            ),
         ),
-        None => "Couldn\u{2019}t read your settings, so Slopty started from its defaults.".to_owned(),
+        None => {
+            "Couldn\u{2019}t read your settings, so Slopty started from its defaults.".to_owned()
+        }
     };
     crate::toast::error(cx, words);
     true
 }
 
 fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(min, max)
-    } else {
-        default
-    }
+    if value.is_finite() { value.clamp(min, max) } else { default }
 }
 
 fn min_or(value: f32, min: f32, default: f32) -> f32 {
-    if value.is_finite() {
-        value.max(min)
-    } else {
-        default
-    }
+    if value.is_finite() { value.max(min) } else { default }
 }
 
 #[cfg(test)]
@@ -1388,10 +1353,7 @@ mod tests {
             width: 1200.0,
             height: 800.0,
         };
-        let settings = UiSettings {
-            window_geometry: Some(geometry),
-            ..Default::default()
-        };
+        let settings = UiSettings { window_geometry: Some(geometry), ..Default::default() };
         settings.save(dir.path()).unwrap();
         assert_eq!(UiSettings::load(dir.path()).window_geometry, Some(geometry));
         assert_eq!(WindowGeometry::from_bounds(geometry.bounds()), geometry);
@@ -1409,17 +1371,8 @@ mod tests {
             width: 1920.0,
             height: 1080.0,
         };
-        let secondary = WindowGeometry {
-            display_uuid: Some(uuid::Uuid::from_u128(2)),
-            ..primary
-        };
-        let saved = WindowGeometry {
-            x: 100.0,
-            y: 80.0,
-            width: 1200.0,
-            height: 800.0,
-            ..secondary
-        };
+        let secondary = WindowGeometry { display_uuid: Some(uuid::Uuid::from_u128(2)), ..primary };
+        let saved = WindowGeometry { x: 100.0, y: 80.0, width: 1200.0, height: 800.0, ..secondary };
         let encoded = serde_json::to_string(&saved).unwrap();
         let saved: WindowGeometry = serde_json::from_str(&encoded).unwrap();
         assert_eq!(saved.restore(&[primary, secondary], 0), Some((1, saved)));
@@ -1430,20 +1383,12 @@ mod tests {
     fn settings_section_round_trips_and_old_or_unknown_values_read_as_general() {
         use crate::shell::SettingsSection;
         let dir = tempfile::tempdir().unwrap();
-        let settings = UiSettings {
-            settings_section: SettingsSection::Appearance,
-            ..Default::default()
-        };
+        let settings =
+            UiSettings { settings_section: SettingsSection::Appearance, ..Default::default() };
         settings.save(dir.path()).unwrap();
         let text = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
-        assert!(
-            text.contains(r#""settingsSection": "appearance""#),
-            "{text}"
-        );
-        assert_eq!(
-            UiSettings::load(dir.path()).settings_section,
-            SettingsSection::Appearance
-        );
+        assert!(text.contains(r#""settingsSection": "appearance""#), "{text}");
+        assert_eq!(UiSettings::load(dir.path()).settings_section, SettingsSection::Appearance);
         for section in SettingsSection::ALL {
             let encoded = serde_json::to_string(&UiSettings {
                 settings_section: section,
@@ -1492,20 +1437,11 @@ mod tests {
             saved.restore(&[primary], 0),
             Some((
                 0,
-                WindowGeometry {
-                    display_uuid: primary.display_uuid,
-                    x: 120.0,
-                    y: 75.0,
-                    ..saved
-                }
+                WindowGeometry { display_uuid: primary.display_uuid, x: 120.0, y: 75.0, ..saved }
             ))
         );
         assert_eq!(saved.restore(&[], 0), None);
-        let oversized = WindowGeometry {
-            width: 2400.0,
-            height: 1600.0,
-            ..saved
-        };
+        let oversized = WindowGeometry { width: 2400.0, height: 1600.0, ..saved };
         assert_eq!(oversized.restore(&[primary], 0), Some((0, primary)));
     }
 
@@ -1523,42 +1459,19 @@ mod tests {
         };
         assert_eq!(
             saved.restore(&[display, display], 1),
-            Some((
-                1,
-                WindowGeometry {
-                    display_uuid: display.display_uuid,
-                    ..saved
-                }
-            ))
+            Some((1, WindowGeometry { display_uuid: display.display_uuid, ..saved }))
         );
     }
 
     #[test]
     fn window_geometry_rejects_invalid_values_without_resetting_settings() {
-        let valid = WindowGeometry {
-            display_uuid: None,
-            x: 40.0,
-            y: 50.0,
-            width: 1200.0,
-            height: 800.0,
-        };
+        let valid =
+            WindowGeometry { display_uuid: None, x: 40.0, y: 50.0, width: 1200.0, height: 800.0 };
         for geometry in [
-            WindowGeometry {
-                x: f32::NAN,
-                ..valid
-            },
-            WindowGeometry {
-                y: f32::INFINITY,
-                ..valid
-            },
-            WindowGeometry {
-                width: 0.0,
-                ..valid
-            },
-            WindowGeometry {
-                height: -1.0,
-                ..valid
-            },
+            WindowGeometry { x: f32::NAN, ..valid },
+            WindowGeometry { y: f32::INFINITY, ..valid },
+            WindowGeometry { width: 0.0, ..valid },
+            WindowGeometry { height: -1.0, ..valid },
         ] {
             let settings = UiSettings {
                 window_geometry: Some(geometry),
@@ -1592,13 +1505,8 @@ mod tests {
 
     #[test]
     fn window_geometry_fits_smaller_display_and_keeps_titlebar_visible() {
-        let display = WindowGeometry {
-            display_uuid: None,
-            x: 0.0,
-            y: 25.0,
-            width: 1280.0,
-            height: 720.0,
-        };
+        let display =
+            WindowGeometry { display_uuid: None, x: 0.0, y: 25.0, width: 1280.0, height: 720.0 };
         let geometry = WindowGeometry {
             display_uuid: None,
             x: 2000.0,
@@ -1607,17 +1515,9 @@ mod tests {
             height: 1500.0,
         };
         assert_eq!(geometry.fit(display), display);
-        let small = WindowGeometry {
-            width: 800.0,
-            height: 500.0,
-            ..display
-        };
+        let small = WindowGeometry { width: 800.0, height: 500.0, ..display };
         assert_eq!(geometry.fit(small), small);
-        let tiny = WindowGeometry {
-            width: 100.0,
-            height: 100.0,
-            ..display
-        };
+        let tiny = WindowGeometry { width: 100.0, height: 100.0, ..display };
         assert_eq!(tiny.fit(display).width, 900.0);
         assert_eq!(tiny.fit(display).height, 600.0);
     }
@@ -1632,22 +1532,10 @@ mod tests {
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.sidebar_width, 300.0);
-        assert_eq!(
-            loaded.terminal_font_family,
-            crate::typography::UiFontFamily::GeistMono
-        );
-        assert_eq!(
-            loaded.terminal_font_size,
-            crate::typography::TERMINAL_FONT_SIZE_DEFAULT
-        );
-        assert_eq!(
-            loaded.code_font_family,
-            crate::typography::UiFontFamily::GeistMono
-        );
-        assert_eq!(
-            loaded.code_font_size,
-            crate::typography::CODE_FONT_SIZE_DEFAULT
-        );
+        assert_eq!(loaded.terminal_font_family, crate::typography::UiFontFamily::GeistMono);
+        assert_eq!(loaded.terminal_font_size, crate::typography::TERMINAL_FONT_SIZE_DEFAULT);
+        assert_eq!(loaded.code_font_family, crate::typography::UiFontFamily::GeistMono);
+        assert_eq!(loaded.code_font_size, crate::typography::CODE_FONT_SIZE_DEFAULT);
     }
 
     #[test]
@@ -1658,12 +1546,7 @@ mod tests {
         .unwrap();
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.notifications_enabled);
-        assert!(
-            serde_json::to_value(&loaded)
-                .unwrap()
-                .get("activeTurnSendBehavior")
-                .is_none()
-        );
+        assert!(serde_json::to_value(&loaded).unwrap().get("activeTurnSendBehavior").is_none());
     }
 
     #[test]
@@ -1711,7 +1594,9 @@ mod tests {
             code_font_family: crate::typography::UiFontFamily::Geist,
             code_font_size: 11.0,
             files_show_all: true,
-            accent: slopty_shell_theme::AccentSelection::Preset(slopty_shell_theme::AccentPreset::Cyan),
+            accent: slopty_shell_theme::AccentSelection::Preset(
+                slopty_shell_theme::AccentPreset::Cyan,
+            ),
             surface: slopty_shell_theme::SurfacePreference::Frosted,
             pause_animations_in_background: true,
             smooth_scrolling: false,
@@ -1806,20 +1691,11 @@ mod tests {
         assert_eq!(loaded.surface, slopty_shell_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.notifications_enabled, "other keys still parse");
-        assert_eq!(
-            loaded.files_autosave_delay_ms,
-            FILES_AUTOSAVE_DELAY_DEFAULT_MS
-        );
+        assert_eq!(loaded.files_autosave_delay_ms, FILES_AUTOSAVE_DELAY_DEFAULT_MS);
         assert!(!loaded.files_autosave_enabled);
         assert!(!loaded.files_word_wrap);
-        assert_eq!(
-            loaded.code_font_size,
-            crate::typography::CODE_FONT_SIZE_DEFAULT
-        );
-        assert_eq!(
-            loaded.terminal_font_size,
-            crate::typography::TERMINAL_FONT_SIZE_DEFAULT
-        );
+        assert_eq!(loaded.code_font_size, crate::typography::CODE_FONT_SIZE_DEFAULT);
+        assert_eq!(loaded.terminal_font_size, crate::typography::TERMINAL_FONT_SIZE_DEFAULT);
         assert!(!loaded.files_show_all);
     }
 
@@ -1832,17 +1708,11 @@ mod tests {
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path());
-        assert_eq!(
-            loaded.ui_font_family,
-            crate::typography::UiFontFamily::Geist
-        );
+        assert_eq!(loaded.ui_font_family, crate::typography::UiFontFamily::Geist);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.notifications_enabled);
         assert!(!loaded.diff_wrap);
-        assert_eq!(
-            loaded.ui_font_size,
-            crate::typography::UiFontSize::default()
-        );
+        assert_eq!(loaded.ui_font_size, crate::typography::UiFontSize::default());
     }
 
     #[test]
@@ -1867,10 +1737,7 @@ mod tests {
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path());
-        assert_eq!(
-            loaded.ui_font_family,
-            crate::typography::UiFontFamily::Geist
-        );
+        assert_eq!(loaded.ui_font_family, crate::typography::UiFontFamily::Geist);
         assert_eq!(loaded.sidebar_width, 300.0);
     }
 
@@ -1923,48 +1790,27 @@ mod tests {
         assert_eq!(loaded.sidebar_width, SIDEBAR_MAX);
         assert_eq!(loaded.right_pane_width, RIGHT_PANE_MIN);
         assert_eq!(
-            UiSettings {
-                sidebar_width: 1.0,
-                ..Default::default()
-            }
-            .clamped()
-            .sidebar_width,
+            UiSettings { sidebar_width: 1.0, ..Default::default() }.clamped().sidebar_width,
             SIDEBAR_MIN
         );
         assert_eq!(
-            UiSettings {
-                files_autosave_delay_ms: 1,
-                ..Default::default()
-            }
-            .clamped()
-            .files_autosave_delay_ms,
+            UiSettings { files_autosave_delay_ms: 1, ..Default::default() }
+                .clamped()
+                .files_autosave_delay_ms,
             FILES_AUTOSAVE_DELAY_MIN_MS
         );
         assert_eq!(
-            UiSettings {
-                code_font_size: 100.0,
-                ..Default::default()
-            }
-            .clamped()
-            .code_font_size,
+            UiSettings { code_font_size: 100.0, ..Default::default() }.clamped().code_font_size,
             crate::typography::FONT_SIZE_MAX
         );
         assert_eq!(
-            UiSettings {
-                terminal_font_size: 1.0,
-                ..Default::default()
-            }
-            .clamped()
-            .terminal_font_size,
+            UiSettings { terminal_font_size: 1.0, ..Default::default() }
+                .clamped()
+                .terminal_font_size,
             crate::typography::FONT_SIZE_MIN
         );
         assert_eq!(
-            UiSettings {
-                code_font_size: f32::NAN,
-                ..Default::default()
-            }
-            .clamped()
-            .code_font_size,
+            UiSettings { code_font_size: f32::NAN, ..Default::default() }.clamped().code_font_size,
             crate::typography::CODE_FONT_SIZE_DEFAULT
         );
     }
@@ -1972,36 +1818,21 @@ mod tests {
     #[test]
     fn legacy_files_editor_font_size_becomes_the_code_font_size() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"filesEditorFontSize": 15.0}"#,
-        )
-        .unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"filesEditorFontSize": 15.0}"#).unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.code_font_size, 15.0);
-        assert_eq!(
-            loaded.terminal_font_size,
-            crate::typography::TERMINAL_FONT_SIZE_DEFAULT
-        );
+        assert_eq!(loaded.terminal_font_size, crate::typography::TERMINAL_FONT_SIZE_DEFAULT);
     }
 
     #[test]
     fn large_right_pane_width_is_preserved() {
-        let loaded = UiSettings {
-            right_pane_width: 2400.0,
-            ..Default::default()
-        }
-        .clamped();
+        let loaded = UiSettings { right_pane_width: 2400.0, ..Default::default() }.clamped();
         assert_eq!(loaded.right_pane_width, 2400.0);
     }
 
     #[test]
     fn nan_heals_to_default() {
-        let healed = UiSettings {
-            sidebar_width: f32::NAN,
-            ..Default::default()
-        }
-        .clamped();
+        let healed = UiSettings { sidebar_width: f32::NAN, ..Default::default() }.clamped();
         assert_eq!(healed.sidebar_width, SIDEBAR_DEFAULT);
     }
 
@@ -2129,16 +1960,9 @@ mod tests {
         assert_eq!(keymap.get(ShortcutId::ToggleChanges), "mod-r");
         assert_eq!(keymap.get(ShortcutId::NextNeedsYou), "mod-j");
         assert_eq!(keymap.get(ShortcutId::Inbox), "mod-shift-j");
-        let ctrl = if crate::keys::MOD_IS_COMMAND {
-            "ctrl"
-        } else {
-            "mod"
-        };
+        let ctrl = if crate::keys::MOD_IS_COMMAND { "ctrl" } else { "mod" };
         assert_eq!(keymap.get(ShortcutId::NextSession), format!("{ctrl}-tab"));
-        assert_eq!(
-            keymap.get(ShortcutId::PrevSession),
-            format!("{ctrl}-shift-tab")
-        );
+        assert_eq!(keymap.get(ShortcutId::PrevSession), format!("{ctrl}-shift-tab"));
         assert_eq!(keymap.get(ShortcutId::NewSession), "mod-n");
         assert_eq!(keymap.get(ShortcutId::ArchiveSession), "mod-shift-a");
         keymap.set(ShortcutId::ToggleSidebar, "mod-shift-x".into());
@@ -2175,14 +1999,8 @@ mod tests {
                 format!("mod-{suffix}")
             }
         };
-        assert_eq!(
-            combo_from_keystroke(true, false, false, false, "s"),
-            Some(ctrl_combo("s"))
-        );
-        assert_eq!(
-            combo_from_keystroke(false, false, false, true, "s"),
-            Some("mod-s".into())
-        );
+        assert_eq!(combo_from_keystroke(true, false, false, false, "s"), Some(ctrl_combo("s")));
+        assert_eq!(combo_from_keystroke(false, false, false, true, "s"), Some("mod-s".into()));
         assert_eq!(
             combo_from_keystroke(true, false, true, false, "tab"),
             Some(ctrl_combo("shift-tab"))
@@ -2192,19 +2010,10 @@ mod tests {
             Some(ctrl_combo("alt-shift-k"))
         );
         // Plain keys record without modifiers (Esc is filtered by the caller).
-        assert_eq!(
-            combo_from_keystroke(false, false, false, false, "f5"),
-            Some("f5".into())
-        );
+        assert_eq!(combo_from_keystroke(false, false, false, false, "f5"), Some("f5".into()));
         // Bare modifier presses record nothing.
-        assert_eq!(
-            combo_from_keystroke(true, false, false, false, "ctrl"),
-            None
-        );
-        assert_eq!(
-            combo_from_keystroke(false, false, true, false, "shift"),
-            None
-        );
+        assert_eq!(combo_from_keystroke(true, false, false, false, "ctrl"), None);
+        assert_eq!(combo_from_keystroke(false, false, true, false, "shift"), None);
         assert_eq!(combo_from_keystroke(false, false, false, false, ""), None);
     }
 
@@ -2265,11 +2074,7 @@ mod tests {
 
     #[test]
     fn combo_translation() {
-        let primary = if crate::keys::MOD_IS_COMMAND {
-            "cmd"
-        } else {
-            "ctrl"
-        };
+        let primary = if crate::keys::MOD_IS_COMMAND { "cmd" } else { "ctrl" };
         assert_eq!(platform_combo("mod-s"), format!("{primary}-s"));
         assert_eq!(platform_combo("alt-f4"), "alt-f4");
         // Literal ctrl passes through untouched — the macOS spelling of
@@ -2315,10 +2120,8 @@ mod tests {
     #[test]
     fn short_or_long_jump_lists_heal_to_the_slot_count() {
         // Short: surviving entries keep their slot, the rest take defaults.
-        let mut keymap = KeymapConfig {
-            jump_session: vec!["mod-alt-1".into()],
-            ..KeymapConfig::default()
-        };
+        let mut keymap =
+            KeymapConfig { jump_session: vec!["mod-alt-1".into()], ..KeymapConfig::default() };
         keymap.heal_jump_slots();
         assert_eq!(keymap.jump_session.len(), JUMP_SLOTS);
         assert_eq!(keymap.get(ShortcutId::JumpSession(0)), "mod-alt-1");
@@ -2333,10 +2136,7 @@ mod tests {
         assert_eq!(keymap.jump_session.len(), JUMP_SLOTS);
 
         // Absent: the whole list comes back.
-        let mut keymap = KeymapConfig {
-            jump_session: Vec::new(),
-            ..KeymapConfig::default()
-        };
+        let mut keymap = KeymapConfig { jump_session: Vec::new(), ..KeymapConfig::default() };
         keymap.heal_jump_slots();
         assert_eq!(keymap.jump_session, KeymapConfig::default().jump_session);
     }
@@ -2354,7 +2154,11 @@ mod tests {
         assert_eq!(loaded.sidebar_width, 300.0);
         assert_eq!(loaded.keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
         assert_eq!(loaded.keymap.get(ShortcutId::JumpSession(0)), "mod-alt-1");
-        assert_eq!(loaded.keymap.get(ShortcutId::JumpSession(1)), "mod-2", "not a string: the default");
+        assert_eq!(
+            loaded.keymap.get(ShortcutId::JumpSession(1)),
+            "mod-2",
+            "not a string: the default"
+        );
         assert_eq!(loaded.keymap.get(ShortcutId::JumpSession(8)), "mod-9");
         assert_eq!(loaded.keymap.jump_session.len(), JUMP_SLOTS, "no tenth slot");
     }
@@ -2400,15 +2204,7 @@ mod tests {
             assert_eq!(localize_combo(us, &azerty), here);
         }
         // Letters, named keys and keys AZERTY keeps in place stay put.
-        for combo in [
-            "mod-b",
-            "mod-shift-a",
-            "ctrl-tab",
-            "mod-enter",
-            "f5",
-            "mod-,",
-            "mod--",
-        ] {
+        for combo in ["mod-b", "mod-shift-a", "ctrl-tab", "mod-enter", "f5", "mod-,", "mod--"] {
             assert_eq!(localize_combo(combo, &azerty), combo);
         }
         // So does every key on a US layout, and the bindable spelling
@@ -2426,10 +2222,7 @@ mod tests {
             assert_eq!(localize_key(&us, &azerty), here.as_str(), "{here} via {us}");
         }
         assert_eq!(canonical_key("tab", &azerty).as_deref(), Some("tab"));
-        assert_eq!(
-            canonical_combo("mod-alt-&", &azerty).as_deref(),
-            Some("mod-alt-1")
-        );
+        assert_eq!(canonical_combo("mod-alt-&", &azerty).as_deref(), Some("mod-alt-1"));
         // AZERTY relocates @ and nothing lands on that key.
         assert_eq!(canonical_key("@", &azerty), None);
         // Two US keys sharing one target (Icelandic ] and }) take the lower.
@@ -2450,11 +2243,8 @@ mod tests {
         // ⌘J is the jump's; a person who had put it on another action keeps it there
         // and the jump arrives unbound, rather than one chord binding twice.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"shortcuts": {"saveFile": "mod-j"}}"#,
-        )
-        .unwrap();
+        std::fs::write(UiSettings::path(dir.path()), r#"{"shortcuts": {"saveFile": "mod-j"}}"#)
+            .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.keymap.get(ShortcutId::SaveFile), "mod-j");
         assert_eq!(loaded.keymap.get(ShortcutId::NextNeedsYou), "");
@@ -2475,24 +2265,15 @@ mod tests {
         let keymap = UiSettings::load(dir.path()).keymap;
         assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
         assert_eq!(keymap.get(ShortcutId::NextNeedsYou), "mod-j");
-        assert_eq!(
-            keymap.get(ShortcutId::NextSession),
-            ShortcutId::NextSession.default_combo()
-        );
+        assert_eq!(keymap.get(ShortcutId::NextSession), ShortcutId::NextSession.default_combo());
     }
 
     #[test]
     fn terminal_height_clamps_on_load() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(UiSettings::path(dir.path()), r#"{"terminalHeight": 5}"#).unwrap();
-        assert_eq!(
-            UiSettings::load(dir.path()).terminal_height,
-            TERMINAL_MIN_HEIGHT
-        );
+        assert_eq!(UiSettings::load(dir.path()).terminal_height, TERMINAL_MIN_HEIGHT);
         std::fs::write(UiSettings::path(dir.path()), r#"{"terminalHeight": 99999}"#).unwrap();
-        assert_eq!(
-            UiSettings::load(dir.path()).terminal_height,
-            TERMINAL_ABS_MAX_HEIGHT
-        );
+        assert_eq!(UiSettings::load(dir.path()).terminal_height, TERMINAL_ABS_MAX_HEIGHT);
     }
 }

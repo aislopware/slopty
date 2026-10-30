@@ -152,7 +152,11 @@ impl Shell {
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.show_notice(crate::toast::ToastKind::Error, "Couldn\u{2019}t reach the Slopty engine. Wait for it to connect, then try again.", cx);
+            self.show_notice(
+                crate::toast::ToastKind::Error,
+                "Couldn\u{2019}t reach the Slopty engine. Wait for it to connect, then try again.",
+                cx,
+            );
             return;
         };
         let params = serde_json::json!({
@@ -165,7 +169,8 @@ impl Shell {
             let chat = match opened {
                 Ok(answer) => answer.get("chatId").and_then(|c| c.as_str()).map(str::to_owned),
                 Err(error) => {
-                    let _gone = this.update(cx, |this, cx| this.past_refused(&error.to_string(), cx));
+                    let _gone =
+                        this.update(cx, |this, cx| this.past_refused(&error.to_string(), cx));
                     return;
                 }
             };
@@ -180,7 +185,10 @@ impl Shell {
                 let listed = this
                     .update(cx, |this, cx| this.state.read(cx).chats.iter().any(|c| c.id == chat))
                     .unwrap_or(true);
-                if listed || cx.background_executor().now().saturating_duration_since(since) >= CHAT_WITHIN {
+                if listed
+                    || cx.background_executor().now().saturating_duration_since(since)
+                        >= CHAT_WITHIN
+                {
                     break;
                 }
                 cx.background_executor().timer(CHAT_POLL).await;
@@ -197,7 +205,11 @@ impl Shell {
     }
 
     /// Resume ended session `chat` in a new terminal, by Claude Code's own `--resume`.
-    pub(super) fn resume_ended_session(&mut self, chat: &slopty_view_proto::Chat, cx: &mut Context<Self>) {
+    pub(super) fn resume_ended_session(
+        &mut self,
+        chat: &slopty_view_proto::Chat,
+        cx: &mut Context<Self>,
+    ) {
         let Some(native) = chat.harness_session_id.clone().filter(|id| !id.is_empty()) else {
             return;
         };
@@ -214,15 +226,19 @@ impl Shell {
 
     /// Whether ended session `chat` is being resumed now.
     pub(super) fn resuming(&self, chat: &slopty_view_proto::Chat) -> bool {
-        chat.harness_session_id
-            .as_deref()
-            .is_some_and(|native| self.past_sessions.opening(&format!("{}:{native}", chat.device_id)))
+        chat.harness_session_id.as_deref().is_some_and(|native| {
+            self.past_sessions.opening(&format!("{}:{native}", chat.device_id))
+        })
     }
 
     /// The session `key` did not open, for `why`: said in a notice.
     fn past_refused(&mut self, why: &str, cx: &mut Context<Self>) {
         self.past_sessions.opening = None;
-        self.show_error_detail("Couldn\u{2019}t open the Claude Code session. Try again.", why.to_owned(), cx);
+        self.show_error_detail(
+            "Couldn\u{2019}t open the Claude Code session. Try again.",
+            why.to_owned(),
+            cx,
+        );
         cx.notify();
     }
 }
@@ -281,7 +297,8 @@ mod tests {
     fn a_session_is_named_by_what_was_asked_in_it() {
         let mut past = row("0123456789abcdef");
         assert_eq!(past.label(), "Session 01234567");
-        past.prompt = Some(PromptLine { text: "the last\nprompt".to_owned(), ..PromptLine::default() });
+        past.prompt =
+            Some(PromptLine { text: "the last\nprompt".to_owned(), ..PromptLine::default() });
         assert_eq!(past.label(), "the last prompt");
         past.title = Some("Fix the build".to_owned());
         assert_eq!(past.label(), "Fix the build");

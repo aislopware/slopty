@@ -14,13 +14,12 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use gpui::{
-    AnyElement, BackgroundExecutor, Image, ImageFormat, SharedString, Size, div, prelude::*, px,
-};
+use gpui::prelude::*;
+use gpui::{AnyElement, BackgroundExecutor, Image, ImageFormat, SharedString, Size, div, px};
+use slopty_view_rpc::methods;
 
 use crate::state::EngineHandle;
 use crate::theme::ink;
-use slopty_view_rpc::methods;
 
 /// The largest attachment read back.
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
@@ -61,10 +60,7 @@ pub(crate) fn with_attachments(text: &str, paths: &[String]) -> String {
         return text.to_string();
     }
     let refs: Vec<String> = paths.iter().map(|p| format!("- {p}")).collect();
-    format!(
-        "{text}\n\nAttached images (local files — open them to view):\n{}",
-        refs.join("\n")
-    )
+    format!("{text}\n\nAttached images (local files — open them to view):\n{}", refs.join("\n"))
 }
 
 /// An attachment ref parsed back out of a user message's text.
@@ -83,16 +79,8 @@ pub struct ParsedUserMessage {
 }
 
 fn name_from_path(path: &str) -> String {
-    let name = path
-        .rsplit(['/', '\\'])
-        .next()
-        .map(str::trim)
-        .unwrap_or_default();
-    if name.is_empty() {
-        "image".to_string()
-    } else {
-        name.to_string()
-    }
+    let name = path.rsplit(['/', '\\']).next().map(str::trim).unwrap_or_default();
+    if name.is_empty() { "image".to_string() } else { name.to_string() }
 }
 
 /// Find the refs trailer: a blank line, then a line starting (case-insensitive)
@@ -105,10 +93,8 @@ fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
     while let Some(rel) = lower[from..].find(needle) {
         let gap = from + rel;
         let line_start = gap + 2;
-        let line_end = content[line_start..]
-            .find('\n')
-            .map(|p| line_start + p)
-            .unwrap_or(content.len());
+        let line_end =
+            content[line_start..].find('\n').map(|p| line_start + p).unwrap_or(content.len());
         let line = content[line_start..line_end].trim_end_matches('\r');
         if line.ends_with("):") {
             let refs_start = (line_end + 1).min(content.len());
@@ -122,10 +108,7 @@ fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
 /// Split the visible prompt from its attachment-ref trailer.
 pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
     let Some((body_end, refs_start)) = find_refs_marker(content) else {
-        return ParsedUserMessage {
-            text: content.to_string(),
-            attachments: Vec::new(),
-        };
+        return ParsedUserMessage { text: content.to_string(), attachments: Vec::new() };
     };
     let body = content[..body_end].trim_end();
     let attachments: Vec<UserImageAttachment> = content[refs_start..]
@@ -142,15 +125,9 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
         })
         .collect();
     if attachments.is_empty() {
-        return ParsedUserMessage {
-            text: content.to_string(),
-            attachments,
-        };
+        return ParsedUserMessage { text: content.to_string(), attachments };
     }
-    ParsedUserMessage {
-        text: body.to_string(),
-        attachments,
-    }
+    ParsedUserMessage { text: body.to_string(), attachments }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,8 +179,15 @@ pub(crate) async fn read_attachment_bytes(
     path: &str,
     expected_raster_mime: Option<&str>,
 ) -> Option<(String, String, Vec<u8>)> {
-    read_attachment_bytes_with(engine, executor, target_device_id, path, expected_raster_mime, |_| {})
-        .await
+    read_attachment_bytes_with(
+        engine,
+        executor,
+        target_device_id,
+        path,
+        expected_raster_mime,
+        |_| {},
+    )
+    .await
 }
 
 /// [`read_attachment_bytes`], handing `head` the file's first bytes as soon as its first
@@ -222,10 +206,8 @@ pub(crate) async fn read_attachment_bytes_with(
     let mut offset = 0u64;
     let mut done = false;
     for _ in 0..MAX_READ_CHUNKS {
-        let params = with_target(
-            serde_json::json!({ "path": path, "offset": offset }),
-            target_device_id,
-        );
+        let params =
+            with_target(serde_json::json!({ "path": path, "offset": offset }), target_device_id);
         let chunk = call_with_timeout(
             engine,
             executor,
@@ -267,9 +249,7 @@ pub(crate) async fn read_attachment_bytes_with(
     }
     // Callers await this on the UI thread; decode the (up to 24 MiB) payload
     // off it.
-    let bytes = executor
-        .spawn(async move { BASE64.decode(b64.as_bytes()).ok() })
-        .await?;
+    let bytes = executor.spawn(async move { BASE64.decode(b64.as_bytes()).ok() }).await?;
     Some((name, mime, bytes))
 }
 
@@ -280,23 +260,15 @@ pub async fn read_attachment_image(
     path: &str,
     expected_raster_mime: Option<&str>,
 ) -> Option<LoadedAttachmentImage> {
-    let (name, mime, bytes) = read_attachment_bytes(
-        engine,
-        executor,
-        target_device_id,
-        path,
-        expected_raster_mime,
-    )
-    .await?;
+    let (name, mime, bytes) =
+        read_attachment_bytes(engine, executor, target_device_id, path, expected_raster_mime)
+            .await?;
     if bytes.is_empty() {
         return None;
     }
     let image = if let Some(expected) = expected_raster_mime {
         if expected != mime
-            || !matches!(
-                mime.as_str(),
-                "image/png" | "image/jpeg" | "image/webp" | "image/gif"
-            )
+            || !matches!(mime.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif")
         {
             return None;
         }
@@ -317,11 +289,7 @@ pub async fn read_attachment_image(
         Arc::new(Image::from_bytes(format, bytes))
     };
     Some(LoadedAttachmentImage {
-        name: if name.is_empty() {
-            name_from_path(path)
-        } else {
-            name
-        },
+        name: if name.is_empty() { name_from_path(path) } else { name },
         image,
     })
 }
@@ -350,18 +318,9 @@ pub enum AttachmentSnapshot {
 }
 
 enum CacheEntry {
-    Loading {
-        attempts: u32,
-    },
-    Loaded {
-        image: CachedAttachmentImage,
-        bytes: usize,
-        last_used: u64,
-    },
-    Error {
-        attempts: u32,
-        at: Instant,
-    },
+    Loading { attempts: u32 },
+    Loaded { image: CachedAttachmentImage, bytes: usize, last_used: u64 },
+    Error { attempts: u32, at: Instant },
 }
 
 fn retry_delay(attempts: u32) -> Duration {
@@ -383,11 +342,7 @@ pub(crate) struct AttachmentKey {
 
 impl AttachmentKey {
     pub(crate) fn new(device: &str, path: &str, mime: Option<&str>) -> Self {
-        Self {
-            device: device.into(),
-            path: path.into(),
-            raster_mime: mime.map(str::to_owned),
-        }
+        Self { device: device.into(), path: path.into(), raster_mime: mime.map(str::to_owned) }
     }
 }
 
@@ -419,21 +374,12 @@ impl ImageCache {
         // CPU/GPU copies as well as encoded bytes in the existing cache budget.
         let pixels = png_dimensions(&image.image.bytes)
             .map_or(0, |(w, h)| (w as usize).saturating_mul(h as usize));
-        let bytes = image
-            .image
-            .bytes
-            .len()
-            .saturating_add(pixels.saturating_mul(8));
+        let bytes = image.image.bytes.len().saturating_add(pixels.saturating_mul(8));
         let generated = key.raster_mime.is_some();
         self.tick += 1;
-        if let Some(CacheEntry::Loaded { image, bytes, .. }) = self.map.insert(
-            key.clone(),
-            CacheEntry::Loaded {
-                image,
-                bytes,
-                last_used: self.tick,
-            },
-        ) {
+        if let Some(CacheEntry::Loaded { image, bytes, .. }) =
+            self.map.insert(key.clone(), CacheEntry::Loaded { image, bytes, last_used: self.tick })
+        {
             self.loaded_bytes = self.loaded_bytes.saturating_sub(bytes);
             if generated {
                 self.generated_bytes = self.generated_bytes.saturating_sub(bytes);
@@ -517,14 +463,13 @@ pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnaps
         cache.tick
     };
     match cache.map.get_mut(source) {
-        Some(CacheEntry::Loaded {
-            image, last_used, ..
-        }) => {
+        Some(CacheEntry::Loaded { image, last_used, .. }) => {
             *last_used = tick;
             AttachmentSnapshot::Loaded(image.clone())
         }
         Some(CacheEntry::Error { attempts, at }) => AttachmentSnapshot::Error {
-            retry_in: retry_delay(attempts.saturating_sub(1)).saturating_sub(crate::clock::spent(*at)),
+            retry_in: retry_delay(attempts.saturating_sub(1))
+                .saturating_sub(crate::clock::spent(*at)),
         },
         Some(CacheEntry::Loading { .. }) | None => AttachmentSnapshot::Loading,
     }
@@ -574,9 +519,7 @@ impl Drop for AttachmentLoadGuard {
     fn drop(&mut self) {
         let mut cache = cache().lock().unwrap();
         if let Some(entry @ CacheEntry::Loading { .. }) = cache.map.get_mut(&self.0) {
-            let CacheEntry::Loading { attempts } = entry else {
-                unreachable!()
-            };
+            let CacheEntry::Loading { attempts } = entry else { unreachable!() };
             *entry = CacheEntry::Error {
                 attempts: attempts.saturating_add(1),
                 at: crate::clock::stopwatch(), // a retry's wait, not a moment drawn
@@ -586,10 +529,7 @@ impl Drop for AttachmentLoadGuard {
 }
 
 pub(crate) fn store_loaded_for(source: &AttachmentKey, name: SharedString, image: Arc<Image>) {
-    cache()
-        .lock()
-        .unwrap()
-        .insert_loaded(source.clone(), CachedAttachmentImage { name, image });
+    cache().lock().unwrap().insert_loaded(source.clone(), CachedAttachmentImage { name, image });
 }
 
 pub(crate) fn store_error_for(source: &AttachmentKey) {
@@ -624,12 +564,7 @@ pub struct PreviewImage {
 
 impl PreviewImage {
     pub fn new(name: impl Into<SharedString>, image: Arc<Image>) -> Self {
-        Self {
-            name: name.into(),
-            image,
-            viewer: Default::default(),
-            plate: None,
-        }
+        Self { name: name.into(), image, viewer: Default::default(), plate: None }
     }
 
     pub(crate) fn with_plate(mut self, plate: gpui::Hsla) -> Self {
@@ -663,29 +598,19 @@ pub(crate) fn lightbox_with_size(
     let max_h = px(f32::from(viewport.height) * 0.85);
     let max_w = px(f32::from(viewport.width) * 0.9);
     let natural_size = natural_size.or_else(|| {
-        preview
-            .image
-            .clone()
-            .use_render_image(window, cx)
-            .map(|image| {
-                let dimensions = image.size(0);
-                gpui::size(
-                    px(dimensions.width.0 as f32),
-                    px(dimensions.height.0 as f32),
-                )
-            })
+        preview.image.clone().use_render_image(window, cx).map(|image| {
+            let dimensions = image.size(0);
+            gpui::size(px(dimensions.width.0 as f32), px(dimensions.height.0 as f32))
+        })
     });
     let content = match natural_size {
-        Some(natural) => preview.viewer.render(
-            preview.image.clone(),
-            natural,
-            None,
-            preview.plate,
-            window,
-            cx,
-        ),
+        Some(natural) => {
+            preview.viewer.render(preview.image.clone(), natural, None, preview.plate, window, cx)
+        }
         // The house's pending line, shown only past its grace.
-        None => crate::loaders::pending("attachment-preview-load", "Loading image…").into_any_element(),
+        None => {
+            crate::loaders::pending("attachment-preview-load", "Loading image…").into_any_element()
+        }
     };
     // The caption goes under the picture as it is fitted (the viewer's own fit, never
     // past its natural size), not under the room it may be zoomed in, which a wide picture
@@ -729,71 +654,69 @@ pub(crate) fn lightbox_with_size(
         })
         .child(crate::icons::icon(crate::icons::CLOSE).size(px(16.0)).text_color(ink(0.8)));
     gpui::deferred(
-        gpui::anchored()
-            .position(gpui::point(px(0.0), px(0.0)))
-            .child(
-                div()
-                    .id("attachment-lightbox")
-                    // A dialog named for its image, which VoiceOver can reach and close.
-                    .role(gpui::Role::Dialog)
-                    .aria_label(preview.name.clone())
-                    .occlude()
-                    .track_focus(focus)
-                    .relative()
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .bg(crate::popover::scrim_alpha(0.7))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "escape" {
-                            cx.stop_propagation();
-                            close_on_key(window, cx);
-                        }
-                    })
-                    .capture_any_mouse_down(move |event, _, _| {
-                        if event.button == gpui::MouseButton::Left {
-                            press_state.begin_click();
-                        }
-                    })
-                    .on_click(move |_, window, cx| {
+        gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
+            div()
+                .id("attachment-lightbox")
+                // A dialog named for its image, which VoiceOver can reach and close.
+                .role(gpui::Role::Dialog)
+                .aria_label(preview.name.clone())
+                .occlude()
+                .track_focus(focus)
+                .relative()
+                .w(viewport.width)
+                .h(viewport.height)
+                .bg(crate::popover::scrim_alpha(0.7))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
                         cx.stop_propagation();
-                        if !click_state.dragged() {
-                            on_close(window, cx);
-                        }
-                    })
-                    .on_scroll(|_, _, cx| cx.stop_propagation())
-                    .child(
-                        div()
-                            .id("attachment-lightbox-image")
-                            .role(gpui::Role::Image)
-                            .aria_label(preview.name.clone())
-                            .w(max_w)
-                            .h(max_h)
-                            .child(content),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(caption_top)
-                            .left_0()
-                            .w(viewport.width)
-                            .flex()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .debug_selector(|| "attachment-lightbox-caption".into())
-                                    .max_w(max_w)
-                                    .overflow_hidden()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .text_color(ink(0.45))
-                                    .child(preview.name.clone()),
-                            ),
-                    )
-                    .child(close),
-            ),
+                        close_on_key(window, cx);
+                    }
+                })
+                .capture_any_mouse_down(move |event, _, _| {
+                    if event.button == gpui::MouseButton::Left {
+                        press_state.begin_click();
+                    }
+                })
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    if !click_state.dragged() {
+                        on_close(window, cx);
+                    }
+                })
+                .on_scroll(|_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .id("attachment-lightbox-image")
+                        .role(gpui::Role::Image)
+                        .aria_label(preview.name.clone())
+                        .w(max_w)
+                        .h(max_h)
+                        .child(content),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .top(caption_top)
+                        .left_0()
+                        .w(viewport.width)
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .debug_selector(|| "attachment-lightbox-caption".into())
+                                .max_w(max_w)
+                                .overflow_hidden()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(ink(0.45))
+                                .child(preview.name.clone()),
+                        ),
+                )
+                .child(close),
+        ),
     )
     .priority(3)
     .into_any_element()
@@ -810,9 +733,19 @@ mod tests {
     }
 
     impl gpui::Render for Shown {
-        fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
             let closed = self.closed.clone();
-            div().size_full().child(lightbox(window, &self.preview, &self.focus, move |_, _| closed.set(true), cx))
+            div().size_full().child(lightbox(
+                window,
+                &self.preview,
+                &self.focus,
+                move |_, _| closed.set(true),
+                cx,
+            ))
         }
     }
 
@@ -830,10 +763,16 @@ mod tests {
             move |_, cx| {
                 let png = {
                     let mut bytes = std::io::Cursor::new(Vec::new());
-                    image::RgbImage::new(4, 4).write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+                    image::RgbImage::new(4, 4)
+                        .write_to(&mut bytes, image::ImageFormat::Png)
+                        .unwrap();
                     Image::from_bytes(ImageFormat::Png, bytes.into_inner())
                 };
-                Shown { preview: PreviewImage::new("chart.png", Arc::new(png)), focus: cx.focus_handle(), closed }
+                Shown {
+                    preview: PreviewImage::new("chart.png", Arc::new(png)),
+                    focus: cx.focus_handle(),
+                    closed,
+                }
             }
         });
         let nodes = cx.update(|window, cx| {
@@ -859,9 +798,20 @@ mod tests {
     fn the_lightbox_names_its_picture_just_under_it(cx: &mut gpui::TestAppContext) {
         struct Sized(PreviewImage, gpui::FocusHandle);
         impl gpui::Render for Sized {
-            fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            fn render(
+                &mut self,
+                window: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
                 let natural = Some(gpui::size(px(640.0), px(400.0)));
-                div().size_full().child(lightbox_with_size(window, &self.0, &self.1, natural, |_, _| {}, cx))
+                div().size_full().child(lightbox_with_size(
+                    window,
+                    &self.0,
+                    &self.1,
+                    natural,
+                    |_, _| {},
+                    cx,
+                ))
             }
         }
         cx.update(|cx| {
@@ -904,7 +854,6 @@ mod tests {
         assert_eq!(parsed.attachments.len(), 1);
     }
 
-
     #[test]
     fn plain_text_passes_through_unchanged() {
         assert_eq!(with_attachments("hello", &[]), "hello");
@@ -937,11 +886,7 @@ mod tests {
             ("ico", None),
             ("txt", None),
         ] {
-            assert_eq!(
-                format_by_extension(Path::new(&format!("f.{ext}"))),
-                expect,
-                "ext {ext}"
-            );
+            assert_eq!(format_by_extension(Path::new(&format!("f.{ext}"))), expect, "ext {ext}");
         }
     }
 
@@ -953,7 +898,6 @@ mod tests {
         assert_eq!(retry_delay(3), Duration::from_millis(15_000));
         assert_eq!(retry_delay(9), Duration::from_millis(15_000));
     }
-
 }
 
 #[cfg(test)]
@@ -968,36 +912,18 @@ mod generated_image_tests {
         let gif = AttachmentKey::new(owner, path, Some("image/gif"));
         let raw = Arc::new(Image::from_bytes(ImageFormat::Gif, b"GIF89a".to_vec()));
         store_loaded_for(&AttachmentKey::new(owner, path, None), "image.gif".into(), raw.clone());
-        assert!(matches!(
-            attachment_snapshot_for(&png),
-            AttachmentSnapshot::Loading
-        ));
+        assert!(matches!(attachment_snapshot_for(&png), AttachmentSnapshot::Loading));
         assert!(begin_load_for(&png));
         assert!(!begin_load_for(&png));
         assert!(begin_load_for(&gif));
         drop(AttachmentLoadGuard(png.clone()));
-        assert!(matches!(
-            attachment_snapshot_for(&png),
-            AttachmentSnapshot::Error { .. }
-        ));
-        assert!(matches!(
-            attachment_snapshot_for(&gif),
-            AttachmentSnapshot::Loading
-        ));
+        assert!(matches!(attachment_snapshot_for(&png), AttachmentSnapshot::Error { .. }));
+        assert!(matches!(attachment_snapshot_for(&gif), AttachmentSnapshot::Loading));
         store_loaded_for(&gif, "image.gif".into(), raw);
-        assert!(matches!(
-            attachment_snapshot_for(&png),
-            AttachmentSnapshot::Error { .. }
-        ));
-        assert!(matches!(
-            attachment_snapshot_for(&gif),
-            AttachmentSnapshot::Loaded(_)
-        ));
+        assert!(matches!(attachment_snapshot_for(&png), AttachmentSnapshot::Error { .. }));
+        assert!(matches!(attachment_snapshot_for(&gif), AttachmentSnapshot::Loaded(_)));
         let changed = AttachmentKey::new(owner, path, Some("image/jpeg"));
-        assert!(matches!(
-            attachment_snapshot_for(&changed),
-            AttachmentSnapshot::Loading
-        ));
+        assert!(matches!(attachment_snapshot_for(&changed), AttachmentSnapshot::Loading));
     }
 
     #[test]
@@ -1086,13 +1012,8 @@ mod generated_image_tests {
             MAX_ATTACHMENT_BYTES as usize,
         )
         .unwrap();
-        assert_eq!(
-            image::guess_format(&decoded.image.bytes).unwrap(),
-            image::ImageFormat::Png
-        );
-        let pixels = image::load_from_memory(&decoded.image.bytes)
-            .unwrap()
-            .to_rgba8();
+        assert_eq!(image::guess_format(&decoded.image.bytes).unwrap(), image::ImageFormat::Png);
+        let pixels = image::load_from_memory(&decoded.image.bytes).unwrap().to_rgba8();
         assert_eq!(pixels.get_pixel(0, 0).0, [255, 0, 0, 255]);
     }
 
@@ -1163,11 +1084,9 @@ mod generated_image_tests {
                 .write_to(&mut png, image::ImageFormat::Png)
                 .unwrap();
             let calls = Arc::new(Mutex::new(vec![]));
-            let engine =
-                EngineHandle::from_test_client(slopty_view_rpc::memory_client(Arc::new(ImageRpc {
-                    calls: calls.clone(),
-                    bytes: png.into_inner(),
-                })));
+            let engine = EngineHandle::from_test_client(slopty_view_rpc::memory_client(Arc::new(
+                ImageRpc { calls: calls.clone(), bytes: png.into_inner() },
+            )));
             let loaded = read_attachment_image(
                 &engine,
                 &executor,
@@ -1180,10 +1099,7 @@ mod generated_image_tests {
             let calls = calls.lock().unwrap();
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0]["path"], "/profile/uploads/image.png");
-            assert_eq!(
-                calls[0].get("targetDeviceId").and_then(|v| v.as_str()),
-                target
-            );
+            assert_eq!(calls[0].get("targetDeviceId").and_then(|v| v.as_str()), target);
         }
     }
 
@@ -1204,9 +1120,7 @@ mod generated_image_tests {
     #[test]
     fn generated_image_decode_accepts_attachment_byte_cap_but_rejects_excess() {
         let mut png = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::new_rgba8(1, 1)
-            .write_to(&mut png, image::ImageFormat::Png)
-            .unwrap();
+        image::DynamicImage::new_rgba8(1, 1).write_to(&mut png, image::ImageFormat::Png).unwrap();
         let mut bytes = png.into_inner();
         // Padding represents a large source with small dimensions; the intake
         // cap is 24 MiB, independent of the workspace preview's 8 MiB cap.

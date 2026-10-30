@@ -15,9 +15,10 @@
 
 use std::time::{Duration, Instant};
 
+use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Global, IntoElement, LongPressEvent, Pixels, ScrollEvent,
-    SharedString, TouchPhase, Window, div, prelude::*, px,
+    SharedString, TouchPhase, Window, div, px,
 };
 
 use super::Shell;
@@ -63,7 +64,8 @@ const SHEET_DISMISS: f32 = 0.3;
 const SHEET_FLICK: f32 = 9.0;
 /// The glide to rest: the theme's sheet pace on the drawer's curve, which follows a flick.
 const SHEET_GLIDE: Duration = Duration::from_millis(300);
-const SHEET_CURVE: crate::motion::CubicBezier = crate::motion::CubicBezier::new(0.32, 0.72, 0.0, 1.0);
+const SHEET_CURVE: crate::motion::CubicBezier =
+    crate::motion::CubicBezier::new(0.32, 0.72, 0.0, 1.0);
 /// The scrim over what the full sheet leaves above it, in dark-mode terms
 /// ([`crate::theme::scrim`]); it deepens as the sheet rises from the medium detent.
 const SHEET_DIM: f32 = 0.3;
@@ -313,12 +315,21 @@ fn band_target(id: &'static str, label: impl Into<SharedString>) -> gpui::Statef
 }
 
 /// One of the phone's icon buttons, a finger's target, named for a screen reader.
-fn nav_icon(id: &'static str, glyph: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+fn nav_icon(
+    id: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
     nav_button(id, icon(glyph).size(px(19.0)).text_color(theme.text), label)
 }
 
 /// [`nav_icon`] around a drawn glyph.
-fn nav_button(id: &'static str, glyph: impl IntoElement, label: &'static str) -> gpui::Stateful<gpui::Div> {
+fn nav_button(
+    id: &'static str,
+    glyph: impl IntoElement,
+    label: &'static str,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .debug_selector(move || id.into())
@@ -419,7 +430,11 @@ impl Shell {
         window: &Window,
         cx: &App,
     ) -> gpui::Div {
-        let row = if session && self.compact() { cx.try_global::<Row>().map(|row| row.0.clone()) } else { None };
+        let row = if session && self.compact() {
+            cx.try_global::<Row>().map(|row| row.0.clone())
+        } else {
+            None
+        };
         let page = div().flex_1().min_h_0().w_full().child(page);
         if !cfg!(target_os = "ios") {
             return div().size_full().flex().flex_col().child(page).children(row);
@@ -428,11 +443,8 @@ impl Shell {
         let safe = insets.safe_area;
         // The keyboard's band stays only while a field takes what is typed: once the keyboard
         // drops the page reaches the safe area again, whatever keyboard frame UIKit last reported.
-        let bottom = if self.keyboard_band_held(window) {
-            insets.effective().bottom
-        } else {
-            safe.bottom
-        };
+        let bottom =
+            if self.keyboard_band_held(window) { insets.effective().bottom } else { safe.bottom };
         // Under a session the bands it keeps clear continue its terminal's ground rather than
         // standing as empty strips of the window's: the home indicator's, the keyboard's while it
         // rises or stands, and on a tablet the status bar's over its title row, right of the
@@ -455,7 +467,9 @@ impl Shell {
             .flex()
             .flex_col()
             .when(phone, |frame| frame.bg(if session { ground } else { theme.glass() }))
-            .when(!phone, |frame| frame.children(band(true, safe.top)).children(band(false, bottom)))
+            .when(!phone, |frame| {
+                frame.children(band(true, safe.top)).children(band(false, bottom))
+            })
             .child(page)
             .children(row)
             .pt(safe.top)
@@ -514,9 +528,12 @@ impl Shell {
         let new_glyph = step.map_or(icons::PLUS, super::spaces::FirstStep::glyph);
         let eye = self.render_inbox_button(theme, cx);
         type OnClick = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
-        let button = |id: &'static str, glyph: &'static str, label: &'static str, on_click: OnClick| {
-            super::window_control_button(id, glyph, theme, on_click).role(gpui::Role::Button).aria_label(label)
-        };
+        let button =
+            |id: &'static str, glyph: &'static str, label: &'static str, on_click: OnClick| {
+                super::window_control_button(id, glyph, theme, on_click)
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+            };
         let palette = button(
             "compact-palette",
             icons::COMMAND,
@@ -597,7 +614,10 @@ impl Shell {
             let session = state.selected_chat_row().map(|chat| BandSession {
                 chat: chat.id.clone(),
                 title: crate::transcript::single_line(
-                    chat.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("New session"),
+                    chat.title
+                        .as_deref()
+                        .filter(|title| !title.trim().is_empty())
+                        .unwrap_or("New session"),
                 )
                 .into(),
                 machine_branch: super::tabs::machine_and_branch(
@@ -606,7 +626,11 @@ impl Shell {
                 )
                 .map(SharedString::from),
                 harness: chat.config.as_ref().map(|config| config.harness),
-                mark: Mark::of(state.display_status_for(chat, now), state.session_for(&chat.id), now),
+                mark: Mark::of(
+                    state.display_status_for(chat, now),
+                    state.session_for(&chat.id),
+                    now,
+                ),
                 terminal: state.session_terminal(&chat.id).is_some(),
                 inspects: crate::inspector::inspects(state, &chat.id),
             });
@@ -614,7 +638,8 @@ impl Shell {
         };
         let terminal = session.as_ref().is_some_and(|session| session.terminal);
         let ground = terminal.then(|| self.shown_ground(cx));
-        let ink = ground.map_or_else(|| theme.clone(), |ground| super::tabs::ink_for(ground, &theme));
+        let ink =
+            ground.map_or_else(|| theme.clone(), |ground| super::tabs::ink_for(ground, &theme));
         if let (Some(session), Some(ground)) = (&session, ground) {
             self.set_key_row(session.harness, ground, cx);
         }
@@ -651,7 +676,11 @@ impl Shell {
                 .aria_label(session.title.clone())
                 .when(session.inspects, |identity| {
                     identity
-                        .aria_description(if inspector_up { "Hides the inspector" } else { "Shows the inspector" })
+                        .aria_description(if inspector_up {
+                            "Hides the inspector"
+                        } else {
+                            "Shows the inspector"
+                        })
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _, window, cx| {
                             // The sheet comes up over the terminal, so the keyboard makes way.
@@ -709,10 +738,10 @@ impl Shell {
                     cx.notify();
                 }))
                 .child(
-                    div()
-                        .size(px(7.0))
-                        .rounded_full()
-                        .bg(super::marks::hue(crate::loaders::status_mark::MarkState::Waiting, &ink)),
+                    div().size(px(7.0)).rounded_full().bg(super::marks::hue(
+                        crate::loaders::status_mark::MarkState::Waiting,
+                        &ink,
+                    )),
                 )
                 .child(
                     div()
@@ -746,7 +775,12 @@ impl Shell {
     /// The key row's door from the band: what runs in the session on screen (its agent, by the
     /// chat's harness, or a shell), the ground under it, and its terminal. The row is made with
     /// the first session page a phone draws.
-    fn set_key_row(&mut self, harness: Option<slopty_view_proto::HarnessId>, ground: gpui::Hsla, cx: &mut Context<Self>) {
+    fn set_key_row(
+        &mut self,
+        harness: Option<slopty_view_proto::HarnessId>,
+        ground: gpui::Hsla,
+        cx: &mut Context<Self>,
+    ) {
         let row = if let Some(row) = cx.try_global::<Row>() {
             row.0.clone()
         } else {
@@ -769,7 +803,12 @@ impl Shell {
             && !crate::live::key_row::hardware_keyboard(cx)
             && self.session_terminal.read(cx).focus_handle().contains_focused(window, cx);
         let bar = if holds {
-            let harness = self.state.read(cx).selected_chat_row().and_then(|chat| chat.config.as_ref()).map(|config| config.harness);
+            let harness = self
+                .state
+                .read(cx)
+                .selected_chat_row()
+                .and_then(|chat| chat.config.as_ref())
+                .map(|config| config.harness);
             key_row::bar(harness)
         } else {
             crate::live::key_row::Bar::default()
@@ -832,7 +871,11 @@ impl Shell {
             .flex_none()
             .w_full()
             .h(px(Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD))
-            .bg(if theme.is_frost() { theme.glass() } else { gpui::Hsla { a: 1.0, ..theme.glass() } })
+            .bg(if theme.is_frost() {
+                theme.glass()
+            } else {
+                gpui::Hsla { a: 1.0, ..theme.glass() }
+            })
             .border_b_1()
             .border_color(theme.border)
             .flex()
@@ -877,7 +920,9 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .bg(theme.panel_bg())
-                .when(cfg!(target_os = "ios"), |el| el.pt(safe.top).pb(bottom).pl(safe.left).pr(safe.right))
+                .when(cfg!(target_os = "ios"), |el| {
+                    el.pt(safe.top).pb(bottom).pl(safe.left).pr(safe.right)
+                })
                 .child(bar)
                 .child(div().flex_1().min_h_0().w_full().child(body))
                 .children(overlays)
@@ -888,27 +933,40 @@ impl Shell {
     /// The sheet's pan, which a finger starts on its header (`on`): from then on the
     /// gesture is the sheet's, wherever the header has moved from the place the pan started,
     /// which a touch pan's every step is hit-tested at, through the momentum after it is let go.
-    fn sheet_pan(&self, on: bool, height: f32, safe_top: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn sheet_pan(
+        &self,
+        on: bool,
+        height: f32,
+        safe_top: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let shell = cx.weak_entity();
         gpui::canvas(
-            move |bounds, window, _| on.then(|| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)),
+            move |bounds, window, _| {
+                on.then(|| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal))
+            },
             move |_, hitbox, window, _| {
                 window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Capture {
                         return;
                     }
                     let sheet = cx.default_global::<Sheet>();
-                    let owned = sheet.drag.is_some() || (sheet.fling && event.momentum_phase.is_some());
+                    let owned =
+                        sheet.drag.is_some() || (sheet.fling && event.momentum_phase.is_some());
                     let starts = event.momentum_phase.is_none()
                         && event.touch_phase == TouchPhase::Started
-                        && hitbox.as_ref().is_some_and(|hitbox| hitbox.should_handle_scroll(window));
+                        && hitbox
+                            .as_ref()
+                            .is_some_and(|hitbox| hitbox.should_handle_scroll(window));
                     if !owned && !starts {
                         if event.momentum_phase.is_none() {
                             sheet.fling = false;
                         }
                         return;
                     }
-                    let _ = shell.update(cx, |this, cx| this.pan_compact_inspector(event, height, safe_top, cx));
+                    let _ = shell.update(cx, |this, cx| {
+                        this.pan_compact_inspector(event, height, safe_top, cx)
+                    });
                     cx.stop_propagation();
                     window.refresh();
                 });
@@ -920,7 +978,13 @@ impl Shell {
 
     /// One step of a finger on the phone's inspector sheet ([`Self::sheet_pan`]): the sheet
     /// follows it, and comes to rest where [`sheet_rest`] says when let go.
-    fn pan_compact_inspector(&mut self, event: &ScrollEvent, height: f32, safe_top: f32, cx: &mut Context<Self>) {
+    fn pan_compact_inspector(
+        &mut self,
+        event: &ScrollEvent,
+        height: f32,
+        safe_top: f32,
+        cx: &mut Context<Self>,
+    ) {
         let (at, glide) = (crate::clock::now(cx), !cx.reduce_motion());
         let sheet = cx.default_global::<Sheet>();
         if let Some(momentum) = event.momentum_phase {
@@ -934,7 +998,8 @@ impl Shell {
                     sheet.drag = None;
                 }
                 // From where it is, mid-glide or at rest.
-                let travel = sheet.top.map_or(0.0, |top| top - detent_top(sheet.detent, height, safe_top));
+                let travel =
+                    sheet.top.map_or(0.0, |top| top - detent_top(sheet.detent, height, safe_top));
                 let drag = sheet.drag.get_or_insert(SheetDrag { travel, last: 0.0 });
                 drag.travel += step;
                 drag.last = step;
@@ -995,7 +1060,11 @@ impl Shell {
         // The page's own box on iOS: inside the safe area, and above the keyboard while a
         // field holds it (`compact_frame`).
         let (page_top, page_bottom, page_left, page_right) = if ios {
-            let bottom = if self.keyboard_band_held(window) { insets.effective().bottom } else { safe.bottom };
+            let bottom = if self.keyboard_band_held(window) {
+                insets.effective().bottom
+            } else {
+                safe.bottom
+            };
             (safe.top, bottom, safe.left, safe.right)
         } else {
             (px(0.0), px(0.0), px(0.0), px(0.0))
@@ -1003,13 +1072,18 @@ impl Shell {
         let sheet = cx.default_global::<Sheet>();
         if up && !sheet.up {
             // Up from the foot, or back up from wherever it was sinking.
-            let from = sheet.top.filter(|_| sheet.glide.is_some_and(|glide| glide.away)).unwrap_or(height);
+            let from =
+                sheet.top.filter(|_| sheet.glide.is_some_and(|glide| glide.away)).unwrap_or(height);
             sheet.detent = Detent::Medium;
             sheet.drag = None;
             sheet.glide = (!reduced).then_some(Glide { from, at: now, away: false });
         } else if !up && sheet.up {
             sheet.drag = None;
-            sheet.glide = (!reduced).then(|| Glide { from: sheet.top.unwrap_or(height), at: now, away: true });
+            sheet.glide = (!reduced).then(|| Glide {
+                from: sheet.top.unwrap_or(height),
+                at: now,
+                away: true,
+            });
         }
         sheet.up = up;
         let rest = detent_top(sheet.detent, height, safe_top);
@@ -1041,7 +1115,8 @@ impl Shell {
         }
         let large = detent_top(Detent::Large, height, safe_top);
         let medium = detent_top(Detent::Medium, height, safe_top);
-        let dim = if medium > large { ((medium - top) / (medium - large)).clamp(0.0, 1.0) } else { 0.0 };
+        let dim =
+            if medium > large { ((medium - top) / (medium - large)).clamp(0.0, 1.0) } else { 0.0 };
         let theme = Theme::of(cx).clone();
         let put_away = |this: &mut Self, cx: &mut Context<Self>| {
             this.put_away_view(super::RightSurface::Inspector, cx);
@@ -1064,7 +1139,11 @@ impl Shell {
             .id("compact-inspector-grabber")
             .debug_selector(|| "compact-inspector-grabber".into())
             .role(gpui::Role::Button)
-            .aria_label(if detent == Detent::Large { "Collapse inspector" } else { "Expand inspector" })
+            .aria_label(if detent == Detent::Large {
+                "Collapse inspector"
+            } else {
+                "Expand inspector"
+            })
             .absolute()
             .top_0()
             .left(px(0.0))
@@ -1080,7 +1159,8 @@ impl Shell {
                 let (at, glide) = (crate::clock::now(cx), !cx.reduce_motion());
                 let sheet = cx.default_global::<Sheet>();
                 let from = sheet.top.unwrap_or(medium);
-                sheet.detent = if sheet.detent == Detent::Large { Detent::Medium } else { Detent::Large };
+                sheet.detent =
+                    if sheet.detent == Detent::Large { Detent::Medium } else { Detent::Large };
                 sheet.glide = glide.then_some(Glide { from, at, away: false });
                 this.motion_active.set(true);
                 cx.notify();
@@ -1118,8 +1198,18 @@ impl Shell {
                     .text_color(theme.text)
                     .child("Inspector"),
             )
-            .child(div().absolute().top_0().bottom_0().right(px(12.0)).flex().items_center().child(close));
-        let fill = if theme.is_frost() { theme.glass() } else { gpui::Hsla { a: 1.0, ..theme.glass() } };
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(px(12.0))
+                    .flex()
+                    .items_center()
+                    .child(close),
+            );
+        let fill =
+            if theme.is_frost() { theme.glass() } else { gpui::Hsla { a: 1.0, ..theme.glass() } };
         let body = div()
             .id("compact-inspector-sheet")
             .debug_selector(|| "compact-inspector-sheet".into())
@@ -1340,7 +1430,10 @@ mod tests {
         let steps = pan(&mut active, &[(0.0, 0.0), (2.0, 30.0), (60.0, 40.0), (40.0, 0.0)]);
         assert!(steps.iter().all(|step| *step == SwipeStep::Pass), "the list scrolls: {steps:?}");
         // Momentum after a release is never a swipe.
-        assert_eq!(swipe_step(&mut active, "chat", 90.0, 0.0, TouchPhase::Moved, true), SwipeStep::Pass);
+        assert_eq!(
+            swipe_step(&mut active, "chat", 90.0, 0.0, TouchPhase::Moved, true),
+            SwipeStep::Pass
+        );
         // A cancelled pan springs back with nothing done.
         let mut active = None;
         swipe_step(&mut active, "chat", 0.0, 0.0, TouchPhase::Started, false);
@@ -1401,11 +1494,13 @@ mod tests {
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
                     state.local_device_id = Some("local".into());
-                    state.chats = vec![serde_json::from_value(serde_json::json!({
-                        "id": "fix", "title": "Fix the build", "deviceId": "local",
-                        "archived": false, "createdAt": chrono::Utc::now(),
-                    }))
-                    .unwrap()];
+                    state.chats = vec![
+                        serde_json::from_value(serde_json::json!({
+                            "id": "fix", "title": "Fix the build", "deviceId": "local",
+                            "archived": false, "createdAt": chrono::Utc::now(),
+                        }))
+                        .unwrap(),
+                    ];
                 });
                 shell
             }))
@@ -1548,7 +1643,8 @@ mod tests {
         // A screen reader reads the picker's devices as buttons, the dot's state in words.
         let read = a11y(cx);
         assert!(
-            read.iter().any(|(role, label)| *role == gpui::Role::Button && label.starts_with("Studio, ")),
+            read.iter()
+                .any(|(role, label)| *role == gpui::Role::Button && label.starts_with("Studio, ")),
             "the device row: {read:?}"
         );
         // The project added, the phone lands on its new chat, as the Mac does.
@@ -1640,7 +1736,9 @@ mod tests {
     // while another session waits on the person says how many, its press opening the next; on
     // that one it says nothing, the session itself being the one that waited.
     #[gpui::test]
-    fn a_phones_session_band_jumps_to_the_next_session_that_needs_you(cx: &mut gpui::TestAppContext) {
+    fn a_phones_session_band_jumps_to_the_next_session_that_needs_you(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (shell, cx) = ipad(cx);
         cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
         shell.update(cx, |shell, cx| {
@@ -1676,7 +1774,10 @@ mod tests {
         let opened = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
         let fix = a11y(cx);
         FORCE_COMPACT.with(|force| force.set(false));
-        assert!(has(&docs, "Back to Sessions") && has(&docs, "Chat docs"), "back and the title: {docs:?}");
+        assert!(
+            has(&docs, "Back to Sessions") && has(&docs, "Chat docs"),
+            "back and the title: {docs:?}"
+        );
         assert!(has(&docs, "1 needs you, go to the next"), "another waits: {docs:?}");
         assert!(subtitle, "the machine under the title");
         assert_eq!(opened.as_deref(), Some("fix"), "the press opens the one that waits");
@@ -1723,7 +1824,10 @@ mod tests {
                     .filter_map(|(_, node)| {
                         let label = node.label()?.to_owned();
                         let rect = node.bounds()?;
-                        let (w, h) = ((rect.x1 - rect.x0) as f32 / scale, (rect.y1 - rect.y0) as f32 / scale);
+                        let (w, h) = (
+                            (rect.x1 - rect.x0) as f32 / scale,
+                            (rect.y1 - rect.y0) as f32 / scale,
+                        );
                         Some((label, w, h))
                     })
                     .collect::<Vec<_>>()
@@ -1745,15 +1849,19 @@ mod tests {
         buttons(cx);
         cx.update(|window, cx| shell.update(cx, |shell, cx| shell.summon_files(window, cx)));
         let touch = buttons(cx);
-        let mine: Vec<_> = touch.iter().filter(|(label, _, _)| ours.contains(&label.as_str())).collect();
+        let mine: Vec<_> =
+            touch.iter().filter(|(label, ..)| ours.contains(&label.as_str())).collect();
         let small: Vec<_> = mine.iter().filter(|(_, w, h)| w.min(*h) < 43.9).collect();
-        let missing: Vec<_> = ours.iter().filter(|label| !mine.iter().any(|(drawn, _, _)| drawn == *label)).collect();
+        let missing: Vec<_> =
+            ours.iter().filter(|label| !mine.iter().any(|(drawn, ..)| drawn == *label)).collect();
         assert!(missing.is_empty(), "{missing:?} not drawn: {touch:?}");
         assert!(small.is_empty(), "under a finger's 44 pt: {small:?}");
         FORCE_COMPACT.with(|force| force.set(false));
         let mac = buttons(cx);
-        let palette =
-            mac.iter().find(|(label, _, _)| label == "Command palette").expect("the palette on a Mac");
+        let palette = mac
+            .iter()
+            .find(|(label, ..)| label == "Command palette")
+            .expect("the palette on a Mac");
         assert!(
             (palette.1 - 24.0).abs() < 0.5 && (palette.2 - 24.0).abs() < 0.5,
             "as drawn on a Mac: {palette:?}"
@@ -1803,7 +1911,10 @@ mod tests {
         let (toast, height) = bounds(cx);
         let toast = toast.expect("the toast on a Mac");
         let foot = super::super::SIDEBAR_FOOTER_BUTTON_SIZE + 3.0 * Theme::SPACE_SM;
-        assert!((height - toast.1 - foot).abs() < 0.5, "over the sidebar's foot: {toast:?} in {height}");
+        assert!(
+            (height - toast.1 - foot).abs() < 0.5,
+            "over the sidebar's foot: {toast:?} in {height}"
+        );
     }
 
     /// The last frame's accessibility tree as (role, label), drawn with the tree on.
@@ -1835,7 +1946,8 @@ mod tests {
         let rows = |read: &[(gpui::Role, String)]| {
             read.iter()
                 .filter(|(role, label)| {
-                    *role == gpui::Role::Button && (label.contains("Chat fix") || label.contains("Chat docs"))
+                    *role == gpui::Role::Button
+                        && (label.contains("Chat fix") || label.contains("Chat docs"))
                 })
                 .count()
         };
@@ -1889,7 +2001,10 @@ mod tests {
             .collect();
         assert!(statuses.contains(&"Needs you"), "{statuses:?}");
         assert!(statuses.contains(&"Working"), "{statuses:?}");
-        assert!(!statuses.iter().any(|label| *label == "Input" || *label == "Waiting"), "{statuses:?}");
+        assert!(
+            !statuses.iter().any(|label| *label == "Input" || *label == "Waiting"),
+            "{statuses:?}"
+        );
     }
 
     // A phone's session puts its inspector up by a press on the band's title: a sheet over the
@@ -1914,7 +2029,8 @@ mod tests {
             cx.debug_bounds("compact-inspector-sheet").map(|bounds| f32::from(bounds.origin.y))
         };
         let pan = |cx: &mut gpui::VisualTestContext, steps: &[f32]| {
-            let at = cx.debug_bounds("compact-inspector-header").expect("the sheet's header").center();
+            let at =
+                cx.debug_bounds("compact-inspector-header").expect("the sheet's header").center();
             let last = steps.len() - 1;
             for (ix, y) in steps.iter().enumerate() {
                 cx.simulate_event(ScrollEvent {
@@ -1957,14 +2073,23 @@ mod tests {
         let shown_after_close = shell.read_with(cx, |shell, cx| shell.inspector_shown(cx));
         FORCE_COMPACT.with(|force| force.set(false));
         assert!(has(&chat, gpui::Role::Button, "Chat docs"), "the band's title: {chat:?}");
-        assert!(!has(&chat, gpui::Role::Button, "Show files"), "views come from the palette: {chat:?}");
+        assert!(
+            !has(&chat, gpui::Role::Button, "Show files"),
+            "views come from the palette: {chat:?}"
+        );
         assert!(has(&files, gpui::Role::Heading, "Files"), "the files page: {files:?}");
         assert!(has(&files, gpui::Role::Button, "Back to Session"), "{files:?}");
-        assert!(!has(&files, gpui::Role::Button, "Back to Sessions"), "the chat's page gives way: {files:?}");
+        assert!(
+            !has(&files, gpui::Role::Button, "Back to Sessions"),
+            "the chat's page gives way: {files:?}"
+        );
         assert!(has(&back, gpui::Role::Button, "Back to Sessions"), "back on the chat: {back:?}");
         assert!(!has(&back, gpui::Role::Heading, "Files"), "{back:?}");
         assert!(has(&sheet, gpui::Role::Dialog, "Inspector"), "the sheet: {sheet:?}");
-        assert!(has(&sheet, gpui::Role::Button, "Back to Sessions"), "over the session's page: {sheet:?}");
+        assert!(
+            has(&sheet, gpui::Role::Button, "Back to Sessions"),
+            "over the session's page: {sheet:?}"
+        );
         assert!(has(&sheet, gpui::Role::Button, "Expand inspector"), "{sheet:?}");
         assert_eq!(medium, Some(422.0), "up at half the screen");
         assert_eq!(large, Some(SHEET_LARGE_GAP), "the whole screen");
@@ -1989,9 +2114,17 @@ mod tests {
         assert_eq!(sheet_rest(500.0, 1.0, height, safe), Some(Detent::Medium), "short of the pull");
         assert_eq!(sheet_rest(600.0, 1.0, height, safe), None, "pulled away");
         assert_eq!(sheet_rest(400.0, -12.0, height, safe), Some(Detent::Large), "flicked up");
-        assert_eq!(sheet_rest(100.0, 12.0, height, safe), Some(Detent::Medium), "flicked down from the top");
+        assert_eq!(
+            sheet_rest(100.0, 12.0, height, safe),
+            Some(Detent::Medium),
+            "flicked down from the top"
+        );
         assert_eq!(sheet_rest(430.0, 12.0, height, safe), None, "flicked down from half");
         assert_eq!(dragged_top(Detent::Medium, 100.0, height, safe), 522.0, "with the finger");
-        assert_eq!(dragged_top(Detent::Large, -40.0, height, safe), 47.0, "a quarter as far above the top");
+        assert_eq!(
+            dragged_top(Detent::Large, -40.0, height, safe),
+            47.0,
+            "a quarter as far above the top"
+        );
     }
 }

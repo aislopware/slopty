@@ -2,10 +2,8 @@
 //! Device-local interface typography: bundled font registration, the persisted
 //! catalog choice, and the effective family installed into [`crate::theme::Theme`].
 
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gpui::{App, Global, Rems, SharedString, Window, px, rems};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -85,15 +83,8 @@ impl<'de> Deserialize<'de> for UiFontFamily {
 pub struct UiFontSize(u8);
 
 impl UiFontSize {
-    pub const ALL: [Self; 7] = [
-        Self(12),
-        Self(13),
-        Self(14),
-        Self(15),
-        Self(16),
-        Self(18),
-        Self(20),
-    ];
+    pub const ALL: [Self; 7] =
+        [Self(12), Self(13), Self(14), Self(15), Self(16), Self(18), Self(20)];
 
     pub const fn pixels(self) -> f32 {
         self.0 as f32
@@ -159,11 +150,7 @@ pub const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
 // fallback. Here each letter is its own run, the tracking the gap between them.
 /// The letters [`tracked_caps`] sets, each its own run: `label` in capitals.
 pub fn tracked_letters(label: &str) -> Vec<SharedString> {
-    label
-        .to_uppercase()
-        .chars()
-        .map(|letter| SharedString::from(letter.to_string()))
-        .collect()
+    label.to_uppercase().chars().map(|letter| SharedString::from(letter.to_string())).collect()
 }
 
 /// `label` in capitals at `size` (px at the 16 px baseline, as [`ui_rems`]), its letters
@@ -216,10 +203,7 @@ impl FontAvailability {
                 UiFontFamily::Installed("Arial".into()),
                 UiFontFamily::Installed("Menlo".into()),
             ],
-            fixed_width: vec![
-                UiFontFamily::GeistMono,
-                UiFontFamily::Installed("Menlo".into()),
-            ],
+            fixed_width: vec![UiFontFamily::GeistMono, UiFontFamily::Installed("Menlo".into())],
         }
     }
 
@@ -246,22 +230,14 @@ impl FontAvailability {
     }
 
     fn fallback(&self) -> UiFontFamily {
-        if self.geist {
-            UiFontFamily::Geist
-        } else {
-            UiFontFamily::System
-        }
+        if self.geist { UiFontFamily::Geist } else { UiFontFamily::System }
     }
 
     /// Code and terminal degrade to the bundled mono face instead of the
     /// interface sans: a device-local pick that later disappears should not
     /// silently turn fixed-width surfaces proportional.
     fn fallback_mono(&self) -> UiFontFamily {
-        if self.geist_mono {
-            UiFontFamily::GeistMono
-        } else {
-            self.fallback()
-        }
+        if self.geist_mono { UiFontFamily::GeistMono } else { self.fallback() }
     }
 
     #[cfg(test)]
@@ -345,17 +321,13 @@ pub(crate) fn bundled_font_faces() -> impl Iterator<Item = &'static [u8]> {
 #[cfg(test)]
 pub(crate) fn native_text_system() -> (std::sync::MutexGuard<'static, ()>, gpui::WindowTextSystem) {
     static NATIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = NATIVE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = NATIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // A headless platform still carries the native CoreText backend.
     let platform = gpui_platform::current_platform(true);
     let text_system = gpui::WindowTextSystem::new(std::sync::Arc::new(gpui::TextSystem::new(
         platform.text_system(),
     )));
-    text_system
-        .add_fonts(bundled_font_faces().map(Cow::Borrowed).collect())
-        .unwrap();
+    text_system.add_fonts(bundled_font_faces().map(Cow::Borrowed).collect()).unwrap();
     (guard, text_system)
 }
 
@@ -383,18 +355,13 @@ const FIXED_WIDTH_TOLERANCE: f32 = 0.01;
 fn face_is_fixed_width(font: &ttf_parser::Face) -> bool {
     let Some(advances) = ['i', 'm', 'W', '0']
         .iter()
-        .map(|ch| {
-            font.glyph_index(*ch)
-                .and_then(|id| font.glyph_hor_advance(id))
-        })
+        .map(|ch| font.glyph_index(*ch).and_then(|id| font.glyph_hor_advance(id)))
         .collect::<Option<Vec<_>>>()
     else {
         return false;
     };
-    let (min, max) = (
-        advances.iter().copied().min().unwrap_or(0),
-        advances.iter().copied().max().unwrap_or(0),
-    );
+    let (min, max) =
+        (advances.iter().copied().min().unwrap_or(0), advances.iter().copied().max().unwrap_or(0));
     min > 0 && f32::from(max - min) <= FIXED_WIDTH_TOLERANCE * f32::from(min)
 }
 
@@ -448,11 +415,7 @@ pub fn register_fonts(cx: &App) -> FontAvailability {
         .collect();
     let geist = register_family(cx, &UiFontFamily::Geist, &GEIST);
     let geist_mono = register_family(cx, &UiFontFamily::GeistMono, &GEIST_MONO);
-    let mut choices = vec![
-        UiFontFamily::Geist,
-        UiFontFamily::GeistMono,
-        UiFontFamily::System,
-    ];
+    let mut choices = vec![UiFontFamily::Geist, UiFontFamily::GeistMono, UiFontFamily::System];
     let mut fixed_width = vec![UiFontFamily::GeistMono];
     for name in system_names {
         if families_with_latin_metrics.get(&name) == Some(&true) {
@@ -460,20 +423,11 @@ pub fn register_fonts(cx: &App) -> FontAvailability {
         }
         choices.push(UiFontFamily::Installed(name));
     }
-    FontAvailability {
-        geist,
-        geist_mono,
-        choices,
-        fixed_width,
-    }
+    FontAvailability { geist, geist_mono, choices, fixed_width }
 }
 
 fn resolve_effective(requested: &UiFontFamily, availability: &FontAvailability) -> UiFontFamily {
-    if availability.is_available(requested) {
-        requested.clone()
-    } else {
-        availability.fallback()
-    }
+    if availability.is_available(requested) { requested.clone() } else { availability.fallback() }
 }
 
 /// `fixed_width_only` guards the terminal grid: a settings file may already
@@ -489,11 +443,7 @@ fn resolve_effective_mono(
     } else {
         availability.is_available(requested)
     };
-    if usable {
-        requested.clone()
-    } else {
-        availability.fallback_mono()
-    }
+    if usable { requested.clone() } else { availability.fallback_mono() }
 }
 
 /// Install typography state before appearance builds the first [`crate::theme::Theme`].
@@ -527,15 +477,11 @@ pub fn init(
 }
 
 pub fn requested(cx: &App) -> UiFontFamily {
-    cx.try_global::<TypographyState>()
-        .map(|state| state.requested.clone())
-        .unwrap_or_default()
+    cx.try_global::<TypographyState>().map(|state| state.requested.clone()).unwrap_or_default()
 }
 
 pub fn effective(cx: &App) -> UiFontFamily {
-    cx.try_global::<TypographyState>()
-        .map(|state| state.effective.clone())
-        .unwrap_or_default()
+    cx.try_global::<TypographyState>().map(|state| state.effective.clone()).unwrap_or_default()
 }
 
 pub fn effective_family_name(cx: &App) -> SharedString {
@@ -587,24 +533,18 @@ pub fn code_font_size(cx: &App) -> f32 {
 }
 
 pub fn font_size(cx: &App) -> UiFontSize {
-    cx.try_global::<TypographyState>()
-        .map(|state| state.size)
-        .unwrap_or_default()
+    cx.try_global::<TypographyState>().map(|state| state.size).unwrap_or_default()
 }
 
 pub fn availability(cx: &App) -> FontAvailability {
-    cx.try_global::<TypographyState>()
-        .map(|state| state.availability.clone())
-        .unwrap_or_default()
+    cx.try_global::<TypographyState>().map(|state| state.availability.clone()).unwrap_or_default()
 }
 
 /// Monotonic id of the current effective UI typography (family + size).
 /// Long-lived layout caches compare this value to invalidate measurements
 /// that can change when prose wraps differently.
 pub fn generation(cx: &App) -> u32 {
-    cx.try_global::<TypographyState>()
-        .map(|state| state.generation)
-        .unwrap_or_default()
+    cx.try_global::<TypographyState>().map(|state| state.generation).unwrap_or_default()
 }
 
 /// Validate, apply, repaint, and persist one confirmed choice. Returns whether
@@ -848,10 +788,7 @@ mod tests {
     fn unavailable_family_resolves_to_geist() {
         let unavailable = UiFontFamily::Installed("Inter".into());
         let availability = FontAvailability::all().without(&unavailable);
-        assert_eq!(
-            resolve_effective(&unavailable, &availability),
-            UiFontFamily::Geist
-        );
+        assert_eq!(resolve_effective(&unavailable, &availability), UiFontFamily::Geist);
         assert!(availability.is_available(&UiFontFamily::System));
     }
 
@@ -864,52 +801,36 @@ mod tests {
             UiFontFamily::GeistMono
         );
         assert_eq!(
-            resolve_effective_mono(
-                &unavailable,
-                &availability.clone().without(&unavailable),
-                true
-            ),
+            resolve_effective_mono(&unavailable, &availability.clone().without(&unavailable), true),
             UiFontFamily::GeistMono
         );
         // Only when the bundled mono face itself failed to register does a
         // fixed-width surface fall back to the interface family.
         let without_mono = availability.without(&UiFontFamily::GeistMono);
-        assert_eq!(
-            resolve_effective_mono(&unavailable, &without_mono, false),
-            UiFontFamily::Geist
-        );
+        assert_eq!(resolve_effective_mono(&unavailable, &without_mono, false), UiFontFamily::Geist);
     }
 
     #[test]
     fn advance_check_separates_bundled_mono_from_bundled_sans() {
         for bytes in GEIST_MONO {
-            assert!(face_is_fixed_width(
-                &ttf_parser::Face::parse(bytes, 0).unwrap()
-            ));
+            assert!(face_is_fixed_width(&ttf_parser::Face::parse(bytes, 0).unwrap()));
         }
         for bytes in GEIST {
-            assert!(!face_is_fixed_width(
-                &ttf_parser::Face::parse(bytes, 0).unwrap()
-            ));
+            assert!(!face_is_fixed_width(&ttf_parser::Face::parse(bytes, 0).unwrap()));
         }
     }
 
     #[test]
     fn terminal_catalog_drops_proportional_families() {
         let availability = FontAvailability::all();
-        for proportional in [
-            UiFontFamily::Geist,
-            UiFontFamily::System,
-            UiFontFamily::Installed("Arial".into()),
-        ] {
+        for proportional in
+            [UiFontFamily::Geist, UiFontFamily::System, UiFontFamily::Installed("Arial".into())]
+        {
             assert!(availability.is_available(&proportional));
             assert!(!availability.is_fixed_width_available(&proportional));
             assert!(!availability.fixed_width_choices().contains(&proportional));
         }
-        for fixed in [
-            UiFontFamily::GeistMono,
-            UiFontFamily::Installed("Menlo".into()),
-        ] {
+        for fixed in [UiFontFamily::GeistMono, UiFontFamily::Installed("Menlo".into())] {
             assert!(availability.is_fixed_width_available(&fixed));
             assert!(availability.fixed_width_choices().contains(&fixed));
         }
@@ -929,10 +850,7 @@ mod tests {
             UiFontFamily::GeistMono
         );
         // The same value is still legal for code and diffs.
-        assert_eq!(
-            resolve_effective_mono(&persisted, &availability, false),
-            persisted
-        );
+        assert_eq!(resolve_effective_mono(&persisted, &availability, false), persisted);
     }
 
     #[test]
@@ -940,11 +858,7 @@ mod tests {
         let availability = FontAvailability::all();
         assert_eq!(
             availability.choices()[..3],
-            [
-                UiFontFamily::Geist,
-                UiFontFamily::GeistMono,
-                UiFontFamily::System
-            ]
+            [UiFontFamily::Geist, UiFontFamily::GeistMono, UiFontFamily::System]
         );
     }
 
@@ -976,10 +890,9 @@ mod tests {
 
     #[test]
     fn bundled_families_have_required_static_faces() {
-        for (expected_family, faces) in [
-            ("Geist", GEIST.as_slice()),
-            ("Geist Mono", GEIST_MONO.as_slice()),
-        ] {
+        for (expected_family, faces) in
+            [("Geist", GEIST.as_slice()), ("Geist Mono", GEIST_MONO.as_slice())]
+        {
             let mut found = Vec::new();
             for bytes in faces {
                 let face = ttf_parser::Face::parse(bytes, 0).unwrap();

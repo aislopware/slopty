@@ -524,9 +524,7 @@ fn row(
                 .child(item.label.clone()),
         )
         .children(item.shortcut.as_ref().map(|keys| popover::kbd_hint(theme, keys)))
-        .when_some(ticked, |el, on| {
-            el.child(crate::settings::widgets::select_check(theme, on))
-        })
+        .when_some(ticked, |el, on| el.child(crate::settings::widgets::select_check(theme, on)))
         .into_any_element()
 }
 
@@ -573,6 +571,9 @@ mod tests {
         m.push(MenuItem::new("find", "Find", |_, _| {}).shortcut("⌘F"));
         assert_eq!(m.len(), 2);
         assert_eq!(m.step(Some(0), 1), Some(1));
-        assert_eq!(m.row(1).and_then(MenuItem::shortcut_keys).map(SharedString::as_ref), Some("⌘F"));
+        assert_eq!(
+            m.row(1).and_then(MenuItem::shortcut_keys).map(SharedString::as_ref),
+            Some("⌘F")
+        );
     }
 }

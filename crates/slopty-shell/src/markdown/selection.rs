@@ -57,8 +57,7 @@ fn state() -> &'static Mutex<Option<MdSelection>> {
 #[cfg(test)]
 pub(crate) fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
-    let held = LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let held = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // Each holder starts with no selection, as a new app does. The state is the
     // process's, which keeps it across a `#[gpui::test]`'s seeds: the drag one seed left open
     // read as the next one's (the nightly's GPUI seeds, 2026-10-29).
@@ -70,11 +69,7 @@ pub(crate) fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
 /// `(element index, byte offset)` into `elements` (document-ordered
 /// `(key, text)` pairs). Handles either direction; empty slices are skipped.
 pub fn resolve_spans(elements: &[(&str, &str)], a: (usize, usize), b: (usize, usize)) -> Vec<Span> {
-    let (start, end) = if (a.0, a.1) <= (b.0, b.1) {
-        (a, b)
-    } else {
-        (b, a)
-    };
+    let (start, end) = if (a.0, a.1) <= (b.0, b.1) { (a, b) } else { (b, a) };
     let mut spans = Vec::new();
     for (ei, (key, text)) in elements.iter().enumerate().take(end.0 + 1).skip(start.0) {
         let from = if ei == start.0 { start.1 } else { 0 };
@@ -124,11 +119,7 @@ pub(crate) fn begin_with_span_in(surface: u64, key: &str, text: &str, range: Ran
         anchor_ix: range.start,
         dragging: true,
         forward: None,
-        spans: vec![Span {
-            key: key.to_string(),
-            range,
-            text: text.to_string(),
-        }],
+        spans: vec![Span { key: key.to_string(), range, text: text.to_string() }],
     });
 }
 
@@ -140,11 +131,7 @@ pub fn drag_anchor(key: &str) -> Option<usize> {
 }
 
 pub(crate) fn anchor_key() -> Option<String> {
-    state()
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|s| s.anchor_key.clone())
+    state().lock().unwrap().as_ref().map(|s| s.anchor_key.clone())
 }
 
 /// The surface the selection lives in (0 when there is none).
@@ -154,11 +141,7 @@ pub(crate) fn anchor_surface() -> u64 {
 
 /// Whether a markdown selection drag is currently in flight.
 pub fn is_dragging() -> bool {
-    state()
-        .lock()
-        .unwrap()
-        .as_ref()
-        .is_some_and(|selection| selection.dragging)
+    state().lock().unwrap().as_ref().is_some_and(|selection| selection.dragging)
 }
 
 /// Resolve a drag head against this frame's visible elements.
@@ -173,9 +156,8 @@ pub fn update_drag(elements: &[(&str, &str)], head: (usize, usize)) -> bool {
     let Some(selection) = guard.as_mut().filter(|selection| selection.dragging) else {
         return false;
     };
-    let spans = if let Some(anchor_ei) = elements
-        .iter()
-        .position(|(key, _)| *key == selection.anchor_key)
+    let spans = if let Some(anchor_ei) =
+        elements.iter().position(|(key, _)| *key == selection.anchor_key)
     {
         let anchor = (anchor_ei, selection.anchor_ix);
         selection.forward = Some(anchor <= head);
@@ -204,31 +186,24 @@ fn extend_virtualized_drag(
 ) -> Option<Vec<Span>> {
     if forward {
         let (element_ix, span_ix) =
-            elements
-                .iter()
-                .enumerate()
-                .find_map(|(element_ix, (key, _))| {
-                    existing
-                        .iter()
-                        .position(|span| span.key == *key)
-                        .map(|span_ix| (element_ix, span_ix))
-                })?;
+            elements.iter().enumerate().find_map(|(element_ix, (key, _))| {
+                existing
+                    .iter()
+                    .position(|span| span.key == *key)
+                    .map(|span_ix| (element_ix, span_ix))
+            })?;
         let start = existing[span_ix].range.start;
         let mut merged = existing[..span_ix].to_vec();
         merged.extend(resolve_spans(elements, (element_ix, start), head));
         Some(merged)
     } else {
         let (element_ix, span_ix) =
-            elements
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(element_ix, (key, _))| {
-                    existing
-                        .iter()
-                        .position(|span| span.key == *key)
-                        .map(|span_ix| (element_ix, span_ix))
-                })?;
+            elements.iter().enumerate().rev().find_map(|(element_ix, (key, _))| {
+                existing
+                    .iter()
+                    .position(|span| span.key == *key)
+                    .map(|span_ix| (element_ix, span_ix))
+            })?;
         let end = existing[span_ix].range.end;
         let mut merged = resolve_spans(elements, head, (element_ix, end));
         merged.extend_from_slice(&existing[span_ix + 1..]);
@@ -284,10 +259,7 @@ pub fn end_active_drag() -> Option<String> {
 /// owner; the element the down landed IN claims right after). True if cleared.
 pub fn clear_if_owner(key: &str) -> bool {
     let mut guard = state().lock().unwrap();
-    if guard
-        .as_ref()
-        .is_some_and(|s| s.anchor_key == key && !s.dragging)
-    {
+    if guard.as_ref().is_some_and(|s| s.anchor_key == key && !s.dragging) {
         *guard = None;
         return true;
     }
@@ -299,10 +271,7 @@ pub fn clear_if_owner(key: &str) -> bool {
 pub fn wash_range(surface: u64, key: &str) -> Option<Range<usize>> {
     let guard = state().lock().unwrap();
     let sel = guard.as_ref().filter(|sel| sel.surface == surface)?;
-    sel.spans
-        .iter()
-        .find(|s| s.key == key && !s.range.is_empty())
-        .map(|s| s.range.clone())
+    sel.spans.iter().find(|s| s.key == key && !s.range.is_empty()).map(|s| s.range.clone())
 }
 
 /// The full selected text (Cmd+C), spans joined in document order.
@@ -316,11 +285,7 @@ pub fn selected_text() -> Option<String> {
 }
 
 fn join_spans(spans: &[Span]) -> String {
-    spans
-        .iter()
-        .map(|s| &s.text[s.range.clone()])
-        .collect::<Vec<_>>()
-        .join("\n")
+    spans.iter().map(|s| &s.text[s.range.clone()]).collect::<Vec<_>>().join("\n")
 }
 
 /// Word range around `ix` for double-click selection: an alphanumeric/`_`
@@ -363,11 +328,7 @@ mod tests {
     use super::*;
 
     fn elems<'a>() -> Vec<(&'a str, &'a str)> {
-        vec![
-            ("p1", "first paragraph"),
-            ("p2", "second"),
-            ("p3", "third one"),
-        ]
+        vec![("p1", "first paragraph"), ("p2", "second"), ("p3", "third one")]
     }
 
     #[test]
@@ -426,14 +387,8 @@ mod tests {
         assert!(update_drag(&elems(), (2, 5)));
         let shifted = [("p2", "second"), ("p3", "third one"), ("p4", "fourth")];
         assert!(update_drag(&shifted, (2, 4)));
-        assert_eq!(
-            selected_text().as_deref(),
-            Some("paragraph\nsecond\nthird one\nfour")
-        );
-        assert_eq!(
-            end_active_drag().as_deref(),
-            Some("paragraph\nsecond\nthird one\nfour")
-        );
+        assert_eq!(selected_text().as_deref(), Some("paragraph\nsecond\nthird one\nfour"));
+        assert_eq!(end_active_drag().as_deref(), Some("paragraph\nsecond\nthird one\nfour"));
         assert_eq!(drag_anchor("p1"), None);
     }
 
