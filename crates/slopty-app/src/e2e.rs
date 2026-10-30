@@ -121,10 +121,12 @@ pub(crate) fn serve(
                 },
                 // A finger UIKit itself delivers, its moves paced on the app's clock; then a
                 // frame, like any input.
-                Command::UiFinger { from, to, steps } => match finger(from, to, steps, cx).await {
-                    Ok(view) => after_frame(window, Reply::Touched { view }, cx).await,
-                    Err(message) => Reply::Error { message },
-                },
+                Command::UiFinger { from, to, steps, held_ms } => {
+                    match finger(from, to, steps, held_ms, cx).await {
+                        Ok(view) => after_frame(window, Reply::Touched { view }, cx).await,
+                        Err(message) => Reply::Error { message },
+                    }
+                }
                 // The system's own answers, from the async task: nothing on screen changes.
                 Command::PushRegister { token } => push_register(&token).await,
                 Command::OpenPush { payload } => open_push(&payload),
@@ -300,40 +302,49 @@ async fn after_frame(window: AnyWindowHandle, answer: Reply, cx: &mut gpui::Asyn
 }
 
 /// A finger UIKit itself delivers (`slopty_platform::finger`): down at `from`, `steps` moves
-/// 16 ms apart to `to`, lifted there; with no steps a tap, lifted 60 ms after it lands. Gives
+/// 16 ms apart to `to`, lifted 16 ms after the last; with no steps a tap, lifted 60 ms after it
+/// lands. Each event is sent when it is due and says that time, as a digitizer's does: one the
+/// main thread was too busy to send then goes as soon as it can, still saying its time. The
+/// main thread is held busy `held_ms` after the last move, so the lift goes that late. Gives
 /// the view it landed on.
 #[cfg(all(target_os = "ios", feature = "e2e"))]
 async fn finger(
     from: [f32; 2],
     to: [f32; 2],
     steps: u32,
+    held_ms: u32,
     cx: &mut gpui::AsyncApp,
 ) -> Result<String, String> {
+    use std::time::Duration;
+
     use slopty_platform::finger::Finger;
+    const EVERY: Duration = Duration::from_millis(16);
+    const TAP: Duration = Duration::from_millis(60);
     let point = |t: f32| {
         let [x0, y0] = from;
         let [x1, y1] = to;
         (f64::from((x1 - x0).mul_add(t, x0)), f64::from((y1 - y0).mul_add(t, y0)))
     };
-    let pause = |ms| cx.background_executor().timer(std::time::Duration::from_millis(ms));
     let (x, y) = point(0.0);
     let finger = Finger::down(x, y)?;
-    if steps == 0 {
-        pause(60).await;
-    }
+    let landed = std::time::Instant::now();
+    let until =
+        |due: Duration| cx.background_executor().timer(due.saturating_sub(landed.elapsed()));
     for step in 1..=steps {
-        pause(16).await;
+        let due = EVERY * step;
+        until(due).await;
         #[expect(clippy::cast_precision_loss, reason = "a drag's few steps")]
         let (x, y) = point(step as f32 / steps as f32);
-        finger.moved(x, y);
+        finger.moved(x, y, due);
     }
-    if steps > 0 {
-        pause(16).await;
-    }
+    // The stall itself: this is the main thread, and nothing else runs on it meanwhile.
+    std::thread::sleep(Duration::from_millis(u64::from(held_ms)));
+    let lifted = if steps == 0 { TAP } else { EVERY * (steps + 1) };
+    until(lifted).await;
     let (x, y) = point(1.0);
-    let landed = finger.landed().to_owned();
-    finger.lift(x, y);
-    Ok(landed)
+    let view = finger.landed().to_owned();
+    finger.lift(x, y, lifted);
+    Ok(view)
 }
 
 #[cfg(not(all(target_os = "ios", feature = "e2e")))]
@@ -342,6 +353,7 @@ async fn finger(
     _from: [f32; 2],
     _to: [f32; 2],
     _steps: u32,
+    _held_ms: u32,
     _cx: &mut gpui::AsyncApp,
 ) -> Result<String, String> {
     Err("a finger UIKit delivers is iOS only (with the e2e feature)".into())

@@ -7,14 +7,19 @@
 //! hit testing and gesture recognisers then decide where it goes, as with a person's finger.
 //! The private setters are the ones KIF and UIKit's own tests use (as gpui-fast's
 //! `native_scroll_test` does). The app sends these to itself, in the simulator, under test.
+//!
+//! Each event carries the time it was due, as a person's finger's carries the time the
+//! digitizer read it: a main thread busy when one is due delays its delivery, never its time,
+//! so the recognisers that read a finger's speed from those times (UIKit's, GPUI's) see the
+//! finger the test moved, not the stall.
 
 use std::ffi::c_void;
+use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, class, msg_send, sel};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::NSProcessInfo;
 
 // `IOHIDEvent`'s creators (IOKit's `IOHIDEvent.h`, exported though not in the SDK): the
 // digitizer events UIKit reads a touch's position and contact from.
@@ -59,8 +64,55 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn IOHIDEventAppendEvent(event: *mut c_void, child: *mut c_void, options: u32);
     fn IOHIDEventSetIntegerValue(event: *mut c_void, field: u32, value: i32);
-    fn mach_absolute_time() -> u64;
     fn CFRelease(object: *const c_void);
+}
+
+// The host's clock (`mach/mach_time.h`, libSystem): the time base of a digitizer event's time,
+// and through it of `UITouch.timestamp`, the seconds of it since the system started.
+unsafe extern "C" {
+    fn mach_absolute_time() -> u64;
+    fn mach_timebase_info(info: *mut MachTimebase) -> i32;
+}
+
+/// `mach_timebase_info_data_t`: nanoseconds are ticks times `numerator` over `denominator`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct MachTimebase {
+    numerator: u32,
+    denominator: u32,
+}
+
+/// The host's clock now, in ticks.
+fn ticks_now() -> u64 {
+    // SAFETY: reads the host's clock.
+    unsafe { mach_absolute_time() }
+}
+
+/// The host clock's time base, read once.
+fn timebase() -> MachTimebase {
+    static BASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    let (numerator, denominator) = *BASE.get_or_init(|| {
+        let mut base = MachTimebase::default();
+        // SAFETY: fills the struct it is given; it cannot fail on Apple's kernels.
+        let _status = unsafe { mach_timebase_info(&raw mut base) };
+        (base.numerator.max(1), base.denominator.max(1))
+    });
+    MachTimebase { numerator, denominator }
+}
+
+/// `ticks` on the host's clock as UIKit's seconds since the system started.
+fn uptime_of(ticks: u64) -> f64 {
+    let base = timebase();
+    #[expect(clippy::cast_precision_loss, reason = "a clock read to the nanosecond, in seconds")]
+    let nanos = ticks as f64 * f64::from(base.numerator) / f64::from(base.denominator);
+    nanos / 1e9
+}
+
+/// `after` in the host clock's ticks.
+fn ticks_of(after: Duration) -> u64 {
+    let base = timebase();
+    let ticks = after.as_nanos() * u128::from(base.denominator) / u128::from(base.numerator);
+    u64::try_from(ticks).unwrap_or(u64::MAX)
 }
 
 /// An `IOHIDEventRef`, typed as UIKit's selectors declare it.
@@ -87,13 +139,11 @@ const BEGAN: isize = 0;
 const MOVED: isize = 1;
 const ENDED: isize = 3;
 
-/// A hand's digitizer event holding one finger at `at` (window points) in `phase`; the caller
-/// releases it.
-fn hid_event(at: CGPoint, phase: isize) -> HidEvent {
+/// A hand's digitizer event holding one finger at `at` (window points) in `phase`, read at
+/// `time` (the host clock's ticks); the caller releases it.
+fn hid_event(at: CGPoint, phase: isize, time: u64) -> HidEvent {
     let touching = u8::from(phase != ENDED);
     let mask = if phase == MOVED { EVENT_POSITION } else { EVENT_RANGE | EVENT_TOUCH };
-    // SAFETY: reads the host's clock.
-    let time = unsafe { mach_absolute_time() };
     // SAFETY: IOKit's creator makes a new event the caller owns.
     let hand = unsafe {
         IOHIDEventCreateDigitizerEvent(
@@ -149,9 +199,12 @@ fn hid_event(at: CGPoint, phase: isize) -> HidEvent {
 }
 
 /// One finger on the app's key window, from where it landed until it lifts.
+#[derive(Debug)]
 pub struct Finger {
     touch: Retained<AnyObject>,
     landed: String,
+    /// When it landed, on the host's clock: its later events are timed from here.
+    landed_at: u64,
     _main: MainThreadMarker,
 }
 
@@ -185,8 +238,8 @@ impl Finger {
             // SAFETY: the setter it just said it has.
             let () = unsafe { msg_send![&*touch, setGestureView: view] };
         }
-        let finger = Self { touch, landed: classes(view), _main: main };
-        finger.send(at, BEGAN);
+        let finger = Self { touch, landed: classes(view), landed_at: ticks_now(), _main: main };
+        finger.send(at, BEGAN, Duration::ZERO);
         Ok(finger)
     }
 
@@ -197,24 +250,27 @@ impl Finger {
         &self.landed
     }
 
-    /// The finger, moved to `(x, y)`.
-    pub fn moved(&self, x: f64, y: f64) {
-        self.send(CGPoint { x, y }, MOVED);
+    /// The finger, moved to `(x, y)` `after` it landed: the move's time, whenever it is sent.
+    pub fn moved(&self, x: f64, y: f64, after: Duration) {
+        self.send(CGPoint { x, y }, MOVED, after);
     }
 
-    /// The finger, lifted at `(x, y)`.
-    pub fn lift(self, x: f64, y: f64) {
-        self.send(CGPoint { x, y }, ENDED);
+    /// The finger, lifted at `(x, y)` `after` it landed.
+    pub fn lift(self, x: f64, y: f64, after: Duration) {
+        self.send(CGPoint { x, y }, ENDED, after);
     }
 
-    /// The touch at `at` in `phase`, sent through `UIApplication` in its one touches event,
-    /// emptied and given this touch and its digitizer event.
-    fn send(&self, at: CGPoint, phase: isize) {
-        let hid = hid_event(at, phase);
+    /// The touch at `at` in `phase`, `after` the finger landed, sent through `UIApplication` in
+    /// its one touches event, emptied and given this touch and its digitizer event. The touch
+    /// and its digitizer event both say that time, never the time it is sent: a send that
+    /// comes late (the main thread was busy when it was due) is a finger's event UIKit read
+    /// late.
+    fn send(&self, at: CGPoint, phase: isize, after: Duration) {
+        let time = self.landed_at.saturating_add(ticks_of(after));
+        let hid = hid_event(at, phase, time);
         let touch = &*self.touch;
-        let now = NSProcessInfo::processInfo().systemUptime();
         // SAFETY: `UITouch`'s own setters on this live touch, on the main thread (`_main`).
-        let () = unsafe { msg_send![touch, setTimestamp: now] };
+        let () = unsafe { msg_send![touch, setTimestamp: uptime_of(time)] };
         if phase != BEGAN {
             // SAFETY: as above.
             let () = unsafe { msg_send![touch, _setLocationInWindow: at, resetPrevious: false] };

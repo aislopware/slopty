@@ -20,6 +20,10 @@ const HEADER: f32 = 26.0;
 /// How far each drag goes, points, in its moves 16 ms apart.
 const DRAG: f32 = 160.0;
 const MOVES: u32 = 10;
+/// How long the app's main thread is busy between the fling's last move and its lift: well past
+/// the 40 ms after which a lift reads as a finger that stopped, as when a page's web view is
+/// made under a person's finger. The lift still says when it happened, so it flings.
+const HELD: Duration = Duration::from_millis(120);
 /// The short page's height before and after a tap on it, CSS pixels.
 const SHORT: u32 = 160;
 const TAPPED: u32 = 400;
@@ -112,6 +116,21 @@ async fn where_is(drv: &mut Driver, title: &str) -> (f32, f32) {
     let dump = drv.dump().await.unwrap();
     let found = card(&dump, title).unwrap_or_else(|| panic!("no {title} card"));
     (found.bounds[1], found.bounds[3])
+}
+
+/// How the frames drawn since the last reset went, in words: how long the main thread left
+/// between them, which a stall under the finger stretches, and their longest draw.
+fn frames_said(frames: &slopty_e2e::FrameInfo) -> String {
+    let ms = |us: u64| Duration::from_micros(us).as_millis();
+    format!(
+        "{} frames, intervals p50 {} p95 {} p99 {} ms, longest draw {} ms, {} slots dropped",
+        frames.frames,
+        ms(frames.interval_p50_us),
+        ms(frames.interval_p95_us),
+        ms(frames.interval_p99_us),
+        ms(frames.draw_max_us),
+        frames.dropped
+    )
 }
 
 /// The natives the window presents and where each takes the pointer, in words: its visible
@@ -263,8 +282,14 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     let (top_before, h_before) = where_is(drv, "Tall").await;
     let before = top_before + h_before;
     let natives = natives_said(drv).await;
+    drv.frames_reset().await.unwrap();
     let landed = drv
-        .ui_finger_drag([at[0], at[1] + DRAG / 2.0], [at[0], at[1] - DRAG / 2.0], MOVES)
+        .ui_finger_drag(
+            [at[0], at[1] + DRAG / 2.0],
+            [at[0], at[1] - DRAG / 2.0],
+            MOVES,
+            Duration::ZERO,
+        )
         .await
         .unwrap();
     measure(&format!("pages-touch-landed {device} tall drag from {at:?}: {landed}; {natives}"));
@@ -277,6 +302,8 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
             card(d, "Tall").is_some_and(|n| n.bounds[3] < scrolled_below)
         })
         .await;
+    let frames = drv.dump().await.unwrap().frames;
+    measure(&format!("pages-touch-frames {device} tall drag: {}", frames_said(&frames)));
     let (top_after, now) = where_is(drv, "Tall").await;
     let after = top_after + now;
     let reached = if now < scrolled_below {
@@ -323,7 +350,7 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     }
 
     // A page with nothing to scroll: the drag scrolls the chat by the whole of it, and the
-    // fling after the lift carries it on.
+    // fling after the lift carries it on, though the app was busy just before the lift.
     tokio::time::sleep(Duration::from_millis(2500)).await;
     wheel(drv, gutter, true, 30).await;
     let short_card = live_card(drv, "Short", top, bottom).await;
@@ -333,14 +360,21 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     let end = |(y, h): (f32, f32)| y + h;
     let before = end(where_is(drv, "Short").await);
     let natives = natives_said(drv).await;
-    let landed = drv.ui_finger_drag(from, [from[0], from[1] - DRAG], MOVES).await.unwrap();
+    drv.frames_reset().await.unwrap();
+    let landed = drv.ui_finger_drag(from, [from[0], from[1] - DRAG], MOVES, HELD).await.unwrap();
     measure(&format!("pages-touch-landed {device} short drag: {landed}; {natives}"));
     let lifted = end(where_is(drv, "Short").await);
     tokio::time::sleep(Duration::from_millis(600)).await;
     let coasted = end(where_is(drv, "Short").await);
+    let frames = drv.dump().await.unwrap().frames;
     measure(&format!(
-        "pages-touch-short {device}: a {DRAG} pt drag over a page with nothing to scroll moved \
-         the chat {:.1} pt by the lift, {:.1} pt more in its fling",
+        "pages-touch-frames {device} short drag, the app busy {HELD:?} before its lift: {}",
+        frames_said(&frames)
+    ));
+    measure(&format!(
+        "pages-touch-short {device}: a {DRAG} pt drag over a page with nothing to scroll, the \
+         app busy {HELD:?} before its lift, moved the chat {:.1} pt by the lift, {:.1} pt more \
+         in its fling",
         before - lifted,
         lifted - coasted
     ));
@@ -349,6 +383,54 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     }
     if lifted - coasted <= 20.0 {
         missing.push(format!("the chat flings on after the lift: {lifted} -> {coasted}"));
+    }
+
+    // The app's own word on the run: where its main thread hung, and whether anything the
+    // platform told the window was dropped while the app was borrowed. UIKit lays the window out
+    // as GPUI's present commits whenever a page's web view moved, every frame of a scroll over
+    // one, and what it says then waits for the app (gpui-fast's `fast::window_wait`).
+    let log = std::fs::read_to_string(stack.path("app").join("app.log")).unwrap_or_default();
+    let field = |line: &str, key: &str| {
+        line.split_once(key).and_then(|(_, rest)| rest.split_whitespace().next()).map(str::to_owned)
+    };
+    // Each hang's report: how long the main thread stalled, and in what.
+    let hangs: Vec<String> = log
+        .lines()
+        .filter(|line| line.contains("the main thread hung"))
+        .filter_map(|line| field(line, "path="))
+        .map(|path| {
+            let report: serde_json::Value = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default();
+            format!("{} ms in {}", report["stall_ms"], report["cause"])
+        })
+        .collect();
+    let dropped = log.lines().filter(|line| line.contains("RefCell already borrowed")).count();
+    measure(&format!(
+        "pages-main-thread {device}: hangs {hangs:?}; {dropped} words to the window dropped \
+         while the app was borrowed"
+    ));
+    // When WebKit started, and each web view was made after its card first asked for it.
+    let started: Vec<String> = log
+        .lines()
+        .filter(|line| line.contains("WebKit started ahead"))
+        .filter_map(|line| field(line, "took_ms="))
+        .collect();
+    let made: Vec<String> = log
+        .lines()
+        .filter(|line| {
+            line.contains("a page's web view was made")
+                || line.contains("a page's document went to its web view")
+        })
+        .filter_map(|line| field(line, "after_ms="))
+        .collect();
+    measure(&format!(
+        "pages-web-views {device}: WebKit started ahead in {started:?} ms; web views made \
+         {made:?} ms after their cards opened"
+    ));
+    if dropped > 0 {
+        missing.push(format!("nothing the platform tells the window is dropped: {dropped} were"));
     }
     assert!(missing.is_empty(), "a finger over pages:\n{}", missing.join("\n"));
     stack.shutdown().await;

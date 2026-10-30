@@ -203,8 +203,9 @@ impl Driver {
     }
 
     /// A finger UIKit itself delivers, dragged from one window point to another in `steps`
-    /// moves 16 ms apart and lifted (iOS): what a page's web view sees as a person's drag. Gives
-    /// the view it landed on.
+    /// moves 16 ms apart and lifted (iOS): what a page's web view sees as a person's drag. The
+    /// app's main thread is kept busy `held` between the last move and the lift
+    /// ([`Command::UiFinger`]'s `held_ms`). Gives the view it landed on.
     ///
     /// # Errors
     ///
@@ -214,8 +215,10 @@ impl Driver {
         from: [f32; 2],
         to: [f32; 2],
         steps: u32,
+        held: Duration,
     ) -> Result<String> {
-        self.finger(Command::UiFinger { from, to, steps }).await
+        let held_ms = u32::try_from(held.as_millis()).unwrap_or(u32::MAX);
+        self.finger(Command::UiFinger { from, to, steps, held_ms }).await
     }
 
     /// A finger UIKit itself delivers, down and up at a window point (iOS): a tap whatever view
@@ -225,7 +228,7 @@ impl Driver {
     ///
     /// When the app is not on iOS or the socket breaks.
     pub async fn ui_finger_tap(&mut self, x: f32, y: f32) -> Result<String> {
-        self.finger(Command::UiFinger { from: [x, y], to: [x, y], steps: 0 }).await
+        self.finger(Command::UiFinger { from: [x, y], to: [x, y], steps: 0, held_ms: 0 }).await
     }
 
     /// A finger's command, and the view it landed on ([`Reply::Touched`]).

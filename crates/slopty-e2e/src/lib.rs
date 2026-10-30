@@ -316,9 +316,10 @@ pub enum Command {
     /// A finger as UIKit itself delivers one (iOS only): a `UITouch` hit-tested where it lands
     /// and sent through `UIApplication`, so whatever view is under it (a page's web view and its
     /// scroll views, not only GPUI's) and their gesture recognisers decide where it goes. It
-    /// lands at `from`, moves to `to` in `steps` moves 16 ms apart and lifts there; with no
-    /// steps it is a tap, lifted 60 ms after it lands. The reply ([`Reply::Touched`]) says
-    /// which view it landed on, after the frame that follows the lift.
+    /// lands at `from`, moves to `to` in `steps` moves 16 ms apart and lifts there 16 ms after
+    /// the last; with no steps it is a tap, lifted 60 ms after it lands. Each event says the
+    /// time it was due, as a digitizer's does. The reply ([`Reply::Touched`]) says which view
+    /// it landed on, after the frame that follows the lift.
     UiFinger {
         /// Where it lands, window points.
         from: [f32; 2],
@@ -326,6 +327,10 @@ pub enum Command {
         to: [f32; 2],
         /// Its moves between.
         steps: u32,
+        /// How long the app's main thread is kept busy after the last move is sent, before
+        /// the lift is: the lift is sent that late and still says its own time, as when a
+        /// person lifts while the app is busy (a page's web view being made, say).
+        held_ms: u32,
     },
     /// One report of the metal view's `UIPinchGestureRecognizer` (iOS only): `scale` is the
     /// change since the previous report (the view resets the recognizer to 1 after each), so

@@ -1719,3 +1719,55 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_page_reaches_the_network_only_once_granted`, `a_views_requests_wait_for_the_app`,
     `pages_are_capped_and_each_has_its_own_process`) and the unit tests of `web::page`'s
     `stage`, `sandbox`, `bridge` and `view` (slopty-platform).
+- ✅ **A fling is timed by when the finger moved, not by when the app heard it** (2026-10-30, the
+  iPhone pages e2e's lost flings). GPUI's touch recognizer read a finger's speed off the times it
+  handled each touch, and takes a lift that comes more than 40 ms after the last move for a finger
+  that had stopped. A main thread busy as the finger lifted, a page's web view being made say, so
+  killed the fling the person threw: the iPhone pages e2e lost its fling in two runs of six. The
+  platform knows when each touch happened (`UITouch.timestamp`), and gpui-fast now carries it on
+  `TouchEvent::timestamp` and runs the recognizer at that time (aislopware/gpui-fast#66,
+  `a9b5490f`). A pan a page's container hands on, which UIKit's recognizer action reports with no
+  time, takes the times of the touches it follows. The fling itself runs from when its lift is
+  handled, so the content starts from where it stood rather than jumping ahead by the wait. The
+  self-test's finger (`slopty_platform::finger`) stamps each event with the time it was due, as a
+  digitizer does, and sends its moves on deadlines from the touch down, so a busy main thread delays
+  its delivery and never its times. We considered widening the 40 ms gap, which would fling fingers
+  that had stopped, and keeping the main thread free under a finger, which cannot cover every stall.
+  Tests: gpui-fast's `fast::tests::touch_time` (a lift handled 100 ms late still flings; a lift
+  stamped 100 ms after the last move does not; an untimed touch is timed as handled) and the e2e
+  `a_finger_over_a_live_page_scrolls_the_chat_or_the_page`, whose fling drag holds the app's main
+  thread 120 ms before its lift (`UiFinger`'s `held_ms`).
+- ✅ **What the platform tells a window while the app is borrowed waits for it** (2026-10-30, the
+  iPhone's `RefCell already borrowed` errors). GPUI presents a frame inside a Core Animation
+  transaction, and when a native view it placed has moved, a page's web view under a scroll or a
+  fling, UIKit lays out the window's view controller as that transaction commits. Its
+  `viewDidLayoutSubviews` told the window its insets, and its size when that changed, while the
+  frame's draw still held the app, so GPUI's callback found the app borrowed, logged the error and
+  dropped what it was told: 63 times in one run of the iPhone pages e2e, once a frame while the
+  chat scrolled over a page. gpui-fast now queues every word a platform tells a window that finds
+  the app borrowed, an input, a resize, an inset or the like, and every word after it behind it,
+  and hands them on in order once the borrow ends; and the iPhone window tells its insets only when
+  they changed (aislopware/gpui-fast#67, `0524ed79`). We considered telling the insets outside the
+  present, which leaves every other callback's drop in place, and dropping only repeats, which
+  loses a real change made there. Tests: gpui-fast's `fast::tests::window_wait` (an input, inputs
+  behind it, an input sent from inside a waiting one's dispatch, a resize, and a resize between two
+  presses, each sent while the app is borrowed, reach the window in order) and the e2e
+  `a_finger_over_a_live_page_scrolls_the_chat_or_the_page`, which fails on any such error in the
+  app's log.
+- ✅ **Each process compiles its pages' rule list into a store of its own** (2026-10-30, page tests
+  failing together with `WKErrorDomain` 6). Every page loads under one content rule list, which
+  each page host compiles as it starts. WebKit's compile deletes the list's file, moves the new
+  one in, then maps it, and runs one process's compiles one after another but knows nothing of
+  other processes. Processes of one executable shared the default store, so when page tests ran
+  side by side, or two instances of the app started at once, one mapped a file another had just
+  deleted ("Mapping file failed"): all nine page tests of one gate run failed at once. A host
+  now compiles into `slopty-page-rules-<pid>` in the temporary directory, and each compile
+  removes the stores of processes that have ended. Compiling into the shared store under a name
+  per process would have left a file behind for every run. Whether two compiles meet in that
+  moment is luck, and six processes compiling forty times each at once never did on this Mac,
+  so the test checks what made it possible instead: slopty-platform's
+  `compiling_the_rule_list_leaves_other_processes_lists_alone` finds the file its own list is
+  mapped from among its memory's regions, runs another process that compiles the same list and
+  loads a page, and that file is still the one at its path; the ended process's store goes at
+  the next compile. Under the shared store it fails at once, the file replaced by a test running
+  beside it.
