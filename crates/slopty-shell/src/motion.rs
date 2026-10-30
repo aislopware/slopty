@@ -30,25 +30,6 @@
 //! gpui has no scale transform for `div`s at the pinned rev (only `svg`
 //! transformations), so `menu-in`/`dialog-in` approximate their scale component
 //! with fade + translate; see the module report in ARCHITECTURE §4 follow-ups.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::private_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::cast_precision_loss,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::float_cmp,
-    clippy::manual_midpoint,
-    clippy::missing_assert_message,
-    clippy::needless_pass_by_ref_mut,
-    clippy::nonminimal_bool,
-    clippy::return_self_not_must_use,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::unreadable_literal,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -109,7 +90,7 @@ struct PulseLease {
 
 impl PulseLease {
     fn renew(&mut self, now: Instant, stride: u64) {
-        self.until = now + PULSE_LEASE;
+        self.until = now.checked_add(PULSE_LEASE).unwrap_or(now);
         self.stride = self.stride.min(stride);
     }
 
@@ -147,11 +128,11 @@ pub fn locked_phase(period: Duration, now: Instant) -> f32 {
     phase
 }
 
-/// Current phase `[0,1)` of a repeating spec, plus a lease that keeps the
-/// calling view re-rendering at [`PULSE_TICK`] while its spinner stays
-/// mounted. All cells across all views share one epoch, so multi-instance
-/// loaders stay phase-locked. Reduced motion returns a static 0 and schedules
-/// nothing.
+/// Current phase `[0,1)` of a repeating spec, plus a lease that keeps the calling view drawing.
+///
+/// The view re-renders at the pulse clock's tick (about 30 Hz) while its spinner stays mounted.
+/// All cells across all views share one epoch, so multi-instance loaders stay phase-locked.
+/// Reduced motion returns a static 0 and schedules nothing.
 pub fn pulse_delta(spec: &MotionSpec, view: EntityId, cx: &mut App) -> f32 {
     pulse_delta_every(spec, view, 1, cx)
 }
@@ -191,8 +172,10 @@ const PACE_RAMP: Duration = Duration::from_secs(60);
 const PACE_CALM: f64 = 0.6;
 
 /// The phase `[0,1)` at `now` of a repeating animation lasting `period` that has shown a wait
-/// since `since`: [`locked_phase`] as the wait starts, and the phase of one process-wide clock
-/// slowed to [`PACE_CALM`] once it is [`PACE_RAMP`] old, eased between them without a jump.
+/// since `since`.
+///
+/// It is [`locked_phase`] as the wait starts, and the phase of one process-wide clock slowed to
+/// 0.6 of its pace once the wait is a minute old, eased between them without a jump.
 pub fn paced_phase(period: Duration, now: Instant, since: Option<Instant>) -> f32 {
     let Some(since) = since.filter(|_| !period.is_zero()) else {
         return locked_phase(period, now);
@@ -206,16 +189,16 @@ pub fn paced_phase(period: Duration, now: Instant, since: Option<Instant>) -> f3
     // ∫ pace over the wait, with pace = 1 − (1 − calm)·smoothstep(age / ramp).
     let slack = 1.0 - PACE_CALM;
     let travelled = if age < ramp {
-        age - slack * ramp * (u.powi(3) - u.powi(4) / 2.0)
+        (-slack * ramp).mul_add(u.powi(4).mul_add(-0.5, u.powi(3)), age)
     } else {
-        PACE_CALM * age + slack * ramp / 2.0
+        PACE_CALM.mul_add(age, slack * ramp / 2.0)
     };
     // What the calm clock is ahead of this wait's once both are calm, taken up over the ramp.
-    let ahead = -(slack * ramp / 2.0 + slack * start) / period;
+    let ahead = -slack.mul_add(start, slack * ramp / 2.0) / period;
     let ahead = ahead - ahead.round();
-    let smooth = u * u * (3.0 - 2.0 * u);
+    let smooth = u * u * 2.0_f64.mul_add(-u, 3.0);
     #[expect(clippy::cast_possible_truncation, reason = "a phase in [0,1)")]
-    let phase = ((start + travelled) / period + smooth * ahead).rem_euclid(1.0) as f32;
+    let phase = smooth.mul_add(ahead, (start + travelled) / period).rem_euclid(1.0) as f32;
     phase
 }
 
@@ -238,30 +221,36 @@ pub fn pulse_moment(view: EntityId, cx: &mut App) -> Instant {
     shown.at
 }
 
-/// Activity feedback uses a slow, uniform brightness pulse when the system
-/// reduces motion. A paused background still stops all animation.
-/// Decorative animation continues to use the reduced-motion-gated helpers.
-#[derive(Clone, Copy)]
+/// Where an activity grid's pulse stands this frame.
+///
+/// Activity feedback uses a slow, uniform brightness pulse when the system reduces motion. A
+/// paused background still stops all animation. Decorative animation continues to use the
+/// reduced-motion-gated helpers.
+#[derive(Clone, Copy, Debug)]
 pub struct ActivityPulse {
     phase: f32,
     subtle: bool,
 }
 
 impl ActivityPulse {
-    pub fn opacity(&self, cell_phase: f32, dim: f32) -> f32 {
+    /// The opacity of a cell `cell_phase` behind the wave's front, `dim` at rest; under reduced
+    /// motion every cell fades alike.
+    pub fn opacity(self, cell_phase: f32, dim: f32) -> f32 {
         if self.subtle {
             // No travelling chase or size change, just a gentle 2.4s fade.
-            0.6 + 0.2 * pulse_wave(self.phase)
+            0.2_f32.mul_add(pulse_wave(self.phase), 0.6)
         } else {
             gspin_opacity(self.phase + cell_phase, dim)
         }
     }
 }
 
+/// `view`'s activity pulse this frame, keeping it drawn at the full tick while it shows.
 pub fn activity_pulse(view: EntityId, cx: &mut App) -> ActivityPulse {
     activity_pulse_every(view, 1, cx)
 }
 
+/// [`activity_pulse`] at half the tick, for the coarser cell loaders.
 pub fn activity_pulse_slow(view: EntityId, cx: &mut App) -> ActivityPulse {
     activity_pulse_every(view, 2, cx)
 }
@@ -271,7 +260,7 @@ fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPu
     let animate = !subtle
         || cx
             .try_global::<MotionState>()
-            .is_some_and(|state| state.system && !(state.pause_in_background && !state.active));
+            .is_some_and(|state| state.system && (!state.pause_in_background || state.active));
     let phase = if animate {
         let stride = if subtle { 2 } else { stride };
         schedule_pulse_every(view, stride, cx);
@@ -303,7 +292,10 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
     clock
         .leases
         .entry(view)
-        .or_insert(PulseLease { until: now + PULSE_LEASE, stride })
+        .or_insert_with(|| PulseLease {
+            until: now.checked_add(PULSE_LEASE).unwrap_or(now),
+            stride,
+        })
         .renew(now, stride);
     if !clock.running {
         clock.running = true;
@@ -356,42 +348,48 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
 // Cubic bezier
 // ---------------------------------------------------------------------------
 
-/// A CSS `cubic-bezier(x1, y1, x2, y2)` timing function (endpoints fixed at
-/// (0,0) and (1,1)). Evaluation solves x(t) = input by Newton iteration with a
-/// bisection fallback — the standard `UnitBezier` approach.
+/// A CSS `cubic-bezier(x1, y1, x2, y2)` timing function, its endpoints fixed at (0,0) and (1,1).
+///
+/// Evaluation solves x(t) = input by Newton iteration with a bisection fallback — the standard
+/// `UnitBezier` approach.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CubicBezier {
+    /// The first control point's progress.
     pub x1: f32,
+    /// The first control point's output.
     pub y1: f32,
+    /// The second control point's progress.
     pub x2: f32,
+    /// The second control point's output.
     pub y2: f32,
 }
 
 impl CubicBezier {
+    /// The curve CSS writes `cubic-bezier(x1, y1, x2, y2)`.
     pub const fn new(x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
         Self { x1, y1, x2, y2 }
     }
 
     fn coefficients(a: f32, b: f32) -> (f32, f32, f32) {
         let c = 3.0 * a;
-        let bb = 3.0 * (b - a) - c;
+        let bb = 3.0_f32.mul_add(b - a, -c);
         let aa = 1.0 - c - bb;
         (aa, bb, c)
     }
 
     fn sample_x(&self, t: f32) -> f32 {
         let (a, b, c) = Self::coefficients(self.x1, self.x2);
-        ((a * t + b) * t + c) * t
+        a.mul_add(t, b).mul_add(t, c) * t
     }
 
     fn sample_y(&self, t: f32) -> f32 {
         let (a, b, c) = Self::coefficients(self.y1, self.y2);
-        ((a * t + b) * t + c) * t
+        a.mul_add(t, b).mul_add(t, c) * t
     }
 
     fn sample_x_derivative(&self, t: f32) -> f32 {
         let (a, b, c) = Self::coefficients(self.x1, self.x2);
-        (3.0 * a * t + 2.0 * b) * t + c
+        (3.0 * a).mul_add(t, 2.0 * b).mul_add(t, c)
     }
 
     /// Curve parameter `t` for a given progress `x` (both 0..1).
@@ -412,10 +410,10 @@ impl CubicBezier {
         // Bisection fallback (x(t) is monotonic for valid CSS beziers).
         let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
         for _ in 0..32 {
-            let mid = (lo + hi) / 2.0;
+            let mid = f32::midpoint(lo, hi);
             if self.sample_x(mid) < x { lo = mid } else { hi = mid }
         }
-        (lo + hi) / 2.0
+        f32::midpoint(lo, hi)
     }
 
     /// Eased output for input progress `x ∈ [0,1]` (clamped).
@@ -456,22 +454,29 @@ pub const EASE_IN_OUT: CubicBezier = CubicBezier::new(0.42, 0.0, 0.58, 1.0);
 // Motion specs (the catalog)
 // ---------------------------------------------------------------------------
 
-/// One catalog entry: duration + optional delay + curve. The delay is folded into
-/// the gpui animation timeline (gpui `Animation` has no native delay): the
-/// animation runs for `delay + duration` and [`progress`](Self::progress) holds 0
-/// until the delay has elapsed.
+/// One catalog entry: duration + optional delay + curve.
+///
+/// The delay is folded into the gpui animation timeline (gpui `Animation` has no native delay):
+/// the animation runs for `delay + duration` and [`progress`](Self::progress) holds 0 until the
+/// delay has elapsed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MotionSpec {
+    /// How long the motion runs once its delay is over, in milliseconds.
     pub duration_ms: u64,
+    /// How long it holds still first, in milliseconds.
     pub delay_ms: u64,
+    /// Its easing.
     pub curve: CubicBezier,
 }
 
 impl MotionSpec {
+    /// A motion of `duration_ms` along `curve`, starting at once.
     pub const fn new(duration_ms: u64, curve: CubicBezier) -> Self {
         Self { duration_ms, delay_ms: 0, curve }
     }
 
+    /// This motion held still for `delay_ms` first.
+    #[must_use]
     pub const fn with_delay(mut self, delay_ms: u64) -> Self {
         self.delay_ms = delay_ms;
         self
@@ -479,13 +484,21 @@ impl MotionSpec {
 
     /// Wall-clock span of the whole timeline (delay + duration).
     pub const fn total(&self) -> Duration {
-        Duration::from_millis(self.delay_ms + self.duration_ms)
+        Duration::from_millis(self.delay_ms.saturating_add(self.duration_ms))
     }
 
     /// Eased progress (0..1) for a raw timeline delta (0..1 across [`total`](Self::total)).
     /// Pure — unit-testable without a window.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the catalog's timings, a few seconds of milliseconds, are exact in f32"
+    )]
+    #[expect(
+        clippy::suboptimal_flops,
+        reason = "progress stays exactly 0 up to the delay's end, as a fade late-in pins"
+    )]
     pub fn progress(&self, raw_delta: f32) -> f32 {
-        let total = (self.delay_ms + self.duration_ms) as f32;
+        let total = self.delay_ms.saturating_add(self.duration_ms) as f32;
         if total <= 0.0 || self.duration_ms == 0 {
             return 1.0;
         }
@@ -560,9 +573,10 @@ pub const FOLD_HIDE: MotionSpec = MotionSpec::new(150, EASE_EXIT);
 /// How far a fold's contents rise as they fade in, in pixels.
 pub const FOLD_RISE: f32 = 3.0;
 
-/// A fold `elapsed` into opening (or closing): its height's share of the way open, its contents'
-/// opacity, and how far below their place they stand. Honours [`speed_scale`]; settled at once
-/// under reduced motion (`still`).
+/// A fold `elapsed` into opening (or closing).
+///
+/// It says its height's share of the way open, its contents' opacity, and how far below their
+/// place they stand. Honours [`speed_scale`]; settled at once under reduced motion (`still`).
 pub fn fold_frame(opening: bool, elapsed: Duration, still: bool) -> FoldFrame {
     if still {
         let open = if opening { 1.0 } else { 0.0 };
@@ -595,17 +609,19 @@ pub struct FoldFrame {
 pub const TAB_SLIDE: MotionSpec = MotionSpec::new(150, EASE_OUT);
 /// Diff-pane per-file collapse: 180ms height (§1.11).
 pub const COLLAPSE: MotionSpec = MotionSpec::new(180, EASE_OUT);
-/// Reversible new-thread ↔ session handoff. The shared composer moves and
-/// morphs on a fast-starting, soft-landing curve while the canvas/transcript
-/// crossfade is staged around it. Slightly longer than a utility transition,
+/// Reversible new-thread ↔ session handoff: 420 ms.
+///
+/// The shared composer moves and morphs on a fast-starting, soft-landing curve while the
+/// canvas/transcript crossfade is staged around it. Slightly longer than a utility transition,
 /// but still short enough to acknowledge a send immediately.
 pub const NEW_THREAD_TRANSITION: MotionSpec = MotionSpec::new(420, EASE_RESORT);
 /// Diff-pane chevron rotate: 200ms (§1.11; approximated as a crossfade — gpui
 /// divs have no rotation transform at the pinned rev, same caveat as scale).
 pub const CHEVRON: MotionSpec = MotionSpec::new(200, EASE);
-/// Rail-tick / scroll-to-row glide: 500ms ease-in-out over the whole distance
-/// (Electron parity — the original rail rode the browser's native smooth
-/// scroll, a fixed-duration gentle ease, never percent-of-remaining).
+/// Rail-tick / scroll-to-row glide: 500ms ease-in-out over the whole distance.
+///
+/// Electron parity — the original rail rode the browser's native smooth scroll, a
+/// fixed-duration gentle ease, never percent-of-remaining.
 pub const SCROLL_GLIDE: MotionSpec = MotionSpec::new(500, EASE_IN_OUT);
 /// Tailwind's default transition curve — CSS `cubic-bezier(0.4, 0, 0.2, 1)`
 /// (`transition-colors` et al. carry it unless overridden).
@@ -632,23 +648,34 @@ pub const GRADIENT_SPIN: MotionSpec = MotionSpec::new(750, EASE);
 // Resize-edge feedback
 // ---------------------------------------------------------------------------
 
-/// Pane resize limits acknowledge a held pointer without persisting an
-/// out-of-range size. The small displacement is shared by the shell panes and
-/// nested surface splits so every seam has the same physical response.
+/// How far a pane bounces past a resize limit the pointer holds against, in pixels.
+///
+/// Pane resize limits acknowledge a held pointer without persisting an out-of-range size. The
+/// small displacement is shared by the shell panes and nested surface splits so every seam has
+/// the same physical response.
 pub const RESIZE_EDGE_NUDGE: f32 = 5.0;
+/// How long a resize-limit bounce lasts, out and home.
 pub const RESIZE_EDGE_BOUNCE_MS: u64 = 220;
+/// The share of the bounce spent going out; the rest eases home.
 pub const RESIZE_EDGE_BOUNCE_OUT_FRACTION: f32 = 0.32;
 
+/// Which limit a resize holds against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeEdge {
+    /// The narrowest the pane may be.
     Min,
+    /// The widest the pane may be.
     Max,
 }
 
+/// One drag event of a resize, clamped to its limits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResizeDragSample {
+    /// The width the pane takes, inside its limits.
     pub width: f32,
+    /// The limit the pointer holds against, if any.
     pub edge: Option<ResizeEdge>,
+    /// Whether this event starts a bounce: it reached a limit it was not already at.
     pub starts_bounce: bool,
 }
 
@@ -661,7 +688,7 @@ pub fn resize_drag_sample(
     latched_edge: Option<ResizeEdge>,
     reduced_motion: bool,
 ) -> ResizeDragSample {
-    debug_assert!(min <= max);
+    debug_assert!(min <= max, "a resize's limits run from narrow to wide");
     let edge = if requested <= min {
         Some(ResizeEdge::Min)
     } else if requested >= max {
@@ -676,13 +703,17 @@ pub fn resize_drag_sample(
     }
 }
 
+/// A bounce against a resize limit under way.
 #[derive(Debug, Clone, Copy)]
 pub struct ResizeEdgeBounce {
+    /// The limit it bounces off.
     pub edge: ResizeEdge,
+    /// When it started.
     pub started: Instant,
 }
 
 impl ResizeEdgeBounce {
+    /// A bounce off `edge` starting at `now`.
     pub const fn new(edge: ResizeEdge, now: Instant) -> Self {
         Self { edge, started: now }
     }
@@ -690,7 +721,7 @@ impl ResizeEdgeBounce {
 
 fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+    t * t * 2.0_f32.mul_add(-t, 3.0)
 }
 
 /// Rounded two-phase pulse: ease out to the overshoot, then take a little
@@ -724,8 +755,9 @@ where
     })
 }
 
-/// New-thread composition entrance: opacity 0→1 while settling 10px down into
-/// place over [`FADE_IN`]. Keeping the logo, target selectors, composer, and
+/// New-thread composition entrance: opacity 0→1 while settling 10px down into place.
+///
+/// It runs over [`FADE_IN`]. Keeping the logo, target selectors, composer, and
 /// checkout row under one animation makes the blank canvas arrive as a single
 /// object instead of four independently moving pieces.
 pub fn settle_down<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E>
@@ -761,7 +793,7 @@ where
     E: Styled + IntoElement + 'static,
 {
     element.with_animation(id, MENU_IN.animation(), |el, t| {
-        el.relative().opacity(0.3 + 0.7 * t).top(px(-2.0 * (1.0 - t)))
+        el.relative().opacity(0.7_f32.mul_add(t, 0.3)).top(px(-2.0 * (1.0 - t)))
     })
 }
 
@@ -773,7 +805,7 @@ where
     E: Styled + IntoElement + 'static,
 {
     element.with_animation(id, MENU_IN.animation(), move |el, t| {
-        el.relative().opacity(0.3 + 0.7 * t).top(px(from * (1.0 - t)))
+        el.relative().opacity(0.7_f32.mul_add(t, 0.3)).top(px(from * (1.0 - t)))
     })
 }
 
@@ -792,8 +824,9 @@ where
     })
 }
 
-/// Popover exit: the reverse of [`menu_in`] — fade to 0 + translateY 0→−2 over
-/// [`MENU_OUT`]. Unlike the entrances, the eased progress `t` comes from the
+/// Popover exit: the reverse of [`menu_in`] — fade to 0 + translateY 0→−2 over [`MENU_OUT`].
+///
+/// Unlike the entrances, the eased progress `t` comes from the
 /// caller (computed off [`crate::popover::Popup`]'s closing instant at render
 /// time): `with_animation`'s element-id-keyed clock replays from 0 on remount
 /// (the hover-blend comment's warning), and a replay mid-exit is a full-opacity
@@ -842,6 +875,7 @@ pub use slopty_view_proto::motion::{
 /// Gradient-matrix spinner wave: intensity (0..1) of cell `wave_index` out of
 /// `wave_count` diagonals, at raw delta `raw_delta` of the 750ms period. The wave
 /// front travels across diagonals once per period.
+#[expect(clippy::cast_precision_loss, reason = "a grid's few diagonals, exact in f32")]
 pub fn matrix_wave(raw_delta: f32, wave_index: usize, wave_count: usize) -> f32 {
     let count = wave_count.max(1) as f32;
     pulse_wave(staggered_phase(raw_delta, wave_index, 1.0 / count))
@@ -849,7 +883,7 @@ pub fn matrix_wave(raw_delta: f32, wave_index: usize, wave_count: usize) -> f32 
 
 /// Linear interpolation (layout tweens).
 pub fn lerp(from: f32, to: f32, t: f32) -> f32 {
-    from + (to - from) * t
+    (to - from).mul_add(t, from)
 }
 
 // ---------------------------------------------------------------------------
@@ -897,6 +931,7 @@ impl FadeEntry {
         lerp(self.origin, self.target, HOVER_FADE.curve.eval(raw))
     }
 
+    #[expect(clippy::float_cmp, reason = "a fade to exactly where it stands has nothing to run")]
     fn settled(&self, now: Instant, duration: Duration) -> bool {
         self.origin == self.target || now.saturating_duration_since(self.started) >= duration
     }
@@ -907,10 +942,14 @@ impl FadeEntry {
 /// interpolated height when a second click reverses an in-flight transition.
 #[derive(Clone, Copy)]
 pub(crate) struct DisclosureMotion {
-    pub(crate) epoch: u64,
-    pub(crate) from: f32,
-    pub(crate) to: f32,
-    pub(crate) started: Instant,
+    /// Bumped by each flip, so a reversed tween is a new animation.
+    pub epoch: u64,
+    /// The height it starts from.
+    pub from: f32,
+    /// The height it settles at.
+    pub to: f32,
+    /// When it started.
+    pub started: Instant,
 }
 
 impl DisclosureMotion {
@@ -929,7 +968,8 @@ impl DisclosureMotion {
     }
 
     pub(crate) fn animating(self, now: Instant) -> bool {
-        now.saturating_duration_since(self.started) < COLLAPSE.total() + Duration::from_millis(120)
+        now.saturating_duration_since(self.started)
+            < COLLAPSE.total().saturating_add(Duration::from_millis(120))
     }
 }
 
@@ -946,6 +986,7 @@ pub struct IndicatorSlide {
 }
 
 impl IndicatorSlide {
+    /// An indicator resting at `position` (in segments) as of `now`.
     pub const fn at(position: f32, now: Instant) -> Self {
         Self { from: position, to: position, started: now }
     }
@@ -964,6 +1005,7 @@ impl IndicatorSlide {
         INDICATOR_SLIDE.progress(raw)
     }
 
+    /// Where the indicator stands at `now`, in segments.
     pub fn value_at(&self, now: Instant) -> f32 {
         lerp(self.from, self.to, self.progress(now))
     }
@@ -974,6 +1016,8 @@ impl IndicatorSlide {
         *self = Self { from, to, started: now };
     }
 
+    /// Whether it is still on its way at `now`.
+    #[expect(clippy::float_cmp, reason = "a slide to exactly where it stands has nothing to run")]
     pub fn animating_at(&self, now: Instant) -> bool {
         self.from != self.to && now.saturating_duration_since(self.started) < Self::duration()
     }
@@ -981,7 +1025,7 @@ impl IndicatorSlide {
 
 /// Per-key hover progress store. Pure core (explicit `now`) — unit-testable;
 /// the thread-local wrappers below feed it wall time.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct HoverFades {
     entries: HashMap<String, FadeEntry>,
     frame: u64,
@@ -1029,14 +1073,15 @@ impl HoverFades {
     /// An element with `key`'s [`fade_driver`] is laid out, and stays until
     /// [`Self::unmount`]: the fades hold the key through frames that draw it from the last one.
     pub fn mount(&mut self, key: &str) {
-        *self.mounted.entry(key.to_owned()).or_default() += 1;
+        let count = self.mounted.entry(key.to_owned()).or_default();
+        *count = count.saturating_add(1);
     }
 
     /// An element [`Self::mount`] told of is gone: once none stands behind `key`, its
     /// leave will never come, and the fade lets it go.
     pub fn unmount(&mut self, key: &str) {
         let Some(count) = self.mounted.get_mut(key) else { return };
-        *count -= 1;
+        *count = count.saturating_sub(1);
         if *count == 0 {
             self.mounted.remove(key);
             self.entries.remove(key);
@@ -1046,14 +1091,14 @@ impl HoverFades {
     /// Whether `key` is held though no read of the last frame stamped it.
     #[cfg(test)]
     fn unread(&self, key: &str) -> bool {
-        self.entries.get(key).is_some_and(|entry| entry.seen + 1 < self.frame)
+        self.entries.get(key).is_some_and(|entry| entry.seen.saturating_add(1) < self.frame)
     }
 
     /// Once-per-frame bookkeeping: advance the frame counter, prune entries
     /// that settled back to rest or went a full frame unread (unmounted), and
     /// report whether any fade is still mid-flight (→ keep frames coming).
     pub fn tick_at(&mut self, now: Instant) -> bool {
-        self.frame += 1;
+        self.frame = self.frame.saturating_add(1);
         let frame = self.frame;
         let duration = Self::duration();
         let mut active = false;
@@ -1063,7 +1108,7 @@ impl HoverFades {
             // (its leave event will never come) — drop the entry.
             // Unless a mounted element holds it, drawn from its last frame, which reads
             // nothing ([`HoverFades::mount`]).
-            if entry.seen + 1 < frame && !mounted.contains_key(key) {
+            if entry.seen.saturating_add(1) < frame && !mounted.contains_key(key) {
                 return false;
             }
             let settled = entry.settled(now, duration);
@@ -1105,9 +1150,10 @@ pub fn hover_t(key: &str) -> f32 {
     HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, hover_frame()))
 }
 
-/// How far a control that a hover reveals shows: on a touch screen, where nothing hovers,
-/// it is there at rest (opencode gates every reveal on `(hover: hover)`); elsewhere it is `key`'s
-/// hover fade, as [`hover_t`].
+/// How far a control that a hover reveals shows.
+///
+/// On a touch screen, where nothing hovers, it is there at rest (opencode gates every reveal on
+/// `(hover: hover)`); elsewhere it is `key`'s hover fade, as [`hover_t`].
 pub fn revealed_by_hover(key: &str) -> f32 {
     if cfg!(target_os = "ios") { 1.0 } else { hover_t(key) }
 }
@@ -1129,8 +1175,9 @@ pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
     HOVER_FADES.with(|fades| fades.borrow_mut().set_at(key, hovered, reduced, hover_now()));
 }
 
-/// An element's hover fade for `key`, read with [`hover_t`]/[`hover_blend`] in the
-/// same view: the pointer's flips set it ([`hover_listener`]), and while it runs, each frame the
+/// An element's hover fade for `key`, read with [`hover_t`]/[`hover_blend`] in the same view.
+///
+/// The pointer's flips set it ([`hover_listener`]), and while it runs, each frame the
 /// element is laid out in asks its own view for the next. The shell's frames keep coming while
 /// any fade runs, but a view the window draws from its last frame reads no fade: without its
 /// own ask, a view of its own (a settings page, a picker) would keep the frame the flip drew.
@@ -1145,11 +1192,12 @@ pub trait HoverFade: StatefulInteractiveElement + ParentElement {
 
 impl<E: StatefulInteractiveElement + ParentElement> HoverFade for E {}
 
-/// The part of [`HoverFade`] that keeps `key`'s fade moving, for an element whose own
-/// hover listener calls [`hover_listener`]'s: nothing drawn, and while the fade runs, the view
-/// it is laid out in is asked for the next frame.
+/// The part of [`HoverFade`] that keeps `key`'s fade moving.
 ///
-/// It also holds the element's place in the fades ([`FadeMount`]). A view the window draws from
+/// It is for an element whose own hover listener calls [`hover_listener`]'s: nothing drawn,
+/// and while the fade runs, the view it is laid out in is asked for the next frame.
+///
+/// It also holds the element's place in the fades (`FadeMount`). A view the window draws from
 /// its last frame reads no fade, and the fades let go of a key no frame read, as an element gone
 /// whose leave will never come: a card, row or trigger the pointer rests on would then come back
 /// unlit when its view is next built, while the frame before drew it lit. GPUI keeps an
@@ -1290,13 +1338,14 @@ impl StateEntry {
         lerp(self.origin, self.target, self.spec.progress(raw))
     }
 
+    #[expect(clippy::float_cmp, reason = "a morph to exactly where it stands has nothing to run")]
     fn settled(&self, now: Instant) -> bool {
         self.origin == self.target || now.saturating_duration_since(self.started) >= self.duration()
     }
 }
 
 /// Per-key state-morph store. Pure core (explicit `now`) — unit-testable.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct StateMorphs {
     entries: HashMap<String, StateEntry>,
     frame: u64,
@@ -1315,6 +1364,7 @@ impl StateMorphs {
     ) -> f32 {
         let target = if on { 1.0 } else { 0.0 };
         let frame = self.frame;
+        let flipped = |entry: &StateEntry| (entry.target > 0.5) != on;
         let Some(entry) = self.entries.get_mut(key) else {
             self.entries.insert(
                 key.to_owned(),
@@ -1322,7 +1372,7 @@ impl StateMorphs {
             );
             return target;
         };
-        if entry.target != target {
+        if flipped(entry) {
             let current = entry.value(now);
             *entry = StateEntry {
                 origin: if reduced { target } else { current },
@@ -1339,11 +1389,11 @@ impl StateMorphs {
     /// Once-per-frame bookkeeping: prune unmounted entries and report whether
     /// any morph is still mid-flight (→ keep frames coming).
     pub fn tick_at(&mut self, now: Instant) -> bool {
-        self.frame += 1;
+        self.frame = self.frame.saturating_add(1);
         let frame = self.frame;
         let mut active = false;
         self.entries.retain(|_, entry| {
-            if entry.seen + 1 < frame {
+            if entry.seen.saturating_add(1) < frame {
                 return false;
             }
             active |= !entry.settled(now);
@@ -1384,8 +1434,9 @@ pub fn state_morphs_active(now: Instant) -> bool {
 // Reduced motion
 // ---------------------------------------------------------------------------
 
-/// Dev/measurement knob (`SLOPTY_MOTION_SCALE`, default 1): stretches every
-/// catalog timeline by this factor — e.g. `SLOPTY_MOTION_SCALE=10` slows the
+/// Dev/measurement knob (`SLOPTY_MOTION_SCALE`, default 1).
+///
+/// It stretches every catalog timeline by this factor — e.g. `SLOPTY_MOTION_SCALE=10` slows the
 /// 200ms pane tweens to 2s so screenshot bursts can sample the geometry
 /// per frame. Read once; never set in production.
 pub fn speed_scale() -> f32 {
@@ -1410,10 +1461,11 @@ pub fn reduced_motion(cx: &App) -> bool {
     cx.reduce_motion()
 }
 
-/// The global reduced-motion flag as a view read it for its render pass, kept for the
-/// code that runs without a `cx`. Only [`ReducedMotion::of`] makes one, from the flag: a view's
-/// copy is the flag's, so a test asks for reduced motion through [`set_reduced_motion`], never by
-/// writing the copy, which the next render would overwrite.
+/// The global reduced-motion flag as a view read it for its render pass.
+///
+/// It is kept for the code that runs without a `cx`. Only [`ReducedMotion::of`] makes one, from the
+/// flag: a view's copy is the flag's, so a test asks for reduced motion through
+/// [`set_reduced_motion`], never by writing the copy, which the next render would overwrite.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReducedMotion(bool);
 
@@ -1465,10 +1517,12 @@ pub fn init(pause_in_background: bool, cx: &mut App) {
     apply(cx);
 }
 
+/// Whether the person chose to pause animations while Slopty is in the background.
 pub fn pause_in_background(cx: &App) -> bool {
     cx.try_global::<MotionState>().is_some_and(|state| state.pause_in_background)
 }
 
+/// Pause animations in the background, or not, as the person chose; saved with the settings.
 pub fn set_pause_in_background(enabled: bool, cx: &mut App) {
     let Some(state) = state_mut(cx) else {
         return;
@@ -1483,9 +1537,11 @@ pub fn set_pause_in_background(enabled: bool, cx: &mut App) {
     });
 }
 
-/// Fix the flag at `reduced` for good: the e2e socket asks for Reduce Motion so every
-/// dump's frame can be judged, and neither the OS's setting, a paused background nor the
-/// window becoming active (which reads the OS's again) may undo it.
+/// Fix the flag at `reduced` for good.
+///
+/// The e2e socket asks for Reduce Motion so every dump's frame can be judged, and neither the OS's
+/// setting, a paused background nor the window becoming active (which reads the OS's again) may
+/// undo it.
 pub fn hold(reduced: bool, cx: &mut App) {
     match state_mut(cx) {
         Some(state) => {
@@ -1556,14 +1612,16 @@ pub fn shimmer_ink(index: usize, phase_ms: f32) -> f32 {
     (std::f32::consts::PI * local / pass).sin()
 }
 
-/// `text` as a shimmering line while `active`: each glyph inked from `theme.text_faint` to
-/// `theme.text` as the band crosses it, asking for the next frame meanwhile. Settled, or under
-/// reduced motion, it is plain `theme.text_muted`. The caller sets font and size around it.
+/// `text` as a shimmering line while `active`.
+///
+/// Each glyph is inked from `theme.text_faint` to `theme.text` as the band crosses it, asking for
+/// the next frame meanwhile. Settled, or under reduced motion, it is plain `theme.text_muted`. The
+/// caller sets font and size around it.
 pub fn shimmer_text(
     text: impl Into<SharedString>,
     active: bool,
     theme: &crate::theme::Theme,
-    window: &mut Window,
+    window: &Window,
     cx: &App,
 ) -> gpui::StyledText {
     let text: SharedString = text.into();
@@ -1590,7 +1648,7 @@ pub fn shimmer_color(ink: f32, theme: &crate::theme::Theme) -> Hsla {
     if ink <= 0.5 {
         mix(theme.text_faint, theme.accent, ink * 2.0)
     } else {
-        mix(theme.accent, crest, ink * 2.0 - 1.0)
+        mix(theme.accent, crest, ink.mul_add(2.0, -1.0))
     }
 }
 
@@ -1617,7 +1675,8 @@ fn shimmer_runs(
         if let Some(from) = unlit.take() {
             runs.push((from..start, ink_style(faint)));
         }
-        runs.push((start..start + ch.len_utf8(), ink_style(shimmer_color(ink, theme))));
+        let end = start.saturating_add(ch.len_utf8());
+        runs.push((start..end, ink_style(shimmer_color(ink, theme))));
     }
     if let Some(from) = unlit {
         runs.push((from..text.len(), ink_style(faint)));
@@ -1757,7 +1816,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn activity_pulse_honors_a_paused_background_and_a_hold(cx: &mut gpui::TestAppContext) {
+    fn activity_pulse_honors_a_paused_background_and_a_hold(cx: &gpui::TestAppContext) {
         use gpui::AppContext as _;
 
         cx.update(|cx| {
@@ -1796,7 +1855,7 @@ mod tests {
     /// A held flag (the e2e socket's Reduce Motion) outlasts the window becoming active,
     /// which re-reads the OS's setting, the OS's setting changing, and a paused background.
     #[gpui::test]
-    fn a_held_reduce_motion_outlasts_activation_and_the_setting(cx: &mut gpui::TestAppContext) {
+    fn a_held_reduce_motion_outlasts_activation_and_the_setting(cx: &gpui::TestAppContext) {
         cx.update(|cx| {
             cx.set_global(MotionState {
                 pause_in_background: true,
@@ -1877,7 +1936,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn system_reduced_motion_keeps_activity_loaders_ticking(cx: &mut gpui::TestAppContext) {
+    fn system_reduced_motion_keeps_activity_loaders_ticking(cx: &gpui::TestAppContext) {
         use gpui::AppContext as _;
 
         cx.update(|cx| {
@@ -1925,6 +1984,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_precision_loss, reason = "sweep steps under 2^24, exact in f32")]
     fn eval_never_escapes_unit_interval_dense_sweep() {
         // Regression: f32 rounding produced 1.000000119 near the tail of
         // EASE_OUT_EXPO, tripping gpui's `delta ∈ [0,1]` assert (SIGABRT on
@@ -1964,9 +2024,9 @@ mod tests {
     fn bezier_known_values() {
         // References computed independently with 80-step bisection.
         let cases: [(&str, CubicBezier, [f32; 5]); 3] = [
-            ("expo", EASE_OUT_EXPO, [0.494391, 0.825622, 0.971779, 0.997677, 0.999878]),
-            ("ease-out", EASE_OUT, [0.160572, 0.378138, 0.684643, 0.906535, 0.982973]),
-            ("ease", EASE, [0.094796, 0.408511, 0.802403, 0.960459, 0.994316]),
+            ("expo", EASE_OUT_EXPO, [0.494_391, 0.825_622, 0.971_779, 0.997_677, 0.999_878]),
+            ("ease-out", EASE_OUT, [0.160_572, 0.378_138, 0.684_643, 0.906_535, 0.982_973]),
+            ("ease", EASE, [0.094_796, 0.408_511, 0.802_403, 0.960_459, 0.994_316]),
         ];
         for (name, curve, expected) in cases {
             for (x, want) in [0.1, 0.25, 0.5, 0.75, 0.9].into_iter().zip(expected) {
@@ -1986,6 +2046,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::cast_precision_loss, reason = "a hundred steps, exact in f32")]
     fn bezier_is_monotonic_for_catalog_curves() {
         for curve in [EASE_OUT_EXPO, EASE_OUT, EASE, EASE_RESORT, EASE_IN_OUT] {
             let mut last = 0.0;
@@ -2272,7 +2333,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn focus_and_the_system_drive_the_global_flag(cx: &mut gpui::TestAppContext) {
+    fn focus_and_the_system_drive_the_global_flag(cx: &gpui::TestAppContext) {
         cx.update(|cx| {
             cx.set_global(MotionState {
                 pause_in_background: false,
@@ -2311,7 +2372,7 @@ mod tests {
 
         let theme = crate::theme::Theme::dark();
         let text = "Running tests";
-        let runs = shimmer_runs(text, pass / 2.0 + 3.0 * 45.0, &theme);
+        let runs = shimmer_runs(text, 3.0_f32.mul_add(45.0, pass / 2.0), &theme);
         let mut end = 0;
         for (range, _) in &runs {
             assert_eq!(range.start, end, "runs tile the text");
@@ -2395,6 +2456,6 @@ pub fn fast_tier(
     element: impl IntoElement + Styled + 'static,
 ) -> impl IntoElement {
     element.with_animation(id, Animation::new(Duration::from_millis(700)), |el, t| {
-        el.opacity(1.0 - 0.35 * (1.0 - t) * (std::f32::consts::PI * t).sin())
+        el.opacity((-0.35 * (1.0 - t)).mul_add((std::f32::consts::PI * t).sin(), 1.0))
     })
 }

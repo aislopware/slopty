@@ -7,33 +7,40 @@
 //! Call `leave` on trigger exit, `cancel` on clicks/keyboard/dismissal, and
 //! `contains_pointer` from a window mouse listener to dismiss outside the safe
 //! trigger → child corridor. This works for children on either side.
-#![allow(
-    let_underscore_drop,
-    missing_copy_implementations,
-    missing_debug_implementations,
-    missing_docs,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::time::Duration;
 
 use gpui::{Bounds, Context, Pixels, Point, Task, px};
 
-#[derive(Debug, PartialEq, Eq)]
+/// What a pointer event over a trigger asks of its submenu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoverAction {
+    /// Nothing changes.
     None,
+    /// Open the trigger's submenu now.
     Open,
+    /// The pointer heads for the open child: open after the grace ([`HoverIntent::defer`]).
     Defer,
 }
 
+/// One nested menu's pointer intent: which trigger waits to open, and the corridor toward the
+/// open child that keeps it waiting.
 pub struct HoverIntent<K> {
     origin: Option<Point<Pixels>>,
     pending: Option<K>,
     pointer: Option<Point<Pixels>>,
-    task: Option<Task<()>>,
+    /// Its `Err`, the view gone by the grace's end, is nobody's to read.
+    task: Option<Task<anyhow::Result<()>>>,
+}
+
+// By hand: `K` need not be `Debug`, and the task says nothing.
+impl<K> std::fmt::Debug for HoverIntent<K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HoverIntent")
+            .field("origin", &self.origin)
+            .field("pending", &self.pending.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<K> Default for HoverIntent<K> {
@@ -43,21 +50,25 @@ impl<K> Default for HoverIntent<K> {
 }
 
 impl<K: Clone + PartialEq> HoverIntent<K> {
+    /// Drop the waiting trigger and its grace: a click, a key or the menu's dismissal.
     pub fn cancel(&mut self) {
         self.task = None;
         self.pending = None;
         self.pointer = None;
     }
 
+    /// [`Self::cancel`], forgetting where the pointer stood on the open trigger too.
     pub fn reset(&mut self) {
         self.cancel();
         self.origin = None;
     }
 
+    /// The pointer stands at `pointer` on the open trigger: the corridor starts there.
     pub const fn record_origin(&mut self, pointer: Point<Pixels>) {
         self.origin = Some(pointer);
     }
 
+    /// The trigger waiting out its grace, if any.
     pub const fn pending(&self) -> Option<&K> {
         self.pending.as_ref()
     }
@@ -73,6 +84,8 @@ impl<K: Clone + PartialEq> HoverIntent<K> {
             .is_some_and(|(origin, bounds)| corridor(origin, pointer, bounds, left))
     }
 
+    /// The pointer entered `target` while `current` is open, its child at `bounds` (to the
+    /// `left` or right).
     pub fn enter(
         &mut self,
         current: Option<&K>,
@@ -95,6 +108,8 @@ impl<K: Clone + PartialEq> HoverIntent<K> {
         }
     }
 
+    /// The pointer moved over `target`: a waiting trigger opens once the pointer turns away
+    /// from the child or leaves the corridor, and its grace renews while it heads on.
     pub fn moved(
         &mut self,
         current: Option<&K>,
@@ -120,12 +135,15 @@ impl<K: Clone + PartialEq> HoverIntent<K> {
         HoverAction::None
     }
 
+    /// The pointer left `target`: its wait, if it waited, ends.
     pub fn leave(&mut self, target: &K) {
         if self.pending() == Some(target) {
             self.cancel();
         }
     }
 
+    /// Whether `pointer` is still where the open child may keep standing: on its `trigger`, on
+    /// the `child`, or in the corridor between them. Outside, the menu is dismissed.
     pub fn contains_pointer(
         &mut self,
         trigger: Bounds<Pixels>,
@@ -141,14 +159,15 @@ impl<K: Clone + PartialEq> HoverIntent<K> {
         child.contains(&pointer) || self.toward_child(pointer, Some(child), left)
     }
 
+    /// Run `apply` on the view once the grace has passed, unless [`Self::cancel`] comes first.
     pub fn defer<T: 'static>(
         &mut self,
-        cx: &mut Context<T>,
+        cx: &Context<T>,
         apply: impl FnOnce(&mut T, &mut Context<T>) + 'static,
     ) {
         self.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(300)).await;
-            let _ = this.update(cx, apply);
+            this.update(cx, apply)
         }));
     }
 }

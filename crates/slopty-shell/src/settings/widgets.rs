@@ -240,7 +240,7 @@ impl PageScroll {
     /// per render ([`rail`] pairs this with the hide-countdown scheduling).
     fn metrics(&mut self) -> Option<MenuScrollbarMetrics> {
         self.bar.note_scroll(&self.scroll);
-        self.bar.metrics(&self.scroll)
+        MenuScrollbarState::metrics(&self.scroll)
     }
 }
 

@@ -1,10 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Dropdown placement within a dialog, measured after layout.
-#![allow(
-    clippy::manual_clamp,
-    clippy::renamed_function_params,
-    reason = "shell lint migration: slice D"
-)]
 
 use gpui::prelude::*;
 use gpui::{
@@ -34,7 +29,7 @@ pub fn contained_menu(
     // Half the usable height guarantees room on at least one side, even
     // when the trigger sits in the middle of a small dialog.
     let max_height =
-        ((f32::from(limits.size.height) - trigger_height) / 2.0 - 6.0).max(1.0).min(320.0);
+        ((f32::from(limits.size.height) - trigger_height) / 2.0 - 6.0).clamp(1.0, 320.0);
     let card = content
         .id(SharedString::from(format!("{id}-scroll")))
         .debug_selector(|| "contained-menu-scroll".into())
@@ -129,11 +124,11 @@ impl Element for ContainedMenu {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        child: &mut LayoutId,
+        request_layout: &mut LayoutId,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let size = window.layout_bounds(*child).size;
+        let size = window.layout_bounds(*request_layout).size;
         let origin =
             menu_origin(bounds.origin, size, px(self.trigger_height), self.limits, self.align);
         window.with_element_offset(origin - bounds.origin, |window| {

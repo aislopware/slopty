@@ -11,26 +11,6 @@
 //! Pure logic (wrap-around list navigation, ranked substring filtering, key
 //! classification) lives in free functions with unit tests; the elements only
 //! feed them measurements/events.
-#![allow(
-    missing_copy_implementations,
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::float_cmp,
-    clippy::float_cmp_const,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::string_slice,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    reason = "shell lint migration: slice D"
-)]
 
 mod contained;
 mod hover_intent;
@@ -55,14 +35,19 @@ use crate::theme::{Theme, hairline, ink};
 /// `Ready` / `Error` (inline message + Retry).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Loadable<T> {
+    /// Never requested.
     #[default]
     Idle,
+    /// Asked for, not answered yet.
     Loading,
+    /// Answered.
     Ready(T),
+    /// Failed, with what to say.
     Error(String),
 }
 
 impl<T> Loadable<T> {
+    /// The value once it has loaded.
     pub const fn ready(&self) -> Option<&T> {
         match self {
             Self::Ready(value) => Some(value),
@@ -70,10 +55,12 @@ impl<T> Loadable<T> {
         }
     }
 
+    /// Whether it is on its way.
     pub const fn is_loading(&self) -> bool {
         matches!(self, Self::Loading)
     }
 
+    /// What went wrong, if loading failed.
     pub fn error(&self) -> Option<&str> {
         match self {
             Self::Error(message) => Some(message),
@@ -86,8 +73,10 @@ impl<T> Loadable<T> {
 // Popup — open/closing/closed lifecycle (exit animations)
 // ---------------------------------------------------------------------------
 
-/// Popup state with an exit phase. gpui unmounts an element the frame its
-/// state drops, so a closing animation needs the state held alive while
+/// Popup state with an exit phase.
+///
+/// gpui unmounts an element the frame its state drops, so a closing animation needs the state
+/// held alive while
 /// [`motion::menu_out`] plays: `open` → `begin_close` (render keeps mounting,
 /// with the out animation and dead hit-testing) → [`reap_popup`]'s timer
 /// `finish_close`es ~[`motion::MENU_OUT`] later. Use [`Self::is_open`] for
@@ -104,6 +93,16 @@ pub struct Popup<T> {
     return_focus: Option<(gpui::FocusHandle, gpui::FocusHandle)>,
 }
 
+// By hand: `T` need not be `Debug`, and the focus handles say nothing.
+impl<T> std::fmt::Debug for Popup<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Popup")
+            .field("open", &self.is_open())
+            .field("closing", &self.is_closing())
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> Default for Popup<T> {
     fn default() -> Self {
         Self { inner: None, pressed_while_open: false, return_focus: None }
@@ -111,6 +110,7 @@ impl<T> Default for Popup<T> {
 }
 
 impl<T> Popup<T> {
+    /// Open with `value`, at once interactive.
     pub fn open(&mut self, value: T) {
         self.inner = Some((value, None));
         self.return_focus = None;
@@ -138,6 +138,7 @@ impl<T> Popup<T> {
         matches!(self.inner, Some((_, None)))
     }
 
+    /// Playing its exit animation, already closed to the person.
     pub const fn is_closing(&self) -> bool {
         matches!(self.inner, Some((_, Some(_))))
     }
@@ -166,6 +167,7 @@ impl<T> Popup<T> {
         }
     }
 
+    /// The state to change, only while genuinely open (see [`Self::as_open`]).
     pub const fn open_mut(&mut self) -> Option<&mut T> {
         match &mut self.inner {
             Some((value, None)) => Some(value),
@@ -218,7 +220,7 @@ impl<T> Popup<T> {
     }
 
     /// Drop the state if the exit phase has run its course. A popup reopened
-    /// (or re-closed) since the matching [`begin_close`] is left alone — the
+    /// (or re-closed) since the matching [`Self::begin_close`] is left alone — the
     /// newer phase's own reap handles it.
     pub fn finish_close(&mut self, now: Instant) {
         if let Some((_, Some(since))) = &self.inner
@@ -255,11 +257,12 @@ pub fn return_focus(window: &mut Window, cx: &mut gpui::App) {
     }
 }
 
-/// Schedule the reap for a [`Popup::begin_close`]: after the exit animation's
-/// span, drop the popup state and repaint. `popup` re-borrows the field from
-/// the view (the state can't be captured — the view owns it).
+/// Schedule the reap for a [`Popup::begin_close`].
+///
+/// After the exit animation's span, drop the popup state and repaint. `popup` re-borrows the
+/// field from the view (the state can't be captured — the view owns it).
 pub fn reap_popup<V: 'static, T: 'static>(
-    cx: &mut gpui::Context<V>,
+    cx: &gpui::Context<V>,
     popup: impl Fn(&mut V) -> &mut Popup<T> + 'static,
 ) {
     cx.spawn(async move |view, cx| {
@@ -271,11 +274,11 @@ pub fn reap_popup<V: 'static, T: 'static>(
                     .saturating_add(Duration::from_millis(20)),
             )
             .await;
+        // A view gone by then has no popup left to reap.
         view.update(cx, |view, cx| {
             popup(view).finish_close(crate::clock::now(cx));
             cx.notify();
         })
-        .ok();
     })
     .detach();
 }
@@ -290,18 +293,20 @@ pub const fn menu_step(active: Option<usize>, count: usize, delta: isize) -> Opt
     if count == 0 {
         return None;
     }
-    let count_i = count as isize;
-    let next = match active {
-        None => {
-            if delta >= 0 {
-                0
-            } else {
-                count_i - 1
-            }
-        }
-        Some(at) => (at as isize + delta).rem_euclid(count_i),
+    let Some(at) = active else {
+        return Some(if delta >= 0 { 0 } else { count.saturating_sub(1) });
     };
-    Some(next as usize)
+    // Both below `count`, so neither sum below overflows.
+    let (Some(at), Some(step)) = (at.checked_rem(count), delta.unsigned_abs().checked_rem(count))
+    else {
+        return None;
+    };
+    let next = if delta >= 0 {
+        at.saturating_add(step)
+    } else {
+        at.saturating_add(count.saturating_sub(step))
+    };
+    next.checked_rem(count)
 }
 
 /// Match rank of a label against a query: `0` prefix match, `1` substring,
@@ -337,17 +342,23 @@ pub fn filter_indices<S: AsRef<str>>(query: &str, labels: &[S]) -> Vec<usize> {
 /// Keys the pickers care about, classified from a raw keystroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuKey {
+    /// ↑ or ⌃P — the row above.
     Up,
+    /// ↓ or ⌃N — the row below.
     Down,
     /// Plain Enter — activate the highlighted row.
     Enter,
     /// Cmd/Ctrl+Enter — the "pick this folder" accelerator in the browser.
     ModEnter,
+    /// Escape — close.
     Escape,
+    /// Backspace — up a level in a browser with an empty query.
     Backspace,
+    /// Anything else, left to the text field.
     Other,
 }
 
+/// What `key`, with ⌘ (`cmd`) or ⌃ (`ctrl`) held, asks of a picker.
 pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
     match key {
         "up" => MenuKey::Up,
@@ -369,20 +380,24 @@ pub fn classify_key(key: &str, cmd: bool, ctrl: bool) -> MenuKey {
 // Elements
 // ---------------------------------------------------------------------------
 
-/// The floating-menu surface:
-/// Shared floating surface used by palettes, popovers, dropdowns and menus.
-/// Mount helpers supply the same 16px backdrop blur as the composer.
-/// Corner radius must match the frost wrapper's mask.
+/// The floating-menu surface's corner radius.
+///
+/// Shared floating surface used by palettes, popovers, dropdowns and menus. Mount helpers supply
+/// the same 16px backdrop blur as the composer. Corner radius must match the frost wrapper's
+/// mask.
 pub const CARD_RADIUS: f32 = 12.0;
 
+/// The gap between a menu's rows.
 pub const MENU_GAP: f32 = 2.0;
 /// The four-pixel inset of [`popover_card`] that [`menu_scroll_host`] /
 /// [`menu_scroll_list`] cancel for card-bleeding scroll hosts.
 pub const CARD_INSET: f32 = 4.0;
 /// Concentric corners: rows sit inside both the card's 1px border and padding.
 pub const MENU_ITEM_RADIUS: f32 = CARD_RADIUS - 1.0 - CARD_INSET;
+/// A palette row's corner radius, concentric inside the palette's 14px card.
 pub const PALETTE_ITEM_RADIUS: f32 = 14.0 - CARD_INSET;
 
+/// The floating surface's fill: frost's tint or glass, else the input glass.
 pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
     if theme.is_frost() {
         if matches!(theme.appearance, crate::theme::Appearance::Dark) {
@@ -395,6 +410,8 @@ pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
     }
 }
 
+/// The floating card every menu, picker and popover draws on: its radius, elevation, fill,
+/// inset and type.
 pub fn popover_card(theme: &Theme) -> Div {
     div()
         .rounded(px(CARD_RADIUS))
@@ -415,9 +432,10 @@ pub fn popover_card_flush(theme: &Theme) -> Div {
     popover_card(theme).p(px(0.0))
 }
 
-/// Host half of the card-bleed scroll treatment: bleed the rail to the card
-/// edge; the inner list ([`menu_scroll_list`]) re-pads so rows stay put.
-/// The rail mounts as a SIBLING of the scroller, above its clip — a rail
+/// Host half of the card-bleed scroll treatment.
+///
+/// It bleeds the rail to the card edge; the inner list ([`menu_scroll_list`]) re-pads so rows stay
+/// put. The rail mounts as a SIBLING of the scroller, above its clip — a rail
 /// inside the scroller would scroll away with the content. Geometry only:
 /// chain the view's own listeners (`.on_hover` for the list-hover note) onto
 /// the returned element, plus `.my(px(-CARD_INSET))` when the card carries
@@ -439,6 +457,7 @@ pub fn completion_card(theme: &Theme) -> Div {
     popover_card(theme).w_full().max_h(px(320.0))
 }
 
+/// A completion card's list: the re-padded scroller with its rows, faded at its edges.
 pub fn completion_list(
     id: &'static str,
     scroll: &ScrollHandle,
@@ -597,13 +616,13 @@ fn menu_motion_from(id: SharedString, exit: Option<f32>, inner: Div, from: f32) 
 /// Entrance travel for menus that open away from a trigger edge.
 const MENU_TRAVEL: f32 = 4.0;
 
-/// Wrap popover content in a floating anchored layer attached to the trigger:
-/// the caller `.child(anchored_menu(...))`s this from the trigger element while
-/// open. Plays `menu-in` (0.14s fade + 2px drop); `closing` (the [`Popup`]
-/// exit phase) swaps in `menu-out`. Dismissal is the caller's
-/// `.on_mouse_down_out` on the content. The layer `.occlude()`s: hitboxes are
-/// paint-order only in gpui, so without it clicks on menu rows would ALSO fire
-/// whatever clickable sits under the floating layer.
+/// Wrap popover content in a floating anchored layer attached to the trigger.
+///
+/// The caller `.child(anchored_menu(...))`s this from the trigger element while open. Plays
+/// `menu-in` (0.14s fade + 2px drop); `closing` (the [`Popup`] exit phase) swaps in `menu-out`.
+/// Dismissal is the caller's `.on_mouse_down_out` on the content. The layer `.occlude()`s: hitboxes
+/// are paint-order only in gpui, so without it clicks on menu rows would ALSO fire whatever
+/// clickable sits under the floating layer.
 pub fn anchored_menu(
     id: impl Into<SharedString>,
     content: AnyElement,
@@ -623,10 +642,10 @@ pub fn anchored_menu(
     )
 }
 
-/// [`anchored_menu`] opening DOWNWARD from the trigger's bottom edge — a
-/// dropdown proper (the sidebar's space filter). The default variant pins to
-/// the trigger's top-left, which reads fine for context-style menus but
-/// covers a button-shaped trigger.
+/// [`anchored_menu`] opening DOWNWARD from the trigger's bottom edge.
+///
+/// A dropdown proper (the sidebar's space filter). The default variant pins to the trigger's
+/// top-left, which reads fine for context-style menus but covers a button-shaped trigger.
 pub fn anchored_menu_below(
     id: impl Into<SharedString>,
     content: AnyElement,
@@ -635,9 +654,10 @@ pub fn anchored_menu_below(
     anchored_menu_below_gap(id, content, closing, 6.0)
 }
 
-/// [`anchored_menu_below`] right-aligned to the trigger's right edge. This is
-/// the dropdown counterpart to [`anchored_menu_above_end`]: trailing sidebar
-/// controls can open a full-width card leftward without leaving the sidebar.
+/// [`anchored_menu_below`] right-aligned to the trigger's right edge.
+///
+/// This is the dropdown counterpart to [`anchored_menu_above_end`]: trailing sidebar controls can
+/// open a full-width card leftward without leaving the sidebar.
 pub fn anchored_menu_below_end(
     id: impl Into<SharedString>,
     content: AnyElement,
@@ -720,9 +740,10 @@ pub fn nested_menu(id: impl Into<SharedString>, content: AnyElement, left: bool)
         .into_any_element()
 }
 
-/// [`anchored_menu_below`] with a caller-chosen trigger→card gap — the
-/// changes-header dropdowns hang off a tight titlebar band and need more
-/// breathing room than the default 6px (user report; t3code sits near 10).
+/// [`anchored_menu_below`] with a caller-chosen trigger→card gap.
+///
+/// The changes-header dropdowns hang off a tight titlebar band and need more breathing room than
+/// the default 6px (user report; t3code sits near 10).
 pub fn anchored_menu_below_gap(
     id: impl Into<SharedString>,
     content: AnyElement,
@@ -809,6 +830,7 @@ pub fn anchored_menu_above_at(
         .into_any_element()
 }
 
+/// A menu opening upward across its trigger's whole width, as wide as the trigger.
 pub fn full_width_menu_above(
     id: impl Into<SharedString>,
     content: AnyElement,
@@ -892,7 +914,7 @@ pub fn menu_at(
 /// scope. Mirrors [`Theme::scrim`], which is pinned at `X = 0.6` dark /
 /// `0.32` light; other dark-mode alphas scale the light side by the same
 /// ratio so the *dark* result is always exactly `alpha_dark` (never routed
-/// through [`Hsla::opacity`], whose `0..=1` clamp would clip a
+/// through [`gpui::Hsla::opacity`], whose `0..=1` clamp would clip a
 /// larger-than-0.6 alpha before it could scale the light side).
 pub(crate) fn scrim_alpha(alpha_dark: f32) -> gpui::Hsla {
     crate::theme::scrim(alpha_dark)
@@ -990,12 +1012,12 @@ fn modal_with(
     .into_any_element()
 }
 
-/// One menu row: `gap-2.5 rounded-lg px-2 py-1.5
-/// text-[13px]`, active = `bg-white/10 text-foreground`, hover wash
-/// `white/[0.08]` fading over `transition-colors` via the
-/// per-`fade_key` [`motion::hover_blend`]. The caller adds the id/click
-/// listener — `fade_key` must be unique app-wide and stable across frames
-/// (the id string is a good choice).
+/// One menu row, lit when `active` and washed on hover.
+///
+/// `gap-2.5 rounded-lg px-2 py-1.5 text-[13px]`, active = `bg-white/10 text-foreground`, hover
+/// wash `white/[0.08]` fading over `transition-colors` via the per-`fade_key`
+/// [`motion::hover_blend`]. The caller adds the id/click listener — `fade_key` must be unique
+/// app-wide and stable across frames (the id string is a good choice).
 pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> Div {
     let row = div()
         .flex()
@@ -1025,10 +1047,10 @@ pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) 
     }
 }
 
-/// [`menu_row`] with a distinct keyboard-navigation highlight: a selected row
-/// carries the full `bg-white/10` wash, the keyboard cursor the lighter
-/// `bg-white/[0.08]` — two selected-
-/// looking rows never appear at once.
+/// [`menu_row`] with a distinct keyboard-navigation highlight.
+///
+/// A selected row carries the full `bg-white/10` wash, the keyboard cursor the lighter
+/// `bg-white/[0.08]` — two selected-looking rows never appear at once.
 pub fn menu_row_nav(
     theme: &Theme,
     selected: bool,
@@ -1043,10 +1065,10 @@ pub fn menu_row_nav(
     }
 }
 
-/// Small uppercase section heading inside a floating menu (slopty
-/// `MenuHeading`): `px-2 pb-1 pt-1.5 text-[10px] font-medium uppercase
-/// tracking-[0.1em] text-muted-foreground/60`, its tracking laid out exactly
-/// (`typography::tracked_caps`).
+/// Small uppercase section heading inside a floating menu (slopty `MenuHeading`).
+///
+/// `px-2 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground/60`,
+/// its tracking laid out exactly (`typography::tracked_caps`).
 pub fn menu_heading(theme: &Theme, label: &str) -> Div {
     let theme = &theme.for_popup();
     div()
@@ -1069,21 +1091,22 @@ pub fn menu_separator() -> Div {
     div().h(px(1.0)).mx(px(-CARD_INSET)).my(px(MENU_GAP)).bg(hairline(0.07))
 }
 
-/// The recessed band tone for a palette/picker header or footer strip — a
-/// translucent black so the glass still reads through (the add-space palette
-/// converged on this; measured subtler tones vanish against the dim scrim).
-/// Free function (like [`ink`]/[`hairline`]/[`wash`]), mirroring
-/// [`Theme::band`], for the several callers with no `Theme`/`cx` in scope
-/// (some outside this crate's `ui` module tree — threading a `&Theme` param
-/// would ripple past this task's file scope).
+/// The recessed band tone for a palette/picker header or footer strip.
+///
+/// A translucent black so the glass still reads through (the add-space palette converged on this;
+/// measured subtler tones vanish against the dim scrim). Free function (like
+/// [`ink`]/[`hairline`]/[`crate::theme::wash`]), mirroring [`Theme::band`], for the several callers
+/// with no `Theme`/`cx` in scope (some outside this crate's `ui` module tree — threading a `&Theme`
+/// param would ripple past this task's file scope).
 pub fn band() -> gpui::Hsla {
     crate::theme::band()
 }
 
-/// Shared shell for command-palette-style flows. The recessed header/footer
-/// bands are supplied by callers, while this owns the glass tint, outline,
-/// radius, clipping, and shadow that make Cmd+K and its sibling flows read as
-/// one component family.
+/// Shared shell for command-palette-style flows.
+///
+/// The recessed header/footer bands are supplied by callers, while this owns the glass tint,
+/// outline, radius, clipping, and shadow that make Cmd+K and its sibling flows read as one
+/// component family.
 pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> Div {
     div()
         .w(width)
@@ -1194,9 +1217,10 @@ pub fn key_hint_pair(
 /// back to a mismatched face); the system font draws the platform's own.
 pub const KEY_GLYPH_FONT: &str = ".SystemUIFont";
 
-/// A menu row's fixed key, one its own handler takes rather than a binding to look up
-/// (F2 renames): the key at the row's end in [`kbd_hint`]'s voice, and the same key for
-/// assistive tech. A bound action's key is read from the keymap instead (`keys::for_action`).
+/// A menu row's fixed key, one its own handler takes rather than a binding to look up (F2 renames).
+///
+/// The key at the row's end in [`kbd_hint`]'s voice, and the same key for assistive tech. A bound
+/// action's key is read from the keymap instead (`keys::for_action`).
 pub fn fixed_key(row: Stateful<Div>, theme: &Theme, combo: &str) -> Stateful<Div> {
     row.aria_keyshortcuts(crate::keys::aria_combo(combo))
         .child(kbd_hint(theme, &crate::keys::combo_text(combo)))
@@ -1218,10 +1242,11 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> Div {
 /// The search row's height, hairline included.
 pub const SEARCH_ROW_HEIGHT: f32 = 40.0;
 
-/// The model picker's search row, shared by every searchable picker: a
-/// magnifier and a borderless input over a full-bleed hairline, in the
-/// card's own tone. Mount it as the card's FIRST child — it cancels the
-/// card's inset to run edge to edge, then restores the inset above the list.
+/// The model picker's search row, shared by every searchable picker.
+///
+/// A magnifier and a borderless input over a full-bleed hairline, in the card's own tone. Mount it
+/// as the card's FIRST child — it cancels the card's inset to run edge to edge, then restores the
+/// inset above the list.
 pub fn search_input_frame(theme: &Theme, input: AnyElement) -> Div {
     search_row(theme).child(div().flex_1().min_w_0().child(input))
 }
@@ -1284,8 +1309,10 @@ pub fn find_card_in(
     crate::frost::frosted(CARD_RADIUS, crate::frost::MENU_BLUR, motion::menu_in(key, card))
 }
 
-/// A find card's step or close button: 24 square, a 14 glyph, a faded hover. A step with no
-/// match to go to dims to [`crate::theme::DISABLED_OPACITY`] and takes no pointer; name it with
+/// A find card's step or close button.
+///
+/// 24 square, a 14 glyph, a faded hover. A step with no match to go to dims to
+/// [`crate::theme::DISABLED_OPACITY`] and takes no pointer; name it with
 /// [`crate::settings::widgets::ActionHint::action_hint`].
 pub fn find_step(
     id: impl Into<ElementId>,
@@ -1332,10 +1359,11 @@ pub fn find_tally(theme: &Theme, tally: impl Into<SharedString>) -> Stateful<Div
 /// A searchable picker's row height, matching the model picker's rows.
 pub const PICKER_ROW_HEIGHT: f32 = 32.0;
 
-/// One row of a searchable picker, drawn like the model picker's: selection
-/// is the card's selected wash and ring, and the keyboard cursor and hover
-/// share one faint ink wash. The caller adds the id and listeners; `fade_key`
-/// keys the hover fade, as in [`menu_row`].
+/// One row of a searchable picker, drawn like the model picker's.
+///
+/// Selection is the card's selected wash and ring, and the keyboard cursor and hover share one
+/// faint ink wash. The caller adds the id and listeners; `fade_key` keys the hover fade, as in
+/// [`menu_row`].
 pub fn picker_row(
     theme: &Theme,
     selected: bool,
@@ -1376,9 +1404,10 @@ pub fn picker_divider() -> Div {
     div().flex_none().h(px(1.0)).my(px(2.0)).mx(px(-CARD_INSET)).bg(hairline(0.08))
 }
 
-/// A bordered trailing menu section (a picker's action group: `mt-1 flex flex-col gap-0.5 border-t
-/// border-white/[0.06] pt-1` — the hairline runs edge-to-edge of the card's
-/// p-1 inset, unlike [`menu_separator`]'s mx-1).
+/// A bordered trailing menu section: a picker's action group.
+///
+/// `mt-1 flex flex-col gap-0.5 border-t border-white/[0.06] pt-1` — the hairline runs
+/// edge-to-edge of the card's p-1 inset, unlike [`menu_separator`]'s mx-1.
 pub fn menu_section() -> Div {
     div()
         .mt(px(4.0))
@@ -1525,7 +1554,7 @@ pub fn skeleton_rows(
                 .h(px(28.0))
                 .rounded(px(Theme::CONTROL_RADIUS))
                 .bg(wash)
-                .opacity(0.35 + 0.4 * motion::pulse_wave(phase))
+                .opacity(0.4_f32.mul_add(motion::pulse_wave(phase), 0.35))
         }))
         .into_any_element()
 }
@@ -1540,15 +1569,16 @@ pub fn skeleton_bar(width: f32, view: gpui::EntityId, cx: &mut gpui::App) -> Any
         .h(px(11.0))
         .rounded(px(5.5))
         .bg(ink(0.08))
-        .opacity(0.35 + 0.4 * motion::pulse_wave(motion::staggered_phase(delta, 0, 0.0)))
+        .opacity(0.4_f32.mul_add(motion::pulse_wave(motion::staggered_phase(delta, 0, 0.0)), 0.35))
         .into_any_element()
 }
 
-/// [`skeleton_rows`] shaped like a MENU loading: shorter bars of varied
-/// widths reading as ghost labels rather than full-width slabs (the model
-/// picker's loading state — reference design's skeleton). Widths cycle a
-/// small deterministic ladder so the stagger reads organic without
-/// randomness (randomness would repaint differently every open).
+/// [`skeleton_rows`] shaped like a MENU loading.
+///
+/// Shorter bars of varied widths reading as ghost labels rather than full-width slabs (the model
+/// picker's loading state — reference design's skeleton). Widths cycle a small deterministic ladder
+/// so the stagger reads organic without randomness (randomness would repaint differently every
+/// open).
 pub fn skeleton_menu_rows(
     _id: &'static str,
     _theme: &Theme,
@@ -1569,10 +1599,10 @@ pub fn skeleton_menu_rows(
             let phase = motion::staggered_phase(delta, i, 0.08);
             div()
                 .h(px(14.0))
-                .w(gpui::relative(WIDTHS[i % WIDTHS.len()]))
+                .w(gpui::relative(WIDTHS.iter().cycle().nth(i).copied().unwrap_or(0.5)))
                 .rounded(px(7.0))
                 .bg(wash)
-                .opacity(0.35 + 0.4 * motion::pulse_wave(phase))
+                .opacity(0.4_f32.mul_add(motion::pulse_wave(phase), 0.35))
         }))
         .into_any_element()
 }
@@ -1612,9 +1642,13 @@ pub const MENU_SCROLLBAR_FADE_MS: u64 = 260;
 /// Geometry of the floating thumb for a scroll viewport at one instant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MenuScrollbarMetrics {
+    /// How tall the track is, inside its insets.
     pub track_height: f32,
+    /// How far down the track the thumb's top stands.
     pub thumb_top: f32,
+    /// How tall the thumb is.
     pub thumb_height: f32,
+    /// How far the content scrolls in all.
     pub max_scroll: f32,
 }
 
@@ -1636,7 +1670,7 @@ impl MenuScrollbarMetrics {
         if viewport_height <= 0.0 || max_scroll <= 0.0 {
             return None;
         }
-        let track_height = (viewport_height - MENU_SCROLLBAR_TRACK_INSET * 2.0).max(0.0);
+        let track_height = MENU_SCROLLBAR_TRACK_INSET.mul_add(-2.0, viewport_height).max(0.0);
         if track_height <= 0.0 {
             return None;
         }
@@ -1665,9 +1699,11 @@ impl MenuScrollbarMetrics {
 
 /// Marker for GPUI's captured drag stream. The actual grab geometry stays in
 /// [`MenuScrollbarState`] so a track click can center the thumb first.
+#[derive(Debug, Clone, Copy)]
 pub struct MenuScrollbarDrag;
 
 /// Invisible drag preview: scrollbar drags manipulate the existing thumb.
+#[derive(Debug, Clone, Copy)]
 pub struct MenuScrollbarDragGhost;
 
 impl Render for MenuScrollbarDragGhost {
@@ -1676,10 +1712,10 @@ impl Render for MenuScrollbarDragGhost {
     }
 }
 
-/// Hover/drag interaction state for one floating scrollbar, owned by the view
-/// that renders the list. Event handlers stay on the view (they need its
-/// listeners) and delegate here; only one list surface owns a state at a
-/// time, so mutually exclusive popups may share one instance.
+/// Hover/drag interaction state for one floating scrollbar, owned by the view of the list.
+///
+/// Event handlers stay on the view (they need its listeners) and delegate here; only one list
+/// surface owns a state at a time, so mutually exclusive popups may share one instance.
 ///
 /// Visibility: the rail paints while a drag or a track-hover holds it open,
 /// or while scroll motion is recent ([`Self::note_scroll`]) — scrolling
@@ -1695,7 +1731,7 @@ impl Render for MenuScrollbarDragGhost {
 /// it did not draw again must still show what a view drawn from scratch then
 /// shows. The fade itself is a GPUI animation, which draws the view on every
 /// frame until the rail is gone.
-#[derive(Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct MenuScrollbarState {
     list_hovered: bool,
     bar_hovered: bool,
@@ -1727,6 +1763,7 @@ impl MenuScrollbarState {
         self.note_scroll_offset_at(position, crate::clock::event_now());
     }
 
+    #[expect(clippy::float_cmp, reason = "any change of the offset at all is motion")]
     fn note_scroll_offset_at(&mut self, position: f32, at: Instant) {
         match self.last_scroll_y {
             // First observation: establish the baseline only — a fresh mount
@@ -1769,7 +1806,7 @@ impl MenuScrollbarState {
     /// Metrics from any scroll handle's live bounds/offset — both
     /// `ScrollHandle` and a virtualized list's base handle qualify. `None`
     /// when the content fits.
-    pub fn metrics(&self, scroll: &ScrollHandle) -> Option<MenuScrollbarMetrics> {
+    pub fn metrics(scroll: &ScrollHandle) -> Option<MenuScrollbarMetrics> {
         let bounds = scroll.bounds();
         // GPUI stores the maximum as a positive distance; only the live
         // scroll offset is negative while content moves upward.
@@ -1809,7 +1846,7 @@ impl MenuScrollbarState {
             return None;
         }
         self.linger_armed = Some(motion);
-        let ends = motion + Duration::from_millis(MENU_SCROLLBAR_LINGER_MS);
+        let ends = motion.checked_add(Duration::from_millis(MENU_SCROLLBAR_LINGER_MS))?;
         Some((motion, ends.saturating_duration_since(now)))
     }
 
@@ -1872,7 +1909,7 @@ impl MenuScrollbarState {
     /// under the pointer first), engage the drag, and scroll to the pointer.
     /// `false` when there is nothing to scroll.
     pub fn begin_press(&mut self, scroll: &ScrollHandle, pointer_y: Pixels) -> bool {
-        let Some(metrics) = self.metrics(scroll) else {
+        let Some(metrics) = Self::metrics(scroll) else {
             return false;
         };
         self.begin_press_in(&metrics, scroll.bounds().top(), pointer_y);
@@ -1904,7 +1941,7 @@ impl MenuScrollbarState {
     /// Move an engaged drag to `pointer_y`. `false` when no drag is engaged
     /// or the content stopped scrolling mid-drag.
     pub fn drag_to(&self, scroll: &ScrollHandle, pointer_y: Pixels) -> bool {
-        let Some(metrics) = self.metrics(scroll) else {
+        let Some(metrics) = Self::metrics(scroll) else {
             return false;
         };
         let Some(fraction) = self.drag_target_in(&metrics, scroll.bounds().top(), pointer_y) else {
@@ -1997,9 +2034,10 @@ impl MenuScrollbarState {
     }
 }
 
-/// Wake the view as a scroll's linger ends, so the rail fades out and hides
-/// [`MENU_SCROLLBAR_LINGER_MS`] + [`MENU_SCROLLBAR_FADE_MS`] after the last
-/// scroll motion instead of sticking until the next unrelated render. Call
+/// Wake the view as a scroll's linger ends, so the rail fades out and hides.
+///
+/// It hides [`MENU_SCROLLBAR_LINGER_MS`] + [`MENU_SCROLLBAR_FADE_MS`] after the last scroll
+/// motion instead of sticking until the next unrelated render. Call
 /// once per render after the rail's activity note
 /// ([`MenuScrollbarState::note_scroll`] / [`MenuScrollbarState::note_scroll_offset`]);
 /// one wake per motion. The fade begins as the wake runs, and `reach` finds `bar` on
@@ -2007,19 +2045,19 @@ impl MenuScrollbarState {
 pub fn schedule_scrollbar_hide<T: 'static>(
     bar: &mut MenuScrollbarState,
     reach: impl Fn(&mut T) -> &mut MenuScrollbarState + 'static,
-    cx: &mut Context<T>,
+    cx: &Context<T>,
 ) {
     let Some((motion, delay)) = bar.arm_linger_wake(crate::clock::event_now()) else {
         return;
     };
     cx.spawn(async move |this, cx| {
         cx.background_executor().timer(delay).await;
+        // A view gone by then has no rail left to fade.
         this.update(cx, |this, cx| {
             if reach(this).linger_ended(motion, crate::clock::event_now()) {
                 cx.notify();
             }
         })
-        .ok();
     })
     .detach();
 }
@@ -2040,10 +2078,10 @@ pub fn fading_rail(strip: Stateful<Div>, bar: &MenuScrollbarState, id: &'static 
     }
 }
 
-/// The view-side halves of one floating rail. Implement on the view that owns
-/// the list, and [`rail`] folds the whole treatment — activity note, hide
-/// scheduling, metrics, visuals, and all six pointer listeners — into one
-/// call.
+/// The view-side halves of one floating rail.
+///
+/// Implement on the view that owns the list, and [`rail`] folds the whole treatment — activity
+/// note, hide scheduling, metrics, visuals, and all six pointer listeners — into one call.
 pub trait ScrollRailHost: 'static {
     /// The rail's hover/drag interaction state.
     fn rail_bar(&mut self) -> &mut MenuScrollbarState;
@@ -2064,7 +2102,7 @@ pub trait ScrollRailHost: 'static {
     fn rail_metrics(&mut self) -> Option<MenuScrollbarMetrics> {
         let scroll = self.rail_scroll()?;
         self.rail_bar().note_scroll(&scroll);
-        self.rail_bar().metrics(&scroll)
+        MenuScrollbarState::metrics(&scroll)
     }
 
     /// A press landed on the rail at window-y `pointer_y`; `true` when it
@@ -2085,15 +2123,18 @@ pub trait ScrollRailHost: 'static {
     }
 }
 
-/// The whole floating-scrollbar treatment for any [`ScrollRailHost`] view:
-/// note the frame's scroll activity, keep the hide countdown scheduled,
-/// render the rail, and wire the six pointer listeners (strip hover, press,
-/// drag capture, drag move, and both mouse-up ends) onto it. The drag-move
-/// listener rides on the strip itself — gpui dispatches the captured drag
-/// stream to it wherever the pointer travels. `None` while the rail is
-/// hidden or the content fits; the host keeps only its own list-hover
-/// listener. Handle-less owners get their overrides called at the same
-/// points the default handle calls would be.
+/// The whole floating-scrollbar treatment for any [`ScrollRailHost`] view.
+///
+/// Note the frame's scroll activity, keep the hide countdown scheduled, render the rail, and wire
+/// the six pointer listeners (strip hover, press, drag capture, drag move, and both mouse-up ends)
+/// onto it. The drag-move listener rides on the strip itself — gpui dispatches the captured drag
+/// stream to it wherever the pointer travels. `None` while the rail is hidden or the content fits;
+/// the host keeps only its own list-hover listener. Handle-less owners get their overrides called
+/// at the same points the default handle calls would be.
+#[expect(
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: seam, callers in slices A and C"
+)]
 pub fn rail<V: ScrollRailHost>(
     host: &mut V,
     id: &'static str,
@@ -2151,92 +2192,10 @@ pub fn rail<V: ScrollRailHost>(
     ))
 }
 
-/// One handle-backed rail on a view that hosts several: where its state
-/// lives and which scroller feeds it. [`ScrollRailHost`] spells this out for
-/// a view's only rail; a view can implement that trait once, so its other
-/// rails go through [`rail_for`] instead.
-pub struct RailAccess<V> {
-    pub bar: fn(&mut V) -> &mut MenuScrollbarState,
-    pub scroll: fn(&V) -> ScrollHandle,
-}
-
-impl<V> Clone for RailAccess<V> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<V> Copy for RailAccess<V> {}
-
-/// [`rail`] for a rail named by `access`: the same activity note, hide
-/// scheduling, visuals, and six pointer listeners, off its scroll handle.
-pub fn rail_for<V: 'static>(
-    host: &mut V,
-    access: RailAccess<V>,
-    id: &'static str,
-    theme: &Theme,
-    cx: &mut Context<V>,
-) -> Option<AnyElement> {
-    let scroll = (access.scroll)(host);
-    let bar = (access.bar)(host);
-    bar.note_scroll(&scroll);
-    let metrics = bar.metrics(&scroll)?;
-    schedule_scrollbar_hide(bar, access.bar, cx);
-    let (now, reduced) = (cx.frame_time(), cx.reduce_motion());
-    let strip = (access.bar)(host).render_rail(theme, metrics, now, reduced)?;
-    Some(fading_rail(
-        strip
-            .id(id)
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if (access.bar)(this).set_bar_hovered(*hovered) {
-                    cx.notify();
-                }
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    let scroll = (access.scroll)(this);
-                    if (access.bar)(this).begin_press(&scroll, event.position.y) {
-                        cx.stop_propagation();
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_drag(MenuScrollbarDrag, |_, _, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| MenuScrollbarDragGhost)
-            })
-            .on_drag_move(cx.listener(
-                move |this, event: &gpui::DragMoveEvent<MenuScrollbarDrag>, _, cx| {
-                    let scroll = (access.scroll)(this);
-                    if (access.bar)(this).drag_to(&scroll, event.event.position.y) {
-                        cx.notify();
-                    }
-                },
-            ))
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
-                    (access.bar)(this).end_press();
-                    cx.notify();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseUpEvent, _, cx| {
-                    (access.bar)(this).end_press();
-                    cx.notify();
-                }),
-            ),
-        (access.bar)(host),
-        id,
-    ))
-}
-
-/// Rewind a handle-owned menu list to its top and drop its rail activity
-/// baseline in one step — the pair every "reopen this menu fresh" site must
-/// make. Skipping the offset half strands the list mid-scroll; skipping the
-/// baseline half lets the next note read the jump back to the top as
+/// Rewind a handle-owned menu list to its top and drop its rail activity baseline in one step.
+///
+/// The pair every "reopen this menu fresh" site must make. Skipping the offset half strands the
+/// list mid-scroll; skipping the baseline half lets the next note read the jump back to the top as
 /// scrolling and show the rail.
 pub fn reset_menu_scroll(scroll: &ScrollHandle, bar: &mut MenuScrollbarState) {
     scroll.set_offset(Point::default());
@@ -2250,19 +2209,27 @@ pub fn reset_menu_scroll(scroll: &ScrollHandle, bar: &mut MenuScrollbarState) {
 // their vertical API.
 // ---------------------------------------------------------------------------
 
+/// Geometry of a horizontal floating thumb, as [`MenuScrollbarMetrics`] is of a vertical one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HorizontalScrollbarMetrics {
+    /// How wide the track is, inside its insets.
     pub track_width: f32,
+    /// How far along the track the thumb's left edge stands.
     pub thumb_left: f32,
+    /// How wide the thumb is.
     pub thumb_width: f32,
+    /// How far the content scrolls in all.
     pub max_scroll: f32,
 }
 
 impl HorizontalScrollbarMetrics {
+    /// Distance the thumb itself can travel.
     pub fn travel(self) -> f32 {
         (self.track_width - self.thumb_width).max(0.0)
     }
 
+    /// Pure geometry from the viewport and scroll distances, as
+    /// [`MenuScrollbarMetrics::from_viewport`]. `None` when the content fits.
     pub fn from_viewport(
         viewport_width: f32,
         max_scroll: f32,
@@ -2272,7 +2239,7 @@ impl HorizontalScrollbarMetrics {
         if viewport_width <= 0.0 || max_scroll <= 0.0 {
             return None;
         }
-        let track_width = (viewport_width - MENU_SCROLLBAR_TRACK_INSET * 2.0).max(0.0);
+        let track_width = MENU_SCROLLBAR_TRACK_INSET.mul_add(-2.0, viewport_width).max(0.0);
         if track_width <= 0.0 {
             return None;
         }
@@ -2291,11 +2258,12 @@ impl HorizontalScrollbarMetrics {
     }
 }
 
-/// Hover/drag state for one horizontal code viewport. Geometry comes from the
-/// same tracked [`gpui::ScrollHandle`] that moves the code, so the thumb always
-/// represents the block's real local overflow (virtual transcript height is
-/// irrelevant here).
-#[derive(Default)]
+/// Hover/drag state for one horizontal code viewport.
+///
+/// Geometry comes from the same tracked [`gpui::ScrollHandle`] that moves the code, so the thumb
+/// always represents the block's real local overflow (virtual transcript height is irrelevant
+/// here).
+#[derive(Debug, Default, Clone, Copy)]
 pub struct HorizontalScrollbarState {
     viewport_hovered: bool,
     bar_hovered: bool,
@@ -2303,6 +2271,8 @@ pub struct HorizontalScrollbarState {
 }
 
 impl HorizontalScrollbarState {
+    /// The thumb's geometry from `scroll`'s live bounds and offset; `None` when the code fits.
+    #[expect(clippy::unused_self, reason = "shell lint migration: seam, callers in slice C")]
     pub fn metrics(&self, scroll: &ScrollHandle) -> Option<HorizontalScrollbarMetrics> {
         let bounds = scroll.bounds();
         let max_scroll = f32::from(scroll.max_offset().x).max(0.0);
@@ -2314,14 +2284,17 @@ impl HorizontalScrollbarState {
         )
     }
 
+    /// Whether the rail shows: the pointer is over the code, or a drag holds it.
     pub const fn visible(&self) -> bool {
         self.viewport_hovered || self.grab.is_some()
     }
 
+    /// Whether the thumb draws widened: the pointer is on the rail, or a drag holds it.
     pub const fn active(&self) -> bool {
         self.bar_hovered || self.grab.is_some()
     }
 
+    /// The pointer entered or left the code. Whether anything drawn changed.
     pub const fn set_viewport_hovered(&mut self, hovered: bool) -> bool {
         if self.viewport_hovered == hovered {
             return false;
@@ -2333,6 +2306,7 @@ impl HorizontalScrollbarState {
         true
     }
 
+    /// The pointer entered or left the rail. Whether anything drawn changed.
     pub const fn set_bar_hovered(&mut self, hovered: bool) -> bool {
         let active = hovered || self.grab.is_some();
         if self.bar_hovered == active {
@@ -2342,11 +2316,14 @@ impl HorizontalScrollbarState {
         true
     }
 
+    /// A press landed on the rail at window-x `pointer_x`: grab the thumb where it was
+    /// pressed (or centred under the pointer on the track) and scroll to it. `false` when there
+    /// is nothing to scroll.
     pub fn begin_press(&mut self, scroll: &ScrollHandle, pointer_x: Pixels) -> bool {
         let Some(metrics) = self.metrics(scroll) else {
             return false;
         };
-        let pointer_in_track = self.pointer_in_track(scroll, pointer_x);
+        let pointer_in_track = Self::pointer_in_track(scroll, pointer_x);
         let grab_offset = if (metrics.thumb_left..=metrics.thumb_left + metrics.thumb_width)
             .contains(&pointer_in_track)
         {
@@ -2359,6 +2336,7 @@ impl HorizontalScrollbarState {
         true
     }
 
+    /// Move an engaged drag to `pointer_x`. `false` when no drag is engaged or nothing scrolls.
     pub fn drag_to(&self, scroll: &ScrollHandle, pointer_x: Pixels) -> bool {
         let Some(grab_offset) = self.grab else {
             return false;
@@ -2367,7 +2345,7 @@ impl HorizontalScrollbarState {
             return false;
         };
         let thumb_left =
-            (self.pointer_in_track(scroll, pointer_x) - grab_offset).clamp(0.0, metrics.travel());
+            (Self::pointer_in_track(scroll, pointer_x) - grab_offset).clamp(0.0, metrics.travel());
         let scroll_to = if metrics.travel() <= 0.0 {
             0.0
         } else {
@@ -2378,6 +2356,7 @@ impl HorizontalScrollbarState {
         true
     }
 
+    /// The press ended. Whether anything drawn changed.
     pub const fn end_press(&mut self) -> bool {
         self.grab = None;
         if !self.viewport_hovered && self.bar_hovered {
@@ -2387,7 +2366,7 @@ impl HorizontalScrollbarState {
         false
     }
 
-    fn pointer_in_track(&self, scroll: &ScrollHandle, pointer_x: Pixels) -> f32 {
+    fn pointer_in_track(scroll: &ScrollHandle, pointer_x: Pixels) -> f32 {
         f32::from(pointer_x - scroll.bounds().left()) - MENU_SCROLLBAR_TRACK_INSET
     }
 }
@@ -2452,7 +2431,7 @@ mod tests {
         // Case-insensitive.
         assert_eq!(filter_indices("MA", &labels), vec![0, 2, 1]);
         // No matches → empty.
-        assert!(filter_indices("zzz", &labels).is_empty());
+        assert_eq!(filter_indices("zzz", &labels), Vec::<usize>::new());
         // Empty / whitespace query keeps input order.
         assert_eq!(filter_indices("", &labels), vec![0, 1, 2, 3]);
         assert_eq!(filter_indices("   ", &labels), vec![0, 1, 2, 3]);
@@ -2518,6 +2497,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the thumb clamps to exactly the minimum")]
     fn scrollbar_metrics_clamps_min_thumb_and_position() {
         let m = MenuScrollbarMetrics::from_viewport(100.0, 9900.0, 4950.0).unwrap();
         // Raw ratio (92 * 100 / 10000 ≈ 0.92px) clamps to the readable minimum.
@@ -2543,6 +2523,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the thumb clamps to exactly the minimum")]
     fn horizontal_scrollbar_hides_without_overflow_and_clamps_position() {
         assert_eq!(HorizontalScrollbarMetrics::from_viewport(300.0, 0.0, 0.0), None);
         let m = HorizontalScrollbarMetrics::from_viewport(100.0, 9900.0, 99_999.0).unwrap();
@@ -2734,15 +2715,19 @@ fn search_match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
     let folded = text.to_lowercase();
     let mut original = Vec::with_capacity(folded.len());
     for (start, ch) in text.char_indices() {
-        let range = start..start + ch.len_utf8();
+        let range = start..start.saturating_add(ch.len_utf8());
         for lower in ch.to_lowercase() {
             original.extend(std::iter::repeat_n(range.clone(), lower.len_utf8()));
         }
     }
     let mut ranges = Vec::new();
     for word in query.to_lowercase().split_whitespace() {
+        // `original` holds one range per byte of `folded`, so both ends are there.
         for (start, _) in folded.match_indices(word) {
-            ranges.push(original[start].start..original[start + word.len() - 1].end);
+            let last = start.saturating_add(word.len()).saturating_sub(1);
+            if let (Some(first), Some(last)) = (original.get(start), original.get(last)) {
+                ranges.push(first.start..last.end);
+            }
         }
     }
     ranges.sort_by_key(|range| range.start);
@@ -2776,17 +2761,20 @@ mod search_highlight_tests {
     fn inline_matches_keep_adjacent_word_boundaries() {
         let text = "fieldnotes/fix-authentication-redirects";
         let ranges = search_match_ranges(text, "authentication");
-        assert_eq!(&text[..ranges[0].start], "fieldnotes/fix-");
-        assert_eq!(&text[ranges[0].clone()], "authentication");
-        assert_eq!(&text[ranges[0].end..], "-redirects");
+        assert_eq!(text.get(..ranges[0].start), Some("fieldnotes/fix-"));
+        assert_eq!(text.get(ranges[0].clone()), Some("authentication"));
+        assert_eq!(text.get(ranges[0].end..), Some("-redirects"));
     }
 
     #[test]
     fn highlights_repeated_case_insensitive_and_overlapping_words() {
         assert_eq!(search_match_ranges("New chat, new project", "NEW"), vec![0..3, 10..13]);
         assert_eq!(search_match_ranges("authentication", "auth authentication"), vec![0..14]);
-        assert!(search_match_ranges("New chat", "  ").is_empty());
-        assert!(search_match_ranges("New chat", "settings").is_empty());
+        assert_eq!(search_match_ranges("New chat", "  "), Vec::<std::ops::Range<usize>>::new());
+        assert_eq!(
+            search_match_ranges("New chat", "settings"),
+            Vec::<std::ops::Range<usize>>::new()
+        );
     }
 
     #[test]
@@ -2800,10 +2788,14 @@ mod search_highlight_tests {
 /// and window margin. Prefer above; flip only when it cannot fit useful chrome.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MenuGeometry {
+    /// The height the menu may take.
     pub height: f32,
+    /// Whether it opens below the trigger rather than above.
     pub below: bool,
 }
 
+/// Where a menu fits for a trigger spanning `top` to `bottom` of a window `viewport_height`
+/// tall: above it while useful chrome fits there, else below where there is more room.
 pub fn menu_geometry(top: f32, bottom: f32, viewport_height: f32) -> MenuGeometry {
     let above = (top - 14.0).max(0.0);
     let below = (viewport_height - bottom - 14.0).max(0.0);
@@ -2957,7 +2949,7 @@ mod menu_row_tests {
             f32::from(cx.debug_bounds(selector).expect("row drawn").size.height)
         };
         let (plain, keyed) = (height("row-plain"), height("row-keyed"));
-        let zeron = 2.0 * 6.0 + 13.0 * std::f32::consts::GOLDEN_RATIO;
+        let zeron = 13.0_f32.mul_add(std::f32::consts::GOLDEN_RATIO, 2.0 * 6.0);
         assert!((plain - zeron).abs() < 0.5, "{plain} against zeron's {zeron}");
         assert!((keyed - plain).abs() < 0.01, "the keys keep the row: {keyed} vs {plain}");
     }

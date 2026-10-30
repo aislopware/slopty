@@ -1,17 +1,6 @@
 //! Two small motions every surface shares: a copy control's "Copied" span, and a section
 //! that grows into its height instead of arriving at it in one frame
 //! (`.research/micro-details-2026-10-16.md`, M3 and M5).
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::float_cmp,
-    clippy::needless_pass_by_ref_mut,
-    clippy::return_self_not_must_use,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -45,7 +34,7 @@ pub fn copy_feedback(key: impl Into<SharedString>, cx: &mut App) {
     let key: SharedString = key.into();
     let mark = {
         let marks = cx.default_global::<CopiedMarks>();
-        marks.next += 1;
+        marks.next = marks.next.wrapping_add(1);
         let mark = marks.next;
         marks.marks.insert(key.clone(), mark);
         mark
@@ -73,8 +62,10 @@ pub fn copy_icon(key: &str, cx: &App) -> &'static str {
     if copied(key, cx) { crate::icons::CHECK } else { crate::icons::COPY }
 }
 
-/// A section that grows from nothing to its height over [`COLLAPSE`] as `open` turns true and
-/// shrinks back as it turns false, so what sits under it slides rather than jumps. Pass the same
+/// A section that grows from nothing to its height over [`COLLAPSE`] as `open` turns true.
+///
+/// It shrinks back as `open` turns false, so what sits under it slides rather than jumps. Pass
+/// the same
 /// `key` every frame; keep passing the child while it closes, or it vanishes at once. Reduced
 /// motion snaps. A section mounted open grows in.
 pub fn reveal_height(
@@ -85,6 +76,7 @@ pub fn reveal_height(
     RevealHeight { key: key.into(), open, fold: false, child: child.into_any_element() }
 }
 
+/// A section growing to its height, or shrinking from it: see [`reveal_height`].
 #[derive(IntoElement)]
 pub struct RevealHeight {
     key: ElementId,
@@ -94,10 +86,22 @@ pub struct RevealHeight {
     child: AnyElement,
 }
 
+// By hand: the child element has no `Debug`.
+impl std::fmt::Debug for RevealHeight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevealHeight")
+            .field("key", &self.key)
+            .field("open", &self.open)
+            .field("fold", &self.fold)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RevealHeight {
     /// Moves as the one fold groups, cards and trays share ([`fold_frame`];
     /// design-inspiration item 7): the height opens first and the contents fade in and rise
     /// after it; closing, the contents are gone before the height lands.
+    #[must_use]
     pub const fn fold(mut self) -> Self {
         self.fold = true;
         self
@@ -180,7 +184,7 @@ impl RenderOnce for RevealHeight {
                 state.open = open;
             }
             let (height, frame, running) = at(state);
-            (height, frame, running, state.natural.clone())
+            (height, frame, running, Rc::clone(&state.natural))
         });
         if running {
             window.request_animation_frame();
@@ -214,7 +218,8 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn a_copy_span_ends_on_its_own(cx: &mut TestAppContext) {
+    #[expect(clippy::arithmetic_side_effects, reason = "halves of the 1.5 s span")]
+    fn a_copy_span_ends_on_its_own(cx: &TestAppContext) {
         cx.update(|cx| {
             copy_feedback("copy-message", cx);
             assert!(copied("copy-message", cx));
@@ -295,7 +300,8 @@ mod tests {
         let (_, frame, _) = state.fold(start + Duration::from_millis(200), false);
         assert!(frame.opacity > 0.0 && frame.opacity < 1.0, "then fade in");
         let (height, frame, running) = state.fold(start + Duration::from_millis(400), false);
-        assert!(!running && height.is_none() && frame.opacity == 1.0 && frame.rise == 0.0);
+        assert!(!running && height.is_none(), "settled open: {height:?}");
+        assert_eq!((frame.opacity, frame.rise), (1.0, 0.0), "the contents in place");
 
         state.open = false;
         state.tween = Some((40.0, start));
