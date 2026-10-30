@@ -12,7 +12,7 @@ use slopty_view_proto::ToolCall;
 
 use super::{Row, RowKind, Transcript, fnv1a};
 use crate::markdown::parser::BlockTree;
-use crate::notice::{NoticeChipIcon::Tile, notice_chip};
+use crate::notice::notice_chip;
 use crate::theme::Theme;
 use crate::motion::HoverFade as _;
 
@@ -569,7 +569,7 @@ impl Transcript {
             .py(px(4.0))
             .w_full()
             .child(
-                notice_chip(theme, true, "Update needed", words, Tile)
+                notice_chip(theme, "Update needed", words)
                     .overflow_hidden()
                     .w_full()
                     .child(div().flex().flex_row().items_center().ml(px(-8.0)).child(copy)),

@@ -27,8 +27,6 @@ pub mod edge_fade;
 pub mod file_icons;
 pub mod files;
 pub mod frost;
-mod glass;
-mod haptics;
 pub mod icons;
 pub mod inspector; // the read-only inspector of an agent session, in the right pane
 pub mod keys; // how a key reads in tooltips, menus, the palette and the a11y tree
@@ -47,7 +45,6 @@ pub mod page; // a page an agent shows inline, as its card
 pub mod pickers;
 pub mod popover;
 pub mod presence; // whether the person looks at the window
-pub mod project_actions;
 pub mod rail;
 mod roll_text;
 pub mod running_pill;

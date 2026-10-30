@@ -242,7 +242,6 @@ pub(super) struct NativePage(Rc<RefCell<Host>>);
 
 pub(super) struct Host {
     web: WebView,
-    data: BrowserData,
     view: Retained<WKWebView>,
     observer: Retained<Observer>,
     // gpui-fast's native host, which places, clips and routes the page.
@@ -253,9 +252,6 @@ pub(super) struct Host {
     wheel: Rc<PageGlide>,
     shortcuts: Rc<RefCell<Vec<String>>>,
     presentation: Presentation,
-    tx: Sender,
-    #[cfg(feature = "browser-fixture")]
-    visibility_changes: Cell<u64>,
 }
 
 impl NativePage {
@@ -319,7 +315,7 @@ impl NativePage {
         }
         let shortcuts = Rc::new(RefCell::new(Vec::<String>::new()));
         let monitor_view = view.clone();
-        let monitor_tx = tx.clone();
+        let monitor_tx = tx;
         let monitor_shortcuts = shortcuts.clone();
         let callback = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
             let e = unsafe { event.as_ref() };
@@ -424,7 +420,6 @@ impl NativePage {
             )
         };
         Ok(Self(Rc::new(RefCell::new(Host {
-            data: data.clone(),
             web,
             view,
             observer,
@@ -435,9 +430,6 @@ impl NativePage {
             wheel,
             shortcuts,
             presentation: Presentation::Hidden,
-            #[cfg(feature = "browser-fixture")]
-            visibility_changes: Cell::new(0),
-            tx,
         }))))
     }
     pub fn handle(&self) -> Rc<RefCell<Host>> {
@@ -777,9 +769,6 @@ impl Host {
             self.focus_chrome();
         }
         if self.view.isHidden() == visible {
-            #[cfg(feature = "browser-fixture")]
-            self.visibility_changes
-                .set(self.visibility_changes.get() + 1);
             let _ = self.web.set_visible(visible);
         }
     }
@@ -810,171 +799,6 @@ impl Drop for Host {
         self.wheel.stop();
         self.view.removeFromSuperview();
         // The native host takes its container away with its last clone.
-    }
-}
-
-#[cfg(feature = "browser-fixture")]
-impl NativePage {
-    pub fn fixture_move_cursor(&self, x: f64, y: f64) {
-        #[link(name = "CoreGraphics", kind = "framework")]
-        unsafe extern "C" {
-            fn CGWarpMouseCursorPosition(point: objc2_foundation::NSPoint) -> i32;
-        }
-        let host = self.0.borrow();
-        let window = host.view.window().unwrap();
-        let height = host.parent.clone().bounds().size.height;
-        let p = window.convertPointToScreen(objc2_foundation::NSPoint::new(x, height - y));
-        let screen = objc2_app_kit::NSScreen::mainScreen(host.view.mtm()).unwrap();
-        unsafe {
-            CGWarpMouseCursorPosition(objc2_foundation::NSPoint::new(
-                p.x,
-                screen.frame().size.height - p.y,
-            ));
-        }
-    }
-    pub fn fixture_backdrop_layers(&self) -> String {
-        unsafe fn describe(layer: *mut AnyObject, depth: usize, out: &mut String) {
-            if layer.is_null() || depth > 8 {
-                return;
-            }
-            unsafe {
-                let desc: Retained<NSString> = msg_send![layer, description];
-                out.push_str(&format!("{}{}\n", " ".repeat(depth), desc));
-                let layers: *mut AnyObject = msg_send![layer, sublayers];
-                if !layers.is_null() {
-                    let count: usize = msg_send![layers, count];
-                    for i in 0..count.min(30) {
-                        let child: *mut AnyObject = msg_send![layers, objectAtIndex:i];
-                        describe(child, depth + 1, out);
-                    }
-                }
-            }
-        }
-        let host = self.0.borrow();
-        let mut out = String::new();
-        for view in host.parent.subviews() {
-            if view.class().name() == c"GPUIBackdropView" {
-                unsafe {
-                    let layer: *mut AnyObject = msg_send![&*view, layer];
-                    describe(layer, 0, &mut out);
-                }
-            }
-        }
-        out
-    }
-    pub fn fixture_page_hit(&self, x: f64, y: f64) -> bool {
-        let host = self.0.borrow();
-        let point = objc2_foundation::NSPoint::new(x, host.parent.bounds().size.height - y);
-        host.parent
-            .hitTest(point)
-            .is_some_and(|hit| hit.isDescendantOf(&host.clip))
-    }
-    pub fn fixture_backdrops(&self) -> Vec<(f64, f64, f64, f64)> {
-        let host = self.0.borrow();
-        host.parent
-            .subviews()
-            .iter()
-            .filter(|view| view.class().name() == c"GPUIBackdropView" && !view.isHidden())
-            .map(|view| {
-                let r = view.frame();
-                (
-                    r.origin.x,
-                    host.parent.bounds().size.height - r.origin.y - r.size.height,
-                    r.size.width,
-                    r.size.height,
-                )
-            })
-            .collect()
-    }
-    pub fn fixture_geometry(&self) -> (f32, f32, f32) {
-        let host = self.0.borrow();
-        (
-            host.bounds.unwrap().size.width.into(),
-            host.view.frame().size.width as f32,
-            host.visible_bounds.unwrap().size.width.into(),
-        )
-    }
-    pub fn fixture_origin(&self) -> (f32, f32) {
-        let b = self.0.borrow().bounds.unwrap();
-        (b.origin.x.into(), b.origin.y.into())
-    }
-    pub fn fixture_overlay_visible(&self) -> bool {
-        let host = self.0.borrow();
-        host.parent
-            .clone()
-            .subviews()
-            .iter()
-            .any(|v| v.class().name() == c"GPUIOverlayView" && !v.isHidden())
-    }
-    pub fn fixture_visibility_changes(&self) -> u64 {
-        let host = self.0.borrow();
-        host.visibility_changes.get()
-    }
-    pub fn fixture_focus(&self) {
-        let _ = self.0.borrow().web.focus();
-    }
-    pub fn fixture_focused(&self) -> bool {
-        has_focus(&self.0.borrow().view)
-    }
-    pub fn fixture_overlay_at(&self, x: f64, y: f64) -> bool {
-        let host = self.0.borrow();
-        let parent = host.parent.clone();
-        let point = objc2_foundation::NSPoint::new(
-            x,
-            if parent.isFlipped() {
-                y
-            } else {
-                parent.bounds().size.height - y
-            },
-        );
-        parent
-            .hitTest(point)
-            .is_some_and(|hit| hit.class().name() == c"GPUIOverlayView")
-    }
-    pub fn fixture_click(&self, x: f64, y: f64) {
-        self.fixture_move_cursor(x, y);
-        let host = self.0.borrow();
-        let parent = host.parent.clone();
-        let window = host.view.window().unwrap();
-        let point = objc2_foundation::NSPoint::new(x, parent.bounds().size.height - y);
-        let app = objc2_app_kit::NSApplication::sharedApplication(host.view.mtm());
-        for kind in [
-            objc2_app_kit::NSEventType::LeftMouseDown,
-            objc2_app_kit::NSEventType::LeftMouseUp,
-        ] {
-            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(kind, point, NSEventModifierFlags::empty(), 0., window.windowNumber(), None, 0, 1, 1.).unwrap();
-            app.postEvent_atStart(&event, false);
-        }
-    }
-    pub fn fixture_visible(&self) -> bool {
-        !self.0.borrow().view.isHidden()
-    }
-    pub fn fixture_cookies(&self, completion: impl FnOnce(Vec<String>) + 'static) {
-        use objc2_foundation::{NSArray, NSHTTPCookie};
-        let completion = RefCell::new(Some(completion));
-        let block = block2::RcBlock::new(move |cookies: std::ptr::NonNull<NSArray<NSHTTPCookie>>| {
-            let cookies = unsafe { cookies.as_ref() };
-            let values = cookies.iter().map(|cookie| format!(
-                "{}={}; domain={}; path={}; httpOnly={}; sessionOnly={}",
-                cookie.name(), cookie.value(), cookie.domain(), cookie.path(),
-                cookie.isHTTPOnly(), cookie.isSessionOnly()
-            )).collect();
-            if let Some(completion) = completion.borrow_mut().take() {
-                completion(values);
-            }
-        });
-        unsafe {
-            self.0.borrow().view.configuration().websiteDataStore().httpCookieStore().getAllCookies(&block);
-        }
-    }
-
-    pub fn fixture_eval(&self, script: &str) {
-        unsafe {
-            self.0
-                .borrow()
-                .view
-                .evaluateJavaScript_completionHandler(&NSString::from_str(script), None);
-        }
     }
 }
 

@@ -3556,7 +3556,7 @@ impl Changes {
 
     /// A small hover-washed icon button for the pane header. The header lives
     /// inside the titlebar drag strip, so the button occludes and swallows the
-    /// mouse-down (same discipline as the shell's `header_icon_button`).
+    /// mouse-down, as the titlebar's own buttons do (`window_control_button`).
     // The pane's one icon button (`surface_chrome::icon_button`).
     fn header_button(
         id: &'static str,

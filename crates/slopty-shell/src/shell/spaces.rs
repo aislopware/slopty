@@ -18,7 +18,6 @@ use crate::pickers::{
 };
 use gpui::{FocusHandle, Window};
 use std::collections::HashSet;
-use crate::state::time_ago_changes;
 use slopty_view_proto::{
     Device, DriveEntry, DriveListing, FolderListing, HomeFolderMatch,
     HomeFolderSearchResult, SearchHomeFoldersRequest, Space,
@@ -244,11 +243,6 @@ const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
 /// [`ARCHIVED_PAGE_ROWS`].
 const ARCHIVED_INITIAL_ROWS: usize = 10;
 const ARCHIVED_PAGE_ROWS: usize = 25;
-
-/// Shared quiet rule for sidebar groups and palette sections.
-pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
-    div().h(px(1.0)).bg(theme.border.opacity(0.6))
-}
 
 /// `icon` leads the label — a project group's icon, which its rows then omit.
 /// Every sidebar section's header (Sessions, Archived, project groups and
@@ -1933,16 +1927,6 @@ impl Shell {
         if open && self.sidebar_reveal_motions.remove(key) {
             self.begin_sidebar_disclosure_motion(key, 0.0, body_height);
         }
-    }
-
-    /// How long ago `then` was, by the sidebar's clock; notes when that next reads
-    /// differently, for the clock's tick.
-    pub(super) fn sidebar_time_ago(&self, then: chrono::DateTime<Utc>) -> SharedString {
-        let now = self.sidebar_clock;
-        if let Some(changes) = time_ago_changes(then, now) {
-            self.note_sidebar_change(changes);
-        }
-        format_time_ago(then, now).into()
     }
 
     /// Something read by the sidebar's clock next reads differently at `at`; its tick
@@ -4997,63 +4981,6 @@ mod tests {
         let mut busy = chat("aardvark");
         busy.last_message_at = Some(Utc.timestamp_opt(99, 0).unwrap());
         assert!(compare_sidebar_chats(&alpha, &busy).is_gt(), "by id, not by its last message");
-    }
-}
-
-/// Synthetic responses for the isolated native screenshot fixture only.
-#[cfg(feature = "project-palette-fixture")]
-impl Shell {
-    pub fn fixture_project_responses(&mut self, cx: &mut Context<Self>) {
-        let Some(flow) = self.add_space.as_mut() else {
-            return;
-        };
-        if flow.device.is_some() && !matches!(flow.drives, Loadable::Ready(_)) {
-            flow.drives = Loadable::Ready(
-                serde_json::from_value(serde_json::json!([
-                    {"name":"Projects", "path":"/projects"},
-                    {"name":"System", "path":"/"}
-                ]))
-                .unwrap(),
-            );
-            cx.notify();
-        }
-        if flow.step == ProjectStep::Folders && !matches!(flow.browser, Loadable::Ready(_)) {
-            let path = flow
-                .browser_path
-                .clone()
-                .unwrap_or_else(|| "/home/alex".into());
-            if flow.browser_path.is_none() {
-                flow.home = Some(path.clone());
-            }
-            let names = match path.as_str() {
-                "/home/alex" => vec![
-                    "Desktop",
-                    "Documents",
-                    "Downloads",
-                    "Movies",
-                    "Music",
-                    "Pictures",
-                    "Projects",
-                    "Public",
-                    "dotfiles",
-                    "notes",
-                    "sandbox",
-                    "scratch",
-                ],
-                "/projects" | "/home/alex/Projects" => vec!["fieldnotes", "mobile-app", "website"],
-                _ => vec!["assets", "docs", "src", "tests"],
-            };
-            flow.browser = Loadable::Ready(
-                serde_json::from_value(serde_json::json!({
-                    "path":path,
-                    "entries":names.into_iter().map(|name| serde_json::json!({
-                        "name":name,"isDir":true,"isRepo":name=="fieldnotes"
-                    })).collect::<Vec<_>>()
-                }))
-                .unwrap(),
-            );
-            cx.notify();
-        }
     }
 }
 

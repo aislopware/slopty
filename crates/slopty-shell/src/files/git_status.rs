@@ -265,23 +265,8 @@ impl GitStatusSource {
 }
 
 impl FilesSurface {
-    #[cfg(test)]
-    pub(crate) fn test_git_source(&self) -> Option<gpui::EntityId> {
-        self.git_status.as_ref().map(Entity::entity_id)
-    }
     pub(super) fn git_status_notice(&self, cx: &App) -> Option<&'static str> {
         self.git_status.as_ref()?.read(cx).notice
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_git_color(
-        &self,
-        path: &str,
-        directory: bool,
-        cx: &App,
-    ) -> Option<gpui::Hsla> {
-        self.git_decoration(path, directory, cx)
-            .map(|decoration| decoration.color(Theme::of(cx)))
     }
     pub(crate) fn release_git_status(&mut self) {
         self.git_status_subscription = None;

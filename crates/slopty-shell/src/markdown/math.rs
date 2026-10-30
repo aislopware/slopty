@@ -262,16 +262,6 @@ fn nbsp_em() -> f32 {
 /// How many fonts glyphs can name ([`slopty_math::bundled::FONTS`]).
 const FONTS: usize = slopty_math::bundled::FONTS as usize;
 
-/// The bundled math face a glyph font index names, parsed on first use.
-fn math_face(font: u8) -> Option<&'static ttf_parser::Face<'static>> {
-    static FACES: [OnceLock<Option<ttf_parser::Face<'static>>>; FONTS] =
-        [const { OnceLock::new() }; FONTS];
-    FACES
-        .get(usize::from(font))?
-        .get_or_init(|| ttf_parser::Face::parse(slopty_math::bundled::font_at(font).data(), 0).ok())
-        .as_ref()
-}
-
 /// The horizontal extent `formula` paints over, in ems from its origin: its
 /// advance box widened to everything it paints (slopty_math's `left`/`right`
 /// cover every glyph's ink and rule), so negative space or an overhang never
@@ -863,6 +853,16 @@ impl Element for MathGlyphs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bundled math face a glyph font index names, parsed on first use.
+    fn math_face(font: u8) -> Option<&'static ttf_parser::Face<'static>> {
+        static FACES: [OnceLock<Option<ttf_parser::Face<'static>>>; FONTS] =
+            [const { OnceLock::new() }; FONTS];
+        FACES
+            .get(usize::from(font))?
+            .get_or_init(|| ttf_parser::Face::parse(slopty_math::bundled::font_at(font).data(), 0).ok())
+            .as_ref()
+    }
 
     #[test]
     fn formulas_are_cached_by_source_and_style() {

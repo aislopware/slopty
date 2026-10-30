@@ -10,7 +10,7 @@
 //! (zoom) while the tree keeps its shape. The session's pane never closes: closing every other
 //! pane brings the view back to it.
 
-use gpui::{Bounds, Pixels, Point, Size, point, px, size};
+use gpui::{Bounds, Pixels, Size, point, px, size};
 
 use super::RightSurface;
 
@@ -525,11 +525,6 @@ impl Panes {
         let next = if forward { (at + 1) % panes.len() } else { (at + panes.len() - 1) % panes.len() };
         panes[next]
     }
-}
-
-/// Where a point falls among laid-out panes: the pane under it.
-pub(crate) fn pane_at(laid: &Laid, at: Point<Pixels>) -> Option<Pane> {
-    laid.panes.iter().find(|(_, bounds)| bounds.contains(&at)).map(|(pane, _)| *pane)
 }
 
 #[cfg(test)]

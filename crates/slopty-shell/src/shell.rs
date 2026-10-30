@@ -57,7 +57,6 @@ use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript};
 
-mod actions_ui;
 #[cfg(test)]
 mod chat_rename_tests;
 mod command_palette;
@@ -132,22 +131,6 @@ actions!(
         ArchiveSession
     ]
 );
-
-/// Restore a default focus only after an in-flight handoff has had a frame to
-/// claim the window. A synchronous focus-lost fallback can otherwise steal
-/// focus from controls that are mounting in response to the same input event.
-pub(crate) fn restore_focus_if_empty_on_next_frame<T: 'static>(
-    focus: FocusHandle,
-    window: &mut Window,
-    cx: &mut Context<T>,
-) {
-    window.on_next_frame(move |window, cx| {
-        if window.focused(cx).is_none() {
-            window.focus(&focus, cx);
-        }
-    });
-    cx.notify();
-}
 
 /// Run [`restore_mounted_focus`] after this frame, judged against it only while the focus is
 /// where the frame found it. A frame drawn while an input is dispatched (a key draws a dirty
@@ -757,23 +740,8 @@ impl NavHistory {
     }
 }
 
-/// The transcript's fade at the bottom stack: `(inset, band)` for a stack `stack_h` tall
-/// over the transcript whose composer footer reaches `floor` under the pill. Opaque from the
-/// pill's top (the status strip above it is empty air), zero by the pill's bottom, and nothing
-/// under the footer.
-fn transcript_floor_fade(stack_h: f32, floor: f32) -> (f32, f32) {
-    let floor = floor.clamp(0.0, (stack_h - Theme::STATUS_STRIP_HEIGHT).max(0.0));
-    (floor, (stack_h - Theme::STATUS_STRIP_HEIGHT - floor).max(1.0))
-}
-
 /// Flex gap between sidebar list items.
 const SIDEBAR_LIST_GAP: f32 = 2.0;
-/// Fixed vertical slot occupied by one active sidebar card.
-#[cfg(test)]
-const SIDEBAR_SESSION_SLOT: f32 = 61.0 + SIDEBAR_LIST_GAP;
-const SIDEBAR_DRAG_SCROLL_BAND: f32 = 48.0;
-const SIDEBAR_DRAG_SCROLL_MAX: f32 = 12.0;
-const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
 
 /// The sidebar footer's profile and settings buttons share one hit target.
 const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 28.0;
@@ -1062,8 +1030,6 @@ pub struct Shell {
     past_sessions: past_sessions::PastSessions,
     // The inbox (`inbox`).
     inbox: inbox::Inbox,
-    /// Host-owned project Actions cached per (device, space).
-    project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
     /// scope/base pick and diff watch (multiple diff panels, user request).
     diffs: std::collections::HashMap<u64, Entity<Changes>>,
@@ -1123,10 +1089,6 @@ pub struct Shell {
     chat_rename: Option<ChatRename>,
     // The keyboard of the remove-project dialog; sessions are archived, never deleted.
     delete_space_focus: crate::surface_chrome::ModalFocus,
-    /// Keyboard of the New/Edit section dialog, given back to what had it on close.
-    section_focus: crate::surface_chrome::ModalFocus,
-    /// Keyboard of the project action editor and its Delete confirmation.
-    project_action_focus: crate::surface_chrome::ModalFocus,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
     /// RPC task is retained separately so rerenders do not cancel it.
     /// Space-row context menu (dropdown rows): (space id, window position).
@@ -1404,7 +1366,6 @@ impl Shell {
             open_in: popover::Popup::default(),
             past_sessions: past_sessions::PastSessions::default(),
             inbox: inbox::Inbox::default(),
-            project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
             files_subs: std::collections::HashMap::new(),
@@ -1451,8 +1412,6 @@ impl Shell {
             chat_copy_left: false,
             chat_rename: None,
             delete_space_focus: crate::surface_chrome::ModalFocus::new(cx),
-            section_focus: crate::surface_chrome::ModalFocus::new(cx),
-            project_action_focus: crate::surface_chrome::ModalFocus::new(cx),
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
             delete_space_confirm: None,
@@ -4456,12 +4415,6 @@ impl Shell {
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
-        if let Some(overlay) = self.render_project_action_overlay(viewport, window, cx) {
-            overlays.push(overlay);
-        }
-
-
-
         overlays
     }
 
@@ -5219,83 +5172,6 @@ fn linux_caption_button(
                     style.text_color(hover_fg)
                 }),
         )
-}
-
-/// A 28 px icon button for the main-panel header, its glyph centred in the muted ink.
-// The caller names it with `action_hint` (its tooltip, key and accessible name).
-fn header_icon_button(
-    id: &'static str,
-    icon_path: &'static str,
-    on: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let glyph = icon(icon_path).size(px(16.0)).text_color(theme.text_muted);
-    header_icon_button_with(id, glyph, on, theme, on_click)
-}
-
-/// [`header_icon_button`] around a caller-drawn glyph (the morphing sidebar
-/// glyph).
-// `on` washes what it draws for a pane it shows, as an open menu's trigger is.
-fn header_icon_button_with(
-    id: &'static str,
-    glyph: impl IntoElement,
-    on: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let fade_key = format!("header-icon-{id}");
-    // On a touch screen it takes presses over a finger's 44 pt around the 28 it draws.
-    let reach = crate::surface_chrome::touch_reach(28.0);
-    let group = SharedString::from(format!("header-icon-press-{id}"));
-    let drawn = div()
-        .id(SharedString::from(format!("{id}-drawn")))
-        .size(px(28.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0))
-        // The wash fades, from the theme's one table of wash steps, as every icon toggle's
-        // (`surface_chrome::icon_button_frame`): a latched button under the pointer still
-        // answers, a step past its latch.
-        .bg({
-            let (rest, hover) = if on {
-                (crate::theme::selected_wash(), crate::theme::selected_hover_wash())
-            } else {
-                (crate::theme::wash(0.0), crate::theme::control_hover())
-            };
-            motion::hover_blend(&fade_key, rest, hover)
-        })
-        .group_active(group.clone(), |style| style.bg(crate::theme::pressed_wash()))
-        .child(glyph);
-    div()
-        .id(id)
-        .debug_selector(|| id.into())
-        .group(group)
-        .size(px(28.0 + 2.0 * reach))
-        .m(px(-reach))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(6.0 + reach))
-        .cursor_pointer()
-        .hover_fade(fade_key)
-        // Same occlusion + click-swallowing as [`window_control_button`]: this
-        // button sits inside the chat header's titlebar drag region, so its
-        // rect must be carved out of the strip's drag/double-click surface.
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            on_click(event, window, cx)
-        })
-        // A button reached by Tab, its ring a hairline that never resizes it, pressed
-        // with a darker wash.
-        .role(gpui::Role::Button)
-        .tab_index(0)
-        .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
-        .child(drawn)
 }
 
 impl Render for Shell {

@@ -389,7 +389,6 @@ pub(crate) struct WorkspacePathItem {
 pub(crate) enum WorkspacePathSource {
     Tree,
     Search,
-    FileTab,
 }
 
 impl WorkspacePathDrag {

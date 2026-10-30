@@ -16,15 +16,6 @@ use std::{
     rc::Rc,
 };
 
-#[cfg(feature = "browser-fixture")]
-thread_local! {
-    static FIXTURE_LINKS: RefCell<std::collections::HashMap<String, (Point<Pixels>, FocusHandle)>> = RefCell::default();
-}
-#[cfg(feature = "browser-fixture")]
-pub(crate) fn fixture_link(target: &str) -> Option<(Point<Pixels>, FocusHandle)> {
-    FIXTURE_LINKS.with(|links| links.borrow().get(target).cloned())
-}
-
 pub struct LinkRanges {
     pub id: SharedString,
     pub child: AnyElement,
@@ -129,15 +120,6 @@ impl Element for LinkRanges {
                     .into_iter()
                     .enumerate()
                 {
-                    #[cfg(feature = "browser-fixture")]
-                    if part == 0 {
-                        FIXTURE_LINKS.with(|links| {
-                            links.borrow_mut().insert(
-                                target.original.clone(),
-                                (rect.center(), state.focus[index].clone()),
-                            )
-                        });
-                    }
                     let menu = state.menu.clone();
                     let keyboard_menu = menu.clone();
                     let focus = state.focus[index].clone();

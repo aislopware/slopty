@@ -42,9 +42,6 @@ pub(super) const AGENTS: [Agent; 4] = [
     Agent { id: calls::TERMINAL_AGENT, name: "Terminal" },
 ];
 
-/// The palette entry, and the picker's title.
-pub(super) const NEW_SESSION: &str = "New session\u{2026}";
-
 /// How long a started session is waited for in the sidebar's list.
 const LISTED_WITHIN: Duration = Duration::from_secs(10);
 /// How often it is looked for meanwhile.

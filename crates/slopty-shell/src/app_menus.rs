@@ -598,66 +598,79 @@ mod about_panel {
 // delegate does not implement applicationShouldTerminate:.
 #[cfg(target_os = "macos")]
 mod native_quit {
-    use super::*;
-    // objc2; objc 0.2 is banned in the workspace (deny.toml).
-    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-    use objc2::{class, msg_send, sel};
-    use std::cell::{Cell, RefCell};
+    use std::cell::Cell;
 
     thread_local! {
         static ALLOWED: Cell<bool> = const { Cell::new(false) };
-        static REQUEST: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
-    }
-
-    extern "C" fn should_terminate(_: &AnyObject, _: Sel, _: *mut AnyObject) -> usize {
-        if ALLOWED.get() {
-            return 1; // NSTerminateNow
-        }
-        REQUEST.with_borrow(|request| {
-            if let Some(request) = request {
-                request();
-            }
-        });
-        0 // NSTerminateCancel; re-request only after buffers are safe.
     }
 
     pub(super) fn allow() {
         ALLOWED.set(true);
     }
 
-    pub(super) fn init(cx: &mut App) {
-        let executor = cx.foreground_executor().clone();
-        let app = cx.to_async();
-        REQUEST.with_borrow_mut(|request| {
-            *request = Some(Box::new(move || {
-                let app = app.clone(); // gpui-fast updates through `&AsyncApp`
-                executor
-                    .spawn(async move {
-                        let _ = app.update(request_quit);
-                    })
-                    .detach();
-            }));
-        });
-        // AppKit invokes delegate methods on the main thread. Add only the
-        // missing selector: never replace GPUI's existing quit observer.
-        unsafe {
-            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-            let delegate: *mut AnyObject = msg_send![app, delegate];
-            assert!(!delegate.is_null(), "GPUI application delegate must exist");
-            let class = (*delegate).class() as *const AnyClass as *mut AnyClass;
-            let added = objc2::ffi::class_addMethod(
-                class,
-                sel!(applicationShouldTerminate:),
-                std::mem::transmute::<
-                    extern "C" fn(&AnyObject, Sel, *mut AnyObject) -> usize,
-                    Imp,
-                >(should_terminate),
-                c"Q@:@".as_ptr(),
-            );
-            assert!(
-                added.as_bool(),
-                "GPUI termination delegate contract changed"
-            );
+    // Tests run without AppKit's application delegate, so only the app installs the hook.
+    #[cfg(not(test))]
+    pub(super) use hook::init;
+
+    #[cfg(not(test))]
+    mod hook {
+        use super::super::{App, request_quit};
+        use super::ALLOWED;
+        // objc2; objc 0.2 is banned in the workspace (deny.toml).
+        use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+        use objc2::{class, msg_send, sel};
+        use std::cell::RefCell;
+
+        thread_local! {
+            static REQUEST: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+        }
+
+        extern "C" fn should_terminate(_: &AnyObject, _: Sel, _: *mut AnyObject) -> usize {
+            if ALLOWED.get() {
+                return 1; // NSTerminateNow
+            }
+            REQUEST.with_borrow(|request| {
+                if let Some(request) = request {
+                    request();
+                }
+            });
+            0 // NSTerminateCancel; re-request only after buffers are safe.
+        }
+
+        pub(in crate::app_menus) fn init(cx: &mut App) {
+            let executor = cx.foreground_executor().clone();
+            let app = cx.to_async();
+            REQUEST.with_borrow_mut(|request| {
+                *request = Some(Box::new(move || {
+                    let app = app.clone(); // gpui-fast updates through `&AsyncApp`
+                    executor
+                        .spawn(async move {
+                            let _ = app.update(request_quit);
+                        })
+                        .detach();
+                }));
+            });
+            // AppKit invokes delegate methods on the main thread. Add only the
+            // missing selector: never replace GPUI's existing quit observer.
+            unsafe {
+                let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+                let delegate: *mut AnyObject = msg_send![app, delegate];
+                assert!(!delegate.is_null(), "GPUI application delegate must exist");
+                let class = (*delegate).class() as *const AnyClass as *mut AnyClass;
+                let added = objc2::ffi::class_addMethod(
+                    class,
+                    sel!(applicationShouldTerminate:),
+                    std::mem::transmute::<
+                        extern "C" fn(&AnyObject, Sel, *mut AnyObject) -> usize,
+                        Imp,
+                    >(should_terminate),
+                    c"Q@:@".as_ptr(),
+                );
+                assert!(
+                    added.as_bool(),
+                    "GPUI termination delegate contract changed"
+                );
+            }
         }
     }
 }

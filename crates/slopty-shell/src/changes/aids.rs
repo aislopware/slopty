@@ -447,12 +447,3 @@ impl popover::ScrollRailHost for Changes {
         self.show_tree.then(|| self.tree_scroll.clone())
     }
 }
-
-/// A time of day, as the turn list shows when a message was sent; none for an unknown time.
-fn clock(at_ms: i64) -> Option<String> {
-    if at_ms <= 0 {
-        return None;
-    }
-    let at = chrono::DateTime::from_timestamp_millis(at_ms)?;
-    Some(at.with_timezone(&chrono::Local).format(crate::transcript::clock_format()).to_string())
-}

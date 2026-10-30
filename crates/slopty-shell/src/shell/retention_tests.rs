@@ -247,7 +247,6 @@ pub(super) struct Node {
     pub label: String,
     pub description: Option<String>,
     pub expanded: Option<bool>,
-    pub disabled: bool,
     pub bounds: gpui::Bounds<Pixels>,
 }
 
@@ -272,7 +271,6 @@ pub(super) fn tree(cx: &mut VisualTestContext) -> HashMap<NodeId, Node> {
                         label: node.label().unwrap_or_default().to_owned(),
                         description: node.description().map(str::to_owned),
                         expanded: node.is_expanded(),
-                        disabled: node.is_disabled(),
                         bounds: gpui::Bounds::from_corners(
                             gpui::point(at(r.x0), at(r.y0)),
                             gpui::point(at(r.x1), at(r.y1)),

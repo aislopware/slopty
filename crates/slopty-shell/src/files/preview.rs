@@ -346,11 +346,6 @@ fn path_is_same_or_descendant(path: &str, ancestor: &str) -> bool {
 }
 
 impl FilesSurface {
-    #[cfg(test)]
-    pub(crate) fn test_images_visible(&self) -> bool {
-        self.preview.images_visible
-    }
-
     pub(crate) fn suspend_images(&mut self, cx: &mut Context<Self>) {
         if !self.preview.images_visible {
             return;
@@ -3077,20 +3072,6 @@ mod tests {
 
 #[cfg(test)]
 impl FilesSurface {
-    pub(crate) fn test_document_text(&self, path: &str) -> Option<String> {
-        self.preview
-            .documents
-            .get(path)?
-            .file
-            .as_ref()?
-            .text
-            .clone()
-    }
-
-    pub(crate) fn test_document_phase(&self, path: &str) -> Option<String> {
-        Some(format!("{:?}", self.preview.documents.get(path)?.phase))
-    }
-
     pub(crate) fn seed_pending_exit_test_document(&mut self, failed: bool) {
         let mut document = FileDocument::loading(DocumentKey {
             chat_id: "test".into(),

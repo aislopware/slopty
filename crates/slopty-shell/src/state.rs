@@ -92,8 +92,8 @@ pub struct EngineBootConfig {
 }
 
 /// The engine itself. Slopty's server is the only backend; the interface reaches it
-/// through this service (`slopty-ui`), in process, with slopty's envelopes and dispatch. Set
-/// before [`AppState::bootstrap`] runs.
+/// through this service (`slopty-ui`), in process, over the view-rpc frames. Set before
+/// [`AppState::bootstrap`] runs.
 pub struct EngineService(pub Arc<dyn RpcService>);
 
 impl gpui::Global for EngineService {}
@@ -1063,20 +1063,6 @@ impl AppState {
             doc_id.clone(),
             Arc::new(slopty_view_doc::TranscriptBaseline::capture(&entries)),
         );
-        self.sub_transcripts.insert(doc_id, entries);
-    }
-
-    pub(crate) fn set_prepared_subagent_snapshot(
-        &mut self,
-        doc_id: String,
-        entries: Vec<SessionMessageEntry>,
-        prepared: Arc<crate::transcript::PreparedTranscript>,
-    ) {
-        self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        self.sub_watch_tasks.remove(&doc_id);
-        self.transcript_baselines
-            .insert(doc_id.clone(), prepared.navigation_baseline.clone());
-        self.prepared_transcripts.insert(doc_id.clone(), prepared);
         self.sub_transcripts.insert(doc_id, entries);
     }
 

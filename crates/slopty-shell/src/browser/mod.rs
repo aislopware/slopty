@@ -110,8 +110,6 @@ pub struct BrowserSurface {
     previews: slopty_view_proto::PreviewSnapshot,
     previews_loading: bool,
     previews_task: Option<gpui::Task<()>>,
-    #[cfg(feature = "browser-fixture")]
-    fixture_preview_open: std::rc::Rc<std::cell::Cell<Option<gpui::Point<gpui::Pixels>>>>,
     presentation: Presentation,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
@@ -191,8 +189,6 @@ impl BrowserSurface {
             previews: slopty_view_proto::PreviewSnapshot::default(),
             previews_loading: true,
             previews_task: None,
-            #[cfg(feature = "browser-fixture")]
-            fixture_preview_open: Default::default(),
             presentation: Presentation::Hidden,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
@@ -269,14 +265,6 @@ impl BrowserSurface {
         cx.notify();
     }
 
-    #[cfg(feature = "browser-fixture")]
-    pub fn fixture_previews(&self) -> slopty_view_proto::PreviewSnapshot {
-        self.previews.clone()
-    }
-    #[cfg(feature = "browser-fixture")]
-    pub fn fixture_preview_open_position(&self) -> Option<gpui::Point<gpui::Pixels>> {
-        self.fixture_preview_open.get()
-    }
 
     /// The daemon resolves the session's current cwd for every update, so a
     /// checkout change cannot leave this tab discovering the previous project.
@@ -574,154 +562,6 @@ impl BrowserSurface {
                 }));
             }
         }
-    }
-}
-
-#[cfg(feature = "browser-fixture")]
-impl BrowserContext {
-    pub fn fixture_persistence_supported() -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            native::persistent_profiles_supported()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            cfg!(target_os = "linux")
-        }
-    }
-
-    /// Named WK stores live outside the fixture's temporary data directory.
-    /// Remove only the store derived from this fixture installation and identity.
-    pub fn fixture_remove_profile(
-        data_dir: &std::path::Path,
-        device: &str,
-        completion: impl FnOnce(Result<(), String>) + Send + 'static,
-    ) {
-        #[cfg(target_os = "macos")]
-        {
-            use wry::WebViewExtDarwin;
-            if native::persistent_profiles_supported() {
-                let profile = profile::BrowserProfile::for_workspace(
-                    data_dir,
-                    Some(slopty_view_proto::WorkspaceScope::Local),
-                    None,
-                    Some(device),
-                )
-                .unwrap();
-                eprintln!("Storage cleanup: invoke; main_thread={}", objc2::MainThreadMarker::new().is_some());
-                // A cleanup-only process has not constructed a WebKit store yet.
-                // Initialize its main run loop before removal dispatches back from the
-                // WebsiteDataStoreIO queue. An ephemeral store never opens user data.
-                let mtm = objc2::MainThreadMarker::new().expect("profile cleanup requires the main thread");
-                let initialization = unsafe { objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm) };
-                drop(initialization);
-                wry::WebView::remove_data_store(&profile.data_store_identifier(), move |result| {
-                    eprintln!("Storage cleanup: callback; main_thread={}; result={result:?}", objc2::MainThreadMarker::new().is_some());
-                    completion(result.map_err(|error| error.to_string()));
-                });
-                eprintln!("Storage cleanup: invocation returned");
-            } else {
-                completion(Ok(()));
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (data_dir, device);
-            completion(Ok(()));
-        }
-    }
-}
-
-#[cfg(feature = "browser-fixture")]
-impl BrowserSurface {
-    pub fn fixture_history(&mut self, forward: bool) {
-        self.history(forward);
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_move_cursor(&self, x: f64, y: f64) {
-        self.native.as_ref().unwrap().fixture_move_cursor(x, y);
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_origin(&self) -> (f32, f32) {
-        self.native.as_ref().unwrap().fixture_origin()
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_overlay_visible(&self) -> bool {
-        self.native.as_ref().unwrap().fixture_overlay_visible()
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_visibility_changes(&self) -> u64 {
-        self.native.as_ref().unwrap().fixture_visibility_changes()
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_focus(&self) {
-        self.native.as_ref().unwrap().fixture_focus();
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_focused(&self) -> bool {
-        self.native.as_ref().unwrap().fixture_focused()
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_overlay_at(&self, x: f64, y: f64) -> bool {
-        self.native.as_ref().unwrap().fixture_overlay_at(x, y)
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_click(&self, x: f64, y: f64) {
-        self.native.as_ref().unwrap().fixture_click(x, y);
-    }
-    pub fn fixture_native_visible(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            self.native
-                .as_ref()
-                .is_some_and(|native| native.fixture_visible())
-        }
-        #[cfg(target_os = "linux")]
-        {
-            self.presentation != Presentation::Hidden
-                && self.native.as_ref().is_some_and(|n| n.image.is_some())
-        }
-        #[cfg(windows)]
-        {
-            self.presentation != Presentation::Hidden && self.native.is_some()
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-        {
-            false
-        }
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_backdrop_layers(&self) -> String {
-        self.native.as_ref().unwrap().fixture_backdrop_layers()
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_page_hit(&self, x: f64, y: f64) -> bool {
-        self.native.as_ref().unwrap().fixture_page_hit(x, y)
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_backdrops(&self) -> Vec<(f64, f64, f64, f64)> {
-        self.native.as_ref().unwrap().fixture_backdrops()
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_geometry(&self) -> (f32, f32, f32) {
-        self.native.as_ref().unwrap().fixture_geometry()
-    }
-    #[cfg(target_os = "macos")]
-    pub fn fixture_cookies(&self, completion: impl FnOnce(Vec<String>) + 'static) {
-        self.native.as_ref().expect("storage page must be attached").fixture_cookies(completion);
-    }
-
-    pub fn fixture_eval(&self, script: &str) {
-        #[cfg(target_os = "macos")]
-        if let Some(native) = &self.native {
-            native.fixture_eval(script);
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(native) = &self.native {
-            native.evaluate(script);
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        let _ = script;
     }
 }
 

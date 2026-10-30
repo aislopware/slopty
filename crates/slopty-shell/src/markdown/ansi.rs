@@ -139,11 +139,6 @@ pub fn parse(language: Option<&str>, code: &str) -> Vec<AnsiLine> {
     lines
 }
 
-/// `code` with every escape taken out: what copy puts on the clipboard.
-pub fn strip(language: Option<&str>, code: &str) -> String {
-    parse(language, code).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n")
-}
-
 /// `style` after the SGR parameters `params` ("1;31", "38;5;208", "" = reset).
 fn apply_sgr(mut style: AnsiStyle, params: &str) -> AnsiStyle {
     let codes: Vec<u16> = if params.is_empty() {
@@ -263,6 +258,11 @@ pub fn runs(line: &AnsiLine, mono: &gpui::Font, theme: &Theme) -> Vec<TextRun> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `code` with every escape taken out, as the code block shows and copies it.
+    fn strip(language: Option<&str>, code: &str) -> String {
+        parse(language, code).into_iter().map(|line| line.text).collect::<Vec<_>>().join("\n")
+    }
 
     /// A coloured prompt and a reset read as two runs over the plain text.
     #[test]

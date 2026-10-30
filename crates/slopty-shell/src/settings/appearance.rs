@@ -882,18 +882,6 @@ fn palette_preview(theme: &Theme) -> gpui::Div {
         .child(div().w_1_3().h_full().bg(theme.accent))
 }
 
-// A row's action reads as every settings row's (Quiet, its words alone), and is named
-// by them for a screen reader.
-fn compact_action(
-    theme: &Theme,
-    label: &str,
-    id: impl Into<SharedString>,
-) -> gpui::Stateful<gpui::Div> {
-    widgets::text_action(theme, widgets::ActionTone::Quiet, label)
-        .id(id.into())
-        .aria_label(SharedString::from(label.to_owned()))
-}
-
 fn accent_swatch(
     page_theme: &Theme,
     selection: AccentSelection,
