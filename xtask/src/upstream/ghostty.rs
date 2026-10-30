@@ -115,9 +115,12 @@ pub fn move_submodule(sh: &Shell, main: &Utf8Path, fork: &Fork, head: &str) -> R
 }
 
 /// The command that regenerates libghostty-rs's bindings from the ghostty `GHOSTTY_SOURCE_DIR`
-/// names. It compiles, so it runs on the sync's runner (`super::check_on_runner`).
-pub const REGENERATE: &str =
-    "cargo run --locked --quiet -p libghostty-vt-sys --features bindgen-tool --bin gen-bindings";
+/// names. It compiles, so it runs on the sync's runner (`super::check_on_runner`). bindgen parses
+/// the headers once per target with LLVM's own libclang, as upstream's dev shell does: Xcode's
+/// clang sends a musl target's `stddef.h` on to a system header a freestanding parse has none of.
+pub const REGENERATE: &str = "brew list --formula llvm >/dev/null 2>&1 || brew install --quiet llvm\n\
+     LIBCLANG_PATH=\"$(brew --prefix llvm)/lib\" \
+     cargo run --locked --quiet -p libghostty-vt-sys --features bindgen-tool --bin gen-bindings";
 
 /// Pin libghostty-rs (checked out at `dir`, on its branch) to ghostty `head` and commit it. The
 /// bindings are regenerated on the runner, and [`take_bindings`] adds them to this commit.
