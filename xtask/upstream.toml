@@ -102,19 +102,6 @@ upstream_branch = "main"
 vendored = "vendor/noq-proto"
 base = "1fe2a3424043959909a128e1acbe3697e3082080"
 
-# zeron is the source Slopty's interface was copied from, not a fork and not a dependency: its UI
-# crate and the data types that crate compiles against live in `crates/slopty-shell` and its
-# siblings under Slopty's names. `xtask/zeron.toml` maps zeron's paths and names onto ours, and
-# lists what is not taken. Applying its renames to a zeron file at `base` gives our file, apart
-# from the edits marked `// slopty:`, so a sync is a three-way merge of base → new into our files.
-[zeron]
-kind = "copied-ui"
-upstream = "https://github.com/zeronsh/zeron.git"
-upstream_branch = "main"
-checkout = ".research/zeron"
-map = "xtask/zeron.toml"
-base = "369d42815190ea6c4865c92dc060c54d790f4dcd"
-
 # Releases Slopty waits for rather than forking: the gate warns once crates.io has one. objc2's
 # framework crates (0.3.2) were generated from Xcode 16.4, so the few 27 calls Slopty makes are
 # declared by hand; 0.4.0 is upstream's Xcode 27 release, whose core and block2 changes break
