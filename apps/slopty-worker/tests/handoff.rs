@@ -414,7 +414,9 @@ mod handoff {
     }
 
     /// With no client connected, or none that takes pages, the page opens on this machine at
-    /// once, as it would without Slopty, and stderr says why.
+    /// once, as it would without Slopty, and stderr says why. At once is in what the worker
+    /// did, not in how long a loaded machine took: the only wait in a handoff is the one on a
+    /// client asked to take it (the worker's `handoff::TAKE_WAIT`), and no client was asked.
     #[tokio::test]
     async fn with_no_client_to_take_it_a_page_opens_here_at_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -422,16 +424,24 @@ mod handoff {
         let stubs = stubs(dir.path(), 0);
         let path = format!("{}:{PATH}", stubs.display());
         let url = "https://example.com/oauth";
-        let started = tokio::time::Instant::now();
         let (code, said) = exits(d.run_as("slopty-browser", &[url], None, &path)).await;
         assert_eq!(code, 0);
         assert!(said.contains("no client is connected"), "{said}");
         assert_eq!(stub_said(dir.path(), "open").as_deref(), Some(format!("{url} ").as_str()));
-        let (_e, _terminal) = d.client("terminal").await;
+        let (_e, mut terminal) = d.client("terminal").await;
         let (code, said) = exits(d.run_as("slopty-browser", &[url], None, &path)).await;
         assert_eq!(code, 0);
         assert!(said.contains("no connected client takes it"), "{said}");
-        assert!(started.elapsed() < Duration::from_secs(3), "no wait on a client that cannot");
+        // Everything the worker sent the client before its pong: no handoff among it.
+        let sent_at = slopty_core::MonoTime::now();
+        terminal.tx.send(&ClientMsg::Ping { sent_at }).await.unwrap();
+        let asked = next_msg(&mut terminal, |m| match m {
+            WorkerMsg::Handoff(event) => Some(Some(event)),
+            WorkerMsg::Pong { sent_at: s } if s == sent_at => Some(None),
+            _ => None,
+        })
+        .await;
+        assert_eq!(asked, None, "a client that takes no pages is never asked, so nothing waits");
     }
 
     /// `EDITOR` shows the file on the client and waits. The program that waits reads what the
