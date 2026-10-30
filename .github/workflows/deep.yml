@@ -337,13 +337,12 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
       # The fuzzers' second engine: ziggy runs AFL++, which cargo-afl builds (with its runtime
       # for this toolchain) and instruments the targets for, on stable, where no LLVM plugin is
-      # wanted.
+      # wanted. Both are built from source: `config --build` builds AFL++ from the copy in
+      # cargo-afl's crate source, which a prebuilt binary (binstall's QuickInstall) leaves out.
       - if: matrix.slug == 'fuzz'
         run: |
-          cargo binstall --no-confirm --locked ziggy@1.7.3 cargo-afl@0.18.2
+          cargo install --locked ziggy@1.7.3 cargo-afl@0.18.2
           cargo afl config --build --force
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
       - name: ${{ matrix.check }}
         run: |
           mkdir -p target/deep
