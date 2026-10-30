@@ -343,6 +343,19 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                         if let Some(time) = facts.as_mut().and_then(|facts| facts.time.as_mut()) {
                             time.turn_started = turn_start(state, item.turn);
                         }
+                        // slopty: what the model read where the step shows something else, and its
+                        // raw record, each fetched when the person opens it.
+                        let seen = call.seen.as_ref().map(|seen| slopty_view_doc::BlobLink {
+                            blob: format!("{thread}/{id}{SEEN_BLOB}"),
+                            lines: seen.lines,
+                        });
+                        let raw =
+                            (!call.raw.is_empty()).then(|| format!("{thread}/{id}{RAW_BLOB}"));
+                        if seen.is_some() || raw.is_some() {
+                            let facts = facts.get_or_insert_default();
+                            facts.seen = seen;
+                            facts.raw = raw;
+                        }
                     }
                     parts.push(part);
                     // slopty: the files it changed, as the TUI lists them under a command.
@@ -1065,12 +1078,24 @@ fn tool(
         _ if call.state == ToolState::Failed => slopty_view_doc::SubagentStatus::Failed,
         _ => slopty_view_doc::SubagentStatus::Done,
     });
-    let output =
-        call.output.as_ref().and_then(|out| slopty_view_doc::summarize_tool_output(&out.text));
+    // slopty: the output as the thread holds it, its head (a running command's tail), so an open
+    // step shows its lines and "+ N lines" before anything is fetched; the whole is fetched where
+    // the thread cut it or the step shows less of it (`inspector.md`, "Any step opens to its
+    // whole detail").
+    let output = call
+        .output
+        .as_ref()
+        .map(|out| out.text.trim())
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
     let output_ref = call
         .output
         .as_ref()
-        .filter(|out| out.is_clipped() || output.as_deref() != Some(out.text.trim()))
+        .filter(|out| {
+            out.is_clipped()
+                || usize::try_from(out.lines).unwrap_or(usize::MAX)
+                    > slopty_view_doc::OUTPUT_HEAD_LINES
+        })
         .map(|_| format!("{thread}/{id}"));
     let diff_ref = diffable(call, input.as_ref()).then(|| format!("{thread}/{id}.diff"));
     MessagePart::Tool {
@@ -1135,6 +1160,14 @@ fn shell_edit_id(item: &str, n: usize) -> String {
 
 /// What marks a part as a file a command changed ([`shell_edit_id`]).
 const SHELL_EDIT: &str = ":edit:";
+
+/// What ends the blob of the text the model read of a call's result, where its step shows
+/// something else (`{thread}/{item}.seen`).
+pub const SEEN_BLOB: &str = ".seen";
+
+/// What ends the blob of a call's raw record: its agent's records of it, as one JSON array
+/// (`{thread}/{item}.raw`).
+pub const RAW_BLOB: &str = ".raw";
 
 /// The call and the index of the file a command changed that part `id` shows.
 #[must_use]

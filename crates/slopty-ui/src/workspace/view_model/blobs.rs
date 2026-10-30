@@ -49,8 +49,9 @@ fn text_of(whole: Option<&Arc<Expanded>>) -> Option<String> {
 impl WorkspaceView {
     /// `FetchToolBlob`: a tool call's whole output (`{thread}/{item}`), or an edit's diff
     /// (`{thread}/{item}.diff`) as the shell draws one ([`transcript::tool_diff`]), or a file's
-    /// a command changed (`{thread}/{item}:edit:{n}.diff`), each whole once its worker sent
-    /// what it had cut.
+    /// a command changed (`{thread}/{item}:edit:{n}.diff`), or the text the model read of its
+    /// result ([`transcript::SEEN_BLOB`]), or its records as one JSON array
+    /// ([`transcript::RAW_BLOB`]), each whole once its worker sent what it had cut.
     pub(super) fn view_tool_blob(
         &self,
         params: &serde_json::Value,
@@ -60,10 +61,42 @@ impl WorkspaceView {
         else {
             return Task::ready(Err(missing()));
         };
-        let (item, diff) = item.strip_suffix(".diff").map_or((item, false), |item| (item, true));
         let Some((key, thread)) = self.chat_thread(chat, cx) else {
             return Task::ready(Err(missing()));
         };
+        // slopty: what the model read of a call's result, and the call's own records.
+        if let Some(item) = item.strip_suffix(transcript::SEEN_BLOB) {
+            let Some(seen) = self.view_tool_call(key, thread, item, cx).and_then(|call| call.seen)
+            else {
+                return Task::ready(Err(missing()));
+            };
+            let Some(full) = seen.full.clone() else { return Task::ready(Ok(blob(&seen.text))) };
+            let whole = Self::view_whole(key, thread, full, cx);
+            return cx.background_spawn(async move {
+                text_of(whole.await.as_ref()).map(|text| blob(&text)).ok_or_else(missing)
+            });
+        }
+        if let Some(item) = item.strip_suffix(transcript::RAW_BLOB) {
+            let Some(call) = self.view_tool_call(key, thread, item, cx) else {
+                return Task::ready(Err(missing()));
+            };
+            let wholes: Vec<_> = call
+                .raw
+                .into_iter()
+                .map(|record| Self::view_whole(key, thread, record, cx))
+                .collect();
+            return cx.background_spawn(async move {
+                let mut records = Vec::with_capacity(wholes.len());
+                for whole in wholes {
+                    records.extend(text_of(whole.await.as_ref()));
+                }
+                // Each record is a JSON object: together, an array of them.
+                (!records.is_empty())
+                    .then(|| blob(&format!("[{}]", records.join(",\n"))))
+                    .ok_or_else(missing)
+            });
+        }
+        let (item, diff) = item.strip_suffix(".diff").map_or((item, false), |item| (item, true));
         // slopty: a file a command changed, drawn as an edit's chip under the command's.
         if diff && let Some((item, n)) = transcript::shell_edit_of(item) {
             let Some(edit) =

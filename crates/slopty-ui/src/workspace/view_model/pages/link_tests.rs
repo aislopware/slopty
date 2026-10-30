@@ -40,6 +40,8 @@ fn showing(source: PageSource) -> ThreadState {
         detail: Some(ToolDetail::Page(PageDetail { title: "Latency".to_owned(), source })),
         child: None,
         ended_ms: None,
+        seen: None,
+        raw: Vec::new(),
     };
     state.items.push(Item {
         id: ItemId("p1".to_owned()),

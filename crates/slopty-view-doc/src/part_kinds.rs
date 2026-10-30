@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::dock::RetryLine;
 
+/// The lines of a tool's output an open step shows before "+ N lines": a longer one is fetched
+/// whole when the person asks.
+pub const OUTPUT_HEAD_LINES: usize = 24;
+
 /// What a tool call says beyond zeron's chip ([`crate::MessagePart::Tool`]'s `facts`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +75,44 @@ pub struct ToolFacts {
     /// When it ran, for its row's duration and its detail's Timing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<StepTime>,
+    /// How a command exited, which its detail says on a line of its own: "Exit code 2".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<ExitCode>,
+    /// Its output still grows: a command that runs, its output read from the file it writes. Its
+    /// detail holds the output in a capped box that follows its own bottom, so the trace stays
+    /// still while it grows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub growing: bool,
+    /// The text the model read of its result, where the step shows something else in its place
+    /// (the diff for an edit, a list for a task call): "Details for Claude", fetched when opened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<BlobLink>,
+    /// Where its agent's own records of it are, fetched as one JSON array when opened: its raw
+    /// record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+}
+
+/// How a command exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitCode {
+    /// The code it exited with.
+    pub code: i32,
+    /// Its agent read a code other than 0 as no failure (grep's 1, "No matches found"), so it
+    /// reads quiet rather than in the failure's colour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
+}
+
+/// A text fetched when the person opens it: where it is, and how long it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobLink {
+    /// What the shell fetches it by.
+    pub blob: String,
+    /// Its lines.
+    pub lines: u32,
 }
 
 /// When a step ran, as its records say: its start and end, and its run alone where the agent

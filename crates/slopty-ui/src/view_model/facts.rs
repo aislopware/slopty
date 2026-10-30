@@ -14,7 +14,7 @@ use slopty_proto::thread::{
 };
 use slopty_proto::visual::{PageDetail, PageSource};
 use slopty_view_doc::{
-    LinkRow, NoteLine, NoteRow, PageCard, RetryLine, StepTime, SubagentProgress, TaskRow,
+    ExitCode, LinkRow, NoteLine, NoteRow, PageCard, RetryLine, StepTime, SubagentProgress, TaskRow,
     ToolFacts, ToolTimer, bytes_short, duration_words, tokens_short,
 };
 
@@ -649,6 +649,15 @@ pub fn tool_facts(
         },
         thought_ms: None,
         time: step_time(started, call, note),
+        exit: match &call.detail {
+            Some(ToolDetail::Exec(exec)) => {
+                exec.exit_code.map(|code| ExitCode { code, quiet: exec.interpretation.is_some() })
+            }
+            _ => None,
+        },
+        growing: matches!(&call.detail, Some(ToolDetail::Exec(exec)) if exec.status == ExecStatus::Running),
+        seen: None,
+        raw: None,
     };
     (facts != ToolFacts::default()).then_some(facts)
 }

@@ -32,6 +32,8 @@ fn call(name: &str, kind: &str, detail: Option<ToolDetail>, state: ToolState) ->
         detail,
         child: None,
         ended_ms: None,
+        seen: None,
+        raw: Vec::new(),
     }
 }
 
