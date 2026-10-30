@@ -11,8 +11,8 @@ use gpui::{Context, Entity, EventEmitter, FocusHandle, Keystroke, SharedString, 
 use crate::motion::HoverFade as _;
 use crate::popover;
 use crate::settings::{
-    KeyEquivalents, KeymapConfig, ShortcutId, canonical_key, combo_from_keystroke, key_equivalents,
-    widgets,
+    KeyEquivalents, KeymapConfig, ShortcutId, canonical_key, combo_from_keystroke_on,
+    key_equivalents, widgets,
 };
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -45,8 +45,8 @@ pub fn record_key(
     let Some(key) = canonical_key(key, equivalents) else {
         return RecordOutcome::Ignored;
     };
-    let gpui::Modifiers { control, alt, shift, platform, .. } = modifiers;
-    match combo_from_keystroke(control, alt, shift, platform, &key) {
+    // An iPad's ⌘ too.
+    match combo_from_keystroke_on(crate::keys::MOD_IS_COMMAND, modifiers, &key) {
         Some(combo) => RecordOutcome::Set(combo),
         None => RecordOutcome::Ignored,
     }
@@ -407,7 +407,7 @@ impl Render for ShortcutsPage {
                         .id("shortcuts-page")
                         .size_full()
                         .overflow_y_scroll()
-                        .track_scroll(&self.scroll.scroll)
+                        .track_scroll(self.scroll.handle())
                         .track_focus(&self.focus)
                         .child(
                             widgets::page_column()
@@ -456,7 +456,7 @@ impl Render for ShortcutsPage {
                                 ),
                         ),
                 )
-                .fade_overflow_y(&self.scroll.scroll),
+                .fade_overflow_y(self.scroll.handle()),
             )
             .children(scrollbar)
             .into_any_element()

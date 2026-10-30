@@ -1,22 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3d2f1e6), see THIRD_PARTY_NOTICES.md
 //! Settings → Appearance: system behavior, independent light/dark variants,
 //! and the optional interactive accent overlay.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::default_trait_access,
-    clippy::float_cmp_const,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::too_many_arguments,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::unused_self,
-    reason = "shell lint migration: slice D"
-)]
 
 use gpui::prelude::*;
 use gpui::{
@@ -40,13 +24,18 @@ use crate::typography::{self, FontAvailability, UiFontFamily, UiFontSize};
 /// terminal draws from the fixed-width subset only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FontKind {
+    /// Menus, chrome and conversations.
     Ui,
+    /// The terminal grid.
     Terminal,
+    /// Code, diffs and file editors.
     Code,
 }
 
+/// What the Appearance page tells the shell that the theme does not carry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppearanceSettingsEvent {
+    /// The code size changed, in px: open file editors take it from here.
     CodeFontSizeChanged(f32),
 }
 
@@ -189,6 +178,7 @@ fn nearest_mono_ix(size: f32) -> usize {
         .unwrap_or_default()
 }
 
+/// Settings → Appearance.
 pub struct AppearancePage {
     conversation_width_select: widgets::SelectState,
     scroll: widgets::PageScroll,
@@ -224,9 +214,20 @@ pub struct AppearancePage {
     surface_select: widgets::SelectState,
 }
 
+// By hand: the menus' state and the search input's subscription say nothing about the page.
+impl std::fmt::Debug for AppearancePage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppearancePage")
+            .field("selected_font", &self.selected_font)
+            .field("selected_terminal_font", &self.selected_terminal_font)
+            .field("selected_code_font", &self.selected_code_font)
+            .finish_non_exhaustive()
+    }
+}
+
 impl AppearancePage {
     // Three presets, Amp's (prune P9).
-    fn render_conversation_width(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_conversation_width(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         use crate::settings::ConversationWidth;
         let current = crate::settings::conversation_width(cx);
         let control = widgets::select(
@@ -247,8 +248,10 @@ impl AppearancePage {
         )
         .width(128.0)
         .on_select(|_, ix, _, cx| {
-            crate::settings::set_conversation_width(ConversationWidth::ALL[ix], cx);
-            cx.notify();
+            if let Some(&width) = ConversationWidth::ALL.get(ix) {
+                crate::settings::set_conversation_width(width, cx);
+                cx.notify();
+            }
         })
         .render(&self.conversation_width_select, cx);
         widgets::card_row(theme, false)
@@ -262,7 +265,7 @@ impl AppearancePage {
                         vec![div().child(current.description()).into_any_element()],
                     )),
             )
-            .children(self.reset_row(
+            .children(Self::reset_row(
                 "conversation-width-reset",
                 "Conversation width",
                 current == ConversationWidth::default(),
@@ -276,6 +279,7 @@ impl AppearancePage {
             .into_any_element()
     }
 
+    /// The page, its pickers at the families and sizes in effect.
     pub fn new(cx: &mut Context<Self>) -> Self {
         // `PaletteSearch` binds text-editing keys only — arrows/Enter/Escape
         // stay unbound and bubble from the input to the menu card's own key
@@ -400,23 +404,24 @@ impl AppearancePage {
     }
 
     /// Apply rung `ix` of this kind's size ladder.
-    fn commit_size(
-        &mut self,
-        kind: FontKind,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let ix = ix.min(kind.size_count() - 1);
+    fn commit_size(kind: FontKind, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let ix = ix.min(kind.size_count().saturating_sub(1));
+        let mono = MONO_FONT_SIZES.get(ix).copied();
         match kind {
             FontKind::Ui => {
-                typography::set_font_size(UiFontSize::ALL[ix], window, cx);
+                if let Some(&size) = UiFontSize::ALL.get(ix) {
+                    typography::set_font_size(size, window, cx);
+                }
             }
             FontKind::Terminal => {
-                typography::set_terminal_font_size(MONO_FONT_SIZES[ix], cx);
+                if let Some(size) = mono {
+                    typography::set_terminal_font_size(size, cx);
+                }
             }
             FontKind::Code => {
-                let next = MONO_FONT_SIZES[ix];
+                let Some(next) = mono else {
+                    return;
+                };
                 typography::set_code_font_size(next, cx);
                 // Open file editors only learn the new size through this event.
                 cx.emit(AppearanceSettingsEvent::CodeFontSizeChanged(next));
@@ -462,7 +467,7 @@ impl AppearancePage {
         cx.notify();
     }
 
-    fn close_font_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
+    fn close_font_menu(&mut self, kind: FontKind, cx: &Context<Self>) {
         if !self.font_menu_mut(kind).begin_close(crate::clock::now(cx)) {
             return;
         }
@@ -491,7 +496,7 @@ impl AppearancePage {
         }
     }
 
-    fn dismiss_font_menu(&mut self, kind: FontKind, cx: &mut Context<Self>) {
+    fn dismiss_font_menu(&mut self, kind: FontKind, cx: &Context<Self>) {
         *self.font_dismissed_at(kind) = Some(crate::clock::now(cx));
         self.close_font_menu(kind, cx);
     }
@@ -577,12 +582,11 @@ impl AppearancePage {
     }
 
     fn reset_row(
-        &self,
         id: impl Into<SharedString>,
         label: &str,
         is_default: bool,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
         reset: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Option<gpui::Stateful<gpui::Div>> {
         widgets::reset_action(theme, id, label, is_default).map(|button| {
@@ -598,13 +602,7 @@ impl AppearancePage {
         kind.apply_family(kind.default_family(), cx);
         let effective = kind.effective(cx);
         self.set_selected_font(kind, effective);
-        self.commit_size(kind, kind.default_size_ix(), window, cx);
-    }
-
-    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if self.scroll.set_list_hovered(*hovered) {
-            cx.notify();
-        }
+        Self::commit_size(kind, kind.default_size_ix(), window, cx);
     }
 }
 
@@ -627,19 +625,14 @@ fn step_font(
     kind: FontKind,
     availability: &FontAvailability,
 ) -> UiFontFamily {
-    if choices.is_empty() {
-        return current.clone();
-    }
-    let current = choices.iter().position(|family| family == current).unwrap_or_default() as isize;
-    let mut ix = current + delta.signum();
-    while (0..choices.len() as isize).contains(&ix) {
-        let candidate = &choices[ix as usize];
-        if kind.is_available_for(availability, candidate) {
-            return candidate.clone();
-        }
-        ix += delta.signum();
-    }
-    choices[current as usize].clone()
+    let at = choices.iter().position(|family| family == current).unwrap_or_default();
+    let usable = |family: &&UiFontFamily| kind.is_available_for(availability, family);
+    let next = match delta.signum() {
+        1 => choices.iter().skip(at.saturating_add(1)).find(usable),
+        -1 => choices.iter().take(at).rev().find(usable),
+        _ => None,
+    };
+    next.or_else(|| choices.get(at)).unwrap_or(current).clone()
 }
 
 /// Narrow and rank families by a typed query: prefix matches first, then
@@ -650,7 +643,10 @@ fn filter_families(query: &str, choices: &[UiFontFamily]) -> Vec<UiFontFamily> {
         return choices.to_vec();
     }
     let labels: Vec<&str> = choices.iter().map(UiFontFamily::label).collect();
-    popover::filter_indices(query, &labels).into_iter().map(|ix| choices[ix].clone()).collect()
+    popover::filter_indices(query, &labels)
+        .into_iter()
+        .filter_map(|ix| choices.get(ix).cloned())
+        .collect()
 }
 
 fn first_available(
@@ -921,11 +917,11 @@ impl AppearancePage {
         kind: FontKind,
         theme: &Theme,
         availability: &FontAvailability,
-        fixed: SharedString,
         viewport: gpui::Size<gpui::Pixels>,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let slug = kind.slug();
+        let fixed = theme.font_sans_fixed.clone();
         // The scroll helpers key off `&'static str`, so the ids are spelled
         // out rather than formatted from the slug.
         let (host_id, list_id, rail_id) = match kind {
@@ -987,7 +983,7 @@ impl AppearancePage {
             let rail = widgets::rail(self.font_list_mut(kind), rail_id, theme, cx, move |page| {
                 page.font_list_mut(kind)
             });
-            let scroll = self.font_list_mut(kind).scroll.clone();
+            let scroll = self.font_list_mut(kind).handle().clone();
             popover::menu_scroll_host(host_id)
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                     if this.font_list_mut(kind).set_list_hovered(*hovered) {
@@ -1064,11 +1060,11 @@ impl AppearancePage {
     /// The size dropdown beside the family picker. Every kind picks from a
     /// discrete ladder, so all three rows read alike.
     fn render_size_picker(
-        &mut self,
+        &self,
         kind: FontKind,
         theme: &Theme,
         fixed: SharedString,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let slug = kind.slug();
         widgets::select(
@@ -1086,17 +1082,17 @@ impl AppearancePage {
         )
         .width(128.0)
         .font_family(fixed)
-        .on_select(move |page, ix, window, cx| page.commit_size(kind, ix, window, cx))
+        .on_select(move |_, ix, window, cx| Self::commit_size(kind, ix, window, cx))
         .render(self.size_select(kind), cx)
         .into_any_element()
     }
 
     fn render_theme_selector(
-        &mut self,
+        &self,
         appearance_kind: Appearance,
         selections: &ThemeSelection,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let registry = ThemeRegistry::builtin();
         let selected_id = selections.variant_id(model_appearance(appearance_kind)).to_owned();
@@ -1206,7 +1202,7 @@ impl Render for AppearancePage {
             let selector = self.render_theme_selector(appearance_kind, &current_themes, &theme, cx);
             let default_id =
                 ThemeSelection::default().variant_id(model_appearance(appearance_kind)).to_owned();
-            let reset = self.reset_row(
+            let reset = Self::reset_row(
                 format!(
                     "{}-theme-reset",
                     if appearance_kind.is_light() { "light" } else { "dark" }
@@ -1296,8 +1292,10 @@ impl Render for AppearancePage {
             )
             .width(148.0)
             .on_select(|_, ix, _, cx| {
-                appearance::set_surface(SurfacePreference::ALL[ix], cx);
-                cx.notify();
+                if let Some(&surface) = SurfacePreference::ALL.get(ix) {
+                    appearance::set_surface(surface, cx);
+                    cx.notify();
+                }
             })
             .render(&self.surface_select, cx);
         let mut settings_rows = theme_rows;
@@ -1317,7 +1315,7 @@ impl Render for AppearancePage {
                             ],
                         )),
                 )
-                .children(self.reset_row(
+                .children(Self::reset_row(
                     "accent-reset",
                     "Accent color",
                     current_accent == AccentSelection::ThemeDefault,
@@ -1356,7 +1354,7 @@ impl Render for AppearancePage {
                             ],
                         )),
                 )
-                .children(self.reset_row(
+                .children(Self::reset_row(
                     "appearance-surface-reset",
                     "Glass",
                     current_surface == SurfacePreference::default(),
@@ -1463,30 +1461,12 @@ impl Render for AppearancePage {
                 .into_any_element(),
         ];
 
-        let ui_picker = self.render_font_picker(
-            FontKind::Ui,
-            &theme,
-            &availability,
-            fixed.clone(),
-            window.viewport_size(),
-            cx,
-        );
-        let terminal_picker = self.render_font_picker(
-            FontKind::Terminal,
-            &theme,
-            &availability,
-            fixed.clone(),
-            window.viewport_size(),
-            cx,
-        );
-        let code_picker = self.render_font_picker(
-            FontKind::Code,
-            &theme,
-            &availability,
-            fixed.clone(),
-            window.viewport_size(),
-            cx,
-        );
+        let viewport = window.viewport_size();
+        let ui_picker = self.render_font_picker(FontKind::Ui, &theme, &availability, viewport, cx);
+        let terminal_picker =
+            self.render_font_picker(FontKind::Terminal, &theme, &availability, viewport, cx);
+        let code_picker =
+            self.render_font_picker(FontKind::Code, &theme, &availability, viewport, cx);
         let ui_size = self.render_size_picker(FontKind::Ui, &theme, fixed.clone(), cx);
         let terminal_size = self.render_size_picker(FontKind::Terminal, &theme, fixed.clone(), cx);
         let code_size = self.render_size_picker(FontKind::Code, &theme, fixed.clone(), cx);
@@ -1502,7 +1482,7 @@ impl Render for AppearancePage {
         {
             let font_default = kind.requested(cx) == kind.default_family()
                 && kind.size_ix(cx) == kind.default_size_ix();
-            let reset = self.reset_row(
+            let reset = Self::reset_row(
                 format!("{}-font-reset", kind.slug()),
                 kind.label(),
                 font_default,
@@ -1564,7 +1544,7 @@ impl Render for AppearancePage {
             .id("appearance-page-host")
             .relative()
             .size_full()
-            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .on_hover(widgets::PageScroll::hover_listener(cx, |page| &mut page.scroll))
             .child(
                 crate::edge_fade::edge_faded(
                     16.0,
@@ -1574,7 +1554,7 @@ impl Render for AppearancePage {
                         .id("appearance-page")
                         .size_full()
                         .overflow_y_scroll()
-                        .track_scroll(&self.scroll.scroll)
+                        .track_scroll(self.scroll.handle())
                         .child(
                             widgets::page_column()
                                 // One page head (`widgets::page_head`).
@@ -1610,7 +1590,7 @@ impl Render for AppearancePage {
                                 .child(font_section),
                         ),
                 )
-                .fade_overflow_y(&self.scroll.scroll),
+                .fade_overflow_y(self.scroll.handle()),
             )
             .children(scrollbar)
     }
@@ -1622,6 +1602,7 @@ mod tests {
 
     // Each font slot's picker marks Geist or Geist Mono and its ladder the default size.
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the defaults are rungs of the ladder exactly")]
     fn each_font_slot_knows_its_default() {
         assert_eq!(FontKind::Ui.default_family(), UiFontFamily::Geist);
         assert_eq!(FontKind::Code.default_family(), UiFontFamily::GeistMono);
@@ -1642,7 +1623,7 @@ mod tests {
     fn every_mode_gets_a_card() {
         assert_eq!(AppearanceMode::ALL.len(), 3);
         for mode in AppearanceMode::ALL {
-            assert!(!mode.label().is_empty());
+            assert!(!mode.label().is_empty(), "{mode:?} has a label");
         }
     }
 
@@ -1660,7 +1641,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
-            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             appearance::init(
                 AppearanceMode::Dark,
                 ThemeSelection::default(),
@@ -1790,7 +1771,7 @@ mod tests {
 
         assert_eq!(filter_families("", &catalog), catalog);
         assert_eq!(filter_families("   ", &catalog), catalog);
-        assert!(filter_families("helvetica", &catalog).is_empty());
+        assert!(filter_families("helvetica", &catalog).is_empty(), "no family matches");
         // Case-insensitive, and the bundled entries still lead when they match.
         assert_eq!(
             filter_families("GEIST", &catalog),
@@ -1828,6 +1809,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the clamp lands on its bound exactly")]
     fn pixel_sizes_render_whole_and_fractional_values() {
         assert_eq!(format_px(13.0), "13 px");
         assert_eq!(format_px(typography::CODE_FONT_SIZE_DEFAULT), "12.5 px");
@@ -1849,6 +1831,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the ladder's rungs are pinned exactly")]
     fn mono_size_ladder_keeps_both_defaults_exactly_reachable() {
         assert!(MONO_FONT_SIZES.windows(2).all(|pair| pair[0] < pair[1]));
         for default in [typography::TERMINAL_FONT_SIZE_DEFAULT, typography::CODE_FONT_SIZE_DEFAULT]
@@ -1877,7 +1860,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
-            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             appearance::init(
                 AppearanceMode::Dark,
                 ThemeSelection::default(),
@@ -1907,7 +1890,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
-            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let (_page, cx) = cx.add_window_view(|_, cx| AppearancePage::new(cx));
         // Tall enough that the row, low on the page, is on screen.
@@ -1944,8 +1927,8 @@ mod tests {
         window
             .update(cx, |page, window, cx| {
                 for kind in [FontKind::Terminal, FontKind::Code] {
-                    let target = kind.size_ix(cx) + 1;
-                    page.commit_size(kind, target, window, cx);
+                    let target = kind.size_ix(cx).saturating_add(1);
+                    AppearancePage::commit_size(kind, target, window, cx);
                     assert_eq!(kind.pixel_size(cx), MONO_FONT_SIZES[target]);
                     assert_eq!(kind.size_ix(cx), target);
                 }
@@ -1974,9 +1957,7 @@ mod tests {
     /// A settings file written before the terminal picker was constrained can
     /// still name a proportional family; startup must not hand it to the grid.
     #[gpui::test]
-    fn persisted_proportional_terminal_family_resolves_to_geist_mono(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn persisted_proportional_terminal_family_resolves_to_geist_mono(cx: &gpui::TestAppContext) {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());

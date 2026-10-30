@@ -1,24 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! Shared scaffolding for the settings pages — a centered page column, large
-//! title, small section labels over filled blocks of hairline-split rows,
-//! badges and small buttons, so every page reads as the same product surface.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::derive_partial_eq_without_eq,
-    clippy::float_cmp,
-    clippy::manual_clamp,
-    clippy::needless_pass_by_ref_mut,
-    clippy::partial_pub_fields,
-    clippy::ref_option,
-    clippy::return_self_not_must_use,
-    clippy::struct_field_names,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice D"
-)]
+//! Shared scaffolding for the settings pages.
+//!
+//! A centered page column, large title, small section labels over filled blocks of hairline-split
+//! rows, badges and small buttons, so every page reads as the same product surface.
 
 use std::rc::Rc;
 
@@ -35,6 +19,8 @@ struct SettingsSidebarWidth(f32);
 
 impl gpui::Global for SettingsSidebarWidth {}
 
+/// Publishes the section column's `width` for this frame, so [`dropdown`] and [`column_width`]
+/// measure the page pane; the global is set only when the width moved.
 pub fn set_sidebar_width(width: f32, cx: &mut gpui::App) {
     if cx.try_global::<SettingsSidebarWidth>().map(|w| w.0) != Some(width) {
         cx.set_global(SettingsSidebarWidth(width));
@@ -59,9 +45,12 @@ pub fn pane_bounds(viewport: gpui::Size<Pixels>, sidebar_width: f32) -> gpui::Bo
 /// that choose a layout by the room they get (the Devices grid).
 pub fn column_width(window: &Window, cx: &gpui::App) -> f32 {
     let pane = f32::from(pane_bounds(window.viewport_size(), sidebar_width(cx)).size.width);
-    pane.min(PAGE_MAX_WIDTH) - 2.0 * PAGE_PAD_X
+    pane.min(PAGE_MAX_WIDTH) - PAGE_PAD_SIDES
 }
 
+/// Mounts a dropdown's `content` under its trigger, kept inside the page pane.
+///
+/// `closing` plays its exit, and the card clears a trigger `trigger_height` tall.
 pub fn dropdown(
     id: impl Into<SharedString>,
     content: gpui::Div,
@@ -124,6 +113,10 @@ pub fn dropdown_rows(
         .into_any_element()
 }
 
+/// How tall a dropdown's scrolling rows may grow in `viewport`.
+///
+/// Half the pane's height beside a trigger `trigger_height` tall, at most 320, less the card's
+/// own `chrome_height` (its padding and any heading).
 pub fn dropdown_list_height(
     viewport: gpui::Size<Pixels>,
     trigger_height: f32,
@@ -133,7 +126,7 @@ pub fn dropdown_list_height(
     // section column's width.
     let limits = pane_bounds(viewport, 0.0);
     let card_height =
-        ((f32::from(limits.size.height) - 16.0 - trigger_height) / 2.0 - 6.0).max(1.0).min(320.0);
+        ((f32::from(limits.size.height) - 16.0 - trigger_height) / 2.0 - 6.0).clamp(1.0, 320.0);
     (card_height - chrome_height).max(1.0)
 }
 
@@ -182,13 +175,13 @@ impl RenderOnce for DropdownRows {
 /// Every settings page follows the same shape: a `scroll: PageScroll` field,
 /// a [`ScrollRailHost`] impl on the page delegating here, and a root
 /// `.relative()` host carrying only the list-hover `on_hover` around the
-/// `.overflow_y_scroll().track_scroll(&self.scroll.scroll)` page, with
+/// `.overflow_y_scroll().track_scroll(self.scroll.handle())` page, with
 /// [`popover::rail`] supplying the rail and all of its listeners.
 #[derive(Debug)]
 pub struct PageScroll {
     /// Tracked by the page's scrolling list directly — including the appshots
     /// half of the shortcuts page, which renders from its own file.
-    pub scroll: ScrollHandle,
+    scroll: ScrollHandle,
     bar: MenuScrollbarState,
 }
 
@@ -209,6 +202,13 @@ impl ScrollRailHost for PageScroll {
 }
 
 impl PageScroll {
+    /// The handle the page's scrolling list tracks (`track_scroll`) and fades by.
+    pub const fn handle(&self) -> &ScrollHandle {
+        &self.scroll
+    }
+
+    /// Notes the pointer entering or leaving the page; true when the rail changed and the page
+    /// should repaint.
     pub fn set_list_hovered(&mut self, hovered: bool) -> bool {
         self.bar.set_list_hovered(hovered)
     }
@@ -258,17 +258,17 @@ impl PageScroll {
     }
 }
 
-/// [`popover::rail`] for a [`PageScroll`] that is not its view's only rail:
-/// `popover::rail` binds to the view's single [`ScrollRailHost`] impl, and a
-/// page carrying a second, menu-local scroll host (the appearance page's
-/// interface-font dropdown) cannot route that impl at both. The wiring
-/// mirrors [`popover::rail`]; `reach` re-borrows the state from the view
-/// inside the strip's pointer listeners, which fire with a `&mut V`.
+/// [`popover::rail`] for a [`PageScroll`] that is not its view's only rail.
+///
+/// `popover::rail` binds to the view's single [`ScrollRailHost`] impl, and a page carrying a
+/// second, menu-local scroll host (the appearance page's interface-font dropdown) cannot route
+/// that impl at both. The wiring mirrors [`popover::rail`]; `reach` re-borrows the state from the
+/// view inside the strip's pointer listeners, which fire with a `&mut V`.
 pub fn rail<V: 'static>(
     scroll: &mut PageScroll,
     id: &'static str,
     theme: &Theme,
-    cx: &mut Context<V>,
+    cx: &Context<V>,
     reach: impl Fn(&mut V) -> &mut PageScroll + Copy + 'static,
 ) -> Option<AnyElement> {
     let metrics = scroll.metrics()?;
@@ -327,6 +327,7 @@ pub fn rail<V: 'static>(
 /// Shortcuts page established this compact rhythm; list-style settings reuse
 /// it instead of drifting by page.
 pub const ROW_TITLE_SIZE: f32 = 13.0;
+/// The description's size under a row title.
 pub const ROW_DESCRIPTION_SIZE: f32 = 12.0;
 /// The air between a row title and its description.
 pub const ROW_DESCRIPTION_GAP: f32 = 4.0;
@@ -335,6 +336,8 @@ pub const ROW_DESCRIPTION_GAP: f32 = 4.0;
 /// content measure with generous air on either side.
 const PAGE_MAX_WIDTH: f32 = 760.0;
 const PAGE_PAD_X: f32 = 40.0;
+/// Both of the column's side paddings.
+const PAGE_PAD_SIDES: f32 = 2.0 * PAGE_PAD_X;
 
 /// Centered page column under the titlebar strip.
 pub fn page_column() -> gpui::Div {
@@ -532,9 +535,10 @@ pub fn section_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div
         .child(label.into())
 }
 
-/// A [`section_label`] for a group nested inside a block row (an expanded
-/// provider's "Completion", "Accounts"): flush with the row text it sits
-/// under, and as tall as a small button so a trailing action never shifts it.
+/// A [`section_label`] for a group nested inside a block row.
+///
+/// An expanded provider's "Completion", "Accounts": flush with the row text it sits under, and as
+/// tall as a small button so a trailing action never shifts it.
 pub fn details_label(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
     div()
         .min_h(px(32.0))
@@ -666,12 +670,15 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .child(label.into())
 }
 
+/// The width of a [`toggle_switch`]'s pill.
 pub const SWITCH_WIDTH: f32 = 44.8;
 const SWITCH_HEIGHT: f32 = 28.8;
 pub(crate) const SWITCH_TRACK_HEIGHT: f32 = 20.8;
 const SWITCH_SIDE_INSET: f32 = 1.6;
 const SWITCH_THUMB_WIDTH: f32 = 24.0;
 const SWITCH_THUMB_HEIGHT: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_SIDE_INSET;
+/// How far the thumb travels from off to on.
+const SWITCH_TRAVEL: f32 = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_SIDE_INSET;
 const SWITCH_MARK_SIZE: f32 = 7.2;
 
 /// A pill switch with the on/off marks nested beneath a sliding thumb.
@@ -702,16 +709,21 @@ struct SwitchVisual {
     key: SharedString,
 }
 
+/// Where a two-state travel ends: 1 for on, 0 for off.
+fn travel_end(on: bool) -> f32 {
+    f32::from(u8::from(on))
+}
+
 struct SwitchTravel {
     from: f32,
-    target: f32,
+    on: bool,
     started: std::time::Instant,
 }
 
 impl SwitchTravel {
     fn value(&self, now: std::time::Instant) -> f32 {
         let t = (now.duration_since(self.started).as_secs_f32() / 0.18).min(1.0);
-        self.from + (self.target - self.from) * (1.0 - (1.0 - t).powi(3))
+        (travel_end(self.on) - self.from).mul_add(1.0 - (1.0 - t).powi(3), self.from)
     }
 }
 
@@ -726,7 +738,7 @@ fn switch_track_color(theme: &Theme, on: bool) -> gpui::Hsla {
             // Preserve the current light opaque treatment.
             let accent = theme.accent;
             crate::theme::flatten(
-                gpui::hsla(accent.h, accent.s, accent.l + (1.0 - accent.l) * 0.10, 0.98),
+                gpui::hsla(accent.h, accent.s, (1.0 - accent.l).mul_add(0.10, accent.l), 0.98),
                 theme.surface,
             )
         }
@@ -768,19 +780,19 @@ fn switch_surface_tones(theme: &Theme, base: gpui::Hsla, thumb: bool) -> (gpui::
 impl RenderOnce for SwitchVisual {
     fn render(self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
         let now = crate::clock::now(cx);
-        let target = if self.on { 1.0 } else { 0.0 };
+        let on = self.on;
+        let target = travel_end(on);
         let reduced = crate::motion::reduced_motion(cx);
         let position = window.with_global_id(self.key.into(), |id, window| {
             window.with_element_state(id, |previous: Option<SwitchTravel>, _| {
                 let mut travel =
-                    previous.unwrap_or(SwitchTravel { from: target, target, started: now });
+                    previous.unwrap_or(SwitchTravel { from: target, on, started: now });
                 let current = travel.value(now);
-                if travel.target != target {
-                    travel = SwitchTravel { from: current, target, started: now };
+                if travel.on != on {
+                    travel = SwitchTravel { from: current, on, started: now };
                 }
                 if reduced {
                     travel.from = target;
-                    travel.target = target;
                 }
                 (travel.value(now), travel)
             })
@@ -795,8 +807,7 @@ impl RenderOnce for SwitchVisual {
         let (thumb_light, thumb_shade) = switch_surface_tones(&self.theme, thumb, true);
         let empty_width = SWITCH_WIDTH - SWITCH_THUMB_WIDTH - SWITCH_SIDE_INSET;
         let mark_padding = (empty_width - SWITCH_MARK_SIZE) / 2.0;
-        let thumb_left = SWITCH_SIDE_INSET
-            + (SWITCH_WIDTH - SWITCH_THUMB_WIDTH - 2.0 * SWITCH_SIDE_INSET) * position;
+        let thumb_left = SWITCH_TRAVEL.mul_add(position, SWITCH_SIDE_INSET);
         let track_element = div()
             .absolute()
             .top_0()
@@ -907,10 +918,10 @@ mod switch_tests {
         use std::time::{Duration, Instant};
 
         let start = Instant::now();
-        let forward = TabSelectionTravel { from: 0.0, target: 1.0, started: start };
+        let forward = TabSelectionTravel { from: 0.0, on: true, started: start };
         let halfway = start + Duration::from_millis(75);
         let current = forward.value(halfway);
-        let reverse = TabSelectionTravel { from: current, target: 0.0, started: halfway };
+        let reverse = TabSelectionTravel { from: current, on: false, started: halfway };
         assert_eq!(reverse.value(halfway), current);
         assert_eq!(
             reverse.value(
@@ -972,10 +983,10 @@ mod switch_tests {
     fn switch_reversal_keeps_current_position_and_settles() {
         use std::time::{Duration, Instant};
         let now = Instant::now();
-        let forward = SwitchTravel { from: 0.0, target: 1.0, started: now };
+        let forward = SwitchTravel { from: 0.0, on: true, started: now };
         let halfway = now + Duration::from_millis(90);
         let current = forward.value(halfway);
-        let reverse = SwitchTravel { from: current, target: 0.0, started: halfway };
+        let reverse = SwitchTravel { from: current, on: false, started: halfway };
         assert_eq!(reverse.value(halfway), current);
         assert_eq!(reverse.value(halfway + Duration::from_millis(180)), 0.0);
         assert_eq!(forward.value(now + Duration::from_millis(180)), 1.0);
@@ -1027,8 +1038,8 @@ mod switch_tests {
         let ring = quads.iter().find(|q| q.border_color == accent).map(|q| points(q.bounds));
         let reach = crate::surface_chrome::RING_OFFSET + crate::surface_chrome::RING_WIDTH;
         let [x, y, w, h] = ring.expect("the keyboard rings the switch");
-        assert!((w - (SWITCH_WIDTH + 2.0 * reach)).abs() <= 0.5, "width {w}");
-        assert!((h - (SWITCH_TRACK_HEIGHT + 2.0 * reach)).abs() <= 0.5, "height {h}");
+        assert!((w - 2.0_f32.mul_add(reach, SWITCH_WIDTH)).abs() <= 0.5, "width {w}");
+        assert!((h - 2.0_f32.mul_add(reach, SWITCH_TRACK_HEIGHT)).abs() <= 0.5, "height {h}");
         let top = y + reach - (SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0;
         assert!((x + reach - 10.0).abs() <= 0.5 && (top - 10.0).abs() <= 0.5, "at {x} {y}");
         let below = quads
@@ -1042,7 +1053,7 @@ mod switch_tests {
 
 struct TabSelectionTravel {
     from: f32,
-    target: f32,
+    on: bool,
     started: std::time::Instant,
 }
 
@@ -1051,7 +1062,7 @@ impl TabSelectionTravel {
         let seconds = crate::motion::TAB_SLIDE.total().as_secs_f32() * crate::motion::speed_scale();
         let elapsed = now.saturating_duration_since(self.started).as_secs_f32();
         let progress = crate::motion::TAB_SLIDE.progress((elapsed / seconds).min(1.0));
-        self.from + (self.target - self.from) * progress
+        (travel_end(self.on) - self.from).mul_add(progress, self.from)
     }
 }
 
@@ -1064,18 +1075,17 @@ pub fn tab_selection_t(
     reduced_motion: bool,
 ) -> f32 {
     let now = window.frame_time();
-    let target = if selected { 1.0 } else { 0.0 };
+    let target = travel_end(selected);
     let value = window.with_global_id(key.into().into(), |id, window| {
         window.with_element_state(id, |previous: Option<TabSelectionTravel>, _| {
             let mut travel =
-                previous.unwrap_or(TabSelectionTravel { from: target, target, started: now });
+                previous.unwrap_or(TabSelectionTravel { from: target, on: selected, started: now });
             let current = travel.value(now);
-            if travel.target != target {
-                travel = TabSelectionTravel { from: current, target, started: now };
+            if travel.on != selected {
+                travel = TabSelectionTravel { from: current, on: selected, started: now };
             }
             if reduced_motion {
                 travel.from = target;
-                travel.target = target;
             }
             (travel.value(now), travel)
         })
@@ -1130,8 +1140,9 @@ pub(crate) fn select_fill(theme: &Theme, lifted: bool) -> gpui::Hsla {
     theme.wash(if lifted { 0.10 } else { 0.06 })
 }
 
-/// The trigger of every settings dropdown: a borderless filled pill. The
-/// caller adds the value ([`select_value`], after any leading glyph), then
+/// The trigger of every settings dropdown: a borderless filled pill.
+///
+/// The caller adds the value ([`select_value`], after any leading glyph), then
 /// [`select_chevron`], plus its own listeners. Its focus ring is paint only,
 /// so focusing never shifts the label.
 pub fn select_trigger(
@@ -1175,6 +1186,7 @@ pub fn select_value(label: impl Into<SharedString>) -> gpui::Div {
     div().flex_1().min_w_0().truncate().child(label.into())
 }
 
+/// The trigger's trailing chevron, brighter while the menu is `open`.
 pub fn select_chevron(theme: &Theme, open: bool) -> gpui::Svg {
     crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
         .size(px(14.0))
@@ -1208,13 +1220,14 @@ pub fn select_check(theme: &Theme, selected: bool) -> gpui::Div {
 
 /// Open state for one [`select`], owned by its page: the popup with its exit
 /// phase, and the keyboard highlight.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct SelectState {
     menu: popover::Popup<()>,
     highlighted: usize,
 }
 
 impl SelectState {
+    /// Whether the menu is open (a closing menu already reads as closed).
     pub const fn is_open(&self) -> bool {
         self.menu.is_open()
     }
@@ -1244,19 +1257,33 @@ pub struct SelectOption {
     detail: Option<SharedString>,
 }
 
+// By hand: the leading glyph is a closure.
+impl std::fmt::Debug for SelectOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectOption")
+            .field("label", &self.label)
+            .field("leading", &self.leading.is_some())
+            .field("detail", &self.detail)
+            .finish()
+    }
+}
+
 impl SelectOption {
+    /// An option reading `label`, with no glyph and no note.
     pub fn new(label: impl Into<SharedString>) -> Self {
         Self { label: label.into(), leading: None, detail: None }
     }
 
     /// A glyph or swatch before the label, in the row and (when selected)
     /// the trigger.
+    #[must_use]
     pub fn leading(mut self, leading: impl Fn() -> AnyElement + 'static) -> Self {
         self.leading = Some(Rc::new(leading));
         self
     }
 
     /// A quiet note after the label, in the row only.
+    #[must_use]
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
         self
@@ -1267,9 +1294,10 @@ type SelectReach<V> = Rc<dyn Fn(&mut V) -> &mut SelectState>;
 type SelectHandler<V> = Rc<dyn Fn(&mut V, usize, &mut Window, &mut Context<V>)>;
 
 /// The settings dropdown: a [`select_trigger`] opening a [`select_menu`] of
-/// options with a check on the current one. Pointer: the trigger toggles and
-/// an outside press dismisses. Keyboard: ↑/↓ open and move the highlight,
-/// Home/End jump, Enter/Space open or commit, Escape closes. `reach`
+/// options with a check on the current one.
+///
+/// Pointer: the trigger toggles and an outside press dismisses. Keyboard: ↑/↓ open and move the
+/// highlight, Home/End jump, Enter/Space open or commit, Escape closes. `reach`
 /// re-borrows the page's [`SelectState`] inside listeners; `label` names the
 /// control for assistive tech, which hears "label: value".
 pub fn select<V: 'static>(
@@ -1290,10 +1318,11 @@ pub fn select<V: 'static>(
         heading: None,
         align: popover::MenuAlign::End,
         reach: Rc::new(reach),
-        on_select: None,
+        handler: None,
     }
 }
 
+/// A [`select`] being built: its options, sizes and handler, until [`Self::render`].
 pub struct Select<V: 'static> {
     id: SharedString,
     label: SharedString,
@@ -1306,12 +1335,24 @@ pub struct Select<V: 'static> {
     heading: Option<&'static str>,
     align: popover::MenuAlign,
     reach: SelectReach<V>,
-    on_select: Option<SelectHandler<V>>,
+    handler: Option<SelectHandler<V>>,
+}
+
+// By hand: `reach` and the handler are closures.
+impl<V: 'static> std::fmt::Debug for Select<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Select")
+            .field("id", &self.id)
+            .field("label", &self.label)
+            .field("options", &self.options)
+            .field("selected", &self.selected)
+            .finish_non_exhaustive()
+    }
 }
 
 fn close_select_rc<V: 'static>(view: &mut V, reach: &SelectReach<V>, cx: &mut Context<V>) {
     if reach(view).menu.begin_close(crate::clock::now(cx)) {
-        let reach = reach.clone();
+        let reach = Rc::clone(reach);
         popover::reap_popup(cx, move |view: &mut V| &mut reach(view).menu);
     }
     cx.notify();
@@ -1321,17 +1362,19 @@ fn commit_select<V: 'static>(
     view: &mut V,
     ix: usize,
     reach: &SelectReach<V>,
-    on_select: &Option<SelectHandler<V>>,
+    handler: Option<&SelectHandler<V>>,
     window: &mut Window,
     cx: &mut Context<V>,
 ) {
     close_select_rc(view, reach, cx);
-    if let Some(on_select) = on_select {
-        on_select(view, ix, window, cx);
+    if let Some(handler) = handler {
+        handler(view, ix, window, cx);
     }
 }
 
 impl<V: 'static> Select<V> {
+    /// The menu's `options`, the `selected` one checked and shown on the trigger.
+    #[must_use]
     pub fn options(
         mut self,
         options: impl IntoIterator<Item = SelectOption>,
@@ -1342,33 +1385,40 @@ impl<V: 'static> Select<V> {
         self
     }
 
+    /// What committing an option does, given its index; the menu has closed by then.
+    #[must_use]
     pub fn on_select(
         mut self,
         on_select: impl Fn(&mut V, usize, &mut Window, &mut Context<V>) + 'static,
     ) -> Self {
-        self.on_select = Some(Rc::new(on_select));
+        self.handler = Some(Rc::new(on_select));
         self
     }
 
     /// Fixed trigger width; the menu matches it unless [`Self::menu_width`]
     /// says otherwise. Without one the trigger fits its value.
+    #[must_use]
     pub const fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
         self
     }
 
+    /// The menu's width when it differs from the trigger's (never under 160).
+    #[must_use]
     pub const fn menu_width(mut self, width: f32) -> Self {
         self.menu_width = Some(width);
         self
     }
 
     /// Font for the value and the rows (key names read in mono).
+    #[must_use]
     pub fn font_family(mut self, font: SharedString) -> Self {
         self.font = Some(font);
         self
     }
 
     /// A small heading over the rows.
+    #[must_use]
     pub const fn heading(mut self, heading: &'static str) -> Self {
         self.heading = Some(heading);
         self
@@ -1376,12 +1426,14 @@ impl<V: 'static> Select<V> {
 
     /// Open the menu rightward from the trigger's left edge, for triggers
     /// that lead a row rather than end it.
+    #[must_use]
     pub const fn open_rightward(mut self) -> Self {
         self.align = popover::MenuAlign::Start;
         self
     }
 
-    pub fn render(self, state: &SelectState, cx: &mut Context<V>) -> gpui::Stateful<gpui::Div> {
+    /// The trigger, and the menu under it while `state` holds it open.
+    pub fn render(self, state: &SelectState, cx: &Context<V>) -> gpui::Stateful<gpui::Div> {
         let Self {
             id,
             label,
@@ -1394,7 +1446,7 @@ impl<V: 'static> Select<V> {
             heading,
             align,
             reach,
-            on_select,
+            handler,
         } = self;
         let count = options.len();
         let open = state.menu.is_open();
@@ -1411,17 +1463,17 @@ impl<V: 'static> Select<V> {
             .when_some(width, |el, width| el.w(px(width)))
             .when_some(font.clone(), Styled::font_family)
             .on_mouse_down(gpui::MouseButton::Left, {
-                let reach = reach.clone();
+                let reach = Rc::clone(&reach);
                 cx.listener(move |view, _, _, _| reach(view).menu.note_trigger_press())
             })
             .on_click({
-                let reach = reach.clone();
-                let on_select = on_select.clone();
+                let reach = Rc::clone(&reach);
+                let handler = handler.clone();
                 cx.listener(move |view, event: &gpui::ClickEvent, window, cx| {
                     let state = reach(view);
                     if event.is_keyboard() && state.menu.is_open() {
                         let ix = state.highlighted;
-                        commit_select(view, ix, &reach, &on_select, window, cx);
+                        commit_select(view, ix, &reach, handler.as_ref(), window, cx);
                     } else if state.menu.take_press_was_open() || state.menu.is_open() {
                         close_select_rc(view, &reach, cx);
                     } else {
@@ -1433,7 +1485,7 @@ impl<V: 'static> Select<V> {
             // Enter/Space arrive as keyboard clicks above; this handles
             // movement and dismissal.
             .on_key_down({
-                let reach = reach.clone();
+                let reach = Rc::clone(&reach);
                 cx.listener(move |view, event: &gpui::KeyDownEvent, _, cx| {
                     let key = event.keystroke.key.as_str();
                     let modifiers = event.keystroke.modifiers;
@@ -1477,8 +1529,8 @@ impl<V: 'static> Select<V> {
             let highlighted = state.highlighted;
             let rows = options.into_iter().enumerate().map(|(ix, option)| {
                 let row_id: SharedString = format!("{id}-option-{ix}").into();
-                let reach = reach.clone();
-                let on_select = on_select.clone();
+                let reach = Rc::clone(&reach);
+                let handler = handler.clone();
                 select_row(&theme, ix == selected, ix == highlighted, row_id.clone())
                     .id(row_id.clone())
                     .debug_selector(move || row_id.to_string())
@@ -1491,7 +1543,7 @@ impl<V: 'static> Select<V> {
                     })
                     .on_click(cx.listener(move |view, _, window, cx| {
                         cx.stop_propagation();
-                        commit_select(view, ix, &reach, &on_select, window, cx);
+                        commit_select(view, ix, &reach, handler.as_ref(), window, cx);
                     }))
                     .children(option.leading.map(|leading| leading()))
                     .child(div().flex_1().min_w_0().truncate().child(option.label))
@@ -1511,7 +1563,7 @@ impl<V: 'static> Select<V> {
                 .w(px(menu_width.or(width).unwrap_or(0.0).max(SELECT_MENU_MIN_WIDTH)))
                 .when_some(font, Styled::font_family)
                 .on_mouse_down_out({
-                    let reach = reach.clone();
+                    let reach = Rc::clone(&reach);
                     cx.listener(move |view, _, _, cx| close_select_rc(view, &reach, cx))
                 })
                 .when_some(heading, |menu, heading| {
@@ -1535,29 +1587,37 @@ impl<V: 'static> Select<V> {
     }
 }
 
-/// Settings actions share one size, corner radius, and hover language. Use
-/// outlined for selectors, quiet for secondary actions, filled for row
+/// Settings actions share one size, corner radius, and hover language.
+///
+/// Use outlined for selectors, quiet for secondary actions, filled for row
 /// actions on a block (the dropdown trigger's glass wash), solid for
 /// commits, and danger for destructive actions behind a confirmation.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum ActionTone {
+    /// A secondary action: muted words that lift on hover.
     Quiet,
-    // A page's destructive action, its words in the danger tone, no fill.
+    /// A page's destructive action, its words in the danger tone, no fill.
     QuietDanger,
+    /// A selector: an outlined input-glass button.
     Outlined,
+    /// A row action on a block, in the dropdown trigger's wash.
     Filled,
+    /// A commit, in the theme's solid fill.
     Solid,
+    /// A destructive action behind a confirmation, in the danger fill.
     Danger,
 }
 
+/// An enabled settings action in `tone`; the caller adds its words and click.
 pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
     action_button_when(theme, tone, true)
 }
 
-/// [`action_button`] that may be disabled: dimmed to [`crate::theme::DISABLED_OPACITY`],
-/// with the default cursor and no hover lift, since a second `.hover` would replace the tone's
-/// rather than remove it. The caller says so to assistive tech (`aria_disabled`) and skips the
-/// click.
+/// [`action_button`] that may be disabled.
+///
+/// Disabled, it dims to [`crate::theme::DISABLED_OPACITY`], with the default cursor and no hover
+/// lift, since a second `.hover` would replace the tone's rather than remove it. The caller says
+/// so to assistive tech (`aria_disabled`) and skips the click.
 pub fn action_button_when(theme: &Theme, tone: ActionTone, enabled: bool) -> gpui::Div {
     fn lift(
         button: gpui::Div,
@@ -1624,10 +1684,12 @@ pub fn action_button_when(theme: &Theme, tone: ActionTone, enabled: bool) -> gpu
     }
 }
 
+/// An [`action_button`] in `tone` reading `label`.
 pub fn text_action(theme: &Theme, tone: ActionTone, label: impl Into<SharedString>) -> gpui::Div {
     action_button(theme, tone).child(label.into())
 }
 
+/// A quiet [`action_button`]; the caller adds its glyph and words.
 pub fn ghost_action(theme: &Theme) -> gpui::Div {
     action_button(theme, ActionTone::Quiet)
 }
@@ -1736,6 +1798,7 @@ impl RenderOnce for SettingsScroll {
 
 /// A one-line hover note for settings controls (reset times, icon-only
 /// actions), in the same frosted chip as the rest of the app's tooltips.
+#[derive(Debug)]
 pub struct TextTooltip {
     text: SharedString,
     // The action's key, resolved when the tooltip opened, and a second line.
@@ -1779,6 +1842,7 @@ pub fn text_tooltip(
 pub const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
 
 /// Where a tooltip's key comes from.
+#[derive(Debug)]
 pub enum Keys {
     /// Whatever `action` is bound to when the tooltip opens; nothing when unbound.
     Action(Box<dyn gpui::Action>),
@@ -1894,6 +1958,9 @@ pub fn tooltip_card_detail(
 /// Names a control for the pointer and for assistive tech from one place: its tooltip (label
 /// and key, after [`TOOLTIP_DELAY`]), its `aria-label` and its `aria-keyshortcuts`.
 pub trait ActionHint: StatefulInteractiveElement + Sized {
+    /// Names the control `label` with `keys`' key, in its tooltip, `aria-label` and
+    /// `aria-keyshortcuts`.
+    #[must_use]
     fn action_hint(self, label: impl Into<SharedString>, keys: Keys, cx: &gpui::App) -> Self {
         let label: SharedString = label.into();
         let aria = keys.aria(cx);
@@ -1908,6 +1975,7 @@ pub trait ActionHint: StatefulInteractiveElement + Sized {
     }
 
     /// [`Self::action_hint`] for a control no key reaches: its tooltip and `aria-label`.
+    #[must_use]
     fn hint(self, label: impl Into<SharedString>) -> Self {
         let label: SharedString = label.into();
         self.aria_label(label.clone())
@@ -1924,8 +1992,11 @@ impl<E: StatefulInteractiveElement + Sized> ActionHint for E {}
 /// What an option is to the person: the default, the one Slopty recommends, or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
+    /// The value a fresh install starts with.
     Default,
+    /// The value Slopty recommends.
     Recommended,
+    /// Both the default and the recommended value.
     DefaultRecommended,
 }
 
@@ -1941,6 +2012,7 @@ impl Standing {
         }
     }
 
+    /// The standing in the plain words its note shows.
     pub const fn words(self) -> &'static str {
         match self {
             Self::Default => "Default",
@@ -1963,6 +2035,7 @@ pub fn standing_note(theme: &Theme, standing: Standing) -> gpui::Div {
 
 impl SelectOption {
     /// Marks the option as the default and/or recommended one (its row's note).
+    #[must_use]
     pub fn standing(self, standing: Option<Standing>) -> Self {
         match standing {
             Some(standing) => self.detail(standing.words()),
@@ -1971,10 +2044,12 @@ impl SelectOption {
     }
 }
 
-/// "Reset" on a settings row whose value differs from its default; nothing at the default, so the
-/// absence of "Reset" is the mark (Zed's rule). The caller adds the click. It lays out as tall as
-/// its words and reaches 4 px above and below them, so the row keeps its height however compact
-/// it is, whether "Reset" shows or not, and the target stays 24 px.
+/// "Reset" on a settings row whose value differs from its default.
+///
+/// Nothing shows at the default, so the absence of "Reset" is the mark (Zed's rule). The caller
+/// adds the click. It lays out as tall as its words and reaches 4 px above and below them, so the
+/// row keeps its height however compact it is, whether "Reset" shows or not, and the target stays
+/// 24 px.
 pub fn reset_action(
     theme: &Theme,
     id: impl Into<SharedString>,
@@ -2090,11 +2165,10 @@ impl Render for OverflowTooltip {
 /// Where a middle-cut value splits: everything before its last `tail` characters, and those
 /// (t3code's `MiddleTruncate`). A value no longer than `tail` is all tail.
 pub fn split_tail(value: &str, tail: usize) -> (&str, &str) {
-    let chars = value.chars().count();
-    if chars <= tail {
+    let Some(head) = value.chars().count().checked_sub(tail).filter(|&head| head > 0) else {
         return ("", value);
-    }
-    let at = value.char_indices().nth(chars - tail).map_or(value.len(), |(ix, _)| ix);
+    };
+    let at = value.char_indices().nth(head).map_or(value.len(), |(ix, _)| ix);
     value.split_at(at)
 }
 
@@ -2165,7 +2239,14 @@ mod hint_tests {
         assert!(reset_action(&theme, "width-reset", "Conversation width", false).is_some());
     }
 
-    gpui::actions!(hint_test, [Probe]);
+    mod actions {
+        #![expect(
+            clippy::derive_partial_eq_without_eq,
+            reason = "gpui::actions! derives PartialEq only"
+        )]
+        gpui::actions!(hint_test, [Probe]);
+    }
+    use actions::Probe;
 
     struct Hinted;
 

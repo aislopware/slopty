@@ -115,7 +115,7 @@ impl Render for NotificationsPage {
                         .id("notifications-page")
                         .size_full()
                         .overflow_y_scroll()
-                        .track_scroll(&self.scroll.scroll)
+                        .track_scroll(self.scroll.handle())
                         .child(
                             widgets::page_column()
                                 // One page head (`widgets::page_head`).
@@ -129,7 +129,7 @@ impl Render for NotificationsPage {
                                 .child(widgets::section(&theme, "Desktop", card).mt(px(24.0))),
                         ),
                 )
-                .fade_overflow_y(&self.scroll.scroll),
+                .fade_overflow_y(self.scroll.handle()),
             )
             .children(scrollbar)
     }

@@ -7,22 +7,6 @@
 //! immediately through that same writer. Corrupt or missing files fall back to
 //! defaults, and loaded values are clamped so a hand-edited file can't wedge the
 //! layout.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::private_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::float_cmp,
-    clippy::float_cmp_const,
-    clippy::fn_params_excessive_bools,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::option_option,
-    clippy::return_self_not_must_use,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice D"
-)]
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -48,36 +32,42 @@ pub mod notifications;
 pub mod shortcuts;
 pub mod widgets;
 
-/// Sidebar drag-resize bounds (px). The minimum keeps the sidebar options
-/// button inside the sidebar beside the titlebar controls: 88 (past the
-/// traffic lights) + 82 (toggle, back, forward) + 32 (new session) + 8 gap
-/// + 24 (options) + 8 inset.
+/// The narrowest the sidebar drags to, in px.
+///
+/// It keeps the sidebar options button inside the sidebar beside the titlebar controls: 88 (past
+/// the traffic lights) + 82 (toggle, back, forward) + 32 (new session) + 8 gap + 24 (options) + 8
+/// inset.
 pub const SIDEBAR_MIN: f32 = 242.0;
+/// The widest the sidebar drags to, in px.
 pub const SIDEBAR_MAX: f32 = 400.0;
+/// The sidebar's width until the person drags it, in px.
 pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
 /// Surface pane floor and default (px). Runtime sizing also reserves space
 /// for the conversation and any docked file explorer.
 pub const RIGHT_PANE_MIN: f32 = 360.0;
+/// The surface pane's width until the person drags it, in px.
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
 /// The Pull requests route's side pane defaults wider than the chat's: the
 /// detail's Code tab needs room beside the board.
 /// Minimum width retained for the conversation when the right pane is open.
 pub const CHAT_PANEL_MIN: f32 = 300.0;
 
-/// Terminal panel height bounds: 160px … 55% of the viewport (§1.10). The
-/// viewport-relative cap applies at runtime; the absolute cap here only heals
-/// hand-edited files.
+/// The terminal panel's least height, in px (§1.10).
 pub const TERMINAL_MIN_HEIGHT: f32 = 160.0;
-pub const TERMINAL_MAX_VH: f32 = 0.55;
+/// The terminal panel's height a hand-edited file is healed to at most, in px.
 pub const TERMINAL_ABS_MAX_HEIGHT: f32 = 2000.0;
+/// The terminal panel's height until the person drags it, in px.
 pub const TERMINAL_DEFAULT_HEIGHT: f32 = 280.0;
 
 /// Debounce for settings writes after a drag/toggle.
 pub const SAVE_DEBOUNCE_MS: u64 = 400;
 
+/// The idle time before an edited file autosaves, until the person picks one.
 pub const FILES_AUTOSAVE_DELAY_DEFAULT_MS: u64 = 900;
+/// The shortest autosave delay a file may hold.
 pub const FILES_AUTOSAVE_DELAY_MIN_MS: u64 = 100;
+/// The longest autosave delay a file may hold.
 pub const FILES_AUTOSAVE_DELAY_MAX_MS: u64 = 10_000;
 
 const FILE_NAME: &str = "ui-settings.json";
@@ -97,8 +87,10 @@ pub enum ConversationWidth {
 }
 
 impl ConversationWidth {
+    /// Every preset, in the order Settings offers them.
     pub const ALL: [Self; 3] = [Self::Default, Self::Wide, Self::Full];
 
+    /// The preset's name in Settings.
     pub const fn label(self) -> &'static str {
         match self {
             Self::Default => "Default",
@@ -107,6 +99,7 @@ impl ConversationWidth {
         }
     }
 
+    /// What the preset does, under its name in Settings.
     pub const fn description(self) -> &'static str {
         match self {
             Self::Default => "Grows a little with the window.",
@@ -128,6 +121,7 @@ impl ConversationWidth {
     }
 }
 
+/// The conversation width the person chose.
 pub fn conversation_width(cx: &App) -> ConversationWidth {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.conversation_width)
@@ -139,6 +133,7 @@ pub fn transcript_width(window: f32, cx: &App) -> f32 {
     conversation_width(cx).cap(window)
 }
 
+/// Keep `width` as the conversation width, and draw the windows again when it changed.
 pub fn set_conversation_width(width: ConversationWidth, cx: &mut App) {
     if update(SavePolicy::Debounced, cx, |settings| {
         settings.conversation_width = width;
@@ -151,7 +146,9 @@ pub fn set_conversation_width(width: ConversationWidth, cx: &mut App) {
 /// reach disk before returning to the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SavePolicy {
+    /// Wait out [`SAVE_DEBOUNCE_MS`] of quiet, so a drag writes once.
     Debounced,
+    /// Write now.
     Immediate,
 }
 
@@ -167,7 +164,18 @@ pub struct SettingsStore {
     saved_revision: u64,
     save_task: Option<Task<()>>,
     // A file [`UiSettings::load`] moved aside, until [`announce_set_aside`] says so.
-    set_aside: Option<Option<PathBuf>>,
+    set_aside: Option<SetAside>,
+}
+
+impl std::fmt::Debug for SettingsStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsStore")
+            .field("data_dir", &self.data_dir)
+            .field("revision", &self.revision)
+            .field("saved_revision", &self.saved_revision)
+            .field("set_aside", &self.set_aside)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Global for SettingsStore {}
@@ -194,6 +202,7 @@ impl SettingsStore {
     }
 }
 
+/// Make the store own `settings`, kept in `data_dir`, as the one writer of its file.
 pub fn init(settings: UiSettings, data_dir: impl Into<PathBuf>, cx: &mut App) {
     let data_dir: PathBuf = data_dir.into();
     let set_aside = take_set_aside(&data_dir);
@@ -212,6 +221,7 @@ pub fn current(cx: &App) -> UiSettings {
     cx.try_global::<SettingsStore>().map(|store| store.current.clone()).unwrap_or_default()
 }
 
+/// Change the settings by `mutate` and save them by `policy`; whether anything changed.
 pub fn update(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut UiSettings)) -> bool {
     if !cx.has_global::<SettingsStore>() {
         return false;
@@ -223,6 +233,7 @@ pub fn update(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut UiSetti
     true
 }
 
+/// Replace the settings with `settings` and save them by `policy`; whether anything changed.
 pub fn replace(settings: UiSettings, policy: SavePolicy, cx: &mut App) -> bool {
     update(policy, cx, |current| *current = settings)
 }
@@ -247,6 +258,7 @@ pub fn set_output_format(kind: &str, format: &str, cx: &mut App) {
     });
 }
 
+/// Keep whether wheel notches glide.
 pub fn set_smooth_scrolling(enabled: bool, cx: &mut App) {
     update(SavePolicy::Immediate, cx, |settings| {
         settings.smooth_scrolling = enabled;
@@ -297,24 +309,32 @@ fn flush_latest(cx: &mut App) {
     }
 }
 
+/// A window's frame, or a display's, in points, and the display it was on.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowGeometry {
+    /// The display it was on, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_uuid: Option<uuid::Uuid>,
+    /// The left edge.
     pub x: f32,
+    /// The top edge.
     pub y: f32,
+    /// The width.
     pub width: f32,
+    /// The height.
     pub height: f32,
 }
 
 impl WindowGeometry {
+    /// Whether every number is finite and the size is not empty.
     pub fn is_valid(self) -> bool {
         [self.x, self.y, self.width, self.height].into_iter().all(f32::is_finite)
             && self.width > 0.0
             && self.height > 0.0
     }
 
+    /// The frame of `bounds`, on no display in particular.
     pub fn from_bounds(bounds: gpui::Bounds<gpui::Pixels>) -> Self {
         Self {
             display_uuid: None,
@@ -325,6 +345,9 @@ impl WindowGeometry {
         }
     }
 
+    /// Where this frame opens again among `displays`, with the index of the one it lands on:
+    /// its own display when it is still there, else centred on `primary` (or the first valid
+    /// one), fitted to it either way. `None` when the frame or every display is invalid.
     pub fn restore(self, displays: &[Self], primary: usize) -> Option<(usize, Self)> {
         if !self.is_valid() {
             return None;
@@ -337,7 +360,7 @@ impl WindowGeometry {
         let index = matched
             .or_else(|| displays.get(primary).filter(|display| display.is_valid()).map(|_| primary))
             .or_else(|| displays.iter().position(|display| display.is_valid()))?;
-        let display = displays[index];
+        let display = *displays.get(index)?;
         let mut geometry = self.fit(display);
         if self.display_uuid.is_some() && matched.is_none() {
             geometry.x = display.x + (display.width - geometry.width) / 2.0;
@@ -347,6 +370,8 @@ impl WindowGeometry {
         Some((index, geometry))
     }
 
+    /// This frame on `display`: at least 900 × 600 and at most the display, and inside it.
+    #[must_use]
     pub fn fit(self, display: Self) -> Self {
         let width = self.width.max(900.0).min(display.width);
         let height = self.height.max(600.0).min(display.height);
@@ -359,6 +384,7 @@ impl WindowGeometry {
         }
     }
 
+    /// The frame as gpui bounds.
     pub fn bounds(self) -> gpui::Bounds<gpui::Pixels> {
         gpui::Bounds::new(
             gpui::point(gpui::px(self.x), gpui::px(self.y)),
@@ -367,6 +393,7 @@ impl WindowGeometry {
     }
 }
 
+/// The harnesses whose skills a prompt completes, with the names a completion shows.
 pub const SKILL_COMPLETION_HARNESSES: [(slopty_view_proto::HarnessId, &str); 9] = [
     (slopty_view_proto::HarnessId::ANTIGRAVITY, "Antigravity"),
     (slopty_view_proto::HarnessId::CLAUDE_CODE, "Claude Code"),
@@ -383,7 +410,9 @@ pub const SKILL_COMPLETION_HARNESSES: [(slopty_view_proto::HarnessId, &str); 9] 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SavedTabs {
+    /// The tabs, in their order.
     pub tabs: Vec<SavedSurface>,
+    /// The index of the tab in front.
     pub active: Option<usize>,
 }
 
@@ -392,15 +421,31 @@ pub struct SavedTabs {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SavedSurface {
     /// A terminal, by its session.
-    Terminal { id: String },
+    Terminal {
+        /// The terminal session's id.
+        id: String,
+    },
     /// A file, owned by chat `chat`.
-    File { chat: String, path: String },
+    File {
+        /// The chat whose workspace holds it.
+        chat: String,
+        /// Its path in that workspace.
+        path: String,
+    },
     /// A web page.
-    Browser { url: String },
+    Browser {
+        /// The page's address.
+        url: String,
+    },
     /// A diff.
     Diff,
     /// A remote window or desktop, by what was chosen.
-    Screen { screen: String, title: String },
+    Screen {
+        /// What was chosen, as the screen picker names it.
+        screen: String,
+        /// The tab's title.
+        title: String,
+    },
     /// The session's inspector.
     Inspector,
     /// The session's files.
@@ -417,12 +462,16 @@ pub struct PaletteUse {
     pub last_ms: i64,
 }
 
+/// The device-local interface settings `ui-settings.json` keeps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
+    /// The main window's last frame.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_geometry: Option<WindowGeometry>,
+    /// The sidebar's width, in px.
     pub sidebar_width: f32,
+    /// Whether the sidebar is folded away.
     pub sidebar_collapsed: bool,
     /// The last selected space — restored on boot when the row still exists;
     /// also the new-tab default when the sidebar filter is "All".
@@ -440,7 +489,9 @@ pub struct UiSettings {
     /// or finished (`slopty_ui`'s `workspace::attention`); none make a sound
     /// (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a feed").
     pub notifications_enabled: bool,
+    /// The surface pane's width, in px.
     pub right_pane_width: f32,
+    /// The terminal panel's height, in px.
     pub terminal_height: f32,
     /// What each chat's pane showed, kept across launches (`shell::kept_tabs`).
     pub session_tabs: std::collections::BTreeMap<String, SavedTabs>,
@@ -469,9 +520,11 @@ pub struct UiSettings {
     /// Terminal family and absolute pixel size. Only fixed-width families
     /// qualify, including compatible Nerd Fonts.
     pub terminal_font_family: crate::typography::UiFontFamily,
+    /// The terminal's text size, in px.
     pub terminal_font_size: f32,
     /// Family and absolute pixel size for code, diffs, and file editors.
     pub code_font_family: crate::typography::UiFontFamily,
+    /// The code, diff and editor text size, in px.
     pub code_font_size: f32,
     /// Independently selected light and dark theme variants.
     pub theme_selection: slopty_shell_theme::ThemeSelection,
@@ -582,24 +635,38 @@ const JUMP_LABELS: [&str; JUMP_SLOTS] = [
 /// rather than panicking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShortcutId {
+    /// Save the file in front.
     SaveFile,
+    /// Reload the web page in front.
     BrowserReload,
+    /// Show or fold the sidebar.
     ToggleSidebar,
+    /// Summon or dismiss the Changes view.
     ToggleChanges,
+    /// Summon or dismiss the Files view.
     ToggleFiles,
+    /// Start a session.
     NewSession,
+    /// Add a project.
     NewProject,
+    /// The next session in the focused pane.
     NextSession,
+    /// The previous session in the focused pane.
     PrevSession,
+    /// Archive the session in front.
     ArchiveSession,
-    // The right pane's last closed tab.
+    /// Reopen the right pane's last closed tab.
     ReopenClosedTab,
-    NextNeedsYou, // the next chat waiting on the person (`shell::sidebar_status`)
-    Inbox,        // what needs the person, across sessions and machines (`shell::inbox`)
+    /// The next chat waiting on the person (`shell::sidebar_status`).
+    NextNeedsYou,
+    /// What needs the person, across sessions and machines (`shell::inbox`).
+    Inbox,
+    /// The sidebar row at this zero-based slot.
     JumpSession(usize),
 }
 
 impl ShortcutId {
+    /// Every shortcut, in the order the Shortcuts table lists them.
     pub const ALL: [Self; 13 + JUMP_SLOTS] = [
         Self::SaveFile,
         Self::BrowserReload,
@@ -647,6 +714,7 @@ impl ShortcutId {
         }
     }
 
+    /// The combo the shortcut has until the person rebinds it, on this platform.
     pub fn default_combo(self) -> &'static str {
         self.default_combo_on(crate::keys::MOD_IS_COMMAND) // every Apple keyboard
     }
@@ -698,7 +766,7 @@ impl ShortcutId {
         }
     }
 
-    /// Its name in `ui-settings.json`'s `shortcuts` ([`StoredKeymap`]); a jump slot is
+    /// Its name in `ui-settings.json`'s `shortcuts` (`StoredKeymap`); a jump slot is
     /// counted from 1, as its key.
     pub fn stored_key(self) -> Cow<'static, str> {
         let name = match self {
@@ -715,32 +783,48 @@ impl ShortcutId {
             Self::ReopenClosedTab => "reopenClosedTab",
             Self::NextNeedsYou => "nextNeedsYou",
             Self::Inbox => "inbox",
-            Self::JumpSession(slot) => return format!("jumpSession{}", slot + 1).into(),
+            Self::JumpSession(slot) => {
+                return format!("jumpSession{}", slot.saturating_add(1)).into();
+            }
         };
         name.into()
     }
 }
 
-/// Persisted shortcut combos. Stored platform-neutral ("mod-s"); translated to
-/// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`]. The file keeps only what the
-/// person changed ([`StoredKeymap`]), so a default that moves reaches everyone who left it be.
+/// Persisted shortcut combos, by [`ShortcutId`].
+///
+/// Stored platform-neutral ("mod-s"); translated to "cmd-s"/"ctrl-s" at bind time by
+/// [`platform_combo`]. The file keeps only what the person changed (`StoredKeymap`), so a default
+/// that moves reaches everyone who left it be.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "StoredKeymap", into = "StoredKeymap")]
 pub struct KeymapConfig {
+    /// [`ShortcutId::SaveFile`]'s combo.
     pub save_file: String,
+    /// [`ShortcutId::BrowserReload`]'s combo.
     pub browser_reload: String,
+    /// [`ShortcutId::ToggleSidebar`]'s combo.
     pub toggle_sidebar: String,
+    /// [`ShortcutId::ToggleChanges`]'s combo.
     pub toggle_changes: String,
+    /// [`ShortcutId::ToggleFiles`]'s combo.
     pub toggle_files: String,
+    /// [`ShortcutId::NewSession`]'s combo.
     pub new_session: String,
+    /// [`ShortcutId::NewProject`]'s combo.
     pub new_project: String,
+    /// [`ShortcutId::NextSession`]'s combo.
     pub next_session: String,
+    /// [`ShortcutId::PrevSession`]'s combo.
     pub prev_session: String,
+    /// [`ShortcutId::ArchiveSession`]'s combo.
     pub archive_session: String,
-    // The right pane's last closed tab.
+    /// [`ShortcutId::ReopenClosedTab`]'s combo.
     pub reopen_closed_tab: String,
-    pub next_needs_you: String, // the next chat waiting on the person
-    pub inbox: String,          // what needs the person
+    /// [`ShortcutId::NextNeedsYou`]'s combo.
+    pub next_needs_you: String,
+    /// [`ShortcutId::Inbox`]'s combo.
+    pub inbox: String,
     /// One combo per jump slot, in slot order; [`Self::heal_jump_slots`] keeps its length.
     pub jump_session: Vec<String>,
 }
@@ -820,6 +904,7 @@ impl Default for KeymapConfig {
 }
 
 impl KeymapConfig {
+    /// `id`'s combo; "" when it is unbound.
     pub fn get(&self, id: ShortcutId) -> &str {
         match id {
             ShortcutId::SaveFile => &self.save_file,
@@ -839,6 +924,7 @@ impl KeymapConfig {
         }
     }
 
+    /// Bind `id` to `combo` ("" unbinds it); a jump slot past [`JUMP_SLOTS`] is left alone.
     pub fn set(&mut self, id: ShortcutId, combo: String) {
         match id {
             ShortcutId::SaveFile => self.save_file = combo,
@@ -859,12 +945,15 @@ impl KeymapConfig {
                     if self.jump_session.len() < JUMP_SLOTS {
                         self.heal_jump_slots();
                     }
-                    self.jump_session[slot] = combo;
+                    if let Some(entry) = self.jump_session.get_mut(slot) {
+                        *entry = combo;
+                    }
                 }
             }
         }
     }
 
+    /// Give `id` its default combo again.
     pub fn reset(&mut self, id: ShortcutId) {
         self.set(id, id.default_combo().to_owned());
     }
@@ -874,15 +963,18 @@ impl KeymapConfig {
     /// keep their slot; missing ones take the default.
     pub fn heal_jump_slots(&mut self) {
         self.jump_session.truncate(JUMP_SLOTS);
-        while self.jump_session.len() < JUMP_SLOTS {
-            self.jump_session.push(JUMP_DEFAULTS[self.jump_session.len()].to_owned());
-        }
+        let kept = self.jump_session.len();
+        self.jump_session.extend(JUMP_DEFAULTS.iter().skip(kept).map(|combo| (*combo).to_owned()));
     }
 }
 
 /// Build a combo string from a recorded keystroke. The primary modifier
 /// (cmd on macOS, ctrl elsewhere) becomes "mod"; bare modifier presses record
 /// nothing.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "shell lint migration: seam, callers in slice A"
+)]
 pub fn combo_from_keystroke(
     ctrl: bool,
     alt: bool,
@@ -890,20 +982,17 @@ pub fn combo_from_keystroke(
     cmd: bool,
     key: &str,
 ) -> Option<String> {
+    let modifiers =
+        gpui::Modifiers { control: ctrl, alt, shift, platform: cmd, ..gpui::Modifiers::none() };
     // An iPad's ⌘ too.
-    combo_from_keystroke_on(crate::keys::MOD_IS_COMMAND, ctrl, alt, shift, cmd, key)
+    combo_from_keystroke_on(crate::keys::MOD_IS_COMMAND, modifiers, key)
 }
 
 /// [`combo_from_keystroke`] for an explicit platform — the ctrl spelling is
 /// platform-dependent, so both paths need to be exercisable from one machine.
-pub fn combo_from_keystroke_on(
-    mac: bool,
-    ctrl: bool,
-    alt: bool,
-    shift: bool,
-    cmd: bool,
-    key: &str,
-) -> Option<String> {
+/// Fn is no part of a combo.
+pub fn combo_from_keystroke_on(mac: bool, modifiers: gpui::Modifiers, key: &str) -> Option<String> {
+    let gpui::Modifiers { control: ctrl, alt, shift, platform: cmd, .. } = modifiers;
     let key = key.trim().to_lowercase();
     if key.is_empty()
         || matches!(key.as_str(), "ctrl" | "control" | "alt" | "shift" | "cmd" | "platform" | "fn")
@@ -932,7 +1021,8 @@ pub fn combo_from_keystroke_on(
 }
 
 /// Shortcut ids whose combos collide with another shortcut (conflict detection).
-pub fn conflicted_shortcuts(keymap: &KeymapConfig) -> Vec<ShortcutId> {
+#[cfg(test)]
+fn conflicted_shortcuts(keymap: &KeymapConfig) -> Vec<ShortcutId> {
     ShortcutId::ALL
         .into_iter()
         .filter(|&id| {
@@ -953,11 +1043,11 @@ pub fn combo_modifiers(combo: &str) -> (bool, bool, bool) {
     (parts.contains(&"mod"), parts.contains(&"alt"), parts.contains(&"shift"))
 }
 
-/// Whether the sidebar should show its jump hints for the currently held
-/// modifiers (t3code `shouldShowThreadJumpHintsForModifiers`). The held set
-/// must match a jump combo EXACTLY, so adding Shift or Alt hides the hints and
-/// a chord like Cmd+Shift+4 never flashes the overlay. `primary` is the held
-/// "mod" key — cmd on macOS, ctrl elsewhere.
+/// Whether the sidebar should show its jump hints for the currently held modifiers.
+///
+/// This is t3code's `shouldShowThreadJumpHintsForModifiers`. The held set must match a jump combo
+/// EXACTLY, so adding Shift or Alt hides the hints and a chord like Cmd+Shift+4 never flashes the
+/// overlay. `primary` is the held "mod" key — cmd on macOS, ctrl elsewhere.
 ///
 /// A jump combo with no modifiers at all never shows hints: it would otherwise
 /// match the resting state and pin the overlay open. Pure.
@@ -991,8 +1081,9 @@ pub fn platform_combo_on(mac: bool, combo: &str) -> String {
         .join("-")
 }
 
-/// Where the active keyboard layout puts shortcut keys: the US key a combo
-/// is written with → the key that layout types in its place. This is
+/// Where the active keyboard layout puts shortcut keys.
+///
+/// It maps the US key a combo is written with → the key that layout types in its place. This is
 /// Apple's own relocation — an AZERTY Mac reaches ⌘1 as ⌘&, ⌘/ as ⌘: and
 /// ⌘[ as ⌘^ — which gpui ships as `get_key_equivalents` but applies only to
 /// bindings loaded with it. Empty on US layouts and off macOS.
@@ -1030,8 +1121,9 @@ pub fn localize_key<'a>(key: &'a str, equivalents: &KeyEquivalents) -> Cow<'a, s
     }
 }
 
-/// The US key a combo stores for a key this layout reported: the inverse of
-/// [`localize_key`], so a recorded chord keeps the spelling its default uses
+/// The US key a combo stores for a key this layout reported.
+///
+/// It is the inverse of [`localize_key`], so a recorded chord keeps the spelling its default uses
 /// (AZERTY ⌘& records as "mod-1") and conflict checks on stored combos still
 /// see one chord per key. `None` when the layout relocates `key` itself and
 /// nothing lands on it — AZERTY's @ key — since no stored combo reaches it.
@@ -1052,12 +1144,10 @@ pub fn canonical_key(key: &str, equivalents: &KeyEquivalents) -> Option<String> 
 /// Split a combo into its modifier prefix and key: ("mod-shift-", "/").
 fn split_combo(combo: &str) -> (&str, &str) {
     // "-" is a key too: "mod--" is Mod+Minus.
-    let key_start = if combo.ends_with('-') {
-        combo.len() - 1
-    } else {
-        combo.rfind('-').map_or(0, |ix| ix + 1)
-    };
-    combo.split_at(key_start)
+    let key_start = combo
+        .strip_suffix('-')
+        .map_or_else(|| combo.rfind('-').map_or(0, |ix| ix.saturating_add(1)), str::len);
+    combo.split_at_checked(key_start).unwrap_or(("", combo))
 }
 
 /// `combo` with its key localized ("mod-/" → "mod-:" on AZERTY), in either
@@ -1130,6 +1220,10 @@ impl UiSettings {
     /// `current`. A stale copy therefore never reverts a choice another
     /// surface saved meanwhile. The destructure is exhaustive, so a new field
     /// does not compile until it is merged here too.
+    #[expect(
+        clippy::float_cmp,
+        reason = "change detection: any edit to a size, however small, wins"
+    )]
     pub fn merge_changes(base: &Self, edited: &Self, mut current: Self) -> Self {
         macro_rules! merge {
             ($($field:ident),* $(,)?) => {{
@@ -1181,6 +1275,7 @@ impl UiSettings {
     }
 
     /// Clamp widths into their legal ranges (also heals NaN to defaults).
+    #[must_use]
     pub fn clamped(mut self) -> Self {
         self.window_geometry = self.window_geometry.filter(|geometry| geometry.is_valid());
         self.sidebar_width =
@@ -1262,16 +1357,25 @@ impl UiSettings {
         std::fs::rename(&tmp, &path)
     }
 
+    /// Where the settings file sits in `data_dir`.
     pub fn path(data_dir: &Path) -> PathBuf {
         data_dir.join(FILE_NAME)
     }
 }
 
 /// Settings files [`UiSettings::load`] could not read, by the data directory they were in, with
-/// where each was moved (`None` when the move failed too), until [`init`] for that directory
-/// takes them.
-static SET_ASIDE: parking_lot::Mutex<Vec<(PathBuf, Option<PathBuf>)>> =
+/// what became of each, until [`init`] for that directory takes them.
+static SET_ASIDE: parking_lot::Mutex<Vec<(PathBuf, SetAside)>> =
     parking_lot::Mutex::new(Vec::new());
+
+/// What became of a settings file [`UiSettings::load`] could not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SetAside {
+    /// Moved beside itself, to this path.
+    MovedTo(PathBuf),
+    /// Left where it was: the move failed too.
+    Stuck,
+}
 
 /// Where a settings file that could not be read goes: beside it, so nothing writes over it.
 pub fn backup_path(data_dir: &Path) -> PathBuf {
@@ -1283,17 +1387,17 @@ pub fn backup_path(data_dir: &Path) -> PathBuf {
 fn set_aside(data_dir: &Path) {
     let backup = backup_path(data_dir);
     let moved = match std::fs::rename(UiSettings::path(data_dir), &backup) {
-        Ok(()) => Some(backup),
+        Ok(()) => SetAside::MovedTo(backup),
         Err(err) => {
             tracing::warn!(error = %err, "the unreadable ui-settings could not be moved aside");
-            None
+            SetAside::Stuck
         }
     };
     SET_ASIDE.lock().push((data_dir.to_path_buf(), moved));
 }
 
 /// The note [`set_aside`] left for `data_dir`, taken.
-fn take_set_aside(data_dir: &Path) -> Option<Option<PathBuf>> {
+fn take_set_aside(data_dir: &Path) -> Option<SetAside> {
     let mut noted = SET_ASIDE.lock();
     let at = noted.iter().position(|(dir, _)| dir == data_dir)?;
     Some(noted.remove(at).1)
@@ -1311,14 +1415,14 @@ pub fn announce_set_aside(cx: &mut App) -> bool {
         return false;
     };
     let words = match set_aside {
-        Some(backup) => format!(
+        SetAside::MovedTo(backup) => format!(
             "Couldn\u{2019}t read your settings, so Slopty started from its defaults. The old file is kept as {}.",
             backup.file_name().map_or_else(
                 || backup.display().to_string(),
                 |name| name.to_string_lossy().into_owned()
             ),
         ),
-        None => {
+        SetAside::Stuck => {
             "Couldn\u{2019}t read your settings, so Slopty started from its defaults.".to_owned()
         }
     };
@@ -1535,6 +1639,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "a missing size takes the default exactly")]
     fn unknown_keys_from_a_newer_build_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1690,6 +1795,7 @@ mod tests {
     /// key; it must load as "follow the OS" rather than failing the whole parse
     /// and resetting every other preference to defaults.
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "a missing size takes the default exactly")]
     fn settings_without_appearance_default_to_system() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1756,7 +1862,7 @@ mod tests {
     // A file that cannot be read is moved aside and said, and the next save never
     // writes over it; none at all is quietly the defaults.
     #[gpui::test]
-    fn a_corrupt_file_is_moved_aside_and_said(cx: &mut gpui::TestAppContext) {
+    fn a_corrupt_file_is_moved_aside_and_said(cx: &gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
         cx.update(|cx| {
@@ -1791,6 +1897,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the clamp lands on the bound exactly")]
     fn loaded_values_are_clamped() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1828,6 +1935,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "a missing size takes the default exactly")]
     fn legacy_files_editor_font_size_becomes_the_code_font_size() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(UiSettings::path(dir.path()), r#"{"filesEditorFontSize": 15.0}"#).unwrap();
@@ -1843,6 +1951,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "NaN heals to the default exactly")]
     fn nan_heals_to_default() {
         let healed = UiSettings { sidebar_width: f32::NAN, ..Default::default() }.clamped();
         assert_eq!(healed.sidebar_width, SIDEBAR_DEFAULT);
@@ -1991,7 +2100,10 @@ mod tests {
     fn every_shortcut_default_is_unique_and_bindable() {
         // A new shortcut must not ship in conflict with an existing one, and
         // its default must parse on this platform.
-        assert!(conflicted_shortcuts(&KeymapConfig::default()).is_empty());
+        assert!(
+            conflicted_shortcuts(&KeymapConfig::default()).is_empty(),
+            "the defaults are unique"
+        );
         for id in ShortcutId::ALL {
             assert!(parse_combo(id.default_combo()).is_ok(), "{id:?} default combo does not parse");
         }
@@ -2038,14 +2150,14 @@ mod tests {
                 let bound = platform_combo_on(mac, combo);
                 let mut parts: Vec<&str> = bound.split('-').collect();
                 let key = parts.pop().expect("a combo always ends in a key");
-                let recorded = combo_from_keystroke_on(
-                    mac,
-                    parts.contains(&"ctrl"),
-                    parts.contains(&"alt"),
-                    parts.contains(&"shift"),
-                    parts.contains(&"cmd"),
-                    key,
-                );
+                let modifiers = gpui::Modifiers {
+                    control: parts.contains(&"ctrl"),
+                    alt: parts.contains(&"alt"),
+                    shift: parts.contains(&"shift"),
+                    platform: parts.contains(&"cmd"),
+                    function: false,
+                };
+                let recorded = combo_from_keystroke_on(mac, modifiers, key);
                 assert_eq!(
                     recorded.as_deref(),
                     Some(combo),
@@ -2070,14 +2182,14 @@ mod tests {
     #[test]
     fn conflict_detection() {
         let mut keymap = KeymapConfig::default();
-        assert!(conflicted_shortcuts(&keymap).is_empty());
+        assert!(conflicted_shortcuts(&keymap).is_empty(), "no shortcut is in conflict");
         keymap.set(ShortcutId::ToggleChanges, "mod-b".into());
         let conflicts = conflicted_shortcuts(&keymap);
         assert!(conflicts.contains(&ShortcutId::ToggleSidebar));
         assert!(conflicts.contains(&ShortcutId::ToggleChanges));
         assert!(!conflicts.contains(&ShortcutId::Inbox));
         keymap.reset(ShortcutId::ToggleChanges);
-        assert!(conflicted_shortcuts(&keymap).is_empty());
+        assert!(conflicted_shortcuts(&keymap).is_empty(), "no shortcut is in conflict");
     }
 
     #[test]
@@ -2256,7 +2368,7 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.keymap.get(ShortcutId::SaveFile), "mod-j");
         assert_eq!(loaded.keymap.get(ShortcutId::NextNeedsYou), "");
-        assert!(conflicted_shortcuts(&loaded.keymap).is_empty());
+        assert!(conflicted_shortcuts(&loaded.keymap).is_empty(), "no shortcut is in conflict");
         loaded.save(dir.path()).unwrap();
         assert_eq!(
             UiSettings::load(dir.path()).keymap.get(ShortcutId::NextNeedsYou),
@@ -2277,6 +2389,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp_const, reason = "the clamp lands on the bound exactly")]
     fn terminal_height_clamps_on_load() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(UiSettings::path(dir.path()), r#"{"terminalHeight": 5}"#).unwrap();

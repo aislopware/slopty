@@ -2767,7 +2767,7 @@ impl Changes {
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(menu) = self.ref_menu.open_mut() {
                     menu.active = popover::menu_step(Some(menu.active), count, delta).unwrap_or(0);
-                    self.ref_menu_scroll.scroll.scroll_to_item(menu.active);
+                    self.ref_menu_scroll.handle().scroll_to_item(menu.active);
                     cx.notify();
                 }
             }
@@ -3689,7 +3689,7 @@ impl Changes {
 
     /// `{branch} → {base ⌄}` — which ref the branch scope compares against
     /// (t3code's ref strip), inlined into the pane header. Branch scope only.
-    fn render_ref_selector(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_ref_selector(&mut self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
         if self.scope != DiffScope::Branch {
             return None;
         }
@@ -3816,7 +3816,7 @@ impl Changes {
         )
     }
 
-    fn render_ref_menu(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_ref_menu(&mut self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let theme = &theme.for_popup();
         let (search, active, focus) = {
             let Some(menu) = self.ref_menu.get() else {
@@ -3824,7 +3824,7 @@ impl Changes {
             };
             (menu.search.clone(), menu.active, menu.focus.clone())
         };
-        let list_scroll = self.ref_menu_scroll.scroll.clone();
+        let list_scroll = self.ref_menu_scroll.handle().clone();
         let rows = self.ref_menu_rows(cx);
         let current = self.base_ref.clone();
         let branches = self.branches.clone();

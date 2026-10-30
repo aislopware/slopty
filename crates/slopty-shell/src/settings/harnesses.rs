@@ -18,23 +18,6 @@
 //! enabled-but-uninstalled rows; the hint covers that too. The engine
 //! enforces the same gates where the state lives, so a raced or stale toggle
 //! self-corrects from the RPC reply.
-#![allow(
-    let_underscore_drop,
-    missing_debug_implementations,
-    missing_docs,
-    trivial_casts,
-    clippy::arithmetic_side_effects,
-    clippy::default_trait_access,
-    clippy::empty_line_after_doc_comments,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::ref_option,
-    clippy::single_match_else,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice D"
-)]
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, px};
@@ -124,7 +107,7 @@ fn install_label(name: &str) -> String {
     format!("Installing {name}…")
 }
 
-fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Value {
+fn install_params(harness: HarnessId, target: Option<&str>) -> serde_json::Value {
     serde_json::json!({"harness": harness, "targetDeviceId": target})
 }
 
@@ -146,6 +129,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
     }
 }
 
+/// Settings → Providers.
 pub struct HarnessesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
@@ -156,22 +140,35 @@ pub struct HarnessesPage {
     device_select: widgets::SelectState,
     /// Last refused/failed toggle (engine guards), shown in the error strip.
     error: Option<String>,
-    load_task: Option<Task<()>>,
-    toggle_task: Option<Task<()>>,
+    load_task: Option<Task<anyhow::Result<()>>>,
+    toggle_task: Option<Task<anyhow::Result<()>>>,
     /// A toggle the engine hasn't answered yet: the switch shows it at once.
     pending_toggle: Option<(HarnessId, bool)>,
     installing: Option<HarnessId>,
-    install_task: Option<Task<()>>,
+    install_task: Option<Task<anyhow::Result<()>>>,
     // The installer's terminal on the target machine, while the page shows it.
     install_run: Option<InstallRun>,
 
     // The person's one autonomy setting (`[agents] autonomy`), its index in AUTONOMY.
     autonomy: Option<usize>,
     autonomy_select: widgets::SelectState,
-    autonomy_task: Option<Task<()>>,
+    autonomy_task: Option<Task<anyhow::Result<()>>>,
+}
+
+impl std::fmt::Debug for HarnessesPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HarnessesPage")
+            .field("target_device", &self.target_device)
+            .field("error", &self.error)
+            .field("pending_toggle", &self.pending_toggle)
+            .field("installing", &self.installing)
+            .field("autonomy", &self.autonomy)
+            .finish_non_exhaustive()
+    }
 }
 
 impl HarnessesPage {
+    /// The page over `state`'s engine, listing this device's agents.
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut page = Self {
             state,
@@ -222,13 +219,12 @@ impl HarnessesPage {
                 }
                 cx.notify();
             })
-            .ok();
         }));
         cx.notify();
     }
 
     // The Autonomy section under the agents.
-    fn render_autonomy(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_autonomy(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let selected = self.autonomy.unwrap_or(AUTONOMY_DEFAULT);
         let select = widgets::select("agents-autonomy", "Autonomy", theme, |page: &mut Self| {
             &mut page.autonomy_select
@@ -303,7 +299,6 @@ impl HarnessesPage {
 
     /// Retarget the page at another device: a different device is a different
     /// install/enablement world, so drop the rows and reload through it.
-
     pub(crate) fn set_target_device(&mut self, target: Option<String>, cx: &mut Context<Self>) {
         widgets::close_select(self, |page: &mut Self| &mut page.device_select, cx);
 
@@ -343,7 +338,6 @@ impl HarnessesPage {
                 };
                 cx.notify();
             })
-            .ok();
         }));
     }
 
@@ -371,7 +365,7 @@ impl HarnessesPage {
         if self.installing.is_some() || self.install_run.is_some() {
             return;
         }
-        let params = install_params(harness, &self.target_device);
+        let params = install_params(harness, self.target_device.as_deref());
         let target = self.target_device.clone();
         self.installing = Some(harness);
         self.error = None;
@@ -397,7 +391,6 @@ impl HarnessesPage {
                 }
                 cx.notify();
             })
-            .ok();
         }));
         cx.notify();
     }
@@ -408,7 +401,9 @@ impl HarnessesPage {
         let watch = crate::live::watch(
             &id,
             Box::new(move |cx| {
-                let _ = page.update(cx, Self::follow_install);
+                if let Some(page) = page.upgrade() {
+                    page.update(cx, Self::follow_install);
+                }
             }),
             cx,
         );
@@ -439,7 +434,7 @@ impl HarnessesPage {
 
     // List the machine's agents again until the one installed shows, its worker seeing
     // the install a beat after the installer ends; `tries` more times at most.
-    fn relist(&mut self, tries: u32, cx: &mut Context<Self>) {
+    fn relist(&mut self, tries: u32, cx: &Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -455,24 +450,23 @@ impl HarnessesPage {
             let arrived = list
                 .as_ref()
                 .is_some_and(|list| list.iter().any(|d| d.id == harness && d.installed));
-            let again = this
-                .update(cx, |page, cx| {
-                    if let Some(list) = list {
-                        page.harnesses = Loadable::Ready(list);
-                    }
-                    cx.notify();
-                    !arrived && tries > 0 && page.install_run.is_some()
-                })
-                .unwrap_or(false);
+            let again = this.update(cx, |page, cx| {
+                if let Some(list) = list {
+                    page.harnesses = Loadable::Ready(list);
+                }
+                cx.notify();
+                !arrived && tries > 0 && page.install_run.is_some()
+            })?;
             if again {
                 cx.background_executor().timer(RELIST_EVERY).await;
-                this.update(cx, |page, cx| page.relist(tries - 1, cx)).ok();
+                this.update(cx, |page, cx| page.relist(tries.saturating_sub(1), cx))?;
             }
+            Ok(())
         }));
     }
 
     // End the installer's terminal on its machine (`CloseTerminal`) and stop showing it.
-    fn close_install(&mut self, cx: &mut Context<Self>) {
+    fn close_install(&mut self, cx: &Context<Self>) {
         let Some(run) = self.install_run.take() else {
             return;
         };
@@ -485,9 +479,9 @@ impl HarnessesPage {
                 this.update(cx, |page, cx| {
                     page.error = Some(format!("The installer did not stop — {error}"));
                     cx.notify();
-                })
-                .ok();
+                })?;
             }
+            anyhow::Ok(())
         })
         .detach();
     }
@@ -590,14 +584,13 @@ impl HarnessesPage {
                 }
                 cx.notify();
             })
-            .ok();
         }));
     }
 
     /// The page-header device switcher (the Accounts pattern): platform glyph
     /// · name · presence dot · sort glyph, opening a dropdown of every
     /// registered device.
-    fn render_device_switcher(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_device_switcher(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         use crate::icons::{self, icon};
         let (mut devices, local_id) = {
             let s = self.state.read(cx);
@@ -623,23 +616,19 @@ impl HarnessesPage {
             options.push(if is_local { option.detail("You") } else { option });
             targets.push((!is_local).then(|| device.id.clone()));
         }
-        let selected =
-            match devices.iter().position(|d| Some(d.id.as_str()) == effective.as_deref()) {
-                Some(ix) => ix,
-                // Not registered (yet): keep the current target reachable.
-                None => {
-                    let muted = theme.text_muted;
-                    options.push(widgets::SelectOption::new("This device").leading(move || {
-                        icon(icons::LAPTOP)
-                            .size(px(16.0))
-                            .flex_none()
-                            .text_color(muted)
-                            .into_any_element()
-                    }));
-                    targets.push(self.target_device.clone());
-                    options.len() - 1
-                }
-            };
+        let selected = if let Some(ix) =
+            devices.iter().position(|d| Some(d.id.as_str()) == effective.as_deref())
+        {
+            ix
+        } else {
+            // Not registered (yet): keep the current target reachable.
+            let muted = theme.text_muted;
+            options.push(widgets::SelectOption::new("This device").leading(move || {
+                icon(icons::LAPTOP).size(px(16.0)).flex_none().text_color(muted).into_any_element()
+            }));
+            targets.push(self.target_device.clone());
+            options.len().saturating_sub(1)
+        };
         widgets::select("harnesses-device-switcher", "Device", theme, |page: &mut Self| {
             &mut page.device_select
         })
@@ -884,12 +873,6 @@ impl HarnessesPage {
             })
             .collect()
     }
-
-    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if self.scroll.set_list_hovered(*hovered) {
-            cx.notify();
-        }
-    }
 }
 
 impl popover::ScrollRailHost for HarnessesPage {
@@ -945,7 +928,7 @@ impl Render for HarnessesPage {
             .id("harnesses-page-host")
             .relative()
             .size_full()
-            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .on_hover(widgets::PageScroll::hover_listener(cx, |page| &mut page.scroll))
             .child(
                 crate::edge_fade::edge_faded(
                     16.0,
@@ -955,7 +938,7 @@ impl Render for HarnessesPage {
                         .id("harnesses-page")
                         .size_full()
                         .overflow_y_scroll()
-                        .track_scroll(&self.scroll.scroll)
+                        .track_scroll(self.scroll.handle())
                         .child(
                             widgets::page_column()
                                 // One page head (`widgets::page_head`).
@@ -970,7 +953,7 @@ impl Render for HarnessesPage {
                                 .child(autonomy),
                         ),
                 )
-                .fade_overflow_y(&self.scroll.scroll),
+                .fade_overflow_y(self.scroll.handle()),
             )
             .children(scrollbar)
     }
@@ -1005,7 +988,7 @@ mod row_tests {
     fn an_installed_agent_says_so_and_no_row_opens(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::default());
         });
@@ -1120,7 +1103,7 @@ mod install_tests {
         let ended = Rc::new(RefCell::new(None::<i32>));
         let heard: Heard = Rc::default();
         cx.update(|cx| {
-            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::default());
             let (ended, heard) = (Rc::clone(&ended), Rc::clone(&heard));
@@ -1148,9 +1131,12 @@ mod install_tests {
             );
         });
         let machine = Arc::new(Machine::default());
-        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
-            Arc::clone(&machine) as Arc<dyn slopty_view_rpc::RpcService>,
-        ));
+        let engine =
+            crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(Arc::<
+                Machine,
+            >::clone(
+                &machine,
+            )));
         let (page, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| {
                 let mut state = crate::state::AppState::new();
@@ -1275,7 +1261,7 @@ fn install_phase_copy_and_cancel_target_match_install() {
     assert_eq!(install_label("Claude Code"), "Installing Claude Code…");
     assert_eq!(install_label("Pi"), "Installing Pi…");
     for target in [None, Some("remote-device".to_owned())] {
-        let params = install_params(HarnessId::PI, &target);
+        let params = install_params(HarnessId::PI, target.as_deref());
         assert_eq!(params["harness"], "pi");
         assert_eq!(params["targetDeviceId"], serde_json::to_value(&target).unwrap());
     }

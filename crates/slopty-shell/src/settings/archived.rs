@@ -348,7 +348,7 @@ impl Render for ArchivedPage {
                         .id("archived-page")
                         .size_full()
                         .overflow_y_scroll()
-                        .track_scroll(&self.scroll.scroll)
+                        .track_scroll(self.scroll.handle())
                         .child(
                             widgets::page_column()
                                 // One page head (`widgets::page_head`), no action: a
@@ -364,7 +364,7 @@ impl Render for ArchivedPage {
                                 .children(pagination),
                         ),
                 )
-                .fade_overflow_y(&self.scroll.scroll),
+                .fade_overflow_y(self.scroll.handle()),
             )
             .children(scrollbar)
     }

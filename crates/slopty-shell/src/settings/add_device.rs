@@ -1,25 +1,10 @@
-//! Settings → Devices' Add device dialog: this Mac shared, a machine installed over ssh (or the
-//! server set up there), or the server this app follows. The app runs each (`AddDevice`); the
-//! dialog draws its steps, the host key or password a run stops to ask for, this Mac's
-//! checklist with each line's fix, the servers to choose between, and what was added. A look on
-//! the tailnet (`LookOnTailnet`) offers the servers and machines that answer.
-#![allow(
-    let_underscore_drop,
-    missing_copy_implementations,
-    missing_debug_implementations,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::indexing_slicing,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    reason = "shell lint migration: slice D"
-)]
+//! Settings → Devices' Add device dialog.
+//!
+//! It adds this Mac shared, a machine installed over ssh (or the server set up there), or the
+//! server this app follows. The app runs each (`AddDevice`); the dialog draws its steps, the host
+//! key or password a run stops to ask for, this Mac's checklist with each line's fix, the servers
+//! to choose between, and what was added. A look on the tailnet (`LookOnTailnet`) offers the
+//! servers and machines that answer.
 
 use gpui::prelude::*;
 use gpui::{
@@ -152,6 +137,7 @@ struct Node {
 }
 
 /// The dialog is done: the page lets it go.
+#[derive(Debug, Clone, Copy)]
 pub struct Closed;
 
 /// The Add device dialog.
@@ -170,10 +156,10 @@ pub struct AddDeviceDialog {
     /// Why the dialog cannot go on, said under the fields.
     note: Option<SharedString>,
     /// Reads the run's stream; dropped, it stops the run.
-    run: Option<Task<()>>,
-    answer: Option<Task<()>>,
+    run: Option<Task<anyhow::Result<()>>>,
+    answer: Option<Task<anyhow::Result<()>>>,
     found: Option<Found>,
-    look: Option<Task<()>>,
+    look: Option<Task<anyhow::Result<()>>>,
     /// What had the keyboard before the dialog took it, given back as it closes.
     restore: Option<gpui::FocusHandle>,
     /// The card's own: it holds the keyboard while a run goes and the button that started the
@@ -190,6 +176,17 @@ pub struct AddDeviceDialog {
 
 impl EventEmitter<Closed> for AddDeviceDialog {}
 
+impl std::fmt::Debug for AddDeviceDialog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddDeviceDialog")
+            .field("choice", &self.choice)
+            .field("serve", &self.serve)
+            .field("open", &self.open)
+            .field("note", &self.note)
+            .finish_non_exhaustive()
+    }
+}
+
 impl AddDeviceDialog {
     /// The dialog on `choice` (the first offered when this device does not offer it), its field
     /// with the keyboard.
@@ -199,8 +196,11 @@ impl AddDeviceDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let choice =
-            if Choice::offered().contains(&choice) { choice } else { Choice::offered()[0] };
+        let choice = if Choice::offered().contains(&choice) {
+            choice
+        } else {
+            Choice::offered().first().copied().unwrap_or(choice)
+        };
         let target = cx.new(|cx| {
             InputState::new(window, cx).placeholder("mac-mini, me@build-box or 100.64.0.7")
         });
@@ -295,24 +295,22 @@ impl AddDeviceDialog {
         cx.notify();
     }
 
-    fn look_on_tailnet(&mut self, cx: &mut Context<Self>) {
+    fn look_on_tailnet(&mut self, cx: &Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else { return };
         self.look = Some(cx.spawn(async move |this, cx| {
             let subscribed = engine
                 .client()
                 .subscribe_checked(methods::LOOK_ON_TAILNET, serde_json::json!({}))
                 .await;
-            let Ok(mut stream) = subscribed else { return };
+            let Ok(mut stream) = subscribed else { return Ok(()) };
             while let Some(value) = stream.recv().await {
                 let Ok(found) = serde_json::from_value::<Found>(value) else { continue };
-                let kept = this.update(cx, |dialog, cx| {
+                this.update(cx, |dialog, cx| {
                     dialog.found = Some(found);
                     cx.notify();
-                });
-                if kept.is_err() {
-                    return;
-                }
+                })?;
             }
+            Ok(())
         }));
     }
 
@@ -462,30 +460,24 @@ impl AddDeviceDialog {
             let mut stream = match subscribed {
                 Ok(stream) => stream,
                 Err(err) => {
-                    this.update(cx, |dialog, cx| {
+                    return this.update(cx, |dialog, cx| {
                         dialog.open = false;
                         dialog.note = Some(err.to_string().into());
                         cx.notify();
-                    })
-                    .ok();
-                    return;
+                    });
                 }
             };
             while let Some(value) = stream.recv().await {
                 let Ok(progress) = serde_json::from_value::<Progress>(value) else { continue };
-                let kept = this.update(cx, |dialog, cx| {
+                this.update(cx, |dialog, cx| {
                     dialog.progress = Some(progress);
                     cx.notify();
-                });
-                if kept.is_err() {
-                    return;
-                }
+                })?;
             }
             this.update(cx, |dialog, cx| {
                 dialog.open = false;
                 cx.notify();
             })
-            .ok();
         }));
         cx.notify();
     }
@@ -511,7 +503,6 @@ impl AddDeviceDialog {
                 }
                 cx.notify();
             })
-            .ok();
         }));
         cx.notify();
     }
@@ -520,7 +511,7 @@ impl AddDeviceDialog {
     fn answer_with(
         &mut self,
         key: &'static str,
-        value: String,
+        value: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -546,12 +537,7 @@ impl AddDeviceDialog {
         self.go(window, cx);
     }
 
-    fn render_tabs(
-        &self,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_tabs(&self, theme: &Theme, window: &mut Window, cx: &Context<Self>) -> AnyElement {
         let offered = Choice::offered();
         if offered.len() < 2 {
             return div().into_any_element();
@@ -592,7 +578,7 @@ impl AddDeviceDialog {
 
     /// The nodes the tailnet offered for the choice on show: servers to connect to, machines to
     /// install on.
-    fn render_found(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_found(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
         let found = self.found.as_ref()?;
         let server = match self.choice {
             Choice::Server => true,
@@ -684,12 +670,7 @@ impl AddDeviceDialog {
         Some(list.into_any_element())
     }
 
-    fn render_steps(
-        &self,
-        theme: &Theme,
-        progress: &Progress,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_steps(&self, theme: &Theme, progress: &Progress, cx: &Context<Self>) -> AnyElement {
         let waits = self.open;
         let mut list = div().mt(px(16.0)).flex().flex_col().gap(px(2.0));
         for (ix, step) in progress.steps.iter().enumerate() {
@@ -737,7 +718,7 @@ impl AddDeviceDialog {
                     .role(gpui::Role::Button)
                     .aria_label(fix.label)
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.answer_with("fix", id.clone(), window, cx);
+                        this.answer_with("fix", &id, window, cx);
                     }))
             });
             list = list.child(
@@ -818,14 +799,14 @@ impl AddDeviceDialog {
                             .child("Join"),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.answer_with("choose", at.clone(), window, cx);
+                        this.answer_with("choose", &at, window, cx);
                     })),
             );
         }
         list.into_any_element()
     }
 
-    fn render_failure(&self, theme: &Theme, failure: &Failure, cx: &App) -> AnyElement {
+    fn render_failure(theme: &Theme, failure: &Failure, cx: &App) -> AnyElement {
         let mono = crate::typography::code_effective_family_name(cx);
         let mut details: Vec<AnyElement> = Vec::new();
         if let Some(hint) = failure.hint.clone() {
@@ -938,7 +919,7 @@ impl Render for AddDeviceDialog {
         });
         let found = progress.is_none().then(|| self.render_found(&theme, cx)).flatten();
         let steps = progress.as_ref().map(|p| self.render_steps(&theme, p, cx));
-        let failure_block = failure.as_ref().map(|f| self.render_failure(&theme, f, cx));
+        let failure_block = failure.as_ref().map(|f| Self::render_failure(&theme, f, cx));
         let ask = self.render_ask(&theme, cx);
         let added_line = added.clone().map(|added| {
             div()
@@ -1097,6 +1078,11 @@ fn share_on(steps: &[Step], share: Option<f32>) -> Option<usize> {
 }
 
 /// A share of 0 to 1 as a whole percent, a share out of range held to it.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 0..=1 and scaled, the rounded percent is a whole 0..=100"
+)]
 fn share_percent(share: f32) -> u8 {
     (share.clamp(0.0, 1.0) * 100.0).round() as u8
 }
@@ -1269,7 +1255,7 @@ mod tests {
         dialog.update_in(cx, |dialog, window, cx| dialog.choose(Choice::Ssh, window, cx));
         assert_eq!(focused(cx), (gpui::Role::TextInput, "Machine's name or address".to_owned()));
         cx.simulate_input("nohost");
-        let _ = focused(cx);
+        focused(cx);
         let typed = dialog.read_with(cx, |dialog, cx| dialog.target.read(cx).value().to_string());
         assert_eq!(typed, "nohost", "the keys land in the field");
         let value = cx.update(|window, _| {
@@ -1291,10 +1277,11 @@ mod tests {
         dialog: &Entity<AddDeviceDialog>,
         cx: &mut gpui::VisualTestContext,
     ) -> std::rc::Rc<std::cell::Cell<u32>> {
-        let closed = std::rc::Rc::new(std::cell::Cell::new(0));
-        let seen = closed.clone();
+        let closed = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let seen = std::rc::Rc::clone(&closed);
         cx.update(|_, cx| {
-            cx.subscribe(dialog, move |_, _: &Closed, _| seen.set(seen.get() + 1)).detach();
+            cx.subscribe(dialog, move |_, _: &Closed, _| seen.set(seen.get().saturating_add(1)))
+                .detach();
         });
         closed
     }
@@ -1305,7 +1292,7 @@ mod tests {
     fn escape_closes_the_dialog_with_the_keyboard_on_nothing(cx: &mut gpui::TestAppContext) {
         let (dialog, cx) = dialog(cx);
         let closed = closes(&dialog, cx);
-        let _ = focused(cx);
+        focused(cx);
         cx.update(Window::blur);
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
@@ -1318,7 +1305,7 @@ mod tests {
     fn escape_closes_the_dialog_with_the_keyboard_on_a_button_gone(cx: &mut gpui::TestAppContext) {
         let (dialog, cx) = dialog(cx);
         let closed = closes(&dialog, cx);
-        let _ = focused(cx);
+        focused(cx);
         dialog.update_in(cx, |dialog, window, cx| {
             window.focus(&dialog.go_focus, cx);
             dialog.open = true;

@@ -4,22 +4,6 @@
 // A machine is named by its own name. Add device is Slopty's own dialog (`add_device`): this
 // Mac, a machine over ssh, or the server. The page shows the server this app follows, with a way
 // to change it.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::clone_on_ref_ptr,
-    clippy::manual_midpoint,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::string_slice,
-    clippy::too_long_first_doc_paragraph,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    reason = "shell lint migration: slice D"
-)]
 
 use chrono::{DateTime, Utc};
 use gpui::prelude::*;
@@ -66,8 +50,9 @@ pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
     }
 }
 
-/// When a machine last seen at `last_seen`, read at `now`, next reads differently: its
-/// "Online" ends past the window, and "Last seen" moves on by the minute, the hour or the day
+/// When a machine last seen at `last_seen`, read at `now`, next reads differently.
+///
+/// Its "Online" ends past the window, and "Last seen" moves on by the minute, the hour or the day
 /// it says. `None` for a machine never seen.
 pub fn presence_changes(
     last_seen: Option<DateTime<Utc>>,
@@ -88,13 +73,15 @@ pub fn presence_changes(
     } else {
         DAY
     };
-    at.checked_add_signed(chrono::Duration::seconds((age / step + 1) * step))
+    let next = age.checked_div(step)?.checked_add(1)?.checked_mul(step)?;
+    at.checked_add_signed(chrono::TimeDelta::try_seconds(next)?)
 }
 
 /// What the page says it lists.
 const DEVICES_SUBTITLE: &str =
     "The machines Slopty works on, each with its own agents, files and terminals.";
 
+/// Settings → Devices.
 pub struct DevicesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
@@ -105,7 +92,7 @@ pub struct DevicesPage {
     add_server: Option<String>,
     error: Option<SharedString>,
     // The action call under way.
-    action_task: Option<Task<()>>,
+    action_task: Option<Task<anyhow::Result<()>>>,
     // The server's code is up ("Connect a phone").
     inviting: bool,
     // The code's dialog holds the keyboard while it shows.
@@ -115,8 +102,18 @@ pub struct DevicesPage {
     /// turns from Online to Last seen without anything else moving.
     clock: DateTime<Utc>,
     /// The clock taken again when the soonest machine's presence next reads differently.
-    clock_tick: Option<Task<()>>,
+    clock_tick: Option<Task<anyhow::Result<()>>>,
     _observe: Subscription,
+}
+
+impl std::fmt::Debug for DevicesPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DevicesPage")
+            .field("add_wanted", &self.add_wanted)
+            .field("inviting", &self.inviting)
+            .field("clock", &self.clock)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The copy span's key for one device's ID.
@@ -125,6 +122,7 @@ fn copied_key(device_id: &str) -> String {
 }
 
 impl DevicesPage {
+    /// The page over `state`'s machines.
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |page, _, cx| {
             page.take_clock(cx);
@@ -150,7 +148,7 @@ impl DevicesPage {
 
     /// Take the clock now, and again when the soonest other machine's presence next
     /// reads differently ([`presence_changes`]), drawing the page then.
-    fn take_clock(&mut self, cx: &mut Context<Self>) {
+    fn take_clock(&mut self, cx: &Context<Self>) {
         self.clock = crate::clock::utc(cx);
         let now = self.clock;
         let state = self.state.read(cx);
@@ -162,15 +160,17 @@ impl DevicesPage {
             .min();
         self.clock_tick = next.map(|at| {
             // A hair past the change, so the clock taken then reads it.
-            let wait =
-                (at - now).to_std().unwrap_or_default() + std::time::Duration::from_millis(5);
+            let wait = at
+                .signed_duration_since(now)
+                .to_std()
+                .unwrap_or_default()
+                .saturating_add(std::time::Duration::from_millis(5));
             cx.spawn(async move |page, cx| {
                 cx.background_executor().timer(wait).await;
                 page.update(cx, |page, cx| {
                     page.take_clock(cx);
                     cx.notify();
                 })
-                .ok();
             })
         });
     }
@@ -236,15 +236,15 @@ impl DevicesPage {
 
     // A copy keeps the button's size and words: its glyph turns to a check and its
     // tooltip says "Copied" for the shared span (M5).
-    fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(device_id.clone()));
-        crate::motion::copy_feedback(copied_key(&device_id), cx);
+    fn copy_id(device_id: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(device_id.to_owned()));
+        crate::motion::copy_feedback(copied_key(device_id), cx);
         cx.notify();
     }
 
     // A machine's (or the server's, `"server"`) action, run by the app; it says how
     // that went in a toast, and a call that does not reach it is said here.
-    fn run_action(&mut self, device_id: String, action: String, cx: &mut Context<Self>) {
+    fn run_action(&mut self, device_id: String, action: String, cx: &Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else { return };
         self.action_task = Some(cx.spawn(async move |this, cx| {
             let params = serde_json::json!({ "deviceId": device_id, "action": action });
@@ -256,14 +256,7 @@ impl DevicesPage {
                     cx.notify();
                 }
             })
-            .ok();
         }));
-    }
-
-    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if self.scroll.set_list_hovered(*hovered) {
-            cx.notify();
-        }
     }
 }
 
@@ -313,7 +306,11 @@ fn action_tone(id: &str) -> widgets::ActionTone {
 
 /// Short device id for the click-to-copy chip (`abcd1234…wxyz`).
 pub fn short_id(id: &str) -> String {
-    if id.len() > 12 { format!("{}…{}", &id[..8], &id[id.len() - 4..]) } else { id.to_owned() }
+    let tail = id.len().checked_sub(4).and_then(|from| id.get(from..));
+    match (id.get(..8), tail) {
+        (Some(head), Some(tail)) if id.len() > 12 => format!("{head}…{tail}"),
+        _ => id.to_owned(),
+    }
 }
 
 impl Render for DevicesPage {
@@ -470,8 +467,8 @@ impl Render for DevicesPage {
                             .tooltip_show_delay(widgets::TOOLTIP_DELAY)
                             .aria_label(format!("Copy device ID {}", device.id))
                             .map(|el| crate::surface_chrome::focus_ring(el, &theme))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.copy_id(copy_id.clone(), cx);
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                Self::copy_id(&copy_id, cx);
                             })),
                     ),
                 )
@@ -623,7 +620,7 @@ impl Render for DevicesPage {
             .id("devices-page-host")
             .relative()
             .size_full()
-            .on_hover(cx.listener(Self::on_scroll_hovered))
+            .on_hover(widgets::PageScroll::hover_listener(cx, |page| &mut page.scroll))
             .child(
                 crate::edge_fade::edge_faded(
                     16.0,
@@ -633,7 +630,7 @@ impl Render for DevicesPage {
                         .id("devices-page")
                         .size_full()
                         .overflow_y_scroll()
-                        .track_scroll(&self.scroll.scroll)
+                        .track_scroll(self.scroll.handle())
                         .child(
                             widgets::page_column()
                                 // Slopty's machines, not a synced registry; one page head.
@@ -647,7 +644,7 @@ impl Render for DevicesPage {
                                 .child(card),
                         ),
                 )
-                .fade_overflow_y(&self.scroll.scroll),
+                .fade_overflow_y(self.scroll.handle()),
             )
             .children(scrollbar)
             .when_some(dialog, ParentElement::child)
@@ -668,7 +665,7 @@ mod tests {
         cx.update(|cx| cx.set_global(Theme::default()));
         let state = cx.new(|_| AppState::new());
         let page = cx.new(|cx| DevicesPage::new(state, cx));
-        page.update(cx, |page, cx| page.copy_id("studio".into(), cx));
+        page.update(cx, |_, cx| DevicesPage::copy_id("studio", cx));
         assert_eq!(
             cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
             Some("studio")
@@ -744,6 +741,7 @@ mod tests {
     /// The Add device dialog keeps its top edge as its tabs change what it holds: only its foot
     /// moves.
     #[gpui::test]
+    #[expect(clippy::cast_possible_truncation, reason = "a window's points fit f32")]
     fn the_add_device_dialog_keeps_its_top_across_tabs(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
         cx.update(|cx| {
@@ -775,8 +773,8 @@ mod tests {
                             (
                                 r.y0 / scale,
                                 r.y1 / scale,
-                                (r.x0 + r.x1) / 2.0 / scale,
-                                (r.y0 + r.y1) / 2.0 / scale,
+                                f64::midpoint(r.x0, r.x1) / scale,
+                                f64::midpoint(r.y0, r.y1) / scale,
                             )
                         })
                 };
@@ -811,13 +809,13 @@ mod tests {
     fn a_silent_machine_goes_offline_by_the_page_s_own_clock(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
         let now = cx.update(|cx| crate::clock::utc(cx));
-        let seen = now - TimeDelta::seconds(60);
+        let seen = now.checked_sub_signed(TimeDelta::seconds(60)).unwrap();
         let state = cx.new(|_| {
             let mut state = AppState::new();
             state.local_device_id = Some("here".into());
             state.devices = vec![
                 serde_json::from_value(serde_json::json!({
-                    "id": "here", "name": "Studio", "platform": "macos", "lastSeenAt": now - TimeDelta::days(3),
+                    "id": "here", "name": "Studio", "platform": "macos", "lastSeenAt": now.checked_sub_signed(TimeDelta::days(3)).unwrap(),
                 }))
                 .unwrap(),
                 serde_json::from_value(serde_json::json!({
@@ -828,10 +826,10 @@ mod tests {
             state
         });
         let page = cx.new(|cx| DevicesPage::new(state, cx));
-        let drawn = std::rc::Rc::new(std::cell::Cell::new(0));
+        let drawn = std::rc::Rc::new(std::cell::Cell::new(0_usize));
         let _drawn = cx.update(|cx| {
-            let drawn = drawn.clone();
-            cx.observe(&page, move |_, _| drawn.set(drawn.get() + 1))
+            let drawn = std::rc::Rc::clone(&drawn);
+            cx.observe(&page, move |_, _| drawn.set(drawn.get().saturating_add(1)))
         });
         let says = |cx: &mut gpui::TestAppContext| {
             page.read_with(cx, |page, _| {
