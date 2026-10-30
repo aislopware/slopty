@@ -363,9 +363,14 @@ impl Inspector {
         self.state.update(cx, |state, cx| state.watch_subagent_doc(chat.clone(), cx));
         let (state, doc) = (self.state.clone(), chat.clone());
         let depth = self.shown().read(cx).depth();
+        // Its links are the open chat's, as its trace is: a chat's chip in it opens that chat.
+        let links = self.transcript.read(cx).drilled_link_handler();
         let transcript = cx.new(|cx| {
             let mut transcript = Transcript::for_doc(state, doc, running, cx);
             transcript.set_depth(depth, cx);
+            if let Some(links) = links {
+                transcript.set_workspace_link_handler(links);
+            }
             transcript
         });
         let drills =

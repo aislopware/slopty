@@ -6,7 +6,7 @@
 use gpui::accesskit::Role;
 use gpui::{TestAppContext, VisualTestContext};
 
-use super::retention_tests::{DESKTOP, device, draw, find, frames, launch, space, tree};
+use super::retention_tests::{DESKTOP, chat_row, device, draw, find, frames, launch, space, tree};
 use super::*;
 
 /// A title the agent gives a chat rises in over the old on its sidebar row and in the
@@ -304,35 +304,34 @@ fn each_move_between_settings_and_the_chats_fades_the_page_in(cx: &mut TestAppCo
 }
 
 /// The inspector and the chat menu, drawn over a shell holding three local chats.
-/// A chat's chip in the inspector's timeline opens that chat when clicked, as the same link
-/// opened from another app does (`crate::open_conversation_link`).
-#[gpui::test]
-fn a_click_on_a_chats_chip_opens_its_chat(cx: &mut TestAppContext) {
-    let (shell, cx) = launch(cx, DESKTOP);
-    shell.update(cx, |shell, cx| shell.open_chat("a".into(), cx));
-    frames(cx, Duration::from_millis(16), 60);
-    cx.update(|_, cx| shell.update(cx, Shell::toggle_inspector));
-    let here = crate::links::workspace_locator(Some(WorkspaceScope::Local), Some("local")).unwrap();
-    let link = crate::links::slopty_conversation_link("b", &here);
-    let reply = slopty_view_doc::SessionMessageEntry {
-        id: "a:answer".into(),
+/// A finished reply, `id`, saying `parts`.
+fn reply(
+    id: &str,
+    parts: Vec<slopty_view_doc::MessagePart>,
+) -> slopty_view_doc::SessionMessageEntry {
+    slopty_view_doc::SessionMessageEntry {
+        id: id.into(),
         role: slopty_view_doc::MessageRole::Assistant,
-        parts: vec![slopty_view_doc::MessagePart::Text {
-            id: "a:answer:t".into(),
-            text: format!("Carried on in [the other chat]({link})."),
-        }],
+        parts,
         created_at: Utc::now().timestamp_millis(),
         device_id: "local".into(),
         status: Some(slopty_view_doc::MessageStatus::Complete),
         duration_ms: None,
-    };
-    shell.update(cx, |shell, cx| {
-        shell.state.update(cx, |state, cx| {
-            state.apply_transcript(vec![reply]);
-            cx.notify();
-        });
-    });
-    frames(cx, Duration::from_millis(16), 60);
+    }
+}
+
+/// Words, `id`, that link to chat `b`: a chat's chip once drawn.
+fn link_to_b(id: &str) -> slopty_view_doc::MessagePart {
+    let here = crate::links::workspace_locator(Some(WorkspaceScope::Local), Some("local")).unwrap();
+    let link = crate::links::slopty_conversation_link("b", &here);
+    slopty_view_doc::MessagePart::Text {
+        id: id.into(),
+        text: format!("Carried on in [the other chat]({link})."),
+    }
+}
+
+/// Click the chip to chat `b` in the frame drawn now; the chat selected after.
+fn click_the_chip(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
     let nodes = tree(cx);
     let links: Vec<&str> = nodes
         .values()
@@ -348,8 +347,82 @@ fn a_click_on_a_chats_chip_opens_its_chat(cx: &mut TestAppContext) {
         .clone();
     cx.simulate_click(chip.bounds.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    let selected = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
-    assert_eq!(selected.as_deref(), Some("b"), "the chip opens its chat");
+    shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
+}
+
+/// A chat's chip in the inspector's timeline opens that chat when clicked, as the same link
+/// opened from another app does (`crate::open_conversation_link`).
+#[gpui::test]
+fn a_click_on_a_chats_chip_opens_its_chat(cx: &mut TestAppContext) {
+    let (shell, cx) = launch(cx, DESKTOP);
+    shell.update(cx, |shell, cx| shell.open_chat("a".into(), cx));
+    frames(cx, Duration::from_millis(16), 60);
+    cx.update(|_, cx| shell.update(cx, Shell::toggle_inspector));
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(vec![reply("a:answer", vec![link_to_b("a:answer:t")])]);
+            cx.notify();
+        });
+    });
+    frames(cx, Duration::from_millis(16), 60);
+    assert_eq!(click_the_chip(&shell, cx).as_deref(), Some("b"), "the chip opens its chat");
+}
+
+/// A subagent's run drilled into from the inspector belongs to the open chat, so a chat's chip
+/// in its trace opens that chat as the open chat's own chips do.
+#[gpui::test]
+fn a_chats_chip_in_a_drilled_subagent_opens_its_chat(cx: &mut TestAppContext) {
+    let (shell, cx) = launch(cx, DESKTOP);
+    let now = Utc::now();
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.chats.push(chat_row("child", 0, Some(("a", true)), now));
+        });
+        shell.open_chat("a".into(), cx);
+    });
+    frames(cx, Duration::from_millis(16), 60);
+    cx.update(|_, cx| shell.update(cx, Shell::toggle_inspector));
+    // A finished subagent's spawn whose run, chat `child`, links to chat `b`.
+    let spawn = slopty_view_doc::MessagePart::Tool {
+        id: "spawn".into(),
+        call: slopty_view_proto::ToolCall::Unknown {
+            name: "Agent: Count lines".into(),
+            input: Some(serde_json::json!({ "description": "Count lines" })),
+        },
+        is_error: false,
+        resolved: true,
+        output: None,
+        output_ref: None,
+        output_bytes: None,
+        diff_ref: None,
+        diff_stats: None,
+        subagent_ref: Some("child".into()),
+        subagent_status: Some(slopty_view_doc::SubagentStatus::Done),
+        facts: Some(Box::new(slopty_view_doc::ToolFacts {
+            subagent_progress: Some(slopty_view_doc::SubagentProgress {
+                state: slopty_view_doc::SubagentProgress::DONE.into(),
+                chat_id: Some("child".into()),
+                ..slopty_view_doc::SubagentProgress::default()
+            }),
+            ..slopty_view_doc::ToolFacts::default()
+        })),
+    };
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.set_subagent_snapshot("child".into(), vec![reply("c", vec![link_to_b("c:t")])]);
+            state.apply_transcript(vec![reply("a:answer", vec![spawn])]);
+            cx.notify();
+        });
+    });
+    frames(cx, Duration::from_millis(16), 60);
+    let open = find(&tree(cx), Role::Button, "Open subagent").expect("the run's Open");
+    cx.simulate_click(open.bounds.center(), gpui::Modifiers::default());
+    frames(cx, Duration::from_millis(16), 60);
+    assert_eq!(
+        click_the_chip(&shell, cx).as_deref(),
+        Some("b"),
+        "the chip in the drilled run opens its chat"
+    );
 }
 
 mod session_card {

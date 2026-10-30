@@ -3573,6 +3573,17 @@ impl Transcript {
         self.workspace_link = Some(handler);
     }
 
+    /// The link handler of a subagent's run drilled into from this chat's timeline: this
+    /// transcript's own, its links counted as this chat's, since the run belongs to the chat
+    /// open. `None` while this transcript has none, or no chat.
+    pub(crate) fn drilled_link_handler(&self) -> Option<render::LinkUi> {
+        let mut link = self.workspace_link.clone()?;
+        if link.source_session.is_none() {
+            link.source_session = Some(self.chat_id.clone()?);
+        }
+        Some(link)
+    }
+
     pub(crate) fn link_ui(&mut self, cx: &Context<Self>) -> Option<render::LinkUi> {
         let source = self
             .workspace_link
