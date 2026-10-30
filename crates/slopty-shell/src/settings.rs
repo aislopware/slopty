@@ -40,11 +40,6 @@ pub const SIDEBAR_MIN: f32 = 242.0;
 pub const SIDEBAR_MAX: f32 = 400.0;
 pub const SIDEBAR_DEFAULT: f32 = 256.0;
 
-/// Independent file explorer width preference and drag bounds (px).
-pub const FILES_PANEL_DEFAULT: f32 = 286.0;
-pub const FILES_PANEL_MIN: f32 = 220.0;
-pub const FILES_PANEL_MAX: f32 = 440.0;
-
 /// Surface pane floor and default (px). Runtime sizing also reserves space
 /// for the conversation and any docked file explorer.
 pub const RIGHT_PANE_MIN: f32 = 360.0;
@@ -418,16 +413,6 @@ pub struct PaletteUse {
     pub last_ms: i64,
 }
 
-/// One chat's open panes, as `ui-settings.json` keeps them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct SavedPanels {
-    pub files: bool,
-    pub terminal: bool,
-    pub changes: bool,
-    pub expanded: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
@@ -439,16 +424,6 @@ pub struct UiSettings {
     /// also the new-tab default when the sidebar filter is "All".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_space_id: Option<String>,
-    /// Last successfully launched Action per project in this viewport.
-    #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub last_project_action_by_space_id: std::collections::HashMap<String, String>,
-    /// Open session tabs in visual order (drag-reorder edits in place).
-    /// Device-local: a tab is a local viewport onto the synced session list —
-    /// closing one never archives the session. Ids of archived/deleted chats
-    /// are pruned against the doc ([`Shell::sync_open_tabs`]). `None` = file
-    /// written by a pre-tabs build; seeded once from the last space's sessions.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub open_tabs: Option<Vec<String>>,
     /// Sidebar session filter: a space id, or `None` for "All spaces".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_filter: Option<String>,
@@ -461,11 +436,8 @@ pub struct UiSettings {
     /// or finished (`slopty_ui`'s `workspace::attention`); none make a sound
     /// (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a feed").
     pub notifications_enabled: bool,
-    pub files_panel_width: f32,
     pub right_pane_width: f32,
     pub terminal_height: f32,
-    /// Which panes each chat had open, kept across launches (`shell::SessionPanels`).
-    pub session_panels: std::collections::BTreeMap<String, SavedPanels>,
     /// What each chat's pane showed, kept across launches (`shell::kept_tabs`).
     pub session_tabs: std::collections::BTreeMap<String, SavedTabs>,
     /// How often and how lately the person ran each palette command, by its name: the palette
@@ -476,8 +448,8 @@ pub struct UiSettings {
     /// `markdown`. A kind not here is shown as its output reads.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub output_formats: std::collections::BTreeMap<String, String>,
-    /// Customizable shortcut combos (feature-inventory §1.4), kept as `shortcuts`: only what the
-    /// person changed.
+    /// The shortcuts the person rebound in Settings, kept as `shortcuts`: only what they
+    /// changed.
     #[serde(rename = "shortcuts")]
     pub keymap: KeymapConfig,
     /// The Settings section last viewed. ⌘, / Ctrl+,, the footer gear and the
@@ -540,15 +512,11 @@ impl Default for UiSettings {
             sidebar_width: SIDEBAR_DEFAULT,
             sidebar_collapsed: false,
             last_space_id: None,
-            last_project_action_by_space_id: std::collections::HashMap::new(),
-            open_tabs: None,
             space_filter: None,
             machine_filter: None,
             notifications_enabled: true,
-            files_panel_width: FILES_PANEL_DEFAULT,
             right_pane_width: RIGHT_PANE_DEFAULT,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
-            session_panels: std::collections::BTreeMap::new(),
             session_tabs: std::collections::BTreeMap::new(),
             palette_uses: std::collections::BTreeMap::new(),
             output_formats: std::collections::BTreeMap::new(),
@@ -654,7 +622,7 @@ impl ShortcutId {
         ShortcutId::JumpSession(8),
     ];
 
-    /// Row label (slopty lib/shortcuts.ts `SHORTCUT_DEFINITIONS`, verbatim).
+    /// The shortcut's name on its Settings row.
     pub fn label(self) -> &'static str {
         match self {
             ShortcutId::SaveFile => "Save file",
@@ -1223,15 +1191,11 @@ impl UiSettings {
             sidebar_width,
             sidebar_collapsed,
             last_space_id,
-            last_project_action_by_space_id,
-            open_tabs,
             space_filter,
             machine_filter,
             notifications_enabled,
-            files_panel_width,
             right_pane_width,
             terminal_height,
-            session_panels,
             session_tabs,
             output_formats,
             palette_uses,
@@ -1274,12 +1238,6 @@ impl UiSettings {
         );
         // The right pane has no persisted upper bound: its live drag clamps
         // against the current window, which is unavailable while loading.
-        self.files_panel_width = clamp_or(
-            self.files_panel_width,
-            FILES_PANEL_MIN,
-            FILES_PANEL_MAX,
-            FILES_PANEL_DEFAULT,
-        );
         self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
         self.terminal_height = clamp_or(
             self.terminal_height,
@@ -1749,18 +1707,11 @@ mod tests {
             sidebar_width: 300.0,
             sidebar_collapsed: true,
             last_space_id: Some("space-1".into()),
-            last_project_action_by_space_id: std::collections::HashMap::from([(
-                "space-1".into(),
-                "dev".into(),
-            )]),
-            open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
             machine_filter: Some("studio".into()),
             notifications_enabled: false,
-            files_panel_width: 310.0,
             right_pane_width: 700.0,
             terminal_height: 320.0,
-            session_panels: std::collections::BTreeMap::new(),
             session_tabs: std::collections::BTreeMap::new(),
             palette_uses: std::collections::BTreeMap::from([(
                 "Toggle sidebar".into(),
@@ -2053,31 +2004,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn files_panel_width_defaults_roundtrips_and_clamps() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth":256}"#).unwrap();
-        assert_eq!(
-            UiSettings::load(dir.path()).files_panel_width,
-            FILES_PANEL_DEFAULT
-        );
-        for (value, expected) in [
-            (310.0, 310.0),
-            (1.0, FILES_PANEL_MIN),
-            (900.0, FILES_PANEL_MAX),
-            (f32::NAN, FILES_PANEL_DEFAULT),
-        ] {
-            let settings = UiSettings {
-                files_panel_width: value,
-                ..Default::default()
-            }
-            .clamped();
-            assert_eq!(settings.files_panel_width, expected);
-            let encoded = serde_json::to_string(&settings).unwrap();
-            let decoded: UiSettings = serde_json::from_str(&encoded).unwrap();
-            assert_eq!(decoded.files_panel_width, expected);
-        }
-    }
 
     #[test]
     fn loaded_values_are_clamped() {
