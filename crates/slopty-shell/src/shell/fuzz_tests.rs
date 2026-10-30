@@ -839,7 +839,6 @@ fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut Tes
         created_at: now.timestamp_millis(),
         device_id: "local".into(),
         status,
-        continuation_of: None,
         duration_ms: None,
     };
     let entries = vec![

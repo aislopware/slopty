@@ -1356,7 +1356,7 @@ impl Shell {
         let art = match &space {
             Some(space) => {
                 let profile = self.active_profile_key(cx);
-                self.project_icons.render(&self.state, Some(space), profile, false, cx)
+                self.project_icons.render(&self.state, Some(space), profile.as_deref(), false, cx)
             }
             None => {
                 icon(icons::FOLDER).size(px(16.0)).text_color(theme.text_muted).into_any_element()
@@ -1612,7 +1612,7 @@ impl Shell {
                 (Some(space), _) => self.project_icons.render(
                     &self.state,
                     Some(space),
-                    profile.clone(),
+                    profile.as_deref(),
                     detail.selected,
                     cx,
                 ),
@@ -1989,25 +1989,22 @@ impl Shell {
                 } else {
                     None
                 };
-                let element = self.render_chat_row(
-                    chat.id.clone(),
-                    transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                    )
-                    .into(),
-                    hint,
-                    SharedString::default(),
-                    SharedString::default(),
-                    None,
+                let chat_row = sidebar::ChatRow {
+                    id: &chat.id,
+                    title: transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
+                        .into(),
+                    title_hint: hint,
+                    time_ago: SharedString::default(),
+                    space_name: SharedString::default(),
+                    branch: None,
                     harness,
                     status,
-                    is_selected,
-                    false,
+                    selected: is_selected,
+                    archived: false,
                     jump_label,
-                    None,
-                    theme,
-                    cx,
-                );
+                    search_query: None,
+                };
+                let element = self.render_chat_row(chat_row, theme, cx);
                 // On a phone, swipe to archive, press long for its menu.
                 let element = self.compact_session_row(element, &chat.id, false, cx);
                 let element = div()
@@ -2174,25 +2171,22 @@ impl Shell {
                 let chat = row.chat;
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = chat.config.as_ref().map(|c| c.harness);
-                let element = self.render_chat_row(
-                    chat.id.clone(),
-                    transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                    )
-                    .into(),
-                    row.hint,
-                    SharedString::default(),
-                    SharedString::default(),
-                    None,
+                let chat_row = sidebar::ChatRow {
+                    id: &chat.id,
+                    title: transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
+                        .into(),
+                    title_hint: row.hint,
+                    time_ago: SharedString::default(),
+                    space_name: SharedString::default(),
+                    branch: None,
                     harness,
-                    row.status,
-                    is_selected,
-                    true,
-                    None,
-                    None,
-                    theme,
-                    cx,
-                );
+                    status: row.status,
+                    selected: is_selected,
+                    archived: true,
+                    jump_label: None,
+                    search_query: None,
+                };
+                let element = self.render_chat_row(chat_row, theme, cx);
                 // On a phone, swipe to bring back, press long for its menu.
                 list = list.child(self.compact_session_row(element, &chat.id, true, cx));
             }

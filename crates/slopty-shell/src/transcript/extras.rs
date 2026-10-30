@@ -884,7 +884,6 @@ mod tests {
             created_at: 1,
             device_id: "d".into(),
             status: Some(status),
-            continuation_of: None,
             duration_ms: None,
         }
     }
@@ -991,7 +990,6 @@ mod tests {
             created_at: 1,
             device_id: "d".into(),
             status: Some(MessageStatus::Complete),
-            continuation_of: None,
             duration_ms: None,
         };
         let mut rows = Vec::new();

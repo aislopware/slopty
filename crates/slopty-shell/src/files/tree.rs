@@ -191,7 +191,7 @@ impl FilesSurface {
         }
     }
 
-    pub(super) fn render_tree(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_tree(&mut self, cx: &Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let scrollbar = popover::rail(self, "files-tree-scrollbar", &theme, cx);
         self.reset_tree_drop_rows();

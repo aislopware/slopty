@@ -35,9 +35,6 @@ pub struct SessionMessageEntry {
     /// How far it is, for the agent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<MessageStatus>,
-    /// The entry it continues, when a long one was split.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continuation_of: Option<String>,
     /// Wall-clock length of this assistant turn, stamped when the segment
     /// finishes. Absent on user rows and live streams.
     #[serde(default, skip_serializing_if = "Option::is_none")]

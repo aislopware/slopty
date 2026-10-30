@@ -463,7 +463,6 @@ fn own_entry(
         created_at: at,
         device_id: device.to_owned(),
         status: None,
-        continuation_of: None,
         duration_ms: None,
     }
 }
@@ -821,7 +820,6 @@ fn tail<'a>(
             created_at: at,
             device_id: device.to_owned(),
             status: None,
-            continuation_of: None,
             duration_ms: None,
         });
     }
@@ -901,7 +899,6 @@ fn assistant(
         created_at: at,
         device_id: device.to_owned(),
         status,
-        continuation_of: None,
         duration_ms,
     }
 }

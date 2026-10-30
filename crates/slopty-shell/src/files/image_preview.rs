@@ -207,8 +207,6 @@ impl Render for ImagePreview {
                 gpui::size(px(source.width), px(source.height)),
                 None,
                 None,
-                window,
-                cx,
             ));
         } else if let Some(error) = self.error.clone() {
             root = root.child(

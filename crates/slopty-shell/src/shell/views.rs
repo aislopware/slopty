@@ -391,13 +391,9 @@ impl Shell {
                     .map_or_else(|| SharedString::from("File"), |path| workspace_file_title(path));
                 (icons::DOCUMENT, title)
             }
-            // The pane's name; its scope is the picker's.
-            RightSurface::Diff(id) => (
-                icons::FILE_DIFF,
-                self.diffs
-                    .get(&id)
-                    .map_or_else(|| "Changes".into(), |changes| changes.read(cx).tab_title()),
-            ),
+            // The pane's name; its scope ("Working tree", "Branch changes") is the picker's under
+            // the tab, said once (`docs/decisions/ui.md`, "The Changes pane names its scope once").
+            RightSurface::Diff(_) => (icons::FILE_DIFF, "Changes".into()),
             // Steps in time, as a trace reads; the eye is the inbox's.
             RightSurface::Inspector => (icons::SORT_BY_TIME, "Inspector".into()),
             RightSurface::Browser(id) => (

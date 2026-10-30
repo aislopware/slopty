@@ -1094,8 +1094,7 @@ impl MarkdownPreview {
                                     .relative()
                                     .child(render::render_block(
                                         &top.block,
-                                        ix,
-                                        ix,
+                                        (ix, ix),
                                         &opts,
                                         &theme,
                                         window,

@@ -84,19 +84,15 @@ pub fn roll_text(
     reduced: bool,
     now: Instant,
 ) -> gpui::AnyElement {
-    rolling(key, text.clone(), reduced, now)
+    rolling(key, &text, reduced, now)
         .unwrap_or_else(|| div().min_w_0().truncate().child(text).into_any_element())
 }
 
 /// The rolling element while `key`'s label is mid-roll, else `None` — for
 /// callers with their own at-rest presentation. Records `text` either way.
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "shell lint migration: seam, callers in slice A (`text` could be borrowed)"
-)]
 pub fn rolling(
     key: impl Into<SharedString>,
-    text: SharedString,
+    text: &SharedString,
     reduced: bool,
     now: Instant,
 ) -> Option<gpui::AnyElement> {
@@ -109,7 +105,7 @@ pub fn rolling(
             rolls.retain(|_, (_, roll)| roll.is_some());
         }
         let entry = rolls.entry(key).or_insert_with(|| (text.clone(), None));
-        if entry.0 != text {
+        if entry.0 != *text {
             let from = std::mem::replace(&mut entry.0, text.clone());
             entry.1 = (!reduced).then(|| Roll { from, to: text.clone(), started: now });
         }

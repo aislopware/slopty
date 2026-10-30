@@ -666,14 +666,9 @@ pub(crate) fn lightbox_with_size(
         })
     });
     let content = match natural_size {
-        Some(natural) => preview.viewer.render(
-            Arc::clone(&preview.image),
-            natural,
-            None,
-            preview.plate,
-            window,
-            cx,
-        ),
+        Some(natural) => {
+            preview.viewer.render(Arc::clone(&preview.image), natural, None, preview.plate)
+        }
         // The house's pending line, shown only past its grace.
         None => {
             crate::loaders::pending("attachment-preview-load", "Loading image…").into_any_element()

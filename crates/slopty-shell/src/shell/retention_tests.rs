@@ -106,7 +106,6 @@ pub(super) fn turn(chat: &str, now: DateTime<Utc>) -> Vec<SessionMessageEntry> {
         created_at: now.timestamp_millis(),
         device_id: "local".into(),
         status,
-        continuation_of: None,
         duration_ms: None,
     };
     let mut entries = Vec::new();

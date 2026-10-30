@@ -618,7 +618,7 @@ mod tests {
         opts.link = Some(LinkUi {
             source_session: Some("chat".into()),
             source_local: true,
-            file_roots: Some(Rc::new(vec![crate::workspace_links::FileLinkRoot {
+            file_roots: Some(Rc::from([crate::workspace_links::FileLinkRoot {
                 chat: Some("chat".into()),
                 root: "/repo".into(),
                 local: true,

@@ -121,7 +121,6 @@ fn entry(status: MessageStatus, parts: Vec<MessagePart>) -> SessionMessageEntry 
         created_at: 0,
         device_id: "dev".into(),
         status: Some(status),
-        continuation_of: None,
         duration_ms: None,
     }
 }
@@ -859,7 +858,6 @@ fn prompt(id: &str, words: &str) -> SessionMessageEntry {
         created_at: 0,
         device_id: "dev".into(),
         status: None,
-        continuation_of: None,
         duration_ms: None,
     }
 }

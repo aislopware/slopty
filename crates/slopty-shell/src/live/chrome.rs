@@ -333,16 +333,17 @@ pub fn tooltip_card_keyed(
     theme: &Theme,
 ) -> crate::frost::Frosted {
     let text: SharedString = text.into();
+    let caps = keys.as_deref().map(|keys| tooltip_keys(theme, keys));
     tooltip_frame(
         theme,
-        (text.clone(), keys.clone()),
+        (text.clone(), keys),
         div()
             .flex()
             .flex_row()
             .items_baseline()
             .gap(px(TOOLTIP_KEY_GAP))
             .child(div().min_w_0().child(text))
-            .children(keys.map(|keys| tooltip_keys(theme, keys))),
+            .children(caps),
     )
 }
 
@@ -393,9 +394,8 @@ pub fn tooltip_frame(
 
 /// A tooltip's keys, each drawn as its own cap (opencode's keybind: 14 px tall, at least as wide,
 /// 4 px each side, radius 2, a faint fill, the glyph at 11 px in the system face so ⇧ ⌥ ⏎ draw).
-#[expect(clippy::needless_pass_by_value, reason = "shell lint migration: seam, callers in slice D")]
-pub fn tooltip_keys(theme: &Theme, keys: SharedString) -> Div {
-    div().flex_none().flex().items_center().gap(px(2.0)).children(key_caps(&keys).into_iter().map(
+pub fn tooltip_keys(theme: &Theme, keys: &str) -> Div {
+    div().flex_none().flex().items_center().gap(px(2.0)).children(key_caps(keys).into_iter().map(
         |cap| {
             div()
                 .h(px(KEY_CAP_SIZE))

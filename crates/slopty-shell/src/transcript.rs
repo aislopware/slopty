@@ -1419,7 +1419,7 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
 #[cfg(test)]
 thread_local! { static FORBID_ROW_PREPARATION: Cell<bool> = const { Cell::new(false) }; }
 
-/// Build the block rows of one (already continuation-joined) entry.
+/// Build the block rows of one entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
 /// incremental parsers for live parts and a cache for complete ones; tests pass
@@ -3390,11 +3390,7 @@ pub struct Transcript {
     workspace_link: Option<render::LinkUi>,
     /// File-link roots per linking chat, valid for one
     /// `AppState::link_roots_revision`: every rendered row asks for them.
-    #[expect(
-        clippy::rc_buffer,
-        reason = "shell lint migration: seam, the type is `render::LinkUi::file_roots` in slice C"
-    )]
-    file_link_roots: (u64, HashMap<SharedString, Rc<Vec<crate::workspace_links::FileLinkRoot>>>),
+    file_link_roots: (u64, HashMap<SharedString, Rc<[crate::workspace_links::FileLinkRoot]>>),
     /// Inline code spans that name an existing file, rewritten into the
     /// Markdown links they stand for per text part (see
     /// [`crate::markdown::inline_code_links`]). Reset with the same
@@ -3609,15 +3605,11 @@ impl Transcript {
     /// the chat's own, its parent's, then this device's project roots. The
     /// memo keeps row rendering from rebuilding them every frame; a state
     /// change that can move a root clears it.
-    #[expect(
-        clippy::rc_buffer,
-        reason = "shell lint migration: seam, the type is `render::LinkUi::file_roots` in slice C"
-    )]
     fn file_link_roots(
         &mut self,
         chat_id: &SharedString,
         cx: &gpui::App,
-    ) -> Rc<Vec<crate::workspace_links::FileLinkRoot>> {
+    ) -> Rc<[crate::workspace_links::FileLinkRoot]> {
         let state = self.state.read(cx);
         let (revision, memo) = &mut self.file_link_roots;
         if *revision != state.link_roots_revision {
@@ -3625,7 +3617,7 @@ impl Transcript {
             memo.clear();
         }
         Rc::clone(
-            memo.entry(chat_id.clone()).or_insert_with(|| Rc::new(state.file_link_roots(chat_id))),
+            memo.entry(chat_id.clone()).or_insert_with(|| Rc::from(state.file_link_roots(chat_id))),
         )
     }
 
@@ -6697,8 +6689,7 @@ impl Transcript {
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
                 render::render_block(
                     &top.block,
-                    *block_ix,
-                    *block_ix,
+                    (*block_ix, *block_ix),
                     &opts,
                     &theme,
                     window,
@@ -6780,7 +6771,12 @@ impl Transcript {
                         ..opts.clone()
                     };
                     drop(render::render_block(
-                        &top.block, *block_ix, *block_ix, &seed_opts, &theme, window, None,
+                        &top.block,
+                        (*block_ix, *block_ix),
+                        &seed_opts,
+                        &theme,
+                        window,
+                        None,
                     ));
                     veil.borrow_mut().finish_seeding();
                 }
@@ -6788,8 +6784,7 @@ impl Transcript {
                 let timer = frame_stats_enabled().then(crate::clock::stopwatch);
                 let el = render::render_block(
                     &top.block,
-                    *block_ix,
-                    *block_ix,
+                    (*block_ix, *block_ix),
                     &opts,
                     &theme,
                     window,
@@ -7454,7 +7449,7 @@ impl Transcript {
         // 3 times · Ran 1 command"), like the working indicator's word.
         let rolled_summary = crate::roll_text::rolling(
             format!("tool-group-title-{row_id}"),
-            summary.text.clone(),
+            &summary.text,
             reduce_motion,
             crate::clock::now(cx),
         );
@@ -7760,7 +7755,12 @@ impl Transcript {
                                     cx,
                                 )
                             } else {
-                                detail_body(body, highlights, &format!("{key}-out"), theme)
+                                detail_body(
+                                    body,
+                                    highlights.as_deref(),
+                                    &format!("{key}-out"),
+                                    theme,
+                                )
                             });
                         }
                         if let Some(stderr) = output.and_then(|output| output.stderr.as_deref()) {
@@ -8469,7 +8469,7 @@ fn file_badge_name(path: &str) -> &str {
 /// lines, indentation intact, counted-tail truncation.
 fn detail_body(
     detail: &ToolDetail,
-    diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
+    diff_highlights: Option<&crate::changes::DiffHighlights>,
     selection_key: &str,
     theme: &Theme,
 ) -> AnyElement {
@@ -11010,7 +11010,6 @@ mod tests {
             created_at: 0,
             device_id: "dev".into(),
             status: Some(status),
-            continuation_of: None,
             duration_ms: None,
         }
     }
@@ -12573,7 +12572,7 @@ mod tests {
             link: render::LinkUi {
                 source_session: Some("chat".into()),
                 source_local: true,
-                file_roots: Some(Rc::new(vec![crate::workspace_links::FileLinkRoot {
+                file_roots: Some(Rc::from([crate::workspace_links::FileLinkRoot {
                     chat: Some("chat".into()),
                     root: "/work/app".into(),
                     local: true,
@@ -12749,7 +12748,6 @@ mod tests {
             created_at: ms,
             device_id: "dev".into(),
             status: None,
-            continuation_of: None,
             duration_ms: None,
         };
         let rows = rows_for_entry(&user, &mut parse);

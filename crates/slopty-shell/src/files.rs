@@ -129,28 +129,37 @@ pub(crate) const TREE_KEY_CONTEXT: &str = "FileTree";
 /// Binds the files surface's keys. Their tooltips and menu rows read them back from the keymap.
 pub(crate) fn bind_keys(cx: &mut gpui::App) {
     use crate::settings::platform_combo;
-    cx.bind_keys([
-        crate::keys::binding(
-            &platform_combo("mod-shift-."),
-            ToggleHiddenFiles,
-            Some(KEY_CONTEXT),
-            cx,
-        ),
-        crate::keys::binding(
-            &platform_combo("mod-shift-v"),
-            ToggleMarkdownPreview,
-            Some(KEY_CONTEXT),
-            cx,
-        ),
-        gpui::KeyBinding::new("alt-z", ToggleWordWrap, Some(KEY_CONTEXT)),
-        crate::keys::binding(&platform_combo("alt-mod-c"), CopyPath, Some(TREE_KEY_CONTEXT), cx),
-        crate::keys::binding(
-            &platform_combo("mod-backspace"),
-            DeleteSelection,
-            Some(TREE_KEY_CONTEXT),
-            cx,
-        ),
-    ]);
+    cx.bind_keys(
+        [
+            crate::keys::binding(
+                &platform_combo("mod-shift-."),
+                ToggleHiddenFiles,
+                Some(KEY_CONTEXT),
+                cx,
+            ),
+            crate::keys::binding(
+                &platform_combo("mod-shift-v"),
+                ToggleMarkdownPreview,
+                Some(KEY_CONTEXT),
+                cx,
+            ),
+            Some(gpui::KeyBinding::new("alt-z", ToggleWordWrap, Some(KEY_CONTEXT))),
+            crate::keys::binding(
+                &platform_combo("alt-mod-c"),
+                CopyPath,
+                Some(TREE_KEY_CONTEXT),
+                cx,
+            ),
+            crate::keys::binding(
+                &platform_combo("mod-backspace"),
+                DeleteSelection,
+                Some(TREE_KEY_CONTEXT),
+                cx,
+            ),
+        ]
+        .into_iter()
+        .flatten(),
+    );
 }
 
 /// A header button whose tooltip names it and, when bound, the key `action` fires on in this
@@ -599,17 +608,31 @@ struct EditorMenuRow {
 
 /// How a files surface edits and lists, from the person's settings.
 #[derive(Debug, Clone, Copy)]
-struct FilesPrefs {
+pub struct FilesPrefs {
     /// An edit saves itself after a pause.
-    autosave: bool,
+    pub autosave: bool,
     /// That pause, in milliseconds.
-    autosave_delay_ms: u64,
+    pub autosave_delay_ms: u64,
     /// The editor's font size, in points.
-    editor_font_size: f32,
+    pub editor_font_size: f32,
     /// Long lines wrap.
-    word_wrap: bool,
+    pub word_wrap: bool,
     /// The tree lists the files git ignores too.
-    show_all_files: bool,
+    pub show_all_files: bool,
+}
+
+impl Default for FilesPrefs {
+    /// No autosave (a second's pause once it is on), the editor at 13 pt, no wrap, and the tree
+    /// without the files git ignores: what an explorer takes, which edits nothing.
+    fn default() -> Self {
+        Self {
+            autosave: false,
+            autosave_delay_ms: 1000,
+            editor_font_size: 13.0,
+            word_wrap: false,
+            show_all_files: false,
+        }
+    }
 }
 
 /// A chat's folder: its explorer (the tree and search), or an editor of one of its files.
@@ -729,11 +752,7 @@ impl Render for FilesSurface {
 }
 
 impl FilesSurface {
-    fn render_explorer(
-        &mut self,
-        theme: &crate::theme::Theme,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    fn render_explorer(&mut self, theme: &crate::theme::Theme, cx: &Context<Self>) -> gpui::Div {
         let projectless_root = {
             let state = self.state.read(cx);
             state.chats.iter().find(|chat| chat.id == self.chat_id && chat.space_id.is_none()).map(
@@ -877,59 +896,25 @@ impl FilesSurface {
         show_all_files: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        let prefs = FilesPrefs {
-            autosave: false,
-            autosave_delay_ms: 1000,
-            editor_font_size: 13.0,
-            word_wrap: false,
-            show_all_files,
-        };
+        let prefs = FilesPrefs { show_all_files, ..FilesPrefs::default() };
         Self::new_with_presentation(state, chat_id, FilesPresentation::Explorer, None, prefs, cx)
     }
 
-    /// An editor with no file open yet, as the tests drive one.
+    /// An editor with no file open yet and the default preferences, as the tests drive one.
     #[cfg(test)]
-    #[expect(clippy::too_many_arguments, reason = "shell lint migration: seam, callers in slice A")]
-    pub fn new(
-        state: Entity<AppState>,
-        chat_id: String,
-        autosave_enabled: bool,
-        autosave_delay_ms: u64,
-        editor_font_size: f32,
-        word_wrap: bool,
-        show_all_files: bool,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let prefs = FilesPrefs {
-            autosave: autosave_enabled,
-            autosave_delay_ms,
-            editor_font_size,
-            word_wrap,
-            show_all_files,
-        };
+    pub fn new(state: Entity<AppState>, chat_id: String, cx: &mut Context<Self>) -> Self {
+        let prefs = FilesPrefs::default();
         Self::new_with_presentation(state, chat_id, FilesPresentation::Editor, None, prefs, cx)
     }
 
     /// An editor of the file at `path`, in `chat_id`'s folder.
-    #[expect(clippy::too_many_arguments, reason = "shell lint migration: seam, callers in slice A")]
     pub fn new_editor(
         state: Entity<AppState>,
         chat_id: String,
         path: String,
-        autosave_enabled: bool,
-        autosave_delay_ms: u64,
-        editor_font_size: f32,
-        word_wrap: bool,
-        show_all_files: bool,
+        prefs: FilesPrefs,
         cx: &mut Context<Self>,
     ) -> Self {
-        let prefs = FilesPrefs {
-            autosave: autosave_enabled,
-            autosave_delay_ms,
-            editor_font_size,
-            word_wrap,
-            show_all_files,
-        };
         Self::new_with_presentation(
             state,
             chat_id,

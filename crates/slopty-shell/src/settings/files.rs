@@ -12,16 +12,15 @@ const DELAY_OPTIONS: [u64; 5] = [300, 600, 900, 1_500, 3_000];
 
 /// A Files preference the person changed, for the shell to keep and apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(clippy::enum_variant_names, reason = "shell lint migration: seam, callers in slice A")]
 pub enum FilesSettingsEvent {
     /// Autosave turned on or off.
-    AutosaveChanged(bool),
+    Autosave(bool),
     /// The autosave delay, in milliseconds.
-    AutosaveDelayChanged(u64),
+    AutosaveDelay(u64),
     /// Word wrap in the editor turned on or off.
-    WordWrapChanged(bool),
+    WordWrap(bool),
     /// Whether the file tree shows ignored and hidden files.
-    ShowAllFilesChanged(bool),
+    ShowAllFiles(bool),
 }
 
 /// Settings → Files.
@@ -143,7 +142,7 @@ impl Render for FilesSettingsPage {
                     return;
                 };
                 page.autosave_delay_ms = delay;
-                cx.emit(FilesSettingsEvent::AutosaveDelayChanged(delay));
+                cx.emit(FilesSettingsEvent::AutosaveDelay(delay));
                 cx.notify();
             })
             .render(&self.delay_select, cx);
@@ -166,7 +165,7 @@ impl Render for FilesSettingsPage {
                         cx,
                         |this, cx| {
                             this.autosave_enabled = false;
-                            cx.emit(FilesSettingsEvent::AutosaveChanged(false));
+                            cx.emit(FilesSettingsEvent::Autosave(false));
                         },
                     ))
                     .child(
@@ -184,7 +183,7 @@ impl Render for FilesSettingsPage {
                             .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.autosave_enabled = !this.autosave_enabled;
-                                cx.emit(FilesSettingsEvent::AutosaveChanged(this.autosave_enabled));
+                                cx.emit(FilesSettingsEvent::Autosave(this.autosave_enabled));
                                 cx.notify();
                             })),
                     ),
@@ -209,7 +208,7 @@ impl Render for FilesSettingsPage {
                             |this, cx| {
                                 let delay = crate::settings::FILES_AUTOSAVE_DELAY_DEFAULT_MS;
                                 this.autosave_delay_ms = delay;
-                                cx.emit(FilesSettingsEvent::AutosaveDelayChanged(delay));
+                                cx.emit(FilesSettingsEvent::AutosaveDelay(delay));
                             },
                         ))
                         .child(delay_control),
@@ -233,7 +232,7 @@ impl Render for FilesSettingsPage {
                         cx,
                         |this, cx| {
                             this.word_wrap = false;
-                            cx.emit(FilesSettingsEvent::WordWrapChanged(false));
+                            cx.emit(FilesSettingsEvent::WordWrap(false));
                         },
                     ))
                     .child(
@@ -251,7 +250,7 @@ impl Render for FilesSettingsPage {
                             .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.word_wrap = !this.word_wrap;
-                                cx.emit(FilesSettingsEvent::WordWrapChanged(this.word_wrap));
+                                cx.emit(FilesSettingsEvent::WordWrap(this.word_wrap));
                                 cx.notify();
                             })),
                     ),
@@ -280,7 +279,7 @@ impl Render for FilesSettingsPage {
                         cx,
                         |this, cx| {
                             this.show_all_files = false;
-                            cx.emit(FilesSettingsEvent::ShowAllFilesChanged(false));
+                            cx.emit(FilesSettingsEvent::ShowAllFiles(false));
                         },
                     ))
                     .child(
@@ -298,9 +297,7 @@ impl Render for FilesSettingsPage {
                             .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.show_all_files = !this.show_all_files;
-                                cx.emit(FilesSettingsEvent::ShowAllFilesChanged(
-                                    this.show_all_files,
-                                ));
+                                cx.emit(FilesSettingsEvent::ShowAllFiles(this.show_all_files));
                                 cx.notify();
                             })),
                     ),
@@ -387,6 +384,6 @@ mod tests {
         draw(cx);
         assert!(cx.debug_bounds("files-word-wrap-reset").is_none());
         page.read_with(cx, |page, _| assert!(!page.word_wrap));
-        assert_eq!(*events.borrow(), [FilesSettingsEvent::WordWrapChanged(false)]);
+        assert_eq!(*events.borrow(), [FilesSettingsEvent::WordWrap(false)]);
     }
 }

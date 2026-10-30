@@ -340,11 +340,7 @@ impl Changes {
     }
 
     /// The changed files as a tree beside the diff; a click brings a file's header to the top.
-    pub(super) fn render_tree(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    pub(super) fn render_tree(&mut self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.show_tree {
             return None;
         }

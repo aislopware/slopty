@@ -289,7 +289,7 @@ impl Shell {
         self.project_icons.render(
             &self.state,
             space.as_ref(),
-            self.active_profile_key(cx),
+            self.active_profile_key(cx).as_deref(),
             selected,
             cx,
         )
@@ -304,15 +304,11 @@ pub struct ProjectIcons {
 }
 
 impl ProjectIcons {
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "shell lint migration: seam, callers in slice C"
-    )]
     pub(crate) fn render<V: 'static>(
         &self,
         state: &Entity<AppState>,
         space: Option<&slopty_view_proto::Space>,
-        profile: Option<String>,
+        profile: Option<&str>,
         selected: bool,
         cx: &mut Context<V>,
     ) -> AnyElement {

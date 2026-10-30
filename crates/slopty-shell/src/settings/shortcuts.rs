@@ -287,11 +287,7 @@ impl ShortcutsPage {
     }
 
     /// The shared rail under the id of whichever page is showing.
-    fn render_scrollbar(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    fn render_scrollbar(&mut self, theme: &Theme, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         popover::rail(self, "shortcuts-page-scrollbar", theme, cx)
     }
 }
@@ -476,12 +472,12 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
-            cx.bind_keys([crate::keys::binding(
+            cx.bind_keys(crate::keys::binding(
                 &crate::settings::platform_combo("mod-n"),
                 crate::shell::NewSession,
                 None,
                 cx,
-            )]);
+            ));
             cx.on_action(move |_: &crate::shell::NewSession, _| observed.set(true));
         });
         let window = cx.add_window(|_, cx| {

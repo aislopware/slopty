@@ -19,20 +19,42 @@ pub const MOD_IS_COMMAND: bool = cfg!(target_vendor = "apple");
 pub const OS: gpui::OperatingSystem =
     if cfg!(target_os = "macos") { gpui::OperatingSystem::Mac } else { gpui::OperatingSystem::Ios };
 
-/// A binding at a chord made at run time ([`crate::settings::platform_combo`], a setting).
+/// A binding at a chord made at run time ([`crate::settings::platform_combo`], a setting), parsed
+/// as GPUI's own keymap loading parses one.
 ///
-/// GPUI's `KeyBinding::new` takes a literal, and this parses the chord as GPUI's own keymap
-/// loading does. A chord that is no chord panics, as `KeyBinding::new`'s does.
-#[expect(clippy::panic, reason = "shell lint migration: seam, callers in slices B, C and D")]
-pub fn binding<A: Action>(chord: &str, action: A, context: Option<&str>, cx: &App) -> KeyBinding {
-    let predicate = context.map(|context| match gpui::KeyBindingContextPredicate::parse(context) {
-        Ok(predicate) => std::rc::Rc::new(predicate),
-        Err(error) => panic!("key context {context:?}: {error}"),
-    });
-    match KeyBinding::load(chord, Box::new(action), predicate, false, None, cx) {
-        Ok(binding) => binding,
-        Err(error) => panic!("chord {chord:?}: {error}"),
+/// A chord or context that does not parse binds nothing: it is logged and `None` comes back, so
+/// a person's chord from a hand-edited file is skipped and the other keys still bind. Slopty's
+/// own chords all parse (`every_built_in_chord_binds`).
+pub fn binding<A: Action>(
+    chord: &str,
+    action: A,
+    context: Option<&str>,
+    cx: &App,
+) -> Option<KeyBinding> {
+    let loaded = match context.map(gpui::KeyBindingContextPredicate::parse).transpose() {
+        Ok(predicate) => {
+            let predicate = predicate.map(std::rc::Rc::new);
+            KeyBinding::load(chord, Box::new(action), predicate, false, None, cx)
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(format!("key context {context:?}: {error}")),
+    };
+    match loaded {
+        Ok(binding) => Some(binding),
+        Err(error) => {
+            tracing::warn!(%error, %chord, "unparsable shortcut; the binding is skipped");
+            #[cfg(test)]
+            SKIPPED.with(|skipped| skipped.set(skipped.get().saturating_add(1)));
+            None
+        }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many bindings [`binding`] skipped on this thread, for the test that proves Slopty's
+    /// own chords all bind.
+    static SKIPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Between the chords of a multi-stroke binding ("⌘K ⌘S"): a thin space.
@@ -362,11 +384,35 @@ mod tests {
         let (bound, named) = if apple { ("cmd-n", "⌘N") } else { ("ctrl-n", "Ctrl+N") };
         assert_eq!(crate::settings::platform_combo("mod-n"), bound);
         assert_eq!(combo_text("mod-n").as_ref(), named);
+        let primary = Modifiers { control: !apple, platform: apple, ..Modifiers::none() };
         assert_eq!(
-            crate::settings::combo_from_keystroke(!apple, false, false, apple, "n").as_deref(),
+            crate::settings::combo_from_keystroke_on(MOD_IS_COMMAND, primary, "n").as_deref(),
             Some("mod-n"),
             "the primary key records as mod"
         );
+    }
+
+    /// A chord or a context that does not parse binds nothing, and a chord that does binds.
+    #[gpui::test]
+    fn a_chord_that_does_not_parse_binds_nothing(cx: &gpui::TestAppContext) {
+        cx.update(|cx| {
+            assert!(binding("cmd-e", Probe, Some("Terminal"), cx).is_some());
+            assert!(binding("cmd-e-e", Probe, None, cx).is_none(), "no chord");
+            assert!(binding("cmd-e", Probe, Some("Terminal )"), cx).is_none(), "no context");
+        });
+    }
+
+    /// Every chord Slopty binds of its own, and every default chord, parses: the whole keymap
+    /// applies with no binding skipped.
+    #[gpui::test]
+    fn every_built_in_chord_binds(cx: &gpui::TestAppContext) {
+        SKIPPED.with(|skipped| skipped.set(0));
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+            crate::shell::apply_keymap(cx, &crate::settings::KeymapConfig::default());
+        });
+        assert_eq!(SKIPPED.with(std::cell::Cell::get), 0, "a binding was skipped");
     }
 
     mod probes {

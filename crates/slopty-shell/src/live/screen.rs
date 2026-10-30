@@ -410,7 +410,7 @@ impl ScreenSurface {
 
     /// The machine's desktops and windows as zeron's picker: the search, then "Displays" and
     /// "Windows" (each app's together, its name trailing), the keyboard's row washed.
-    fn choices(&mut self, choices: &[Choice], theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn choices(&mut self, choices: &[Choice], theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let theme = theme.for_popup();
         let (displays, windows) = visible(choices, &self.query);
         let shown = displays.len().saturating_add(windows.len());

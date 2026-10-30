@@ -6,7 +6,7 @@
 use gpui::accesskit::Role;
 use gpui::{TestAppContext, VisualTestContext};
 
-use super::retention_tests::{DESKTOP, device, draw, find, launch, space, tree};
+use super::retention_tests::{DESKTOP, device, draw, find, frames, launch, space, tree};
 use super::*;
 
 /// A title the agent gives a chat rises in over the old on its sidebar row and in the
@@ -28,7 +28,8 @@ fn a_chat_title_the_agent_gives_rolls_in(cx: &mut TestAppContext) {
     };
     let rolls = |key: &'static str, title: &'static str, cx: &mut VisualTestContext| {
         cx.update(|_, cx| {
-            crate::roll_text::rolling(key, title.into(), false, crate::clock::now(cx)).is_some()
+            let title = SharedString::new_static(title);
+            crate::roll_text::rolling(key, &title, false, crate::clock::now(cx)).is_some()
         })
     };
     cx.update(|_, cx| motion::set_reduced_motion(cx, false));
@@ -303,6 +304,54 @@ fn each_move_between_settings_and_the_chats_fades_the_page_in(cx: &mut TestAppCo
 }
 
 /// The inspector and the chat menu, drawn over a shell holding three local chats.
+/// A chat's chip in the inspector's timeline opens that chat when clicked, as the same link
+/// opened from another app does (`crate::open_conversation_link`).
+#[gpui::test]
+fn a_click_on_a_chats_chip_opens_its_chat(cx: &mut TestAppContext) {
+    let (shell, cx) = launch(cx, DESKTOP);
+    shell.update(cx, |shell, cx| shell.open_chat("a".into(), cx));
+    frames(cx, Duration::from_millis(16), 60);
+    cx.update(|_, cx| shell.update(cx, Shell::toggle_inspector));
+    let here = crate::links::workspace_locator(Some(WorkspaceScope::Local), Some("local")).unwrap();
+    let link = crate::links::slopty_conversation_link("b", &here);
+    let reply = slopty_view_doc::SessionMessageEntry {
+        id: "a:answer".into(),
+        role: slopty_view_doc::MessageRole::Assistant,
+        parts: vec![slopty_view_doc::MessagePart::Text {
+            id: "a:answer:t".into(),
+            text: format!("Carried on in [the other chat]({link})."),
+        }],
+        created_at: Utc::now().timestamp_millis(),
+        device_id: "local".into(),
+        status: Some(slopty_view_doc::MessageStatus::Complete),
+        duration_ms: None,
+    };
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, cx| {
+            state.apply_transcript(vec![reply]);
+            cx.notify();
+        });
+    });
+    frames(cx, Duration::from_millis(16), 60);
+    let nodes = tree(cx);
+    let links: Vec<&str> = nodes
+        .values()
+        .filter(|node| node.role == Role::Link)
+        .map(|node| node.label.as_str())
+        .collect();
+    let chip = nodes
+        .values()
+        .find(|node| {
+            node.role == Role::Link && matches!(node.label.as_str(), "the other chat" | "Chat b")
+        })
+        .unwrap_or_else(|| panic!("the chip is a link of the timeline: {links:?}"))
+        .clone();
+    cx.simulate_click(chip.bounds.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let selected = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
+    assert_eq!(selected.as_deref(), Some("b"), "the chip opens its chat");
+}
+
 mod session_card {
     use super::super::*;
 

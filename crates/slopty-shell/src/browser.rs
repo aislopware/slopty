@@ -52,12 +52,12 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     macro_rules! bind {
         ($combo:literal, $action:ident) => {
             if available($combo, None) {
-                cx.bind_keys([crate::keys::binding(
+                cx.bind_keys(crate::keys::binding(
                     &platform_combo($combo),
                     $action,
                     Some("Browser"),
                     cx,
-                )]);
+                ));
             }
         };
     }
@@ -68,7 +68,7 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     bind!("mod-]", Forward);
     let reload = keymap.get(ShortcutId::BrowserReload);
     if available(reload, Some(ShortcutId::BrowserReload)) && parse_combo(reload).is_ok() {
-        cx.bind_keys([crate::keys::binding(&platform_combo(reload), Reload, Some("Browser"), cx)]);
+        cx.bind_keys(crate::keys::binding(&platform_combo(reload), Reload, Some("Browser"), cx));
     }
 }
 

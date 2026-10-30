@@ -120,7 +120,7 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     macro_rules! fixed {
         ($combo:literal, $action:expr) => {
             if !taken($combo) {
-                bindings.push(crate::keys::binding(&platform_combo($combo), $action, None, cx));
+                bindings.extend(crate::keys::binding(&platform_combo($combo), $action, None, cx));
             }
         };
     }
@@ -143,14 +143,19 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     fixed!("mod-]", NextPane);
     fixed!("mod-[", PreviousPane);
     // The diff's own find, where the Changes surface has the keyboard.
-    bindings.push(crate::keys::binding(&platform_combo("mod-f"), FindInDiff, Some("Changes"), cx));
-    bindings.push(crate::keys::binding(
+    bindings.extend(crate::keys::binding(
+        &platform_combo("mod-f"),
+        FindInDiff,
+        Some("Changes"),
+        cx,
+    ));
+    bindings.extend(crate::keys::binding(
         &platform_combo("mod-g"),
         FindNextInDiff,
         Some("Changes"),
         cx,
     ));
-    bindings.push(crate::keys::binding(
+    bindings.extend(crate::keys::binding(
         &platform_combo("mod-shift-g"),
         FindPreviousInDiff,
         Some("Changes"),

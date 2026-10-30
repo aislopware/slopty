@@ -293,6 +293,9 @@ impl Element for LinkRanges {
                     None => &[0, 4, 5, 6],
                 };
                 let file_resolved = file.is_some();
+                // A chat's chip opens its chat in Slopty, as its click does.
+                let opens_inside =
+                    file_resolved || super::chat_links::is_chat_link(&menu_target.original);
                 let mut card = popover::popover_card(&theme)
                     .child(
                         gpui::canvas(
@@ -367,7 +370,7 @@ impl Element for LinkRanges {
                     let menu = Rc::clone(&state.menu);
                     let enabled = action == LinkAction::Copy
                         || target.navigation.is_ok()
-                        || (action == LinkAction::Internal && file_resolved);
+                        || (action == LinkAction::Internal && opens_inside);
                     popover::menu_row(&theme, false, format!("{}-link-{index}-{selector}", self.id))
                         .id(label)
                         .debug_selector(move || selector.into())

@@ -2862,11 +2862,7 @@ mod markdown_buffer_tests {
                 state,
                 "chat".into(),
                 path.into(),
-                false,
-                1000,
-                13.0,
-                false,
-                false,
+                crate::files::FilesPrefs::default(),
                 cx,
             )
         });
@@ -2951,11 +2947,7 @@ mod markdown_buffer_tests {
                 state,
                 "chat".into(),
                 path.into(),
-                false,
-                1000,
-                13.0,
-                false,
-                false,
+                crate::files::FilesPrefs::default(),
                 cx,
             )
         });
@@ -3078,11 +3070,7 @@ mod markdown_buffer_tests {
                 state,
                 "chat".into(),
                 path.into(),
-                false,
-                1000,
-                13.0,
-                false,
-                false,
+                crate::files::FilesPrefs::default(),
                 cx,
             )
         });
@@ -3160,11 +3148,7 @@ mod markdown_buffer_tests {
                 state,
                 "chat".into(),
                 path.into(),
-                false,
-                1000,
-                13.0,
-                false,
-                false,
+                crate::files::FilesPrefs::default(),
                 cx,
             )
         });
@@ -3215,11 +3199,7 @@ mod markdown_buffer_tests {
                 state,
                 "chat".into(),
                 path.into(),
-                false,
-                1000,
-                13.0,
-                false,
-                false,
+                crate::files::FilesPrefs::default(),
                 cx,
             )
         });
@@ -3279,7 +3259,7 @@ mod markdown_buffer_tests {
         });
         let surface = cx.new(|cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+            FilesSurface::new(state, "chat".into(), cx)
         });
         surface.update(cx, |surface, _| {
             assert_eq!(surface.system_open_path("src/lib.rs"), None);
@@ -3314,7 +3294,7 @@ mod markdown_buffer_tests {
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+            FilesSurface::new(state, "chat".into(), cx)
         });
         window
             .update(cx, |surface, window, cx| {
@@ -3392,7 +3372,7 @@ mod markdown_buffer_tests {
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "owner".into(), false, 1000, 13.0, false, false, cx)
+            FilesSurface::new(state, "owner".into(), cx)
         });
         let (owner, preview) = window
             .update(cx, |surface, _, cx| {
@@ -3511,7 +3491,7 @@ mod markdown_buffer_tests {
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| crate::state::AppState::new());
-            FilesSurface::new(state, "chat".into(), false, 1000, 13.0, false, false, cx)
+            FilesSurface::new(state, "chat".into(), cx)
         });
         let preview = window
             .update(cx, |surface, window, cx| {
@@ -3651,11 +3631,7 @@ mod reload_highlight_tests {
                 state,
                 "chat".into(),
                 path.into(),
-                false,
-                1000,
-                13.0,
-                false,
-                false,
+                crate::files::FilesPrefs::default(),
                 cx,
             )
         });

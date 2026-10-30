@@ -138,8 +138,7 @@ pub struct TranscriptUpsert {
 ///
 /// Entry-level
 /// upserts re-send the whole live entry per tick, which for a long single
-/// reply is the whole reply again (continuations re-join before the watch);
-/// this carries only the new tokens.
+/// reply is the whole reply again; this carries only the new tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextAppend {
     /// The entry, by id.
@@ -173,18 +172,20 @@ impl TranscriptFrame {
 /// the change is a [`TextAppend`]. Any other difference falls back to a full
 /// upsert.
 fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Option<TextAppend> {
-    if prev.id != next.id
-        || prev.role != next.role
-        || prev.created_at != next.created_at
-        || prev.device_id != next.device_id
-        || prev.status != next.status
-        || prev.continuation_of != next.continuation_of
-        || prev.parts.len() != next.parts.len()
+    // Taken apart whole, so a field the entry gains joins the compare.
+    let SessionMessageEntry { id, role, parts, created_at, device_id, status, duration_ms } = prev;
+    if *id != next.id
+        || *role != next.role
+        || *created_at != next.created_at
+        || *device_id != next.device_id
+        || *status != next.status
+        || *duration_ms != next.duration_ms
+        || parts.len() != next.parts.len()
     {
         return None;
     }
     let mut append = None;
-    for (p, n) in prev.parts.iter().zip(&next.parts) {
+    for (p, n) in parts.iter().zip(&next.parts) {
         if p == n {
             continue;
         }
@@ -357,7 +358,6 @@ mod tests {
             created_at: 0,
             device_id: "dev".into(),
             status: None,
-            continuation_of: None,
             duration_ms: None,
         }
     }
@@ -431,6 +431,24 @@ mod tests {
                 assert!(upsert.is_empty(), "reasoning growth must ride the hot path");
                 assert_eq!(append.len(), 1);
                 assert_eq!(append[0].text, " more");
+            }
+            other @ TranscriptFrame::Reset { .. } => panic!("expected delta, got {other:?}"),
+        }
+        apply(&[b0], &[b1]);
+    }
+
+    /// A turn's length stamped on the tick that ends its text travels with it: the entry is
+    /// upserted, not its last tokens appended without it.
+    #[test]
+    fn a_duration_stamped_with_the_last_tokens_is_an_upsert() {
+        let b0 = entry("b", "streaming");
+        let mut b1 = entry("b", "streaming done");
+        b1.duration_ms = Some(1_200);
+        let frame = diff_transcript(std::slice::from_ref(&b0), std::slice::from_ref(&b1));
+        match &frame {
+            TranscriptFrame::Delta { upsert, append, .. } => {
+                assert_eq!(upsert.len(), 1);
+                assert!(append.is_empty());
             }
             other @ TranscriptFrame::Reset { .. } => panic!("expected delta, got {other:?}"),
         }
@@ -523,7 +541,6 @@ mod context_update_tests {
             created_at: 0,
             device_id: "host".into(),
             status: Some(crate::MessageStatus::Streaming),
-            continuation_of: None,
             duration_ms: None,
         };
         let baseline = TranscriptBaseline::capture(&[entry.clone()]);

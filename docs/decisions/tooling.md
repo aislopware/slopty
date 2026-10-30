@@ -3135,10 +3135,39 @@ more full-window layer.
     `SlashCommand` and `SUBAGENT_INPUT_KEEP` were zeron's engine writing its transcript doc.
     Slopty's view model builds a transcript's parts from the thread
     (`slopty_ui::view_model::transcript`), so only their own tests called them.
-  - **The shell moves too, this round.** It first dropped `dead_code = "allow"` and the
+  - **The shell takes them too (2026-10-31).** It first dropped `dead_code = "allow"` and the
     browser fixture's check-cfg, and deleted what that surfaced: the glass and haptics
     modules, project actions end to end, the surface tab strip, and the helpers and test hooks
     nothing called. Its `[lints.clippy]` allow table was to wait for a count. The person ruled
-    instead that the shell takes the workspace lints, rustfmt, typos and taplo now: one
-    mechanical reformat, then the lints in slices worked in parallel. Lane S's plan
-    (`target/lanes/S/plan.md`) holds the count per lint and the partition.
+    instead that the shell takes the workspace lints, rustfmt, typos and taplo at once and
+    thoroughly, never under a blanket allow. The move went in steps:
+    - One mechanical reformat: the workspace rustfmt, the typo fixes, taplo.
+    - The switch: `[lints] workspace = true`, clippy's machine fixes, and every finding left
+      named in a temporary header on its own file. HEAD linted the whole crate from that
+      commit on, and a header could only shrink.
+    - Four slices worked the headers away in parallel, each checkpoint landing on its own: the
+      chrome, the transcript and inspector, documents and panes, the shared core. They were
+      cut along the module graph, so most signature changes stayed inside one slice.
+    - An item whose callers sat in another slice's files kept its signature under an
+      item-level seam `#[expect]` until every slice had landed. The last checkpoint changed
+      those signatures and their callers together: a key binding that returns `Option`
+      instead of panicking, borrowed arguments, `Rc<[T]>` for shared slices, and small structs
+      for long argument lists. No migration `expect` is left, and no seam turned out to be the
+      lint being wrong.
+  - **What the move found.** The lints that deny a panic, a dropped result and an unchecked
+    index in library code found real bugs, each fixed where it was found:
+    - A conversation link copied from the session menu did nothing when opened from another
+      app, and a chat's chip clicked in a transcript went nowhere. Both now open the chat
+      through the state's deep-link path, and the chip's "Open in Slopty" menu row is enabled.
+    - Retrying a browser page whose load had failed dropped the retry's own error.
+    - Stepping a font list by zero looped forever on a family that was not installed.
+    - A menu's out-of-range index panicked.
+    - The bundled file-icon manifest panicked when it did not parse. It now logs and falls
+      back, and a test proves it parses.
+    - A key chord that did not parse panicked. A person's bad chord is now skipped with a log,
+      and a test proves every chord Slopty binds of its own binds.
+
+    The view-doc entry's `continuation_of`, never set since the splitter went, is gone end to
+    end. The streaming delta's text-append check now compares every field of an entry but its
+    parts: it missed the turn's duration, so a duration stamped on the tick of the last tokens
+    was lost.

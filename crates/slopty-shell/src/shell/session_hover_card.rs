@@ -536,19 +536,22 @@ mod tests {
     impl Render for RowHost {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.shell.update(cx, |shell, cx| {
+                let row = sidebar::ChatRow {
+                    id: "hover-test",
+                    title: "Hover test".into(),
+                    title_hint: None,
+                    time_ago: "now".into(),
+                    space_name: "Project".into(),
+                    branch: None,
+                    harness: None,
+                    status: slopty_view_proto::ChatIndicator::Idle,
+                    selected: false,
+                    archived: false,
+                    jump_label: None,
+                    search_query: None,
+                };
                 div().w(px(280.0)).h(px(200.0)).child(shell.render_chat_row(
-                    "hover-test".into(),
-                    "Hover test".into(),
-                    None,
-                    "now".into(),
-                    "Project".into(),
-                    None,
-                    None,
-                    slopty_view_proto::ChatIndicator::Idle,
-                    false,
-                    false,
-                    None,
-                    None,
+                    row,
                     &Theme::default(),
                     cx,
                 ))

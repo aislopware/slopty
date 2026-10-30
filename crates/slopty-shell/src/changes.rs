@@ -80,12 +80,12 @@ pub use actions::{FindInDiff, FindNextInDiff, FindPreviousInDiff, ToggleDiffTree
 // ⇧⌘Y shows or hides the changed files' tree (Claude desktop's `toggleDiffFileList`).
 /// Binds the pane's own keys that the shell's keymap does not.
 pub(crate) fn bind_keys(cx: &mut App) {
-    cx.bind_keys([crate::keys::binding(
+    cx.bind_keys(crate::keys::binding(
         &crate::settings::platform_combo("mod-shift-y"),
         ToggleDiffTree,
         Some("Changes"),
         cx,
-    )]);
+    ));
 }
 
 // The file the inspector asked to see, until a diff tab shows it.
@@ -1967,14 +1967,6 @@ impl Changes {
         };
         self.wanted_file = None;
         self.scroll_to_file(ix, cx);
-    }
-
-    /// The surface-tab title. slopty: the pane's name; its scope ("Working tree", "Branch
-    /// changes") is the picker's under the tab, said once (`docs/decisions/ui.md`, "The Changes
-    /// pane names its scope once"). No History surface (ruled out).
-    #[expect(clippy::unused_self, reason = "shell lint migration: seam, callers in slice A")]
-    pub const fn tab_title(&self) -> SharedString {
-        SharedString::new_static("Changes")
     }
 
     /// The selected chat's host device when it differs from the connected
@@ -4428,10 +4420,9 @@ fn split_row(left: AnyElement, right: AnyElement, wrapped: bool, theme: &Theme) 
 /// pane itself virtualizes these rows individually; this stacked form serves
 /// the transcript and the fold tween's clipped stand-in.)
 /// Full-document old/new highlighting for tool and checkout diffs.
-#[expect(clippy::needless_pass_by_value, reason = "shell lint migration: seam, callers in slice B")]
 pub(crate) fn render_file_body_with_syntax(
     file: &FileDiff,
-    highlights: Option<Arc<DiffHighlights>>,
+    highlights: Option<&DiffHighlights>,
     theme: &Theme,
 ) -> AnyElement {
     let mut children: Vec<AnyElement> = Vec::new();
@@ -4449,8 +4440,7 @@ pub(crate) fn render_file_body_with_syntax(
             );
         }
         for line in &hunk.lines {
-            let spans: &[_] =
-                highlights.as_deref().map_or(&[], |highlights| highlights.spans(line));
+            let spans: &[_] = highlights.map_or(&[], |highlights| highlights.spans(line));
             let plane = CodePlane { width: DiffCodeWidth::Clipped, scroll: None };
             // The find marks only the live rows.
             children.push(diff_line_row(line, spans, theme, gutter_px, plane, &[]));

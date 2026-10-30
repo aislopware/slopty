@@ -291,8 +291,7 @@ pub struct LinkUi {
     /// The ordered checkouts a file link may resolve against on this surface,
     /// the linking chat's own first. `None` renders no trailing open glyph
     /// and offers no file paths — previews and web-only surfaces.
-    #[expect(clippy::rc_buffer, reason = "shell lint migration: seam, callers in slice B")]
-    pub file_roots: Option<Rc<Vec<crate::workspace_links::FileLinkRoot>>>,
+    pub file_roots: Option<Rc<[crate::workspace_links::FileLinkRoot]>>,
     /// Routes an activated link and says where it went.
     pub handler: Rc<LinkFn>,
 }
@@ -451,57 +450,56 @@ where
     F: Fn(&mut V) -> &mut HashMap<SharedString, CodeFenceRuntime> + Clone + 'static,
 {
     let scroll = runtime.scroll.clone();
-    let scrollbar =
-        runtime.scrollbar.metrics(&scroll).filter(|_| runtime.scrollbar.visible()).map(|metrics| {
-            CodeScrollbarUi {
-                metrics,
-                active: runtime.scrollbar.active(),
-                hover: {
-                    let entity = entity.clone();
-                    let key = key.clone();
-                    let runtimes = runtimes.clone();
-                    Rc::new(move |hovered, _, cx| {
-                        let _gone = entity.update(cx, |owner, cx| {
-                            if runtimes(owner)
-                                .get_mut(&key)
-                                .is_some_and(|runtime| runtime.scrollbar.set_bar_hovered(hovered))
-                            {
-                                cx.notify();
-                            }
-                        });
-                    })
-                },
-                press: {
-                    let entity = entity.clone();
-                    let key = key.clone();
-                    let runtimes = runtimes.clone();
-                    Rc::new(move |pointer_x, _, cx| {
-                        let _gone = entity.update(cx, |owner, cx| {
-                            let Some(runtime) = runtimes(owner).get_mut(&key) else {
-                                return;
-                            };
-                            let scroll = runtime.scroll.clone();
-                            if runtime.scrollbar.begin_press(&scroll, pointer_x) {
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                        });
-                    })
-                },
-                release: {
-                    let entity = entity.clone();
-                    let key = key.clone();
-                    let runtimes = runtimes.clone();
-                    Rc::new(move |_, cx| {
-                        let _gone = entity.update(cx, |owner, cx| {
-                            if let Some(runtime) = runtimes(owner).get_mut(&key) {
-                                runtime.scrollbar.end_press();
-                                cx.notify();
-                            }
-                        });
-                    })
-                },
-            }
+    let scrollbar = crate::popover::HorizontalScrollbarMetrics::from_scroll(&scroll)
+        .filter(|_| runtime.scrollbar.visible())
+        .map(|metrics| CodeScrollbarUi {
+            metrics,
+            active: runtime.scrollbar.active(),
+            hover: {
+                let entity = entity.clone();
+                let key = key.clone();
+                let runtimes = runtimes.clone();
+                Rc::new(move |hovered, _, cx| {
+                    let _gone = entity.update(cx, |owner, cx| {
+                        if runtimes(owner)
+                            .get_mut(&key)
+                            .is_some_and(|runtime| runtime.scrollbar.set_bar_hovered(hovered))
+                        {
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+            press: {
+                let entity = entity.clone();
+                let key = key.clone();
+                let runtimes = runtimes.clone();
+                Rc::new(move |pointer_x, _, cx| {
+                    let _gone = entity.update(cx, |owner, cx| {
+                        let Some(runtime) = runtimes(owner).get_mut(&key) else {
+                            return;
+                        };
+                        let scroll = runtime.scroll.clone();
+                        if runtime.scrollbar.begin_press(&scroll, pointer_x) {
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    });
+                })
+            },
+            release: {
+                let entity = entity.clone();
+                let key = key.clone();
+                let runtimes = runtimes.clone();
+                Rc::new(move |_, cx| {
+                    let _gone = entity.update(cx, |owner, cx| {
+                        if let Some(runtime) = runtimes(owner).get_mut(&key) {
+                            runtime.scrollbar.end_press();
+                            cx.notify();
+                        }
+                    });
+                })
+            },
         });
 
     CodeUi {
@@ -672,8 +670,7 @@ pub fn render_tree(
             let document = highlight(ix);
             render_block(
                 &top.block,
-                ix,
-                ix,
+                (ix, ix),
                 opts,
                 theme,
                 window,
@@ -724,11 +721,9 @@ pub(crate) fn code_block_indices(block: &Block, ix: usize) -> Vec<usize> {
 
 /// Render one block (top-level or nested). `top_ix` is the enclosing top-level
 /// block index (cache invalidation scope); `ix` the per-element discriminator.
-#[expect(clippy::too_many_arguments, reason = "shell lint migration: seam, callers in slice B")]
 pub fn render_block(
     block: &Block,
-    top_ix: usize,
-    ix: usize,
+    (top_ix, ix): (usize, usize),
     opts: &RenderOptions,
     theme: &Theme,
     window: &Window,
@@ -762,7 +757,7 @@ pub fn render_block(
             .gap(px(8.0))
             .text_color(theme.text_muted)
             .children(children.iter().enumerate().map(|(ci, child)| {
-                render_block(child, top_ix, quote_child_ix(ix, ci), opts, theme, window, None)
+                render_block(child, (top_ix, quote_child_ix(ix, ci)), opts, theme, window, None)
             }))
             .into_any_element(),
         Block::List { ordered_start, items } => div()
@@ -881,8 +876,7 @@ pub fn render_block(
                             };
                             render_block(
                                 child,
-                                top_ix,
-                                list_child_ix(ix, item_ix, ci),
+                                (top_ix, list_child_ix(ix, item_ix, ci)),
                                 opts,
                                 theme,
                                 window,

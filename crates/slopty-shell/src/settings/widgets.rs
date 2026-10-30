@@ -1930,9 +1930,10 @@ pub fn tooltip_card_detail(
     theme: &Theme,
 ) -> crate::frost::Frosted {
     let title: SharedString = title.into();
+    let caps = keys.as_deref().map(|keys| crate::live::chrome::tooltip_keys(theme, keys));
     crate::live::chrome::tooltip_frame(
         theme,
-        (title.clone(), keys.clone()),
+        (title.clone(), keys),
         div()
             .flex()
             .flex_col()
@@ -1944,7 +1945,7 @@ pub fn tooltip_card_detail(
                     .items_baseline()
                     .gap(px(crate::live::chrome::TOOLTIP_KEY_GAP))
                     .child(div().min_w_0().child(title))
-                    .children(keys.map(|keys| crate::live::chrome::tooltip_keys(theme, keys))),
+                    .children(caps),
             )
             .child(
                 div()

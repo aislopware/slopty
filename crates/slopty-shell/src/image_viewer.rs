@@ -226,18 +226,12 @@ impl ImageView {
 
     /// `image` at `natural` size, fitted to the room it is given until zoomed (a pinch, or the
     /// wheel with Control) and dragged; `plate` fills behind a transparent one.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "shell lint migration: seam, callers in slice C (`_window` and `_cx` are unused)"
-    )]
     pub fn render(
         &self,
         image: Arc<Image>,
         natural: Size<Pixels>,
         on_image_click: Option<ImageClick>,
         plate: Option<gpui::Hsla>,
-        _window: &mut Window,
-        _cx: &mut App,
     ) -> AnyElement {
         let natural = size(f32::from(natural.width), f32::from(natural.height));
         {

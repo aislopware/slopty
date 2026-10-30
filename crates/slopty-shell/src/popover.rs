@@ -2131,15 +2131,11 @@ pub trait ScrollRailHost: 'static {
 /// stream to it wherever the pointer travels. `None` while the rail is hidden or the content fits;
 /// the host keeps only its own list-hover listener. Handle-less owners get their overrides called
 /// at the same points the default handle calls would be.
-#[expect(
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: seam, callers in slices A and C"
-)]
 pub fn rail<V: ScrollRailHost>(
     host: &mut V,
     id: &'static str,
     theme: &Theme,
-    cx: &mut Context<V>,
+    cx: &Context<V>,
 ) -> Option<AnyElement> {
     let metrics = host.rail_metrics()?;
     schedule_scrollbar_hide(host.rail_bar(), V::rail_bar, cx);
@@ -2256,6 +2252,13 @@ impl HorizontalScrollbarMetrics {
             max_scroll,
         })
     }
+
+    /// The thumb's geometry from `scroll`'s live bounds and offset; `None` when the code fits.
+    pub fn from_scroll(scroll: &ScrollHandle) -> Option<Self> {
+        let max_scroll = f32::from(scroll.max_offset().x).max(0.0);
+        let current_scroll = (-f32::from(scroll.offset().x)).clamp(0.0, max_scroll);
+        Self::from_viewport(f32::from(scroll.bounds().size.width), max_scroll, current_scroll)
+    }
 }
 
 /// Hover/drag state for one horizontal code viewport.
@@ -2271,19 +2274,6 @@ pub struct HorizontalScrollbarState {
 }
 
 impl HorizontalScrollbarState {
-    /// The thumb's geometry from `scroll`'s live bounds and offset; `None` when the code fits.
-    #[expect(clippy::unused_self, reason = "shell lint migration: seam, callers in slice C")]
-    pub fn metrics(&self, scroll: &ScrollHandle) -> Option<HorizontalScrollbarMetrics> {
-        let bounds = scroll.bounds();
-        let max_scroll = f32::from(scroll.max_offset().x).max(0.0);
-        let current_scroll = (-f32::from(scroll.offset().x)).clamp(0.0, max_scroll);
-        HorizontalScrollbarMetrics::from_viewport(
-            f32::from(bounds.size.width),
-            max_scroll,
-            current_scroll,
-        )
-    }
-
     /// Whether the rail shows: the pointer is over the code, or a drag holds it.
     pub const fn visible(&self) -> bool {
         self.viewport_hovered || self.grab.is_some()
@@ -2320,7 +2310,7 @@ impl HorizontalScrollbarState {
     /// pressed (or centred under the pointer on the track) and scroll to it. `false` when there
     /// is nothing to scroll.
     pub fn begin_press(&mut self, scroll: &ScrollHandle, pointer_x: Pixels) -> bool {
-        let Some(metrics) = self.metrics(scroll) else {
+        let Some(metrics) = HorizontalScrollbarMetrics::from_scroll(scroll) else {
             return false;
         };
         let pointer_in_track = Self::pointer_in_track(scroll, pointer_x);
@@ -2341,7 +2331,7 @@ impl HorizontalScrollbarState {
         let Some(grab_offset) = self.grab else {
             return false;
         };
-        let Some(metrics) = self.metrics(scroll) else {
+        let Some(metrics) = HorizontalScrollbarMetrics::from_scroll(scroll) else {
             return false;
         };
         let thumb_left =

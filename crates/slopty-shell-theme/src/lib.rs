@@ -566,7 +566,6 @@ pub struct ThemeVariant {
     pub appearance: Appearance,
     /// The author's recommended treatment. Runtime applies the user's
     /// [`SurfacePreference`] before components consume the variant.
-    #[serde(alias = "surfaceTreatment")]
     pub recommended_surface_treatment: SurfaceTreatment,
     /// The interface colours.
     pub colors: ThemeColors,

@@ -1186,26 +1186,26 @@ impl Shell {
                 };
                 let branch = sidebar_status::branch_of(chat).map(SharedString::from);
                 let harness = chat.config.as_ref().map(|c| c.harness);
-                self.render_chat_row(
-                    id.clone(),
-                    transcript::single_line(chat.title.as_deref().unwrap_or("New session")).into(),
-                    None,
-                    format_time_ago(
+                let chat_row = sidebar::ChatRow {
+                    id,
+                    title: transcript::single_line(chat.title.as_deref().unwrap_or("New session"))
+                        .into(),
+                    title_hint: None,
+                    time_ago: format_time_ago(
                         chat.last_message_at.unwrap_or(chat.created_at),
                         crate::clock::utc(cx),
                     )
                     .into(),
-                    folder.into(),
+                    space_name: folder.into(),
                     branch,
                     harness,
-                    state.display_status_for(chat, crate::clock::utc(cx)),
-                    active,
-                    chat.archived,
-                    None,
-                    Some(query),
-                    theme,
-                    cx,
-                )
+                    status: state.display_status_for(chat, crate::clock::utc(cx)),
+                    selected: active,
+                    archived: chat.archived,
+                    jump_label: None,
+                    search_query: Some(query),
+                };
+                self.render_chat_row(chat_row, theme, cx)
             }
         })
     }

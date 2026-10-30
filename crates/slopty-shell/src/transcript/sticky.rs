@@ -308,7 +308,6 @@ mod tests {
                         created_at: 0,
                         device_id: "d".into(),
                         status: None,
-                        continuation_of: None,
                         duration_ms: None,
                     },
                     &mut |_, text| Arc::new(crate::markdown::parser::parse_full(text)),

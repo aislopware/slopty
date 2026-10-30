@@ -175,6 +175,38 @@ fn archive_tooltip(
     move |window, cx| tooltip(window, cx)
 }
 
+/// What one session row says ([`Shell::render_chat_row`]): the sidebar's, the palette's copy and
+/// the hover card test's alike.
+pub(super) struct ChatRow<'a> {
+    /// The chat's id.
+    pub id: &'a str,
+    /// The title the agent gave.
+    pub title: SharedString,
+    /// What tells this row from those beside it (`sidebar_status::Row::hint`), quiet after its
+    /// title.
+    pub title_hint: Option<SharedString>,
+    /// How long since the chat last spoke, which the palette's copy says in its corner.
+    pub time_ago: SharedString,
+    /// Where the chat runs ("project @ device"), the palette's copy's first line.
+    pub space_name: SharedString,
+    /// The chat's branch, the palette's copy's last line.
+    pub branch: Option<SharedString>,
+    /// The program the chat runs, whose mark leads the row.
+    pub harness: Option<slopty_view_proto::HarnessId>,
+    /// How the chat stands.
+    pub status: slopty_view_proto::ChatIndicator,
+    /// The chat is the open one.
+    pub selected: bool,
+    /// The chat is archived.
+    pub archived: bool,
+    /// This row's jump combo while the hint overlay is up. It takes the corner outright, above
+    /// hover and above the status word, so all nine chips appear together instead of leaving a
+    /// hole on whichever row is busy or under the pointer.
+    pub jump_label: Option<SharedString>,
+    /// The palette's query, which the palette's copy highlights; `None` for the sidebar's row.
+    pub search_query: Option<&'a str>,
+}
+
 impl Shell {
     /// The login badge of a machine that turns this device away: a quiet lock whose
     /// tooltip says why, and whose press dials the machine again now. It never asks for a
@@ -408,34 +440,26 @@ impl Shell {
     /// machine is out of reach dims and wears the cached glyph in its mark's place. The palette's
     /// copy spells out where the chat runs, its status or time, and its branch.
     /// Click selects; right-click opens the context menu.
-    #[expect(
-        clippy::too_many_arguments,
-        clippy::needless_pass_by_value,
-        reason = "shell lint migration: seam, callers in slice A"
-    )]
     pub(super) fn render_chat_row(
         &self,
-        id: String,
-        title: SharedString,
-        // What tells this row from those beside it (`sidebar_status::Row::hint`), quiet
-        // after its title.
-        title_hint: Option<SharedString>,
-        time_ago: SharedString,
-        space_name: SharedString,
-        branch: Option<SharedString>,
-        harness: Option<slopty_view_proto::HarnessId>,
-        status: slopty_view_proto::ChatIndicator,
-        selected: bool,
-        archived: bool,
-        // This row's jump combo while the hint overlay is up. It takes the
-        // corner outright — above hover and above the status word — so all
-        // nine chips appear together instead of leaving a hole on whichever
-        // row is busy or under the pointer.
-        jump_label: Option<SharedString>,
-        search_query: Option<&str>,
+        row: ChatRow<'_>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let ChatRow {
+            id,
+            title,
+            title_hint,
+            time_ago,
+            space_name,
+            branch,
+            harness,
+            status,
+            selected,
+            archived,
+            jump_label,
+            search_query,
+        } = row;
         // Activity, not position (t3code Sidebar): status is a small colored
         // word + glyph in the row's top-right corner — Working animates the
         // composer-strip spinner, Done wears a check; Idle rows show the
@@ -461,7 +485,7 @@ impl Shell {
         let compact = search_query.is_none();
         let corner_hovered = self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
-        let content_id = id.clone();
+        let content_id = id.to_owned();
         // The sidebar's rows read the sidebar's clock, as its groups do
         // (`spaces::Shell::sidebar_list`); the palette's copy reads the shell's.
         let now = if search_query.is_none() { self.sidebar_clock } else { crate::clock::utc(cx) };
@@ -470,7 +494,7 @@ impl Shell {
         // its disc in the row's own ground. An agent at rest on its own work (a background
         // command, a subagent it left running) is at work; a result nobody has seen sets the
         // title in the heavier weight.
-        let mark = marks::Mark::of(status, self.state.read(cx).session_for(&id), now);
+        let mark = marks::Mark::of(status, self.state.read(cx).session_for(id), now);
         let status_label = mark.word();
         let status_color = mark.hue(theme).unwrap_or(theme.text_muted);
         let shows_metadata = branch.is_some();
@@ -526,7 +550,7 @@ impl Shell {
         let program = compact.then(|| {
             div()
                 .debug_selector({
-                    let id = id.clone();
+                    let id = id.to_owned();
                     move || format!("chat-agent-{id}") // for the tests
                 })
                 .size(px(SIDEBAR_LEADING_SLOT))
@@ -551,7 +575,7 @@ impl Shell {
                 Some(
                     div()
                         .debug_selector({
-                            let id = id.clone();
+                            let id = id.to_owned();
                             move || format!("chat-cached-{id}") // for the tests
                         })
                         .child(icon(icons::WIFI_OFF).size(px(12.0)).text_color(theme.text_muted))
@@ -564,7 +588,7 @@ impl Shell {
             div()
                 .id(SharedString::from(format!("{row_id}-status")))
                 .debug_selector({
-                    let id = id.clone();
+                    let id = id.to_owned();
                     move || format!("chat-status-{id}")
                 })
                 .size(px(SIDEBAR_LEADING_SLOT))
@@ -656,20 +680,20 @@ impl Shell {
         let mut corner = Some(corner);
         let (hover, text) = (theme.glass_hover(), theme.text);
         let selected_wash = crate::theme::glass_selected_bg();
-        let select_id = id.clone();
-        let menu_id = id.clone();
+        let select_id = id.to_owned();
+        let menu_id = id.to_owned();
         // The row as a screen reader names it, with what tells it from the rows beside it.
         let row_label = match &title_hint {
             Some(hint) => SharedString::from(format!("{title}, {hint}")),
             None => title.clone(),
         };
         let search_query_none = search_query.is_none();
-        let rename_input = search_query_none.then(|| self.rename_input_for(&id)).flatten();
+        let rename_input = search_query_none.then(|| self.rename_input_for(id)).flatten();
         let rolling_title = search_query_none
             .then(|| {
                 crate::roll_text::rolling(
                     format!("sidebar-title-{id}"),
-                    title.clone(),
+                    &title,
                     motion::reduced_motion(cx),
                     crate::clock::now(cx),
                 )
@@ -679,10 +703,10 @@ impl Shell {
         // and a row being renamed keeps the pointer's attention on the field.
         let hover_card = (search_query_none
             && rename_input.is_none()
-            && self.session_hover_card.shown() == Some(id.as_str()))
-        .then(|| self.render_session_hover_card(&id, cx))
+            && self.session_hover_card.shown() == Some(id))
+        .then(|| self.render_session_hover_card(id, cx))
         .flatten();
-        let card_id = id.clone();
+        let card_id = id.to_owned();
         // Hover fades: the wash and the title's brightening ride the same 150ms blend.
         let fade_key = format!("{row_id}-hover");
         let rest_bg = if selected { selected_wash } else { crate::theme::wash(0.0) };
@@ -765,11 +789,11 @@ impl Shell {
             // The list is one keyboard stop, its rows walked with Up and Down
             // (`spaces::SidebarKeys`); a press leaves the keyboard where it was.
             .when(search_query_none, |el| {
-                let focus = self.sidebar_keys.focus(&id, cx);
-                let key_id = id.clone();
+                let focus = self.sidebar_keys.focus(id, cx);
+                let key_id = id.to_owned();
                 el.track_focus(&focus)
                     .tab_index(0)
-                    .tab_stop(self.sidebar_keys.stops_at(&id))
+                    .tab_stop(self.sidebar_keys.stops_at(id))
                     .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_key_down(cx.listener(
@@ -856,10 +880,10 @@ impl Shell {
             .when(
                 search_query_none
                     && rename_input.is_none()
-                    && self.session_hover_card.target() == Some(id.as_str()),
+                    && self.session_hover_card.target() == Some(id),
                 |el| {
                     let shell = cx.weak_entity();
-                    let chat_id = id.clone();
+                    let chat_id = id.to_owned();
                     el.child(
                         gpui::canvas(
                             |bounds, window, _| {
@@ -968,7 +992,7 @@ impl Shell {
                     // jump keys' modifier is held, the row's key stands there instead; it wins
                     // over the hover archive (the person's ask).
                     .when(compact, |el| {
-                        let archive_id = id.clone();
+                        let archive_id = id.to_owned();
                         match compact_jump_label {
                             Some(label) => el.child(
                                 div()
@@ -997,7 +1021,7 @@ impl Shell {
                                         div()
                                             .id(SharedString::from(format!("{row_id}-corner")))
                                             .debug_selector({
-                                                let id = id.clone();
+                                                let id = id.to_owned();
                                                 move || format!("chat-archive-{id}")
                                             })
                                             .size(px(SIDEBAR_LEADING_SLOT))

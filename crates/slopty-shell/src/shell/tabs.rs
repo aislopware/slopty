@@ -244,7 +244,7 @@ impl Shell {
         // A title the agent gives rises in over the old (Amp's), on the house's roll.
         let rolling_title = crate::roll_text::rolling(
             format!("titlebar-title-{chat_id}"),
-            title.clone(),
+            &title,
             motion::reduced_motion(cx),
             crate::clock::now(cx),
         );

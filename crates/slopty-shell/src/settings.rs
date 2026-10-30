@@ -722,7 +722,7 @@ impl ShortcutId {
             Self::NewSession => "mod-n",
             Self::NewProject => "mod-shift-n",
             // Ctrl+Tab on every platform — but spelled the way THAT platform's
-            // recorder spells ctrl (see `combo_from_keystroke`). Off macOS
+            // recorder spells ctrl (see `combo_from_keystroke_on`). Off macOS
             // ctrl IS the primary and stores as "mod"; on macOS it is its own
             // modifier, and "mod" would mean Cmd+Tab, which the OS app
             // switcher eats.
@@ -958,29 +958,11 @@ impl KeymapConfig {
     }
 }
 
-/// Build a combo string from a recorded keystroke. The primary modifier
-/// (cmd on macOS, ctrl elsewhere) becomes "mod"; bare modifier presses record
-/// nothing.
-#[expect(
-    clippy::fn_params_excessive_bools,
-    reason = "shell lint migration: seam, callers in slice A"
-)]
-pub fn combo_from_keystroke(
-    ctrl: bool,
-    alt: bool,
-    shift: bool,
-    cmd: bool,
-    key: &str,
-) -> Option<String> {
-    let modifiers =
-        gpui::Modifiers { control: ctrl, alt, shift, platform: cmd, ..gpui::Modifiers::none() };
-    // An iPad's ⌘ too.
-    combo_from_keystroke_on(crate::keys::MOD_IS_COMMAND, modifiers, key)
-}
-
-/// [`combo_from_keystroke`] for an explicit platform — the ctrl spelling is
-/// platform-dependent, so both paths need to be exercisable from one machine.
-/// Fn is no part of a combo.
+/// The combo a recorded keystroke stores, or `None` for a bare modifier press.
+///
+/// On a platform whose primary modifier is cmd (`mac`, [`crate::keys::MOD_IS_COMMAND`]: an
+/// iPad's ⌘ too) or ctrl, the primary modifier becomes "mod", and Fn is no part of a combo. The
+/// ctrl spelling is platform-dependent, so both paths are exercisable from one machine.
 pub fn combo_from_keystroke_on(mac: bool, modifiers: gpui::Modifiers, key: &str) -> Option<String> {
     let gpui::Modifiers { control: ctrl, alt, shift, platform: cmd, .. } = modifiers;
     let key = key.trim().to_lowercase();
@@ -2108,22 +2090,23 @@ mod tests {
                 format!("mod-{suffix}")
             }
         };
-        assert_eq!(combo_from_keystroke(true, false, false, false, "s"), Some(ctrl_combo("s")));
-        assert_eq!(combo_from_keystroke(false, false, false, true, "s"), Some("mod-s".into()));
+        let record = |modifiers: gpui::Modifiers, key: &str| {
+            combo_from_keystroke_on(crate::keys::MOD_IS_COMMAND, modifiers, key)
+        };
+        let ctrl = gpui::Modifiers::control();
+        assert_eq!(record(ctrl, "s"), Some(ctrl_combo("s")));
+        assert_eq!(record(gpui::Modifiers::command(), "s"), Some("mod-s".into()));
+        assert_eq!(record(gpui::Modifiers::control_shift(), "tab"), Some(ctrl_combo("shift-tab")));
         assert_eq!(
-            combo_from_keystroke(true, false, true, false, "tab"),
-            Some(ctrl_combo("shift-tab"))
-        );
-        assert_eq!(
-            combo_from_keystroke(true, true, true, false, "K"),
+            record(gpui::Modifiers { alt: true, ..gpui::Modifiers::control_shift() }, "K"),
             Some(ctrl_combo("alt-shift-k"))
         );
         // Plain keys record without modifiers (Esc is filtered by the caller).
-        assert_eq!(combo_from_keystroke(false, false, false, false, "f5"), Some("f5".into()));
+        assert_eq!(record(gpui::Modifiers::none(), "f5"), Some("f5".into()));
         // Bare modifier presses record nothing.
-        assert_eq!(combo_from_keystroke(true, false, false, false, "ctrl"), None);
-        assert_eq!(combo_from_keystroke(false, false, true, false, "shift"), None);
-        assert_eq!(combo_from_keystroke(false, false, false, false, ""), None);
+        assert_eq!(record(ctrl, "ctrl"), None);
+        assert_eq!(record(gpui::Modifiers::shift(), "shift"), None);
+        assert_eq!(record(gpui::Modifiers::none(), ""), None);
     }
 
     #[test]

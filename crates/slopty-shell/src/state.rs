@@ -2179,7 +2179,6 @@ mod tests {
             created_at: 0,
             device_id: "dev".into(),
             status: None,
-            continuation_of: None,
             duration_ms: None,
         }
     }

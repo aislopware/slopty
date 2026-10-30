@@ -350,60 +350,70 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
-    cx.bind_keys([
-        crate::keys::binding(&valid_or_default(&keymap.save_file, "mod-s"), SaveFile, None, cx),
-        crate::keys::binding(
-            &valid_or_default(&keymap.toggle_sidebar, "mod-b"),
-            ToggleSidebar,
-            None,
-            cx,
-        ),
-        crate::keys::binding(
-            &valid_or_default(&keymap.toggle_changes, "mod-r"),
-            ToggleChanges,
-            None,
-            cx,
-        ),
-        crate::keys::binding(
-            &valid_or_default(&keymap.toggle_files, "mod-e"),
-            ToggleFiles,
-            None,
-            cx,
-        ),
-        crate::keys::binding(&valid_or_default(&keymap.new_session, "mod-n"), NewSession, None, cx),
-        crate::keys::binding(
-            &valid_or_default(&keymap.next_session, ShortcutId::NextSession.default_combo()),
-            NextSession,
-            None,
-            cx,
-        ),
-        crate::keys::binding(
-            &valid_or_default(&keymap.prev_session, ShortcutId::PrevSession.default_combo()),
-            PrevSession,
-            None,
-            cx,
-        ),
-        crate::keys::binding(
-            &valid_or_default(&keymap.archive_session, "mod-shift-a"),
-            ArchiveSession,
-            None,
-            cx,
-        ),
-        crate::keys::binding(
-            &valid_or_default(&keymap.new_project, ShortcutId::NewProject.default_combo()),
-            AddSpacePalette,
-            None,
-            cx,
-        ),
-        // Fixed: ⇧⌘P summons the command palette (Ghostty's and VS Code's key), and pressing it
-        // again dismisses it. ⌘K is the session picker in every session (`picker`).
-        crate::keys::binding(&platform_combo("mod-shift-p"), ToggleCommandPalette, None, cx),
-        crate::keys::binding(&platform_combo("mod-k"), OpenPicker, None, cx),
-        // ⇧⌘G is Go to Directory, bound before `chrome_keys`' Find Previous on the same key, so
-        // that one goes first and passes the key on unless a find is open where the keyboard is.
-        // A terminal's own Find Previous goes before both and passes it on with its card shut.
-        crate::keys::binding(&platform_combo("mod-shift-g"), GoToDirectory, None, cx),
-    ]);
+    cx.bind_keys(
+        [
+            crate::keys::binding(&valid_or_default(&keymap.save_file, "mod-s"), SaveFile, None, cx),
+            crate::keys::binding(
+                &valid_or_default(&keymap.toggle_sidebar, "mod-b"),
+                ToggleSidebar,
+                None,
+                cx,
+            ),
+            crate::keys::binding(
+                &valid_or_default(&keymap.toggle_changes, "mod-r"),
+                ToggleChanges,
+                None,
+                cx,
+            ),
+            crate::keys::binding(
+                &valid_or_default(&keymap.toggle_files, "mod-e"),
+                ToggleFiles,
+                None,
+                cx,
+            ),
+            crate::keys::binding(
+                &valid_or_default(&keymap.new_session, "mod-n"),
+                NewSession,
+                None,
+                cx,
+            ),
+            crate::keys::binding(
+                &valid_or_default(&keymap.next_session, ShortcutId::NextSession.default_combo()),
+                NextSession,
+                None,
+                cx,
+            ),
+            crate::keys::binding(
+                &valid_or_default(&keymap.prev_session, ShortcutId::PrevSession.default_combo()),
+                PrevSession,
+                None,
+                cx,
+            ),
+            crate::keys::binding(
+                &valid_or_default(&keymap.archive_session, "mod-shift-a"),
+                ArchiveSession,
+                None,
+                cx,
+            ),
+            crate::keys::binding(
+                &valid_or_default(&keymap.new_project, ShortcutId::NewProject.default_combo()),
+                AddSpacePalette,
+                None,
+                cx,
+            ),
+            // Fixed: ⇧⌘P summons the command palette (Ghostty's and VS Code's key), and pressing
+            // it again dismisses it. ⌘K is the session picker in every session (`picker`).
+            crate::keys::binding(&platform_combo("mod-shift-p"), ToggleCommandPalette, None, cx),
+            crate::keys::binding(&platform_combo("mod-k"), OpenPicker, None, cx),
+            // ⇧⌘G is Go to Directory, bound before `chrome_keys`' Find Previous on the same key,
+            // so that one goes first and passes the key on unless a find is open where the
+            // keyboard is. A terminal's own Find Previous goes before both and passes it on with
+            // its card shut.
+            crate::keys::binding(&platform_combo("mod-shift-g"), GoToDirectory, None, cx),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     crate::browser::bind_keys(cx, keymap);
     // The files surface's and the diff's fixed keys, in their own contexts.
     crate::files::bind_keys(cx);
@@ -420,12 +430,12 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             if combo.is_empty() {
                 return None;
             }
-            Some(crate::keys::binding(
+            crate::keys::binding(
                 &valid_or_default(combo, id.default_combo()),
                 JumpSession(slot),
                 None,
                 cx,
-            ))
+            )
         })
         .collect();
     cx.bind_keys(jumps);
@@ -1811,6 +1821,16 @@ impl Shell {
         if !from_main {
             return LinkOutcome::Rejected;
         }
+        // A chat's chip opens its chat, as the same link opened from another app does
+        // (`crate::open_conversation_link`).
+        if crate::markdown::chat_links::is_chat_link(&activation.target.original) {
+            if !matches!(activation.action, LinkAction::Primary | LinkAction::Internal) {
+                return LinkOutcome::Rejected;
+            }
+            let link = &activation.target.original;
+            self.state.update(cx, |state, cx| state.open_deep_link(link, cx));
+            return LinkOutcome::Internal;
+        }
         if activation.target.navigation.is_err() {
             return if matches!(activation.action, LinkAction::Primary | LinkAction::Internal)
                 && self.open_workspace_file_link(&source, &activation.target.original, window, cx)
@@ -1966,15 +1986,18 @@ impl Shell {
         self.file_surface_seq = self.file_surface_seq.saturating_add(1);
         let id = self.file_surface_seq;
         let file = cx.new(|cx| {
+            let prefs = crate::files::FilesPrefs {
+                autosave: self.settings.files_autosave_enabled,
+                autosave_delay_ms: self.settings.files_autosave_delay_ms,
+                editor_font_size: crate::typography::code_font_size(cx),
+                word_wrap: self.settings.files_word_wrap,
+                show_all_files: self.settings.files_show_all,
+            };
             FilesSurface::new_editor(
                 owner_state.clone(),
                 owner_chat.clone(),
                 path.clone(),
-                self.settings.files_autosave_enabled,
-                self.settings.files_autosave_delay_ms,
-                crate::typography::code_font_size(cx),
-                self.settings.files_word_wrap,
-                self.settings.files_show_all,
+                prefs,
                 cx,
             )
         });
@@ -2924,7 +2947,7 @@ impl Shell {
                         &page,
                         window,
                         |this: &mut Self, _, event: &FilesSettingsEvent, window, cx| match *event {
-                            FilesSettingsEvent::AutosaveChanged(autosave_enabled) => {
+                            FilesSettingsEvent::Autosave(autosave_enabled) => {
                                 this.settings.files_autosave_enabled = autosave_enabled;
                                 for surface in
                                     this.files.values().chain(this.file_surfaces.values())
@@ -2936,7 +2959,7 @@ impl Shell {
                                 this.schedule_save(cx);
                                 cx.notify();
                             }
-                            FilesSettingsEvent::AutosaveDelayChanged(autosave_delay_ms) => {
+                            FilesSettingsEvent::AutosaveDelay(autosave_delay_ms) => {
                                 this.settings.files_autosave_delay_ms = autosave_delay_ms;
                                 for surface in
                                     this.files.values().chain(this.file_surfaces.values())
@@ -2948,10 +2971,10 @@ impl Shell {
                                 this.schedule_save(cx);
                                 cx.notify();
                             }
-                            FilesSettingsEvent::WordWrapChanged(word_wrap) => {
+                            FilesSettingsEvent::WordWrap(word_wrap) => {
                                 this.set_files_word_wrap(word_wrap, window, cx);
                             }
-                            FilesSettingsEvent::ShowAllFilesChanged(show_all_files) => {
+                            FilesSettingsEvent::ShowAllFiles(show_all_files) => {
                                 this.set_files_show_all(show_all_files, cx);
                             }
                         },
@@ -6479,16 +6502,7 @@ mod exit_regressions {
                     window.activate_window();
                     let state = shell.state.clone();
                     let files = cx.new(|cx| {
-                        let mut files = FilesSurface::new(
-                            state,
-                            "test".into(),
-                            false,
-                            1000,
-                            13.0,
-                            false,
-                            false,
-                            cx,
-                        );
+                        let mut files = FilesSurface::new(state, "test".into(), cx);
                         files.seed_pending_exit_test_document(failed);
                         files
                     });
@@ -6623,12 +6637,7 @@ mod shortcut_focus_regressions {
     #[gpui::test]
     fn shortcuts_recover_from_retained_editor_focus(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            cx.bind_keys([crate::keys::binding(
-                &platform_combo("mod-2"),
-                JumpSession(1),
-                None,
-                cx,
-            )]);
+            cx.bind_keys(crate::keys::binding(&platform_combo("mod-2"), JumpSession(1), None, cx));
         });
         let host = cx.add_window(|_, cx| ShortcutHost {
             root: cx.focus_handle(),
@@ -6667,12 +6676,7 @@ mod shortcut_focus_regressions {
     #[gpui::test]
     fn shortcuts_work_after_mouse_focus_changes(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            cx.bind_keys([crate::keys::binding(
-                &platform_combo("mod-2"),
-                JumpSession(1),
-                None,
-                cx,
-            )]);
+            cx.bind_keys(crate::keys::binding(&platform_combo("mod-2"), JumpSession(1), None, cx));
         });
         let host = cx.add_window(|_, cx| ShortcutHost {
             root: cx.focus_handle(),
