@@ -11,12 +11,6 @@
 //!   cursor is on or goes up to its group, → opens it, Enter opens it or drills into a subagent,
 //!   and E goes to the next failure (⇧E the one before) in the whole trace, opening what hides it
 //!   (the depth, its group) to land on it. Esc is the inspector's: it goes back.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::or_fun_call,
-    reason = "shell lint migration: slice B"
-)]
 
 use gpui::{Context, KeyDownEvent, SharedString, Window};
 
@@ -52,8 +46,8 @@ impl Depth {
     #[must_use]
     pub fn step(self, delta: isize) -> Self {
         let at = Self::ALL.iter().position(|depth| *depth == self).unwrap_or(1);
-        let to = at.saturating_add_signed(delta).min(Self::ALL.len() - 1);
-        Self::ALL[to]
+        let to = at.saturating_add_signed(delta).min(Self::ALL.len().saturating_sub(1));
+        Self::ALL.get(to).copied().unwrap_or(self)
     }
 }
 
@@ -62,29 +56,28 @@ impl Depth {
 /// its last answer ends on; nothing spliced in under a subagent.
 pub(super) fn prompts_only(rows: Vec<Row>, depth_of: impl Fn(&Row) -> usize) -> Vec<Row> {
     let own: Vec<Row> = rows.into_iter().filter(|row| depth_of(row) == 0).collect();
-    let mut keep = vec![false; own.len()];
-    let mut start = 0;
-    while start < own.len() {
-        let end = own[start + 1..]
-            .iter()
-            .position(|row| matches!(row.kind, RowKind::User { .. }))
-            .map_or(own.len(), |at| start + 1 + at);
-        if matches!(own[start].kind, RowKind::User { .. }) {
-            keep[start] = true;
+    let prompt = |row: &Row| matches!(row.kind, RowKind::User { .. });
+    let words =
+        |row: &Row| matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
+    let mut keep = Vec::with_capacity(own.len());
+    // A turn runs from its prompt (or the list's start) to the next prompt.
+    for turn in own.chunk_by(|_, next| !prompt(next)) {
+        let mut kept = vec![false; turn.len()];
+        if let (Some(first), Some(flag)) = (turn.first(), kept.first_mut()) {
+            *flag = prompt(first);
         }
         // The turn's last words, back from its last one to the first row that is not its words.
-        let words =
-            |row: &Row| matches!(row.kind, RowKind::Markdown { .. } | RowKind::LiveMarkdown { .. });
-        if let Some(last) = (start..end).rev().find(|ix| words(&own[*ix])) {
-            let entry = own[last].entry_id.clone();
-            for ix in (start..=last).rev() {
-                if !words(&own[ix]) || own[ix].entry_id != entry {
+        if let Some(last) = turn.iter().rposition(words)
+            && let Some(entry) = turn.get(last).map(|row| row.entry_id.clone())
+        {
+            for (row, flag) in turn.iter().zip(kept.iter_mut()).take(last.saturating_add(1)).rev() {
+                if !words(row) || row.entry_id != entry {
                     break;
                 }
-                keep[ix] = true;
+                *flag = true;
             }
         }
-        start = end;
+        keep.extend(kept);
     }
     own.into_iter().zip(keep).filter_map(|(row, keep)| keep.then_some(row)).collect()
 }
@@ -159,7 +152,7 @@ impl Transcript {
     /// Scroll only as far as row `ix` needs to be seen, letting go of the end unless it is the
     /// last row.
     fn reveal_row(&mut self, ix: usize) {
-        if ix + 1 < self.rows.len() {
+        if ix.saturating_add(1) < self.rows.len() {
             self.begin_scroll_navigation();
         }
         self.list.scroll_to_reveal_item(ix);
@@ -184,7 +177,7 @@ impl Transcript {
             self.set_depth(Depth::Steps, cx);
         }
         let ix = self.rows.iter().position(|row| row.id == target.row)?;
-        let shape = match (&self.rows[ix].kind, &target.step) {
+        let shape = match (&self.rows.get(ix)?.kind, &target.step) {
             (RowKind::ToolGroup { tools, .. }, Some(step)) => Some((
                 super::group_shape(tools),
                 tools.iter().position(|tool| &tool.part_id == step),
@@ -195,10 +188,10 @@ impl Transcript {
         if let Some(((collapses, solo), at)) = shape {
             // A run that folds shows its steps as rows of their own, the cursor on one.
             if collapses && !solo {
-                if !self.group_shows_steps(&self.rows[ix]) {
+                if !self.rows.get(ix).is_some_and(|row| self.group_shows_steps(row)) {
                     let fold = self.folds.entry(target.row.clone()).or_default();
                     fold.open = Some(true);
-                    fold.epoch += 1;
+                    fold.epoch = fold.epoch.wrapping_add(1);
                 }
                 cursor.step = target.step;
             }
@@ -209,7 +202,7 @@ impl Transcript {
                     .or_default();
                 if fold.open != Some(true) {
                     fold.open = Some(true);
-                    fold.epoch += 1;
+                    fold.epoch = fold.epoch.wrapping_add(1);
                     fold.toggled_at = None;
                 }
             }
@@ -228,13 +221,15 @@ impl Transcript {
         let at =
             self.cursor.as_ref().and_then(|cursor| stops.iter().position(|stop| stop == cursor));
         let to = if let Some(at) = at {
-            at.saturating_add_signed(delta).min(stops.len() - 1)
+            at.saturating_add_signed(delta).min(stops.len().saturating_sub(1))
         } else {
             let top = self.list.logical_scroll_top().item_ix.min(self.rows.len().saturating_sub(1));
             let first = self.rows.get(top).map(|row| row.id.clone());
             stops.iter().position(|stop| Some(&stop.row) == first.as_ref()).unwrap_or(0)
         };
-        self.land(stops[to].clone());
+        if let Some(stop) = stops.get(to).cloned() {
+            self.land(stop);
+        }
     }
 
     /// The row under the cursor and the index of its step in its group, when it stands on one.
@@ -258,7 +253,7 @@ impl Transcript {
             (RowKind::ToolGroup { tools, .. }, step) => {
                 let (collapses, solo) = super::group_shape(tools);
                 // A lone call, or a run that does not fold, is its own step.
-                let step = step.or((!collapses || solo).then_some(0));
+                let step = step.or_else(|| (!collapses || solo).then_some(0));
                 match step {
                     Some(ix) => {
                         let key = SharedString::from(format!("{}#d{ix}", row.id));
@@ -267,7 +262,7 @@ impl Transcript {
                         if shown != open {
                             let fold = self.tool_details.entry(key).or_default();
                             fold.open = Some(open);
-                            fold.epoch += 1;
+                            fold.epoch = fold.epoch.wrapping_add(1);
                             fold.toggled_at = None;
                             if open {
                                 self.reveal_opened(row.id.clone());
@@ -294,7 +289,7 @@ impl Transcript {
                 let ix = self.rows.iter().position(|r| r.id == row.id).unwrap_or(0);
                 let depth = self.depth_of(&row.id);
                 if let Some(up) =
-                    self.rows[..ix].iter().rev().find(|r| self.depth_of(&r.id) < depth)
+                    self.rows.iter().take(ix).rev().find(|r| self.depth_of(&r.id) < depth)
                 {
                     self.cursor = Some(Cursor::row(&up.id));
                 }
@@ -316,7 +311,7 @@ impl Transcript {
         let open = match (&row.kind, step) {
             (RowKind::ToolGroup { tools, .. }, step) => {
                 let (collapses, solo) = super::group_shape(tools);
-                match step.or((!collapses || solo).then_some(0)) {
+                match step.or_else(|| (!collapses || solo).then_some(0)) {
                     Some(ix) => !self
                         .tool_details
                         .get(&SharedString::from(format!("{}#d{ix}", row.id)))
@@ -337,11 +332,11 @@ impl Transcript {
         // (a lone call is its row).
         let order = |rows: &[Row], cursor: &Cursor| -> Option<(usize, usize)> {
             let ix = rows.iter().position(|row| row.id == cursor.row)?;
-            let step = match (&rows[ix].kind, &cursor.step) {
+            let step = match (&rows.get(ix)?.kind, &cursor.step) {
                 (RowKind::ToolGroup { tools, .. }, Some(step)) => {
                     let (collapses, solo) = super::group_shape(tools);
                     let at = tools.iter().position(|tool| &tool.part_id == step);
-                    at.filter(|_| collapses && !solo).map_or(0, |at| at + 1)
+                    at.filter(|_| collapses && !solo).map_or(0, |at| at.saturating_add(1))
                 }
                 _ => 0,
             };
@@ -367,13 +362,16 @@ impl Transcript {
         }
         let here = self.cursor.as_ref().and_then(|cursor| order(rows, cursor));
         let target = if delta >= 0 {
-            failures.iter().find(|(at, _)| here.is_none_or(|here| *at > here)).or(failures.first())
+            failures
+                .iter()
+                .find(|(at, _)| here.is_none_or(|here| *at > here))
+                .or_else(|| failures.first())
         } else {
             failures
                 .iter()
                 .rev()
                 .find(|(at, _)| here.is_none_or(|here| *at < here))
-                .or(failures.last())
+                .or_else(|| failures.last())
         }
         .map(|(_, target)| target.clone());
         let Some(target) = target else { return };

@@ -9,11 +9,6 @@
 //! Each image is an a11y image node labelled with its alt text; its value says when it is
 //! "loading", "missing" (the file could not be read), "refused" (outside the folder) or
 //! "remote".
-#![allow(
-    clippy::assigning_clones,
-    clippy::field_scoped_visibility_modifiers,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -43,10 +38,15 @@ pub(super) struct MdImages {
     /// The resolved paths the row drawn last showed, until the transcript holds them.
     wanted: Vec<String>,
     /// The chat's folder, where a path resolves.
-    pub(super) folder: Option<String>,
+    folder: Option<String>,
 }
 
 impl MdImages {
+    /// Resolve paths in `folder`, the chat's.
+    pub(super) fn set_folder(&mut self, folder: Option<String>) {
+        self.folder = folder;
+    }
+
     /// Another chat's images.
     pub(super) fn clear(&mut self) {
         self.thumbs.clear();
@@ -102,7 +102,7 @@ fn normalize(path: &str, windows: bool) -> Option<String> {
             ".." => {
                 parts.pop()?;
             }
-            drive if ix == 0 && windows && drive.ends_with(':') => prefix = drive.to_owned(),
+            drive if ix == 0 && windows && drive.ends_with(':') => drive.clone_into(&mut prefix),
             part => parts.push(part),
         }
     }

@@ -57,7 +57,7 @@ mod context_menu; // right-click menus in the chat.
 mod detail; // an open step's format, running box, exit code and fetched sections.
 mod extras;
 pub(crate) mod find;
-mod json_tree; // JSON as a tree, for an output and a raw record.
+pub mod json_tree; // JSON as a tree, for an output and a raw record.
 mod jump; // the pill that says what waits below and goes back to it.
 mod md_images;
 pub(crate) mod num; // the casts between counts, pixels and milliseconds, each sound once.
@@ -1559,7 +1559,6 @@ pub fn rows_for_entry(
                 is_error,
                 resolved,
                 output,
-                diff,
                 output_ref,
                 output_bytes,
                 diff_ref,
@@ -1575,7 +1574,7 @@ pub fn rows_for_entry(
                     is_error: *is_error,
                     resolved: *resolved,
                     detail: with_stderr(
-                        tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref()),
+                        tool_detail(output.as_deref(), None, diff_stats.as_deref()),
                         facts.as_deref().and_then(|facts| facts.stderr.as_deref()),
                     )
                     .map(Arc::new),
@@ -4369,7 +4368,11 @@ impl Transcript {
             return None;
         }
         let now = crate::clock::now(cx);
-        let leaving = jump::presence(KEY, self.jump_button_shown(), now)?;
+        let presence = jump::presence(KEY, self.jump_button_shown(), now);
+        if presence == jump::Presence::Gone {
+            return None;
+        }
+        let leaving = presence.leaving();
         if leaving.is_some() {
             // Drawn again until it has gone, so a spent pill never lingers unseen.
             cx.notify();
@@ -5673,7 +5676,7 @@ impl Transcript {
         bubble: UserBubble<'_>,
         theme: &Theme,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let UserBubble { row_id, row_ix, text, markdown } = bubble;
         let fold = self.user_folds.get(row_id).copied().unwrap_or_default();
@@ -5815,7 +5818,7 @@ impl Transcript {
         tree: &Arc<BlockTree>,
         theme: &Theme,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::Div {
         let row_key = user_markdown_key(row_id);
         // Kept across frames like a reply's blocks; replacing the row drops it.
@@ -5840,7 +5843,7 @@ impl Transcript {
             link,
             workspace_root: self.workspace_root(cx),
             code: (!code.is_empty()).then_some(code),
-            code_menu: Some(self.code_menu_ui(cx)),
+            code_menu: Some(Self::code_menu_ui(cx)),
             body: (render::MD_TEXT_SIZE, USER_LINE_HEIGHT), // the bubble's own size
         };
         let highlight = self.code_highlight_for(&row_key, &tree, None, cx);
@@ -6688,7 +6691,7 @@ impl Transcript {
                     link,
                     workspace_root,
                     code,
-                    code_menu: Some(self.code_menu_ui(cx)),
+                    code_menu: Some(Self::code_menu_ui(cx)),
                     body: self.markdown_body(&row.id), // a run in place reads compact (#24).
                 };
                 let highlight = self.code_highlight_for(&row.id, &tree, Some(*block_ix), cx);
@@ -6758,7 +6761,7 @@ impl Transcript {
                     link,
                     workspace_root,
                     code,
-                    code_menu: Some(self.code_menu_ui(cx)),
+                    code_menu: Some(Self::code_menu_ui(cx)),
                     body: self.markdown_body(&row.id), // a run in place reads compact (#24).
                 };
                 if seed_history
@@ -7741,7 +7744,7 @@ impl Transcript {
                         // error apart under a format that is not text.
                         let output = output.as_ref();
                         if let Some(menu) = output.and_then(|output| output.menu.as_ref()) {
-                            panel = panel.child(self.format_menu(&key, menu, theme, cx));
+                            panel = panel.child(Self::format_menu(&key, menu, theme, cx));
                         }
                         let body =
                             output.map_or_else(|| detail.clone(), |output| output.body.clone());
@@ -7838,7 +7841,7 @@ impl Transcript {
                         // What the model read where the step shows otherwise, and its raw
                         // record, each fetched when opened.
                         for section in &sections {
-                            panel = panel.child(self.section(section, theme, cx));
+                            panel = panel.child(Self::section(section, theme, cx));
                         }
                         card = card.child(panel);
                     }
@@ -8921,8 +8924,8 @@ fn chip_header_row(
     // A call under way sweeps its verb with its group title's light, in phase (#14).
     let shimmer = shimmer.filter(|_| sweeps(tool));
     let facts_trail = facts
-        .zip(tool.facts.as_deref())
-        .and_then(|(chip, facts)| chip.trail(&tool.part_id, facts, tool.resolved, theme));
+        .and(tool.facts.as_deref())
+        .and_then(|facts| work::trail(&tool.part_id, facts, tool.resolved, theme));
     let activity = !is_agent_tool(tool);
     let file_path = match &tool.call {
         ToolCall::ReadFile { path }
@@ -9593,7 +9596,7 @@ impl Render for Transcript {
         if self.pinned && !self.list.is_following_tail() {
             self.let_go();
         }
-        self.md_images.borrow_mut().folder = self.image_host(cx).1;
+        self.md_images.borrow_mut().set_folder(self.image_host(cx).1);
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),
@@ -11747,7 +11750,6 @@ mod tests {
             is_error: false,
             resolved: true,
             output: None,
-            diff: None,
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
@@ -11860,7 +11862,6 @@ mod tests {
             is_error: false,
             resolved: true,
             output: None,
-            diff: None,
             output_ref: None,
             output_bytes: None,
             diff_ref: None,

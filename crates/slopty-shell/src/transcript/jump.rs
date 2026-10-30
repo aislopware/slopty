@@ -1,11 +1,6 @@
 //! The jump pill at the foot of a transcript that no longer follows its end: an arrow,
 //! and how many steps arrived below since it let go ("↓ 12 new steps"; `docs/decisions/
 //! inspector.md`, "Follow and anchor"). A press goes back to the end, following it.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::option_option,
-    reason = "shell lint migration: slice B"
-)]
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -40,28 +35,44 @@ thread_local! {
 
 type JumpMarks = std::collections::HashMap<&'static str, (bool, Option<std::time::Instant>, u64)>;
 
-/// Whether `key`'s jump button is drawn at `now`: `None` gone, `Some(None)` shown, and
-/// `Some(Some(n))` leaving, `n` naming this leave so its animation plays once.
-pub(super) fn presence(
-    key: &'static str,
-    shown: bool,
-    now: std::time::Instant,
-) -> Option<Option<u64>> {
+/// Where a jump button stands at a moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Presence {
+    /// Not drawn.
+    Gone,
+    /// Drawn, at rest.
+    Shown,
+    /// Drawn while it leaves, the number naming this leave so its animation plays once.
+    Leaving(u64),
+}
+
+impl Presence {
+    /// The leave under way, for [`leave`]: none while it rests.
+    pub(super) const fn leaving(self) -> Option<u64> {
+        match self {
+            Self::Leaving(n) => Some(n),
+            Self::Gone | Self::Shown => None,
+        }
+    }
+}
+
+/// Where `key`'s jump button stands at `now`.
+pub(super) fn presence(key: &'static str, shown: bool, now: std::time::Instant) -> Presence {
     JUMP_SHOWN.with(|marks| {
         let mut marks = marks.borrow_mut();
         let (was, leave, leaves) = marks.entry(key).or_insert((false, None, 0));
         let result = if shown {
             *leave = None;
-            Some(None)
+            Presence::Shown
         } else {
             if *was {
                 *leave = Some(now);
-                *leaves += 1;
+                *leaves = leaves.wrapping_add(1);
             }
             let leaving = JUMP_OUT.total().mul_f32(motion::speed_scale());
             leave
                 .filter(|at| now.saturating_duration_since(*at) < leaving)
-                .map(|_| Some(*leaves - 1))
+                .map_or(Presence::Gone, |_| Presence::Leaving(leaves.wrapping_sub(1)))
         };
         *was = shown;
         result
@@ -223,7 +234,7 @@ mod tests {
                 (true, std::time::Instant::now()),
                 Theme::of(cx),
                 move |_, _, _| {
-                    clicks.set(clicks.get() + 1);
+                    clicks.set(clicks.get().saturating_add(1));
                 },
             ))
         }
@@ -275,17 +286,17 @@ mod tests {
     #[test]
     fn the_jump_button_plays_one_leave_then_goes() {
         let start = std::time::Instant::now();
-        assert_eq!(presence("jump-leave-test", false, start), None, "never shown");
-        assert_eq!(presence("jump-leave-test", true, start), Some(None));
-        assert_eq!(presence("jump-leave-test", false, start), Some(Some(0)), "leaving");
+        assert_eq!(presence("jump-leave-test", false, start), Presence::Gone, "never shown");
+        assert_eq!(presence("jump-leave-test", true, start), Presence::Shown);
+        assert_eq!(presence("jump-leave-test", false, start), Presence::Leaving(0), "leaving");
         let mid = start + Duration::from_millis(150);
-        assert_eq!(presence("jump-leave-test", false, mid), Some(Some(0)), "the same leave");
+        assert_eq!(presence("jump-leave-test", false, mid), Presence::Leaving(0), "the same leave");
         assert_eq!(
             presence("jump-leave-test", false, start + Duration::from_millis(301)),
-            None,
+            Presence::Gone,
             "gone"
         );
-        assert_eq!(presence("jump-leave-test", true, mid), Some(None));
-        assert_eq!(presence("jump-leave-test", false, mid), Some(Some(1)), "a new leave");
+        assert_eq!(presence("jump-leave-test", true, mid), Presence::Shown);
+        assert_eq!(presence("jump-leave-test", false, mid), Presence::Leaving(1), "a new leave");
     }
 }

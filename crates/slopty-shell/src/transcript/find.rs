@@ -11,19 +11,6 @@
 //! its group, its detail when the match lies there) and puts the trace's cursor on it. Two
 //! filters, failed steps only and steps of one kind, share the match: with either on, only the
 //! steps it keeps match, each one a match by itself while no words are typed.
-#![allow(
-    let_underscore_drop,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_wrap,
-    clippy::derive_partial_eq_without_eq,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::unused_self,
-    clippy::used_underscore_binding,
-    reason = "shell lint migration: slice B"
-)]
 
 use gpui::prelude::*;
 use gpui::{
@@ -40,17 +27,25 @@ use crate::popover;
 use crate::settings::widgets::{self, ActionHint as _, Keys, SelectOption, SelectState};
 use crate::theme::Theme;
 
-gpui::actions!(
-    transcript,
-    [
-        /// Open find in the current thread, or give its field the keyboard.
-        FindInThread,
-        /// Step to the next match.
-        FindNext,
-        /// Step to the previous match.
-        FindPrevious
-    ]
-);
+/// Find's key actions, registered in [`Transcript::install_find`].
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    gpui::actions!(
+        transcript,
+        [
+            /// Open find in the current thread, or give its field the keyboard.
+            FindInThread,
+            /// Step to the next match.
+            FindNext,
+            /// Step to the previous match.
+            FindPrevious
+        ]
+    );
+}
+pub use actions::{FindInThread, FindNext, FindPrevious};
 
 /// What kind of step the kind filter keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,8 +107,10 @@ impl StepKind {
 /// What the filters keep: failed steps only, steps of one kind only, or both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Filter {
-    pub(crate) failed: bool,
-    pub(crate) kind: Option<StepKind>,
+    /// Only failed steps.
+    pub failed: bool,
+    /// Only steps of this kind.
+    pub kind: Option<StepKind>,
 }
 
 impl Filter {
@@ -132,22 +129,25 @@ impl Filter {
 /// One place find counts matches in: a row's text, one step of a group, or a subagent's row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hit {
-    pub(crate) row: SharedString,
+    /// The row the matches are in.
+    row: SharedString,
     /// The step's part id, when the matches are one step's of a group.
-    pub(crate) step: Option<String>,
+    step: Option<String>,
     /// The matches lie in text the washes paint: a prompt's, an answer's.
     text: bool,
     /// Of the matches, how many lie in what the step's line says; the rest are in its detail.
     in_line: usize,
-    pub(crate) count: usize,
+    /// How many matches it holds.
+    count: usize,
 }
 
 /// The open find of one transcript.
 #[derive(Default)]
 pub struct FindState {
-    pub(super) open: bool,
+    open: bool,
     input: Option<Entity<ComposerInput>>,
-    _events: Option<Subscription>,
+    /// The field's events, which reach the transcript while this holds them.
+    events: Option<Subscription>,
     /// The words the hits were counted for.
     query: String,
     /// What the filters keep, and what they kept when the hits were counted.
@@ -174,19 +174,19 @@ impl FindState {
         }
         Some(match (self.active, self.total) {
             (_, 0) => "No results".to_owned(),
-            (Some(at), total) => format!("{} of {total}", at + 1),
+            (Some(at), total) => format!("{} of {total}", at.saturating_add(1)),
             (None, total) => format!("{total} found"),
         })
     }
 
     /// The place holding the match at `at`, and the match's place among that place's.
     fn locate(&self, at: usize) -> Option<(&Hit, usize)> {
-        let mut seen = 0;
+        let mut rest = at;
         for hit in &self.hits {
-            if at < seen + hit.count {
-                return Some((hit, at - seen));
+            match rest.checked_sub(hit.count) {
+                Some(past) => rest = past,
+                None => return Some((hit, rest)),
             }
-            seen += hit.count;
         }
         None
     }
@@ -261,7 +261,7 @@ fn step_hit(
         (1, 1)
     } else {
         let in_line = paint::count(&step_line(tool), needle);
-        (in_line, in_line + paint::count(&step_body(tool), needle))
+        (in_line, in_line.saturating_add(paint::count(&step_body(tool), needle)))
     };
     (count > 0).then(|| Hit {
         row: row.clone(),
@@ -332,7 +332,7 @@ fn error_texts(row: &Row) -> Vec<String> {
 }
 
 fn rows_signature(rows: &[Row]) -> u64 {
-    let mut key = Vec::with_capacity(rows.len() * 24);
+    let mut key = Vec::with_capacity(rows.len().saturating_mul(24));
     for row in rows {
         key.extend_from_slice(row.id.as_bytes());
         key.extend_from_slice(&row.version.to_le_bytes());
@@ -374,7 +374,7 @@ fn with_target(
     // A key the window dispatches reaches this while the window is being updated, which
     // cannot be updated again inside itself: the transcript acts once the dispatch is done.
     cx.defer(move |cx| {
-        let _ = window.update(cx, |_, window, cx| {
+        let _gone = window.update(cx, |_, window, cx| {
             target.update(cx, |transcript, cx| act(transcript, window, cx));
         });
     });
@@ -427,7 +427,7 @@ impl Transcript {
                     _ => {}
                 });
             self.find.input = Some(input);
-            self.find._events = Some(events);
+            self.find.events = Some(events);
         }
         let Some(input) = self.find.input.clone() else {
             return;
@@ -469,14 +469,9 @@ impl Transcript {
             return;
         }
         self.refresh_find(cx);
-        let total = self.find.total;
-        if total == 0 {
+        // Wrapping at both ends; none yet enters at the end it steps towards.
+        let Some(next) = popover::menu_step(self.find.active, self.find.total, delta) else {
             return;
-        }
-        let next = match self.find.active {
-            None if delta < 0 => total - 1,
-            None => 0,
-            Some(at) => (at as isize + delta).rem_euclid(total as isize) as usize,
         };
         self.find.active = Some(next);
         self.publish_find(cx);
@@ -513,7 +508,7 @@ impl Transcript {
     }
 
     /// Count the matches again when the words or the rows changed.
-    fn refresh_find(&mut self, cx: &mut Context<Self>) {
+    fn refresh_find(&mut self, cx: &Context<Self>) {
         let query = self
             .find
             .input
@@ -543,12 +538,12 @@ impl Transcript {
         self.find.signature = signature;
         // The current match stays the same one while rows come and go around it.
         self.find.active = kept.and_then(|(row, step, place)| {
-            let mut seen = 0;
+            let mut seen = 0_usize;
             for hit in &self.find.hits {
                 if hit.row == row && hit.step == step {
-                    return Some(seen + place.min(hit.count.saturating_sub(1)));
+                    return Some(seen.saturating_add(place.min(hit.count.saturating_sub(1))));
                 }
-                seen += hit.count;
+                seen = seen.saturating_add(hit.count);
             }
             None
         });
@@ -556,7 +551,7 @@ impl Transcript {
     }
 
     /// Tell the rows what to wash.
-    fn publish_find(&self, cx: &mut Context<Self>) {
+    fn publish_find(&self, cx: &Context<Self>) {
         let surface = cx.entity_id().as_u64();
         if !self.find.open || self.find.query.is_empty() {
             paint::clear(surface);
@@ -597,7 +592,7 @@ impl Transcript {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        self.note_find_window(window, cx);
+        Self::note_find_window(window, cx);
         if !self.find.open {
             return None;
         }
@@ -656,7 +651,7 @@ impl Transcript {
         let kind_at = filter
             .kind
             .and_then(|kind| StepKind::ALL.iter().position(|k| *k == kind))
-            .map_or(0, |at| at + 1);
+            .map_or(0, |at| at.saturating_add(1));
         let filters = div()
             .px(px(8.0))
             .pb(px(8.0))
@@ -708,7 +703,7 @@ impl Transcript {
 
     /// Find's keys go to the window this transcript draws in, whether or not that
     /// window is the key one (`cx.active_window()` is `None` then).
-    fn note_find_window(&self, window: &Window, cx: &mut Context<Self>) {
+    fn note_find_window(window: &Window, cx: &mut Context<Self>) {
         let handle = window.window_handle();
         let me = cx.entity_id();
         let stale = cx

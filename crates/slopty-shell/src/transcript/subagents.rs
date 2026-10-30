@@ -10,15 +10,6 @@
 //! the inspector pushes its trace on a stack of its own (`inspector.rs`), and the terminal, the
 //! sidebar and the prompt box's mirror stay where they were. Subagents started
 //! together share one line over their rows, "3 Explore agents · 2 working · 1m 12s".
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_precision_loss,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::needless_pass_by_value,
-    clippy::nonminimal_bool,
-    clippy::type_complexity,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -67,21 +58,24 @@ const STATUS_TRAVEL: f32 = 4.0;
 /// Bound on remembered status words, as `roll_text`'s.
 const STATUS_KEYS: usize = 256;
 
+/// Status words by row: the last, and the one it swaps from and since when, while it does.
+type StatusWords =
+    HashMap<SharedString, (SharedString, Option<(SharedString, std::time::Instant)>)>;
+
 thread_local! {
     /// Each row's last status word, and the word it swaps from and since when, while it does.
-    static STATUS: std::cell::RefCell<HashMap<SharedString, (SharedString, Option<(SharedString, std::time::Instant)>)>> =
-        std::cell::RefCell::new(HashMap::new());
+    static STATUS: std::cell::RefCell<StatusWords> = std::cell::RefCell::new(HashMap::new());
 }
 
 /// Where `key`'s status swap stands at `now`, `text` its word: the word it leaves and how
-/// far it has gone, `None` at rest. The first sight of a key never swaps; reduced motion never
-/// does.
+/// long it has been leaving, `None` at rest. The first sight of a key never swaps; reduced
+/// motion never does.
 fn status_swap(
     key: &SharedString,
     text: &SharedString,
     reduced: bool,
     now: std::time::Instant,
-) -> Option<(SharedString, f32)> {
+) -> Option<(SharedString, std::time::Duration)> {
     STATUS.with_borrow_mut(|words| {
         if words.len() >= STATUS_KEYS && !words.contains_key(key) {
             words.retain(|_, (_, swap)| swap.is_some());
@@ -91,13 +85,10 @@ fn status_swap(
             let from = std::mem::replace(&mut entry.0, text.clone());
             entry.1 = (!reduced).then_some((from, now));
         }
-        let ms = entry
-            .1
-            .as_ref()
-            .map(|(_, at)| now.saturating_duration_since(*at).as_secs_f32() * 1_000.0);
-        match ms {
-            Some(ms) if !reduced && ms < STATUS_IN.duration_ms as f32 => {
-                entry.1.as_ref().map(|(from, _)| (from.clone(), ms))
+        let since = entry.1.as_ref().map(|(_, at)| now.saturating_duration_since(*at));
+        match since {
+            Some(since) if !reduced && since < STATUS_IN.total() => {
+                entry.1.as_ref().map(|(from, _)| (from.clone(), since))
             }
             _ => {
                 entry.1 = None;
@@ -109,18 +100,18 @@ fn status_swap(
 
 /// `text` as the row's status word, swapping in from the one it last said.
 fn status_word(
-    key: SharedString,
+    key: &SharedString,
     text: SharedString,
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> gpui::Div {
     let (reduced, now) = (cx.reduce_motion(), crate::clock::now(cx));
-    let Some((from, ms)) = status_swap(&key, &text, reduced, now) else {
+    let Some((from, since)) = status_swap(key, &text, reduced, now) else {
         return div().min_w_0().truncate().child(text);
     };
     crate::motion::pulse_lease(view, cx);
-    let arrived = STATUS_IN.progress(ms / STATUS_IN.duration_ms as f32);
-    let left = STATUS_OUT.progress(ms / STATUS_OUT.duration_ms as f32);
+    let arrived = STATUS_IN.progress(since.div_duration_f32(STATUS_IN.total()));
+    let left = STATUS_OUT.progress(since.div_duration_f32(STATUS_OUT.total()));
     div()
         .relative()
         .min_w_0()
@@ -158,17 +149,17 @@ pub(super) const TASK_LINES: usize = 3;
 #[derive(Default)]
 pub(super) struct SubagentsState {
     /// The subagents open in place, by their row: the chat whose steps are spliced in under it.
-    pub(super) open: HashMap<SharedString, String>,
+    pub open: HashMap<SharedString, String>,
     /// How deep each spliced row sits under the transcript's own, by row; a row of the
     /// transcript's own is not in it.
-    pub(super) depths: HashMap<SharedString, u8>,
+    pub depths: HashMap<SharedString, u8>,
     /// The briefs of runs opened in place that the person pressed open past their first lines,
     /// by row.
-    pub(super) briefs_open: HashSet<SharedString>,
+    pub briefs_open: HashSet<SharedString>,
     /// The runs open in place whose record has not arrived, "Loading its steps…" under their row.
-    pub(super) loading: HashSet<SharedString>,
+    pub loading: HashSet<SharedString>,
     /// The window's size as of the last frame.
-    pub(super) window: gpui::Size<gpui::Pixels>,
+    pub window: gpui::Size<gpui::Pixels>,
 }
 
 /// A subagent as its row reads it.
@@ -247,7 +238,7 @@ impl Run {
                     SubagentProgress::DONE
                 }
                 .to_owned(),
-                step: (!status_running && !(tool.is_error || status_failed))
+                step: (!(status_running || tool.is_error || status_failed))
                     .then(|| reply_line(tool))
                     .flatten(),
                 figures: String::new(),
@@ -305,7 +296,7 @@ impl Run {
             .map(|heard| now.saturating_sub(heard))
             .filter(|ms| *ms >= QUIET_AFTER_MS)
             // In whole minutes: it moves once a minute, not every second.
-            .map(|ms| u64::try_from(ms - ms % QUIET_AFTER_MS).unwrap_or(0))
+            .map(|ms| u64::try_from(ms.saturating_sub(ms % QUIET_AFTER_MS)).unwrap_or(0))
             .map(|ms| format!("quiet {}", slopty_view_doc::duration_words(ms)));
         [
             self.model.as_ref().map(ToString::to_string),
@@ -377,7 +368,7 @@ pub(super) fn batch_words(runs: &[Run], now: i64) -> String {
         Some(now)
     } else {
         runs.iter()
-            .filter_map(|run| Some(run.started_at? + i64::try_from(run.duration_ms?).ok()?))
+            .filter_map(|run| run.started_at?.checked_add(i64::try_from(run.duration_ms?).ok()?))
             .max()
     };
     let span = start.zip(end).map(|(start, end)| {
@@ -583,7 +574,7 @@ impl Transcript {
                 // Its record arrived: what the person opened comes into view.
                 self.reveal_opened(row_id.clone());
             }
-            self.nest(child, state, depth + 1, out);
+            self.nest(child, state, depth.saturating_add(1), out);
         }
     }
 
@@ -740,7 +731,7 @@ impl Transcript {
             )
             .children(step.map(|step| {
                 // The word swaps as it changes (Amp).
-                status_word(SharedString::from(format!("{row_id}-status")), step.into(), view, cx)
+                status_word(&SharedString::from(format!("{row_id}-status")), step.into(), view, cx)
                     .min_w_0()
                     .flex_shrink(1.0)
                     .text_color(step_tint)
@@ -765,7 +756,7 @@ impl Transcript {
         row_id: &SharedString,
         tools: &[ToolItem],
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let runs: Vec<Run> = tools.iter().map(Run::of).collect();
         if runs.iter().any(|run| run.running) {
@@ -953,10 +944,14 @@ mod tests {
         let at = |ms: u64| start + std::time::Duration::from_millis(ms);
         assert_eq!(status_swap(&key, &"Thinking".into(), false, start), None, "first sight");
         let swap = status_swap(&key, &"Running tools".into(), false, at(10));
-        assert_eq!(swap, Some(("Thinking".into(), 0.0)), "it swaps from the last word");
+        assert_eq!(
+            swap,
+            Some(("Thinking".into(), std::time::Duration::ZERO)),
+            "it swaps from the last word"
+        );
         let mid =
             status_swap(&key, &"Running tools".into(), false, at(110)).expect("still swapping");
-        assert!((mid.1 - 100.0).abs() < 0.5, "{mid:?}");
+        assert_eq!(mid.1, std::time::Duration::from_millis(100), "{mid:?}");
         assert_eq!(status_swap(&key, &"Running tools".into(), false, at(10 + 350)), None, "landed");
         assert_eq!(status_swap(&key, &"Thinking".into(), true, at(400)), None, "reduced: at once");
     }

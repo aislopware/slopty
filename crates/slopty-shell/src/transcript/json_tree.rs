@@ -6,7 +6,6 @@
 //! and the folds the person changed: a container shows its count open and a preview of its first
 //! fields folded, as a browser's console does, one fixed-height line each so the step's height
 //! stays analytic.
-#![allow(unnameable_types, reason = "shell lint migration: slice B")]
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -68,10 +67,15 @@ enum Kind {
 /// How a run of a line reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tone {
+    /// An object's field name.
     Key,
+    /// The colon after a field name or an index.
     Punctuation,
+    /// A string.
     Text,
+    /// A number.
     Number,
+    /// `true`, `false` and `null`.
     Literal,
     /// A folded container's preview and an open one's count.
     Quiet,
@@ -82,9 +86,11 @@ pub enum Tone {
 pub struct Line {
     /// The value it shows, which a click on a container's line folds or opens.
     pub value: usize,
+    /// How deep it nests, which indents it.
     pub depth: u16,
     /// `Some(open)` for a container.
     pub fold: Option<bool>,
+    /// What it says.
     pub text: String,
     /// The runs of `text`, by bytes.
     pub runs: Vec<(usize, Tone)>,

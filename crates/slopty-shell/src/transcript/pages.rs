@@ -1,7 +1,6 @@
 //! A page part's row hosts its card ([`crate::page::PageCardView`]), kept per row so the
 //! page's web view and watch outlive a frame; a chart fence in a reply hosts one too
 //! ([`crate::page::FenceChart`]).
-#![allow(clippy::clone_on_ref_ptr, reason = "shell lint migration: slice B")]
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -25,13 +24,13 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view: Entity<PageCardView> = if let Some(view) = self.pages.get(&row.id) {
-            let card = card.clone();
+            let card = Arc::clone(card);
             view.update(cx, |view, cx| view.set_card(card, cx));
             view.clone()
         } else {
             let chat = self.work_chat();
             let engine = self.state.read(cx).engine().cloned();
-            let card = card.clone();
+            let card = Arc::clone(card);
             let view = cx.new(|cx| PageCardView::new(card, chat, engine, cx));
             self.pages.insert(row.id.clone(), view.clone());
             view
@@ -44,7 +43,7 @@ impl Transcript {
     /// Chart fences' media: a fence whose language names a chart draws as its page card, kept
     /// per fence; `None` leaves any other fence code.
     pub(super) fn chart_media(&self, cx: &Context<Self>) -> Rc<crate::markdown::render::ChartFn> {
-        let cards = self.fences.clone();
+        let cards = Rc::clone(&self.fences);
         let chat = self.work_chat();
         let engine = self.state.read(cx).engine().cloned();
         Rc::new(move |language: &str, code: &str, id: SharedString, _theme: &Theme| {
@@ -60,7 +59,7 @@ impl Transcript {
                     key,
                     fence,
                     engine: engine.clone(),
-                    cards: cards.clone(),
+                    cards: Rc::clone(&cards),
                 }
                 .into_any_element(),
             )

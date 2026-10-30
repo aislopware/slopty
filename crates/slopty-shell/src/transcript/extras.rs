@@ -2,18 +2,6 @@
 //! agent said behind its copy and can be tried again, a quiet divider no one wrote (a
 //! compaction, a subagent's news), a proposed plan as a card folded past its first lines, and
 //! the working line's current step.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::case_sensitive_file_extension_comparisons,
-    clippy::clone_on_ref_ptr,
-    clippy::format_collect,
-    clippy::naive_bytecount,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::rc_buffer,
-    clippy::unused_self,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -59,15 +47,14 @@ pub fn plan_segment(rows: &[Row], ix: usize) -> Option<(bool, bool)> {
         other.is_some_and(|other| is_plan_row(other) && other.entry_id == row.entry_id)
     };
     let top = !same(ix.checked_sub(1).and_then(|i| rows.get(i)));
-    let bottom = !same(rows.get(ix + 1));
+    let bottom = !same(rows.get(ix.saturating_add(1)));
     Some((top, bottom))
 }
 
 /// The line `offset` of `text` starts on, from 0.
 fn line_at(text: &str, offset: usize) -> usize {
-    text.as_bytes()
-        .get(..offset.min(text.len()))
-        .map_or(0, |head| head.iter().filter(|b| **b == b'\n').count())
+    // A cut inside a character moves back to its start: no newline is part of one.
+    text.get(..text.floor_char_boundary(offset)).map_or(0, |head| head.matches('\n').count())
 }
 
 /// The rows of a plan's text part `key` (`{entry}#plan:<id>`): a header, one row per block,
@@ -104,9 +91,9 @@ pub fn plan_rows(
         let bytes = text.as_bytes().get(top.range.start.min(end)..end).unwrap_or_default();
         let version = (fnv1a(bytes) << 1) | u64::from(streaming);
         let kind = if streaming {
-            RowKind::LiveMarkdown { tree: tree.clone(), block_ix }
+            RowKind::LiveMarkdown { tree: Arc::clone(tree), block_ix }
         } else {
-            RowKind::Markdown { tree: tree.clone(), block_ix }
+            RowKind::Markdown { tree: Arc::clone(tree), block_ix }
         };
         let mut block = row(format!("{key}.{block_ix}"), version, kind);
         // A block that starts past the fold line hides with the fold; the first block
@@ -260,7 +247,11 @@ pub fn step_words(call: &ToolCall) -> String {
         ToolCall::ReadFile { path } => format!("Reading {}", file_name(path)),
         ToolCall::WriteFile { path, .. } => format!("Writing {}", file_name(path)),
         // A notebook's cell, in the TUI's words.
-        ToolCall::EditFile { path, .. } if path.ends_with(".ipynb") => {
+        ToolCall::EditFile { path, .. }
+            if std::path::Path::new(path)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb")) =>
+        {
             format!("Editing notebook {}", file_name(path))
         }
         ToolCall::EditFile { path, .. } => format!("Editing {}", file_name(path)),
@@ -324,13 +315,13 @@ impl Transcript {
         let entry = self.folds.entry(fold).or_default();
         entry.open = Some(!entry.open.unwrap_or(false));
         entry.toggled_at = None;
-        entry.epoch += 1;
+        entry.epoch = entry.epoch.wrapping_add(1);
         self.last_source = None;
         self.sync(cx);
         cx.notify();
     }
 
-    fn copy_extra(&mut self, row_id: SharedString, text: SharedString, cx: &mut Context<Self>) {
+    fn copy_extra(row_id: &SharedString, text: &SharedString, cx: &mut Context<Self>) {
         cx.stop_propagation();
         cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
         // The house's copy span: the check comes back off on its own.
@@ -340,10 +331,10 @@ impl Transcript {
 
     /// The row a [`RowKind`] of this module draws.
     pub(super) fn render_extra_row(
-        &mut self,
+        &self,
         row: &Row,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         match &row.kind {
             RowKind::ErrorCard { message, detail } => {
@@ -353,7 +344,7 @@ impl Transcript {
                 self.render_update_needed(row, least, have, theme, cx)
             }
             RowKind::Marker { text } => marker(text.clone(), theme),
-            RowKind::PlanHeader { copy } => self.render_plan_header(row, copy, theme, cx),
+            RowKind::PlanHeader { copy } => Self::render_plan_header(row, copy, theme, cx),
             RowKind::PlanFold { fold, hidden_lines } => {
                 self.render_plan_fold(fold, *hidden_lines, theme, cx)
             }
@@ -366,12 +357,12 @@ impl Transcript {
     /// copies. It sends nothing: what to do next is done in the agent's TUI. A request tried
     /// again counts down in its own row (`RetryLine`).
     pub(super) fn render_error_card(
-        &mut self,
+        &self,
         row: &Row,
         message: &SharedString,
         detail: Option<&SharedString>,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let open = self.extras.details_open.contains(&row.id);
         let (title, sentence) = error_title(message);
@@ -530,12 +521,12 @@ impl Transcript {
     /// A Claude Code too old to drive: a banner naming its machine and both versions, with the
     /// command that updates it to copy.
     fn render_update_needed(
-        &mut self,
+        &self,
         row: &Row,
         least: &SharedString,
         have: &SharedString,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let words = update_words(&self.chat_host(cx), least, have);
         let key = format!("{}-update-copy", row.id);
@@ -592,11 +583,10 @@ impl Transcript {
     }
 
     fn render_plan_header(
-        &mut self,
         row: &Row,
         copy: &SharedString,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let copied = crate::motion::copied(&format!("copy-plan-{}", row.id), cx);
         let plan_copy_hover = SharedString::from(format!("{}-copy-hover", row.id));
@@ -652,8 +642,8 @@ impl Transcript {
                         "Copy plan"
                     }))
                     .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.copy_extra(id.clone(), text.clone(), cx);
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        Self::copy_extra(&id, &text, cx);
                     }))
                     .child(
                         crate::icons::icon(if copied {
@@ -669,11 +659,11 @@ impl Transcript {
     }
 
     fn render_plan_fold(
-        &mut self,
+        &self,
         fold: &SharedString,
         hidden_lines: usize,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let open = self.folds.get(fold).is_some_and(|state| state.open == Some(true));
         let label: SharedString = if open {
@@ -769,7 +759,7 @@ impl Transcript {
 
 thread_local! {
     /// Highlighted command lines by their text, a bounded few.
-    static COMMANDS: std::cell::RefCell<std::collections::HashMap<String, Arc<Vec<slopty_syntax::HighlightSpan>>>> =
+    static COMMANDS: std::cell::RefCell<std::collections::HashMap<String, Arc<[slopty_syntax::HighlightSpan]>>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
@@ -777,12 +767,12 @@ thread_local! {
 const COMMANDS_KEPT: usize = 512;
 
 /// A command line's bash tokens, highlighted once.
-fn command_spans(line: &str) -> Arc<Vec<slopty_syntax::HighlightSpan>> {
+fn command_spans(line: &str) -> Arc<[slopty_syntax::HighlightSpan]> {
     COMMANDS.with(|commands| {
         if let Some(spans) = commands.borrow().get(line) {
-            return spans.clone();
+            return Arc::clone(spans);
         }
-        let spans = Arc::new(
+        let spans = Arc::<[slopty_syntax::HighlightSpan]>::from(
             slopty_syntax::highlight(slopty_syntax::HighlightRequest {
                 source: line,
                 path: None,
@@ -796,7 +786,7 @@ fn command_spans(line: &str) -> Arc<Vec<slopty_syntax::HighlightSpan>> {
         if commands.len() >= COMMANDS_KEPT {
             commands.clear();
         }
-        commands.insert(line.to_owned(), spans.clone());
+        commands.insert(line.to_owned(), Arc::clone(&spans));
         spans
     })
 }
@@ -880,6 +870,8 @@ fn marker(text: SharedString, theme: &Theme) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use slopty_view_doc::{MessageRole, ToolDiffStat};
 
     use super::*;
@@ -904,7 +896,6 @@ mod tests {
             is_error: false,
             resolved,
             output: None,
-            diff: None,
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
@@ -988,7 +979,10 @@ mod tests {
 
     #[test]
     fn a_long_plan_folds_past_its_first_lines() {
-        let text: String = (0..30).map(|i| format!("Step {i}.\n\n")).collect();
+        let text = (0..30).fold(String::new(), |mut text, i| {
+            let _written = write!(text, "Step {i}.\n\n");
+            text
+        });
         let tree = Arc::new(crate::markdown::parser::parse_full(&text));
         let plan = SessionMessageEntry {
             id: "plan-card:t".into(),

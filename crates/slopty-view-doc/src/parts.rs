@@ -3,7 +3,7 @@
 //! counts a tool part carries in place of its diff ([`ToolDiffStat`]).
 
 use serde::{Deserialize, Serialize};
-use slopty_view_proto::{ToolCall, ToolDiff, UserInputQuestion};
+use slopty_view_proto::{ToolCall, UserInputQuestion};
 
 /// One file's added and removed lines, which a tool part carries in place of its diff: a diff
 /// runs to tens of KB an edit, so the whole of it is fetched behind the part's `diff_ref`.
@@ -16,22 +16,6 @@ pub struct ToolDiffStat {
     pub additions: u64,
     /// The lines removed.
     pub deletions: u64,
-}
-
-/// Line-level add/delete counts for one file's diff.
-#[must_use]
-pub fn diff_stat(diff: &ToolDiff) -> ToolDiffStat {
-    let (additions, deletions) = match &diff.old_text {
-        None => (u64::try_from(diff.new_text.lines().count()).unwrap_or(u64::MAX), 0),
-        Some(old) => similar::TextDiff::from_lines(old.as_str(), diff.new_text.as_str())
-            .iter_all_changes()
-            .fold((0_u64, 0_u64), |(added, removed), change| match change.tag() {
-                similar::ChangeTag::Insert => (added.saturating_add(1), removed),
-                similar::ChangeTag::Delete => (added, removed.saturating_add(1)),
-                similar::ChangeTag::Equal => (added, removed),
-            }),
-    };
-    ToolDiffStat { path: diff.path.clone(), additions, deletions }
 }
 
 /// How far an answer of the agent's has come.
@@ -61,11 +45,6 @@ pub enum SubagentStatus {
 /// One rendered part of an assistant message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "tool calls, the largest, are most of an agent's transcript: boxing them would add \
-              an allocation to most parts to spare the prose ones some bytes"
-)]
 pub enum MessagePart {
     /// The agent's prose.
     Text {
@@ -124,9 +103,6 @@ pub enum MessagePart {
         /// tail); the whole is behind `output_ref` when this is cut.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
-        /// The file diff inline. The view model sends `diff_stats` and `diff_ref` instead.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        diff: Option<ToolDiff>,
         /// The key (`{chatId}/{partId}`) the whole output is fetched by.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_ref: Option<String>,
@@ -242,12 +218,9 @@ impl MessagePart {
             Self::Text { text, .. } | Self::Reasoning { text, .. } | Self::Marker { text, .. } => {
                 [text.len(), 0, 0, 0]
             }
-            Self::Tool { call, output, diff, diff_stats, .. } => [
-                json(call),
-                optional(output.as_deref()),
-                diff.as_ref().map_or(0, json),
-                diff_stats.as_ref().map_or(0, json),
-            ],
+            Self::Tool { call, output, diff_stats, .. } => {
+                [json(call), optional(output.as_deref()), diff_stats.as_ref().map_or(0, json), 0]
+            }
             Self::Input { questions, .. } => [json(questions), 0, 0, 0],
             Self::Image { id, path, name, mime_type } => {
                 [id.len(), path.len(), name.len(), mime_type.len()]
@@ -263,29 +236,5 @@ impl MessagePart {
             Self::Note { note, .. } => [note.text.len(), optional(note.detail.as_deref()), 0, 0],
         };
         lengths.iter().sum()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn diff_stat_counts_line_changes() {
-        let stat = diff_stat(&ToolDiff {
-            path: "/w/a.rs".into(),
-            old_text: Some("a\nb\nc\n".into()),
-            new_text: "a\nB\nc\nd\n".into(),
-        });
-        assert_eq!(stat.path, "/w/a.rs");
-        assert_eq!(stat.additions, 2); // B + d
-        assert_eq!(stat.deletions, 1); // b
-        // New file: every line is an addition.
-        let stat = diff_stat(&ToolDiff {
-            path: "/w/new.rs".into(),
-            old_text: None,
-            new_text: "one\ntwo\n".into(),
-        });
-        assert_eq!((stat.additions, stat.deletions), (2, 0));
     }
 }

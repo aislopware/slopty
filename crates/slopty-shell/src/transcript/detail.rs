@@ -9,16 +9,6 @@
 //! - Its exit code on a line of its own.
 //! - Two sections fetched when opened: the text the model read where the step shows something else
 //!   ("Details for Claude", Claude Code desktop's), and its raw record, as a tree.
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::float_cmp_const,
-    clippy::format_collect,
-    clippy::match_same_arms,
-    clippy::needless_pass_by_ref_mut,
-    clippy::option_option,
-    clippy::unused_self,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -38,7 +28,7 @@ use crate::theme::Theme;
 const BOX_LINES: usize = 16;
 
 /// Height of a running command's box at its cap.
-const BOX_HEIGHT: f32 = BOX_LINES as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD;
+const BOX_HEIGHT: f32 = super::num::count(BOX_LINES).mul_add(OUTPUT_LINE_HEIGHT, OUTPUT_BODY_PAD);
 
 /// How near its bottom a box still counts as following it.
 const BOX_PINNED: f32 = 10.0;
@@ -125,7 +115,8 @@ pub(super) struct DetailState {
 /// A text's forms, made when first drawn.
 struct Forms {
     _text: Arc<str>,
-    json: Option<Option<Arc<json_tree::Doc>>>,
+    /// Its JSON tree, once read: `None` when it is not JSON.
+    json: std::cell::OnceCell<Option<Arc<json_tree::Doc>>>,
     markdown: Option<Arc<ToolDetail>>,
 }
 
@@ -142,14 +133,14 @@ impl DetailState {
         let at = Arc::as_ptr(text).cast::<u8>().addr();
         self.forms.entry(at).or_insert_with(|| Forms {
             _text: Arc::clone(text),
-            json: None,
+            json: std::cell::OnceCell::new(),
             markdown: None,
         })
     }
 
     fn json(&mut self, text: &Arc<str>) -> Option<Arc<json_tree::Doc>> {
         let forms = self.forms(text);
-        forms.json.get_or_insert_with(|| json_tree::Doc::parse(text).map(Arc::new)).clone()
+        forms.json.get_or_init(|| json_tree::Doc::parse(text).map(Arc::new)).clone()
     }
 
     fn markdown(&mut self, text: &Arc<str>) -> Arc<ToolDetail> {
@@ -288,11 +279,10 @@ impl Transcript {
             .as_deref()
             .and_then(OutputFormat::named)
         {
-            Some(OutputFormat::Json) if json.is_some() => OutputFormat::Json,
             Some(OutputFormat::Markdown) => OutputFormat::Markdown,
-            Some(_) => OutputFormat::Text,
-            None if json.is_some() => OutputFormat::Json,
-            None => OutputFormat::Text,
+            // JSON when asked for, or by default, as long as the text reads as JSON.
+            Some(OutputFormat::Json) | None if json.is_some() => OutputFormat::Json,
+            Some(_) | None => OutputFormat::Text,
         };
         let out_key = SharedString::from(format!("{key}-out"));
         let body = match (format, &json) {
@@ -371,11 +361,10 @@ impl Transcript {
 
     /// The format menu of step `key`: "Output", then each format, the one shown marked.
     pub(super) fn format_menu(
-        &self,
         key: &SharedString,
         menu: &FormatMenu,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         div()
             .id(SharedString::from(format!("{key}-formats")))
@@ -438,9 +427,9 @@ impl Transcript {
         body: &ToolDetail,
         boxed: bool,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
-        let element = self.detail_element(body, &format!("{key}-out"), theme, cx);
+        let element = Self::detail_element(body, &format!("{key}-out"), theme, cx);
         if !boxed {
             return element;
         }
@@ -466,15 +455,14 @@ impl Transcript {
 
     /// `detail`'s body: a tree with its folds, else zeron's body.
     pub(super) fn detail_element(
-        &self,
         detail: &ToolDetail,
         selection_key: &str,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         match detail {
             ToolDetail::Json { lines, truncated_by, key } => {
-                self.json_body(key, lines, *truncated_by, theme, cx)
+                Self::json_body(key, lines, *truncated_by, theme, cx)
             }
             other => super::detail_body(other, None, selection_key, theme),
         }
@@ -482,12 +470,11 @@ impl Transcript {
 
     /// A JSON tree's lines: a container's line folds or opens it.
     fn json_body(
-        &self,
         key: &SharedString,
         lines: &[json_tree::Line],
         more: usize,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         div()
             .id(SharedString::from(format!("{key}-tree")))
@@ -595,12 +582,7 @@ impl Transcript {
 
     /// A fetched section's line, its body under it while open: a press fetches it the first
     /// time, then opens and shuts it.
-    pub(super) fn section(
-        &self,
-        section: &Section,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn section(section: &Section, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let open = matches!(section.state, SectionState::Open(_));
         let words: SharedString = match &section.state {
             SectionState::Loading => format!("Loading {}…", section.name.to_lowercase()).into(),
@@ -670,7 +652,7 @@ impl Transcript {
         }
         let body = match &section.state {
             SectionState::Open(body) => {
-                Some(self.detail_element(body, &format!("{}-body", section.key), theme, cx))
+                Some(Self::detail_element(body, &format!("{}-body", section.key), theme, cx))
             }
             _ => None,
         };
@@ -700,6 +682,8 @@ const fn tone_colour(tone: Tone, theme: &Theme) -> gpui::Hsla {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     /// A kind's format is kept by the tool's name, one MCP tool apart from another.
@@ -728,7 +712,10 @@ mod tests {
     /// it scrolls, so nothing is cut at the head as a finished output's is.
     #[test]
     fn a_running_box_keeps_the_whole_tail() {
-        let text: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+        let text = (1..=40).fold(String::new(), |mut text, n| {
+            let _written = writeln!(text, "line {n}");
+            text
+        });
         let Some(ToolDetail::Output { lines, truncated_by, stderr_from }) =
             growing_detail(&text, Some("warn"))
         else {
@@ -743,8 +730,8 @@ mod tests {
             stderr: None,
         };
         assert_eq!(
-            boxed.height(),
-            DETAIL_SEPARATOR + BOX_HEIGHT,
+            boxed.height().to_bits(),
+            (DETAIL_SEPARATOR + BOX_HEIGHT).to_bits(),
             "capped, so the trace holds still"
         );
     }

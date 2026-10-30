@@ -2,13 +2,6 @@
 //! code block, its header's actions (Copy code, Fit content or Use
 //! horizontal scrolling, Run in terminal). The menu is the house's floating menu
 //! (`popover::menu_at`) at the pointer, driven by the keyboard as every menu is.
-#![allow(
-    clippy::clone_on_ref_ptr,
-    clippy::needless_pass_by_ref_mut,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::rc::Rc;
 
@@ -67,10 +60,7 @@ impl Transcript {
     }
 
     /// The code blocks' right-click: their menu opens here.
-    pub(super) fn code_menu_ui(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Rc<crate::markdown::render::MenuFn> {
+    pub(super) fn code_menu_ui(cx: &Context<Self>) -> Rc<crate::markdown::render::MenuFn> {
         let entity = cx.weak_entity();
         Rc::new(
             move |label: &'static str,
@@ -78,11 +68,9 @@ impl Transcript {
                   position: Point<Pixels>,
                   window: &mut Window,
                   cx: &mut App| {
-                entity
-                    .update(cx, |this, cx| {
-                        this.open_context_menu(label, choices, position, window, cx);
-                    })
-                    .ok();
+                let _gone = entity.update(cx, |this, cx| {
+                    this.open_context_menu(label, choices, position, window, cx);
+                });
             },
         )
     }
@@ -123,7 +111,7 @@ impl Transcript {
             .menu
             .as_open()
             .and_then(|menu| menu.choices.get(nth))
-            .map(|choice| choice.act.clone());
+            .map(|choice| Rc::clone(&choice.act));
         self.close_context_menu(cx);
         if let Some(act) = act {
             act(window, cx);
@@ -161,7 +149,7 @@ impl Transcript {
     }
 
     /// The context menu, while open.
-    pub(super) fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_context_menu(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let menu = self.context_menu.menu.get()?;
         let focus = self.context_menu.focus.clone()?;
         let theme = Theme::of(cx).for_popup();

@@ -1,23 +1,10 @@
 //! The transcript's own rows as assistive tech reads them: a subagent's row, the rows
 //! of background work, a reply's images and formulas. Each test draws a real transcript in a
 //! test window and judges by its accessibility tree.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::format_collect,
-    clippy::format_push_string,
-    clippy::manual_midpoint,
-    clippy::map_with_unused_argument_over_ranges,
-    clippy::suboptimal_flops,
-    clippy::unreachable,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -55,6 +42,10 @@ struct Node {
     children: Vec<NodeId>,
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "accessibility bounds are window points, far inside f32's range"
+)]
 fn tree(window: &Window) -> HashMap<NodeId, Node> {
     let Some(update) = window.a11y_tree() else { return HashMap::new() };
     let scale = f64::from(window.scale_factor());
@@ -71,8 +62,8 @@ fn tree(window: &Window) -> HashMap<NodeId, Node> {
                     value: node.value().unwrap_or_default().to_owned(),
                     expanded: node.is_expanded(),
                     center: point(
-                        px(((r.x0 + r.x1) / 2.0 / scale) as f32),
-                        px(((r.y0 + r.y1) / 2.0 / scale) as f32),
+                        px((f64::midpoint(r.x0, r.x1) / scale) as f32),
+                        px((f64::midpoint(r.y0, r.y1) / scale) as f32),
                     ),
                     height: ((r.y1 - r.y0) / scale) as f32,
                     width: ((r.x1 - r.x0) / scale) as f32,
@@ -164,7 +155,7 @@ fn open(
         state.selected_chat = Some("chat".into());
         state.transcript_replayed = true;
         state.transcript = vec![reply];
-        state.transcript_revision += 1;
+        state.transcript_revision = state.transcript_revision.wrapping_add(1);
     });
     let transcript = cx.new(|cx| Transcript::new(state, cx));
     transcript.update(cx, Transcript::sync);
@@ -183,7 +174,6 @@ fn spawn(progress: SubagentProgress) -> MessagePart {
         is_error: false,
         resolved: false,
         output: None,
-        diff: None,
         output_ref: None,
         output_bytes: None,
         diff_ref: None,
@@ -204,7 +194,7 @@ fn drills(
 ) -> (Rc<RefCell<Vec<String>>>, gpui::Subscription) {
     let drilled = Rc::new(RefCell::new(Vec::new()));
     let events = cx.update(|_, cx| {
-        let drilled = drilled.clone();
+        let drilled = Rc::clone(&drilled);
         cx.subscribe(transcript, move |_, event: &SubagentDrill, _| {
             drilled.borrow_mut().push(event.chat_id.clone());
         })
@@ -307,7 +297,7 @@ fn subagents_started_together_stand_under_one_line(cx: &mut gpui::TestAppContext
             chat_id: Some(chat.into()),
             ..SubagentProgress::default()
         }) else {
-            unreachable!()
+            panic!("a spawn part is a tool part")
         };
         MessagePart::Tool {
             id: id.into(),
@@ -315,7 +305,6 @@ fn subagents_started_together_stand_under_one_line(cx: &mut gpui::TestAppContext
             is_error: false,
             resolved: !running,
             output: None,
-            diff: None,
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
@@ -487,7 +476,7 @@ fn display_formulas_typeset_once_settled(cx: &mut gpui::TestAppContext) {
     transcript.update(cx, |this, cx| {
         this.state.update(cx, |state, _| {
             state.transcript = vec![entry(MessageStatus::Streaming, vec![text("$$\\frac{a}")])];
-            state.transcript_revision += 1;
+            state.transcript_revision = state.transcript_revision.wrapping_add(1);
         });
         this.sync(cx);
     });
@@ -543,7 +532,7 @@ fn opened_before_its_run(cx: &mut gpui::TestAppContext, running: bool) {
     let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
     state.update(cx, |state, cx| {
         state.set_subagent_snapshot("child-chat".into(), vec![run_line(0), run_line(1)]);
-        state.transcript_revision += 1;
+        state.transcript_revision = state.transcript_revision.wrapping_add(1);
         cx.notify();
     });
     // Its steps land in view: what the person opened comes into view once its record is in.
@@ -597,7 +586,7 @@ fn a_chats_words_are_articles_and_paragraphs(cx: &mut gpui::TestAppContext) {
     transcript.update(cx, |this, cx| {
         this.state.update(cx, |state, _| {
             state.transcript = vec![seam, asked, reply];
-            state.transcript_revision += 1;
+            state.transcript_revision = state.transcript_revision.wrapping_add(1);
         });
         this.sync(cx);
     });
@@ -686,7 +675,10 @@ fn a_subagent_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAp
         chat_id: Some("child-chat".into()),
         ..SubagentProgress::default()
     };
-    let words = (0..40).map(|n| format!("Paragraph {n} of the survey.\n\n")).collect::<String>();
+    let words = (0..40).fold(String::new(), |mut words, n| {
+        let _written = write!(words, "Paragraph {n} of the survey.\n\n");
+        words
+    });
     let (transcript, cx) = open(
         cx,
         entry(MessageStatus::Complete, vec![text(&words), spawn(progress), text("Counted.")]),
@@ -794,7 +786,6 @@ fn the_controls_of_a_reply_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
         is_error: false,
         resolved: true,
         output: None,
-        diff: None,
         output_ref: None,
         output_bytes: None,
         diff_ref: None,
@@ -849,7 +840,6 @@ fn exec(id: &str, command: &str, resolved: bool, is_error: bool) -> MessagePart 
         is_error,
         resolved,
         output: None,
-        diff: None,
         output_ref: None,
         output_bytes: None,
         diff_ref: None,
@@ -888,7 +878,7 @@ fn show(
     transcript.update(cx, |this, cx| {
         this.state.update(cx, |state, _| {
             state.transcript = entries;
-            state.transcript_revision += 1;
+            state.transcript_revision = state.transcript_revision.wrapping_add(1);
         });
         this.sync(cx);
     });
@@ -1041,7 +1031,10 @@ fn an_open_step_reads_in_its_format_with_its_exit_code_and_records(cx: &mut gpui
     }
     let mut running = exec("two", "npm run dev", true, false);
     if let MessagePart::Tool { output, facts, .. } = &mut running {
-        *output = Some((1..=40).map(|n| format!("tick {n}\n")).collect());
+        *output = Some((1..=40).fold(String::new(), |mut out, n| {
+            let _written = writeln!(out, "tick {n}");
+            out
+        }));
         *facts = Some(Box::new(ToolFacts { growing: true, ..ToolFacts::default() }));
     }
     let parts = vec![done, text("Done."), running, text("Watching.")];
@@ -1202,7 +1195,7 @@ fn a_drilled_run_reads_from_the_top(cx: &mut gpui::TestAppContext) {
             );
             state.selected_chat = Some("child".into());
             state.transcript = vec![prompt("task", "Count the lines"), answer("a2", "It has 4.")];
-            state.transcript_revision += 1;
+            state.transcript_revision = state.transcript_revision.wrapping_add(1);
         });
         this.sync(cx);
     });
@@ -1226,7 +1219,7 @@ fn a_run_listed_after_it_opened_reads_as_one(cx: &mut gpui::TestAppContext) {
         this.state.update(cx, |state, _| {
             state.selected_chat = Some("child".into());
             state.transcript = vec![prompt("task", "Count the lines"), answer("a2", "It has 4.")];
-            state.transcript_revision += 1;
+            state.transcript_revision = state.transcript_revision.wrapping_add(1);
         });
         this.sync(cx);
     });
@@ -1268,7 +1261,7 @@ fn a_long_prompt_folds_quietly(cx: &mut gpui::TestAppContext) {
         .expect("the bubble")
         .clone();
     // Five lines of 22, the 4 pt gap, the 18 pt control and the bubble's 10 pt pads.
-    let want = 5.0 * super::USER_LINE_HEIGHT + 4.0 + 18.0 + 20.0;
+    let want = super::USER_LINE_HEIGHT.mul_add(5.0, 4.0 + 18.0 + 20.0);
     assert!((bubble.height - want).abs() <= 1.0, "no continuation line: {}", bubble.height);
     for _ in 0..12 {
         if focused(cx) == "Expand message" {
@@ -1323,7 +1316,6 @@ fn the_keyboard_reaches_the_controls_of_a_reply(cx: &mut gpui::TestAppContext) {
         is_error: false,
         resolved: true,
         output: None,
-        diff: None,
         output_ref: None,
         output_bytes: None,
         diff_ref: None,
@@ -1455,7 +1447,7 @@ fn a_running_call_sweeps_its_words() {
     let swept: Vec<bool> = tools.iter().map(super::sweeps).collect();
     assert_eq!(swept, [true, false], "{tools:?}");
     let spawn = rows.iter().find_map(|row| match &row.kind {
-        super::RowKind::Spawn { tool } => Some(tool.clone()),
+        super::RowKind::Spawn { tool } => Some(Arc::clone(tool)),
         _ => None,
     });
     assert!(spawn.is_some_and(|tool| !super::sweeps(&tool)), "its own row, unswept");
@@ -1535,7 +1527,7 @@ fn find_opens_what_hides_the_step_it_lands_on(cx: &mut gpui::TestAppContext) {
             Some(&Cursor { row: group.clone(), step: Some("t2".into()) }),
             "the cursor on it"
         );
-        assert!(this.find.open, "find stays open");
+        assert!(this.finding(), "find stays open");
         assert_eq!(this.find.tally().as_deref(), Some("1 of 1"));
     });
 }
@@ -1600,7 +1592,7 @@ fn the_traces_keys_move_its_cursor_and_e_lands_on_the_failure(cx: &mut gpui::Tes
     cx.simulate_keystrokes("down");
     let below = transcript.read_with(cx, |this, _| {
         let ix = this.rows.iter().position(|row| row.id == group).unwrap();
-        this.rows.get(ix + 1).map(|row| row.id.clone())
+        this.rows.get(ix.saturating_add(1)).map(|row| row.id.clone())
     });
     assert_eq!(at(cx).map(|cursor| cursor.row), below, "over the folded group to the row under it");
 }
@@ -1622,8 +1614,10 @@ fn long_trace_frame_cost(cx: &mut gpui::TestAppContext) {
         call: ToolCall::Exec { command: format!("cargo test -p crate{n} -- --nocapture") },
         is_error: n == 4,
         resolved: true,
-        output: Some((0..12).map(|line| format!("test parser::case_{line} ... ok\n")).collect()),
-        diff: None,
+        output: Some((0..12).fold(String::new(), |mut out, line| {
+            let _written = writeln!(out, "test parser::case_{line} ... ok");
+            out
+        })),
         output_ref: None,
         output_bytes: None,
         diff_ref: None,
@@ -1669,29 +1663,32 @@ fn long_trace_frame_cost(cx: &mut gpui::TestAppContext) {
     let report = |name: &str, samples: Vec<(Duration, usize)>| {
         let mut took: Vec<f64> = samples.iter().map(|(took, _)| took.as_secs_f64() * 1e6).collect();
         took.sort_by(f64::total_cmp);
-        let at = |q: f64| took[((took.len() - 1) as f64 * q).round() as usize];
+        // The sample `percent` of the way up, rounded to the nearest.
+        let at = |percent: usize| {
+            took[took.len().saturating_sub(1).saturating_mul(percent).saturating_add(50) / 100]
+        };
         let rows: Vec<usize> = samples.iter().map(|(_, rows)| *rows).collect();
         println!(
             "MEASURE long_trace {name}: p50 {:.0} µs, p95 {:.0} µs, max {:.0} µs; rows built {}–{} of {total}",
-            at(0.5),
-            at(0.95),
-            at(1.0),
+            at(50),
+            at(95),
+            at(100),
             rows.iter().min().unwrap_or(&0),
             rows.iter().max().unwrap_or(&0),
         );
     };
     transcript.update(cx, |this, _| this.follow());
-    report("held at the end", (0..FRAMES).map(|_| frame(cx)).collect());
+    report("held at the end", std::iter::repeat_with(|| frame(cx)).take(FRAMES).collect());
     transcript.update(cx, |this, _| {
         this.let_go();
         this.list.scroll_to(gpui::ListOffset { item_ix: total / 2, offset_in_item: px(0.0) });
     });
-    let scrolled = (0..FRAMES)
-        .map(|_| {
-            transcript.update(cx, |this, _| this.list.scroll_by(px(53.0)));
-            frame(cx)
-        })
-        .collect();
+    let scrolled = std::iter::repeat_with(|| {
+        transcript.update(cx, |this, _| this.list.scroll_by(px(53.0)));
+        frame(cx)
+    })
+    .take(FRAMES)
+    .collect();
     report("scrolled through the middle", scrolled);
     transcript.update(cx, |this, cx| {
         this.follow();
@@ -1702,7 +1699,7 @@ fn long_trace_frame_cost(cx: &mut gpui::TestAppContext) {
                 id: "live".into(),
                 ..entry(MessageStatus::Streaming, vec![words])
             });
-            state.transcript_revision += 1;
+            state.transcript_revision = state.transcript_revision.wrapping_add(1);
         });
         this.sync(cx);
     });
@@ -1713,9 +1710,9 @@ fn long_trace_frame_cost(cx: &mut gpui::TestAppContext) {
                 this.state.update(cx, |state, _| {
                     let live = state.transcript.last_mut().expect("the live answer");
                     if let Some(MessagePart::Text { text, .. }) = live.parts.last_mut() {
-                        text.push_str(&format!(" Sentence {n} of the answer as it streams."));
+                        let _written = write!(text, " Sentence {n} of the answer as it streams.");
                     }
-                    state.transcript_revision += 1;
+                    state.transcript_revision = state.transcript_revision.wrapping_add(1);
                 });
                 this.sync(cx);
             });

@@ -118,7 +118,7 @@ impl Transcript {
         row_id: &SharedString,
         facts: Option<&TurnFacts>,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let line = div()
             .id(SharedString::from(format!("{row_id}-turn")))
@@ -137,8 +137,7 @@ impl Transcript {
             return line.into_any_element();
         };
         if facts.ended.is_none() {
-            self.work.beat = Some(facts.started);
-            self.tick_soon(cx);
+            self.tick_with_turn(facts.started, cx);
         }
         let words = turn_words(facts, self.clock.timestamp_millis(), &chrono::Local);
         let spoken = [

@@ -1,5 +1,6 @@
-//! Background work as the transcript shows it: a
-//! background task's notice as a quiet row, the agent's quiet notices (a request tried again
+//! Background work as the transcript shows it.
+//!
+//! A background task's notice as a quiet row, the agent's quiet notices (a request tried again
 //! counts down to its next attempt in place), and what a tool call says beyond its chip: its
 //! result in the TUI's words, and each step's time in a lane of its own at the row's trailing
 //! edge (`docs/decisions/inspector.md`, "A step row reads at a glance").
@@ -7,16 +8,6 @@
 //! The words are the view model's (`slopty_view_doc::part_kinds`); this module only draws them
 //! and ticks what runs from the times they carry. It reads, never acts: moving a call to the
 //! background or stopping a task is the agent's TUI's (`docs/decisions/agents.md`, "TUI-first").
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -45,7 +36,7 @@ pub(super) struct WorkState {
     /// The redraw of what ticks, while anything drawn ticks.
     tick: Option<Task<()>>,
     /// When the running turn began (ms since the epoch), whose whole seconds the tick lands on.
-    pub(super) beat: Option<i64>,
+    beat: Option<i64>,
 }
 
 /// Fold `value`'s every field into a row's fingerprint: these shapes change in place.
@@ -250,42 +241,39 @@ pub(super) struct ChipFacts {
     pub alt: bool,
 }
 
-impl ChipFacts {
-    /// The trailing words of `facts` on the chip of part `part_id`, or nothing.
-    pub fn trail(
-        &self,
-        part_id: &str,
-        facts: &ToolFacts,
-        resolved: bool,
-        theme: &Theme,
-    ) -> Option<AnyElement> {
-        // A running step's time is its lane's; its trail keeps only its limit.
-        let running_timer = facts.timer.as_ref().filter(|_| !resolved);
-        let words = match (running_timer, &facts.result) {
-            (Some(timer), _) => timer
-                .timeout_ms
-                .map(|limit| format!("timeout {}", slopty_view_doc::duration_words(limit))),
-            (None, Some(result)) => Some(result.clone()),
-            (None, None) => None,
-        };
-        let words = words?;
-        let tint = if facts.failed { theme.danger } else { theme.text_faint };
-        Some(
-            div()
-                .id(SharedString::from(format!("{part_id}-result")))
-                .role(gpui::Role::Status)
-                .aria_label(SharedString::from(words.clone()))
-                .flex_none()
-                .max_w(px(260.0))
-                .truncate()
-                .text_size(crate::typography::ui_rems(11.0))
-                // A timer that ticks holds its width.
-                .font_features(crate::typography::tabular())
-                .text_color(tint)
-                .child(SharedString::from(words))
-                .into_any_element(),
-        )
-    }
+/// The trailing words of `facts` on the chip of part `part_id`, or nothing.
+pub(super) fn trail(
+    part_id: &str,
+    facts: &ToolFacts,
+    resolved: bool,
+    theme: &Theme,
+) -> Option<AnyElement> {
+    // A running step's time is its lane's; its trail keeps only its limit.
+    let running_timer = facts.timer.as_ref().filter(|_| !resolved);
+    let words = match (running_timer, &facts.result) {
+        (Some(timer), _) => timer
+            .timeout_ms
+            .map(|limit| format!("timeout {}", slopty_view_doc::duration_words(limit))),
+        (None, Some(result)) => Some(result.clone()),
+        (None, None) => None,
+    };
+    let words = words?;
+    let tint = if facts.failed { theme.danger } else { theme.text_faint };
+    Some(
+        div()
+            .id(SharedString::from(format!("{part_id}-result")))
+            .role(gpui::Role::Status)
+            .aria_label(SharedString::from(words.clone()))
+            .flex_none()
+            .max_w(px(260.0))
+            .truncate()
+            .text_size(crate::typography::ui_rems(11.0))
+            // A timer that ticks holds its width.
+            .font_features(crate::typography::tabular())
+            .text_color(tint)
+            .child(SharedString::from(words))
+            .into_any_element(),
+    )
 }
 
 impl ChipFacts {
@@ -335,32 +323,38 @@ impl Transcript {
         ChipFacts { now: self.clock.timestamp_millis(), alt: self.alt }
     }
 
+    /// Draw again on the next whole second of the turn running since `started` (ms since the
+    /// epoch): its time is drawn, and runs.
+    pub(super) fn tick_with_turn(&mut self, started: i64, cx: &Context<Self>) {
+        self.work.beat = Some(started);
+        self.tick_soon(cx);
+    }
+
     /// Draw again in a second: something drawn runs (a timer, a countdown). Each frame that
     /// draws it asks again, so the redraws stop with the last of it. It is the one tick, on
     /// the running turn's next whole second, so every time that runs moves on in one frame
     /// (`inspector.md`, "One clock").
-    pub(super) fn tick_soon(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn tick_soon(&mut self, cx: &Context<Self>) {
         if self.work.tick.is_some() {
             return;
         }
         let wait = match self.work.beat {
             Some(beat) => {
                 let real = crate::clock::utc(cx).timestamp_millis();
-                let to_next = 1_000 - (real - beat).rem_euclid(1_000);
+                let to_next = 1_000_i64.saturating_sub(real.saturating_sub(beat).rem_euclid(1_000));
                 // Just past the second, never just short of it.
-                Duration::from_millis(u64::try_from(to_next).unwrap_or(1_000) + 2)
+                Duration::from_millis(u64::try_from(to_next).unwrap_or(1_000).saturating_add(2))
             }
             None => TICK,
         };
         self.work.tick = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
-            this.update(cx, |this, cx| {
+            let _gone = this.update(cx, |this, cx| {
                 this.work.tick = None;
                 // What runs reads the time this tick took, in every frame built after it.
                 this.clock = crate::clock::utc(cx);
                 cx.notify();
-            })
-            .ok();
+            });
         }));
     }
 
@@ -375,11 +369,11 @@ impl Transcript {
     /// description muted on the right; a notice with a body (a monitor's event, an agent's
     /// report) opens it under the line.
     pub(super) fn render_task_note(
-        &mut self,
+        &self,
         row: &Row,
         task: &TaskRow,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let open = self.work.open.contains(&row.id);
         // The description on the right only where the words do not already say it
@@ -464,7 +458,7 @@ impl Transcript {
         row: &Row,
         note: &NoteRow,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let open = self.work.open.contains(&row.id);
         let retrying = note.retry.is_some() && !note.recovered;
@@ -535,7 +529,7 @@ impl Transcript {
 fn lead_slot(lead: Option<AnyElement>) -> gpui::Div {
     div()
         .w(px(super::ACTIVITY_TRUNK_X * 2.0))
-        .mr(px(super::ACTIVITY_TITLE_X - super::ACTIVITY_TRUNK_X * 2.0 - Theme::SPACE_SM))
+        .mr(px(super::ACTIVITY_TRUNK_X.mul_add(-2.0, super::ACTIVITY_TITLE_X) - Theme::SPACE_SM))
         .flex_none()
         .flex()
         .justify_center()
@@ -590,7 +584,7 @@ fn disclosure(
 /// What opens under a notice: mono, muted, capped.
 fn body_block(text: &str, theme: &Theme) -> AnyElement {
     div()
-        .ml(px(super::ACTIVITY_TRUNK_X * 2.0 + Theme::SPACE_SM))
+        .ml(px(super::ACTIVITY_TRUNK_X.mul_add(2.0, Theme::SPACE_SM)))
         .mb(px(Theme::SPACE_XS))
         .max_h(px(240.0))
         .overflow_hidden()

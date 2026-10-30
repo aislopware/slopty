@@ -7,12 +7,6 @@
 //!
 //! The person's prompt is held nowhere (2026-10-20): Amp, T3 Code and opencode hold none, and
 //! Claude desktop keeps its peek behind a flag; find goes back to a prompt.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice B"
-)]
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, SharedString, Window, div, px};
@@ -39,8 +33,9 @@ const GROUP_BAND_EDGE: f32 = 24.0;
 fn first_under(len: usize, top: &impl Fn(usize) -> f32, line: f32) -> usize {
     let (mut read, mut past) = (0, len);
     while read < past {
-        let mid = read + (past - read) / 2;
-        if top(mid + 1) <= line { read = mid + 1 } else { past = mid }
+        let mid = usize::midpoint(read, past);
+        let next = mid.saturating_add(1);
+        if top(next) <= line { read = next } else { past = mid }
     }
     read
 }
@@ -78,12 +73,12 @@ impl Transcript {
         if !self.group_open(read) || top(read) >= line {
             return None;
         }
-        (top((read + 1).min(len)) > line + band_height()).then_some(read)
+        (top(read.saturating_add(1).min(len)) > line + band_height()).then_some(read)
     }
 
     /// Whether row `ix` is a tool group shown open behind a header that folds it.
     fn group_open(&self, ix: usize) -> bool {
-        let row = &self.rows[ix];
+        let Some(row) = self.rows.get(ix) else { return false };
         let RowKind::ToolGroup { tools, .. } = &row.kind else {
             return false;
         };
@@ -93,7 +88,7 @@ impl Transcript {
 
     /// Fold the group headed at row `ix` and glide back to it.
     fn fold_held_group(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let row = &self.rows[ix];
+        let Some(row) = self.rows.get(ix) else { return };
         if !matches!(row.kind, RowKind::ToolGroup { .. }) {
             return;
         }
@@ -109,7 +104,7 @@ impl Transcript {
     pub(super) fn render_sticky_group(
         &self,
         _window: &Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Vec<AnyElement> {
         let group = self.sticky_group();
         let view = cx.weak_entity();
@@ -130,8 +125,8 @@ impl Transcript {
         drawn
     }
 
-    fn render_held_group(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let row = &self.rows[ix];
+    fn render_held_group(&self, ix: usize, cx: &Context<Self>) -> Option<AnyElement> {
+        let row = self.rows.get(ix)?;
         let RowKind::ToolGroup { summary, .. } = &row.kind else {
             return None;
         };
@@ -186,7 +181,7 @@ impl Transcript {
         words: &SharedString,
         key: &SharedString,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let hover = motion::hover_t(key);
         let column = div()
@@ -302,7 +297,6 @@ mod tests {
                             is_error: false,
                             resolved: true,
                             output: None,
-                            diff: None,
                             output_ref: None,
                             output_bytes: None,
                             diff_ref: None,

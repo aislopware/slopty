@@ -12,22 +12,6 @@
 //! keyboard stays the inspector's, on the way back, so Esc goes back. It sends nothing to the
 //! agent: copying, opening a file and looking at a picture are its only actions, and the TUI
 //! does the rest.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::assigning_clones,
-    clippy::cast_possible_truncation,
-    clippy::clone_on_ref_ptr,
-    clippy::indexing_slicing,
-    clippy::manual_midpoint,
-    clippy::needless_pass_by_ref_mut,
-    clippy::string_slice,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unused_self,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -77,7 +61,10 @@ const ROW_WASH: f32 = 0.03;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectorEvent {
     /// Show `path`'s diff in Changes.
-    OpenChange { path: String },
+    OpenChange {
+        /// The file, as the session's records name it.
+        path: String,
+    },
 }
 
 /// One file the session changed, with its lines added and removed over the session.
@@ -94,15 +81,15 @@ pub(crate) fn changed_files(entries: &[SessionMessageEntry]) -> Vec<ChangedFile>
     let mut out: Vec<ChangedFile> = Vec::new();
     let mut add = |path: &str, additions: u64, deletions: u64| {
         if let Some(file) = out.iter_mut().find(|file| file.path == path) {
-            file.additions += additions;
-            file.deletions += deletions;
+            file.additions = file.additions.saturating_add(additions);
+            file.deletions = file.deletions.saturating_add(deletions);
         } else {
             out.push(ChangedFile { path: path.to_owned(), additions, deletions });
         }
     };
     for entry in entries.iter().filter(|entry| entry.role == MessageRole::Assistant) {
         for part in &entry.parts {
-            let MessagePart::Tool { call, diff, diff_stats, is_error, .. } = part else { continue };
+            let MessagePart::Tool { call, diff_stats, is_error, .. } = part else { continue };
             if *is_error {
                 continue;
             }
@@ -110,11 +97,6 @@ pub(crate) fn changed_files(entries: &[SessionMessageEntry]) -> Vec<ChangedFile>
                 for stat in stats {
                     add(&stat.path, stat.additions, stat.deletions);
                 }
-                continue;
-            }
-            if let Some(diff) = diff {
-                let stat = slopty_view_doc::diff_stat(diff);
-                add(&stat.path, stat.additions, stat.deletions);
                 continue;
             }
             match call {
@@ -194,21 +176,22 @@ pub(crate) fn now_words(
 pub(crate) fn placeholders(text: &str) -> Vec<std::ops::Range<usize>> {
     const OPENS: [&str; 2] = ["[Image #", "[Pasted text #"];
     let mut out = Vec::new();
-    let mut from = 0;
+    let mut from = 0_usize;
     while let Some((start, open)) = OPENS
         .iter()
-        .filter_map(|open| text[from..].find(open).map(|at| (from + at, open.len())))
+        .filter_map(|open| Some((from.checked_add(text.get(from..)?.find(open)?)?, open.len())))
         .min_by_key(|(at, _)| *at)
     {
-        let rest = &text[start + open..];
+        let after = start.saturating_add(open);
+        let rest = text.get(after..).unwrap_or_default();
         match rest.find([']', '[', '\n']) {
-            Some(close) if rest.as_bytes()[close] == b']' => {
-                let end = start + open + close + 1;
+            Some(close) if rest.as_bytes().get(close) == Some(&b']') => {
+                let end = after.saturating_add(close).saturating_add(1);
                 out.push(start..end);
                 from = end;
             }
             // Left open, it is words; look on from after its opening.
-            _ => from = start + open,
+            _ => from = after,
         }
     }
     out
@@ -291,7 +274,17 @@ pub struct Inspector {
 
 impl EventEmitter<InspectorEvent> for Inspector {}
 
+impl std::fmt::Debug for Inspector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inspector")
+            .field("watched", &self.watched)
+            .field("drilled", &self.stack.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Inspector {
+    /// The inspector over `transcript`, the selected session's trace.
     pub fn new(
         state: Entity<AppState>,
         transcript: Entity<Transcript>,
@@ -357,7 +350,7 @@ impl Inspector {
         cx: &mut Context<Self>,
     ) {
         if let Some(at) = self.stack.iter().position(|drilled| drilled.chat == chat) {
-            self.pop_to(at + 1, cx);
+            self.pop_to(at.saturating_add(1), cx);
             return;
         }
         let run = row.as_ref().and_then(|row| from.read(cx).spawn_run(row));
@@ -430,7 +423,7 @@ impl Inspector {
 
     /// Show every trace on the stack at `depth` (`inspector.md`, "One fold depth for the whole
     /// trace").
-    fn set_depth(&mut self, depth: Depth, cx: &mut Context<Self>) {
+    fn set_depth(&self, depth: Depth, cx: &mut Context<Self>) {
         let traces: Vec<Entity<Transcript>> = std::iter::once(self.transcript.clone())
             .chain(self.stack.iter().map(|drilled| drilled.transcript.clone()))
             .collect();
@@ -449,7 +442,7 @@ impl Inspector {
 
     /// The fold depth's control, at the header's trailing edge: each depth a press away, the one
     /// shown marked, `[` and `]` stepping it.
-    fn render_depth(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_depth(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let shown = self.shown().read(cx).depth();
         div()
             .id("inspector-depth")
@@ -508,7 +501,7 @@ impl Inspector {
         if self.watched == chat {
             return;
         }
-        self.watched = chat.clone();
+        self.watched.clone_from(&chat);
         self.tray = None;
         self.card = None;
         self.pop_to(0, cx);
@@ -561,7 +554,7 @@ impl Inspector {
                 read_at: Some(at),
             };
         }
-        (self.facts.files.clone(), self.facts.tasks.clone())
+        (Arc::clone(&self.facts.files), self.facts.tasks.clone())
     }
 
     /// Open `preview` in the lightbox, the keyboard with it until it closes.
@@ -600,6 +593,15 @@ impl Inspector {
         cx.notify();
     }
 
+    /// Where `card`'s line was last drawn.
+    fn line_bounds(&self, card: Card) -> Rc<Cell<Bounds<Pixels>>> {
+        let [now, changes] = &self.lines;
+        Rc::clone(match card {
+            Card::Now => now,
+            Card::Changes => changes,
+        })
+    }
+
     /// One of the fixed lines: `id`, its height [`LINE`] whatever it says, truncating, never
     /// wrapping; a press opens `card` when there is one, and the line keeps where it was drawn.
     fn line(
@@ -607,10 +609,10 @@ impl Inspector {
         id: &'static str,
         card: Option<Card>,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let open = card.is_some_and(|card| self.card == Some(card));
-        let at = card.map(|card| self.lines[card as usize].clone());
+        let at = card.map(|card| self.line_bounds(card));
         div()
             .id(id)
             .debug_selector(move || id.into())
@@ -672,9 +674,9 @@ impl Inspector {
         card: Card,
         content: Vec<AnyElement>,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
-        let line = self.lines[card as usize].clone();
+        let line = self.line_bounds(card);
         let body = crate::popover::popover_card(theme)
             .id(match card {
                 Card::Now => "inspector-now-card",
@@ -715,7 +717,7 @@ impl Inspector {
     /// The session's status and branch, on one line that is always drawn; drilled into a run,
     /// the way back instead ([`Self::render_drilled_header`]). The session's own title is not
     /// said again here: its terminal's title bar and its sidebar row say it.
-    fn render_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_header(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         if !self.stack.is_empty() {
             return self.render_drilled_header(theme, cx);
         }
@@ -773,16 +775,17 @@ impl Inspector {
 
     /// Drilled into a run: the way back, the runs it is under (each a press away), its task's
     /// name and its status mark, on the header's line.
-    fn render_drilled_header(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_drilled_header(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let depth = self.stack.len();
-        let parent: SharedString = match depth {
-            0 | 1 => "the session".into(),
-            _ => self.stack[depth - 2].title.clone(),
-        };
+        let parent: SharedString = depth
+            .checked_sub(2)
+            .and_then(|ix| self.stack.get(ix))
+            .map_or_else(|| "the session".into(), |drilled| drilled.title.clone());
         let run = self.drilled_run(cx);
-        let title = run
-            .as_ref()
-            .map_or_else(|| self.stack[depth - 1].title.clone(), |run| run.title.clone());
+        let title = run.as_ref().map_or_else(
+            || self.stack.last().map(|drilled| drilled.title.clone()).unwrap_or_default(),
+            |run| run.title.clone(),
+        );
         let back_ink = hover_blend("inspector-back", theme.text_muted, theme.text);
         let back = div()
             .id("inspector-back")
@@ -802,11 +805,16 @@ impl Inspector {
             .child(icon(icons::ARROW_LEFT).size(px(12.0)).text_color(back_ink))
             .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.pop_to(depth - 1, cx);
+                this.pop_to(depth.saturating_sub(1), cx);
                 this.refocus(window, cx);
             }));
         let crumbs: Vec<AnyElement> = std::iter::once(SharedString::from("Session"))
-            .chain(self.stack[..depth - 1].iter().map(|drilled| drilled.title.clone()))
+            .chain(
+                self.stack
+                    .iter()
+                    .take(depth.saturating_sub(1))
+                    .map(|drilled| drilled.title.clone()),
+            )
             .enumerate()
             .map(|(level, name)| {
                 let fade = format!("inspector-crumb-{level}");
@@ -873,7 +881,7 @@ impl Inspector {
 
     /// Drilled into a run: what it does now (its step, what it asks of the person, or what it
     /// answered) and its facts, on the Now line, which opens nothing.
-    fn render_drilled_now(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_drilled_now(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let run = self.drilled_run(cx);
         let now = self.clock.timestamp_millis();
         let (said, tint) = match &run {
@@ -923,7 +931,7 @@ impl Inspector {
         &self,
         tasks: Option<&[TodoItem]>,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         if !self.stack.is_empty() {
             return self.render_drilled_now(theme, cx);
@@ -1067,13 +1075,14 @@ impl Inspector {
         &self,
         files: &[ChangedFile],
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let count = files.len();
         let has = count > 0;
         let open = has && self.card == Some(Card::Changes);
-        let (adds, dels) =
-            files.iter().fold((0, 0), |(a, d), file| (a + file.additions, d + file.deletions));
+        let (adds, dels) = files.iter().fold((0_u64, 0_u64), |(a, d), file| {
+            (a.saturating_add(file.additions), d.saturating_add(file.deletions))
+        });
         let counts = |additions: u64, deletions: u64| {
             div()
                 .flex()
@@ -1179,9 +1188,10 @@ impl Inspector {
     }
 }
 
-/// The agent's prompt box as its TUI holds it, mirrored live as the timeline's last row, as the
-/// TUI keeps it under the conversation ([`Transcript::set_footer`]): the prompts queued behind
-/// the turn under way, then the draft, its placeholders drawn apart, and the pictures pasted
+/// The agent's prompt box as its TUI holds it, mirrored live as the timeline's last row.
+///
+/// As the TUI keeps it under the conversation ([`Transcript::set_footer`]): the prompts queued
+/// behind the turn under way, then the draft, its placeholders drawn apart, and the pictures pasted
 /// into it, each a press away from the inspector's lightbox. It is drawn only while the box holds
 /// something, with no caret: what it says is typed in the TUI, and nothing here types.
 pub struct PromptMirror {
@@ -1192,6 +1202,15 @@ pub struct PromptMirror {
     /// The reads of the pictures under way, and the wake-ups that try a failed one again, by
     /// their paths.
     picture_loads: HashMap<String, Task<()>>,
+}
+
+impl std::fmt::Debug for PromptMirror {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PromptMirror")
+            .field("holds", &self.prompt.is_some())
+            .field("loading", &self.picture_loads.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl PromptMirror {
@@ -1210,7 +1229,7 @@ impl PromptMirror {
 
     /// Picture `path` of the prompt box, as the timeline reads its own: from the chat's device,
     /// through the same cache, read once and tried again after a failure's wait.
-    fn picture(&mut self, path: &str, cx: &mut Context<Self>) -> AttachmentSnapshot {
+    fn picture(&mut self, path: &str, cx: &Context<Self>) -> AttachmentSnapshot {
         use crate::attachments::{attachment_snapshot_for, begin_load_for};
         let state = self.state.read(cx);
         let local = state.local_device_id.clone();
@@ -1238,7 +1257,7 @@ impl PromptMirror {
                 wake.clone(),
                 cx.spawn(async move |this, cx| {
                     cx.background_executor()
-                        .timer(retry_in + std::time::Duration::from_millis(60))
+                        .timer(retry_in.saturating_add(std::time::Duration::from_millis(60)))
                         .await;
                     let _gone = this.update(cx, |this, cx| {
                         this.picture_loads.remove(&wake);
@@ -1256,7 +1275,7 @@ impl PromptMirror {
         key: AttachmentKey,
         path: &str,
         target: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) {
         use crate::attachments::{
             AttachmentLoadGuard, read_attachment_image, store_error_for, store_loaded_for,
@@ -1293,11 +1312,10 @@ impl PromptMirror {
     /// opens it in the inspector's lightbox; until then, a still wash; one that cannot be read,
     /// a dashed frame.
     fn render_picture(
-        &self,
         picture: &PromptImage,
         snapshot: AttachmentSnapshot,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let name = SharedString::from(format!("Image #{}", picture.number));
         let id = SharedString::from(format!("inspector-picture-{}", picture.path));
@@ -1310,7 +1328,7 @@ impl PromptMirror {
             .border_1();
         match snapshot {
             AttachmentSnapshot::Loaded(image) => {
-                let preview = PreviewImage::new(name.clone(), image.image.clone());
+                let preview = PreviewImage::new(name.clone(), Arc::clone(&image.image));
                 frame
                     .role(gpui::Role::Button)
                     .aria_label(name.clone())
@@ -1427,7 +1445,7 @@ impl gpui::Render for PromptMirror {
             let mut strip = div().flex().flex_wrap().gap(px(6.0)).pt(px(6.0));
             for picture in &prompt.images {
                 let snapshot = self.picture(&picture.path, cx);
-                strip = strip.child(self.render_picture(picture, snapshot, &theme, cx));
+                strip = strip.child(Self::render_picture(picture, snapshot, &theme, cx));
             }
             section = section.child(strip);
         }
@@ -1474,7 +1492,7 @@ impl gpui::Render for Inspector {
                 match event.keystroke.key.as_str() {
                     "escape" if !this.stack.is_empty() => {
                         cx.stop_propagation();
-                        let depth = this.stack.len() - 1;
+                        let depth = this.stack.len().saturating_sub(1);
                         this.pop_to(depth, cx);
                         this.refocus(window, cx);
                     }
@@ -1577,7 +1595,6 @@ mod tests {
             is_error: false,
             resolved: true,
             output: None,
-            diff: None,
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
@@ -1646,15 +1663,18 @@ mod tests {
     #[test]
     fn the_prompt_box_placeholders_are_drawn_apart_from_its_words() {
         let text = "Look at [Image #1] and [Pasted text #2 +5 lines], not [this] or [Image #3";
-        let found: Vec<&str> = placeholders(text).into_iter().map(|range| &text[range]).collect();
+        let found: Vec<&str> =
+            placeholders(text).into_iter().filter_map(|range| text.get(range)).collect();
         assert_eq!(found, ["[Image #1]", "[Pasted text #2 +5 lines]"]);
         assert_eq!(placeholders("[Image #2][Image #1]").len(), 2, "side by side");
         let open = "[Image #3 then [Image #1]";
-        let found: Vec<&str> = placeholders(open).into_iter().map(|range| &open[range]).collect();
+        let found: Vec<&str> =
+            placeholders(open).into_iter().filter_map(|range| open.get(range)).collect();
         assert_eq!(found, ["[Image #1]"], "one left open never swallows the next");
-        assert!(placeholders("[Image #4\n]").is_empty(), "a placeholder is one line");
-        assert!(placeholders("no pictures").is_empty());
-        assert!(placeholders("").is_empty());
+        let none: [std::ops::Range<usize>; 0] = [];
+        assert_eq!(placeholders("[Image #4\n]"), none, "a placeholder is one line");
+        assert_eq!(placeholders("no pictures"), none);
+        assert_eq!(placeholders(""), none);
     }
 
     /// The window a drill is judged in: a stand-in for the session's terminal beside the pane
@@ -1700,7 +1720,6 @@ mod tests {
             is_error: false,
             resolved: true,
             output: None,
-            diff: None,
             output_ref: None,
             output_bytes: None,
             diff_ref: None,
@@ -1732,6 +1751,10 @@ mod tests {
     }
 
     /// The last frame's accessibility tree, as (role, label, centre) of each node.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "accessibility bounds are window points, far inside f32's range"
+    )]
     fn draw(
         cx: &mut gpui::VisualTestContext,
     ) -> Vec<(gpui::accesskit::Role, String, gpui::Point<Pixels>)> {
@@ -1748,8 +1771,8 @@ mod tests {
                 .map(|(_, node)| {
                     let r = node.bounds().unwrap_or_default();
                     let centre = gpui::point(
-                        px(((r.x0 + r.x1) / 2.0 / scale) as f32),
-                        px(((r.y0 + r.y1) / 2.0 / scale) as f32),
+                        px((f64::midpoint(r.x0, r.x1) / scale) as f32),
+                        px((f64::midpoint(r.y0, r.y1) / scale) as f32),
                     );
                     (node.role(), node.label().unwrap_or_default().to_owned(), centre)
                 })
@@ -1795,7 +1818,7 @@ mod tests {
                 "reply",
                 vec![words("lead", "Sending a scout."), spawn("spawn", "child", "Count lines")],
             )];
-            state.transcript_revision += 1;
+            state.transcript_revision = state.transcript_revision.wrapping_add(1);
         });
         let snapshots = |state: &Entity<AppState>, cx: &mut gpui::VisualTestContext| {
             state.update(cx, |state, _| {
@@ -1945,10 +1968,10 @@ mod tests {
             })
             .unwrap_or_default()
         };
-        let mut stops = 0;
+        let mut stops = 0_u8;
         while focused(cx) != "Subagent Count lines" {
             assert!(stops < 40, "Tab reaches the run's row");
-            stops += 1;
+            stops = stops.saturating_add(1);
             cx.update(Window::focus_next);
         }
         // A key press clicks as it comes up.
