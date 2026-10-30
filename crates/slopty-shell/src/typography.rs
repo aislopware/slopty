@@ -66,20 +66,39 @@ impl<'de> Deserialize<'de> for UiFontFamily {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Ok(match value.as_str() {
-            "geist" => Self::Geist,
-            "geistMono" => Self::GeistMono,
-            "system" => Self::System,
-            // Preserve selections written by the previous fixed catalog. They
-            // now resolve only when the family is installed on this device.
-            "inter" => Self::Installed("Inter".into()),
-            "atkinsonHyperlegibleNext" => Self::Installed("Atkinson Hyperlegible Next".into()),
-            value => match value.strip_prefix("installed:") {
-                Some(name) if !name.is_empty() => Self::Installed(name.to_owned()),
-                _ => Self::Geist,
-            },
-        })
+        Ok(Self::parse(&value).unwrap_or_default())
     }
+}
+
+impl UiFontFamily {
+    /// The family a stored name names, or `None` for a name this build does not write.
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "geist" => Some(Self::Geist),
+            "geistMono" => Some(Self::GeistMono),
+            "system" => Some(Self::System),
+            value => value
+                .strip_prefix("installed:")
+                .filter(|name| !name.is_empty())
+                .map(|name| Self::Installed(name.to_owned())),
+        }
+    }
+}
+
+/// Reads a fixed-width family setting: the terminal's or code's.
+///
+/// A name this build does not write reads as [`UiFontFamily::GeistMono`], those settings'
+/// default, where a plain [`UiFontFamily`] reads it as [`UiFontFamily::Geist`].
+///
+/// # Errors
+///
+/// When the value is not a string.
+pub fn deserialize_mono_family<'de, D>(deserializer: D) -> Result<UiFontFamily, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    Ok(UiFontFamily::parse(&value).unwrap_or(UiFontFamily::GeistMono))
 }
 
 /// Base size used by rem-based interface text. Persisted as a number so future
@@ -886,18 +905,6 @@ mod tests {
         assert_eq!(
             availability.choices()[..3],
             [UiFontFamily::Geist, UiFontFamily::GeistMono, UiFontFamily::System]
-        );
-    }
-
-    #[test]
-    fn legacy_optional_families_become_installed_choices() {
-        assert_eq!(
-            serde_json::from_str::<UiFontFamily>(r#""inter""#).unwrap(),
-            UiFontFamily::Installed("Inter".into())
-        );
-        assert_eq!(
-            serde_json::from_str::<UiFontFamily>(r#""atkinsonHyperlegibleNext""#).unwrap(),
-            UiFontFamily::Installed("Atkinson Hyperlegible Next".into())
         );
     }
 

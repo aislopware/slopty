@@ -34,7 +34,6 @@
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use gpui::{App, Global, Hsla, SharedString, hsla};
-use serde::{Deserialize, Serialize};
 use slopty_shell_theme::{
     AccentPreset, AccentSelection, Color as ModelColor, SurfacePreference, SurfaceTreatment,
     ThemeRegistry, ThemeVariant,
@@ -44,12 +43,10 @@ use slopty_syntax::HighlightKind;
 /// User-selectable accent family. A choice is one color identity, not a
 /// miniature multi-hue theme: every interactive accent role stays on the same
 /// authored hue in both appearances.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AccentColor {
     /// The exact upstream Slopty indigo.
     #[default]
-    #[serde(alias = "violet", alias = "indigo", alias = "red", alias = "purple")]
     Slopty,
     /// Orange.
     Orange,
@@ -58,7 +55,6 @@ pub enum AccentColor {
     /// Green.
     Green,
     /// Cyan.
-    #[serde(alias = "teal")]
     Cyan,
     /// Blue.
     Blue,
@@ -2265,17 +2261,6 @@ mod tests {
         assert_eq!(light.busy, light.accent);
         assert_eq!(light.glyph.mid, light.accent);
         assert_eq!(light.caret, light.accent);
-    }
-
-    #[test]
-    fn previous_preview_accent_names_migrate_without_resetting_settings() {
-        for old_default in ["violet", "indigo", "red", "purple"] {
-            assert_eq!(
-                serde_json::from_str::<AccentColor>(&format!(r#""{old_default}""#)).unwrap(),
-                AccentColor::Slopty
-            );
-        }
-        assert_eq!(serde_json::from_str::<AccentColor>(r#""teal""#).unwrap(), AccentColor::Cyan);
     }
 
     #[test]

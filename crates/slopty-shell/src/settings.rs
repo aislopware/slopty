@@ -48,17 +48,8 @@ pub const SIDEBAR_DEFAULT: f32 = 256.0;
 pub const RIGHT_PANE_MIN: f32 = 360.0;
 /// The surface pane's width until the person drags it, in px.
 pub const RIGHT_PANE_DEFAULT: f32 = 520.0;
-/// The Pull requests route's side pane defaults wider than the chat's: the
-/// detail's Code tab needs room beside the board.
 /// Minimum width retained for the conversation when the right pane is open.
 pub const CHAT_PANEL_MIN: f32 = 300.0;
-
-/// The terminal panel's least height, in px (§1.10).
-pub const TERMINAL_MIN_HEIGHT: f32 = 160.0;
-/// The terminal panel's height a hand-edited file is healed to at most, in px.
-pub const TERMINAL_ABS_MAX_HEIGHT: f32 = 2000.0;
-/// The terminal panel's height until the person drags it, in px.
-pub const TERMINAL_DEFAULT_HEIGHT: f32 = 280.0;
 
 /// Debounce for settings writes after a drag/toggle.
 pub const SAVE_DEBOUNCE_MS: u64 = 400;
@@ -491,8 +482,6 @@ pub struct UiSettings {
     pub notifications_enabled: bool,
     /// The surface pane's width, in px.
     pub right_pane_width: f32,
-    /// The terminal panel's height, in px.
-    pub terminal_height: f32,
     /// What each chat's pane showed, kept across launches (`shell::kept_tabs`).
     pub session_tabs: std::collections::BTreeMap<String, SavedTabs>,
     /// How often and how lately the person ran each palette command, by its name: the palette
@@ -519,10 +508,12 @@ pub struct UiSettings {
     pub ui_font_size: crate::typography::UiFontSize,
     /// Terminal family and absolute pixel size. Only fixed-width families
     /// qualify, including compatible Nerd Fonts.
+    #[serde(deserialize_with = "crate::typography::deserialize_mono_family")]
     pub terminal_font_family: crate::typography::UiFontFamily,
     /// The terminal's text size, in px.
     pub terminal_font_size: f32,
     /// Family and absolute pixel size for code, diffs, and file editors.
+    #[serde(deserialize_with = "crate::typography::deserialize_mono_family")]
     pub code_font_family: crate::typography::UiFontFamily,
     /// The code, diff and editor text size, in px.
     pub code_font_size: f32,
@@ -573,7 +564,6 @@ impl Default for UiSettings {
             machine_filter: None,
             notifications_enabled: true,
             right_pane_width: RIGHT_PANE_DEFAULT,
-            terminal_height: TERMINAL_DEFAULT_HEIGHT,
             session_tabs: std::collections::BTreeMap::new(),
             palette_uses: std::collections::BTreeMap::new(),
             output_formats: std::collections::BTreeMap::new(),
@@ -1242,7 +1232,6 @@ impl UiSettings {
             machine_filter,
             notifications_enabled,
             right_pane_width,
-            terminal_height,
             session_tabs,
             output_formats,
             palette_uses,
@@ -1283,12 +1272,6 @@ impl UiSettings {
         // The right pane has no persisted upper bound: its live drag clamps
         // against the current window, which is unavailable while loading.
         self.right_pane_width = min_or(self.right_pane_width, RIGHT_PANE_MIN, RIGHT_PANE_DEFAULT);
-        self.terminal_height = clamp_or(
-            self.terminal_height,
-            TERMINAL_MIN_HEIGHT,
-            TERMINAL_ABS_MAX_HEIGHT,
-            TERMINAL_DEFAULT_HEIGHT,
-        );
         self.files_autosave_delay_ms = self
             .files_autosave_delay_ms
             .clamp(FILES_AUTOSAVE_DELAY_MIN_MS, FILES_AUTOSAVE_DELAY_MAX_MS);
@@ -1314,27 +1297,16 @@ impl UiSettings {
     /// first ([`announce_set_aside`] says so once the window is up).
     pub fn load(data_dir: &Path) -> Self {
         match std::fs::read_to_string(Self::path(data_dir)) {
-            Ok(text) => {
-                match serde_json::from_str::<serde_json::Value>(&text).and_then(|mut value| {
-                    if let Some(settings) = value.as_object_mut() {
-                        // The files-editor size was the first user-facing code
-                        // size; it now drives every code surface.
-                        if let Some(legacy) = settings.remove("filesEditorFontSize") {
-                            settings.entry("codeFontSize").or_insert(legacy);
-                        }
-                    }
-                    serde_json::from_value::<Self>(value)
-                }) {
-                    Ok(settings) => settings.clamped(),
-                    Err(err) => {
-                        // A file that does not parse is moved aside and said, never
-                        // overwritten by the next save.
-                        tracing::warn!(error = %err, "ui-settings corrupt; using defaults");
-                        set_aside(data_dir);
-                        Self::default()
-                    }
+            Ok(text) => match serde_json::from_str::<Self>(&text) {
+                Ok(settings) => settings.clamped(),
+                Err(err) => {
+                    // A file that does not parse is moved aside and said, never
+                    // overwritten by the next save.
+                    tracing::warn!(error = %err, "ui-settings corrupt; using defaults");
+                    set_aside(data_dir);
+                    Self::default()
                 }
-            }
+            },
             // None yet is the defaults; one that cannot be read (not UTF-8, refused)
             // is moved aside as a corrupt one is.
             Err(err) if err.kind() == io::ErrorKind::NotFound => Self::default(),
@@ -1678,7 +1650,6 @@ mod tests {
             machine_filter: Some("studio".into()),
             notifications_enabled: false,
             right_pane_width: 700.0,
-            terminal_height: 320.0,
             session_tabs: std::collections::BTreeMap::new(),
             palette_uses: std::collections::BTreeMap::from([(
                 "Toggle sidebar".into(),
@@ -1934,14 +1905,33 @@ mod tests {
         );
     }
 
+    // Pre-release, an older file's spellings are not migrated: a key or value no build writes
+    // now reads as that setting's default, and the rest of the file is kept, not set aside.
     #[test]
-    #[expect(clippy::float_cmp_const, reason = "a missing size takes the default exactly")]
-    fn legacy_files_editor_font_size_becomes_the_code_font_size() {
+    #[expect(clippy::float_cmp_const, reason = "a dropped size takes the default exactly")]
+    fn an_old_files_spellings_read_as_their_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"filesEditorFontSize": 15.0}"#).unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{
+                "sidebarWidth": 300,
+                "filesEditorFontSize": 15.0,
+                "terminalHeight": 320,
+                "accentColor": "violet",
+                "uiFontFamily": "inter",
+                "terminalFontFamily": "atkinsonHyperlegibleNext",
+                "codeFontFamily": "inter"
+            }"#,
+        )
+        .unwrap();
         let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.code_font_size, 15.0);
-        assert_eq!(loaded.terminal_font_size, crate::typography::TERMINAL_FONT_SIZE_DEFAULT);
+        assert!(!backup_path(dir.path()).exists(), "nothing was set aside");
+        assert_eq!(loaded.sidebar_width, 300.0, "the file's other choices are kept");
+        assert_eq!(loaded.code_font_size, crate::typography::CODE_FONT_SIZE_DEFAULT);
+        let defaults = UiSettings::default();
+        assert_eq!(loaded.ui_font_family, defaults.ui_font_family);
+        assert_eq!(loaded.terminal_font_family, defaults.terminal_font_family);
+        assert_eq!(loaded.code_font_family, defaults.code_font_family);
     }
 
     #[test]
@@ -1962,7 +1952,6 @@ mod tests {
         let d = UiSettings::default();
         assert_eq!(d.sidebar_width, 256.0);
         assert_eq!(d.right_pane_width, 520.0);
-        assert_eq!(d.terminal_height, 280.0);
         assert!(!d.sidebar_collapsed);
     }
 
@@ -2386,15 +2375,5 @@ mod tests {
         assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
         assert_eq!(keymap.get(ShortcutId::NextNeedsYou), "mod-j");
         assert_eq!(keymap.get(ShortcutId::NextSession), ShortcutId::NextSession.default_combo());
-    }
-
-    #[test]
-    #[expect(clippy::float_cmp_const, reason = "the clamp lands on the bound exactly")]
-    fn terminal_height_clamps_on_load() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"terminalHeight": 5}"#).unwrap();
-        assert_eq!(UiSettings::load(dir.path()).terminal_height, TERMINAL_MIN_HEIGHT);
-        std::fs::write(UiSettings::path(dir.path()), r#"{"terminalHeight": 99999}"#).unwrap();
-        assert_eq!(UiSettings::load(dir.path()).terminal_height, TERMINAL_ABS_MAX_HEIGHT);
     }
 }

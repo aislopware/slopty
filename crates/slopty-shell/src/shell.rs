@@ -5640,7 +5640,6 @@ mod exit_regressions {
                     for step in 0..3_u8 {
                         shell.settings.sidebar_width = 290.0 + f32::from(step);
                         shell.settings.right_pane_width = 540.0 + f32::from(step);
-                        shell.settings.terminal_height = 300.0 + f32::from(step);
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
                         assert_eq!(current.pause_animations_in_background, pause_in_background);
@@ -5664,7 +5663,6 @@ mod exit_regressions {
                     assert_eq!(loaded.conversation_width, conversation_width);
                     assert_eq!(loaded.sidebar_width, 292.0);
                     assert_eq!(loaded.right_pane_width, 542.0);
-                    assert_eq!(loaded.terminal_height, 302.0);
                 })
                 .unwrap();
         }
