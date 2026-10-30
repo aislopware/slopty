@@ -6,9 +6,14 @@
 //! cheap scripted prompt. The transcript is taken from the `transcript_mirror` frames
 //! `--session-mirror` writes on stdout, never from the files under `~/.claude`. Hook payloads
 //! come from this binary, registered for the run as the hook (`fixtures hook-sink`) for the events
-//! Slopty's relay hears (`slopty_agent::hooks::EVENTS`). With no person at a dialog in `-p`, the
-//! sink stands in for one at a permission request: it allows the call or refuses it, as the TUI's
-//! dialog would.
+//! Slopty's relay hears (`slopty_agent::hooks::EVENTS`), and as the relay is: asynchronously, so
+//! Claude Code never waits on it and its payloads come when the relay's would. With no person at
+//! a dialog in `-p`, the sink stands in for one at a permission request: it allows the call or
+//! refuses it, as the TUI's dialog would, so for those events Claude Code waits on it.
+//!
+//! The order the transcript's writes and the hooks reached the run in is kept beside them
+//! (`arrivals.jsonl`): each line says how many of a file's lines came next, and when, in
+//! milliseconds since the first. Replaying the files in it is replaying what Slopty heard.
 //!
 //! No user or project settings are loaded (`--setting-sources ""`), and everything written is
 //! scrubbed: the scratch directory becomes `/work`, the home directory `/home/user`, the user
@@ -139,12 +144,17 @@ const SCENARIOS: &[Scenario] = &[
         canned: false,
         mode: "default",
     },
+    // Two commands Claude Code runs itself, which no hook begins or ends: one that names the
+    // session and prints a line (`/rename`), then a compaction. The turn before ends with a
+    // `Stop` whose relay may come after them.
     Scenario {
         name: "compact",
         files: &[],
         turns: &[
             "Reply with the single word \"ready\".",
-            "/compact Summarize only the user's requests, in one sentence.",
+            "/rename Fixture session",
+            "/compact Keep one sentence: what the user asked for. Leave out the environment \
+             and every instruction that did not come from the user.",
         ],
         allowed: "",
         interrupt_on: None,
@@ -269,6 +279,18 @@ const SINK_EVENTS: [&str; 15] = [
     "PostCompact",
 ];
 
+/// Events the sink answers for the person, so Claude Code waits on it as on the TUI's dialog;
+/// for every other event it runs as Slopty's relay does, without Claude Code waiting.
+const ANSWERED: [&str; 2] = ["PermissionRequest", "PermissionDenied"];
+
+/// How long Claude Code lets the sink run, in seconds: what it lets Slopty's relay run
+/// (`slopty_agent::hooks::TIMEOUT_S`).
+const SINK_TIMEOUT_S: u32 = 5;
+
+/// How long after the last turn the run waits for hooks still running before its input ends:
+/// Claude Code cancels the hooks it did not wait for when it exits.
+const SETTLE: Duration = Duration::from_secs(10);
+
 /// How long one scenario may run.
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -299,6 +321,9 @@ fn capture_all(only: Option<&str>, version: &str) -> Result<()> {
 struct Captured {
     /// Transcript records by the file Claude Code wrote them to, in order.
     files: Vec<(String, Vec<Value>)>,
+    /// Each write that came, in order: when (nanoseconds since the epoch), its file, and how
+    /// many records it held.
+    writes: Vec<(u128, String, usize)>,
 }
 
 impl Captured {
@@ -324,15 +349,19 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
         std::fs::write(work.join(name), text)?;
     }
     let exe = std::env::current_exe()?;
-    let hook = json!([{ "hooks": [{
-        "type": "command",
-        "command": exe.to_string_lossy(),
-        "args": ["fixtures", "hook-sink", sink.to_string_lossy()],
-    }] }]);
+    let hook = |event: &str| {
+        json!([{ "hooks": [{
+            "type": "command",
+            "command": exe.to_string_lossy(),
+            "args": ["fixtures", "hook-sink", sink.to_string_lossy()],
+            "async": !ANSWERED.contains(&event),
+            "timeout": SINK_TIMEOUT_S,
+        }] }])
+    };
     // Thinking is written to the transcript only as summaries, and only when asked for.
     let settings = json!({
         "showThinkingSummaries": true,
-        "hooks": SINK_EVENTS.iter().map(|e| ((*e).to_owned(), hook.clone())).collect::<Map<_, _>>(),
+        "hooks": SINK_EVENTS.iter().map(|e| ((*e).to_owned(), hook(e))).collect::<Map<_, _>>(),
     });
     // A canned run gets a scratch home and the fake API, nothing of the person's.
     let canned = if scenario.canned {
@@ -406,13 +435,19 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Feed the turns and collect the mirrored records until `claude` exits.
+/// Nanoseconds since the epoch, as the sink names its payloads by.
+fn now_ns() -> u128 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+}
+
+/// Feed the turns and collect the mirrored records until `claude` exits. Once the last turn
+/// ended, the input ends when no hook runs any more (or [`SETTLE`] passed).
 fn drive(scenario: &Scenario, child: &mut Child) -> Result<Captured> {
     let stdout = child.stdout.take().context("stdout")?;
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::channel::<(u128, String)>();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
+            if tx.send((now_ns(), line)).is_err() {
                 break;
             }
         }
@@ -428,7 +463,15 @@ fn drive(scenario: &Scenario, child: &mut Child) -> Result<Captured> {
     // When the interrupt is due, once the assistant called the tool.
     let mut due: Option<Instant> = None;
     let mut wakes = scenario.wakes;
+    // The hooks Claude Code started and has not heard the end of, by id.
+    let mut running: Vec<String> = Vec::new();
+    // When the input ends at the latest, once the last turn ended.
+    let mut close_by: Option<Instant> = None;
     loop {
+        if close_by.is_some_and(|by| running.is_empty() || Instant::now() >= by) {
+            drop(stdin.take());
+            close_by = None;
+        }
         if let Some(at) = due
             && Instant::now() >= at
         {
@@ -444,19 +487,34 @@ fn drive(scenario: &Scenario, child: &mut Child) -> Result<Captured> {
             (due, interrupted) = (None, true);
         }
         let left = deadline.saturating_duration_since(Instant::now());
-        let wait = due.map_or(left, |at| at.saturating_duration_since(Instant::now()).min(left));
-        let line = match rx.recv_timeout(wait) {
+        let next = due.into_iter().chain(close_by).min();
+        let wait = next.map_or(left, |at| at.saturating_duration_since(Instant::now()).min(left));
+        let (at, line) = match rx.recv_timeout(wait) {
             Ok(line) => line,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) if due.is_some() && wait < left => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) if next.is_some() && wait < left => continue,
             Err(mpsc::RecvTimeoutError::Timeout) => bail!("timed out"),
         };
         let Ok(frame) = serde_json::from_str::<Value>(&line) else { continue };
+        let hook_id = || frame.get("hook_id").and_then(Value::as_str).map(str::to_owned);
         match frame.get("type").and_then(Value::as_str) {
             Some("transcript_mirror") => {
                 let path = frame.get("filePath").and_then(Value::as_str).unwrap_or_default();
                 let entries = frame.get("entries").and_then(Value::as_array).cloned();
-                captured.push(path, entries.unwrap_or_default());
+                let entries = entries.unwrap_or_default();
+                captured.writes.push((at, path.to_owned(), entries.len()));
+                captured.push(path, entries);
+            }
+            Some("system")
+                if frame.get("subtype").and_then(Value::as_str) == Some("hook_started") =>
+            {
+                running.extend(hook_id());
+            }
+            Some("system")
+                if frame.get("subtype").and_then(Value::as_str) == Some("hook_response") =>
+            {
+                let id = hook_id();
+                running.retain(|r| Some(r) != id.as_ref());
             }
             Some("assistant")
                 if !interrupted && due.is_none() && calls(&frame, scenario.interrupt_on) =>
@@ -469,7 +527,8 @@ fn drive(scenario: &Scenario, child: &mut Child) -> Result<Captured> {
                     (Some(input), Some(turn)) => send_prompt(input, turn)?,
                     // A turn the session starts on its own is still to come: keep it open.
                     (Some(_), None) if wakes > 0 => wakes = wakes.saturating_sub(1),
-                    _ => drop(stdin.take()),
+                    (Some(_), None) => close_by = Instant::now().checked_add(SETTLE),
+                    (None, _) => {}
                 }
             }
             _ => {}
@@ -544,12 +603,20 @@ fn permission_answer(input: &Value) -> Value {
     json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision } })
 }
 
-/// The sink's records, in the order the hooks ran.
-fn sink_payloads(dir: &Path) -> Result<Vec<Value>> {
+/// The sink's records, in the order the hooks ran, each with when it ran (nanoseconds since
+/// the epoch, which its file is named by).
+fn sink_payloads(dir: &Path) -> Result<Vec<(u128, Value)>> {
     let mut names: Vec<PathBuf> =
         std::fs::read_dir(dir)?.map(|e| e.map(|e| e.path())).collect::<Result<_, _>>()?;
     names.sort();
-    names.iter().map(|p| Ok(serde_json::from_str(&std::fs::read_to_string(p)?)?)).collect()
+    names
+        .iter()
+        .map(|p| {
+            let name = p.file_name().context("a payload's file")?.to_string_lossy();
+            let stamp = name.split('-').next().unwrap_or_default().parse()?;
+            Ok((stamp, serde_json::from_str(&std::fs::read_to_string(p)?)?))
+        })
+        .collect()
 }
 
 /// `paths` are the hook sink, the scratch directory and this binary, in that order.
@@ -558,7 +625,7 @@ fn write_fixture(
     paths: [&Path; 3],
     home: &str,
     captured: Captured,
-    hooks: Vec<Value>,
+    hooks: Vec<(u128, Value)>,
     out: &Path,
 ) -> Result<()> {
     let mut scrub = Scrub::new(paths, home)?;
@@ -570,9 +637,10 @@ fn write_fixture(
             scrub.collect(record);
         }
     }
-    for hook in &hooks {
+    for (_, hook) in &hooks {
         scrub.collect(hook);
     }
+    let mut names = HashMap::new();
     let dir = out.join(scenario.name);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
@@ -586,9 +654,29 @@ fn write_fixture(
             "transcript.jsonl".to_owned()
         };
         let lines: Vec<String> = records.into_iter().map(|r| scrub.record(r).to_string()).collect();
-        std::fs::write(dir.join(name), format!("{}\n", lines.join("\n")))?;
+        std::fs::write(dir.join(&name), format!("{}\n", lines.join("\n")))?;
+        names.insert(path, name);
     }
-    let hooks: Vec<String> = hooks.into_iter().map(|h| scrub.value(h, "").to_string()).collect();
+    // What came when: each write of a transcript, and each hook.
+    let mut arrivals: Vec<(u128, &str, usize)> = captured
+        .writes
+        .iter()
+        .filter(|(_, _, records)| *records > 0)
+        .filter_map(|(at, path, records)| Some((*at, names.get(path)?.as_str(), *records)))
+        .chain(hooks.iter().map(|(at, _)| (*at, "hooks.jsonl", 1)))
+        .collect();
+    arrivals.sort_by_key(|(at, ..)| *at);
+    let first = arrivals.first().map_or(0, |(at, ..)| *at);
+    let arrivals: Vec<String> = arrivals
+        .into_iter()
+        .map(|(at, file, lines)| {
+            let ms = u64::try_from(at.saturating_sub(first) / 1_000_000).unwrap_or(u64::MAX);
+            json!({ "file": file, "lines": lines, "ms": ms }).to_string()
+        })
+        .collect();
+    std::fs::write(dir.join("arrivals.jsonl"), format!("{}\n", arrivals.join("\n")))?;
+    let hooks: Vec<String> =
+        hooks.into_iter().map(|(_, h)| scrub.value(h, "").to_string()).collect();
     std::fs::write(dir.join("hooks.jsonl"), format!("{}\n", hooks.join("\n")))?;
     if std::fs::read_dir(dir.join("subagents"))?.next().is_none() {
         std::fs::remove_dir(dir.join("subagents"))?;
