@@ -14,6 +14,10 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
   has one owner and lands first; work that depends on it follows rather than runs beside it.
 - A lane keeps its crates compiling between edits, since a half-edited crate breaks the others'
   remote checks. A lane blocked by another's half-edited crate reports rather than waits.
+  xtask is every lane's tool and `cargo xtask` builds it from this tree, so an xtask edit enters
+  the tree only once it compiles (written in the lane's scratch copy first). A lane whose
+  `cargo xtask` does not build runs the last good build, `target/xtask/debug/xtask`, which a
+  failed build leaves in place: `remote` checks `HEAD` plus its own `--only` paths either way.
 - A lane checks its edits with `SLOPTY_LANE=<its name> cargo xtask remote -p <its crates> --only
   <its paths>`, quick (no `--full`): fmt, host clippy, rustdoc and the tests, here in about a
   minute. The gate is the full check; `--full` (iOS and Linux clippy, the Mac's own tests of a
