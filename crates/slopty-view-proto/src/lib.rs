@@ -1,11 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
-//! slopty-view-proto — the wire types the shell and its view model share: devices, projects,
-//! chats and sessions with what the shell asks of a machine's files, git and terminals
-//! ([`entities`]), what an agent does ([`agent`]), and the derivations every surface draws
-//! alike ([`view`]).
+//! The wire types the shell and its view model share.
+//!
+//! Devices, projects, chats and sessions with what the shell asks of a machine's files, git
+//! and terminals ([`entities`]), what an agent does ([`agent`]), and the derivations every
+//! surface draws alike ([`view`]).
 
 pub mod agent;
-pub mod device_paths;
 pub mod entities;
 pub mod motion;
 pub mod preview;
@@ -18,20 +18,15 @@ pub use entities::*;
 pub use preview::*;
 pub use workspace::*;
 
-/// Parse "0.2.12" (tolerating a `-suffix`/`+build` tail on the last part)
-/// into a comparable triple — the fleet feature-gate primitive (device rows
-/// stamp `Device::version` at boot). `None` for anything that doesn't lead
-/// with three dotted integers, and gates treat `None` as "too old".
+/// Parse "0.2.12" (tolerating a `-suffix`/`+build` tail on the last part) into a triple.
+///
+/// Comparable, so a device's `Device::version` can be gated on. `None` for anything that
+/// doesn't lead with three dotted integers, which gates treat as too old.
 pub fn version_triple(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = version.trim().splitn(3, '.');
     let major: u64 = parts.next()?.parse().ok()?;
     let minor: u64 = parts.next()?.parse().ok()?;
     let patch = parts.next()?;
-    let patch: u64 = patch
-        .split(['-', '+'])
-        .next()
-        .unwrap_or(patch)
-        .parse()
-        .ok()?;
+    let patch: u64 = patch.split(['-', '+']).next().unwrap_or(patch).parse().ok()?;
     Some((major, minor, patch))
 }

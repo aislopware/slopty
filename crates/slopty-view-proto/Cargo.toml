@@ -3,13 +3,15 @@ name = "slopty-view-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 publish.workspace = true
+description = "The wire types the Slopty shell and its view model share"
+
+[lints]
+workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-
-# Rustdoc lints these docs trip under the check (private items, warnings denied), allowed by name.
-[lints.rustdoc]
-broken_intra_doc_links = "allow"
+parking_lot.workspace = true

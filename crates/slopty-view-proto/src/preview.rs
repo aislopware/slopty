@@ -1,61 +1,38 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Device-local discovery metadata and the browser's live preview list.
+//! The browser's live preview list: the ports a session's machine serves that reach this client.
 use serde::{Deserialize, Serialize};
 
-pub const PREVIEW_PROXY_PORT: u16 = 7331;
-
+/// One served port a browser tab can open.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewService {
-    /// Persisted identities; neither includes a listening port or process ID.
+    /// Stable while the port is served: the machine and the port, never a process ID.
     pub id: String,
-    pub project_id: String,
-    pub project_name: String,
-    pub project_cwd: String,
-    pub device_id: String,
+    /// The serving machine's name, shown beside its port.
     pub device_name: String,
+    /// Where this client reaches the port: its own forward, `localhost:<local>`.
     pub hostname: String,
+    /// The process listening on the port.
     pub name: String,
+    /// The port on the serving machine.
     pub port: u16,
-    pub pid: u32,
-    pub cwd: String,
-    /// Process creation time, milliseconds since the Unix epoch.
-    pub started_at: u64,
-    pub slopty_owned: bool,
 }
 
 impl PreviewService {
-    pub fn url(&self, proxy_port: u16) -> String {
-        format!("http://{}:{proxy_port}", self.hostname)
+    /// The address a browser tab loads for this preview.
+    #[must_use]
+    pub fn url(&self) -> String {
+        format!("http://{}", self.hostname)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// What a session's browser tab can preview, sent again whenever it changes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewSnapshot {
+    /// The served ports, by port.
     pub services: Vec<PreviewService>,
-    pub proxy_port: u16,
-    pub error: Option<String>,
-    #[serde(default)]
-    pub project_name: Option<String>,
+    /// Whether the ports are a worker's forwards; false until the first list arrives.
     #[serde(default)]
     pub remote: bool,
-}
-
-impl Default for PreviewSnapshot {
-    fn default() -> Self {
-        Self {
-            services: Vec::new(),
-            proxy_port: PREVIEW_PROXY_PORT,
-            error: None,
-            project_name: None,
-            remote: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WatchPreviewsParams {
-    pub chat_id: String,
 }

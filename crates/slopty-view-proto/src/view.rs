@@ -22,17 +22,24 @@ use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Space};
 /// Viewport ⇄ engine connection lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionStatus {
+    /// Not reached yet.
     Connecting,
+    /// Reached and answering.
     Ready,
+    /// Could not be reached, and why.
     Failed(String),
 }
 
 /// What a chat's status dot / working indicator should show right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Indicator {
+    /// Nothing live: at rest, done, stopped, or a session gone stale.
     None,
+    /// The agent works.
     Working,
+    /// The agent waits on the person.
     AwaitingInput,
+    /// The agent failed.
     Errored,
 }
 
@@ -55,9 +62,7 @@ pub fn effective_indicator(session: Option<&Session>, now: DateTime<Utc>) -> Ind
         | SessionStatus::Stopped => Indicator::None,
         SessionStatus::Errored => Indicator::Errored,
         SessionStatus::Working | SessionStatus::AwaitingInput => {
-            let age_ms = now
-                .signed_duration_since(session.updated_at)
-                .num_milliseconds();
+            let age_ms = now.signed_duration_since(session.updated_at).num_milliseconds();
             if age_ms > SESSION_STALE_MS {
                 Indicator::None
             } else if session.status == SessionStatus::Working {
@@ -78,38 +83,25 @@ pub fn running_subagents(session: Option<&Session>, now: DateTime<Utc>) -> u32 {
         .map_or(0, |s| s.running_subagents)
 }
 
-/// The full display status for a chat row / tab dot: live states win, then the
-/// synced seen marker decides completed-vs-idle. Staleness gating rides on
+/// The full display status for a chat row or tab dot.
+///
+/// Live states win, then the seen marker decides completed or idle. Staleness gating rides on
 /// [`effective_indicator`]; the derivation itself is [`crate::chat_indicator`].
 pub fn display_status(chat: &Chat, session: Option<&Session>, now: DateTime<Utc>) -> ChatIndicator {
     let live = session.filter(|s| effective_indicator(Some(s), now) != Indicator::None);
     crate::chat_indicator(chat, live)
 }
 
-/// Attention bucket for the sidebar's Active list — lower is more urgent.
-pub fn attention_rank(status: ChatIndicator) -> u8 {
-    match status {
-        ChatIndicator::AwaitingInput => 0,
-        ChatIndicator::Errored => 1,
-        ChatIndicator::Working => 2,
-        ChatIndicator::Completed => 3,
-        ChatIndicator::Idle => 4,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Sort orders
 // ---------------------------------------------------------------------------
 
-/// Active-list order: pure recency (`last_message_at` desc, `created_at`
-/// fallback), id tiebreak so the sort is total. Deliberately NOT
-/// attention-bucketed: status drives the DOT, never the position — bucketing
-/// meant that merely OPENING a completed session (completed → seen → idle)
-/// dropped its row under the pointer (user report: "their position in the
-/// scrollbar changes"). Matches the old sidebar, which rendered chats in
-/// recency order and let the dots carry urgency; [`attention_rank`] still
-/// aggregates the space rows' urgency dot.
-pub fn sort_active(rows: &mut Vec<(ChatIndicator, &Chat)>) {
+/// Active-list order: pure recency, `last_message_at` desc with `created_at` as fallback.
+///
+/// The id breaks ties so the sort is total. Never by attention: status drives the dot, never
+/// the position, so opening a finished session (which marks it seen) never moves its row from
+/// under the pointer.
+pub fn sort_active(rows: &mut [(ChatIndicator, &Chat)]) {
     rows.sort_by(|(_, a), (_, b)| {
         let ka = a.last_message_at.unwrap_or(a.created_at);
         let kb = b.last_message_at.unwrap_or(b.created_at);
@@ -120,26 +112,19 @@ pub fn sort_active(rows: &mut Vec<(ChatIndicator, &Chat)>) {
 /// Session-tab order for a space: creation order (activity never reorders
 /// tabs), id tiebreak. Pure.
 pub fn sort_tabs(chats: &mut [&Chat]) {
-    chats.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    chats.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
 }
 
 /// Spaces list order: creation order, id tiebreak — total and stable across
 /// devices. Pure.
 pub fn sort_spaces(spaces: &mut [Space]) {
-    spaces.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    spaces.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
 }
 
-/// The project a space belongs to: spaces sharing a repository identity —
-/// clones and worktrees of one repository, on any device — are one project.
-/// A space without an identity is a project of its own. Pure.
+/// The project a space belongs to.
+///
+/// Spaces sharing a repository identity (clones and worktrees of one repository, on any
+/// device) are one project. A space without an identity is a project of its own. Pure.
 pub fn project_key(space: &Space) -> String {
     match space.repository_id.as_deref() {
         Some(repository_id) => format!("repo:{repository_id}"),
@@ -147,9 +132,10 @@ pub fn project_key(space: &Space) -> String {
     }
 }
 
-/// The space that speaks for `space`'s whole project: the oldest member, id
-/// tiebreak. Its name and color stand for every member, and the choice is
-/// the same on every device, so a repository looks alike everywhere. Pure.
+/// The space that speaks for `space`'s whole project: the oldest member, id tiebreak.
+///
+/// Its name and color stand for every member, and the choice is the same on every device, so
+/// a repository looks alike everywhere. Pure.
 pub fn representative_space<'a>(spaces: &'a [Space], space: &'a Space) -> &'a Space {
     let Some(repository_id) = space.repository_id.as_deref() else {
         return space;
@@ -168,9 +154,7 @@ pub fn sort_chats(chats: &mut [Chat]) {
     chats.sort_by(|a, b| {
         let ka = a.last_message_at.unwrap_or(a.created_at);
         let kb = b.last_message_at.unwrap_or(b.created_at);
-        kb.cmp(&ka)
-            .then_with(|| b.created_at.cmp(&a.created_at))
-            .then_with(|| a.id.cmp(&b.id))
+        kb.cmp(&ka).then_with(|| b.created_at.cmp(&a.created_at)).then_with(|| a.id.cmp(&b.id))
     });
 }
 
@@ -189,9 +173,7 @@ pub enum GatePhase {
     Ready,
 }
 
-/// Missing scope is treated as synced. Current engines always publish
-/// [`WorkspaceScope`] before becoming ready, while old daemons are deliberately
-/// kept behind the account gate instead of being mistaken for local runtimes.
+/// The gate's phase while the view model's connection is at `connection`.
 pub fn gate_phase(connection: &ConnectionStatus) -> GatePhase {
     match connection {
         ConnectionStatus::Connecting => GatePhase::Loading,
@@ -213,8 +195,10 @@ mod project_tests {
             git_detected: repository.is_some(),
             git_checked_at: None,
             checkout_id: None,
-            repository_id: repository.map(str::to_string),
-            created_at: DateTime::<Utc>::UNIX_EPOCH + chrono::TimeDelta::minutes(minutes),
+            repository_id: repository.map(str::to_owned),
+            created_at: DateTime::<Utc>::UNIX_EPOCH
+                .checked_add_signed(chrono::TimeDelta::minutes(minutes))
+                .unwrap(),
         }
     }
 
@@ -258,30 +242,27 @@ mod gate_tests {
         let fresh = running_session(3, now - chrono::Duration::seconds(10));
         assert_eq!(running_subagents(Some(&fresh), now), 3);
         // A crashed engine's row must not badge a chat forever.
-        let stale = running_session(
-            3,
-            now - chrono::Duration::milliseconds(SESSION_STALE_MS + 1),
-        );
+        let stale = running_session(3, now - chrono::Duration::milliseconds(SESSION_STALE_MS + 1));
         assert_eq!(running_subagents(Some(&stale), now), 0);
         assert_eq!(running_subagents(None, now), 0);
     }
 }
 
-/// Parse an `AuthStatus` frame tolerantly. The engine currently serializes its
-/// own enum (`{"_tag": "SignedIn", ...}`) while the proto type expects
-/// `{"state": "signedIn", ...}` — accept both so either side can converge
-/// without breaking a viewport.
+/// Parse an `AuthStatus` frame tolerantly.
+///
+/// Both spellings read: the engine's own enum (`{"_tag": "SignedIn", ...}`) and the proto
+/// type's `{"state": "signedIn", ...}`.
 pub fn parse_auth_state(value: &serde_json::Value) -> Option<AuthState> {
     if let Ok(state) = serde_json::from_value::<AuthState>(value.clone()) {
         return Some(state);
     }
-    let tag = value.get("_tag").and_then(|t| t.as_str())?;
+    let tag = value.get("_tag").and_then(serde_json::Value::as_str)?;
     let user = || -> Option<crate::UserProfile> {
         let u = value.get("user")?;
         Some(crate::UserProfile {
-            id: u.get("id")?.as_str()?.to_string(),
-            email: u.get("email")?.as_str()?.to_string(),
-            name: u.get("name").and_then(|n| n.as_str()).map(str::to_string),
+            id: u.get("id")?.as_str()?.to_owned(),
+            email: u.get("email")?.as_str()?.to_owned(),
+            name: u.get("name").and_then(serde_json::Value::as_str).map(str::to_owned),
         })
     };
     match tag {
@@ -289,10 +270,7 @@ pub fn parse_auth_state(value: &serde_json::Value) -> Option<AuthState> {
         "NeedsOrganization" => Some(AuthState::NeedsOrganization { user: user()? }),
         "SignedIn" => Some(AuthState::SignedIn {
             user: user()?,
-            org_id: value
-                .get("orgId")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+            org_id: value.get("orgId").and_then(serde_json::Value::as_str).map(str::to_owned),
         }),
         _ => None,
     }
@@ -303,25 +281,27 @@ pub fn parse_auth_state(value: &serde_json::Value) -> Option<AuthState> {
 // ---------------------------------------------------------------------------
 
 /// One grouped-by-project sidebar section.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatGroup<'a> {
+    /// The project's label, from [`project_label`].
     pub label: String,
+    /// Its chats, most recent first.
     pub chats: Vec<&'a Chat>,
 }
 
 /// Project label for a chat: the basename of its cwd, or "No project".
 pub fn project_label(cwd: Option<&str>) -> String {
     let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
-        return "No project".to_string();
+        return "No project".to_owned();
     };
     if crate::projectless::is_projectless_cwd(Some(cwd)) {
-        return "No project".to_string();
+        return "No project".to_owned();
     }
     std::path::Path::new(cwd.trim_end_matches(['/', '\\']))
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
+        .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| cwd.to_string())
+        .unwrap_or_else(|| cwd.to_owned())
 }
 
 /// Group chats by project label, preserving the incoming (recency) order both
@@ -332,10 +312,7 @@ pub fn group_chats<'a>(chats: impl IntoIterator<Item = &'a Chat>) -> Vec<ChatGro
         let label = project_label(chat.cwd.as_deref());
         match groups.iter_mut().find(|g| g.label == label) {
             Some(group) => group.chats.push(chat),
-            None => groups.push(ChatGroup {
-                label,
-                chats: vec![chat],
-            }),
+            None => groups.push(ChatGroup { label, chats: vec![chat] }),
         }
     }
     groups
@@ -343,32 +320,32 @@ pub fn group_chats<'a>(chats: impl IntoIterator<Item = &'a Chat>) -> Vec<ChatGro
 
 /// Compact relative time ("now", "5m", "3h", "2d", "1w", …) — no "ago" suffix.
 pub fn format_time_ago(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let s = now.signed_duration_since(then).num_seconds().max(0);
+    let secs = now.signed_duration_since(then).num_seconds().max(0);
     // Under a minute reads as "now" — otherwise 45–59s floors to a bare "0m".
-    if s < 60 {
-        return "now".to_string();
+    if secs < 60 {
+        return "now".to_owned();
     }
-    let m = s / 60;
-    if m < 60 {
-        return format!("{m}m");
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m");
     }
-    let h = m / 60;
-    if h < 24 {
-        return format!("{h}h");
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h");
     }
-    let d = h / 24;
-    if d < 7 {
-        return format!("{d}d");
+    let days = hours / 24;
+    if days < 7 {
+        return format!("{days}d");
     }
-    let w = d / 7;
-    if w < 5 {
-        return format!("{w}w");
+    let weeks = days / 7;
+    if weeks < 5 {
+        return format!("{weeks}w");
     }
-    let mo = d / 30;
-    if mo < 12 {
-        return format!("{mo}mo");
+    let months = days / 30;
+    if months < 12 {
+        return format!("{months}mo");
     }
-    format!("{}y", d / 365)
+    format!("{}y", days / 365)
 }
 
 /// Session-row sub-line, "project · branch": the repo
@@ -381,15 +358,11 @@ pub fn chat_location(chat: &Chat) -> Option<String> {
         .map(str::trim)
         .filter(|c| !crate::projectless::is_projectless_cwd(Some(c)))
         .map(|c| project_label(Some(c)));
-    let reference = chat
-        .branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|b| !b.is_empty());
+    let reference = chat.branch.as_deref().map(str::trim).filter(|b| !b.is_empty());
     match (project, reference) {
         (Some(p), Some(r)) => Some(format!("{p} · {r}")),
         (Some(p), None) => Some(p),
-        (None, Some(r)) => Some(r.to_string()),
+        (None, Some(r)) => Some(r.to_owned()),
         (None, None) => None,
     }
 }
@@ -460,7 +433,7 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
 /// read the same on every surface. `slopty-shell` has the oklch→sRGB math.
 pub mod dot {
     /// Running. Pink, not amber: the harsh yellow read as a warning, and running
-    /// is routine (user request).
+    /// is routine.
     pub const WORKING: (f32, f32, f32) = (0.718, 0.202, 349.761);
     /// Asking a question. Indigo — must read differently from "busy" at a glance.
     pub const AWAITING: (f32, f32, f32) = (0.673, 0.182, 276.935);
@@ -468,148 +441,4 @@ pub mod dot {
     pub const ERRORED: (f32, f32, f32) = (0.704, 0.191, 22.216);
     /// Finished but unseen. Emerald — reads as "ready for you".
     pub const COMPLETED: (f32, f32, f32) = (0.765, 0.177, 163.223);
-}
-
-// ---------------------------------------------------------------------------
-// Checkout selection (new sessions)
-// ---------------------------------------------------------------------------
-
-/// Where a new session runs (t3code's env-mode: `local | worktree`).
-///
-/// "Current worktree" is deliberately **not** a third mode — it is `Local` when
-/// the picked ref already happens to be materialized as a worktree, in which
-/// case the session reuses that checkout's path. Modelling it as three states
-/// would let the UI hold a combination the engine cannot honour.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CheckoutKind {
-    /// The space's own folder — or the picked ref's existing worktree.
-    #[default]
-    Local,
-    /// A fresh isolated worktree created off the picked base ref on send.
-    NewWorktree,
-}
-
-/// The resolved on-send checkout action.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CheckoutPlan {
-    /// Run in the space folder as-is. `branch` is the checkout's branch (the
-    /// picked or current ref), carried onto `createChat` so the session names
-    /// it from the first frame; `None` = refs never loaded.
-    CurrentCheckout { branch: Option<String> },
-    /// Reuse the picked ref's existing worktree (a cwd override; no git).
-    ReuseWorktree { path: String, branch: String },
-    /// `CreateWorktree` off `base` on send (the engine mints a `slopty/<name>`
-    /// branch). `base: None` = refs never loaded — send falls back to the space
-    /// folder rather than failing.
-    NewWorktree { base: Option<String> },
-}
-
-/// Resolve the on-send action from the mode and the picked ref.
-pub fn checkout_plan(kind: CheckoutKind, picked: Option<&crate::RepoRef>) -> CheckoutPlan {
-    let name = picked.map(|r| r.name.clone());
-    match kind {
-        CheckoutKind::NewWorktree => CheckoutPlan::NewWorktree { base: name },
-        CheckoutKind::Local => match picked.and_then(|r| r.worktree_path.clone()) {
-            Some(path) => CheckoutPlan::ReuseWorktree {
-                path,
-                branch: name.unwrap_or_default(),
-            },
-            None => CheckoutPlan::CurrentCheckout { branch: name },
-        },
-    }
-}
-
-/// Label of the checkout-kind trigger (t3code `resolveEnvModeLabel`).
-pub fn checkout_label(kind: CheckoutKind, picked: Option<&crate::RepoRef>) -> &'static str {
-    match kind {
-        CheckoutKind::NewWorktree => "New worktree",
-        CheckoutKind::Local => {
-            if picked.is_some_and(|r| r.worktree_path.is_some()) {
-                "Current worktree"
-            } else {
-                "Current checkout"
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod checkout_tests {
-    use super::*;
-    use crate::RepoRef;
-
-    fn plain(name: &str) -> RepoRef {
-        RepoRef {
-            name: name.into(),
-            current: false,
-            worktree_path: None,
-            default: false,
-        }
-    }
-
-    fn materialized(name: &str, path: &str) -> RepoRef {
-        RepoRef {
-            name: name.into(),
-            current: false,
-            worktree_path: Some(path.into()),
-            default: false,
-        }
-    }
-
-    #[test]
-    fn local_resolves_by_whether_the_ref_has_a_worktree() {
-        // The same mode means two different things depending on the ref — which
-        // is exactly why "current worktree" is not its own state.
-        assert_eq!(
-            checkout_plan(CheckoutKind::Local, Some(&plain("main"))),
-            CheckoutPlan::CurrentCheckout {
-                branch: Some("main".into())
-            }
-        );
-        assert_eq!(
-            checkout_plan(CheckoutKind::Local, Some(&materialized("feat", "/wt/feat"))),
-            CheckoutPlan::ReuseWorktree {
-                path: "/wt/feat".into(),
-                branch: "feat".into()
-            }
-        );
-        // No ref picked at all is still the space folder — with no branch to
-        // stamp until refs load.
-        assert_eq!(
-            checkout_plan(CheckoutKind::Local, None),
-            CheckoutPlan::CurrentCheckout { branch: None }
-        );
-    }
-
-    #[test]
-    fn new_worktree_carries_its_base_and_tolerates_none() {
-        assert_eq!(
-            checkout_plan(CheckoutKind::NewWorktree, Some(&plain("main"))),
-            CheckoutPlan::NewWorktree {
-                base: Some("main".into())
-            }
-        );
-        // Refs never loaded: send falls back to the space folder rather than
-        // failing, so the base is allowed to be absent.
-        assert_eq!(
-            checkout_plan(CheckoutKind::NewWorktree, None),
-            CheckoutPlan::NewWorktree { base: None }
-        );
-    }
-
-    #[test]
-    fn labels_say_which_of_the_three_outcomes_you_will_get() {
-        assert_eq!(
-            checkout_label(CheckoutKind::Local, Some(&plain("main"))),
-            "Current checkout"
-        );
-        assert_eq!(
-            checkout_label(CheckoutKind::Local, Some(&materialized("f", "/wt/f"))),
-            "Current worktree"
-        );
-        assert_eq!(
-            checkout_label(CheckoutKind::NewWorktree, Some(&plain("main"))),
-            "New worktree"
-        );
-    }
 }

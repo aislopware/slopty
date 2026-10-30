@@ -11,8 +11,13 @@ use serde::{Deserialize, Serialize};
 pub struct HarnessId(&'static str);
 
 impl HarnessId {
+    /// Google's Antigravity agent over ACP.
+    pub const ANTIGRAVITY: Self = Self("antigravity");
+    /// Anthropic's Claude Code.
     pub const CLAUDE_CODE: Self = Self("claude-code");
+    /// The Codex agent.
     pub const CODEX: Self = Self("codex");
+    /// Cursor's agent, driven over ACP.
     pub const CURSOR: Self = Self("cursor");
     /// Cognition's Devin agent, driven over ACP (`devin acp`).
     pub const DEVIN: Self = Self("devin");
@@ -20,15 +25,6 @@ impl HarnessId {
     pub const GROK: Self = Self("grok");
     /// Nous Research's Hermes Agent, driven over ACP (`hermes acp`).
     pub const HERMES: Self = Self("hermes");
-    /// The Pi coding agent (pi.dev), driven over its native JSONL RPC protocol.
-    pub const PI: Self = Self("pi");
-    /// SST's opencode agent.
-    pub const OPENCODE: Self = Self("opencode");
-    /// Google's Antigravity agent over ACP.
-    pub const ANTIGRAVITY: Self = Self("antigravity");
-    /// Test harness; never shown in production pickers.
-    pub const MOCK: Self = Self("mock");
-
     /// The names known at build time, the rest interned as they are first seen.
     const KNOWN: [Self; 10] = [
         Self::CLAUDE_CODE,
@@ -42,20 +38,29 @@ impl HarnessId {
         Self::ANTIGRAVITY,
         Self::MOCK,
     ];
+    /// Test harness; never shown in production pickers.
+    pub const MOCK: Self = Self("mock");
+    /// SST's opencode agent.
+    pub const OPENCODE: Self = Self("opencode");
+    /// The Pi coding agent (pi.dev), driven over its native JSONL RPC protocol.
+    pub const PI: Self = Self("pi");
 
     /// The harness named `name`: one of the constants, or a name interned for the life of the
     /// process (agents are few, so the names kept stay few).
     pub fn named(name: &str) -> Self {
+        static SEEN: parking_lot::Mutex<Vec<&'static str>> = parking_lot::Mutex::new(Vec::new());
         if let Some(known) = Self::KNOWN.iter().find(|known| known.0 == name) {
             return *known;
         }
-        static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-        let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(kept) = seen.iter().find(|kept| **kept == name) {
-            return Self(kept);
-        }
-        let kept: &'static str = Box::leak(name.to_owned().into_boxed_str());
-        seen.push(kept);
+        let mut seen = SEEN.lock();
+        let kept = if let Some(kept) = seen.iter().find(|kept| **kept == name) {
+            *kept
+        } else {
+            let kept: &'static str = Box::leak(name.to_owned().into_boxed_str());
+            seen.push(kept);
+            kept
+        };
+        drop(seen);
         Self(kept)
     }
 
@@ -93,15 +98,23 @@ impl<'de> Deserialize<'de> for HarnessId {
     }
 }
 
+/// How hard an agent thinks before it answers, from least to most.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
+    /// The least thinking a harness offers.
     Minimal,
+    /// Low effort.
     Low,
+    /// Medium effort.
     Medium,
+    /// High effort.
     High,
+    /// Extra-high effort.
     XHigh,
+    /// The most a model's own setting offers.
     Max,
+    /// Past the maximum, where a harness offers more.
     Ultra,
     /// xhigh + harness-specific setting.
     Ultracode,
@@ -109,14 +122,19 @@ pub enum ReasoningLevel {
     Ultrathink,
 }
 
+/// What an agent's commands may touch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxLevel {
+    /// They read and never write.
     ReadOnly,
+    /// They write inside the workspace only.
     WorkspaceWrite,
+    /// They write anywhere, without a sandbox.
     DangerFullAccess,
 }
 
+/// When words sent to a working agent reach it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {
@@ -126,104 +144,92 @@ pub enum SteeringMode {
     TurnBoundary,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Model {
-    pub id: String,
-    pub label: String,
-    /// Short tagline rendered under the name in the model picker (11px muted),
-    /// mirroring the Electron app's `ModelInfo.description`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub reasoning_levels: Vec<ReasoningLevel>,
-    #[serde(default)]
-    pub options: Vec<ModelOption>,
-    /// The model its agent runs unless one is chosen (an agent's offered default, Claude
-    /// Code's `default`): the one the picker marks "Default · Recommended".
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub recommended: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelOption {
-    pub id: String,
-    pub label: String,
-    pub choices: Vec<ModelOptionChoice>,
-    pub default_choice: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelOptionChoice {
-    pub id: String,
-    pub label: String,
-}
-
-/// The session-scoped singleton id for the live plan/todo chip. ACP plan
-/// updates carry no wire id; adapters emit every update under this one id so
-/// the fold refreshes the same chip in place. Consumers that de-duplicate
-/// tool ids across segment boundaries (the engine's stale-echo filter) must
-/// EXEMPT this id — it legitimately reappears in every segment for the whole
-/// life of a run.
-pub const LIVE_PLAN_TOOL_ID: &str = "acp-plan";
-
 /// A decoded tool invocation, reduced to the fields each kind renders.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ToolCall {
+    /// A shell command.
     Exec {
+        /// The command line, whole.
         command: String,
     },
+    /// A file read.
     ReadFile {
+        /// The file read.
         path: String,
     },
+    /// A file written whole.
     WriteFile {
+        /// The file written.
         path: String,
         /// Full content; STRIPPED by the render-parts policy before entering the doc.
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<String>,
     },
+    /// A file edited in place.
     EditFile {
+        /// The file edited.
         path: String,
+        /// The text replaced, when the harness says.
         #[serde(skip_serializing_if = "Option::is_none")]
         old_string: Option<String>,
+        /// The text put in its place, when the harness says.
         #[serde(skip_serializing_if = "Option::is_none")]
         new_string: Option<String>,
     },
+    /// A patch applied.
     ApplyPatch {
+        /// The file patched, when the patch names one.
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// A text search through files.
     Search {
+        /// What it searches for.
         pattern: String,
+        /// Where it searches, when not the workspace.
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// A file search by name pattern.
     Glob {
+        /// The pattern.
         pattern: String,
     },
+    /// A web page fetched.
     WebFetch {
+        /// The page's address.
         url: String,
+        /// What the agent asked of the page, when it said.
         #[serde(skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
     },
+    /// A web search.
     WebSearch {
+        /// What it searched for.
         query: String,
     },
+    /// The agent's checklist, set again.
     Todo {
+        /// The checklist, in order.
         #[serde(default)]
         items: Vec<TodoItem>,
     },
+    /// A tool of an MCP server.
     Mcp {
+        /// The server.
         server: String,
+        /// The tool.
         tool: String,
+        /// The call's input.
         #[serde(skip_serializing_if = "Option::is_none")]
         input: Option<serde_json::Value>,
     },
+    /// Any other tool.
     Unknown {
+        /// The tool's name.
         name: String,
+        /// The call's input.
         #[serde(skip_serializing_if = "Option::is_none")]
         input: Option<serde_json::Value>,
     },
@@ -240,8 +246,8 @@ impl ToolCall {
     /// linked to a never-created doc and opened an empty panel).
     pub fn is_subagent_spawn(&self) -> bool {
         let name = match self {
-            ToolCall::Unknown { name, .. } => name,
-            ToolCall::Mcp { tool, .. } => tool,
+            Self::Unknown { name, .. } => name,
+            Self::Mcp { tool, .. } => tool,
             _ => return false,
         };
         name == "Agent" || name.starts_with("Agent: ")
@@ -263,7 +269,7 @@ impl ToolCall {
             return None;
         }
         let input = match self {
-            ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. } => input.as_ref()?,
+            Self::Unknown { input, .. } | Self::Mcp { input, .. } => input.as_ref()?,
             _ => return None,
         };
         SUBAGENT_MODEL_KEYS
@@ -277,47 +283,26 @@ impl ToolCall {
 /// Spawn-input keys that carry a child model, in precedence order. Drivers
 /// disagree on the spelling, so the lookup is by key set, not by harness —
 /// a new adapter naming it any of these needs no code change here.
-pub const SUBAGENT_MODEL_KEYS: [&str; 4] = ["model", "modelId", "model_id", "subagent_model"];
+const SUBAGENT_MODEL_KEYS: [&str; 4] = ["model", "modelId", "model_id", "subagent_model"];
 
-/// The spawn-input keys [`sanitize_tool_call`](crate::) must preserve so the
+/// The spawn-input keys tool-call sanitising must preserve so the
 /// chip can name the child's model. Deliberately tiny: everything else on a
 /// spawn's input (the whole prompt, most of all) stays host-local.
-pub const SUBAGENT_INPUT_KEEP: [&str; 5] = [
-    "model",
-    "modelId",
-    "model_id",
-    "subagent_model",
-    "subagent_type",
-];
+pub const SUBAGENT_INPUT_KEEP: [&str; 5] =
+    ["model", "modelId", "model_id", "subagent_model", "subagent_type"];
 
-/// Bounds on an agent's inline visual ([`AgentEvent::Visual`]): a Luau
-/// script Slopty runs in a sandbox and renders natively.
-pub const VISUAL_MAX_BYTES: usize = 256 * 1024;
-pub const VISUAL_MAX_TITLE_CHARS: usize = 200;
-/// Files a visual may ship with (models, textures, environment maps).
-pub const VISUAL_MAX_ASSETS: usize = 16;
-pub const VISUAL_MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
-pub const VISUAL_MAX_TOTAL_ASSET_BYTES: usize = 10 * 1024 * 1024;
-
-/// Whether `name` can name a visual's asset: a plain file name.
-pub fn valid_visual_asset_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && !name.starts_with('.')
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-}
-
-/// Where one checklist item stands. Claude's TodoWrite, OpenCode and ACP plans
+/// Where one checklist item stands. Claude's `TodoWrite`, opencode and ACP plans
 /// distinguish the item being worked on from those still waiting; Codex and
 /// Cursor only report done / not done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TodoStatus {
+    /// Not started.
     #[default]
     Pending,
+    /// Being worked on.
     InProgress,
+    /// Done.
     Completed,
 }
 
@@ -340,11 +325,14 @@ impl TodoStatus {
 /// working. `status` is additive and written only when it adds information —
 /// i.e. for an in-progress item; a missing or unreadable value derives from
 /// `done`. Build items with [`TodoItem::new`] to keep the two consistent.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoItem {
+    /// The item's words.
     pub text: String,
+    /// Whether it is done.
     pub done: bool,
+    /// Where it stands, written only for an item in progress.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -354,6 +342,7 @@ pub struct TodoItem {
 }
 
 impl TodoItem {
+    /// An item at `status`, its `done` and `status` agreeing.
     pub fn new(text: impl Into<String>, status: TodoStatus) -> Self {
         Self {
             text: text.into(),
@@ -364,11 +353,7 @@ impl TodoItem {
 
     /// Effective status: `done` wins, then the explicit status, else pending.
     pub fn status(&self) -> TodoStatus {
-        if self.done {
-            TodoStatus::Completed
-        } else {
-            self.status.unwrap_or_default()
-        }
+        if self.done { TodoStatus::Completed } else { self.status.unwrap_or_default() }
     }
 }
 
@@ -385,193 +370,99 @@ where
 
 /// A slash command advertised by the agent (ACP `availableCommands`): typed as
 /// `/name` at the start of the composer, sent to the agent as prompt text.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommand {
+    /// The command, without its slash.
     pub name: String,
+    /// What it does, in the agent's words.
     #[serde(default)]
     pub description: String,
-    /// Placeholder hint for the command's argument, when it takes one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_hint: Option<String>,
 }
 
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDiff {
+    /// The file changed.
     pub path: String,
+    /// Its text before, none for a new file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old_text: Option<String>,
+    /// Its text after.
     pub new_text: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserInputQuestion {
-    pub id: String,
-    pub header: String,
-    pub question: String,
-    pub options: Vec<String>,
-    #[serde(default)]
-    pub multi_select: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill: Option<String>,
-    #[serde(default)]
-    pub multiline: bool,
-    // An approval or a prompt like Claude Code's trust dialog offers choices, not a field.
-    /// It takes one of its options, on a click, and no words of one's own.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub choices_only: bool,
-    // An approval that is long, unknown or destructive is never shown as allowable at
-    // a key's press (Claude desktop's rules).
-    /// Focus starts on the deny ([`Self::deny_option`]), not the first option.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub deny_first: bool,
-    /// No key answers it: only a click on an option does.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub click_only: bool,
-    /// The allow stays disabled until the whole of `question` has been scrolled through.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub read_gate: bool,
-    /// Which of `options` turns the call down once.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deny_option: Option<usize>,
-    /// The change an edit's approval would make.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proposed: Option<ToolDiff>,
-    // What the dock draws a request's card by (`docs/decisions/ui.md`).
-    /// What each of `options` says under it, by the same index; empty for one that says
-    /// nothing, and no entries at all when none says anything.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub option_descriptions: Vec<String>,
-    /// The request's kind, as the thread names it: `approval`, `plan`, `question`,
-    /// `elicitation`, `retry`, `dialog:<kind>`, or one Slopty does not know (a generic card).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub kind: String,
-    /// A form's JSON Schema, for an elicitation: its answer is a JSON object of it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub schema_json: Option<String>,
-    /// An address to open, for an elicitation that asks the person to go somewhere.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// Who asks, when a chat an agent started under this one does: "Sent by reviewer". Its
-    /// answer, sent on this chat, goes to that chat's request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sent_by: Option<String>,
-    /// The rule the agent suggests for allowing its like from now on, for "Allow with rule".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rule: Option<RuleOffer>,
-    /// When the agent stops waiting and answers no by itself, in ms since the epoch.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub until_ms: Option<i64>,
-    /// Why the agent asks, in its own words, when it says: the rule, the hook or the check that
-    /// wanted the person's word.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// What each of `options` would look like, by the same index (markdown or code), shown in a
-    /// pane beside the options; empty when none has one.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub option_previews: Vec<String>,
-    /// What each of `options` says while the pointer rests on it, by the same index (the folders
-    /// an "Always allow" reaches, in full, one per line); empty for one that says nothing, and no
-    /// entries at all when none says anything.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub option_tooltips: Vec<String>,
-    /// Which of `options` allows the call once, where the agent takes the person's words with an
-    /// allow ("Allow, and say what's next…"): its answer's labels are that option's and the
-    /// words.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow_option: Option<usize>,
-    /// The words an edit of the request starts from, where its agent takes them back edited
-    /// with `allow_option` (a plan's own text, the TUI's Ctrl+G): "Edit plan…".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edit_from: Option<String>,
-    /// A choice beside an agent's questions that answers none of them, by its label (Claude
-    /// Code's "Chat about this"): picked, the answer is it alone under the `choice` id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aside: Option<String>,
-    /// Only the person at this card answers it, never a note's button, an API call or another
-    /// agent (Claude Code's `requires_user_interaction`): the card says "Answer in Slopty".
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub needs_presence: bool,
-    /// The command an approval would run, whole, which the card draws in the code face ahead of
-    /// `question` (then only the agent's words about it); none for any other request.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// The call can destroy work or reach past it (deleting, forcing, rewriting history, raising
-    /// privileges): the card warns before anything else. Unlike `deny_first`, which only picks
-    /// the careful default, it never marks a call for being long or unknown.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub risky: bool,
-    // An approval's answers have a hierarchy (opencode's permission dock).
-    /// Which of `options` the card recommends and draws as its primary: an approval's
-    /// once-allow, none where the card starts on its deny (a risky, long or unknown call).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub primary_option: Option<usize>,
-    /// Which of `options` also stop the agent's turn ("Deny and stop"), drawn in danger ink.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stop_options: Vec<usize>,
-}
-
-// One wording for a request only the person at its card answers.
-impl UserInputQuestion {
-    /// What the card of a question that `needs_presence` says (`slopty_proto`'s
-    /// `Request::NEEDS_PRESENCE`, the words an answer from elsewhere is refused with).
-    pub const NEEDS_PRESENCE: &'static str = "Answer in Slopty";
-    /// Why, in the card's tooltip and to a screen reader (the rest of `slopty_proto`'s
-    /// `Request::NEEDS_PRESENCE_REFUSED`).
-    pub const NEEDS_PRESENCE_WHY: &'static str = "The agent takes this answer only from its card";
-}
-
-// "Allow with rule" (`slopty.AllowWithRule`).
-/// A rule an approval offers to allow its like from now on.
+/// A request an agent waits on the person for: a question, an approval, a plan or a dialog.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RuleOffer {
-    /// The index in `options` of the choice that allows it always.
-    pub option: usize,
-    /// The rule, in the agent's words (`Bash(cargo test:*)`).
-    pub rule: String,
-    /// The scope it goes to unless the person picks another (a `RuleScope` id: `local`,
-    /// `project`, `user`).
+pub struct UserInputQuestion {
+    /// The request's id within its turn.
+    pub id: String,
+    /// Its title: an agent question's header, an approval's tool.
+    pub header: String,
+    /// What it asks, in the agent's words.
+    pub question: String,
+    /// The answers it offers, by label.
+    pub options: Vec<String>,
+    /// The request's kind, as the thread names it: `approval`, `plan`, `question`,
+    /// `elicitation`, `retry`, `dialog:<kind>`, or one Slopty does not know.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// The command an approval would run, whole; none for any other request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    pub command: Option<String>,
 }
 
+/// How a turn ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DoneStatus {
+    /// It finished.
     Completed,
+    /// The person stopped it.
     Interrupted,
+    /// It failed.
     Errored,
 }
 
 /// The normalized streaming event every harness emits.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AgentEvent {
+    /// A session began.
     #[serde(rename_all = "camelCase")]
     SessionStarted {
+        /// The agent running it.
         harness: HarnessId,
+        /// The model it runs on.
         model: String,
+        /// The tools it has.
         #[serde(default)]
         tools: Vec<String>,
+        /// Where it runs.
         cwd: String,
         /// Harness-native session id (used for resume).
         session_id: String,
+        /// The id of the reply it starts.
         assistant_message_id: String,
     },
+    /// More of the reply's text.
     TextDelta {
+        /// The text added.
         text: String,
     },
     /// A generated raster asset. The engine materializes this path before publication.
     #[serde(rename_all = "camelCase")]
     GeneratedImage {
+        /// The image's id.
         id: String,
+        /// Where it is stored.
         path: String,
+        /// Its file name.
         name: String,
+        /// Its media type.
         mime_type: String,
     },
     /// An agent-authored visual shown inline in the reply: a Luau script
@@ -581,25 +472,37 @@ pub enum AgentEvent {
     // The view model emits it from the thread's `show_visual` call; `path` names the
     // script in that thread (`slopty_ui::view_model::transcript::visual_path`).
     Visual {
+        /// The visual's id.
         id: String,
+        /// Where its script is stored.
         path: String,
+        /// Its title.
         title: String,
     },
+    /// More of the agent's thinking.
     ReasoningDelta {
+        /// The text added.
         text: String,
     },
     /// Backend-internal steering boundary marker.
     #[serde(rename_all = "camelCase")]
     AssistantMessageCompleted {
+        /// The reply that ended.
         assistant_message_id: String,
     },
+    /// A tool call began.
     ToolCall {
+        /// The call's id.
         id: String,
+        /// What it calls.
         call: ToolCall,
     },
+    /// A tool call ended.
     #[serde(rename_all = "camelCase")]
     ToolResult {
+        /// The call's id.
         id: String,
+        /// Whether it failed.
         is_error: bool,
         /// Tool output text, capped by the emitting harness (ACP tool-call
         /// content; claude/codex adapters never populate it). The doc-side
@@ -614,13 +517,17 @@ pub enum AgentEvent {
     /// Missing fields preserve the previous measurement; zero tokens is valid.
     #[serde(rename_all = "camelCase")]
     ContextUsage {
+        /// Tokens in the context now.
         tokens: Option<u64>,
+        /// The context's size.
         window: Option<u64>,
     },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {
+        /// Tokens read.
         input_tokens: u64,
+        /// Tokens written.
         output_tokens: u64,
     },
     /// The agent advertised (or changed) its slash-command set — ACP
@@ -628,32 +535,47 @@ pub enum AgentEvent {
     /// harness for the composer's `/` popup; never persisted to docs.
     #[serde(rename_all = "camelCase")]
     AvailableCommands {
+        /// The commands, as the agent lists them.
         commands: Vec<SlashCommand>,
     },
+    /// The agent failed.
     Error {
+        /// What went wrong.
         message: String,
     },
+    /// The agent waits on the person.
     #[serde(rename_all = "camelCase")]
     InputRequested {
+        /// The request's id.
         request_id: String,
+        /// What it asks.
         questions: Vec<UserInputQuestion>,
     },
+    /// A request was answered or withdrawn.
     #[serde(rename_all = "camelCase")]
     InputResolved {
+        /// The request's id.
         request_id: String,
     },
     /// A confirmed new assignment. When tagged as Subagent, this reopens the
     /// same child transcript even if the provider does not echo the user text.
     #[serde(rename_all = "camelCase")]
     Steered {
+        /// The reply the new words end, when one was under way.
         assistant_message_id: Option<String>,
+        /// The reply the new words start.
         next_assistant_message_id: Option<String>,
     },
+    /// The turn ended.
     #[serde(rename_all = "camelCase")]
     Done {
+        /// How it ended.
         status: DoneStatus,
+        /// The agent's last words, when it gave them.
         result: Option<String>,
+        /// What went wrong, when it failed.
         error: Option<String>,
+        /// The harness's session id, for resuming it.
         session_id: Option<String>,
     },
     /// A USER-role message injected into a running session — today only seen
@@ -665,6 +587,7 @@ pub enum AgentEvent {
     /// chat's user messages come from doc commands, not the wire).
     #[serde(rename_all = "camelCase")]
     UserMessage {
+        /// The message.
         text: String,
     },
     /// An event belonging to a SUBAGENT's nested transcript, attributed to
@@ -676,8 +599,10 @@ pub enum AgentEvent {
     /// behavior.
     #[serde(rename_all = "camelCase")]
     Subagent {
+        /// The call that spawned the subagent.
         parent_tool_use_id: String,
-        event: Box<AgentEvent>,
+        /// The subagent's event.
+        event: Box<Self>,
     },
 }
 
@@ -689,9 +614,7 @@ mod tests {
     fn agent_event_round_trips() {
         let ev = AgentEvent::ToolCall {
             id: "t1".into(),
-            call: ToolCall::Exec {
-                command: "cargo test".into(),
-            },
+            call: ToolCall::Exec { command: "cargo test".into() },
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
@@ -729,35 +652,16 @@ mod tests {
             None
         );
         // A spawn that named nothing usable inherits — nothing to render.
-        assert_eq!(
-            spawn(serde_json::json!({ "model": " " })).subagent_model(),
-            None
-        );
-        assert_eq!(
-            spawn(serde_json::json!({ "prompt": "x" })).subagent_model(),
-            None
-        );
-        assert_eq!(
-            ToolCall::Unknown {
-                name: "Agent".into(),
-                input: None
-            }
-            .subagent_model(),
-            None
-        );
+        assert_eq!(spawn(serde_json::json!({ "model": " " })).subagent_model(), None);
+        assert_eq!(spawn(serde_json::json!({ "prompt": "x" })).subagent_model(), None);
+        assert_eq!(ToolCall::Unknown { name: "Agent".into(), input: None }.subagent_model(), None);
         // Non-string values are not names.
-        assert_eq!(
-            spawn(serde_json::json!({ "model": 5 })).subagent_model(),
-            None
-        );
+        assert_eq!(spawn(serde_json::json!({ "model": 5 })).subagent_model(), None);
     }
 
     #[test]
     fn harness_id_uses_kebab_case() {
-        assert_eq!(
-            serde_json::to_string(&HarnessId::CLAUDE_CODE).unwrap(),
-            "\"claude-code\""
-        );
+        assert_eq!(serde_json::to_string(&HarnessId::CLAUDE_CODE).unwrap(), "\"claude-code\"");
     }
 }
 
@@ -782,8 +686,9 @@ mod generated_image_tests {
 
 #[cfg(test)]
 mod todo_item_tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn legacy_items_without_status_derive_from_done() {
@@ -801,10 +706,7 @@ mod todo_item_tests {
         let active = serde_json::to_value(TodoItem::new("c", TodoStatus::InProgress)).unwrap();
         assert_eq!(pending, json!({ "text": "a", "done": false }));
         assert_eq!(done, json!({ "text": "b", "done": true }));
-        assert_eq!(
-            active,
-            json!({ "text": "c", "done": false, "status": "inProgress" })
-        );
+        assert_eq!(active, json!({ "text": "c", "done": false, "status": "inProgress" }));
     }
 
     #[test]
@@ -826,11 +728,7 @@ mod todo_item_tests {
 
     #[test]
     fn done_outranks_a_stale_status() {
-        let item = TodoItem {
-            text: "a".into(),
-            done: true,
-            status: Some(TodoStatus::InProgress),
-        };
+        let item = TodoItem { text: "a".into(), done: true, status: Some(TodoStatus::InProgress) };
         assert_eq!(item.status(), TodoStatus::Completed);
     }
 
@@ -860,6 +758,6 @@ mod harness_id_tests {
         assert_eq!(gemini.as_str(), "gemini");
         assert_eq!(gemini, HarnessId::named("gemini"));
         assert!(std::ptr::eq(gemini.as_str(), HarnessId::named("gemini").as_str()), "interned");
-        assert!(read("\"\"").is_err());
+        read("\"\"").unwrap_err();
     }
 }

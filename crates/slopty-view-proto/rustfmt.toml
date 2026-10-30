@@ -1,3 +1,0 @@
-# Copied UI code is kept as written, never reformatted, so it stays diffable with the source it
-# was copied from (docs/decisions/ui.md).
-disable_all_formatting = true
