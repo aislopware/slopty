@@ -1124,7 +1124,13 @@ impl Shell {
             .id("picker-card")
             .debug_selector(|| "picker-card".into())
             // No focus of its own: a press on a row the machine refuses, or on a machine's
-            // tab, leaves the keyboard in the search, so typing goes on filtering.
+            // tab, leaves the keyboard in the search, so typing goes on filtering. The search
+            // lets go of the keyboard at a press outside it, before the press lands, so the
+            // card hands it back once the press reaches it.
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let search = search.clone();
+                move |_, window, cx| window.focus(&search.focus_handle(cx), cx)
+            })
             .role(gpui::Role::Dialog)
             .aria_label(label)
             .w(px(PICKER_WIDTH))
@@ -1717,6 +1723,70 @@ mod tests {
         let Row::Folder(first) = &typed[0] else { panic!("a folder") };
         assert_eq!(first.path, "/Users/me/code/x", "a typed path, home expanded");
         assert!(first.typed);
+    }
+
+    /// A press on a past session a Claude Code holds elsewhere is refused and the card says
+    /// why; the keyboard stays in the search, so the next key goes on filtering.
+    #[gpui::test]
+    fn a_refused_pick_leaves_the_keyboard_in_the_search(cx: &mut gpui::TestAppContext) {
+        use crate::settings::platform_combo;
+        let (shell, cx) =
+            super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        };
+        let search_has_keyboard = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let picker = shell.read(cx).picker.as_ref();
+                picker.is_some_and(|picker| picker.search.focus_handle(cx).is_focused(window))
+            })
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_session_terminals([("a".to_owned(), "t-a".to_owned())].into());
+                cx.notify();
+            });
+            shell.open_chat("a".into(), cx);
+        });
+        draw(cx);
+        cx.simulate_keystrokes(&platform_combo("mod-k"));
+        draw(cx);
+        cx.simulate_input("startup");
+        let held = PastRow {
+            key: "box:held".into(),
+            device_id: "box".into(),
+            device: Some("box".into()),
+            native: "held".into(),
+            title: Some("Profile the startup path".into()),
+            running: Some("interactive".into()),
+            resume: vec!["--resume".into(), "held".into()],
+            ..PastRow::default()
+        };
+        shell.update(cx, |shell, cx| {
+            if let Some(picker) = shell.picker.as_mut() {
+                picker.past = vec![held.clone()];
+            }
+            cx.notify();
+        });
+        draw(cx);
+        assert!(search_has_keyboard(cx), "the search has the keyboard");
+
+        let at = cx.debug_bounds("picker-row-past-box:held").expect("the held session's row");
+        cx.simulate_click(at.center(), gpui::Modifiers::default());
+        draw(cx);
+        let refused =
+            shell.read_with(cx, |shell, _| shell.picker.as_ref().and_then(|p| p.refused.clone()));
+        assert!(refused.is_some() && refused == held.held_elsewhere(), "says why: {refused:?}");
+        assert!(search_has_keyboard(cx), "the keyboard stays in the search");
+        cx.simulate_input(" ");
+        let typed = shell.read_with(cx, |shell, cx| {
+            shell.picker.as_ref().map(|picker| picker.search.read(cx).text().to_owned())
+        });
+        assert_eq!(typed.as_deref(), Some("startup "), "the next key goes on filtering");
     }
 
     /// ⌘K opens the session picker and ⇧⌘G turns it to Go to Directory, whose own key shuts
