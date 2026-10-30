@@ -12,6 +12,7 @@ One file per topic under `docs/decisions/`; an entry is cited by its bold title 
 - [Platform](decisions/platform.md)
 - [UI](decisions/ui.md)
 - [Layout](decisions/layout.md) (supersedes UI's zeron base for layout and components)
+- [Inspector](decisions/inspector.md) (the trace-shaped, read-only session view)
 - [Terminal](decisions/terminal.md)
 - [Transport](decisions/transport.md)
 - [Video](decisions/video.md)
