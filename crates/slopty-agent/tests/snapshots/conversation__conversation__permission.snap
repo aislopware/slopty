@@ -52,7 +52,10 @@ expression: "decode(\"permission\").snapshot()"
             at_ms: 1793345951283
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000019
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000017
     - id: toolu_02
       at_ms: 1793345952806
       body:
@@ -85,7 +88,10 @@ expression: "decode(\"permission\").snapshot()"
             at_ms: 1793345953043
             images: []
             said: Done
+            record: 00000000-0000-4000-8000-000000000026
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000024
     - id: toolu_03
       at_ms: 1793345954553
       body:
@@ -110,7 +116,18 @@ expression: "decode(\"permission\").snapshot()"
             at_ms: 1793345954571
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000030
+            seen:
+              text: ""
+              lines: 3
+              chars: 16
+              full:
+                record: 00000000-0000-4000-8000-000000000030
+                part:
+                  Result:
+                    tool_use_id: toolu_03
           title: ~
+          record: 00000000-0000-4000-8000-000000000029
     - id: toolu_04
       at_ms: 1793345956348
       body:
@@ -147,7 +164,10 @@ expression: "decode(\"permission\").snapshot()"
             at_ms: 1793345956372
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000035
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000033
     - id: toolu_05
       at_ms: 1793345956488
       body:
@@ -175,7 +195,10 @@ expression: "decode(\"permission\").snapshot()"
             at_ms: 1793345956510
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000038
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000036
     - id: "00000000-0000-4000-8000-000000000042:0"
       at_ms: 1793345958023
       body:

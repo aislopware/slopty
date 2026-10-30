@@ -1117,6 +1117,8 @@ mod tests {
             at_ms: WallMs::ZERO,
             images: Vec::new(),
             said: None,
+            record: String::new(),
+            seen: None,
         };
         let call = |thread: &Conversation, id: &str, ended: bool| Change::Upsert {
             thread: thread.clone(),
@@ -1129,6 +1131,7 @@ mod tests {
                     detail: ToolDetail::Plan { plan: clipped("Do it") },
                     result: ended.then(done),
                     title: None,
+                    record: String::new(),
                 })),
             },
         };

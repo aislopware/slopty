@@ -74,6 +74,10 @@ pub const PROSE: Cap = Cap { lines: 400, chars: 32_000 };
 /// 40 lines or 4 000 characters the old conversation view settled on (`claude-code.md`).
 pub const OUTPUT: Cap = Cap { lines: 40, chars: 4_000 };
 
+/// What is kept of the text the model read where the call shows something else
+/// ([`ToolResult::seen`]): nothing, only its size and where it is.
+const SEEN: Cap = Cap { lines: 0, chars: 0 };
+
 /// Diff lines kept per call, across its hunks.
 pub const PATCH_LINES: usize = 400;
 
@@ -1043,7 +1047,14 @@ impl Conversation {
             part: Part::Call { tool_use_id: id.to_owned() },
         };
         let input = Clipped::head(&input_json(input), OUTPUT, Some(whole));
-        let call = ToolCall { name: name.to_owned(), input, detail, result: None, title };
+        let call = ToolCall {
+            name: name.to_owned(),
+            input,
+            detail,
+            result: None,
+            title,
+            record: ctx.uuid.to_owned(),
+        };
         self.add(ctx, id.to_owned(), Body::Tool(Box::new(call)), batch);
         for waiting in self.pending.remove(id).unwrap_or_default() {
             match waiting {
@@ -1107,6 +1118,11 @@ impl Conversation {
             record: ctx.uuid.to_owned(),
             part: Part::Result { tool_use_id: id.to_owned() },
         });
+        // What the model read, where the call shows something else in its place.
+        let kept = said.body.is_none() && (!shown || status != ResultStatus::Ok);
+        let seen =
+            (!kept && !text.trim().is_empty() && shows_otherwise(&call.detail, &text, structured))
+                .then(|| Clipped::head(text.trim(), SEEN, full.clone()));
         // A list the TUI draws under the call stands for the text the model read, and a line
         // drawn alone (a refusal by auto mode) for all of it.
         let text = match said.body {
@@ -1117,7 +1133,15 @@ impl Conversation {
                 .then(|| Clipped::head(text.trim(), OUTPUT, full)),
         };
         let text = text.filter(|t| !t.text.is_empty() || images.is_empty());
-        call.result = Some(ToolResult { status, text, at_ms: ctx.at_ms, images, said: said.line });
+        call.result = Some(ToolResult {
+            status,
+            text,
+            at_ms: ctx.at_ms,
+            images,
+            said: said.line,
+            record: ctx.uuid.to_owned(),
+            seen,
+        });
         let changed_tasks = task_change(&call.detail, call.result.as_ref());
         // A task stopped by a call (`TaskStop`) says so in no notice: the call's result is its end.
         let stopped = (status == ResultStatus::Ok
@@ -1714,6 +1738,43 @@ fn input_json(input: &Value) -> String {
 
 /// Fold a result into the call's detail. Returns whether the detail now shows the outcome, so
 /// the result's own text would only repeat it.
+/// Whether what `detail` shows of a result is not the text the model read (`read`, with its
+/// structured `result`). A subagent's card reads its report. A command's output and standard
+/// error are that text, and a command that printed nothing shows so, which Claude Code's note
+/// ("(Bash completed with no output)") only says again. An edit's diff and a write's lines say
+/// what Claude Code's one line of thanks does; only a longer answer (a snippet of the file as it
+/// is now) says more.
+fn shows_otherwise(detail: &ToolDetail, read: &str, result: Option<&Value>) -> bool {
+    let read = read.trim();
+    match detail {
+        ToolDetail::Agent(_) => false,
+        ToolDetail::Bash(_) => {
+            let printed: Vec<&str> = ["stdout", "stderr"]
+                .into_iter()
+                .filter_map(|key| result.and_then(|r| str_at(r, key)))
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .collect();
+            let note = read.starts_with('(') && read.ends_with(')') && !read.contains('\n');
+            if printed.is_empty() && note {
+                return false;
+            }
+            printed.join("\n") != read
+        }
+        // A step that draws what it did (a diff, the task list, the answers, a plan) stands for
+        // the line confirming it, and differs from the text only when there is more to it.
+        ToolDetail::Edit(_)
+        | ToolDetail::Write(_)
+        | ToolDetail::TaskCreate(_)
+        | ToolDetail::TaskUpdate(_)
+        | ToolDetail::TodoWrite { .. }
+        | ToolDetail::Question(_)
+        | ToolDetail::Plan { .. }
+        | ToolDetail::Shown(_) => read.lines().nth(1).is_some(),
+        _ => true,
+    }
+}
+
 fn apply_result(
     detail: &mut ToolDetail,
     status: ResultStatus,
@@ -2626,6 +2687,7 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
         }
         // Not text of the transcript: a picture's bytes, a file the worker tails.
         Part::Image { .. } | Part::Output { .. } => None,
+        Part::Record => serde_json::to_string_pretty(record).ok(),
         Part::Stdout => result.and_then(|r| string_at(r, "stdout")),
         Part::Stderr => result.and_then(|r| string_at(r, "stderr")),
         Part::Patch => {

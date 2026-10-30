@@ -40,7 +40,18 @@ expression: "decode(\"edit\").snapshot()"
             at_ms: 1793345888833
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000018
+            seen:
+              text: ""
+              lines: 4
+              chars: 24
+              full:
+                record: 00000000-0000-4000-8000-000000000018
+                part:
+                  Result:
+                    tool_use_id: toolu_01
           title: ~
+          record: 00000000-0000-4000-8000-000000000017
     - id: toolu_02
       at_ms: 1793345890863
       body:
@@ -78,7 +89,10 @@ expression: "decode(\"edit\").snapshot()"
             at_ms: 1793345890913
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000023
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000022
     - id: toolu_03
       at_ms: 1793345893384
       body:
@@ -116,7 +130,10 @@ expression: "decode(\"edit\").snapshot()"
             at_ms: 1793345893417
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000029
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000028
     - id: toolu_04
       at_ms: 1793345894990
       body:
@@ -141,7 +158,18 @@ expression: "decode(\"edit\").snapshot()"
             at_ms: 1793345895010
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000033
+            seen:
+              text: ""
+              lines: 2
+              chars: 14
+              full:
+                record: 00000000-0000-4000-8000-000000000033
+                part:
+                  Result:
+                    tool_use_id: toolu_04
           title: Read notes.txt · lines 2-3
+          record: 00000000-0000-4000-8000-000000000032
     - id: "00000000-0000-4000-8000-000000000036:0"
       at_ms: 1793345896778
       body:

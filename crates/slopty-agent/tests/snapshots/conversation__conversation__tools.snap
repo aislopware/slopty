@@ -37,7 +37,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354910526
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000018
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000017
     - id: toolu_02
       at_ms: 1793354913313
       body:
@@ -59,7 +62,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354913333
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000025
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000024
     - id: toolu_03
       at_ms: 1793354913572
       body:
@@ -81,7 +87,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354913590
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000027
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000026
     - id: toolu_04
       at_ms: 1793354915800
       body:
@@ -106,7 +115,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354915816
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000031
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000030
     - id: toolu_05
       at_ms: 1793354917533
       body:
@@ -133,7 +145,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354917593
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000036
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000034
     - id: toolu_06
       at_ms: 1793354917553
       body:
@@ -162,7 +177,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354917601
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000037
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000035
     - id: toolu_07
       at_ms: 1793354919345
       body:
@@ -199,7 +217,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354919925
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000041
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000040
     - id: toolu_08
       at_ms: 1793354921556
       body:
@@ -236,7 +257,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354921624
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000045
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000044
     - id: "00000000-0000-4000-8000-000000000049:0"
       at_ms: 1793354923292
       body:
@@ -277,7 +301,18 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354923543
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000051
+            seen:
+              text: ""
+              lines: 1
+              chars: 261
+              full:
+                record: 00000000-0000-4000-8000-000000000051
+                part:
+                  Result:
+                    tool_use_id: toolu_09
           title: ~
+          record: 00000000-0000-4000-8000-000000000050
     - id: "task:b00000001:1"
       at_ms: 1793354924614
       body:
@@ -318,7 +353,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354925585
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000055
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000054
     - id: toolu_11
       at_ms: 1793354925746
       body:
@@ -343,7 +381,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354925758
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000057
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000056
     - id: toolu_12
       at_ms: 1793354925940
       body:
@@ -371,7 +412,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354926054
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000059
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000058
     - id: "00000000-0000-4000-8000-000000000066:0"
       at_ms: 1793354928151
       body:
@@ -423,7 +467,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354933676
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000068
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000067
     - id: toolu_14
       at_ms: 1793354935827
       body:
@@ -448,7 +495,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354935851
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000073
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000072
     - id: "00000000-0000-4000-8000-000000000076:0"
       at_ms: 1793354937217
       body:
@@ -526,7 +576,10 @@ expression: "decode(\"tools\").snapshot()"
             at_ms: 1793354930454
             images: []
             said: ~
+            record: 00000000-0000-4000-8000-000000000091
+            seen: ~
           title: ~
+          record: 00000000-0000-4000-8000-000000000090
     - id: "00000000-0000-4000-8000-000000000097:0"
       at_ms: 1793354933622
       body:

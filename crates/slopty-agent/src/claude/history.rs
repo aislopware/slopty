@@ -1628,6 +1628,18 @@ impl History {
             detail,
             child,
             ended_ms: call.result.as_ref().map(|r| r.at_ms),
+            seen: call.result.as_ref().and_then(|r| r.seen.as_ref()).map(clip),
+            raw: [Some(call.record.as_str()), call.result.as_ref().map(|r| r.record.as_str())]
+                .into_iter()
+                .flatten()
+                .filter(|record| !record.is_empty())
+                .map(|record| {
+                    content_ref(
+                        thread,
+                        &TextRef { record: record.to_owned(), part: conv::Part::Record },
+                    )
+                })
+                .collect(),
         }
     }
 }

@@ -23,6 +23,8 @@ fn state_with(id: &str, detail: ToolDetail) -> ThreadState {
         detail: Some(detail),
         child: None,
         ended_ms: None,
+        seen: None,
+        raw: Vec::new(),
     };
     state.items.push(Item {
         id: ItemId(id.to_owned()),

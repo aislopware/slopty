@@ -153,6 +153,8 @@ mod golden_thread {
             detail,
             child: None,
             ended_ms: None,
+            seen: None,
+            raw: Vec::new(),
         }
     }
 

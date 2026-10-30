@@ -60,6 +60,8 @@ fn tool(id: &str, state: ToolState) -> Item {
             detail: None,
             child: None,
             ended_ms: None,
+            seen: None,
+            raw: Vec::new(),
         })),
     }
 }

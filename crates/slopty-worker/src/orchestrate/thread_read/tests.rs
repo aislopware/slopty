@@ -65,6 +65,8 @@ fn call(output: &str) -> ItemBody {
         detail: None,
         child: Some(ThreadId::derived(&["child"])),
         ended_ms: None,
+        seen: None,
+        raw: Vec::new(),
     }))
 }
 

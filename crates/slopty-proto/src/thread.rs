@@ -656,6 +656,13 @@ pub struct ToolCall {
     pub child: Option<ThreadId>,
     /// When it ended.
     pub ended_ms: Option<WallMs>,
+    /// The text its agent read of its result, where `output` and `detail` show something else
+    /// (the diff for an edit, a command's output without what its tool added): none of it kept,
+    /// only its size and where it is.
+    pub seen: Option<Clipped>,
+    /// Where its agent's own records of it are, its call's and then its result's, each read whole
+    /// when asked: its raw record.
+    pub raw: Vec<ContentRef>,
 }
 
 /// The tool-call kinds clients draw on their own.

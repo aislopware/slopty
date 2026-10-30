@@ -105,6 +105,8 @@ pub enum Part {
         /// The command's call.
         tool_use_id: String,
     },
+    /// The record whole, as pretty JSON: what its agent wrote, raw.
+    Record,
 }
 
 /// A text, cut to a cap when it is longer.
@@ -335,6 +337,9 @@ pub struct ToolCall {
     /// pages 1-3", "Create notes.md".
     #[serde(default)]
     pub title: Option<String>,
+    /// The `uuid` of the record that holds it, which [`Part::Record`] reads whole.
+    #[serde(default)]
+    pub record: String,
 }
 
 /// How a call ended.
@@ -353,6 +358,14 @@ pub struct ToolResult {
     /// where its detail does not already say it: "Read PDF (1.2MB)", "Did 3 searches in 4s".
     #[serde(default)]
     pub said: Option<String>,
+    /// The `uuid` of the record that holds it, which [`Part::Record`] reads whole.
+    #[serde(default)]
+    pub record: String,
+    /// The text the model read, where what the call shows is something else: the diff for an
+    /// edit, the lines a list draws, a command's output apart from what its tool added. None of
+    /// it is kept, only its size and its [`Part::Result`], read when asked.
+    #[serde(default)]
+    pub seen: Option<Clipped>,
 }
 
 /// Most bytes of an image a worker sends; a larger one is described and never sent.

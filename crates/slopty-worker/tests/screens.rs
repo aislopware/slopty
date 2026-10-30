@@ -77,6 +77,8 @@ mod screens {
                 })),
                 child: None,
                 ended_ms: None,
+                seen: None,
+                raw: Vec::new(),
             };
             self.apply(Action::ItemStarted(Item {
                 id: ItemId(id.to_owned()),

@@ -262,6 +262,73 @@ fn a_long_text_is_clipped_and_can_be_had_whole() {
     assert_eq!(Clipped::head("short", OUTPUT, None).text, "short");
 }
 
+/// Where a call shows something other than the text the model read, that text is kept only as
+/// its size and where it is; where it shows that very text, nothing more. Each record that holds
+/// the call, and its result, reads back whole.
+#[test]
+fn what_the_model_read_and_the_raw_records_are_where_they_were_written() {
+    let updated =
+        "The file /w/a.rs has been updated. Here's the result of running `cat -n`:\n1\tfn a() {}";
+    let edit = json!({"file_path": "/w/a.rs", "old_string": "fn b", "new_string": "fn a"});
+    let patched = json!({"structuredPatch": [
+        {"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1, "lines": ["-fn b() {}", "+fn a() {}"]},
+    ]});
+    let printed = json!({"stdout": "hi", "stderr": ""});
+    let jsonl = [
+        line(&call("a1", None, "t1", "Edit", &edit)),
+        line(&result("u1", Some("a1"), "t1", updated, &patched)),
+        line(&call("a2", Some("u1"), "t2", "Bash", &json!({"command": "echo hi"}))),
+        line(&result("u2", Some("a2"), "t2", "hi", &printed)),
+        line(&call("a3", Some("u2"), "t3", "Bash", &json!({"command": "cd / && echo hi"}))),
+        line(&result("u3", Some("a3"), "t3", "hi\nShell cwd was reset to /w", &printed)),
+        line(&call("a4", Some("u3"), "t4", "Grep", &json!({"pattern": "fn"}))),
+        line(&result("u4", Some("a4"), "t4", "a.rs", &json!({"numFiles": 1}))),
+        line(&call("a5", Some("u4"), "t5", "Bash", &json!({"command": "true"}))),
+        line(&result(
+            "u5",
+            Some("a5"),
+            "t5",
+            "(Bash completed with no output)",
+            &json!({"stdout": ""}),
+        )),
+        line(&call("a6", Some("u5"), "t6", "TaskCreate", &json!({"subject": "Survey"}))),
+        line(&result(
+            "u6",
+            Some("a6"),
+            "t6",
+            "Task #1 created successfully: Survey",
+            &json!({"task": {"id": "1", "subject": "Survey"}}),
+        )),
+    ]
+    .concat();
+    let mut c = Conversation::default();
+    c.ingest_jsonl(&MAIN, &jsonl);
+    let result_of = |id: &str| tool(&c, &MAIN, id).result.clone().expect("a result");
+
+    let seen = result_of("t1").seen.expect("an edit shows its diff, not what the model read");
+    assert_eq!((seen.text.as_str(), seen.lines), ("", 2), "nothing of it kept, only its size");
+    assert_eq!(
+        full_text(&jsonl, seen.full.as_ref().expect("where it is")).as_deref(),
+        Some(updated)
+    );
+    assert_eq!(result_of("t2").seen, None, "a command's output is what the model read");
+    let reset = result_of("t3").seen.expect("Claude Code's line after the output");
+    assert_eq!(reset.lines, 2);
+    assert_eq!(result_of("t4").seen, None, "a search shows the very text the model read");
+    assert_eq!(result_of("t5").seen, None, "a command that printed nothing shows so");
+    assert_eq!(result_of("t6").seen, None, "the task list stands for its one line");
+
+    let call = tool(&c, &MAIN, "t1");
+    let raw = |record: &str| {
+        let reference = TextRef { record: record.to_owned(), part: Part::Record };
+        serde_json::from_str::<Value>(&full_text(&jsonl, &reference).expect("the record"))
+            .expect("JSON")
+    };
+    assert_eq!(raw(&call.record)["uuid"], "a1", "the call's record, whole");
+    let answered = raw(&result_of("t1").record);
+    assert_eq!(answered["toolUseResult"], patched, "the result's record, whole");
+}
+
 /// A diff longer than the cap keeps its first lines and still counts every change.
 #[test]
 fn a_long_diff_keeps_its_counts() {
@@ -563,6 +630,7 @@ fn a_calls_input_keeps_the_fields_a_dialog_is_worded_from() {
             detail: detail(name, &input, None),
             result: None,
             title: None,
+            record: String::new(),
         };
         assert_eq!(call_input(&call), input, "{name}: a whole input is read whole");
         call.input = Clipped::head(&"x".repeat(OUTPUT.chars + 1), OUTPUT, None);

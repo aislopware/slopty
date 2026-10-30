@@ -17,6 +17,8 @@ fn call(name: &str, detail: Option<ToolDetail>, input: &str, output: Option<&str
         detail,
         child: None,
         ended_ms: None,
+        seen: None,
+        raw: Vec::new(),
     }
 }
 
