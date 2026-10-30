@@ -63,12 +63,13 @@ impl Transcript {
         })
     }
 
-    /// The band of the window a live page may sit in: below the titlebar's fade, above the
-    /// bottom's fade. It is called while the list lays out its rows, so it reads the
-    /// viewport as the frame began rather than the list.
+    /// The band of the window a live page may sit in: below the transcript's top scroll edge,
+    /// above the bottom's fade. The transcript lays out inside its pane, which clears the
+    /// window's chrome, so no titlebar stands over its top. It is called while the list lays out
+    /// its rows, so it reads the viewport as the frame began rather than the list.
     fn page_clear_band(&self) -> (f32, f32) {
         let viewport = self.page_viewport;
-        let top = f32::from(viewport.top()) + Theme::TITLEBAR_HEIGHT + Theme::TRANSCRIPT_FADE_BAND;
+        let top = f32::from(viewport.top()) + Theme::TRANSCRIPT_FADE_BAND;
         let bottom = f32::from(viewport.bottom()) - Theme::TRANSCRIPT_FADE_BAND;
         (top, bottom.max(top))
     }
