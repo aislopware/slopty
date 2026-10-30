@@ -1791,3 +1791,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   ("a finger over the iPhone's pages"). Tests: the e2e
   `a_finger_over_a_live_page_scrolls_the_chat_or_the_page` says when each view was made after its
   card opened, how long it took, and every hang; gpui-fast's `fast::tests::touch_in_flight`.
+- ✅ **A tap that only clicks a page leaves the keyboard where it was** (2026-10-30, the iPhone
+  pages e2e's stalled tap). `WebKit` makes a page's view the first responder as a tap or a press
+  on it ends (`-[WKContentView _singleTapRecognized:]`), so that keys reach the page, and UIKit
+  then builds the keyboard's input views for it. The first tap on a page held the main thread 460
+  to 854 ms in the iPhone simulator within the delivery of the finger's lift (470 of 476
+  main-thread samples in `_reloadInputViewsForResponder:` and the keyboard's layout), and the
+  keyboard left the session's terminal for a page with nothing to type in. On iOS a page's web
+  view is `SloptyPageWebView`, a `WKWebView` that refuses `becomeFirstResponder` while one of its
+  gesture recognizers is ending, unless it holds the keyboard already. A field the page focuses
+  asks once the gesture is over (`-[WKContentView _elementDidFocus:…]`) and takes the keyboard,
+  as a browser tile's fields raised it themselves (`ui.md`, "The browser tile's native view").
+  We considered leaving a tap to hand the page the hardware keyboard's keys, as Safari does: a
+  page here sits in a session, whose terminal keeps the keys, and a page that wants them has a
+  field. On the Mac a click still gives the page the keyboard, as AppKit does for a view that
+  accepts it. Test: the e2e `a_finger_over_a_live_page_scrolls_the_chat_or_the_page` taps a page
+  that grows to one height when the tap leaves the keyboard and to another once its frame hears
+  `focus` (`WebKit` focuses a page as its view becomes the first responder); without the refusal
+  it says the page took the keyboard.

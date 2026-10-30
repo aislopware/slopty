@@ -24,9 +24,13 @@ const MOVES: u32 = 10;
 /// the 40 ms after which a lift reads as a finger that stopped, as when a page's web view is
 /// made under a person's finger. The lift still says when it happened, so it flings.
 const HELD: Duration = Duration::from_millis(120);
-/// The short page's height before and after a tap on it, CSS pixels.
-const SHORT: u32 = 160;
-const TAPPED: u32 = 400;
+/// The short page's height before a tap on it, and after one: `TAPPED` while the keyboard stays
+/// where it was, `TOOK` once the page's document has the focus (its view holds the keyboard),
+/// CSS pixels: the page's own word on where a tap left the keyboard. `TOOK` is the taller, so
+/// the drag after the tap finds the card either way.
+const SHORT: u16 = 160;
+const TAPPED: f32 = 400.0;
+const TOOK: f32 = 480.0;
 /// The heights the tall page says once a finger touched it, and once it has scrolled, CSS
 /// pixels: its card's height tells which reached it.
 const TOUCHED: f32 = 500.0;
@@ -158,15 +162,20 @@ async fn wheel(drv: &mut Driver, x: f32, up: bool, times: usize) {
 #[ignore = "live: cargo xtask e2e ios"]
 async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     let prompt = "Show the pages";
+    // The page's frame hears `focus` once its document has the focus: WebKit gives a page the
+    // focus as its view becomes the first responder, and a click gives it the frame clicked.
     let short = page(
-        SHORT,
+        SHORT.into(),
         &format!(
             "<div id=\"box\" style=\"height:{SHORT}px;background:#cde;font:600 18px \
              -apple-system\">Short page</div>"
         ),
         &format!(
-            "document.body.addEventListener('click', () => {{\
-               document.getElementById('box').style.height = '{TAPPED}px'; size({TAPPED}); }});"
+            "let tapped = false, held = false;\
+             const say = () => {{ const height = held ? {TOOK} : {TAPPED};\
+               document.getElementById('box').style.height = height + 'px'; size(height); }};\
+             addEventListener('focus', () => {{ held = true; if (tapped) say(); }});\
+             document.body.addEventListener('click', () => {{ tapped = true; say(); }});"
         ),
     );
     // Taller than a card shows, so it scrolls in its card. A finger's touch has it say one
@@ -293,7 +302,7 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
         .await
         .unwrap();
     measure(&format!("pages-touch-landed {device} tall drag from {at:?}: {landed}; {natives}"));
-    if !landed.contains("WKWebView") {
+    if !landed.contains("SloptyPageWebView") {
         missing.push(format!("a finger over the tall page lands in its web view: {landed}"));
     }
     let scrolled_below = f32::midpoint(TOUCHED, SCROLLED) + HEADER;
@@ -326,14 +335,15 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     }
 
     // A tap on the page is the page's: it grows, and says so. At the chat's top, where the
-    // short page is.
+    // short page is. A tap that only clicks leaves the keyboard where it was: the web view
+    // takes it only for a field the page focuses, and the page's word says which.
     wheel(drv, gutter, true, 30).await;
     let short_card = live_card(drv, "Short", top, bottom).await;
     let [x, y, w, h] = short_card.bounds;
     let natives = natives_said(drv).await;
     let landed = drv.ui_finger_tap(x + w / 2.0, y + HEADER + 30.0).await.unwrap();
     measure(&format!("pages-touch-landed {device} short tap: {landed}; {natives}"));
-    if !landed.contains("WKWebView") {
+    if !landed.contains("SloptyPageWebView") {
         missing.push(format!("a finger over the short page lands in its web view: {landed}"));
     }
     let grown = drv
@@ -342,11 +352,24 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
         })
         .await;
     let (_, grown_to) = where_is(drv, "Short").await;
+    // The page's height after the tap, from its card's: the card is the page and its head.
+    let said = grown_to - h + f32::from(SHORT);
+    let keyboard = if (said - TOOK).abs() < 1.0 {
+        "the page took it"
+    } else if (said - TAPPED).abs() < 1.0 {
+        "where it was"
+    } else {
+        "no word from the page"
+    };
     measure(&format!(
-        "pages-touch-tap {device}: the tapped page's card {h:.0} -> {grown_to:.0} pt tall"
+        "pages-touch-tap {device}: the tapped page's card {h:.0} -> {grown_to:.0} pt tall; the \
+         keyboard {keyboard}"
     ));
     if grown.is_err() {
         missing.push(format!("a tap reaches the page, which grows: {h:.0} -> {grown_to:.0}"));
+    }
+    if (said - TOOK).abs() < 1.0 {
+        missing.push("a tap that only clicks leaves the keyboard where it was".to_owned());
     }
 
     // A page with nothing to scroll: the drag scrolls the chat by the whole of it, and the

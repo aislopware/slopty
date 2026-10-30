@@ -18366,3 +18366,38 @@ for i in $(seq 50); do for j in 1 2 3 4; do $B --exact actor::<each of the five>
 Before, three of them took every test thread in every run (`threads-required`), and the gate
 and the warm runners retried four. After, 200 runs of the five, four processes at once, all
 passed in 22 s; a Linux runner passed them too (run 41006228450, `ubuntu-24.04`).
+
+## 2026-10-30 — a finger over the iPhone's pages: web views made after a frame, a tap's keyboard
+
+The e2e guest `slopty-27-e2e-2` on mac-studio, its iPhone 18 Pro simulator (iOS 27.2), the app's
+debug build; one run of `a_finger_over_a_live_page_scrolls_the_chat_or_the_page` a row, which
+opens five pages in one turn, drags over a tall one, taps a short one and drags over it with the
+app busy 120 ms before the lift. Hangs are the app's own monitor's (the main thread stalled over
+250 ms), each with what it stalled in.
+
+| build | hangs | each web view ready, after its card opened | each one's making | `RefCell already borrowed` |
+| --- | --- | --- | --- | --- |
+| before the day's fixes | 844 ms making web views as their documents came; 660 ms presenting a frame; 665 ms in the tap | 859, 888, 17, 25, 50 ms | | 63 |
+| touch times and held words (gpui-fast#66, #67) | 368 ms making web views; 460 ms in the tap | 376, 381, 18, 26, 31 ms | | 0 |
+| web views made after a frame, one a frame, as tasks | 359 ms making the first, no finger down; 554 ms in the tap | 376, 548, 21, 34, 59 ms | 359, 11, 9, 8, 9 ms | 0 |
+| and a tap that only clicks leaves the keyboard (`F@4ee370bf24`) | 382 ms making the first, no finger down | 411, 567, 34, 50, 60 ms | 382, 11, 7, 7, 8 ms | 0 |
+
+The first web view a process makes pays `WebKit`'s start: its process pool (`WebPreferences`, a
+TCC query over XPC) and its first page (`WKContentView`, `createWebPage`); later ones take 7 to
+11 ms. It stays, but lands in a task of its own after a frame and never under a finger, and the
+views after it wait a frame each rather than stacking into its stall, so the second is ready
+about 150 ms later than before. The tap's stall was 460 to 854 ms in five runs before the
+refusal (`docs/decisions/platform.md`, "A tap that only clicks a page leaves the keyboard where
+it was"), and none in three after: a sample of the app over the tap had 470 of 476 main-thread
+samples in UIKit building the keyboard's input views for `WebKit`'s content view, inside the
+delivery of the finger's lift. With the refusal turned off (`F@6d3207818e`) the tapped page says
+it took the keyboard and the case fails. The fling after the held lift went 282.0, 287.0 and
+288.3 pt in the last three rows, and the short drag's frames were p50 15, p95 20, p99 128 ms
+apart in the last (the 99th is the 120 ms hold).
+
+```sh
+SLOPTY_LANE=F cargo xtask remote -p slopty-e2e --e2e ios \
+  -E 'test(a_finger_over_a_live_page_scrolls_the_chat_or_the_page)' --until-fail 3
+# The tap's stack, in the guest while the case taps:
+sudo sample <the app's pid> 45 1 -mayDie -file /tmp/slopty.sample.txt
+```

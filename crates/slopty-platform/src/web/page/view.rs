@@ -203,7 +203,7 @@ pub(super) fn mount(
     let web: Retained<AnyObject> = super::wheel::PageWebView::new(frame, &config, mtm).into();
     #[cfg(not(target_os = "macos"))]
     let web = {
-        let class = objc2::runtime::AnyClass::get(c"WKWebView")?;
+        let class = web_view_class()?;
         // SAFETY: `NSObject` rule: `alloc` on a class returns a fresh instance to initialise.
         let allocated: objc2::rc::Allocated<AnyObject> = unsafe { msg_send![class, alloc] };
         // SAFETY: WebKit rule: `initWithFrame:configuration:` is `WKWebView`'s designated
@@ -746,6 +746,99 @@ define_class!(
 /// `UIScrollViewContentInsetAdjustmentNever` (`UIScrollView.h`).
 #[cfg(target_os = "ios")]
 const INSET_ADJUSTMENT_NEVER: isize = 2;
+
+/// The class of a page's web view on iOS: `WKWebView`, but a finger's tap or press on the page
+/// leaves the keyboard where it was ([`become_first_responder`]). Named as the Mac's
+/// (`super::wheel::PageWebView`), and registered once.
+#[cfg(target_os = "ios")]
+fn web_view_class() -> Option<&'static objc2::runtime::AnyClass> {
+    static CLASS: std::sync::OnceLock<Option<&'static objc2::runtime::AnyClass>> =
+        std::sync::OnceLock::new();
+    *CLASS.get_or_init(|| {
+        let superclass = objc2::runtime::AnyClass::get(c"WKWebView")?;
+        let mut builder = objc2::runtime::ClassBuilder::new(c"SloptyPageWebView", superclass)?;
+        // A pointer for one lifetime of its receiver, which objc2 takes, not for every one.
+        let responder: extern "C-unwind" fn(_, _) -> _ = become_first_responder;
+        // SAFETY: `NSObject` rule: the override has `UIResponder`'s own signature for
+        // `becomeFirstResponder` (`UIResponder.h`): no arguments, a `BOOL`.
+        unsafe {
+            builder.add_method(sel!(becomeFirstResponder), responder);
+        }
+        Some(builder.register())
+    })
+}
+
+/// A page's web view asked to take the keyboard, on iOS. `WebKit`'s content view asks as a
+/// finger's tap or press on the page ends (`-[WKContentView _singleTapRecognized:]`), so that
+/// keys type into the page, and UIKit then builds the keyboard's views for it: the first tap on
+/// a page held the main thread 460 to 854 ms in the iPhone simulator, within the delivery of the
+/// finger's lift, and took the keyboard from the session's terminal. A gesture that only clicks
+/// is refused, and the keyboard stays where it was; a field the page focuses asks once the
+/// gesture is over (`-[WKContentView _elementDidFocus:…]`) and takes it, and a view that holds
+/// the keyboard already keeps it.
+#[cfg(target_os = "ios")]
+extern "C-unwind" fn become_first_responder(this: &AnyObject, _: Sel) -> objc2::runtime::Bool {
+    /// `UIGestureRecognizerStateEnded` (`UIGestureRecognizer.h`): a recognizer sending its
+    /// action as its gesture ends, until UIKit resets it once the finger's touches are over.
+    const ENDED: isize = 3;
+    // SAFETY: UIKit rule (`UIResponder.h`): `isFirstResponder`, on the main thread.
+    let holds = below(this, &|view| unsafe { msg_send![view, isFirstResponder] });
+    let ending = below(this, &|view| {
+        // SAFETY: UIKit rule (`UIView.h`): a view's recognizers, an array or nil, on the main
+        // thread.
+        let recognizers: Option<Retained<AnyObject>> =
+            unsafe { msg_send![view, gestureRecognizers] };
+        each(recognizers.as_deref()).any(|recognizer| {
+            // SAFETY: UIKit rule (`UIGestureRecognizer.h`): a recognizer's state, read on the
+            // main thread.
+            let state: isize = unsafe { msg_send![&*recognizer, state] };
+            state == ENDED
+        })
+    });
+    if ending && !holds {
+        return objc2::runtime::Bool::NO;
+    }
+    let Some(superclass) = objc2::runtime::AnyClass::get(c"WKWebView") else {
+        return objc2::runtime::Bool::NO;
+    };
+    // SAFETY: UIKit rule (`UIResponder.h`): `becomeFirstResponder` as `WKWebView` answers it, on
+    // the main thread, where UIKit asks it.
+    unsafe { msg_send![super(this, superclass), becomeFirstResponder] }
+}
+
+/// Whether `found` holds for the web view `web` or a view below it, as far down as its content
+/// view, which takes the touches and the keyboard (`WKWebView` > its scroll view > its content
+/// view).
+#[cfg(target_os = "ios")]
+fn below(web: &AnyObject, found: &dyn Fn(&AnyObject) -> bool) -> bool {
+    /// The content view's depth below its web view.
+    const CONTENT: u8 = 2;
+    fn from(view: &AnyObject, depth: u8, found: &dyn Fn(&AnyObject) -> bool) -> bool {
+        if found(view) {
+            return true;
+        }
+        if depth >= CONTENT {
+            return false;
+        }
+        // SAFETY: UIKit rule (`UIView.h`): a view's subviews, an array, on the main thread.
+        let subviews: Option<Retained<AnyObject>> = unsafe { msg_send![view, subviews] };
+        each(subviews.as_deref()).any(|subview| from(&subview, depth.saturating_add(1), found))
+    }
+    from(web, 0, found)
+}
+
+/// The objects of `array`, an `NSArray` or nothing.
+#[cfg(target_os = "ios")]
+fn each(array: Option<&AnyObject>) -> impl Iterator<Item = Retained<AnyObject>> + '_ {
+    // SAFETY: `NSArray` rule (`NSArray.h`): `count` of an array.
+    let count: usize = array.map_or(0, |array| unsafe { msg_send![array, count] });
+    (0..count).filter_map(move |at| {
+        let array = array?;
+        // SAFETY: `NSArray` rule: `objectAtIndex:` below `count` gives that object, never nil.
+        let object: Retained<AnyObject> = unsafe { msg_send![array, objectAtIndex: at] };
+        Some(object)
+    })
+}
 
 /// `WKPermissionDecisionDeny` (`WKUIDelegate.h`).
 const DENY: isize = 2;
