@@ -9,6 +9,6 @@
   "ignorePatterns": ["node_modules", "reports", ".stryker-tmp", "deep"],
   "tempDirName": ".stryker-tmp",
   "cleanTempDir": "always",
-  "timeoutMS": 3000,
+  "timeoutMS": 10000,
   "tsconfigFile": "tsconfig.stryker-none.json"
 }
