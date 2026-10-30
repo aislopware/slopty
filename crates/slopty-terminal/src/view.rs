@@ -31,6 +31,7 @@ use slopty_proto::terminal::{
 use slopty_proto::transfer::ClipMsg;
 use slopty_shell::composer::{ComposerInput, ComposerInputEvent};
 use slopty_shell::live::chrome;
+use slopty_shell::live::key_row::{self, Modifier};
 use slopty_shell::{icons, popover};
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
@@ -565,15 +566,8 @@ pub struct TerminalView {
     typed: String,
     /// Words the person has put in the program's line and not yet sent (see [`drafting_after`]).
     drafting: bool,
-    /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
-    sticky_control: bool,
-    /// The next key (or typed character) gets Alt, as Meta whatever the ⌥ setting: the key
-    /// bar's Alt toggle, for readline's and Emacs' Meta chords a soft keyboard cannot make.
-    sticky_alt: bool,
     /// A key hid the pointer ("hide the pointer while typing") and it has not moved since.
     pointer_hidden: bool,
-    /// The next tap opens the link under it, as ⌘-click does: the phone key bar's ⌘ toggle.
-    sticky_command: bool,
     /// Text selected with the mouse.
     selection: Option<Selection>,
     /// The left button is down and moving it extends the selection.
@@ -784,10 +778,7 @@ impl TerminalView {
             marked: None,
             typed: String::new(),
             drafting: false,
-            sticky_control: false,
-            sticky_alt: false,
             pointer_hidden: false,
-            sticky_command: false,
             block_menu: popover::Popup::default(),
             command_started: None,
             selection: None,
@@ -2043,10 +2034,10 @@ impl TerminalView {
         self.clip_hook.as_ref().map_or(ClipPaste::Text, |hook| hook())
     }
 
-    /// ⌘V, or the phone key bar's "paste": the clipboard into the session (the worker brackets
-    /// it when the program asked). Files on it go to the shell's directory instead, and their
-    /// paths are typed. A picture with no text goes to the worker's pasteboard, and then an
-    /// empty paste tells the program to read it there.
+    /// ⌘V: the clipboard into the session (the worker brackets it when the program asked). Files
+    /// on it go to the shell's directory instead, and their paths are typed. A picture with no
+    /// text goes to the worker's pasteboard, and then an empty paste tells the program to read it
+    /// there.
     pub fn paste_clipboard(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
         let paste = self.clip_paste();
         let text = matches!(paste, ClipPaste::Text)
@@ -2264,7 +2255,8 @@ impl TerminalView {
         self.theme.behaviour.option_as_alt.applies(slopty_platform::right_option_held())
     }
 
-    /// Send a key as if it had been pressed with the terminal focused (key bar buttons).
+    /// Send a key as if it had been pressed with the terminal focused: one the view types on its
+    /// own, or an action's.
     pub fn press(&mut self, keystroke: Keystroke, cx: &mut Context<Self>) {
         self.typed.clear();
         if self.copy_mode.is_some() {
@@ -2280,52 +2272,53 @@ impl TerminalView {
     /// latency meter and the bottom of the history, so a held key echoes locally like a tap.
     ///
     /// Returns whether the tile shows something new before the worker answers: a guess, the
-    /// bottom of the history, a sticky modifier let go. A key that changes nothing on screen
-    /// must not draw a frame. The echo arrives a few milliseconds later, and a frame drawn in
-    /// between holds the echo's frame back a whole refresh (MEASUREMENTS, "keystroke to glass").
+    /// bottom of the history. A key that changes nothing on screen must not draw a frame. The
+    /// echo arrives a few milliseconds later, and a frame drawn in between holds the echo's frame
+    /// back a whole refresh (MEASUREMENTS, "keystroke to glass").
     #[must_use]
     fn type_key(&mut self, mut keystroke: Keystroke, held: bool, cx: &mut Context<Self>) -> bool {
-        // An armed ⌘ with the bar's ↑ / ↓ is ⌘↑ / ⌘↓: between prompts, not to the program.
-        if self.sticky_command && matches!(keystroke.key.as_str(), "up" | "down") {
-            self.sticky_command = false;
+        // The touch key row's armed modifiers go with this key, the row's or the system
+        // keyboard's (`slopty_shell::live::key_row`): a latched one is spent, a held one stays.
+        let armed = key_row::spend(cx);
+        // An armed ⌘ with ↑ / ↓ is ⌘↑ / ⌘↓: between prompts, not to the program.
+        if armed.command && matches!(keystroke.key.as_str(), "up" | "down") {
             self.step_prompt(if keystroke.key == "up" { -1 } else { 1 }, cx);
             return true;
         }
-        // An armed ⌘ with the bar's ← → ⌫ is the Mac's line-editing chord, as on the desktop.
-        if self.sticky_command
+        // An armed ⌘ with ← → ⌫ is the Mac's line-editing chord, as on the desktop.
+        if armed.command
             && let Some(bytes) = keys::natural_editing(&Keystroke {
                 modifiers: gpui::Modifiers { platform: true, ..gpui::Modifiers::default() },
                 key: keystroke.key.clone(),
                 ..Keystroke::default()
             })
         {
-            self.sticky_command = false;
             if self.state.view_offset() != 0 {
                 self.state.scroll_to_bottom();
             }
             self.send(TermRequest::Raw(bytes.to_vec()), cx);
             return true;
         }
-        // An armed Alt with the bar's ← → is the Mac's word motion, as ⌥← ⌥→ are on the desktop.
-        if self.sticky_alt
+        // An armed ⌥ with ← → is the Mac's word motion, as ⌥← ⌥→ are on the desktop.
+        if armed.alt
             && let Some(bytes) = keys::natural_editing(&Keystroke {
                 modifiers: gpui::Modifiers { alt: true, ..gpui::Modifiers::default() },
                 key: keystroke.key.clone(),
                 ..Keystroke::default()
             })
         {
-            self.sticky_alt = false;
             if self.state.view_offset() != 0 {
                 self.state.scroll_to_bottom();
             }
             self.send(TermRequest::Raw(bytes.to_vec()), cx);
             return true;
         }
-        let unstuck = std::mem::take(&mut self.sticky_control);
-        if unstuck {
+        if armed.control {
             keystroke.modifiers.control = true;
         }
-        let meta = std::mem::take(&mut self.sticky_alt);
+        // ⌥ armed goes as Meta, whatever the ⌥ setting: readline's and Emacs' Meta chords a soft
+        // keyboard cannot make.
+        let meta = armed.alt;
         if meta {
             keystroke.modifiers.alt = true;
         }
@@ -2356,7 +2349,7 @@ impl TerminalView {
         } else {
             self.send(TermRequest::Key(key), cx);
         }
-        unstuck || scrolled || guessing || shows
+        scrolled || guessing || shows
     }
 
     /// The visible rows as text, top to bottom, trailing spaces trimmed; a row still being
@@ -3416,7 +3409,7 @@ impl TerminalView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
-        // A tap brings back the soft keyboard the key bar's Hide put away: the terminal kept
+        // A tap brings back the soft keyboard the key row's hide key put away: the terminal kept
         // the focus, so focusing it again would not.
         if cfg!(target_os = "ios") {
             window.request_virtual_keyboard();
@@ -3437,8 +3430,8 @@ impl TerminalView {
             return;
         };
         // ⌘-click opens the link under the pointer, as in every terminal: the program's OSC 8
-        // target when there is one, else the URL in the text. The key bar's ⌘ arms one tap.
-        let armed = event.button == MouseButton::Left && std::mem::take(&mut self.sticky_command);
+        // target when there is one, else the URL in the text. The key row's ⌘ arms one tap.
+        let armed = event.button == MouseButton::Left && key_row::spend_one(Modifier::Command, cx);
         if armed {
             cx.notify();
         }
@@ -3748,14 +3741,13 @@ impl TerminalView {
         };
         let keys = arrows(if rows < 0 { "up" } else { "down" }, rows)
             .chain(arrows(if cells < 0 { "left" } else { "right" }, cells));
-        // The phone's armed ⌃ and Alt are for the next typed key, not for these.
-        let sticky_control = std::mem::take(&mut self.sticky_control);
-        let sticky_alt = std::mem::take(&mut self.sticky_alt);
+        // The key row's armed modifiers are for the next typed key, not for these.
+        let kept = key_row::armed(cx);
+        key_row::clear(cx);
         for key in keys {
             self.press(Keystroke { key: key.to_owned(), ..Keystroke::default() }, cx);
         }
-        self.sticky_control = sticky_control;
-        self.sticky_alt = sticky_alt;
+        key_row::put_back(kept, cx);
     }
 
     /// A selection just made goes to the clipboard when the theme asks for it.
@@ -3882,16 +3874,17 @@ impl EntityInputHandler for TerminalView {
             return;
         }
         // In copy mode a soft keyboard's or an input method's text is its keys, one a character
-        // (the ⌃ and Alt toggles have theirs read below), never the program's.
-        if self.copy_mode.is_some() && !self.sticky_control && !self.sticky_alt {
+        // (the key row's armed ⌃ and ⌥ have theirs read below), never the program's.
+        let armed = key_row::armed(cx);
+        if self.copy_mode.is_some() && !armed.on(Modifier::Control) && !armed.on(Modifier::Alt) {
             for c in text.chars() {
                 self.copy_command(copy_mode::typed_command(c), Some(&mut *window), cx);
             }
             return;
         }
-        // ⌃ armed on the key bar: a single typed character becomes a control key.
+        // ⌃ armed on the key row: a single typed character becomes a control key.
         let mut chars = text.chars();
-        if self.sticky_control
+        if armed.on(Modifier::Control)
             && let (Some(c), None) = (chars.next(), chars.next())
             && c.is_ascii()
         {
@@ -3903,9 +3896,9 @@ impl EntityInputHandler for TerminalView {
             self.press(keystroke, cx);
             return;
         }
-        // Alt armed: a single typed character goes as Meta and that character (`ESC b`).
+        // ⌥ armed: a single typed character goes as Meta and that character (`ESC b`).
         let mut chars = text.chars();
-        if self.sticky_alt
+        if armed.on(Modifier::Alt)
             && let (Some(c), None) = (chars.next(), chars.next())
             && c.is_ascii()
         {
@@ -3918,6 +3911,28 @@ impl EntityInputHandler for TerminalView {
                 key_char: Some(c.to_string()),
             };
             self.press(keystroke, cx);
+            return;
+        }
+        // ⌘ armed: a single typed character is the window's ⌘ chord (⌘K the picker, ⌘V a
+        // paste), as a keyboard's is, handed on once this edit is done.
+        let mut chars = text.chars();
+        if armed.on(Modifier::Command)
+            && let (Some(c), None) = (chars.next(), chars.next())
+            && c.is_ascii_graphic()
+        {
+            let _spent = key_row::spend(cx);
+            let keystroke = Keystroke {
+                modifiers: gpui::Modifiers {
+                    platform: true,
+                    shift: c.is_ascii_uppercase(),
+                    ..gpui::Modifiers::default()
+                },
+                key: c.to_ascii_lowercase().to_string(),
+                key_char: None,
+            };
+            cx.defer_in(window, move |_, window, cx| {
+                window.dispatch_keystroke(keystroke, cx);
+            });
             return;
         }
         let scrolled = self.state.view_offset() != 0;
@@ -5669,7 +5684,7 @@ mod tests {
 
         dispatch(cx, Box::new(CopyBlockOutput));
         assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
-        // slopty: no block goes to an agent from here; the menu offers none.
+        // No block goes to an agent from here; the menu offers none.
         let menu = |cx: &mut VisualTestContext| {
             view.read_with(cx, |v, _| {
                 let block = v.state.command_block(LineIndex(4));
@@ -7080,7 +7095,7 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the rail does not select");
     }
 
-    /// slopty: the dispatcher's clock moved on by `by` with nothing run that came due by then,
+    /// The dispatcher's clock moved on by `by` with nothing run that came due by then,
     /// as a frame the display asks for can begin before the timers due by its moment run.
     fn clock_ahead(cx: &VisualTestContext, by: Duration) {
         cx.executor()
@@ -7092,7 +7107,7 @@ mod tests {
             .advance(by);
     }
 
-    /// slopty: a window whose root holds the terminal, as the shell's does: the root told to
+    /// A window whose root holds the terminal, as the shell's does: the root told to
     /// draw again draws the terminal again from the last frame.
     struct Hosting(Entity<TerminalView>);
 
@@ -7102,7 +7117,7 @@ mod tests {
         }
     }
 
-    /// slopty: [`terminal`] under a [`Hosting`] root.
+    /// [`terminal`] under a [`Hosting`] root.
     fn hosted_terminal(
         cx: &mut TestAppContext,
     ) -> (Entity<Hosting>, Entity<TerminalView>, &mut VisualTestContext) {
@@ -7124,7 +7139,7 @@ mod tests {
         (host, view, cx)
     }
 
-    /// slopty: the thumbs down the terminal's right edge in a frame the root alone is told to
+    /// The thumbs down the terminal's right edge in a frame the root alone is told to
     /// draw (the terminal drawn again from the last frame), and in one drawn from scratch at
     /// its moment.
     fn thumbs_drawn_and_from_scratch(
@@ -7154,7 +7169,7 @@ mod tests {
         })
     }
 
-    /// slopty: after a scroll, the rail lingers, then fades from when its wake runs: a frame that
+    /// After a scroll, the rail lingers, then fades from when its wake runs: a frame that
     /// begins past the linger and the fade before that wake has run (the e2e's jump pill, then
     /// ⌘F) draws the thumb a frame from scratch draws too, and once the wake runs the thumb
     /// fades out over frames the view draws, then is gone from both.
